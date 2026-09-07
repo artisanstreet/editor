@@ -120,7 +120,7 @@ fn center(cx: &mut gpui::VisualTestContext, selector: &'static str) -> gpui::Poi
 fn focus_probe(cx: &mut gpui::VisualTestContext, view: &gpui::Entity<TabsProbe>) {
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
 }
 
@@ -396,7 +396,7 @@ fn key_activation_paths_are_suppressed_when_selected_already_matches(cx: &mut Te
     let config = config(values.clone());
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let probe = TabsProbe::new(cx, config);
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();

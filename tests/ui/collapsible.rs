@@ -188,7 +188,7 @@ fn enter_and_space_activate_once_while_unrelated_keys_are_suppressed(cx: &mut Te
             false,
             MountMode::Unmounted,
         );
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();
@@ -249,7 +249,7 @@ fn disabled_collapsible_suppresses_input_and_does_not_acquire_focus(cx: &mut Tes
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
         assert!(!focus.is_focused(window));
-        window.focus(&focus);
+        window.focus(&focus, app);
         view.update(app, |_, cx| cx.notify());
     });
     cx.run_until_parked();

@@ -5,12 +5,36 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "editor"
+path = "src/main.rs"
+
 [dependencies]
 artisan-assets = { path = "../assets" }
 artisan-domain = { path = "../domain" }
+artisan-editor-cli = { path = "../cli" }
+artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
+gpui_platform.workspace = true
+rustls-pki-types.workspace = true
+statig.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[[test]]
+name = "active_thread_light_policy"
+path = "../../tests/frontend/active_thread_light_policy.rs"
+
+[[test]]
+name = "activity_status_labels"
+path = "../../tests/frontend/activity_status_labels.rs"
+
+[[test]]
+name = "approval_presentation"
+path = "../../tests/frontend/approval_presentation.rs"
 
 [[test]]
 name = "attention"
@@ -21,20 +45,64 @@ name = "attention_reconnect"
 path = "../../tests/frontend/attention_reconnect.rs"
 
 [[test]]
+name = "attention_title_policy"
+path = "../../tests/frontend/attention_title_policy.rs"
+
+[[test]]
 name = "artisan_error_code"
 path = "../../tests/frontend/artisan_error_code.rs"
+
+[[test]]
+name = "attachment_tray_policy"
+path = "../../tests/frontend/attachment_tray_policy.rs"
+
+[[test]]
+name = "authoritative_subscription_policy"
+path = "../../tests/frontend/authoritative_subscription_policy.rs"
 
 [[test]]
 name = "browser_dom_boundary"
 path = "../../tests/frontend/browser_dom_boundary.rs"
 
 [[test]]
+name = "clipboard_write_boundary"
+path = "../../tests/frontend/clipboard_write_boundary.rs"
+
+[[test]]
+name = "component_gallery_policy"
+path = "../../tests/frontend/component_gallery_policy.rs"
+
+[[test]]
+name = "composer_action_failure"
+path = "../../tests/frontend/composer_action_failure.rs"
+
+[[test]]
+name = "composer_draft_session_policy"
+path = "../../tests/frontend/composer_draft_session_policy.rs"
+
+[[test]]
+name = "composer_gesture"
+path = "../../tests/frontend/composer_gesture.rs"
+
+[[test]]
+name = "composer_send_readiness"
+path = "../../tests/frontend/composer_send_readiness.rs"
+
+[[test]]
 name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 
 [[test]]
+name = "context_auto_compaction"
+path = "../../tests/frontend/context_auto_compaction.rs"
+
+[[test]]
 name = "context_usage_description"
 path = "../../tests/frontend/context_usage_description.rs"
+
+[[test]]
+name = "context_usage_details_policy"
+path = "../../tests/frontend/context_usage_details_policy.rs"
 
 [[test]]
 name = "context_usage_gauge_policy"
@@ -45,6 +113,26 @@ name = "context_usage_model_name"
 path = "../../tests/frontend/context_usage_model_name.rs"
 
 [[test]]
+name = "conversation_checklist"
+path = "../../tests/frontend/conversation_checklist.rs"
+
+[[test]]
+name = "conversation_delivery_machine"
+path = "../../tests/frontend/conversation_delivery_machine.rs"
+
+[[test]]
+name = "conversation_duration"
+path = "../../tests/frontend/conversation_duration.rs"
+
+[[test]]
+name = "conversation_error_card_policy"
+path = "../../tests/frontend/conversation_error_card_policy.rs"
+
+[[test]]
+name = "conversation_host"
+path = "../../tests/frontend/conversation_host.rs"
+
+[[test]]
 name = "conversation_presentation"
 path = "../../tests/frontend/conversation_presentation.rs"
 
@@ -53,16 +141,84 @@ name = "conversation_projection"
 path = "../../tests/frontend/conversation_projection.rs"
 
 [[test]]
+name = "conversation_relative_age"
+path = "../../tests/frontend/conversation_relative_age.rs"
+
+[[test]]
+name = "conversation_scene"
+path = "../../tests/frontend/conversation_scene.rs"
+
+[[test]]
+name = "conversation_state_machine"
+path = "../../tests/frontend/conversation_state_machine.rs"
+
+[[test]]
+name = "conversation_surface"
+path = "../../tests/frontend/conversation_surface.rs"
+
+[[test]]
 name = "conversation_scroll_position"
 path = "../../tests/frontend/conversation_scroll_position.rs"
+
+[[test]]
+name = "conversation_status_labels"
+path = "../../tests/frontend/conversation_status_labels.rs"
+
+[[test]]
+name = "conversation_steering"
+path = "../../tests/frontend/conversation_steering.rs"
+
+[[test]]
+name = "conversation_steering_machine"
+path = "../../tests/frontend/conversation_steering_machine.rs"
 
 [[test]]
 name = "conversation_turn_footer_policy"
 path = "../../tests/frontend/conversation_turn_footer_policy.rs"
 
 [[test]]
+name = "conversation_turn_machine"
+path = "../../tests/frontend/conversation_turn_machine.rs"
+
+[[test]]
 name = "conversation_turn_navigator"
 path = "../../tests/frontend/conversation_turn_navigator.rs"
+
+[[test]]
+name = "conversation_view_machine"
+path = "../../tests/frontend/conversation_view_machine.rs"
+
+[[test]]
+name = "dev_instance_policy"
+path = "../../tests/frontend/dev_instance_policy.rs"
+
+[[test]]
+name = "dropdown_highlight_settle"
+path = "../../tests/frontend/dropdown_highlight_settle.rs"
+
+[[test]]
+name = "editor_diagnostic_mapping"
+path = "../../tests/frontend/editor_diagnostic_mapping.rs"
+
+[[test]]
+name = "editor_language"
+path = "../../tests/frontend/editor_language.rs"
+
+[[test]]
+name = "editor_route_gate_policy"
+path = "../../tests/frontend/editor_route_gate_policy.rs"
+
+[[test]]
+name = "editor_view_state_policy"
+path = "../../tests/frontend/editor_view_state_policy.rs"
+
+[[test]]
+name = "editor_workspace_identity"
+path = "../../tests/frontend/editor_workspace_identity.rs"
+
+[[test]]
+name = "engine_section_indicator_policy"
+path = "../../tests/frontend/engine_section_indicator_policy.rs"
 
 [[test]]
 name = "engine_usage_cache"
@@ -73,8 +229,36 @@ name = "file_icon"
 path = "../../tests/frontend/file_icon.rs"
 
 [[test]]
+name = "forge_endpoint_policy"
+path = "../../tests/frontend/forge_endpoint_policy.rs"
+
+[[test]]
 name = "forge_recovery_health"
 path = "../../tests/frontend/forge_recovery_health.rs"
+
+[[test]]
+name = "forge_repair_request"
+path = "../../tests/frontend/forge_repair_request.rs"
+
+[[test]]
+name = "gradient_avatar"
+path = "../../tests/frontend/gradient_avatar.rs"
+
+[[test]]
+name = "harness_setup_policy"
+path = "../../tests/frontend/harness_setup_policy.rs"
+
+[[test]]
+name = "host_identity_controller"
+path = "../../tests/frontend/host_identity_controller.rs"
+
+[[test]]
+name = "host_resume_recovery_policy"
+path = "../../tests/frontend/host_resume_recovery_policy.rs"
+
+[[test]]
+name = "hover_pill_geometry_policy"
+path = "../../tests/frontend/hover_pill_geometry_policy.rs"
 
 [[test]]
 name = "hover_pill_group_policy"
@@ -93,8 +277,20 @@ name = "latest_request_gate"
 path = "../../tests/frontend/latest_request_gate.rs"
 
 [[test]]
+name = "machine_switch"
+path = "../../tests/frontend/machine_switch.rs"
+
+[[test]]
 name = "markdown_fence_policy"
 path = "../../tests/frontend/markdown_fence_policy.rs"
+
+[[test]]
+name = "markdown_language_registry_policy"
+path = "../../tests/frontend/markdown_language_registry_policy.rs"
+
+[[test]]
+name = "markdown_streaming_words"
+path = "../../tests/frontend/markdown_streaming_words.rs"
 
 [[test]]
 name = "markdown_test_parser_policy"
@@ -117,6 +313,22 @@ name = "mobile_breakpoint_policy"
 path = "../../tests/frontend/mobile_breakpoint_policy.rs"
 
 [[test]]
+name = "model_favorites_presentation"
+path = "../../tests/frontend/model_favorites_presentation.rs"
+
+[[test]]
+name = "model_policy_controller"
+path = "../../tests/frontend/model_policy_controller.rs"
+
+[[test]]
+name = "model_policy_controls_presentation"
+path = "../../tests/frontend/model_policy_controls_presentation.rs"
+
+[[test]]
+name = "model_selection_presentation"
+path = "../../tests/frontend/model_selection_presentation.rs"
+
+[[test]]
 name = "motion_spring"
 path = "../../tests/frontend/motion_spring.rs"
 
@@ -125,8 +337,20 @@ name = "native_shell"
 path = "../../tests/frontend/native_shell.rs"
 
 [[test]]
+name = "new_thread_draft"
+path = "../../tests/frontend/new_thread_draft.rs"
+
+[[test]]
 name = "new_thread_interaction"
 path = "../../tests/frontend/new_thread_interaction.rs"
+
+[[test]]
+name = "new_thread_sentence_policy"
+path = "../../tests/frontend/new_thread_sentence_policy.rs"
+
+[[test]]
+name = "notification_contract"
+path = "../../tests/frontend/notification_contract.rs"
 
 [[test]]
 name = "notification_events"
@@ -137,12 +361,28 @@ name = "notification_preferences"
 path = "../../tests/frontend/notification_preferences.rs"
 
 [[test]]
+name = "object_url_boundary"
+path = "../../tests/frontend/object_url_boundary.rs"
+
+[[test]]
+name = "onboarding_harness_presentation"
+path = "../../tests/frontend/onboarding_harness_presentation.rs"
+
+[[test]]
 name = "onboarding_route"
 path = "../../tests/frontend/onboarding_route.rs"
 
 [[test]]
+name = "project_catalog"
+path = "../../tests/frontend/project_catalog.rs"
+
+[[test]]
 name = "project_identity_policy"
 path = "../../tests/frontend/project_identity_policy.rs"
+
+[[test]]
+name = "project_path_policy"
+path = "../../tests/frontend/project_path_policy.rs"
 
 [[test]]
 name = "telemetry_bootstrap_policy"
@@ -165,8 +405,28 @@ name = "reader_attention"
 path = "../../tests/frontend/reader_attention.rs"
 
 [[test]]
+name = "relative_time"
+path = "../../tests/frontend/relative_time.rs"
+
+[[test]]
+name = "repository_mark"
+path = "../../tests/frontend/repository_mark.rs"
+
+[[test]]
+name = "rich_link_url"
+path = "../../tests/frontend/rich_link_url.rs"
+
+[[test]]
 name = "route_navigation"
 path = "../../tests/frontend/route_navigation.rs"
+
+[[test]]
+name = "route_navigation_adapter"
+path = "../../tests/frontend/route_navigation_adapter.rs"
+
+[[test]]
+name = "run_usage_policy"
+path = "../../tests/frontend/run_usage_policy.rs"
 
 [[test]]
 name = "runtime_fixture_policy"
@@ -181,12 +441,136 @@ name = "runtime_surface"
 path = "../../tests/frontend/runtime_surface.rs"
 
 [[test]]
+name = "scoped_attachment_queue"
+path = "../../tests/frontend/scoped_attachment_queue.rs"
+
+[[test]]
+name = "scoped_attachment_runner_policy"
+path = "../../tests/frontend/scoped_attachment_runner_policy.rs"
+
+[[test]]
+name = "session_projection"
+path = "../../tests/frontend/session_projection.rs"
+
+[[test]]
+name = "session_tool_policy"
+path = "../../tests/frontend/session_tool_policy.rs"
+
+[[test]]
+name = "setup_label_transition_policy"
+path = "../../tests/frontend/setup_label_transition_policy.rs"
+
+[[test]]
+name = "shell_command"
+path = "../../tests/frontend/shell_command.rs"
+
+[[test]]
+name = "shell_layout"
+path = "../../tests/frontend/shell_layout.rs"
+
+[[test]]
+name = "shell_presentation_preferences_policy"
+path = "../../tests/frontend/shell_presentation_preferences_policy.rs"
+
+[[test]]
+name = "shell_presentation_state"
+path = "../../tests/frontend/shell_presentation_state.rs"
+
+[[test]]
+name = "speed_presentation"
+path = "../../tests/frontend/speed_presentation.rs"
+
+[[test]]
+name = "steering_pending_lip"
+path = "../../tests/frontend/steering_pending_lip.rs"
+
+[[test]]
+name = "tab_derivations"
+path = "../../tests/frontend/tab_derivations.rs"
+
+[[test]]
+name = "terminal_presentation"
+path = "../../tests/frontend/terminal_presentation.rs"
+
+[[test]]
+name = "thread_environment_presentation"
+path = "../../tests/frontend/thread_environment_presentation.rs"
+
+[[test]]
+name = "thread_hover_rail_policy"
+path = "../../tests/frontend/thread_hover_rail_policy.rs"
+
+[[test]]
 name = "thread_list_navigation"
 path = "../../tests/frontend/thread_list_navigation.rs"
 
 [[test]]
+name = "thread_navigation_core"
+path = "../../tests/frontend/thread_navigation_core.rs"
+
+[[test]]
+name = "thread_panel_policy"
+path = "../../tests/frontend/thread_panel_policy.rs"
+
+[[test]]
+name = "thread_read_tracker"
+path = "../../tests/frontend/thread_read_tracker.rs"
+
+[[test]]
+name = "thread_retention_settings_policy"
+path = "../../tests/frontend/thread_retention_settings_policy.rs"
+
+[[test]]
+name = "thread_route_gate_policy"
+path = "../../tests/frontend/thread_route_gate_policy.rs"
+
+[[test]]
+name = "thread_title_policy"
+path = "../../tests/frontend/thread_title_policy.rs"
+
+[[test]]
+name = "thread_title_settings_policy"
+path = "../../tests/frontend/thread_title_settings_policy.rs"
+
+[[test]]
 name = "transcript"
 path = "../../tests/frontend/transcript.rs"
+
+[[test]]
+name = "usage_meter"
+path = "../../tests/frontend/usage_meter.rs"
+
+[[test]]
+name = "usage_recovery_settings_policy"
+path = "../../tests/frontend/usage_recovery_settings_policy.rs"
+
+[[test]]
+name = "usage_refresh_claims"
+path = "../../tests/frontend/usage_refresh_claims.rs"
+
+[[test]]
+name = "usage_reset_duration"
+path = "../../tests/frontend/usage_reset_duration.rs"
+
+[[test]]
+name = "usage_window_motion"
+path = "../../tests/frontend/usage_window_motion.rs"
+
+[[test]]
+name = "vcs_diff_presentation"
+path = "../../tests/frontend/vcs_diff_presentation.rs"
+
+[[test]]
+name = "vcs_labels"
+path = "../../tests/frontend/vcs_labels.rs"
+
+[[test]]
+name = "workspace_header_presentation"
+path = "../../tests/frontend/workspace_header_presentation.rs"
+
+[[test]]
+name = "workspace_tab_state"
+path = "../../tests/frontend/workspace_tab_state.rs"
 
 [lints]
 workspace = true

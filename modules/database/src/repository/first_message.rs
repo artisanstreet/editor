@@ -196,6 +196,10 @@ async fn insert_queue_receipt(
         message_id: Set(Some(input.message_id.as_str().to_owned())),
         body: Set(Some(input.body.as_str().to_owned())),
         accepted_at_ms: Set(millis(input.accepted_at)),
+        engine_run_config_version: Set(None),
+        engine_run_config: Set(None),
+        engine_run_config_expected_revision: Set(None),
+        engine_run_config_result_revision: Set(None),
     })
     .on_conflict(do_nothing_on_conflict())
     .exec_without_returning(database)

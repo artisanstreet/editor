@@ -334,6 +334,9 @@ async fn bounded_thread_listing_reports_overflow_without_loading_the_whole_table
             title: Set(format!("Thread {index}")),
             created_at_ms: Set(200),
             updated_at_ms: Set(200),
+            engine_run_config_version: Set(None),
+            engine_run_config_revision: Set(0),
+            engine_run_config: Set(None),
         }
         .insert(&database)
         .await

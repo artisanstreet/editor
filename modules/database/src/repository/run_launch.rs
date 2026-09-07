@@ -43,6 +43,7 @@ use super::message_dispatch::DispatchLeaseOwner;
 use super::{
     ClaimedMessageDispatch, Repository, RepositoryError, corrupt_data, database_error, millis,
 };
+use super::{ThreadEngineSettings, thread_engine_config};
 
 /// Exact byte length of every run-launch capability and of the start key.
 pub(super) const RUN_CAPABILITY_BYTES: usize = 32;
@@ -194,6 +195,8 @@ pub struct LaunchClaimedRun<'a> {
     pub run_start_key: &'a RunStartKey,
     /// Named owner/lease/claim capabilities persisted as raw BLOBs.
     pub credentials: &'a RunLaunchCredentials,
+    /// Exact immutable engine settings read for this launch.
+    pub engine_settings: &'a ThreadEngineSettings,
 }
 
 /// Payload-free durable receipt of one launch attempt.
@@ -459,7 +462,9 @@ async fn load_accepted_message(
 async fn ensure_thread_admits_launch(
     transaction: &sea_orm::DatabaseTransaction,
     thread_id: &ThreadId,
+    message_id: &MessageId,
     operated_at_ms: i64,
+    engine_settings: &ThreadEngineSettings,
 ) -> Result<(), RunLaunchError> {
     let thread = entities::thread::Entity::find_by_id(thread_id.as_str())
         .one(transaction)
@@ -479,6 +484,12 @@ async fn ensure_thread_admits_launch(
                 later_field: "launch operated_at",
             },
         ));
+    }
+    let actual = thread_engine_config::settings_from_thread(thread)?;
+    if actual.as_ref() != Some(engine_settings) {
+        return Err(RunLaunchError::SnapshotMismatch {
+            message_id: message_id.clone(),
+        });
     }
     Ok(())
 }
@@ -541,7 +552,14 @@ async fn build_launched_graph(
 
     let AcceptedMessageContext { thread_id, body } =
         load_accepted_message(transaction, &claimed.message_id.clone(), operated_at_ms).await?;
-    ensure_thread_admits_launch(transaction, &thread_id, operated_at_ms).await?;
+    ensure_thread_admits_launch(
+        transaction,
+        &thread_id,
+        &claimed.message_id,
+        operated_at_ms,
+        command.engine_settings,
+    )
+    .await?;
 
     let (next_renderer_ordinal, last_patch_sequence) =
         obtain_conversation_state(transaction, thread_id.as_str(), operated_at_ms).await?;
@@ -719,6 +737,13 @@ async fn insert_launched_run(
         created_at_ms: Set(operated_at_ms),
         updated_at_ms: Set(operated_at_ms),
         terminal_at_ms: Set(None),
+        engine_run_config_version: Set(Some(1)),
+        engine_run_config_revision: Set(Some(command.engine_settings.revision().as_i64())),
+        engine_run_config: Set(Some(OpaqueBytes::new(
+            crate::engine_run_config::encode(command.engine_settings.config()).map_err(
+                |error| corrupt_data_launch("assistant_runs", "engine_run_config", &error),
+            )?,
+        ))),
     })
     .exec(transaction)
     .await
@@ -975,7 +1000,53 @@ async fn load_validated_replayed_run(
             run_id: command.run_id.clone(),
         });
     }
+    validate_engine_snapshot(&run, command.engine_settings, &claimed.message_id)?;
     Ok(run)
+}
+
+fn validate_engine_snapshot(
+    run: &entities::AssistantRun,
+    settings: &ThreadEngineSettings,
+    message_id: &MessageId,
+) -> Result<(), RunLaunchError> {
+    if run.engine_run_config_version != Some(1) {
+        return Err(corrupt_data_launch(
+            "assistant_runs",
+            "engine_run_config_version",
+            "configured run snapshot must use version one",
+        ));
+    }
+    let revision = run
+        .engine_run_config_revision
+        .and_then(|value| u64::try_from(value).ok())
+        .and_then(|value| artisan_domain::EngineConfigRevision::new(value).ok())
+        .ok_or_else(|| {
+            corrupt_data_launch(
+                "assistant_runs",
+                "engine_run_config_revision",
+                "run snapshot revision is outside its domain range",
+            )
+        })?;
+    let blob = run.engine_run_config.as_ref().ok_or_else(|| {
+        corrupt_data_launch(
+            "assistant_runs",
+            "engine_run_config",
+            "required run snapshot is null",
+        )
+    })?;
+    let stored = crate::engine_run_config::decode(blob.as_slice())
+        .map_err(|error| corrupt_data_launch("assistant_runs", "engine_run_config", &error))?;
+    let canonical = crate::engine_run_config::encode(settings.config())
+        .map_err(|error| corrupt_data_launch("assistant_runs", "engine_run_config", &error))?;
+    if revision != settings.revision()
+        || stored != *settings.config()
+        || blob.as_slice() != canonical.as_slice()
+    {
+        return Err(RunLaunchError::SnapshotMismatch {
+            message_id: message_id.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Validates the replayed turn/item projections and their ordinal ledger.

@@ -103,9 +103,9 @@ pub enum ProjectionError {
     BaselineRequired,
     /// A batch arrived while recovery was already required.
     RecoveryRequired,
-    /// A batch did not start exactly at the current cursor. Subsumed tails,
-    /// duplicates, overlaps, and forward gaps all land here because zero
-    /// retained history cannot prove payload equivalence.
+    /// A delivery operation did not match the current cursor: a patch batch
+    /// failed exact continuation, or a resumed acknowledgement named a
+    /// different cursor.
     CursorMismatch,
     /// A snapshot lowered the cursor or watermark, conflicted at an equal
     /// cursor, or violated a common-entity rule against the current window.
@@ -149,7 +149,7 @@ impl std::fmt::Display for ProjectionError {
                 formatter.write_str("projection requires a fresh snapshot before further batches")
             }
             Self::CursorMismatch => {
-                formatter.write_str("batch does not continue the current cursor")
+                formatter.write_str("delivery does not continue the current cursor")
             }
             Self::SnapshotConflict => {
                 formatter.write_str("snapshot conflicts with the materialized window")
@@ -316,6 +316,39 @@ impl ConversationProjection {
 
         self.publish(incoming.clone());
         Ok(SnapshotDisposition::Applied)
+    }
+
+    /// Acknowledges an authoritative resumed subscription at the existing
+    /// last-good cursor.
+    ///
+    /// This is deliberately a status-only operation. It validates the
+    /// acknowledgement against this projection's fixed thread and existing
+    /// snapshot, then clears recovery without cloning, replacing, or otherwise
+    /// changing the snapshot. No baseline or cursor is fabricated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectionError::ThreadMismatch`] for a foreign thread,
+    /// [`ProjectionError::BaselineRequired`] when no snapshot has been
+    /// accepted, or [`ProjectionError::CursorMismatch`] when the acknowledgement
+    /// does not name the existing last-good cursor. Every refusal preserves the
+    /// snapshot, cursor, and prior status exactly.
+    pub fn acknowledge_resumed(
+        &mut self,
+        thread_id: &ThreadId,
+        cursor: ConversationCursor,
+    ) -> Result<(), ProjectionError> {
+        if thread_id != &self.thread_id {
+            return Err(ProjectionError::ThreadMismatch);
+        }
+        let Some(previous) = self.state.as_ref() else {
+            return Err(ProjectionError::BaselineRequired);
+        };
+        if previous.cursor() != cursor {
+            return Err(ProjectionError::CursorMismatch);
+        }
+        self.status = ProjectionStatus::Ready;
+        Ok(())
     }
 
     /// Applies one contiguous patch batch on top of the current window.

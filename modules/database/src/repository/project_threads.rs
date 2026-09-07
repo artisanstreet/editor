@@ -345,6 +345,9 @@ async fn insert_thread(
         title: Set(summary.title.as_str().to_owned()),
         created_at_ms: Set(millis(summary.created_at)),
         updated_at_ms: Set(millis(summary.updated_at)),
+        engine_run_config_version: Set(None),
+        engine_run_config_revision: Set(0),
+        engine_run_config: Set(None),
     })
     .on_conflict(do_nothing_on_conflict())
     .exec_without_returning(database)
@@ -367,6 +370,10 @@ async fn insert_attach_receipt(
         message_id: Set(None),
         body: Set(None),
         accepted_at_ms: Set(millis(input.attached_at)),
+        engine_run_config_version: Set(None),
+        engine_run_config: Set(None),
+        engine_run_config_expected_revision: Set(None),
+        engine_run_config_result_revision: Set(None),
     })
     .on_conflict(do_nothing_on_conflict())
     .exec_without_returning(database)
@@ -388,6 +395,10 @@ async fn insert_create_receipt(
         message_id: Set(None),
         body: Set(None),
         accepted_at_ms: Set(millis(input.created_at)),
+        engine_run_config_version: Set(None),
+        engine_run_config: Set(None),
+        engine_run_config_expected_revision: Set(None),
+        engine_run_config_result_revision: Set(None),
     })
     .on_conflict(do_nothing_on_conflict())
     .exec_without_returning(database)

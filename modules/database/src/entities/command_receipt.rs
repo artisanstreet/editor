@@ -2,6 +2,8 @@
 
 use sea_orm::entity::prelude::*;
 
+use super::execution_value::OpaqueBytes;
+
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "command_receipts")]
 pub struct Model {
@@ -15,6 +17,10 @@ pub struct Model {
     pub message_id: Option<String>,
     pub body: Option<String>,
     pub accepted_at_ms: i64,
+    pub engine_run_config_version: Option<i64>,
+    pub engine_run_config: Option<OpaqueBytes>,
+    pub engine_run_config_expected_revision: Option<i64>,
+    pub engine_run_config_result_revision: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
@@ -26,6 +32,8 @@ pub enum CommandKind {
     CreateThread,
     #[sea_orm(string_value = "queue_first_message")]
     QueueFirstMessage,
+    #[sea_orm(string_value = "set_thread_engine_config")]
+    SetThreadEngineConfig,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

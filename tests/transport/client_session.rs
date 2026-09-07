@@ -33,6 +33,7 @@
 //! can preempt a client-side close with an implicit one.
 
 use std::error::Error;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -45,9 +46,11 @@ use artisan_domain::{
 use artisan_protocol::artisan_capnp;
 use artisan_protocol::{
     ClientRequest, ConnectionId, ErrorCode, ErrorDetail, EventCursor, FrameId, Hello,
-    HelloCredential, LocalCapability, ProtocolDecodeError, ProtocolFailure, ProtocolValueError,
-    ProtocolVersion, ReconnectCapability, ResponsePayload, ServerEvent, ServerResponse,
-    VersionOffer, Welcome, WireEnvelope, WireEnvelopeBody, encode_envelope,
+    HelloCredential, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
+    LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, ProtocolDecodeError,
+    ProtocolFailure, ProtocolValueError, ProtocolVersion, ReconnectCapability, ResponsePayload,
+    ServerEvent, ServerResponse, VersionOffer, Welcome, WireEnvelope, WireEnvelopeBody,
+    encode_envelope,
 };
 use artisan_transport as transport;
 use artisan_transport::{
@@ -58,7 +61,7 @@ use artisan_transport::{
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
-use quinn::{Connection, ConnectionError, ReadError, VarInt};
+use quinn::{Connection, ConnectionError, ReadError, StoppedError, VarInt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 /// Fixed rotated-capability bytes carried by every scripted Welcome;
@@ -335,6 +338,14 @@ fn target(addr: SocketAddr) -> LoopbackTarget {
 
 /// Builds an owned Hello envelope carrying the fixture credential.
 fn hello_envelope(frame: &str) -> Result<WireEnvelope, Box<dyn Error>> {
+    hello_envelope_with_lifecycle(frame, false)
+}
+
+/// Builds an owned Hello envelope with the requested lifecycle offer.
+fn hello_envelope_with_lifecycle(
+    frame: &str,
+    supports_lifecycle_control: bool,
+) -> Result<WireEnvelope, Box<dyn Error>> {
     Ok(WireEnvelope {
         protocol_version: ProtocolVersion::V1,
         frame_id: FrameId::parse(frame)?,
@@ -342,12 +353,20 @@ fn hello_envelope(frame: &str) -> Result<WireEnvelope, Box<dyn Error>> {
         body: WireEnvelopeBody::Hello(Hello {
             supported_versions: VersionOffer::new(vec![1])?,
             credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
+            supports_lifecycle_control,
         }),
     })
 }
 
 /// Builds the scripted Welcome envelope.
 fn welcome_envelope() -> Result<WireEnvelope, Box<dyn Error>> {
+    welcome_envelope_with_lifecycle(false)
+}
+
+/// Builds the scripted Welcome envelope with the requested negotiated bit.
+fn welcome_envelope_with_lifecycle(
+    lifecycle_control_supported: bool,
+) -> Result<WireEnvelope, Box<dyn Error>> {
     Ok(WireEnvelope {
         protocol_version: ProtocolVersion::V1,
         frame_id: FrameId::parse("fixture-welcome")?,
@@ -356,6 +375,7 @@ fn welcome_envelope() -> Result<WireEnvelope, Box<dyn Error>> {
             negotiated_version: ProtocolVersion::V1,
             connection_id: ConnectionId::parse(CONNECTION_TAG)?,
             reconnect_capability: ReconnectCapability::from_bytes(ROTATED_CAPABILITY),
+            lifecycle_control_supported,
         }),
     })
 }
@@ -372,6 +392,29 @@ fn request_envelope(frame: &str) -> Result<WireEnvelope, Box<dyn Error>> {
     })
 }
 
+/// Builds a native lifecycle request envelope with a caller-chosen operation.
+fn lifecycle_request_envelope(
+    frame: &str,
+    request: LifecycleRequest,
+) -> Result<WireEnvelope, Box<dyn Error>> {
+    Ok(WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: FrameId::parse(frame)?,
+        sent_at: UnixMillis::from_millis(3),
+        body: WireEnvelopeBody::Request(ClientRequest::Lifecycle(request)),
+    })
+}
+
+/// Builds a native lifecycle status request envelope.
+fn lifecycle_status_request(frame: &str) -> Result<WireEnvelope, Box<dyn Error>> {
+    lifecycle_request_envelope(frame, LifecycleRequest::Status)
+}
+
+/// Builds a native lifecycle stop request envelope preserving `require_idle`.
+fn lifecycle_stop_request(frame: &str, require_idle: bool) -> Result<WireEnvelope, Box<dyn Error>> {
+    lifecycle_request_envelope(frame, LifecycleRequest::Stop { require_idle })
+}
+
 /// Builds the successful correlated response for `request_id`.
 fn correlated_response(request_id: &RequestId) -> Result<WireEnvelope, Box<dyn Error>> {
     Ok(WireEnvelope {
@@ -385,17 +428,65 @@ fn correlated_response(request_id: &RequestId) -> Result<WireEnvelope, Box<dyn E
     })
 }
 
-/// Builds a failure correlated to exactly `request_id`.
-fn correlated_failure(request_id: &RequestId) -> Result<WireEnvelope, Box<dyn Error>> {
+/// Builds a correlated typed failure with the requested stable code.
+fn correlated_failure_with_code(
+    request_id: &RequestId,
+    code: ErrorCode,
+) -> Result<WireEnvelope, Box<dyn Error>> {
     Ok(WireEnvelope {
         protocol_version: ProtocolVersion::V1,
         frame_id: FrameId::parse(format!("reject-{request_id}"))?,
         sent_at: UnixMillis::from_millis(4),
         body: WireEnvelopeBody::ProtocolError(ProtocolFailure {
-            code: ErrorCode::Internal,
+            code,
             detail: ErrorDetail::parse("scripted correlated failure")?,
             retryable: false,
             request_id: Some(request_id.clone()),
+        }),
+    })
+}
+
+/// Builds a failure correlated to exactly `request_id`.
+fn correlated_failure(request_id: &RequestId) -> Result<WireEnvelope, Box<dyn Error>> {
+    correlated_failure_with_code(request_id, ErrorCode::Internal)
+}
+
+/// Builds a correlated lifecycle status response.
+fn lifecycle_status_response(
+    request_id: &RequestId,
+    state: LifecycleState,
+    active_work_count: u32,
+) -> Result<WireEnvelope, Box<dyn Error>> {
+    Ok(WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: FrameId::parse(format!("lifecycle-status-{request_id}"))?,
+        sent_at: UnixMillis::from_millis(4),
+        body: WireEnvelopeBody::Response(ServerResponse {
+            request_id: request_id.clone(),
+            payload: ResponsePayload::Lifecycle(LifecycleResponse::Status(LifecycleStatus::new(
+                state,
+                active_work_count,
+            )?)),
+        }),
+    })
+}
+
+/// Builds a correlated lifecycle stop response.
+fn lifecycle_stop_response(
+    request_id: &RequestId,
+    disposition: LifecycleStopDisposition,
+    state: LifecycleState,
+) -> Result<WireEnvelope, Box<dyn Error>> {
+    Ok(WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: FrameId::parse(format!("lifecycle-stop-{request_id}"))?,
+        sent_at: UnixMillis::from_millis(4),
+        body: WireEnvelopeBody::Response(ServerResponse {
+            request_id: request_id.clone(),
+            payload: ResponsePayload::Lifecycle(LifecycleResponse::Stop(LifecycleStopReceipt {
+                disposition,
+                state,
+            })),
         }),
     })
 }
@@ -501,6 +592,24 @@ enum Step {
     CorrelatedResponse,
     /// A typed failure correlated to the request it settles.
     CorrelatedFailure,
+    /// A typed failure with a caller-chosen stable code.
+    CorrelatedFailureCode(ErrorCode),
+    /// A lifecycle status response after a matching status request.
+    LifecycleStatus {
+        /// State returned in the typed status.
+        state: LifecycleState,
+        /// Active-work count returned in the typed status.
+        active_work_count: u32,
+    },
+    /// A lifecycle stop response after checking the request's idle policy.
+    LifecycleStop {
+        /// `require_idle` expected on the received stop request.
+        require_idle: bool,
+        /// Disposition returned in the typed receipt.
+        disposition: LifecycleStopDisposition,
+        /// State returned in the typed receipt.
+        state: LifecycleState,
+    },
     /// A verbatim envelope regardless of what the request carried.
     Fixed(WireEnvelope),
     /// Raw framed bytes that bypass the owned-envelope encoder.
@@ -564,11 +673,20 @@ async fn drive_handshake(
 /// connection so the test can keep the server handles alive until after
 /// the client result and explicit shutdown or abandonment.
 async fn serve_full(
-    mut connections: tokio::sync::mpsc::Receiver<Connection>,
+    connections: tokio::sync::mpsc::Receiver<Connection>,
     steps: Vec<Step>,
 ) -> Result<Connection, Box<dyn Error>> {
+    serve_full_with_lifecycle(connections, steps, false).await
+}
+
+/// Full scripted dialogue with an explicit lifecycle Welcome selection.
+async fn serve_full_with_lifecycle(
+    mut connections: tokio::sync::mpsc::Receiver<Connection>,
+    steps: Vec<Step>,
+    lifecycle_control_supported: bool,
+) -> Result<Connection, Box<dyn Error>> {
     let connection = next_connection(&mut connections).await?;
-    let welcome = welcome_envelope()?;
+    let welcome = welcome_envelope_with_lifecycle(lifecycle_control_supported)?;
     // The handshake handles end here; the CONNECTION is returned below
     // so the test retains live peer handles past the client result.
     let (_hello, _handshake_send, _handshake_receive) =
@@ -600,6 +718,42 @@ async fn serve_full(
                     .await
                     .map_err(|_| "failure send timed out")??;
             }
+            Step::CorrelatedFailureCode(code) => {
+                let reply = correlated_failure_with_code(&request_id, code)?;
+                tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                    .await
+                    .map_err(|_| "failure send timed out")??;
+            }
+            Step::LifecycleStatus {
+                state,
+                active_work_count,
+            } => {
+                assert!(matches!(
+                    &request.body,
+                    WireEnvelopeBody::Request(ClientRequest::Lifecycle(LifecycleRequest::Status))
+                ));
+                let reply = lifecycle_status_response(&request_id, state, active_work_count)?;
+                tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                    .await
+                    .map_err(|_| "lifecycle status send timed out")??;
+            }
+            Step::LifecycleStop {
+                require_idle,
+                disposition,
+                state,
+            } => {
+                let WireEnvelopeBody::Request(ClientRequest::Lifecycle(LifecycleRequest::Stop {
+                    require_idle: received_require_idle,
+                })) = &request.body
+                else {
+                    panic!("the fixture expected a lifecycle stop request");
+                };
+                assert_eq!(*received_require_idle, require_idle);
+                let reply = lifecycle_stop_response(&request_id, disposition, state)?;
+                tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                    .await
+                    .map_err(|_| "lifecycle stop send timed out")??;
+            }
             Step::Fixed(reply) => {
                 tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
                     .await
@@ -616,6 +770,349 @@ async fn serve_full(
     // The handshake stream handles end here; the CONNECTION is returned
     // and retained by the caller until the client result and shutdown.
     Ok(connection)
+}
+
+/// Controls the response stream's end behavior for the response-FIN
+/// acknowledgement tests. Non-finish variants deliberately keep the server
+/// send side open so the client's private STOP is the only possible stream
+/// terminal signal.
+#[derive(Clone, Copy)]
+enum ResponseStreamScript {
+    /// Send one correlated response and keep the stream open.
+    CorrelatedResponseHeldOpen,
+    /// Send one correlated response and cleanly FIN the stream.
+    CorrelatedResponseFinished,
+    /// Send a response correlated to a different request and keep open.
+    WrongCorrelation,
+    /// Send a bounded but undecodable response and keep open.
+    MalformedResponse,
+    /// Send a payload-free wrong-family reply and keep open.
+    WrongFamily,
+    /// Send one valid response followed by a complete trailing frame.
+    TrailingData,
+}
+
+/// Typed peer-side observation of the response send stream's terminal state.
+///
+/// `CleanFinish` is the only successful dedicated-mode completion. The two
+/// abandonment variants are both valid only for terminal-error fixtures:
+/// either Quinn surfaced the stream STOP code, or the session's typed
+/// application abandonment close won the race first.
+#[derive(Debug, Eq, PartialEq)]
+enum ResponseStreamDisposition {
+    /// `SendStream::stopped()` returned `Ok(None)` after clean FIN.
+    CleanFinish,
+    /// `SendStream::stopped()` returned a peer STOP code.
+    StreamStopped(VarInt),
+    /// The client closed the session with the exact private abandon code.
+    SessionAbandoned,
+}
+
+/// Classifies the pinned Quinn stop witness without weakening terminal
+/// evidence. Arbitrary connection loss, transport closure, zero-RTT
+/// rejection, and a watchdog timeout remain fixture failures.
+fn classify_response_stream_disposition(
+    stopped: Result<Option<VarInt>, StoppedError>,
+) -> Result<ResponseStreamDisposition, Box<dyn Error>> {
+    match stopped {
+        Ok(None) => Ok(ResponseStreamDisposition::CleanFinish),
+        Ok(Some(code)) => Ok(ResponseStreamDisposition::StreamStopped(code)),
+        Err(StoppedError::ConnectionLost(ConnectionError::ApplicationClosed(close)))
+            if u64::from(close.error_code) == LEAF_ABANDON_CODE =>
+        {
+            Ok(ResponseStreamDisposition::SessionAbandoned)
+        }
+        Err(StoppedError::ConnectionLost(ConnectionError::ApplicationClosed(_))) => {
+            Err("the response stream observed an unexpected application close".into())
+        }
+        Err(StoppedError::ConnectionLost(_)) => {
+            Err("the response stream stop witness lost its connection".into())
+        }
+        Err(StoppedError::ZeroRttRejected) => {
+            Err("the response stream stop witness rejected 0-RTT".into())
+        }
+    }
+}
+
+/// Requires the exact private stream STOP for an ordinary request whose
+/// session remains alive while the witness is collected.
+fn assert_response_stream_stopped(disposition: &ResponseStreamDisposition) {
+    let ResponseStreamDisposition::StreamStopped(code) = disposition else {
+        panic!("ordinary response did not report its private stream STOP");
+    };
+    assert_eq!(
+        *code,
+        VarInt::from_u32(LEAF_STREAM_STOP_CODE),
+        "ordinary response must report the exact private stream STOP"
+    );
+}
+
+/// Accepts only the two exact terminal-error observations: the private stream
+/// STOP code or the session's typed application abandonment close. Clean FIN
+/// is never terminal-error evidence.
+fn assert_response_stream_abandoned(disposition: &ResponseStreamDisposition) {
+    match disposition {
+        ResponseStreamDisposition::StreamStopped(code) => assert_eq!(
+            *code,
+            VarInt::from_u32(LEAF_STREAM_STOP_CODE),
+            "a terminal response must report the exact private stream STOP"
+        ),
+        ResponseStreamDisposition::SessionAbandoned => {}
+        ResponseStreamDisposition::CleanFinish => {
+            panic!("a terminal response must not report clean FIN acknowledgement")
+        }
+    }
+}
+
+/// Serves one request response and witnesses the peer's stream disposition.
+///
+/// The server waits on [`quinn::SendStream::stopped`] while retaining its
+/// connection. A cleanly finished response must report `None`; an ordinary
+/// held-open response must report the leaf's private STOP code; terminal
+/// dedicated-mode errors may report that same STOP or the exact typed session
+/// abandonment close when connection teardown wins the race.
+async fn serve_response_stream(
+    mut connections: tokio::sync::mpsc::Receiver<Connection>,
+    script: ResponseStreamScript,
+    stopped_witness: tokio::sync::oneshot::Sender<ResponseStreamDisposition>,
+    response_written: Option<tokio::sync::oneshot::Sender<()>>,
+) -> Result<Connection, Box<dyn Error>> {
+    let connection = next_connection(&mut connections).await?;
+    let welcome = welcome_envelope()?;
+    let (_hello, _handshake_send, _handshake_receive) =
+        drive_handshake(&connection, &welcome).await?;
+
+    let (mut send, mut receive) = tokio::time::timeout(TEST_DEADLINE, connection.accept_bi())
+        .await
+        .map_err(|_| "response request stream timed out")??;
+    let request = tokio::time::timeout(TEST_DEADLINE, transport::receive_envelope(&mut receive))
+        .await
+        .map_err(|_| "response request read timed out")??;
+    let request_id = request.frame_id.to_request_id()?;
+
+    match script {
+        ResponseStreamScript::CorrelatedResponseHeldOpen
+        | ResponseStreamScript::CorrelatedResponseFinished => {
+            let reply = correlated_response(&request_id)?;
+            tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                .await
+                .map_err(|_| "correlated response send timed out")??;
+        }
+        ResponseStreamScript::WrongCorrelation => {
+            let reply = correlated_response(&RequestId::parse("different-response")?)?;
+            tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                .await
+                .map_err(|_| "wrong-correlation response send timed out")??;
+        }
+        ResponseStreamScript::MalformedResponse => {
+            let malformed = raw_unsupported_version_bytes();
+            tokio::time::timeout(TEST_DEADLINE, transport::write_frame(&mut send, &malformed))
+                .await
+                .map_err(|_| "malformed response send timed out")??;
+        }
+        ResponseStreamScript::WrongFamily => {
+            let reply = event_reply()?;
+            tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                .await
+                .map_err(|_| "wrong-family response send timed out")??;
+        }
+        ResponseStreamScript::TrailingData => {
+            let reply = correlated_response(&request_id)?;
+            tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                .await
+                .map_err(|_| "trailing-data response send timed out")??;
+            let trailing = event_reply()?;
+            tokio::time::timeout(
+                TEST_DEADLINE,
+                transport::send_envelope(&mut send, &trailing),
+            )
+            .await
+            .map_err(|_| "trailing response frame send timed out")??;
+        }
+    }
+
+    if let Some(response_written) = response_written {
+        response_written
+            .send(())
+            .map_err(|()| "the response-written witness receiver was dropped")?;
+    }
+    if matches!(script, ResponseStreamScript::CorrelatedResponseFinished) {
+        send.finish()?;
+    }
+
+    let stopped = tokio::time::timeout(TEST_DEADLINE, send.stopped())
+        .await
+        .map_err(|_| "the response stream stop witness timed out")?;
+    let disposition = classify_response_stream_disposition(stopped)?;
+    stopped_witness
+        .send(disposition)
+        .map_err(|_| "the response stream witness receiver was dropped")?;
+    Ok(connection)
+}
+
+/// Proves that an acknowledging response rejection never reaches clean FIN
+/// acknowledgement and instead causes the private stream STOP.
+async fn acknowledging_response_rejection(
+    script: ResponseStreamScript,
+) -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let server_side = serve_response_stream(server.take_connections(), script, stopped_tx, None);
+    let client = async {
+        let cancel = CancelHandle::new();
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("ack-rejection-hello")?,
+            component_limits(1),
+            &cancel,
+        )
+        .await?;
+        let rejected = tokio::time::timeout(
+            TEST_DEADLINE,
+            session.request_acknowledging_response(
+                request_envelope("ack-rejection-request")?,
+                &cancel,
+            ),
+        )
+        .await
+        .map_err(|_| "acknowledging response rejection timed out")?;
+
+        match script {
+            ResponseStreamScript::WrongCorrelation => assert!(matches!(
+                rejected,
+                Err(ClientRequestError::Reply(
+                    ReplyRejection::DifferentCorrelation
+                ))
+            )),
+            ResponseStreamScript::MalformedResponse => assert!(matches!(
+                rejected,
+                Err(ClientRequestError::Exchange(DeadlineError::Peer {
+                    operation: OperationKind::Receive,
+                    error: ExchangeError::Receive(EnvelopeReceiveError::Decode(_)),
+                }))
+            )),
+            ResponseStreamScript::WrongFamily => assert!(matches!(
+                rejected,
+                Err(ClientRequestError::Reply(
+                    ReplyRejection::UnexpectedFamily {
+                        received: HandshakeMessageKind::Event
+                    }
+                ))
+            )),
+            ResponseStreamScript::TrailingData => assert!(matches!(
+                rejected,
+                Err(ClientRequestError::Exchange(DeadlineError::Peer {
+                    operation: OperationKind::Receive,
+                    error: ExchangeError::TrailingResponse,
+                }))
+            )),
+            _ => panic!("the rejection fixture must produce a rejected response"),
+        }
+
+        let stopped = tokio::time::timeout(TEST_DEADLINE, stopped_rx)
+            .await
+            .map_err(|_| "rejected response STOP witness timed out")?
+            .map_err(|_| "rejected response STOP witness was dropped")?;
+        assert_response_stream_abandoned(&stopped);
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// Proves cancellation and the whole request timeout both stop a response
+/// stream whose valid reply has arrived but whose FIN is deliberately held.
+async fn acknowledging_response_fin_abandonment(
+    cancel_mid_wait: bool,
+) -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let (response_written_tx, response_written_rx) = tokio::sync::oneshot::channel();
+    let server_side = serve_response_stream(
+        server.take_connections(),
+        ResponseStreamScript::CorrelatedResponseHeldOpen,
+        stopped_tx,
+        Some(response_written_tx),
+    );
+    let client = async {
+        let cancel = CancelHandle::new();
+        let mut limits = component_limits(1);
+        if !cancel_mid_wait {
+            limits.request = Duration::from_millis(250);
+        }
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("ack-abandonment-hello")?,
+            limits,
+            &cancel,
+        )
+        .await?;
+        let mut request =
+            Box::pin(session.request_acknowledging_response(
+                request_envelope("ack-abandonment-request")?,
+                &cancel,
+            ));
+
+        tokio::select! {
+            biased;
+            outcome = &mut request => {
+                panic!("a held response FIN cannot let the acknowledging request settle: {outcome:?}");
+            }
+            written = tokio::time::timeout(TEST_DEADLINE, response_written_rx) => {
+                written
+                    .map_err(|_| "response-written witness timed out")?
+                    .map_err(|_| "response-written witness was dropped")?;
+            }
+        }
+
+        if cancel_mid_wait {
+            cancel.cancel();
+        }
+        let outcome = tokio::time::timeout(TEST_DEADLINE, &mut request)
+            .await
+            .map_err(|_| "response-FIN abandonment was not bounded")?;
+        if cancel_mid_wait {
+            assert!(matches!(
+                outcome,
+                Err(ClientRequestError::Exchange(DeadlineError::Cancelled {
+                    operation: OperationKind::Receive
+                }))
+            ));
+        } else {
+            assert!(matches!(
+                outcome,
+                Err(ClientRequestError::Exchange(DeadlineError::Timeout {
+                    operation: OperationKind::Receive,
+                    ..
+                }))
+            ));
+        }
+
+        let stopped = tokio::time::timeout(TEST_DEADLINE, stopped_rx)
+            .await
+            .map_err(|_| "abandoned response STOP witness timed out")?
+            .map_err(|_| "abandoned response STOP witness was dropped")?;
+        assert_response_stream_abandoned(&stopped);
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
 }
 
 /// Shared spawned-task scenario for absence witnesses: handshakes with
@@ -650,19 +1147,26 @@ async fn handshake_then_witness_closed(
 }
 
 /// Opens exactly one server-owned delivery stream, writes only the prefix and
-/// one body byte of one envelope, then releases the client's biased receive
-/// selection. That selection polls the receive branch before the release
-/// branch, so the stream is accepted and blocked inside its frame read before
-/// the client abandons it. The server witnesses the receiver's synchronous
-/// STOP before serving one ordinary request on the still-live connection.
+/// one body byte of one envelope, and waits until the client has polled the
+/// receive future again after that write. The client-side future is then
+/// known to have accepted the stream and to be blocked inside its frame read;
+/// the server witnesses the receiver's synchronous STOP before serving one
+/// ordinary request on the still-live session connection.
 async fn serve_fragmented_delivery(
     mut connections: tokio::sync::mpsc::Receiver<Connection>,
-    fragment_written: tokio::sync::oneshot::Sender<()>,
+    initial_poll: tokio::sync::oneshot::Receiver<()>,
+    post_poll: tokio::sync::oneshot::Receiver<()>,
+    ready: tokio::sync::oneshot::Sender<()>,
 ) -> Result<Connection, Box<dyn Error>> {
     let connection = next_connection(&mut connections).await?;
     let welcome = welcome_envelope()?;
     let (_hello, _handshake_send, _handshake_receive) =
         drive_handshake(&connection, &welcome).await?;
+
+    tokio::time::timeout(TEST_DEADLINE, initial_poll)
+        .await
+        .map_err(|_| "delivery receive future did not start")?
+        .map_err(|_| "delivery receive poll witness was dropped before acceptance")?;
 
     let mut delivery_send = tokio::time::timeout(TEST_DEADLINE, connection.open_uni())
         .await
@@ -673,7 +1177,12 @@ async fn serve_fragmented_delivery(
         "the scripted envelope must have a body byte after its four-byte prefix"
     );
     delivery_send.write_all(&framed[..5]).await?;
-    fragment_written
+
+    tokio::time::timeout(TEST_DEADLINE, post_poll)
+        .await
+        .map_err(|_| "delivery receive future did not poll after the fragment")?
+        .map_err(|_| "delivery receive poll witness was dropped before the STOP")?;
+    ready
         .send(())
         .map_err(|()| "the client abandoned before receiving the mid-frame witness")?;
 
@@ -807,8 +1316,15 @@ async fn fragmented_delivery_abandonment(cancel_mid_frame: bool) -> Result<(), B
     let (certificate, private_key, pin) = ephemeral_identity();
     let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
 
+    let (initial_tx, initial_rx) = tokio::sync::oneshot::channel();
+    let (post_tx, post_rx) = tokio::sync::oneshot::channel();
     let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
-    let server_side = serve_fragmented_delivery(server.take_connections(), ready_tx);
+    let connections = server.take_connections();
+    let server_task = tokio::spawn(async move {
+        serve_fragmented_delivery(connections, initial_rx, post_rx, ready_tx)
+            .await
+            .map_err(|err| err.to_string())
+    });
     let client = async {
         let (session, _) = ClientSession::connect(
             target(server.addr),
@@ -822,10 +1338,23 @@ async fn fragmented_delivery_abandonment(cancel_mid_frame: bool) -> Result<(), B
         let (session, receiver) = session.take_delivery()?;
         let delivery_cancel = CancelHandle::new();
         let mut receive = Box::pin(receiver.recv(&delivery_cancel));
+        let mut initial_tx = Some(initial_tx);
+        let mut post_tx = Some(post_tx);
+        let mut witnessed = Box::pin(std::future::poll_fn(move |context| {
+            let poll = receive.as_mut().poll(context);
+            if poll.is_pending() {
+                if let Some(tx) = initial_tx.take() {
+                    let _ = tx.send(());
+                } else if let Some(tx) = post_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+            poll
+        }));
 
         tokio::select! {
             biased;
-            _ = &mut receive => {
+            _ = &mut witnessed => {
                 panic!("fragmented delivery receive completed before the abort");
             }
             ready = &mut ready_rx => {
@@ -835,10 +1364,10 @@ async fn fragmented_delivery_abandonment(cancel_mid_frame: bool) -> Result<(), B
 
         if cancel_mid_frame {
             delivery_cancel.cancel();
-            let result = receive.await;
+            let result = witnessed.await;
             assert!(matches!(result, Err(DeliveryLost)));
         } else {
-            drop(receive);
+            drop(witnessed);
         }
 
         let request_cancel = CancelHandle::new();
@@ -850,10 +1379,16 @@ async fn fragmented_delivery_abandonment(cancel_mid_frame: bool) -> Result<(), B
         Ok::<_, Box<dyn Error>>(())
     };
 
-    let (client_result, server_result) = tokio::join!(client, server_side);
-    let retained_connection = server_result?;
+    let client_result = client.await;
+    let server_result = tokio::time::timeout(TEST_DEADLINE, server_task)
+        .await
+        .map_err(|_| "fragmented delivery server task timed out")?
+        .map_err(|err| -> Box<dyn Error> {
+            format!("fragmented delivery server task panicked: {err}").into()
+        })?
+        .map_err(|err: String| -> Box<dyn Error> { err.into() })?;
     client_result?;
-    drop(retained_connection);
+    drop(server_result);
     drop(server);
     Ok(())
 }
@@ -1155,11 +1690,412 @@ async fn pinned_handshake_hands_the_welcome_to_the_caller() -> Result<(), Box<dy
     );
     assert_eq!(session.protocol_version(), ProtocolVersion::V1);
     assert_eq!(session.connection_id().as_str(), CONNECTION_TAG);
+    assert!(!session.lifecycle_control_supported());
     assert_eq!(session.pending_capacity(), transport::PENDING_CAPACITY);
     assert_eq!(session.admission_budget(), 2);
     assert_eq!(session.admitted(), 0);
 
     session.shutdown(&cancel).await?;
+    drop(server);
+    Ok(())
+}
+
+/// Ordinary requests still stop the response stream after settling exactly
+/// one correlated reply; they do not wait for the peer's FIN.
+#[tokio::test]
+async fn ordinary_request_stops_after_one_correlated_response() -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let server_side = serve_response_stream(
+        server.take_connections(),
+        ResponseStreamScript::CorrelatedResponseHeldOpen,
+        stopped_tx,
+        None,
+    );
+    let client = async {
+        let cancel = CancelHandle::new();
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("ordinary-response-hello")?,
+            component_limits(1),
+            &cancel,
+        )
+        .await?;
+        let (session, resolved) = session
+            .request(request_envelope("ordinary-response-request")?, &cancel)
+            .await?;
+        assert_eq!(resolved.request_id().as_str(), "ordinary-response-request");
+        assert!(matches!(resolved.outcome(), RequestOutcome::Response(_)));
+
+        let stopped = tokio::time::timeout(TEST_DEADLINE, stopped_rx)
+            .await
+            .map_err(|_| "ordinary response STOP witness timed out")?
+            .map_err(|_| "ordinary response STOP witness was dropped")?;
+        assert_response_stream_stopped(&stopped);
+        session.shutdown(&cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// The dedicated mode returns the same correlated response owner only after
+/// the server has finished the response stream and observed clean
+/// acknowledgement.
+#[tokio::test]
+async fn acknowledging_response_waits_for_clean_response_fin() -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let server_side = serve_response_stream(
+        server.take_connections(),
+        ResponseStreamScript::CorrelatedResponseFinished,
+        stopped_tx,
+        None,
+    );
+    let client = async {
+        let cancel = CancelHandle::new();
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("ack-response-hello")?,
+            component_limits(2),
+            &cancel,
+        )
+        .await?;
+        let (session, resolved) = session
+            .request_acknowledging_response(request_envelope("ack-response-request")?, &cancel)
+            .await?;
+        assert_eq!(resolved.request_id().as_str(), "ack-response-request");
+        let RequestOutcome::Response(response) = resolved.outcome() else {
+            panic!("the acknowledging response must settle successfully");
+        };
+        assert_eq!(response.request_id.as_str(), "ack-response-request");
+        assert_eq!(session.admitted(), 1);
+        assert_eq!(session.connection_id().as_str(), CONNECTION_TAG);
+
+        let stopped = tokio::time::timeout(TEST_DEADLINE, stopped_rx)
+            .await
+            .map_err(|_| "clean response FIN witness timed out")?
+            .map_err(|_| "clean response FIN witness was dropped")?;
+        assert_eq!(
+            stopped,
+            ResponseStreamDisposition::CleanFinish,
+            "a valid settled response followed by FIN must be cleanly acknowledged"
+        );
+        session.shutdown(&cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// A wrong-correlation reply cannot be settled or cleanly acknowledged.
+#[tokio::test]
+async fn acknowledging_response_wrong_correlation_stops_stream() -> Result<(), Box<dyn Error>> {
+    acknowledging_response_rejection(ResponseStreamScript::WrongCorrelation).await
+}
+
+/// A bounded but undecodable reply cannot be cleanly acknowledged.
+#[tokio::test]
+async fn acknowledging_response_malformed_reply_stops_stream() -> Result<(), Box<dyn Error>> {
+    acknowledging_response_rejection(ResponseStreamScript::MalformedResponse).await
+}
+
+/// A wrong-family reply cannot be settled or cleanly acknowledged.
+#[tokio::test]
+async fn acknowledging_response_wrong_family_stops_stream() -> Result<(), Box<dyn Error>> {
+    acknowledging_response_rejection(ResponseStreamScript::WrongFamily).await
+}
+
+/// A complete trailing frame after the one correlated reply is an exchange
+/// error, not clean response completion, and the peer observes private STOP.
+#[tokio::test]
+async fn acknowledging_response_trailing_data_stops_stream() -> Result<(), Box<dyn Error>> {
+    acknowledging_response_rejection(ResponseStreamScript::TrailingData).await
+}
+
+/// Cancellation while the peer withholds response FIN is bounded and
+/// terminal, and the guarded stream emits the private STOP.
+#[tokio::test]
+async fn acknowledging_response_cancellation_while_waiting_for_fin_is_terminal()
+-> Result<(), Box<dyn Error>> {
+    acknowledging_response_fin_abandonment(true).await
+}
+
+/// Timeout while the peer withholds response FIN uses the original request
+/// budget and emits the private STOP before the consumed session is dropped.
+#[tokio::test]
+async fn acknowledging_response_timeout_while_waiting_for_fin_is_terminal()
+-> Result<(), Box<dyn Error>> {
+    acknowledging_response_fin_abandonment(false).await
+}
+
+/// A lifecycle request on a session whose Welcome did not negotiate the
+/// feature fails before request identity or exchange admission. The peer
+/// observes the session's typed abandonment close while accepting no request
+/// stream, so no request bytes or server handler can have run.
+#[tokio::test]
+async fn unnegotiated_lifecycle_request_is_rejected_before_request_io() -> Result<(), Box<dyn Error>>
+{
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_task = tokio::spawn(handshake_then_witness_closed(server.take_connections()));
+
+    let cancel = CancelHandle::new();
+    let client = async {
+        let (session, welcome) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope_with_lifecycle("unoffered-hello", false)?,
+            component_limits(1),
+            &cancel,
+        )
+        .await?;
+        assert!(!welcome.welcome.lifecycle_control_supported);
+        assert!(!session.lifecycle_control_supported());
+        assert_eq!(session.admitted(), 0);
+
+        let outcome = session
+            .request(lifecycle_status_request("unoffered-status")?, &cancel)
+            .await;
+        assert!(matches!(
+            outcome,
+            Err(ClientRequestError::UnsupportedFeature)
+        ));
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_task);
+    let peer_saw_no_request_stream =
+        server_result.expect("unnegotiated lifecycle fixture task does not panic");
+    assert!(
+        peer_saw_no_request_stream,
+        "the peer must observe session abandonment without accepting request I/O"
+    );
+    client_result?;
+    drop(server);
+    Ok(())
+}
+
+/// A negotiated lifecycle status uses the ordinary request exchange and
+/// settles the waiter with the exact outer frame identity.
+#[tokio::test]
+async fn negotiated_lifecycle_status_round_trips_exact_correlation() -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_addr = server.addr;
+    let client = async {
+        let (session, welcome) = ClientSession::connect(
+            target(server_addr),
+            certificate,
+            pin,
+            hello_envelope_with_lifecycle("status-hello", true)?,
+            component_limits(2),
+            &CancelHandle::new(),
+        )
+        .await?;
+        assert!(welcome.welcome.lifecycle_control_supported);
+        assert!(session.lifecycle_control_supported());
+
+        let cancel = CancelHandle::new();
+        let (session, resolved) = session
+            .request(lifecycle_status_request("status-request")?, &cancel)
+            .await?;
+        assert_eq!(resolved.request_id().as_str(), "status-request");
+        let RequestOutcome::Response(response) = resolved.outcome() else {
+            panic!("the lifecycle status must settle as a successful response");
+        };
+        assert_eq!(response.request_id.as_str(), "status-request");
+        let ResponsePayload::Lifecycle(LifecycleResponse::Status(status)) = &response.payload
+        else {
+            panic!("the response must carry the lifecycle status payload");
+        };
+        assert_eq!(status, &LifecycleStatus::new(LifecycleState::Busy, 2)?);
+        session.shutdown(&cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let server_side = serve_full_with_lifecycle(
+        server.take_connections(),
+        vec![Step::LifecycleStatus {
+            state: LifecycleState::Busy,
+            active_work_count: 2,
+        }],
+        true,
+    );
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// Negotiated lifecycle stop requests preserve both `require_idle` values,
+/// and each typed receipt crosses the existing correlated response path.
+#[tokio::test]
+async fn negotiated_lifecycle_stop_preserves_idle_policy_and_receipts() -> Result<(), Box<dyn Error>>
+{
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_addr = server.addr;
+    let client = async {
+        let (mut session, welcome) = ClientSession::connect(
+            target(server_addr),
+            certificate,
+            pin,
+            hello_envelope_with_lifecycle("stop-hello", true)?,
+            component_limits(4),
+            &CancelHandle::new(),
+        )
+        .await?;
+        assert!(welcome.welcome.lifecycle_control_supported);
+        assert!(session.lifecycle_control_supported());
+
+        let cases = [
+            ("stop-accepted", true, LifecycleStopDisposition::Accepted),
+            ("stop-duplicate", false, LifecycleStopDisposition::Duplicate),
+            (
+                "stop-already-stopping",
+                true,
+                LifecycleStopDisposition::AlreadyStopping,
+            ),
+        ];
+        let cancel = CancelHandle::new();
+        for (frame, require_idle, disposition) in cases {
+            let (owner, resolved) = session
+                .request(lifecycle_stop_request(frame, require_idle)?, &cancel)
+                .await?;
+            session = owner;
+            assert_eq!(resolved.request_id().as_str(), frame);
+            let RequestOutcome::Response(response) = resolved.outcome() else {
+                panic!("the lifecycle stop must settle as a successful response");
+            };
+            assert_eq!(response.request_id.as_str(), frame);
+            let ResponsePayload::Lifecycle(LifecycleResponse::Stop(receipt)) = &response.payload
+            else {
+                panic!("the response must carry the lifecycle stop receipt");
+            };
+            assert_eq!(receipt.disposition, disposition);
+            assert_eq!(receipt.state, LifecycleState::Draining);
+        }
+        assert_eq!(session.admitted(), 3);
+        session.shutdown(&cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let server_side = serve_full_with_lifecycle(
+        server.take_connections(),
+        vec![
+            Step::LifecycleStop {
+                require_idle: true,
+                disposition: LifecycleStopDisposition::Accepted,
+                state: LifecycleState::Draining,
+            },
+            Step::LifecycleStop {
+                require_idle: false,
+                disposition: LifecycleStopDisposition::Duplicate,
+                state: LifecycleState::Draining,
+            },
+            Step::LifecycleStop {
+                require_idle: true,
+                disposition: LifecycleStopDisposition::AlreadyStopping,
+                state: LifecycleState::Draining,
+            },
+        ],
+        true,
+    );
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// Correlated lifecycle rejections remain ordinary outcomes, and the same
+/// negotiated session can issue a later ordinary request successfully.
+#[tokio::test]
+async fn correlated_lifecycle_failures_preserve_the_live_session() -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_addr = server.addr;
+    let client = async {
+        let (session, welcome) = ClientSession::connect(
+            target(server_addr),
+            certificate,
+            pin,
+            hello_envelope_with_lifecycle("failure-hello", true)?,
+            component_limits(4),
+            &CancelHandle::new(),
+        )
+        .await?;
+        assert!(welcome.welcome.lifecycle_control_supported);
+        assert!(session.lifecycle_control_supported());
+        let cancel = CancelHandle::new();
+
+        let (session, busy) = session
+            .request(lifecycle_stop_request("busy-stop", true)?, &cancel)
+            .await?;
+        let RequestOutcome::Failure(failure) = busy.outcome() else {
+            panic!("LifecycleBusy must remain a correlated failure outcome");
+        };
+        assert_eq!(failure.code, ErrorCode::LifecycleBusy);
+        assert_eq!(
+            failure.request_id.as_ref().map(RequestId::as_str),
+            Some("busy-stop")
+        );
+
+        let (session, unsupported) = session
+            .request(lifecycle_status_request("unsupported-status")?, &cancel)
+            .await?;
+        let RequestOutcome::Failure(failure) = unsupported.outcome() else {
+            panic!("UnsupportedFeature must remain a correlated failure outcome");
+        };
+        assert_eq!(failure.code, ErrorCode::UnsupportedFeature);
+        assert_eq!(
+            failure.request_id.as_ref().map(RequestId::as_str),
+            Some("unsupported-status")
+        );
+
+        let (session, recovered) = session
+            .request(request_envelope("after-lifecycle-failures")?, &cancel)
+            .await?;
+        assert!(matches!(recovered.outcome(), RequestOutcome::Response(_)));
+        assert_eq!(session.admitted(), 3);
+        session.shutdown(&cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let server_side = serve_full_with_lifecycle(
+        server.take_connections(),
+        vec![
+            Step::CorrelatedFailureCode(ErrorCode::LifecycleBusy),
+            Step::CorrelatedFailureCode(ErrorCode::UnsupportedFeature),
+            Step::CorrelatedResponse,
+        ],
+        true,
+    );
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
     drop(server);
     Ok(())
 }
@@ -2031,12 +2967,13 @@ async fn withhold_and_witness_close(
     witnessed: tokio::sync::mpsc::Sender<()>,
     mut release: tokio::sync::mpsc::Receiver<()>,
     peer_closed: tokio::sync::oneshot::Sender<bool>,
+    lifecycle_control_supported: bool,
 ) {
     let Ok(Some(connection)) = tokio::time::timeout(TEST_DEADLINE, connections.recv()).await else {
         let _reported = peer_closed.send(false);
         return;
     };
-    let Ok(welcome) = welcome_envelope() else {
+    let Ok(welcome) = welcome_envelope_with_lifecycle(lifecycle_control_supported) else {
         let _reported = peer_closed.send(false);
         return;
     };
@@ -2083,6 +3020,115 @@ async fn withhold_and_witness_close(
     let _reported = peer_closed.send(witnessed_close);
 }
 
+/// Abandons a genuinely mid-flight negotiated lifecycle exchange either by
+/// caller cancellation or by its whole-stage timeout. The peer has already
+/// read the complete Stop request, then witnesses the existing typed
+/// session-abandonment close after the guarded stream cleanup runs; the
+/// fixture does not claim that the server cancelled any lifecycle work.
+async fn lifecycle_exchange_abandonment(cancel_mid_flight: bool) -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+
+    let (witnessed_tx, mut witnessed_rx) = tokio::sync::mpsc::channel(1);
+    let (release_tx, release_rx) = tokio::sync::mpsc::channel(1);
+    let (peer_closed_tx, peer_closed_rx) = tokio::sync::oneshot::channel();
+    let server_task = tokio::spawn(withhold_and_witness_close(
+        server.take_connections(),
+        witnessed_tx,
+        release_rx,
+        peer_closed_tx,
+        true,
+    ));
+
+    let cancel = CancelHandle::new();
+    let mut limits = component_limits(2);
+    if !cancel_mid_flight {
+        limits.request = Duration::from_secs(2);
+    }
+    let (session, welcome) = ClientSession::connect(
+        target(server.addr),
+        certificate,
+        pin,
+        hello_envelope_with_lifecycle("abandon-lifecycle-hello", true)?,
+        limits,
+        &cancel,
+    )
+    .await?;
+    assert!(welcome.welcome.lifecycle_control_supported);
+    assert!(session.lifecycle_control_supported());
+
+    let mut request = Box::pin(session.request(
+        lifecycle_stop_request("abandon-lifecycle-stop", true)?,
+        &cancel,
+    ));
+    tokio::select! {
+        biased;
+        _ = &mut request => {
+            panic!("the fixture withheld the lifecycle reply, so the exchange must stay pending");
+        }
+        event = tokio::time::timeout(TEST_DEADLINE, witnessed_rx.recv()) => {
+            assert_eq!(
+                event.expect("lifecycle request witness is bounded"),
+                Some(()),
+                "the peer must read the complete lifecycle request before abandonment"
+            );
+        }
+    }
+
+    if cancel_mid_flight {
+        cancel.cancel();
+        assert!(matches!(
+            request.await,
+            Err(ClientRequestError::Exchange(DeadlineError::Cancelled {
+                operation: OperationKind::Receive
+            }))
+        ));
+    } else {
+        assert!(matches!(
+            request.await,
+            Err(ClientRequestError::Exchange(DeadlineError::Timeout {
+                operation: OperationKind::Receive,
+                ..
+            }))
+        ));
+    }
+
+    release_tx
+        .send(())
+        .await
+        .expect("the lifecycle fixture is waiting for the local abandonment");
+    let peer_saw_close = tokio::time::timeout(TEST_DEADLINE, peer_closed_rx)
+        .await
+        .expect("lifecycle closure witness is bounded")
+        .expect("lifecycle fixture reports the closure witness");
+    assert!(
+        peer_saw_close,
+        "the peer must observe the existing typed session-abandonment close"
+    );
+    tokio::time::timeout(TEST_DEADLINE, server_task)
+        .await
+        .expect("lifecycle fixture task finishes")
+        .expect("lifecycle fixture task does not panic");
+    drop(server);
+    Ok(())
+}
+
+/// A cancelled negotiated lifecycle exchange retains the existing guarded
+/// STOP/RESET and terminal session-abandonment behavior.
+#[tokio::test]
+async fn cancelled_lifecycle_exchange_abandons_the_session_after_full_send()
+-> Result<(), Box<dyn Error>> {
+    lifecycle_exchange_abandonment(true).await
+}
+
+/// A timed-out negotiated lifecycle exchange retains the existing guarded
+/// STOP/RESET and terminal session-abandonment behavior.
+#[tokio::test]
+async fn timed_out_lifecycle_exchange_abandons_the_session_after_full_send()
+-> Result<(), Box<dyn Error>> {
+    lifecycle_exchange_abandonment(false).await
+}
+
 /// Cancelling a genuinely mid-flight request — proven pending by the
 /// peer having READ the full request bytes while the reply was withheld
 /// — closes the connection, and the peer positively witnesses the typed
@@ -2103,6 +3149,7 @@ async fn mid_flight_cancellation_closes_connection_during_pending_receive()
         witnessed_tx,
         release_rx,
         peer_closed_tx,
+        false,
     ));
 
     let cancel = CancelHandle::new();
@@ -2177,6 +3224,7 @@ async fn mid_flight_timeout_witnesses_pending_io() -> Result<(), Box<dyn Error>>
         witnessed_tx,
         release_rx,
         peer_closed_tx,
+        false,
     ));
 
     let cancel = CancelHandle::new();
@@ -2336,6 +3384,7 @@ async fn dropping_pending_request_closes_connection_with_reply_pending()
         witnessed_tx,
         release_rx,
         peer_closed_tx,
+        false,
     ));
 
     let cancel = CancelHandle::new();

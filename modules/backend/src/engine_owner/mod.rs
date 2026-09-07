@@ -25,11 +25,14 @@
 
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use artisan_domain::RunId;
+use artisan_database::ThreadEngineSettings;
+use artisan_domain::{MessageBody, RootPath, RunId};
+use artisan_native_engine::VerifiedOpenCode2ProfileLaunch;
 use artisan_transport::CancelHandle;
 use thiserror::Error;
 use tokio::runtime::Handle;
@@ -39,7 +42,7 @@ pub(crate) mod event;
 pub(crate) mod framing;
 pub mod http;
 pub(crate) mod observation;
-mod operation;
+pub(crate) mod operation;
 mod process;
 pub mod readiness;
 pub(crate) mod stream;
@@ -60,8 +63,200 @@ mod engine_owner_readiness;
 #[path = "../../../../tests/backend/engine_owner_streaming.rs"]
 mod engine_owner_streaming;
 
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_configured.rs"]
+mod engine_owner_configured;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_preflight.rs"]
+mod engine_owner_preflight;
+
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
+
+/// Immutable input handed to the configured `OpenCode2` owner.
+///
+/// The dispatcher constructs this only after reading the durable settings and
+/// resolving the exact registered profile.  The owner never rereads the
+/// thread, registry, or environment while this value is live.
+pub(crate) struct EngineTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt_text: MessageBody,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: VerifiedOpenCode2ProfileLaunch,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for EngineTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineTurnInput { <redacted> }")
+    }
+}
+
+/// Test-only launch seam for the configured fixture.
+///
+/// Production `VerifiedOpenCode2ProfileLaunch` remains non-constructible and
+/// non-cloneable; this seam is `#[cfg(test)]` only and never appears in a
+/// normal production build or in any manufactured install/profile/product
+/// receipt. The fixture executable is an explicitly supplied regular file path
+/// and the scenario is a frozen fixture string.
+#[cfg(test)]
+pub(crate) struct FixtureConfiguredLaunch {
+    pub(crate) program: PathBuf,
+    pub(crate) version: &'static str,
+    pub(crate) profile_id: String,
+    pub(crate) scenario: &'static str,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for FixtureConfiguredLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FixtureConfiguredLaunch { <redacted> }")
+    }
+}
+
+/// Test-only input for the configured fixture turn.
+///
+/// Mirrors `EngineTurnInput` but replaces the verified capability with an
+/// explicitly supplied fixture program/version/profile. `#[cfg(test)]` only.
+#[cfg(test)]
+pub(crate) struct FixtureTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt_text: MessageBody,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) fixture: FixtureConfiguredLaunch,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for FixtureTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FixtureTurnInput { <redacted> }")
+    }
+}
+
+/// Private launch for the single internal configured pipeline.
+///
+/// The `Verified` variant carries the production capability and is present in
+/// all builds; the `Fixture` variant is `#[cfg(test)]` only and never
+/// constructible in non-test builds. Never `Clone`.
+pub(crate) enum InternalLaunch {
+    Verified(Box<VerifiedOpenCode2ProfileLaunch>),
+    #[cfg(test)]
+    Fixture(FixtureConfiguredLaunch),
+}
+
+impl std::fmt::Debug for InternalLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InternalLaunch { <redacted> }")
+    }
+}
+
+impl InternalLaunch {
+    pub(crate) fn profile_id(&self) -> &str {
+        match self {
+            Self::Verified(verified) => verified.as_ref().profile_id().as_str(),
+            #[cfg(test)]
+            Self::Fixture(fixture) => fixture.profile_id.as_str(),
+        }
+    }
+
+    pub(crate) fn version(&self) -> &str {
+        match self {
+            Self::Verified(verified) => verified.as_ref().version(),
+            #[cfg(test)]
+            Self::Fixture(fixture) => fixture.version,
+        }
+    }
+}
+
+/// Single internal input for the one configured-turn pipeline.
+///
+/// Both `EngineTurnInput` (production) and `FixtureTurnInput` (`#[cfg(test)]`)
+/// convert into this at admission, so the queued `Job::Turn` always carries
+/// the same type and exactly one executor proves the lifecycle.
+pub(crate) struct InternalTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt_text: MessageBody,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: InternalLaunch,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for InternalTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InternalTurnInput { <redacted> }")
+    }
+}
+
+/// Absolute deadlines for one configured-engine preflight.
+///
+/// The admission deadline bounds queue waiting and both protocol phases. The
+/// close deadline belongs to teardown and remains an uncancellable cleanup
+/// boundary once a child has been spawned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PreflightDeadlines {
+    pub(crate) readiness: tokio::time::Instant,
+    pub(crate) health: tokio::time::Instant,
+    pub(crate) close: tokio::time::Instant,
+    pub(crate) admission: tokio::time::Instant,
+}
+
+/// Immutable production input for one owner-serialized configured preflight.
+///
+/// The caller supplies the already verified launch capability, exact project
+/// root, absolute phase/admission deadlines, and the existing protocol
+/// bounds. No profile, root, executable, credential, or budget is discovered
+/// by the owner.
+pub(crate) struct EnginePreflightInput {
+    pub(crate) project_root: RootPath,
+    pub(crate) launch: VerifiedOpenCode2ProfileLaunch,
+    pub(crate) deadlines: PreflightDeadlines,
+    pub(crate) bounds: EngineBounds,
+}
+
+impl fmt::Debug for EnginePreflightInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EnginePreflightInput { <redacted> }")
+    }
+}
+
+/// Test-only input for the same preflight executor using the existing
+/// configured-engine fixture seam.
+#[cfg(test)]
+pub(crate) struct FixturePreflightInput {
+    pub(crate) project_root: RootPath,
+    pub(crate) fixture: FixtureConfiguredLaunch,
+    pub(crate) deadlines: PreflightDeadlines,
+    pub(crate) bounds: EngineBounds,
+}
+
+#[cfg(test)]
+impl fmt::Debug for FixturePreflightInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FixturePreflightInput { <redacted> }")
+    }
+}
+
+/// Single internal preflight input carried by the owner queue.
+pub(crate) struct InternalPreflightInput {
+    pub(crate) project_root: RootPath,
+    pub(crate) launch: InternalLaunch,
+    pub(crate) deadlines: PreflightDeadlines,
+    pub(crate) bounds: EngineBounds,
+}
 
 /// Raw engine time limits.
 ///
@@ -338,6 +533,27 @@ impl EngineOwner {
         }
     }
 
+    /// Starts an owner whose executable and per-attempt limits arrive with
+    /// each configured turn.  The queue capacity is selected by the caller;
+    /// no scheduler or engine default is introduced here.
+    pub(crate) fn start_configured(control_capacity: NonZeroUsize, runtime: &Handle) -> Self {
+        let (jobs, pending) = mpsc::channel::<Job>(control_capacity.get());
+        let shutdown = Arc::new(CancelHandle::new());
+        let (health_sender, health) = watch::channel(OwnerHealth::Active);
+        let join = runtime.spawn(operation::run_configured_owner(
+            pending,
+            Arc::clone(&shutdown),
+            health_sender,
+        ));
+        Self {
+            jobs,
+            shutdown,
+            health,
+            join,
+            observed_join: None,
+        }
+    }
+
     /// Returns the current payload-free health state.
     #[must_use]
     pub fn health(&self) -> EngineOwnerHealth {
@@ -420,7 +636,7 @@ impl EngineOwner {
         };
         let control = Arc::new(CancelHandle::new());
         let (respond, receiver) = oneshot::channel();
-        let job = Job {
+        let job = Job::Legacy {
             run_id,
             deadline,
             control: Arc::clone(&control),
@@ -428,6 +644,164 @@ impl EngineOwner {
         };
         match self.jobs.try_send(job) {
             Ok(()) => Ok(operation::AcceptedLaunch::from_parts(receiver, control)),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
+        }
+    }
+
+    /// Admits one configured `OpenCode2` turn into the single owner queue.
+    ///
+    /// The observation channel is created at the persisted capacity carried
+    /// by the immutable run settings.  The returned handoff exposes session
+    /// preparation and a one-shot bind authorization gate; it never exposes
+    /// the child, endpoint, credentials, or raw provider response.
+    pub(crate) fn admit_turn(
+        &self,
+        input: EngineTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt_text: input.prompt_text,
+            settings: input.settings,
+            launch: InternalLaunch::Verified(Box::new(input.launch)),
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    /// Admits one configured-engine preflight into the single owner queue.
+    ///
+    /// The capability and project root are moved into the owner. The owner
+    /// performs only configured spawn, readiness, authenticated health, and
+    /// observed cleanup; it does not create a provider session or deliver a
+    /// prompt.
+    pub(crate) fn admit_preflight(
+        &self,
+        input: EnginePreflightInput,
+    ) -> Result<operation::AcceptedPreflight, LaunchAdmissionError> {
+        let internal = InternalPreflightInput {
+            project_root: input.project_root,
+            launch: InternalLaunch::Verified(Box::new(input.launch)),
+            deadlines: input.deadlines,
+            bounds: input.bounds,
+        };
+        self.admit_internal_preflight(internal)
+    }
+
+    /// Test-only fixture admission for the same owner-serialized preflight
+    /// branch. It uses the existing configured fixture launch seam and no
+    /// alternate engine protocol.
+    #[cfg(test)]
+    pub(crate) fn admit_fixture_preflight(
+        &self,
+        input: FixturePreflightInput,
+    ) -> Result<operation::AcceptedPreflight, LaunchAdmissionError> {
+        let internal = InternalPreflightInput {
+            project_root: input.project_root,
+            launch: InternalLaunch::Fixture(input.fixture),
+            deadlines: input.deadlines,
+            bounds: input.bounds,
+        };
+        self.admit_internal_preflight(internal)
+    }
+
+    fn admit_internal_preflight(
+        &self,
+        input: InternalPreflightInput,
+    ) -> Result<operation::AcceptedPreflight, LaunchAdmissionError> {
+        if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
+            return Err(LaunchAdmissionError::Unavailable);
+        }
+        let control = Arc::new(CancelHandle::new());
+        let (respond, receiver) = oneshot::channel();
+        let job = Job::Preflight {
+            input: Box::new(input),
+            control: Arc::clone(&control),
+            respond,
+        };
+        match self.jobs.try_send(job) {
+            Ok(()) => Ok(operation::AcceptedPreflight::from_parts(receiver, control)),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
+        }
+    }
+
+    /// Test-only fixture admission. Converts `FixtureTurnInput` into the
+    /// single internal input so the queued `Job::Turn` always carries the
+    /// same type and exactly one executor proves the lifecycle.
+    #[cfg(test)]
+    pub(crate) fn admit_fixture_turn(
+        &self,
+        input: FixtureTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt_text: input.prompt_text,
+            settings: input.settings,
+            launch: InternalLaunch::Fixture(input.fixture),
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    fn admit_internal(
+        &self,
+        input: InternalTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
+            return Err(LaunchAdmissionError::Unavailable);
+        }
+        if budget == Duration::ZERO {
+            return Err(LaunchAdmissionError::InvalidDeadline);
+        }
+        let Some(deadline) = tokio::time::Instant::now().checked_add(budget) else {
+            return Err(LaunchAdmissionError::InvalidDeadline);
+        };
+        let observation_capacity = usize::try_from(
+            input
+                .settings
+                .config()
+                .runtime()
+                .observation_capacity()
+                .get(),
+        )
+        .map_err(|_| LaunchAdmissionError::InvalidCapacity)?;
+        if observation_capacity == 0 || observation_capacity > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(LaunchAdmissionError::InvalidCapacity);
+        }
+        let control = Arc::new(CancelHandle::new());
+        let (prepared, prepared_receiver) = oneshot::channel();
+        let (authorize, authorize_receiver) = oneshot::channel();
+        let (respond, receiver) = oneshot::channel();
+        let (observations, observation_receiver) = mpsc::channel(observation_capacity);
+        let job = Job::Turn {
+            input: Box::new(input),
+            deadline,
+            control: Arc::clone(&control),
+            prepared,
+            authorize: authorize_receiver,
+            observations,
+            respond,
+        };
+        match self.jobs.try_send(job) {
+            Ok(()) => Ok(operation::AcceptedTurn::from_parts(
+                prepared_receiver,
+                authorize,
+                observation_receiver,
+                receiver,
+                control,
+            )),
             Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
         }
@@ -452,7 +826,7 @@ impl EngineOwner {
     pub(crate) fn inject_expired_for_tests(&self, run_id: RunId) -> operation::AcceptedLaunch {
         let control = Arc::new(CancelHandle::new());
         let (respond, receiver) = oneshot::channel();
-        let job = Job {
+        let job = Job::Legacy {
             run_id,
             deadline: tokio::time::Instant::now() - Duration::from_secs(1),
             control: Arc::clone(&control),

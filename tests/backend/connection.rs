@@ -21,27 +21,39 @@ use std::mem::size_of;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use artisan_backend::conversation_subscription_registry::SubscriptionState;
 use artisan_backend::{
     AuthenticationStageError, ConnectionLimits, CredentialAuthenticationError, CredentialAuthority,
-    ForgeApp, ForgeConfig, ForgeConnection, RequestHandler, RequestStageError, ServerFrameStamp,
-    WelcomeMetadata,
+    ForgeApp, ForgeConfig, ForgeConnection, LifecycleController, RequestHandler, RequestStageError,
+    ServerFrameStamp, WelcomeMetadata,
 };
 use artisan_database::{
-    AttachProjectInput, CreateThreadInput, QueueFirstMessageInput, SqliteConfig,
+    AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
+    CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
+    ProviderBindingBytes, QueueFirstMessageInput, RunLaunchCredentials, RunStartKey,
+    SetThreadEngineConfigInput, SqliteConfig,
 };
 use artisan_domain::{
-    AttachProject, Command, DirectoryId, DisplayName, ListAttachedProjects, ListDirectories,
-    MessageBody, MessageId, ProjectId, Query, QueueFirstMessage, ReceiptDisposition, RequestId,
-    RootPath, ThreadId, ThreadTitle, UnixMillis,
+    ApprovalMode, AttachProject, ByteLimit, Command, ConversationCursor, ConversationRequest,
+    ConversationSubscribe, ConversationUnsubscribe, CountLimit, DirectoryId, DisplayName,
+    EngineAgentId, EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy,
+    EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, ItemId,
+    ListAttachedProjects, ListDirectories, MessageBody, MessageId, NetworkAccess,
+    OpenCode2Selection, PatchId, PermissionId, ProjectId, Query, QueueFirstMessage,
+    ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadTitle, TurnId, UnixMillis,
+    WebSearchAccess,
 };
 use artisan_protocol::{
-    APPLICATION_PROTOCOL_VERSION, ClientRequest, ConnectionId, ErrorCode, FirstMessageReceipt,
-    FrameId, Hello, HelloCredential, LocalCapability, ProtocolDecodeError, ProtocolVersion,
+    APPLICATION_PROTOCOL_VERSION, ClientRequest, ConnectionId, ConversationSubscriptionStarted,
+    ConversationSubscriptionStopped, ErrorCode, FirstMessageReceipt, FrameId, Hello,
+    HelloCredential, LifecycleRequest, LocalCapability, ProtocolDecodeError, ProtocolVersion,
     ReconnectCapability, ResponsePayload, ServerResponse, VersionOffer, WireEnvelope,
     WireEnvelopeBody, encode_envelope,
 };
@@ -384,6 +396,7 @@ fn hello_envelope(credential: HelloCredential) -> WireEnvelope {
             supported_versions: VersionOffer::new(vec![APPLICATION_PROTOCOL_VERSION])
                 .expect("valid fixture version offer"),
             credential,
+            supports_lifecycle_control: false,
         }),
     }
 }
@@ -411,6 +424,10 @@ fn list_directories_request(frame: &str) -> WireEnvelope {
     )
 }
 
+fn lifecycle_request(frame: &str, request: LifecycleRequest) -> WireEnvelope {
+    request_envelope(frame, ClientRequest::Lifecycle(request))
+}
+
 fn attach_project_command(frame: &str) -> WireEnvelope {
     request_envelope(
         frame,
@@ -431,6 +448,156 @@ fn queue_first_message_command(frame: &str) -> WireEnvelope {
             body: MessageBody::parse("first body").expect("valid fixture body"),
         })),
     )
+}
+
+fn fresh_subscription_request(frame: &str, thread_id: ThreadId) -> WireEnvelope {
+    request_envelope(
+        frame,
+        ClientRequest::Conversation(ConversationRequest::Subscribe(
+            ConversationSubscribe::fresh(thread_id),
+        )),
+    )
+}
+
+fn resume_subscription_request(
+    frame: &str,
+    thread_id: ThreadId,
+    after: ConversationCursor,
+) -> WireEnvelope {
+    request_envelope(
+        frame,
+        ClientRequest::Conversation(ConversationRequest::Subscribe(
+            ConversationSubscribe::resume(thread_id, after),
+        )),
+    )
+}
+
+fn unsubscribe_request(frame: &str, thread_id: ThreadId) -> WireEnvelope {
+    request_envelope(
+        frame,
+        ClientRequest::Conversation(ConversationRequest::Unsubscribe(ConversationUnsubscribe {
+            thread_id,
+        })),
+    )
+}
+
+fn fixture_engine_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-connection").expect("permission id is valid"),
+        EngineAgentId::parse("agent-connection").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-connection").expect("profile id is valid"),
+            EngineModelId::parse("model-connection").expect("model id is valid"),
+            EngineRouteId::parse("route-connection").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
+}
+
+async fn seed_subscription_thread(app: &ForgeApp) -> Result<ThreadId, Box<dyn Error>> {
+    let repository = app.repository();
+    repository.attach_project(attach_input()).await?;
+    repository.create_thread(create_thread_input()).await?;
+    let thread_id = ThreadId::parse("thread-1")?;
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("request-engine-connection")?,
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: fixture_engine_config(),
+            accepted_at: UnixMillis::from_millis(200),
+        })
+        .await?;
+    repository.queue_first_message(queue_input()).await?;
+
+    // Finish the same public repository workflow that creates durable
+    // conversation patches, so the resume case exercises the replay-batch
+    // preparation branch while still asserting activation at the request
+    // cursor.
+    let claimed = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: DispatchLeaseOwner::new([0x11; 32]),
+            claimed_at: UnixMillis::from_millis(400),
+            lease_expires_at: UnixMillis::from_millis(900),
+        })
+        .await?
+        .ok_or("seed dispatch should be claimable")?;
+    let run_id = artisan_domain::RunId::parse("run-1")?;
+    let turn_id = TurnId::parse("turn-1")?;
+    let item_id = ItemId::parse("item-1")?;
+    let first_patch_id = PatchId::parse("patch-1-first")?;
+    let second_patch_id = PatchId::parse("patch-1-second")?;
+    let run_start_key = RunStartKey::new([0x44; 32]);
+    let credentials = RunLaunchCredentials::new([0xa1; 32], [0xb2; 32], [0xc3; 32]);
+    let engine_settings = repository
+        .read_thread_engine_settings(&thread_id)
+        .await?
+        .ok_or("seed engine settings should be present")?;
+    let launched = repository
+        .launch_claimed_run(LaunchClaimedRun {
+            claimed: &claimed,
+            run_id: &run_id,
+            turn_id: &turn_id,
+            item_id: &item_id,
+            first_patch_id: &first_patch_id,
+            second_patch_id: &second_patch_id,
+            operated_at: UnixMillis::from_millis(500),
+            run_start_key: &run_start_key,
+            credentials: &credentials,
+            engine_settings: &engine_settings,
+        })
+        .await?;
+    let launched = match launched {
+        LaunchClaimedRunOutcome::Started(receipt)
+        | LaunchClaimedRunOutcome::AlreadyStarted(receipt) => receipt,
+    };
+    let binding = ProviderBindingBytes::new(vec![0xab; 16])?;
+    let bound = repository
+        .bind_run_provider(BindRunProvider {
+            claimed: &claimed,
+            receipt: &launched,
+            run_start_key: &run_start_key,
+            credentials: &credentials,
+            expected_launch_at: UnixMillis::from_millis(500),
+            bound_at: UnixMillis::from_millis(600),
+            binding_version: 1,
+            binding_bytes: &binding,
+        })
+        .await?;
+    if !matches!(
+        bound,
+        BindRunProviderOutcome::Bound(_) | BindRunProviderOutcome::AlreadyBound(_)
+    ) {
+        return Err("seed provider binding did not persist".into());
+    }
+
+    Ok(ThreadId::parse("thread-1")?)
 }
 
 fn welcome_metadata() -> WelcomeMetadata {
@@ -455,6 +622,11 @@ fn default_limits() -> ConnectionLimits {
         handshake: Duration::from_secs(2),
         next_request: Duration::from_secs(2),
     }
+}
+
+fn default_lifecycle() -> &'static LifecycleController {
+    static CONTROLLER: OnceLock<LifecycleController> = OnceLock::new();
+    CONTROLLER.get_or_init(LifecycleController::new)
 }
 
 /// Builds framed bytes whose nested first-message receipt id disagrees with
@@ -547,7 +719,7 @@ async fn admitted_client<'authority, 'handler, 'cancel>(
 ) -> Result<
     (
         AuthenticatedClient,
-        ForgeConnection<'authority, 'handler, 'cancel>,
+        ForgeConnection<'authority, 'handler, 'cancel, 'static>,
     ),
     Box<dyn Error>,
 > {
@@ -573,6 +745,7 @@ async fn admitted_client<'authority, 'handler, 'cancel>(
         server_connection,
         authority,
         handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         cancel,
@@ -618,6 +791,7 @@ async fn rejected_admission(
         server_connection,
         authority,
         handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         cancel,
@@ -658,8 +832,14 @@ async fn round_trip<'authority, 'handler, 'cancel>(
     client: &AuthenticatedClient,
     request: WireEnvelope,
     stamp: ServerFrameStamp,
-    owner: ForgeConnection<'authority, 'handler, 'cancel>,
-) -> Result<(WireEnvelope, ForgeConnection<'authority, 'handler, 'cancel>), Box<dyn Error>> {
+    owner: ForgeConnection<'authority, 'handler, 'cancel, 'static>,
+) -> Result<
+    (
+        WireEnvelope,
+        ForgeConnection<'authority, 'handler, 'cancel, 'static>,
+    ),
+    Box<dyn Error>,
+> {
     // A deliberately cloned stamp serves the borrowed client half while the
     // original moves into the consuming dispatch half.
     let client_stamp = stamp.clone();
@@ -788,6 +968,53 @@ async fn send_raw_frame(connection: &Connection, payload: &[u8]) -> Result<(), B
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn lifecycle_request_without_a_negotiated_witness_is_correlated_and_fail_closed()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("lifecycle-unsupported").await;
+    let handler = RequestHandler::new(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+
+    let (client, owner) = admitted_client(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+    )
+    .await?;
+    assert!(!client.welcome.welcome.lifecycle_control_supported);
+
+    let (reply, owner) = round_trip(
+        &client,
+        lifecycle_request("lifecycle-unsupported", LifecycleRequest::Status),
+        response_stamp("lifecycle-unsupported-reply"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::ProtocolError(failure) = reply.body else {
+        panic!("expected unsupported-feature protocol failure");
+    };
+    assert_eq!(failure.code, ErrorCode::UnsupportedFeature);
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.request_id,
+        Some(RequestId::parse("lifecycle-unsupported").expect("valid request id"))
+    );
+    assert!(!cancel.is_cancelled());
+
+    drop(owner);
+    expect_application_close(&client.connection).await;
+    drop(client);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn bootstrap_admission_serves_a_real_listing_and_finishes_every_stream()
 -> Result<(), Box<dyn Error>> {
     let mut loopback = spawn_loopback();
@@ -845,6 +1072,232 @@ async fn bootstrap_admission_serves_a_real_listing_and_finishes_every_stream()
         owner,
     )
     .await?;
+
+    drop(owner);
+    expect_application_close(&client.connection).await;
+    drop(client);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_subscription_activates_at_snapshot_cursor_after_response_fin()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("subscription-fresh").await;
+    let thread_id = seed_subscription_thread(&app).await?;
+    let handler = RequestHandler::with_subscriptions(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+
+    let (client, owner) = admitted_client(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+    )
+    .await?;
+
+    let (reply, owner) = round_trip(
+        &client,
+        fresh_subscription_request("frame-subscribe-fresh", thread_id.clone()),
+        response_stamp("forge-subscribe-fresh-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated fresh-subscription response");
+    };
+    assert_eq!(response.request_id.as_str(), "frame-subscribe-fresh");
+    let ResponsePayload::ConversationSubscriptionStarted(ConversationSubscriptionStarted::Fresh(
+        start,
+    )) = response.payload
+    else {
+        panic!("expected a fresh conversation subscription response");
+    };
+    assert_eq!(start.snapshot().thread_id(), &thread_id);
+    let response_cursor = start.snapshot().cursor();
+
+    // `round_trip` returns only after the consuming owner has returned, so
+    // this view observes the post-FIN activation rather than the preparation
+    // state held while the response was still in flight.
+    let active = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("fresh subscription should remain registered");
+    assert_eq!(active.state(), SubscriptionState::Active);
+    assert_eq!(active.cursor(), response_cursor);
+
+    drop(owner);
+    expect_application_close(&client.connection).await;
+    drop(client);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_subscription_activates_at_requested_cursor_after_response_fin()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("subscription-resume").await;
+    let thread_id = seed_subscription_thread(&app).await?;
+    let handler = RequestHandler::with_subscriptions(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+
+    let (client, owner) = admitted_client(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+    )
+    .await?;
+
+    let requested_cursor = ConversationCursor::new(1);
+    let (reply, owner) = round_trip(
+        &client,
+        resume_subscription_request(
+            "frame-subscribe-resume",
+            thread_id.clone(),
+            requested_cursor,
+        ),
+        response_stamp("forge-subscribe-resume-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated resume response");
+    };
+    assert_eq!(response.request_id.as_str(), "frame-subscribe-resume");
+    let ResponsePayload::ConversationSubscriptionStarted(
+        ConversationSubscriptionStarted::Resumed {
+            thread_id: response_thread_id,
+            cursor,
+        },
+    ) = response.payload
+    else {
+        panic!("expected a resumed conversation subscription response");
+    };
+    assert_eq!(response_thread_id, thread_id);
+    assert_eq!(cursor, requested_cursor);
+
+    // The preparation seam intentionally discards any replay batch endpoint;
+    // activation must retain the cursor named by the response.
+    let active = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("resumed subscription should remain registered");
+    assert_eq!(active.state(), SubscriptionState::Active);
+    assert_eq!(active.cursor(), requested_cursor);
+
+    drop(owner);
+    expect_application_close(&client.connection).await;
+    drop(client);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsubscribe_is_idempotent_on_a_sequential_connection_without_activation_work()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("subscription-unsubscribe").await;
+    let thread_id = seed_subscription_thread(&app).await?;
+    let handler = RequestHandler::with_subscriptions(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+
+    let (client, owner) = admitted_client(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+    )
+    .await?;
+
+    let (reply, owner) = round_trip(
+        &client,
+        fresh_subscription_request("frame-unsubscribe-seed", thread_id.clone()),
+        response_stamp("forge-unsubscribe-seed-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated seed response");
+    };
+    assert!(matches!(
+        response.payload,
+        ResponsePayload::ConversationSubscriptionStarted(ConversationSubscriptionStarted::Fresh(_))
+    ));
+    assert_eq!(
+        handler
+            .subscription_view(&thread_id)
+            .await
+            .expect("seed subscription should be active")
+            .state(),
+        SubscriptionState::Active
+    );
+
+    let (reply, owner) = round_trip(
+        &client,
+        unsubscribe_request("frame-unsubscribe", thread_id.clone()),
+        response_stamp("forge-unsubscribe-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated unsubscribe response");
+    };
+    assert_eq!(response.request_id.as_str(), "frame-unsubscribe");
+    let ResponsePayload::ConversationSubscriptionStopped(stopped) = response.payload else {
+        panic!("expected an idempotent stopped response");
+    };
+    assert_eq!(
+        stopped,
+        ConversationSubscriptionStopped {
+            thread_id: thread_id.clone()
+        }
+    );
+    assert!(handler.subscription_view(&thread_id).await.is_none());
+
+    // A second stop crosses the same sequential owner and proves the absent
+    // path is the same successful no-work acknowledgement.
+    let (reply, owner) = round_trip(
+        &client,
+        unsubscribe_request("frame-unsubscribe-again", thread_id.clone()),
+        response_stamp("forge-unsubscribe-again-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated repeated-unsubscribe response");
+    };
+    assert_eq!(response.request_id.as_str(), "frame-unsubscribe-again");
+    let ResponsePayload::ConversationSubscriptionStopped(stopped) = response.payload else {
+        panic!("expected an idempotent stopped response for an absent entry");
+    };
+    assert_eq!(stopped, ConversationSubscriptionStopped { thread_id });
+    assert!(
+        handler
+            .subscription_view(&ThreadId::parse("thread-1")?)
+            .await
+            .is_none()
+    );
 
     drop(owner);
     expect_application_close(&client.connection).await;
@@ -1082,6 +1535,7 @@ async fn non_hello_first_frames_never_touch_the_authority() -> Result<(), Box<dy
         server_connection,
         &mut authority,
         &handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         &cancel,
@@ -1161,6 +1615,7 @@ async fn truncated_first_frame_failure(
         server_connection,
         authority,
         handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         cancel,
@@ -1198,6 +1653,7 @@ async fn oversized_first_frame_failure(
         server_connection,
         authority,
         handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         cancel,
@@ -1306,6 +1762,7 @@ async fn zero_limit_handshake_failure(
             server_connection,
             authority,
             handler,
+            default_lifecycle(),
             welcome_metadata(),
             ConnectionLimits {
                 handshake: Duration::ZERO,
@@ -1337,6 +1794,7 @@ async fn precancelled_handshake_failure(
             server_connection,
             authority,
             handler,
+            default_lifecycle(),
             welcome_metadata(),
             default_limits(),
             &cancel,
@@ -1446,6 +1904,7 @@ async fn a_stalled_welcome_write_times_out_leaving_the_authority_awaiting_rotati
             server_connection,
             &mut authority,
             &handler,
+            default_lifecycle(),
             welcome_metadata(),
             ConnectionLimits {
                 handshake: Duration::from_millis(400),
@@ -1536,6 +1995,7 @@ async fn cancelling_a_blocked_welcome_keeps_queued_requests_undispatched()
             server_connection,
             &mut authority,
             &handler,
+            default_lifecycle(),
             welcome_metadata(),
             default_limits(),
             &cancel,
@@ -1676,6 +2136,7 @@ async fn pipelined_control_bytes_are_discarded_before_any_dispatch() -> Result<(
         server_connection,
         &mut authority,
         &handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         &cancel,
@@ -1809,6 +2270,7 @@ async fn dropping_unpolled_futures_and_ready_owners_closes_connections()
         server_connection,
         &mut authority,
         &handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         &cancel,
@@ -2093,6 +2555,7 @@ async fn zero_next_request_timeout_returns_rotated(
         server_connection,
         authority,
         &handler,
+        default_lifecycle(),
         welcome_metadata(),
         ConnectionLimits {
             handshake: Duration::from_secs(2),

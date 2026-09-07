@@ -10,6 +10,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::{FluentBuilder, Refineable};
 use gpui::{
@@ -459,7 +460,7 @@ fn attach_keyboard_handler(
 }
 
 fn tab_trigger_id(list_id: &ElementId, value: &SharedString) -> ElementId {
-    ElementId::NamedChild(Box::new(list_id.clone()), format!("tab-{value}").into())
+    ElementId::NamedChild(Arc::new(list_id.clone()), format!("tab-{value}").into())
 }
 
 struct TriggerContext<'a> {

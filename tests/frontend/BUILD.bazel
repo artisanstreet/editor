@@ -3,6 +3,39 @@ load("@rules_rust//rust:defs.bzl", "rust_test")
 # External frontend tests: exercise the public `artisan_frontend` surface only.
 
 rust_test(
+    name = "active_thread_light_policy_test",
+    srcs = ["active_thread_light_policy.rs"],
+    crate_name = "active_thread_light_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "activity_status_labels_test",
+    srcs = ["activity_status_labels.rs"],
+    crate_name = "activity_status_labels_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "approval_presentation_test",
+    srcs = ["approval_presentation.rs"],
+    crate_name = "approval_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "attention_test",
     srcs = ["attention.rs"],
     crate_name = "attention_test",
@@ -28,9 +61,42 @@ rust_test(
 )
 
 rust_test(
+    name = "attention_title_policy_test",
+    srcs = ["attention_title_policy.rs"],
+    crate_name = "attention_title_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "artisan_error_code_test",
     srcs = ["artisan_error_code.rs"],
     crate_name = "artisan_error_code_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "attachment_tray_policy_test",
+    srcs = ["attachment_tray_policy.rs"],
+    crate_name = "attachment_tray_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "authoritative_subscription_policy_test",
+    srcs = ["authoritative_subscription_policy.rs"],
+    crate_name = "authoritative_subscription_policy_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -50,6 +116,17 @@ rust_test(
 )
 
 rust_test(
+    name = "clipboard_write_boundary_test",
+    srcs = ["clipboard_write_boundary.rs"],
+    crate_name = "clipboard_write_boundary_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "command_ranking_test",
     srcs = ["command_ranking.rs"],
     crate_name = "command_ranking_test",
@@ -61,9 +138,64 @@ rust_test(
 )
 
 rust_test(
+    name = "component_gallery_policy_test",
+    srcs = ["component_gallery_policy.rs"],
+    crate_name = "component_gallery_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "composer_action_failure_test",
+    srcs = ["composer_action_failure.rs"],
+    crate_name = "composer_action_failure_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "composer_draft_session_policy_test",
+    srcs = ["composer_draft_session_policy.rs"],
+    crate_name = "composer_draft_session_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "context_auto_compaction_test",
+    srcs = ["context_auto_compaction.rs"],
+    crate_name = "context_auto_compaction_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "context_usage_description_test",
     srcs = ["context_usage_description.rs"],
     crate_name = "context_usage_description_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "context_usage_details_policy_test",
+    srcs = ["context_usage_details_policy.rs"],
+    crate_name = "context_usage_details_policy_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -105,10 +237,95 @@ rust_test(
 )
 
 rust_test(
+    name = "composer_gesture_test",
+    srcs = ["composer_gesture.rs"],
+    crate_name = "composer_gesture_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "composer_send_readiness_test",
+    srcs = ["composer_send_readiness.rs"],
+    crate_name = "composer_send_readiness_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_checklist_test",
+    srcs = ["conversation_checklist.rs"],
+    crate_name = "conversation_checklist_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_delivery_machine_test",
+    srcs = ["conversation_delivery_machine.rs"],
+    crate_name = "conversation_delivery_machine_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "conversation_diff_stat_test",
     srcs = ["conversation_diff_stat.rs"],
     crate_name = "conversation_diff_stat_test",
     deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_duration_test",
+    srcs = ["conversation_duration.rs"],
+    crate_name = "conversation_duration_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_error_card_policy_test",
+    srcs = ["conversation_error_card_policy.rs"],
+    crate_name = "conversation_error_card_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_host_test",
+    srcs = ["conversation_host.rs"],
+    crate_name = "conversation_host_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",
@@ -141,10 +358,101 @@ rust_test(
 )
 
 rust_test(
+    name = "conversation_relative_age_test",
+    srcs = ["conversation_relative_age.rs"],
+    crate_name = "conversation_relative_age_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_scene_test",
+    srcs = ["conversation_scene.rs"],
+    crate_name = "conversation_scene_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_state_machine_test",
+    srcs = ["conversation_state_machine.rs"],
+    crate_name = "conversation_state_machine_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_surface_test",
+    srcs = ["conversation_surface.rs"],
+    crate_name = "conversation_surface_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "conversation_scroll_position_test",
     srcs = ["conversation_scroll_position.rs"],
     crate_name = "conversation_scroll_position_test",
     deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_status_labels_test",
+    srcs = ["conversation_status_labels.rs"],
+    crate_name = "conversation_status_labels_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_steering_test",
+    srcs = ["conversation_steering.rs"],
+    crate_name = "conversation_steering_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_steering_machine_test",
+    srcs = ["conversation_steering_machine.rs"],
+    crate_name = "conversation_steering_machine_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",
@@ -163,9 +471,122 @@ rust_test(
 )
 
 rust_test(
+    name = "conversation_turn_machine_test",
+    srcs = ["conversation_turn_machine.rs"],
+    crate_name = "conversation_turn_machine_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "conversation_turn_navigator_test",
     srcs = ["conversation_turn_navigator.rs"],
     crate_name = "conversation_turn_navigator_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_view_machine_test",
+    srcs = ["conversation_view_machine.rs"],
+    crate_name = "conversation_view_machine_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "dev_instance_policy_test",
+    srcs = ["dev_instance_policy.rs"],
+    crate_name = "dev_instance_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "dropdown_highlight_settle_test",
+    srcs = ["dropdown_highlight_settle.rs"],
+    crate_name = "dropdown_highlight_settle_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "editor_diagnostic_mapping_test",
+    srcs = ["editor_diagnostic_mapping.rs"],
+    crate_name = "editor_diagnostic_mapping_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "editor_language_test",
+    srcs = ["editor_language.rs"],
+    crate_name = "editor_language_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "editor_route_gate_policy_test",
+    srcs = ["editor_route_gate_policy.rs"],
+    crate_name = "editor_route_gate_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "editor_view_state_policy_test",
+    srcs = ["editor_view_state_policy.rs"],
+    crate_name = "editor_view_state_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "editor_workspace_identity_test",
+    srcs = ["editor_workspace_identity.rs"],
+    crate_name = "editor_workspace_identity_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "engine_section_indicator_policy_test",
+    srcs = ["engine_section_indicator_policy.rs"],
+    crate_name = "engine_section_indicator_policy_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -196,9 +617,86 @@ rust_test(
 )
 
 rust_test(
+    name = "forge_endpoint_policy_test",
+    srcs = ["forge_endpoint_policy.rs"],
+    crate_name = "forge_endpoint_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "forge_recovery_health_test",
     srcs = ["forge_recovery_health.rs"],
     crate_name = "forge_recovery_health_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "forge_repair_request_test",
+    srcs = ["forge_repair_request.rs"],
+    crate_name = "forge_repair_request_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "gradient_avatar_test",
+    srcs = ["gradient_avatar.rs"],
+    crate_name = "gradient_avatar_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "harness_setup_policy_test",
+    srcs = ["harness_setup_policy.rs"],
+    crate_name = "harness_setup_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "host_identity_controller_test",
+    srcs = ["host_identity_controller.rs"],
+    crate_name = "host_identity_controller_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "host_resume_recovery_policy_test",
+    srcs = ["host_resume_recovery_policy.rs"],
+    crate_name = "host_resume_recovery_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "hover_pill_geometry_policy_test",
+    srcs = ["hover_pill_geometry_policy.rs"],
+    crate_name = "hover_pill_geometry_policy_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -270,6 +768,38 @@ rust_test(
 )
 
 rust_test(
+    name = "native_subscription_bridge_test",
+    srcs = ["native_subscription_bridge.rs"],
+    crate_name = "native_subscription_bridge_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+        "//modules/protocol:protocol",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "native_thread_picker_test",
+    srcs = ["native_thread_picker.rs"],
+    crate_name = "native_thread_picker_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "latest_request_gate_test",
     srcs = ["latest_request_gate.rs"],
     crate_name = "latest_request_gate_test",
@@ -281,9 +811,42 @@ rust_test(
 )
 
 rust_test(
+    name = "machine_switch_test",
+    srcs = ["machine_switch.rs"],
+    crate_name = "machine_switch_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "markdown_fence_policy_test",
     srcs = ["markdown_fence_policy.rs"],
     crate_name = "markdown_fence_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "markdown_language_registry_policy_test",
+    srcs = ["markdown_language_registry_policy.rs"],
+    crate_name = "markdown_language_registry_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "markdown_streaming_words_test",
+    srcs = ["markdown_streaming_words.rs"],
+    crate_name = "markdown_streaming_words_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -347,6 +910,50 @@ rust_test(
 )
 
 rust_test(
+    name = "model_favorites_presentation_test",
+    srcs = ["model_favorites_presentation.rs"],
+    crate_name = "model_favorites_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "model_policy_controller_test",
+    srcs = ["model_policy_controller.rs"],
+    crate_name = "model_policy_controller_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "model_policy_controls_presentation_test",
+    srcs = ["model_policy_controls_presentation.rs"],
+    crate_name = "model_policy_controls_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "model_selection_presentation_test",
+    srcs = ["model_selection_presentation.rs"],
+    crate_name = "model_selection_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "motion_spring_test",
     srcs = ["motion_spring.rs"],
     crate_name = "motion_spring_test",
@@ -358,9 +965,57 @@ rust_test(
 )
 
 rust_test(
+    name = "new_thread_draft_test",
+    srcs = ["new_thread_draft.rs"],
+    crate_name = "new_thread_draft_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "new_thread_interaction_test",
     srcs = ["new_thread_interaction.rs"],
     crate_name = "new_thread_interaction_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "new_thread_sentence_policy_test",
+    srcs = ["new_thread_sentence_policy.rs"],
+    crate_name = "new_thread_sentence_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "new_thread_surface_test",
+    srcs = ["new_thread_surface.rs"],
+    crate_name = "new_thread_surface_test",
+    deps = [
+        "//modules/frontend:frontend",
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "notification_contract_test",
+    srcs = ["notification_contract.rs"],
+    crate_name = "notification_contract_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -424,6 +1079,28 @@ rust_test(
 )
 
 rust_test(
+    name = "object_url_boundary_test",
+    srcs = ["object_url_boundary.rs"],
+    crate_name = "object_url_boundary_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "onboarding_harness_presentation_test",
+    srcs = ["onboarding_harness_presentation.rs"],
+    crate_name = "onboarding_harness_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "onboarding_route_test",
     srcs = ["onboarding_route.rs"],
     crate_name = "onboarding_route_test",
@@ -460,9 +1137,31 @@ rust_test(
 )
 
 rust_test(
+    name = "project_catalog_test",
+    srcs = ["project_catalog.rs"],
+    crate_name = "project_catalog_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "project_identity_policy_test",
     srcs = ["project_identity_policy.rs"],
     crate_name = "project_identity_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "project_path_policy_test",
+    srcs = ["project_path_policy.rs"],
+    crate_name = "project_path_policy_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -482,9 +1181,64 @@ rust_test(
 )
 
 rust_test(
+    name = "relative_time_test",
+    srcs = ["relative_time.rs"],
+    crate_name = "relative_time_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "repository_mark_test",
+    srcs = ["repository_mark.rs"],
+    crate_name = "repository_mark_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "rich_link_url_test",
+    srcs = ["rich_link_url.rs"],
+    crate_name = "rich_link_url_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "route_navigation_test",
     srcs = ["route_navigation.rs"],
     crate_name = "route_navigation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "route_navigation_adapter_test",
+    srcs = ["route_navigation_adapter.rs"],
+    crate_name = "route_navigation_adapter_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "run_usage_policy_test",
+    srcs = ["run_usage_policy.rs"],
+    crate_name = "run_usage_policy_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -526,6 +1280,127 @@ rust_test(
 )
 
 rust_test(
+    name = "scoped_attachment_queue_test",
+    srcs = ["scoped_attachment_queue.rs"],
+    crate_name = "scoped_attachment_queue_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "scoped_attachment_runner_policy_test",
+    srcs = ["scoped_attachment_runner_policy.rs"],
+    crate_name = "scoped_attachment_runner_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "session_projection_test",
+    srcs = ["session_projection.rs"],
+    crate_name = "session_projection_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "session_tool_policy_test",
+    srcs = ["session_tool_policy.rs"],
+    crate_name = "session_tool_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "setup_label_transition_policy_test",
+    srcs = ["setup_label_transition_policy.rs"],
+    crate_name = "setup_label_transition_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "shell_command_test",
+    srcs = ["shell_command.rs"],
+    crate_name = "shell_command_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "shell_layout_test",
+    srcs = ["shell_layout.rs"],
+    crate_name = "shell_layout_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "shell_presentation_preferences_policy_test",
+    srcs = ["shell_presentation_preferences_policy.rs"],
+    crate_name = "shell_presentation_preferences_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "shell_presentation_state_test",
+    srcs = ["shell_presentation_state.rs"],
+    crate_name = "shell_presentation_state_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "speed_presentation_test",
+    srcs = ["speed_presentation.rs"],
+    crate_name = "speed_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "steering_pending_lip_test",
+    srcs = ["steering_pending_lip.rs"],
+    crate_name = "steering_pending_lip_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "subscription_projection_test",
     srcs = ["subscription_projection.rs"],
     crate_name = "subscription_projection_test",
@@ -541,6 +1416,50 @@ rust_test(
 )
 
 rust_test(
+    name = "tab_derivations_test",
+    srcs = ["tab_derivations.rs"],
+    crate_name = "tab_derivations_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "terminal_presentation_test",
+    srcs = ["terminal_presentation.rs"],
+    crate_name = "terminal_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "thread_environment_presentation_test",
+    srcs = ["thread_environment_presentation.rs"],
+    crate_name = "thread_environment_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "thread_hover_rail_policy_test",
+    srcs = ["thread_hover_rail_policy.rs"],
+    crate_name = "thread_hover_rail_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "thread_list_selection_test",
     srcs = ["thread_list_navigation.rs"],
     crate_name = "thread_list_navigation_test",
@@ -548,6 +1467,72 @@ rust_test(
         "//modules/domain:domain",
         "//modules/frontend:frontend",
     ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "thread_navigation_core_test",
+    srcs = ["thread_navigation_core.rs"],
+    crate_name = "thread_navigation_core_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "thread_panel_policy_test",
+    srcs = ["thread_panel_policy.rs"],
+    crate_name = "thread_panel_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "thread_read_tracker_test",
+    srcs = ["thread_read_tracker.rs"],
+    crate_name = "thread_read_tracker_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "thread_retention_settings_policy_test",
+    srcs = ["thread_retention_settings_policy.rs"],
+    crate_name = "thread_retention_settings_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "thread_route_gate_policy_test",
+    srcs = ["thread_route_gate_policy.rs"],
+    crate_name = "thread_route_gate_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "thread_title_policy_test",
+    srcs = ["thread_title_policy.rs"],
+    crate_name = "thread_title_policy_test",
+    deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",
@@ -571,9 +1556,119 @@ rust_test(
 )
 
 rust_test(
+    name = "thread_title_settings_policy_test",
+    srcs = ["thread_title_settings_policy.rs"],
+    crate_name = "thread_title_settings_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "transcript_test",
     srcs = ["transcript.rs"],
     crate_name = "transcript_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "usage_meter_test",
+    srcs = ["usage_meter.rs"],
+    crate_name = "usage_meter_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "usage_recovery_settings_policy_test",
+    srcs = ["usage_recovery_settings_policy.rs"],
+    crate_name = "usage_recovery_settings_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "usage_refresh_claims_test",
+    srcs = ["usage_refresh_claims.rs"],
+    crate_name = "usage_refresh_claims_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "usage_reset_duration_test",
+    srcs = ["usage_reset_duration.rs"],
+    crate_name = "usage_reset_duration_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "usage_window_motion_test",
+    srcs = ["usage_window_motion.rs"],
+    crate_name = "usage_window_motion_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "vcs_diff_presentation_test",
+    srcs = ["vcs_diff_presentation.rs"],
+    crate_name = "vcs_diff_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "vcs_labels_test",
+    srcs = ["vcs_labels.rs"],
+    crate_name = "vcs_labels_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "workspace_header_presentation_test",
+    srcs = ["workspace_header_presentation.rs"],
+    crate_name = "workspace_header_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "workspace_tab_state_test",
+    srcs = ["workspace_tab_state.rs"],
+    crate_name = "workspace_tab_state_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",

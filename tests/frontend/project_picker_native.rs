@@ -106,7 +106,7 @@ impl PickerHost {
         // Same pinned-GPUI rule as the leaf's trigger: an explicitly tracked
         // handle must carry its own tab settings to become traversable.
         let lead_focus = cx.focus_handle().tab_index(0).tab_stop(true);
-        lead_focus.focus(window);
+        lead_focus.focus(window, cx);
         Self {
             lead_focus,
             lead_height_px: lead_height,
@@ -124,8 +124,8 @@ impl Render for PickerHost {
             .flex_col()
             .gap(px(8.0))
             .p(px(8.0))
-            .on_action(|_: &FixtureNextTabStop, window, _| window.focus_next())
-            .on_action(|_: &FixturePrevTabStop, window, _| window.focus_prev())
+            .on_action(|_: &FixtureNextTabStop, window, cx| window.focus_next(cx))
+            .on_action(|_: &FixturePrevTabStop, window, cx| window.focus_prev(cx))
             .child(
                 div()
                     .id("lead-tab-stop")
@@ -993,6 +993,7 @@ fn modified_closing_release_leaves_no_fence_for_the_next_genuine_open(cx: &mut T
     cx.simulate_event(KeyDownEvent {
         keystroke: ctrl_enter.clone(),
         is_held: false,
+        prefer_character_input: false,
     });
     cx.run_until_parked();
     cx.update(|window, app| {
@@ -1070,6 +1071,7 @@ fn ctrl_released_first_close_fences_its_plain_up_and_still_opens_fresh(cx: &mut 
     cx.simulate_event(KeyDownEvent {
         keystroke: ctrl_enter,
         is_held: false,
+        prefer_character_input: false,
     });
     cx.run_until_parked();
     cx.update(|_, app| {

@@ -26,6 +26,9 @@ pub struct Model {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub terminal_at_ms: Option<i64>,
+    pub engine_run_config_version: Option<i64>,
+    pub engine_run_config_revision: Option<i64>,
+    pub engine_run_config: Option<OpaqueBytes>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

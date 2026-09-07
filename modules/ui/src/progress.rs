@@ -144,7 +144,7 @@ impl ProgressStyle {
             track_height: px(TRACK_HEIGHT_PX),
             corner_radius: px(PILL_RADIUS_PX),
             track_color: Hsla {
-                a: TRACK_ALPHA,
+                alpha: TRACK_ALPHA,
                 ..primary
             },
             fill_color: primary,

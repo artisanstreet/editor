@@ -18,6 +18,38 @@
 /// snowflakes, and UUIDs.
 pub const IDENTIFIER_MAX_BYTES: usize = 128;
 
+/// Maximum UTF-8 byte length of one managed native engine profile id.
+///
+/// Profile ids are deliberately narrower than ordinary Forge identities:
+/// they become one component of a managed home directory, so the domain
+/// accepts only the ASCII filename-safe grammar enforced by
+/// [`crate::EngineProfileId`].
+pub const ENGINE_PROFILE_ID_MAX_BYTES: usize = 64;
+
+/// Maximum canonical UTF-8 JSON byte length of one persisted engine config.
+pub const ENGINE_CONFIG_MAX_ENCODED_BYTES: usize = 65_536;
+
+/// Maximum duration accepted by any engine runtime control, in milliseconds.
+pub const ENGINE_RUNTIME_MAX_MILLIS: u64 = 86_400_000;
+
+/// Maximum JSON body and HTTP buffer size accepted by engine runtime controls.
+pub const ENGINE_RUNTIME_MAX_BODY_BYTES: u64 = 8_388_608;
+
+/// Maximum SSE event size accepted by engine runtime controls.
+pub const ENGINE_RUNTIME_MAX_SSE_EVENT_BYTES: u64 = 8_388_608;
+
+/// Maximum SSE/readiness line size accepted by engine runtime controls.
+pub const ENGINE_RUNTIME_MAX_LINE_BYTES: u64 = 65_536;
+
+/// Maximum HTTP header count accepted by engine runtime controls.
+pub const ENGINE_RUNTIME_MAX_HEADER_COUNT: u64 = 64;
+
+/// Maximum captured engine stderr size accepted by runtime controls.
+pub const ENGINE_RUNTIME_MAX_STDERR_BYTES: u64 = 65_536;
+
+/// Maximum observation capacity accepted by runtime controls.
+pub const ENGINE_RUNTIME_MAX_OBSERVATIONS: u64 = 4_096;
+
 /// Maximum UTF-8 byte length of a thread title.
 ///
 /// Legacy titles were non-empty after trimming but unbounded
