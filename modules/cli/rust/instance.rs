@@ -1,6 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
+    num::{NonZeroU32, NonZeroU64},
     path::{Path, PathBuf},
 };
 
@@ -15,9 +16,6 @@ pub struct InstanceConfig {
     pub listen_host: String,
     pub listen_port: u16,
     pub mode: ForgeMode,
-    /// Static web hosting is a development capability. Installed homes
-    /// default to a control-surface-only Forge; the Electron editor renders
-    /// the bundled frontend instead of a Forge-served page.
     #[serde(default)]
     pub serve_frontend: bool,
     pub version: u8,
@@ -51,9 +49,6 @@ pub struct InstancePaths {
     pub log: PathBuf,
 }
 
-/// Resolves the home's single Forge instance files. This is the path
-/// resolution choke point, so the legacy `profiles/<name>/` layout migrates
-/// here before any caller reads or writes an instance file.
 pub fn paths(layout: &Layout) -> Result<InstancePaths> {
     migrate_legacy_profiles(layout)?;
     Ok(InstancePaths {
@@ -64,10 +59,6 @@ pub fn paths(layout: &Layout) -> Result<InstancePaths> {
     })
 }
 
-/// Moves a single legacy `profiles/<name>/` directory's contents to the home
-/// root. A home that already has a root `config.json` is current and skipped.
-/// More than one legacy profile cannot be merged automatically, so the user
-/// must delete all but one before any command proceeds.
 fn migrate_legacy_profiles(layout: &Layout) -> Result<()> {
     if layout.root.join("config.json").is_file() {
         return Ok(());
@@ -253,8 +244,6 @@ fn restrict_directory(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn restrict_directory(path: &Path) -> Result<()> {
-    // The installer places ARTISAN_HOME in a current-user directory. Rust's
-    // safe standard library has no Windows ACL API; do not broaden its ACL.
     fs::metadata(path)
         .map(|_| ())
         .map_err(io("inspect Artisan home directory"))
@@ -272,6 +261,684 @@ fn sync_directory(path: &Path) -> Result<()> {
     fs::metadata(path)
         .map(|_| ())
         .map_err(io("inspect Artisan home directory"))
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub enum NativeInstanceError {
+    NotFound,
+    TooLarge,
+    FileChanged,
+    FileSizeMismatch,
+    FileHashMismatch,
+    EntropyUnavailable,
+    InvalidInstanceIdentity,
+    InvalidPath(PathBuf),
+    Io {
+        context: &'static str,
+        path: PathBuf,
+    },
+    InvalidManifest,
+    InvalidNativeRunConfiguration,
+    UnsafePath(PathBuf),
+}
+
+impl std::fmt::Display for NativeInstanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("native file is not present"),
+            Self::TooLarge => f.write_str("native file exceeds its read bound"),
+            Self::FileChanged => f.write_str("native file changed while it was read"),
+            Self::FileSizeMismatch => f.write_str("native file size does not match"),
+            Self::FileHashMismatch => f.write_str("native file hash does not match"),
+            Self::EntropyUnavailable => f.write_str("secure random source failed"),
+            Self::InvalidInstanceIdentity => f.write_str("invalid native instance identity"),
+            Self::InvalidPath(path) => write!(f, "invalid absolute path: {}", path.display()),
+            Self::Io { context, path } => {
+                write!(f, "{context} at {}: [REDACTED]", path.display())
+            }
+            Self::InvalidManifest => write!(f, "invalid instance manifest"),
+            Self::InvalidNativeRunConfiguration => {
+                write!(f, "invalid native-run configuration")
+            }
+            Self::UnsafePath(path) => {
+                write!(
+                    f,
+                    "refusing unsafe filesystem operation on {}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeInstanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.debug_tuple("NotFound").finish(),
+            Self::TooLarge => f.debug_tuple("TooLarge").finish(),
+            Self::FileChanged => f.debug_tuple("FileChanged").finish(),
+            Self::FileSizeMismatch => f.debug_tuple("FileSizeMismatch").finish(),
+            Self::FileHashMismatch => f.debug_tuple("FileHashMismatch").finish(),
+            Self::EntropyUnavailable => f.debug_tuple("EntropyUnavailable").finish(),
+            Self::InvalidInstanceIdentity => f.debug_tuple("InvalidInstanceIdentity").finish(),
+            Self::InvalidPath(_) => f.debug_tuple("InvalidPath").field(&"<redacted>").finish(),
+            Self::Io { context, .. } => f
+                .debug_struct("Io")
+                .field("context", context)
+                .field("path", &"<redacted>")
+                .finish(),
+            Self::InvalidManifest => f.debug_tuple("InvalidManifest").finish(),
+            Self::InvalidNativeRunConfiguration => {
+                f.debug_tuple("InvalidNativeRunConfiguration").finish()
+            }
+            Self::UnsafePath(_) => f.debug_tuple("UnsafePath").field(&"<redacted>").finish(),
+        }
+    }
+}
+
+impl std::error::Error for NativeInstanceError {}
+
+type NativeResult<T> = std::result::Result<T, NativeInstanceError>;
+
+/// Mints one stable native instance identity from the operating system's
+/// entropy source.
+pub fn mint_instance_id() -> NativeResult<[u8; 16]> {
+    let mut instance_id = [0_u8; 16];
+    getrandom::fill(&mut instance_id).map_err(|_| NativeInstanceError::EntropyUnavailable)?;
+    if instance_id.iter().all(|byte| *byte == 0) {
+        return Err(NativeInstanceError::InvalidInstanceIdentity);
+    }
+    Ok(instance_id)
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeInstanceFile {
+    schema: String,
+    version: u64,
+    instance_id: [u8; 16],
+    database_path: PathBuf,
+    custody_path: PathBuf,
+    readiness_path: PathBuf,
+    credentials_manifest: PathBuf,
+    listener: NativeListenerFile,
+    native_run: NativeRunFile,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeListenerFile {
+    admission_timeout_ms: u64,
+    handshake_timeout_ms: u64,
+    request_timeout_ms: u64,
+    drain_timeout_ms: u64,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeRunFile {
+    claim_lease_ms: NonZeroU64,
+    poll_interval_ms: NonZeroU64,
+    retry_backoff_ms: NonZeroU64,
+    shutdown_budget_ms: NonZeroU64,
+    queue_capacity: NonZeroU32,
+    max_command_retries: NonZeroU32,
+    prompt_delivery: String,
+    stream_after: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeListenerConfig {
+    admission_timeout_ms: u64,
+    handshake_timeout_ms: u64,
+    request_timeout_ms: u64,
+    drain_timeout_ms: u64,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+}
+
+impl NativeListenerConfig {
+    pub fn new(
+        admission_timeout_ms: u64,
+        handshake_timeout_ms: u64,
+        request_timeout_ms: u64,
+        drain_timeout_ms: u64,
+        admission_capacity: NonZeroU32,
+        requests_per_connection: NonZeroU32,
+    ) -> Self {
+        Self {
+            admission_timeout_ms,
+            handshake_timeout_ms,
+            request_timeout_ms,
+            drain_timeout_ms,
+            admission_capacity,
+            requests_per_connection,
+        }
+    }
+
+    pub fn admission_timeout_ms(&self) -> u64 {
+        self.admission_timeout_ms
+    }
+
+    pub fn handshake_timeout_ms(&self) -> u64 {
+        self.handshake_timeout_ms
+    }
+
+    pub fn request_timeout_ms(&self) -> u64 {
+        self.request_timeout_ms
+    }
+
+    pub fn drain_timeout_ms(&self) -> u64 {
+        self.drain_timeout_ms
+    }
+
+    pub fn admission_capacity(&self) -> NonZeroU32 {
+        self.admission_capacity
+    }
+
+    pub fn requests_per_connection(&self) -> NonZeroU32 {
+        self.requests_per_connection
+    }
+}
+
+// Forge converts native-run millisecond durations to signed values.
+const MAX_NATIVE_RUN_DURATION_MS: u64 = u64::MAX / 2;
+const MAX_NATIVE_RUN_PROMPT_DELIVERY_BYTES: usize = 256;
+
+pub(crate) fn is_valid_native_run_duration_ms(value: u64) -> bool {
+    value != 0 && value <= MAX_NATIVE_RUN_DURATION_MS
+}
+
+pub(crate) fn is_valid_native_run_prompt_delivery(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_NATIVE_RUN_PROMPT_DELIVERY_BYTES
+        && value
+            .chars()
+            .all(|character| !character.is_control() && character != '\r' && character != '\n')
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct NativeRunConfigInput {
+    pub claim_lease_ms: u64,
+    pub poll_interval_ms: u64,
+    pub retry_backoff_ms: u64,
+    pub shutdown_budget_ms: u64,
+    pub queue_capacity: u32,
+    pub max_command_retries: u32,
+    pub prompt_delivery: String,
+    pub stream_after: u64,
+}
+
+impl std::fmt::Debug for NativeRunConfigInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeRunConfigInput")
+            .field("claim_lease_ms", &self.claim_lease_ms)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("retry_backoff_ms", &self.retry_backoff_ms)
+            .field("shutdown_budget_ms", &self.shutdown_budget_ms)
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_command_retries", &self.max_command_retries)
+            .field("prompt_delivery_bytes", &self.prompt_delivery.len())
+            .field("stream_after", &self.stream_after)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct NativeRunConfig {
+    claim_lease_ms: NonZeroU64,
+    poll_interval_ms: NonZeroU64,
+    retry_backoff_ms: NonZeroU64,
+    shutdown_budget_ms: NonZeroU64,
+    queue_capacity: NonZeroU32,
+    max_command_retries: NonZeroU32,
+    prompt_delivery: String,
+    stream_after: u64,
+}
+
+impl std::fmt::Debug for NativeRunConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeRunConfig")
+            .field("claim_lease_ms", &self.claim_lease_ms)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("retry_backoff_ms", &self.retry_backoff_ms)
+            .field("shutdown_budget_ms", &self.shutdown_budget_ms)
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_command_retries", &self.max_command_retries)
+            .field("prompt_delivery_bytes", &self.prompt_delivery.len())
+            .field("stream_after", &self.stream_after)
+            .finish()
+    }
+}
+
+impl NativeRunConfig {
+    pub fn new(input: NativeRunConfigInput) -> NativeResult<Self> {
+        let NativeRunConfigInput {
+            claim_lease_ms,
+            poll_interval_ms,
+            retry_backoff_ms,
+            shutdown_budget_ms,
+            queue_capacity,
+            max_command_retries,
+            prompt_delivery,
+            stream_after,
+        } = input;
+        if ![
+            claim_lease_ms,
+            poll_interval_ms,
+            retry_backoff_ms,
+            shutdown_budget_ms,
+        ]
+        .into_iter()
+        .all(is_valid_native_run_duration_ms)
+            || queue_capacity == 0
+            || max_command_retries == 0
+            || !is_valid_native_run_prompt_delivery(&prompt_delivery)
+        {
+            return Err(NativeInstanceError::InvalidNativeRunConfiguration);
+        }
+        Ok(Self {
+            claim_lease_ms: NonZeroU64::new(claim_lease_ms)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            poll_interval_ms: NonZeroU64::new(poll_interval_ms)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            retry_backoff_ms: NonZeroU64::new(retry_backoff_ms)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            shutdown_budget_ms: NonZeroU64::new(shutdown_budget_ms)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            queue_capacity: NonZeroU32::new(queue_capacity)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            max_command_retries: NonZeroU32::new(max_command_retries)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            prompt_delivery,
+            stream_after,
+        })
+    }
+
+    pub fn claim_lease_ms(&self) -> u64 {
+        self.claim_lease_ms.get()
+    }
+
+    pub fn poll_interval_ms(&self) -> u64 {
+        self.poll_interval_ms.get()
+    }
+
+    pub fn retry_backoff_ms(&self) -> u64 {
+        self.retry_backoff_ms.get()
+    }
+
+    pub fn shutdown_budget_ms(&self) -> u64 {
+        self.shutdown_budget_ms.get()
+    }
+
+    pub fn queue_capacity(&self) -> NonZeroU32 {
+        self.queue_capacity
+    }
+
+    pub fn max_command_retries(&self) -> NonZeroU32 {
+        self.max_command_retries
+    }
+
+    pub fn prompt_delivery(&self) -> &str {
+        &self.prompt_delivery
+    }
+
+    pub fn stream_after(&self) -> u64 {
+        self.stream_after
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct NativeInstanceConfig {
+    instance_id: [u8; 16],
+    database_path: PathBuf,
+    custody_path: PathBuf,
+    readiness_path: PathBuf,
+    credentials_manifest: PathBuf,
+    listener: NativeListenerConfig,
+    native_run: NativeRunConfig,
+}
+
+impl std::fmt::Debug for NativeInstanceConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeInstanceConfig")
+            .field("instance_id", &"[REDACTED]")
+            .field("database_path", &"<redacted>")
+            .field("custody_path", &"<redacted>")
+            .field("readiness_path", &"<redacted>")
+            .field("credentials_manifest", &"<redacted>")
+            .field("listener", &self.listener)
+            .field("native_run", &self.native_run)
+            .finish()
+    }
+}
+
+fn metadata_is_symlink_or_reparse(meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_ancestors_all(path: &Path, must_exist: bool) -> NativeResult<()> {
+    let parent = path.parent().unwrap_or(Path::new("/"));
+    for ancestor in parent.ancestors() {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        match fs::symlink_metadata(ancestor) {
+            Ok(meta) => {
+                if metadata_is_symlink_or_reparse(&meta) {
+                    return Err(NativeInstanceError::UnsafePath(ancestor.to_path_buf()));
+                }
+                if !meta.is_dir() {
+                    return Err(NativeInstanceError::UnsafePath(ancestor.to_path_buf()));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if must_exist {
+                    return Err(NativeInstanceError::Io {
+                        context: "inspect parent",
+                        path: ancestor.to_path_buf(),
+                    });
+                }
+            }
+            Err(_) => {
+                return Err(NativeInstanceError::Io {
+                    context: "inspect parent",
+                    path: ancestor.to_path_buf(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+const MAX_NATIVE_INSTANCE_BYTES: usize = 64 * 1024;
+
+fn open_and_read_native(path: &Path) -> NativeResult<Vec<u8>> {
+    artisan_native_engine::read_bounded(path, MAX_NATIVE_INSTANCE_BYTES).map_err(
+        |error| match error {
+            artisan_native_engine::NativeFileError::NotFound => NativeInstanceError::NotFound,
+            artisan_native_engine::NativeFileError::TooLarge => NativeInstanceError::TooLarge,
+            artisan_native_engine::NativeFileError::FileChanged => NativeInstanceError::FileChanged,
+            artisan_native_engine::NativeFileError::FileSizeMismatch => {
+                NativeInstanceError::FileSizeMismatch
+            }
+            artisan_native_engine::NativeFileError::FileHashMismatch => {
+                NativeInstanceError::FileHashMismatch
+            }
+            artisan_native_engine::NativeFileError::UnsafePath
+            | artisan_native_engine::NativeFileError::PrivatePermissions => {
+                NativeInstanceError::UnsafePath(path.to_path_buf())
+            }
+            artisan_native_engine::NativeFileError::Io => NativeInstanceError::Io {
+                context: "read instance file",
+                path: path.to_path_buf(),
+            },
+        },
+    )
+}
+
+impl NativeInstanceConfig {
+    #[cfg(not(test))]
+    pub fn new(
+        instance_id: [u8; 16],
+        database_path: PathBuf,
+        custody_path: PathBuf,
+        readiness_path: PathBuf,
+        credentials_manifest: PathBuf,
+        listener: NativeListenerConfig,
+        native_run: NativeRunConfig,
+    ) -> NativeResult<Self> {
+        Self::new_with_instance_id(
+            instance_id,
+            database_path,
+            custody_path,
+            readiness_path,
+            credentials_manifest,
+            listener,
+            native_run,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn new(
+        database_path: PathBuf,
+        custody_path: PathBuf,
+        readiness_path: PathBuf,
+        credentials_manifest: PathBuf,
+        listener: NativeListenerConfig,
+        native_run: NativeRunConfig,
+    ) -> NativeResult<Self> {
+        Self::new_with_instance_id(
+            mint_instance_id()?,
+            database_path,
+            custody_path,
+            readiness_path,
+            credentials_manifest,
+            listener,
+            native_run,
+        )
+    }
+
+    pub fn new_with_instance_id(
+        instance_id: [u8; 16],
+        database_path: PathBuf,
+        custody_path: PathBuf,
+        readiness_path: PathBuf,
+        credentials_manifest: PathBuf,
+        listener: NativeListenerConfig,
+        native_run: NativeRunConfig,
+    ) -> NativeResult<Self> {
+        if instance_id.iter().all(|byte| *byte == 0) {
+            return Err(NativeInstanceError::InvalidInstanceIdentity);
+        }
+        for path in [
+            &database_path,
+            &custody_path,
+            &readiness_path,
+            &credentials_manifest,
+        ] {
+            if !path.is_absolute() || path.as_os_str().is_empty() || path.parent().is_none() {
+                return Err(NativeInstanceError::InvalidPath((*path).clone()));
+            }
+        }
+        Ok(Self {
+            instance_id,
+            database_path,
+            custody_path,
+            readiness_path,
+            credentials_manifest,
+            listener,
+            native_run,
+        })
+    }
+
+    /// Returns a copy of the stable identity for this native instance.
+    #[must_use]
+    pub fn instance_id(&self) -> [u8; 16] {
+        self.instance_id
+    }
+
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
+    pub fn custody_path(&self) -> &Path {
+        &self.custody_path
+    }
+
+    pub fn readiness_path(&self) -> &Path {
+        &self.readiness_path
+    }
+
+    pub fn credentials_manifest(&self) -> &Path {
+        &self.credentials_manifest
+    }
+
+    pub fn listener(&self) -> &NativeListenerConfig {
+        &self.listener
+    }
+
+    pub fn native_run(&self) -> &NativeRunConfig {
+        &self.native_run
+    }
+
+    pub fn native_path(home: &Path) -> PathBuf {
+        home.join("instance-v2.json")
+    }
+
+    pub fn load(path: &Path) -> NativeResult<Self> {
+        let bytes = open_and_read_native(path)?;
+        let file: NativeInstanceFile =
+            serde_json::from_slice(&bytes).map_err(|_| NativeInstanceError::InvalidManifest)?;
+        if file.schema != "artisan-instance-v2" {
+            return Err(NativeInstanceError::InvalidManifest);
+        }
+        if file.version != 2 {
+            return Err(NativeInstanceError::InvalidManifest);
+        }
+        Self::new_with_instance_id(
+            file.instance_id,
+            file.database_path,
+            file.custody_path,
+            file.readiness_path,
+            file.credentials_manifest,
+            NativeListenerConfig::new(
+                file.listener.admission_timeout_ms,
+                file.listener.handshake_timeout_ms,
+                file.listener.request_timeout_ms,
+                file.listener.drain_timeout_ms,
+                file.listener.admission_capacity,
+                file.listener.requests_per_connection,
+            ),
+            NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: file.native_run.claim_lease_ms.get(),
+                poll_interval_ms: file.native_run.poll_interval_ms.get(),
+                retry_backoff_ms: file.native_run.retry_backoff_ms.get(),
+                shutdown_budget_ms: file.native_run.shutdown_budget_ms.get(),
+                queue_capacity: file.native_run.queue_capacity.get(),
+                max_command_retries: file.native_run.max_command_retries.get(),
+                prompt_delivery: file.native_run.prompt_delivery,
+                stream_after: file.native_run.stream_after,
+            })?,
+        )
+    }
+
+    pub fn write(&self, path: &Path) -> NativeResult<()> {
+        check_ancestors_all(path, false)?;
+        match fs::symlink_metadata(path) {
+            Ok(meta) if metadata_is_symlink_or_reparse(&meta) || meta.is_dir() => {
+                return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+            }
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => return Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(NativeInstanceError::Io {
+                    context: "inspect instance destination",
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+        let file = NativeInstanceFile {
+            schema: "artisan-instance-v2".to_string(),
+            version: 2,
+            instance_id: self.instance_id,
+            database_path: self.database_path.clone(),
+            custody_path: self.custody_path.clone(),
+            readiness_path: self.readiness_path.clone(),
+            credentials_manifest: self.credentials_manifest.clone(),
+            listener: NativeListenerFile {
+                admission_timeout_ms: self.listener.admission_timeout_ms,
+                handshake_timeout_ms: self.listener.handshake_timeout_ms,
+                request_timeout_ms: self.listener.request_timeout_ms,
+                drain_timeout_ms: self.listener.drain_timeout_ms,
+                admission_capacity: self.listener.admission_capacity,
+                requests_per_connection: self.listener.requests_per_connection,
+            },
+            native_run: NativeRunFile {
+                claim_lease_ms: self.native_run.claim_lease_ms,
+                poll_interval_ms: self.native_run.poll_interval_ms,
+                retry_backoff_ms: self.native_run.retry_backoff_ms,
+                shutdown_budget_ms: self.native_run.shutdown_budget_ms,
+                queue_capacity: self.native_run.queue_capacity,
+                max_command_retries: self.native_run.max_command_retries,
+                prompt_delivery: self.native_run.prompt_delivery.clone(),
+                stream_after: self.native_run.stream_after,
+            },
+        };
+        let bytes =
+            serde_json::to_vec_pretty(&file).map_err(|_| NativeInstanceError::InvalidManifest)?;
+        write_native_atomic(path, &bytes)
+    }
+
+    pub fn load_from_home(home: &Path) -> NativeResult<Self> {
+        Self::load(&Self::native_path(home))
+    }
+
+    pub fn write_to_home(&self, home: &Path) -> NativeResult<()> {
+        self.write(&Self::native_path(home))
+    }
+}
+
+pub fn load_native_config(path: &Path) -> NativeResult<NativeInstanceConfig> {
+    NativeInstanceConfig::load(path)
+}
+
+pub fn write_native_config(path: &Path, config: &NativeInstanceConfig) -> NativeResult<()> {
+    config.write(path)
+}
+
+fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;
+    fs::create_dir_all(directory).map_err(|_| NativeInstanceError::Io {
+        context: "create directory",
+        path: directory.to_path_buf(),
+    })?;
+    match artisan_native_engine::replace_file(path, bytes).map_err(|error| match error {
+        artisan_native_engine::NativeFileError::NotFound => NativeInstanceError::NotFound,
+        artisan_native_engine::NativeFileError::TooLarge => NativeInstanceError::TooLarge,
+        artisan_native_engine::NativeFileError::FileChanged => NativeInstanceError::FileChanged,
+        artisan_native_engine::NativeFileError::FileSizeMismatch => {
+            NativeInstanceError::FileSizeMismatch
+        }
+        artisan_native_engine::NativeFileError::FileHashMismatch => {
+            NativeInstanceError::FileHashMismatch
+        }
+        artisan_native_engine::NativeFileError::UnsafePath
+        | artisan_native_engine::NativeFileError::PrivatePermissions => {
+            NativeInstanceError::UnsafePath(path.to_path_buf())
+        }
+        artisan_native_engine::NativeFileError::Io => NativeInstanceError::Io {
+            context: "activate native file",
+            path: path.to_path_buf(),
+        },
+    })? {
+        artisan_native_engine::AtomicReplaceOutcome::Committed => Ok(()),
+        artisan_native_engine::AtomicReplaceOutcome::CommittedButUnverified => {
+            Err(NativeInstanceError::Io {
+                context: "verify activated instance file",
+                path: path.to_path_buf(),
+            })
+        }
+    }
 }
 
 #[cfg(test)]

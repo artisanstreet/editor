@@ -9,9 +9,10 @@ use std::fmt;
 
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
-    ConversationSubscriptionStart, DirectoryId, DirectoryListing, Event, IdentifierError,
-    MessageId, PatchBatch, ProjectListing, ProjectSummary, Query, RequestId, ThreadId,
-    ThreadListing, ThreadSummary, UnixMillis,
+    ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision,
+    EngineProfileId, EngineRunConfig, Event, IdentifierError, MessageId, PatchBatch,
+    ProjectListing, ProjectSummary, Query, ReceiptDisposition, RequestId, ThreadId, ThreadListing,
+    ThreadSummary, UnixMillis,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -68,6 +69,14 @@ pub enum ProtocolValueError {
     /// A nested receipt carried a different request id than its response.
     #[error("response request id and nested receipt request id must match")]
     ResponseCorrelationMismatch,
+    /// A lifecycle status carried an impossible state and active-work count.
+    #[error("lifecycle status {state:?} cannot report active work count {active_work_count}")]
+    InvalidLifecycleStatus {
+        /// Reported lifecycle state.
+        state: LifecycleState,
+        /// Reported active-work count.
+        active_work_count: u32,
+    },
 }
 
 /// Negotiated application protocol version.
@@ -323,6 +332,17 @@ impl ReconnectCapability {
         bool::from(self.0.ct_eq(&candidate.0))
     }
 
+    /// Consumes the capability into a zeroizing fixed-size byte buffer.
+    ///
+    /// The private array is moved into the returned buffer. The consumed
+    /// value is replaced with zeroes before its destructor runs, so the
+    /// destructor never has to expose or retain the transferred capability.
+    #[must_use]
+    pub fn into_zeroizing_bytes(mut self) -> zeroize::Zeroizing<[u8; RECONNECT_CAPABILITY_BYTES]> {
+        let bytes = std::mem::replace(&mut self.0, [0_u8; RECONNECT_CAPABILITY_BYTES]);
+        zeroize::Zeroizing::new(bytes)
+    }
+
     /// Borrows the secret solely for serialization or constant-time
     /// authentication at a restricted boundary. Callers must never format it.
     #[must_use]
@@ -481,6 +501,8 @@ pub struct Hello {
     pub supported_versions: VersionOffer,
     /// Owned single-use credential proving this session's right to connect.
     pub credential: HelloCredential,
+    /// Whether this client offers native lifecycle control support.
+    pub supports_lifecycle_control: bool,
 }
 
 /// Successful application protocol negotiation.
@@ -492,6 +514,126 @@ pub struct Welcome {
     pub connection_id: ConnectionId,
     /// Rotated single-use reconnect credential for resuming a later session.
     pub reconnect_capability: ReconnectCapability,
+    /// Whether this connection negotiated native lifecycle control support.
+    pub lifecycle_control_supported: bool,
+}
+
+/// Native Forge lifecycle state reported by status and stop receipts.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LifecycleState {
+    /// No lifecycle work is currently active.
+    Ready,
+    /// One or more lifecycle operations are active.
+    Busy,
+    /// Shutdown is draining in-flight lifecycle work.
+    Draining,
+}
+
+/// Native lifecycle status with a state/count consistency invariant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleStatus {
+    /// Coarse lifecycle state.
+    pub state: LifecycleState,
+    /// Number of active units of lifecycle work.
+    pub active_work_count: u32,
+}
+
+impl LifecycleStatus {
+    /// Creates a lifecycle status after checking its state/count invariant.
+    ///
+    /// `Ready` requires a zero count, `Busy` requires a positive count, and
+    /// `Draining` permits any in-flight count while cancellation completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::InvalidLifecycleStatus`] for an
+    /// inconsistent state/count pair.
+    pub const fn new(
+        state: LifecycleState,
+        active_work_count: u32,
+    ) -> Result<Self, ProtocolValueError> {
+        let status = Self {
+            state,
+            active_work_count,
+        };
+        match status.validate() {
+            Ok(()) => Ok(status),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Validates a status assembled at the public field boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::InvalidLifecycleStatus`] for an
+    /// inconsistent state/count pair.
+    pub const fn validate(&self) -> Result<(), ProtocolValueError> {
+        match self.state {
+            LifecycleState::Ready => {
+                if self.active_work_count == 0 {
+                    Ok(())
+                } else {
+                    Err(ProtocolValueError::InvalidLifecycleStatus {
+                        state: self.state,
+                        active_work_count: self.active_work_count,
+                    })
+                }
+            }
+            LifecycleState::Busy => {
+                if self.active_work_count == 0 {
+                    Err(ProtocolValueError::InvalidLifecycleStatus {
+                        state: self.state,
+                        active_work_count: self.active_work_count,
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            LifecycleState::Draining => Ok(()),
+        }
+    }
+}
+
+/// Result classification for a native lifecycle stop request.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LifecycleStopDisposition {
+    /// The stop transition was newly accepted.
+    Accepted,
+    /// The same stop request was already accepted.
+    Duplicate,
+    /// A stop transition is already in progress.
+    AlreadyStopping,
+}
+
+/// Native lifecycle stop receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleStopReceipt {
+    /// Whether this stop request was accepted, replayed, or already stopping.
+    pub disposition: LifecycleStopDisposition,
+    /// Lifecycle state observed with the disposition.
+    pub state: LifecycleState,
+}
+
+/// Native lifecycle control request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LifecycleRequest {
+    /// Read the current lifecycle status.
+    Status,
+    /// Ask Forge to stop, optionally requiring an idle lifecycle first.
+    Stop {
+        /// Whether the stop may be accepted only after the lifecycle is idle.
+        require_idle: bool,
+    },
+}
+
+/// Native lifecycle control response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LifecycleResponse {
+    /// Current lifecycle status.
+    Status(LifecycleStatus),
+    /// Result of a stop request.
+    Stop(LifecycleStopReceipt),
 }
 
 /// First-workflow request payload after frame correlation is separated out.
@@ -513,6 +655,21 @@ pub enum ClientRequest {
     /// implements neither duplicate-request suppression nor cancellation
     /// propagation.
     PickDirectory,
+    /// Negotiated native lifecycle status or stop control.
+    Lifecycle(LifecycleRequest),
+}
+
+/// Successful durable thread engine-configuration mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetThreadEngineConfigResult {
+    /// Stable client request identity echoed by the nested result.
+    pub request_id: RequestId,
+    /// Thread whose configuration was changed.
+    pub thread_id: ThreadId,
+    /// Resulting one-based configuration revision.
+    pub revision: EngineConfigRevision,
+    /// Newly accepted or exact duplicate replay.
+    pub disposition: ReceiptDisposition,
 }
 
 /// Receipt returned when a first message is durably queued.
@@ -565,6 +722,78 @@ pub enum DirectoryPickOutcome {
     Cancelled,
 }
 
+/// Authoritative persisted thread engine settings read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThreadEngineSettingsResult {
+    /// No engine configuration has been stored for this thread.
+    Unconfigured { thread_id: ThreadId },
+    /// Complete persisted configuration with its one-based revision.
+    Configured {
+        thread_id: ThreadId,
+        revision: EngineConfigRevision,
+        config: Box<EngineRunConfig>,
+    },
+}
+
+impl ThreadEngineSettingsResult {
+    /// Returns the thread owning these settings.
+    #[must_use]
+    pub fn thread_id(&self) -> &ThreadId {
+        match self {
+            Self::Unconfigured { thread_id } | Self::Configured { thread_id, .. } => thread_id,
+        }
+    }
+
+    /// Returns the stored revision when configured.
+    #[must_use]
+    pub fn revision(&self) -> Option<EngineConfigRevision> {
+        match self {
+            Self::Unconfigured { .. } => None,
+            Self::Configured { revision, .. } => Some(*revision),
+        }
+    }
+
+    /// Returns the stored configuration when configured.
+    #[must_use]
+    pub fn config(&self) -> Option<&EngineRunConfig> {
+        match self {
+            Self::Unconfigured { .. } => None,
+            Self::Configured { config, .. } => Some(config),
+        }
+    }
+}
+
+/// Registered engine profiles catalogue with absence distinction.
+///
+/// `RegistryMissing` means no registry file exists; `RegistryPresent` means
+/// the registry file exists and contains exactly the ordered profile ids
+/// supplied by the authority, which may be empty and contains no home, path,
+/// or executable details.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegisteredEngineProfilesResult {
+    /// The profile registry does not exist.
+    RegistryMissing,
+    /// The registry exists and contains the exact ordered profile ids.
+    RegistryPresent { profile_ids: Vec<EngineProfileId> },
+}
+
+impl RegisteredEngineProfilesResult {
+    /// Returns whether the registry is missing.
+    #[must_use]
+    pub const fn is_missing(&self) -> bool {
+        matches!(self, Self::RegistryMissing)
+    }
+
+    /// Returns the present ordered profile ids, if present.
+    #[must_use]
+    pub fn profile_ids(&self) -> Option<&[EngineProfileId]> {
+        match self {
+            Self::RegistryMissing => None,
+            Self::RegistryPresent { profile_ids } => Some(profile_ids),
+        }
+    }
+}
+
 /// Successful first-workflow response payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResponsePayload {
@@ -598,6 +827,14 @@ pub enum ResponsePayload {
     ConversationSubscriptionStopped(ConversationSubscriptionStopped),
     /// Outcome of one explicit native directory-picker interaction.
     DirectoryPicked(DirectoryPickOutcome),
+    /// Negotiated native lifecycle status or stop result.
+    Lifecycle(LifecycleResponse),
+    /// Durable thread engine-configuration result.
+    ThreadEngineConfigSet(SetThreadEngineConfigResult),
+    /// Authoritative persisted thread engine settings.
+    ThreadEngineSettings(ThreadEngineSettingsResult),
+    /// Registered engine profile catalogue with absence semantics.
+    RegisteredEngineProfiles(RegisteredEngineProfilesResult),
 }
 
 /// Successful response correlated to a client request frame.
@@ -638,6 +875,12 @@ pub enum ErrorCode {
     /// outcome stands, and repeating the conflicting request is never
     /// retryable.
     IdempotencyConflict,
+    /// The peer requested lifecycle control without a negotiated capability.
+    UnsupportedFeature,
+    /// Lifecycle control cannot be accepted while lifecycle work is busy.
+    LifecycleBusy,
+    /// Thread engine configuration revision was stale.
+    EngineConfigConflict,
 }
 
 /// Typed application-protocol rejection or failure.
@@ -787,6 +1030,12 @@ impl WireEnvelope {
                 request_id,
                 payload: ResponsePayload::FirstMessageQueued(receipt),
             }) if request_id != &receipt.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::ThreadEngineConfigSet(result),
+            }) if request_id != &result.request_id => {
                 Err(ProtocolValueError::ResponseCorrelationMismatch)
             }
             _ => Ok(()),

@@ -395,17 +395,30 @@ fn empty_and_every_truncated_pick_prefix_is_malformed_through_reads() {
 #[test]
 fn validate_declared_payload_without_supplied_bytes_is_malformed() {
     let declared = 6_u32;
-    let frame = request_header(REQUEST_TAG_VALIDATE, 12, declared).to_vec();
+    // Build the FULL frame first, then supply progressively longer real
+    // prefixes. The historical loop cloned a header-only frame and called
+    // `truncate` beyond its length — a silent no-op — so payload prefixes
+    // 1..5 were never actually supplied; that is fixed below while every
+    // original assertion keeps its meaning.
+    let mut frame = request_header(REQUEST_TAG_VALIDATE, 12, declared).to_vec();
+    frame.extend_from_slice(b"payloa");
 
     // A positive declared payload with zero supplied bytes cannot complete.
-    let outcome = read_request(&mut Cursor::new(frame.clone()));
+    let mut none_supplied = frame.clone();
+    none_supplied.truncate(HEADER_LEN);
+    let outcome = read_request(&mut Cursor::new(none_supplied));
     assert_eq!(outcome, Err(RequestReadFault::Malformed));
 
-    // Short supplied prefixes are equally incomplete and malformed.
+    // Every short supplied prefix (one through five bytes of the promised
+    // six) is equally incomplete and malformed.
     let declared_len = usize::try_from(declared).expect("small");
     for supplied in 0..declared_len {
         let mut partial = frame.clone();
         partial.truncate(HEADER_LEN + supplied);
+        assert!(
+            partial.len() == HEADER_LEN + supplied,
+            "prefix {supplied} must actually be supplied"
+        );
         let outcome = read_request(&mut Cursor::new(partial));
         assert_eq!(
             outcome,

@@ -87,6 +87,9 @@ async fn seed_foundation(database: &DatabaseConnection) {
         title: Set("Thread".to_owned()),
         created_at_ms: Set(2),
         updated_at_ms: Set(2),
+        engine_run_config_version: Set(None),
+        engine_run_config_revision: Set(0),
+        engine_run_config: Set(None),
     }
     .insert(database)
     .await

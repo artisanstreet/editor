@@ -545,6 +545,9 @@ pub enum ConversationPatch {
         revision: Revision,
         /// Exact incremental fragment; empty is permitted.
         text: IncrementalText,
+        /// Authoritative entity update time supplied by Forge; never client
+        /// arrival time, an envelope timestamp, or a local clock read.
+        updated_at: UnixMillis,
     },
     /// Advances an item's renderer lifecycle.
     ItemLifecycle {
@@ -558,6 +561,9 @@ pub enum ConversationPatch {
         revision: Revision,
         /// New lifecycle.
         lifecycle: ConversationLifecycle,
+        /// Authoritative entity update time supplied by Forge; never client
+        /// arrival time, an envelope timestamp, or a local clock read.
+        updated_at: UnixMillis,
     },
     /// Advances a turn's renderer lifecycle.
     TurnLifecycle {
@@ -571,6 +577,9 @@ pub enum ConversationPatch {
         revision: Revision,
         /// New lifecycle.
         lifecycle: ConversationLifecycle,
+        /// Authoritative entity update time supplied by Forge; never client
+        /// arrival time, an envelope timestamp, or a local clock read.
+        updated_at: UnixMillis,
     },
 }
 
@@ -596,6 +605,28 @@ impl ConversationPatch {
             | Self::ItemAppend { sequence, .. }
             | Self::ItemLifecycle { sequence, .. }
             | Self::TurnLifecycle { sequence, .. } => *sequence,
+        }
+    }
+
+    /// Returns the authoritative Forge-supplied entity update time this
+    /// mutation carries: the complete value's own time for an upsert, the
+    /// explicit delta field for the three in-place mutations. Ordering and
+    /// chronology decisions belong to whichever owner applies this patch.
+    #[must_use]
+    pub const fn updated_at(&self) -> UnixMillis {
+        match self {
+            Self::TurnUpsert { turn, .. } => turn.updated_at,
+            Self::ItemUpsert {
+                item: ConversationItem::UserMessage(message),
+                ..
+            } => message.updated_at,
+            Self::ItemUpsert {
+                item: ConversationItem::AssistantMessage(message),
+                ..
+            } => message.updated_at,
+            Self::ItemAppend { updated_at, .. }
+            | Self::ItemLifecycle { updated_at, .. }
+            | Self::TurnLifecycle { updated_at, .. } => *updated_at,
         }
     }
 }

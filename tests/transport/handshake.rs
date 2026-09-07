@@ -22,6 +22,10 @@ const INITIAL_CAPABILITY: [u8; 32] = [0x49; 32];
 const ROTATED_CAPABILITY: [u8; 32] = [0xc2; 32];
 
 fn hello() -> Result<WireEnvelope, Box<dyn Error>> {
+    hello_with_lifecycle(false)
+}
+
+fn hello_with_lifecycle(supports_lifecycle_control: bool) -> Result<WireEnvelope, Box<dyn Error>> {
     Ok(WireEnvelope {
         protocol_version: ProtocolVersion::V1,
         frame_id: FrameId::parse("client-hello")?,
@@ -29,11 +33,18 @@ fn hello() -> Result<WireEnvelope, Box<dyn Error>> {
         body: WireEnvelopeBody::Hello(Hello {
             supported_versions: VersionOffer::new(vec![1])?,
             credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
+            supports_lifecycle_control,
         }),
     })
 }
 
 fn welcome() -> Result<WireEnvelope, Box<dyn Error>> {
+    welcome_with_lifecycle(false)
+}
+
+fn welcome_with_lifecycle(
+    lifecycle_control_supported: bool,
+) -> Result<WireEnvelope, Box<dyn Error>> {
     Ok(WireEnvelope {
         protocol_version: ProtocolVersion::V1,
         frame_id: FrameId::parse("server-welcome")?,
@@ -42,6 +53,7 @@ fn welcome() -> Result<WireEnvelope, Box<dyn Error>> {
             negotiated_version: ProtocolVersion::V1,
             connection_id: ConnectionId::parse("connection-1")?,
             reconnect_capability: ReconnectCapability::from_bytes(ROTATED_CAPABILITY),
+            lifecycle_control_supported,
         }),
     })
 }
@@ -64,6 +76,117 @@ async fn drain(loopback: Loopback) {
     loopback
         .drain(VarInt::from_u32(0), b"handshake test complete")
         .await;
+}
+
+#[tokio::test]
+async fn client_rejects_a_server_lifecycle_selection_without_an_offer() -> Result<(), Box<dyn Error>>
+{
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+    let (mut client_send, mut client_receive) = client_connection.open_bi().await?;
+
+    let client = tokio::time::timeout(
+        TEST_DEADLINE,
+        transport::client_handshake(
+            &mut client_send,
+            &mut client_receive,
+            hello_with_lifecycle(false)?,
+        ),
+    );
+    let server = async {
+        let (mut server_send, mut server_receive) =
+            tokio::time::timeout(TEST_DEADLINE, server_connection.accept_bi()).await??;
+        let received = tokio::time::timeout(
+            TEST_DEADLINE,
+            transport::receive_client_hello(&mut server_receive),
+        )
+        .await??;
+        assert!(!received.hello.supports_lifecycle_control);
+        let response = welcome_with_lifecycle(true)?;
+        tokio::time::timeout(
+            TEST_DEADLINE,
+            transport::send_server_welcome(
+                &mut server_send,
+                &response,
+                &received.hello.supported_versions,
+            ),
+        )
+        .await??;
+        server_send.finish()?;
+        Ok::<_, Box<dyn Error>>((server_send, server_receive))
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server);
+    let (server_send, server_receive) = server_result?;
+    assert!(matches!(
+        client_result?,
+        Err(transport::HandshakeError::LifecycleFeatureNotOffered)
+    ));
+
+    client_send.finish()?;
+    drop(client_send);
+    drop(client_receive);
+    drop(server_send);
+    drop(server_receive);
+    drop(client_connection);
+    drop(server_connection);
+    drain(loopback).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_preserves_an_offered_lifecycle_selection() -> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+    let (mut client_send, mut client_receive) = client_connection.open_bi().await?;
+
+    let client = tokio::time::timeout(
+        TEST_DEADLINE,
+        transport::client_handshake(
+            &mut client_send,
+            &mut client_receive,
+            hello_with_lifecycle(true)?,
+        ),
+    );
+    let server = async {
+        let (mut server_send, mut server_receive) =
+            tokio::time::timeout(TEST_DEADLINE, server_connection.accept_bi()).await??;
+        let received = tokio::time::timeout(
+            TEST_DEADLINE,
+            transport::receive_client_hello(&mut server_receive),
+        )
+        .await??;
+        assert!(received.hello.supports_lifecycle_control);
+        let response = welcome_with_lifecycle(true)?;
+        tokio::time::timeout(
+            TEST_DEADLINE,
+            transport::send_server_welcome(
+                &mut server_send,
+                &response,
+                &received.hello.supported_versions,
+            ),
+        )
+        .await??;
+        server_send.finish()?;
+        Ok::<_, Box<dyn Error>>((server_send, server_receive))
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server);
+    let (server_send, server_receive) = server_result?;
+    let received = client_result??;
+    assert!(received.welcome.lifecycle_control_supported);
+
+    client_send.finish()?;
+    drop(client_send);
+    drop(client_receive);
+    drop(server_send);
+    drop(server_receive);
+    drop(client_connection);
+    drop(server_connection);
+    drain(loopback).await;
+    Ok(())
 }
 
 #[tokio::test]

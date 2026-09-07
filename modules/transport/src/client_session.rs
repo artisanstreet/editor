@@ -8,9 +8,9 @@
 //! inside that Welcome belongs to the trusted calling coordinator from
 //! that moment on — never to the session, any [`Debug`] output, or any
 //! cloned state. The session retains only the negotiated non-secret
-//! metadata its requests need (protocol revision and connection
-//! identity), exposes no raw Quinn getters, spawns no background reader,
-//! task, channel, queue, or runtime, and carries one accepted
+//! metadata its requests need (protocol revision, connection identity, and
+//! the accepted lifecycle feature bit), exposes no raw Quinn getters, spawns
+//! no background reader, task, channel, queue, or runtime, and carries one accepted
 //! [`ClientRequestLifecycle`] through every successful request of the
 //! connection's whole life.
 //!
@@ -41,6 +41,9 @@
 //! and the same live owner survives it. Abandoning a request locally
 //! proves nothing about durable Forge work behind it: no rollback or
 //! peer-side cancellation is claimed, observed, or implied.
+//! [`ClientSession::request_acknowledging_response`] keeps the same
+//! admission and settlement contract but waits, after settlement, for the
+//! peer's response stream to finish cleanly before returning the owner.
 //!
 //! # Whole-stage limits
 //!
@@ -53,7 +56,8 @@
 //! [`DeadlineError::InvalidLimit`]; there are no fallback limits. The
 //! closest [`OperationKind`] labels the composed stages honestly:
 //! `Handshake` for the handshake stage including its open/send/receive,
-//! `Receive` for a request stage for the same reason.
+//! `Receive` for a request stage for the same reason, including the
+//! dedicated mode's post-settlement clean-EOF wait.
 //!
 //! # Guarded abandonment
 //!
@@ -67,12 +71,15 @@
 //! closes synchronously only and promises no asynchronous drain;
 //! [`ClientSession::shutdown`] is the sole awaited-drain path.
 
+use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use artisan_domain::IdentifierError;
-use artisan_protocol::{ConnectionId, ProtocolVersion, WireEnvelope, WireEnvelopeBody};
-use quinn::{Connection, Endpoint};
+use artisan_protocol::{
+    ClientRequest, ConnectionId, ProtocolVersion, WireEnvelope, WireEnvelopeBody,
+};
+use quinn::{Connection, Endpoint, RecvStream};
 use rustls_pki_types::CertificateDer;
 use thiserror::Error;
 
@@ -92,8 +99,123 @@ mod link;
 
 pub use exchange::{ExchangeError, HandshakeStageError, ReplyRejection};
 
-use exchange::{SettledReply, classify_reply, handshake_stage, request_stage};
+use exchange::{
+    AcknowledgingResponseError, SettledReply, classify_reply, handshake_stage, request_stage,
+    request_stage_acknowledging_response,
+};
 use link::SessionLink;
+
+/// The one public failure condition for the consuming server-delivery
+/// receiver.
+///
+/// The condition intentionally carries no Quinn error, close code, or peer
+/// payload. A lost delivery stream is terminal for this receiver; callers
+/// recover by establishing a fresh session and acquiring a fresh receiver.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("delivery stream was lost")]
+pub struct DeliveryLost;
+
+/// A consuming owner of the server-initiated delivery stream.
+///
+/// The receiver retains only a private clone of the session's connection and
+/// the one accepted receive stream. It never exposes either Quinn handle.
+/// Before the first successful acceptance, [`recv`](Self::recv) waits for one
+/// server-opened unidirectional stream; after that, each consuming call reads
+/// exactly one bounded application envelope from the same stream.
+///
+/// The type deliberately implements neither [`Clone`] nor [`Copy`]. A stream
+/// that is abandoned while a frame is being read is stopped synchronously and
+/// cannot be reused by a later call.
+pub struct DeliveryReceiver {
+    /// Private shared connection handle used only to accept the one inbound
+    /// stream. The session owns the separate connection handle that keeps
+    /// request and shutdown custody independent.
+    connection: Connection,
+    /// Accepted delivery stream, installed before any frame-read await.
+    stream: Option<RecvStream>,
+}
+
+impl fmt::Debug for DeliveryReceiver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeliveryReceiver")
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeliveryReceiver {
+    /// Creates a receiver with no accepted stream.
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            stream: None,
+        }
+    }
+
+    /// Consumes the receiver to accept or use its delivery stream and read
+    /// exactly one bounded envelope.
+    ///
+    /// The first call awaits exactly one `accept_uni`; subsequent calls use
+    /// the already accepted stream. Cancellation is checked before the
+    /// operation and wins through a biased selection both while accepting
+    /// and while reading. Every cancellation, stream/connection failure,
+    /// framing failure, decode failure, or abandoned operation is terminal:
+    /// no receiver is returned. If a stream was accepted, dropping the
+    /// consumed owner stops it with the private delivery-stop code before
+    /// the error is observed by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeliveryLost`] for every delivery failure. No Quinn or
+    /// protocol-source error crosses this boundary.
+    pub async fn recv(
+        mut self,
+        cancel: &CancelHandle,
+    ) -> Result<(DeliveryReceiver, WireEnvelope), DeliveryLost> {
+        if self.stream.is_none() {
+            if cancel.is_cancelled() {
+                return Err(DeliveryLost);
+            }
+            let stream = tokio::select! {
+                biased;
+                () = cancel.wait() => return Err(DeliveryLost),
+                accepted = self.connection.accept_uni() => {
+                    accepted.map_err(|_| DeliveryLost)?
+                }
+            };
+            // Install custody immediately after acceptance and before the
+            // first frame await. Any later escape therefore stops this exact
+            // stream synchronously through `Drop`.
+            self.stream = Some(stream);
+        }
+
+        if cancel.is_cancelled() {
+            return Err(DeliveryLost);
+        }
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(DeliveryLost);
+        };
+        let envelope = tokio::select! {
+            biased;
+            () = cancel.wait() => return Err(DeliveryLost),
+            envelope = crate::receive_envelope(stream) => {
+                envelope.map_err(|_| DeliveryLost)?
+            }
+        };
+        Ok((self, envelope))
+    }
+}
+
+impl Drop for DeliveryReceiver {
+    fn drop(&mut self) {
+        // A receiver drop never closes the shared session connection. It
+        // only stops an accepted inbound stream, including one abandoned in
+        // the middle of a bounded frame read.
+        if let Some(mut stream) = self.stream.take() {
+            let _stopped = stream.stop(link::close_code(link::STREAM_STOP_CODE));
+        }
+    }
+}
 
 /// Fixed simultaneous pending-request capacity of the sequential API.
 ///
@@ -211,6 +333,10 @@ pub enum ClientSessionError {
     /// The awaited shutdown drain failed under its finite limit.
     #[error("shutdown drain failed: {0}")]
     Shutdown(#[source] DeadlineError<TransportError>),
+    /// Delivery acquisition was attempted a second time. The consuming
+    /// session is dropped by this terminal error path.
+    #[error("delivery receiver was already taken")]
+    DeliveryAlreadyTaken,
 }
 
 /// Terminal failure of one sequential request; the session is always
@@ -235,6 +361,10 @@ pub enum ClientRequestError {
         /// Revision negotiated during the session's handshake.
         negotiated_version: u32,
     },
+    /// Native lifecycle control was not negotiated for this session,
+    /// diagnosed before any request identity or network admission.
+    #[error("native lifecycle control was not negotiated")]
+    UnsupportedFeature,
     /// The request's frame identity could not seed its correlation
     /// identity. Unreachable for decoded envelopes, kept typed rather
     /// than panicked.
@@ -253,6 +383,34 @@ pub enum ClientRequestError {
     /// could not settle despite matching.
     #[error("reply rejected: {0}")]
     Reply(#[from] ReplyRejection),
+}
+
+/// Restores the public request error shape after the dedicated stage's
+/// single whole-operation deadline finishes. Reply validation remains a
+/// direct `Reply` error; only wire and deadline failures remain under the
+/// existing `Exchange` boundary.
+fn map_acknowledging_response_error(
+    error: DeadlineError<AcknowledgingResponseError>,
+) -> ClientRequestError {
+    match error {
+        DeadlineError::Timeout { operation, limit } => {
+            ClientRequestError::Exchange(DeadlineError::Timeout { operation, limit })
+        }
+        DeadlineError::Cancelled { operation } => {
+            ClientRequestError::Exchange(DeadlineError::Cancelled { operation })
+        }
+        DeadlineError::InvalidLimit { operation } => {
+            ClientRequestError::Exchange(DeadlineError::InvalidLimit { operation })
+        }
+        DeadlineError::Peer {
+            operation,
+            error: AcknowledgingResponseError::Exchange(error),
+        } => ClientRequestError::Exchange(DeadlineError::Peer { operation, error }),
+        DeadlineError::Peer {
+            error: AcknowledgingResponseError::Reply(error),
+            ..
+        } => ClientRequestError::Reply(error),
+    }
 }
 
 /// One authenticated client session owning exactly one private loopback
@@ -278,6 +436,10 @@ pub struct ClientSession {
     negotiated_version: ProtocolVersion,
     /// Negotiated non-secret connection diagnostic identity.
     connection_id: ConnectionId,
+    /// Whether native lifecycle control was accepted during this handshake.
+    lifecycle_control_supported: bool,
+    /// Whether the one server-delivery receiver has already been acquired.
+    delivery_taken: bool,
 }
 
 impl Drop for ClientSession {
@@ -364,6 +526,7 @@ impl ClientSession {
         let (endpoint, connection) = link.disband();
         let negotiated_version = welcome.protocol_version;
         let connection_id = welcome.welcome.connection_id.clone();
+        let lifecycle_control_supported = welcome.welcome.lifecycle_control_supported;
         Ok((
             Self {
                 endpoint,
@@ -372,6 +535,8 @@ impl ClientSession {
                 limits,
                 negotiated_version,
                 connection_id,
+                lifecycle_control_supported,
+                delivery_taken: false,
             },
             welcome,
         ))
@@ -381,6 +546,13 @@ impl ClientSession {
     #[must_use]
     pub const fn protocol_version(&self) -> ProtocolVersion {
         self.negotiated_version
+    }
+
+    /// Returns whether native lifecycle control was negotiated for this
+    /// session.
+    #[must_use]
+    pub const fn lifecycle_control_supported(&self) -> bool {
+        self.lifecycle_control_supported
     }
 
     /// Returns the server-assigned connection diagnostic identity.
@@ -410,6 +582,31 @@ impl ClientSession {
         PENDING_CAPACITY
     }
 
+    /// Takes the server-initiated delivery receiver without waiting for the
+    /// server or performing any network I/O.
+    ///
+    /// The first call marks this session and returns the same session together
+    /// with exactly one receiver holding only a private cloned connection
+    /// handle. The server opens its stream only after a real delivery write,
+    /// so all waiting belongs to [`DeliveryReceiver::recv`]. A second call is
+    /// a terminal typed session error and consumes the session under the same
+    /// conservative rule as other session-local errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientSessionError::DeliveryAlreadyTaken`] when the
+    /// receiver was already acquired; the supplied session is dropped on
+    /// that path and its endpoint and connection are closed synchronously.
+    pub fn take_delivery(self) -> Result<(Self, DeliveryReceiver), ClientSessionError> {
+        let mut session = self;
+        if session.delivery_taken {
+            return Err(ClientSessionError::DeliveryAlreadyTaken);
+        }
+        session.delivery_taken = true;
+        let receiver = DeliveryReceiver::new(session.connection.clone());
+        Ok((session, receiver))
+    }
+
     /// Runs exactly one sequential request and returns the same owner
     /// with its settled outcome.
     ///
@@ -428,7 +625,8 @@ impl ClientSession {
     /// # Errors
     ///
     /// Returns [`ClientRequestError::NotARequest`] and
-    /// [`ClientRequestError::VersionMismatch`] before any network
+    /// [`ClientRequestError::VersionMismatch`] and
+    /// [`ClientRequestError::UnsupportedFeature`] before any network
     /// attempt, [`ClientRequestError::Correlation`] for an unusable
     /// frame identity, [`ClientRequestError::Admission`] when the
     /// registry rejects the identity, [`ClientRequestError::Exchange`]
@@ -447,8 +645,8 @@ impl ClientSession {
         cancel: &CancelHandle,
     ) -> Result<(Self, ResolvedRequest), ClientRequestError> {
         // Pre-I/O validation, in order: family, negotiated version,
-        // correlation seeding, admission. Nothing touches the network
-        // before all four pass.
+        // negotiated lifecycle feature, correlation seeding, admission.
+        // Nothing touches the network before all five pass.
         if !matches!(&envelope.body, WireEnvelopeBody::Request(_)) {
             let received = message_kind(&envelope.body);
             return Err(ClientRequestError::NotARequest { received });
@@ -458,6 +656,13 @@ impl ClientSession {
                 envelope_version: envelope.protocol_version.get(),
                 negotiated_version: self.negotiated_version.get(),
             });
+        }
+        if matches!(
+            &envelope.body,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(_))
+        ) && !self.lifecycle_control_supported
+        {
+            return Err(ClientRequestError::UnsupportedFeature);
         }
         let request_id = envelope
             .frame_id
@@ -503,6 +708,104 @@ impl ClientSession {
         let resolved = waiter
             .take_outcome()
             .expect("the admitted request settled exactly once into its private waiter");
+        Ok((self, resolved))
+    }
+
+    /// Runs exactly one sequential request, settles its correlated reply,
+    /// and then waits for the peer to finish the response stream cleanly.
+    ///
+    /// This mode is for mutations whose server-side commit is released only
+    /// after the peer observes the response FIN. It preserves the ordinary
+    /// request's pre-I/O validation, admission, settlement, cancellation,
+    /// deadline, and terminal-error policy. The admitted reply is settled
+    /// before the inbound stream is read for its end marker. A clean FIN is
+    /// the only successful stream completion; trailing data or any other
+    /// stream failure consumes the session and emits the private STOP.
+    ///
+    /// The operation consumes `self` for its whole duration and returns the
+    /// same live owner with the settled outcome on success. Dropping the
+    /// future, caller cancellation, timeout, malformed input, wrong family,
+    /// wrong correlation, or failed settlement all retain the existing
+    /// terminal session behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed pre-I/O, admission, exchange, and reply errors
+    /// as [`ClientSession::request`]. The request exchange deadline covers
+    /// stream open, send, reply receive, reply settlement, and clean response
+    /// EOF as one total budget.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the just-settled waiter cannot deliver its one outcome,
+    /// which would mean lifecycle bookkeeping diverged from its registry
+    /// mirror; no decoded input reaches that invariant violation.
+    pub async fn request_acknowledging_response(
+        mut self,
+        envelope: WireEnvelope,
+        cancel: &CancelHandle,
+    ) -> Result<(Self, ResolvedRequest), ClientRequestError> {
+        // Keep the ordinary request's pre-I/O order and policy exactly:
+        // family, negotiated version, lifecycle feature, correlation
+        // seeding, admission. Nothing touches the network before all five
+        // pass.
+        if !matches!(&envelope.body, WireEnvelopeBody::Request(_)) {
+            let received = message_kind(&envelope.body);
+            return Err(ClientRequestError::NotARequest { received });
+        }
+        if envelope.protocol_version != self.negotiated_version {
+            return Err(ClientRequestError::VersionMismatch {
+                envelope_version: envelope.protocol_version.get(),
+                negotiated_version: self.negotiated_version.get(),
+            });
+        }
+        if matches!(
+            &envelope.body,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(_))
+        ) && !self.lifecycle_control_supported
+        {
+            return Err(ClientRequestError::UnsupportedFeature);
+        }
+        let request_id = envelope
+            .frame_id
+            .to_request_id()
+            .map_err(ClientRequestError::Correlation)?;
+        let mut waiter = self
+            .lifecycle
+            .admit(request_id.clone())
+            .map_err(ClientRequestError::Admission)?;
+
+        let negotiated_version = self.negotiated_version;
+        let resolved = run_with_deadline(
+            OperationKind::Receive,
+            self.limits.request,
+            cancel,
+            request_stage_acknowledging_response(&self.connection, envelope, |reply| {
+                // Validation and lifecycle settlement happen before the
+                // stage is allowed to observe response EOF/FIN.
+                let settled = classify_reply(reply, negotiated_version, &request_id)
+                    .map_err(AcknowledgingResponseError::Reply)?;
+                match settled {
+                    SettledReply::Response(response) => {
+                        self.lifecycle
+                            .resolve_on_response(&response)
+                            .map_err(ReplyRejection::Settle)
+                            .map_err(AcknowledgingResponseError::Reply)?;
+                    }
+                    SettledReply::Failure(failure) => {
+                        self.lifecycle
+                            .resolve_on_failure(&failure)
+                            .map_err(ReplyRejection::Settle)
+                            .map_err(AcknowledgingResponseError::Reply)?;
+                    }
+                }
+                Ok(waiter
+                    .take_outcome()
+                    .expect("the admitted request settled exactly once into its private waiter"))
+            }),
+        )
+        .await
+        .map_err(map_acknowledging_response_error)?;
         Ok((self, resolved))
     }
 

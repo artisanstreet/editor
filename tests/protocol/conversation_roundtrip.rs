@@ -68,6 +68,11 @@ const REVISION_THREE: u64 = 3;
 const APPEND_REVISION: u64 = 4;
 const ITEM_LIFECYCLE_REVISION: u64 = 5;
 const TURN_LIFECYCLE_REVISION: u64 = 6;
+/// Distinct Forge-supplied mutation times per delta variant; differing
+/// values expose any copy/paste wiring slip between the three shapes.
+const APPEND_UPDATED_AT_MILLIS: i64 = 1_800_000_300_001;
+const ITEM_LIFECYCLE_UPDATED_AT_MILLIS: i64 = 1_800_000_300_002;
+const TURN_LIFECYCLE_UPDATED_AT_MILLIS: i64 = 1_800_000_300_003;
 
 const SNAPSHOT_RESPONSE_FRAME_ID: &str = "server-frame-300001";
 const STARTED_FRESH_FRAME_ID: &str = "server-frame-300002";
@@ -787,6 +792,7 @@ fn five_variant_batch_frame(frame_id: &str) -> Vec<u8> {
         payload.set_item_id(ITEM_ID_A);
         payload.set_revision(APPEND_REVISION);
         payload.set_text(APPEND_FRAGMENT);
+        payload.set_updated_at_millis(APPEND_UPDATED_AT_MILLIS);
     }
 
     let mut transition = patches.reborrow().get(3);
@@ -797,6 +803,7 @@ fn five_variant_batch_frame(frame_id: &str) -> Vec<u8> {
         payload.set_item_id(ITEM_ID_A);
         payload.set_revision(ITEM_LIFECYCLE_REVISION);
         payload.set_lifecycle(ConversationLifecycle::Failed);
+        payload.set_updated_at_millis(ITEM_LIFECYCLE_UPDATED_AT_MILLIS);
     }
 
     let mut transition = patches.get(4);
@@ -807,6 +814,7 @@ fn five_variant_batch_frame(frame_id: &str) -> Vec<u8> {
         payload.set_turn_id(TURN_ID_B);
         payload.set_revision(TURN_LIFECYCLE_REVISION);
         payload.set_lifecycle(ConversationLifecycle::Cancelled);
+        payload.set_updated_at_millis(TURN_LIFECYCLE_UPDATED_AT_MILLIS);
     }
 
     encode(&message)
@@ -913,6 +921,7 @@ fn round_trips_append_and_lifecycle_patch_variants_in_one_batch() -> capnp::Resu
                     assert_eq!(payload.get_item_id()?, ITEM_ID_A);
                     assert_eq!(payload.get_revision(), APPEND_REVISION);
                     assert_eq!(payload.get_text()?, APPEND_FRAGMENT);
+                    assert_eq!(payload.get_updated_at_millis(), APPEND_UPDATED_AT_MILLIS);
                 }
                 _ => panic!("expected itemAppend patch"),
             }
@@ -926,6 +935,10 @@ fn round_trips_append_and_lifecycle_patch_variants_in_one_batch() -> capnp::Resu
                     assert_eq!(payload.get_item_id()?, ITEM_ID_A);
                     assert_eq!(payload.get_revision(), ITEM_LIFECYCLE_REVISION);
                     assert_eq!(payload.get_lifecycle()?, ConversationLifecycle::Failed,);
+                    assert_eq!(
+                        payload.get_updated_at_millis(),
+                        ITEM_LIFECYCLE_UPDATED_AT_MILLIS
+                    );
                 }
                 _ => panic!("expected itemLifecycle patch"),
             }
@@ -939,6 +952,10 @@ fn round_trips_append_and_lifecycle_patch_variants_in_one_batch() -> capnp::Resu
                     assert_eq!(payload.get_turn_id()?, TURN_ID_B);
                     assert_eq!(payload.get_revision(), TURN_LIFECYCLE_REVISION);
                     assert_eq!(payload.get_lifecycle()?, ConversationLifecycle::Cancelled,);
+                    assert_eq!(
+                        payload.get_updated_at_millis(),
+                        TURN_LIFECYCLE_UPDATED_AT_MILLIS
+                    );
                 }
                 _ => panic!("expected turnLifecycle patch"),
             }
@@ -1207,6 +1224,11 @@ fn zero_patch_sequence_stays_representable() -> capnp::Result<()> {
                     let payload = payload?;
                     assert_eq!(payload.get_item_id()?, ITEM_ID_B);
                     assert_eq!(payload.get_text()?, "");
+                    // The builder never touches the timestamp: an absent
+                    // Int64 decodes as exactly 0 -- epoch zero --
+                    // indistinguishable from a sender-supplied zero. An
+                    // Int64 has no presence information at this boundary.
+                    assert_eq!(payload.get_updated_at_millis(), 0);
                 }
                 _ => panic!("expected itemAppend patch"),
             }

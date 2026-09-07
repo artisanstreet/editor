@@ -1,12 +1,20 @@
 //! Domain-typed repositories for the native schema.
 
+mod conversation_patch_replay;
+mod conversation_projection;
 mod dispatch_payload;
 mod first_message;
 mod message_dispatch;
 mod project_catalog;
 mod project_threads;
+mod run_binding;
+mod run_launch;
+mod run_observation;
+mod startup_reconciliation;
+mod startup_reconciliation_disposition;
+mod thread_engine_config;
 
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::{DatabaseConnection, DbErr, EntityTrait};
 use thiserror::Error;
 
 use artisan_domain::{
@@ -14,6 +22,9 @@ use artisan_domain::{
     UnixMillis,
 };
 
+use crate::entities;
+
+pub use conversation_patch_replay::ConversationPatchReplay;
 pub use dispatch_payload::MessageDispatchPayload;
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
 pub use message_dispatch::{
@@ -23,6 +34,34 @@ pub use message_dispatch::{
 };
 pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
+};
+pub use run_binding::{
+    BindRunProvider, BindRunProviderOutcome, BoundRunReceipt, ProviderBindingBytes, RunBindingError,
+};
+pub use run_launch::{
+    LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, RunLaunchCredentials,
+    RunLaunchError, RunStartKey,
+};
+pub use run_observation::terminal::{
+    AuxiliaryTerminalError, CancelRun, CancelRunError, CancelRunOutcome, CompleteRun,
+    CompleteRunError, CompleteRunOutcome, FailRun, FailRunError, FailRunOutcome, InterruptRun,
+    InterruptRunError, InterruptRunOutcome, InterruptedRunReceipt, RunErrorCode, RunErrorMessage,
+    TerminalRunReceipt,
+};
+pub use run_observation::{
+    AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome, EngineCheckpoint,
+    RunBatchReceiptInfo, RunBatchScope, RunObservationError,
+};
+pub use startup_reconciliation::{
+    StartupReconciliationCandidate, StartupReconciliationCandidates, StartupReconciliationError,
+    StartupReconciliationQuery, StartupRunLifecycle,
+};
+pub use startup_reconciliation_disposition::{
+    StartupReconciliationDisposition, StartupReconciliationDispositionError,
+    StartupReconciliationDispositionOutcome, StartupReconciliationDispositionReceipt,
+};
+pub use thread_engine_config::{
+    SetThreadEngineConfigInput, SetThreadEngineConfigResult, ThreadEngineSettings,
 };
 
 /// Typed failures at the native persistence boundary.
@@ -42,6 +81,13 @@ pub enum RepositoryError {
 
     #[error("thread `{thread_id}` is not attached to a known project")]
     ThreadNotFound { thread_id: ThreadId },
+
+    #[error("thread `{thread_id}` engine configuration revision does not match the precondition")]
+    EngineConfigRevisionConflict {
+        thread_id: ThreadId,
+        expected_revision: Option<artisan_domain::EngineConfigRevision>,
+        actual_revision: Option<artisan_domain::EngineConfigRevision>,
+    },
 
     #[error("thread `{thread_id}` already exists with different persisted values")]
     ThreadConflict { thread_id: ThreadId },
@@ -140,6 +186,38 @@ impl Repository {
     #[must_use]
     pub const fn new(database: DatabaseConnection) -> Self {
         Self { database }
+    }
+
+    /// Reads the persisted project root for a thread without consulting the
+    /// process working directory, source tree, or environment.  A caller
+    /// uses this only while it still owns the immutable thread/run snapshot;
+    /// the root itself is validated at the domain boundary before it leaves
+    /// the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] if the thread or attached project is
+    /// missing, persisted data is corrupt, or a database query fails.
+    pub async fn read_thread_project_root(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<RootPath, RepositoryError> {
+        let thread = entities::thread::Entity::find_by_id(thread_id.as_str())
+            .one(&self.database)
+            .await
+            .map_err(|source| database_error("read thread project", source))?
+            .ok_or_else(|| RepositoryError::ThreadNotFound {
+                thread_id: thread_id.clone(),
+            })?;
+        let project_id = ProjectId::parse(thread.project_id)
+            .map_err(|error| corrupt_data("threads", "project_id", &error))?;
+        let project = entities::attached_project::Entity::find_by_id(project_id.as_str())
+            .one(&self.database)
+            .await
+            .map_err(|source| database_error("read attached project", source))?
+            .ok_or(RepositoryError::ProjectNotFound { project_id })?;
+        RootPath::parse(project.root_path)
+            .map_err(|error| corrupt_data("attached_projects", "root_path", &error))
     }
 }
 

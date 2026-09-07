@@ -371,3 +371,220 @@ pub(crate) fn encode_response(
     frame.extend_from_slice(payload);
     Ok(frame)
 }
+
+// ---------------------------------------------------------------------------
+// Parent-side framing
+//
+// The functions below serve the parent controller only. They deliberately
+// reuse the same constants, layout, and bound discipline as the helper side
+// so the two directions can never drift into a second encoding: one
+// eighteen-byte header, little-endian fields, and the shared root-path byte
+// ceiling checked before anything is allocated or written.
+// ---------------------------------------------------------------------------
+
+/// Wire tag of the `Selected` response: one canonical directory path.
+pub(crate) const RESPONSE_TAG_SELECTED: u8 = 1;
+
+/// Why one request frame could not be encoded for the helper.
+///
+/// Every variant is an out-of-contract construction refused before any byte
+/// is produced; none carries filesystem text.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub(crate) enum RequestEncodeFault {
+    /// A [`RequestKind::Pick`] frame was given a payload; `Pick` is always
+    /// empty on the wire.
+    #[error("pick request must not carry a payload")]
+    PickCarriesPayload,
+    /// A [`RequestKind::Validate`] frame was given no payload; its path
+    /// cannot be empty.
+    #[error("validate request must carry a non-empty path payload")]
+    EmptyValidatePayload,
+    /// A [`RequestKind::Validate`] payload exceeded the shared root-path
+    /// byte ceiling.
+    #[error("validate payload of {length} bytes is beyond the shared bound")]
+    ValidatePayloadBeyondBound {
+        /// The offending payload length in UTF-8 bytes.
+        length: usize,
+    },
+}
+
+/// Encodes one complete request frame around the exact correlation
+/// generation.
+///
+/// The returned buffer is the full frame: [`REQUEST_MAGIC`], the current
+/// [`PROTOCOL_VERSION`], the request tag, the little-endian generation, the
+/// little-endian payload length, then the payload bytes for
+/// [`RequestKind::Validate`] (none for [`RequestKind::Pick`]). Structural
+/// rules are enforced here rather than trusted from callers, mirroring the
+/// helper's own header rejection table.
+///
+/// # Errors
+///
+/// Returns [`RequestEncodeFault`] instead of emitting any frame when the
+/// kind/payload combination violates the v1 contract or the payload exceeds
+/// [`ROOT_PATH_MAX_BYTES`].
+pub(crate) fn encode_request(
+    generation: u64,
+    kind: RequestKind,
+    payload: &[u8],
+) -> Result<Vec<u8>, RequestEncodeFault> {
+    let tag = match kind {
+        RequestKind::Pick => {
+            if !payload.is_empty() {
+                return Err(RequestEncodeFault::PickCarriesPayload);
+            }
+            REQUEST_TAG_PICK
+        }
+        RequestKind::Validate => {
+            if payload.is_empty() {
+                return Err(RequestEncodeFault::EmptyValidatePayload);
+            }
+            if payload.len() > ROOT_PATH_MAX_BYTES {
+                return Err(RequestEncodeFault::ValidatePayloadBeyondBound {
+                    length: payload.len(),
+                });
+            }
+            REQUEST_TAG_VALIDATE
+        }
+    };
+
+    let Ok(payload_len) = u32::try_from(payload.len()) else {
+        // Unreachable behind the ROOT_PATH_MAX_BYTES check above, but the
+        // refusal stays explicit rather than panicking into existence.
+        return Err(RequestEncodeFault::ValidatePayloadBeyondBound {
+            length: payload.len(),
+        });
+    };
+
+    let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
+    frame.extend_from_slice(&REQUEST_MAGIC);
+    frame.push(PROTOCOL_VERSION);
+    frame.push(tag);
+    frame.extend_from_slice(&generation.to_le_bytes());
+    frame.extend_from_slice(&payload_len.to_le_bytes());
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+/// Decoded response header fields available before any payload byte is read.
+///
+/// `payload_len` is already proven to fit the shared root-path ceiling and
+/// the per-tag emptiness rule, so a caller may allocate for it safely and
+/// knows which outcome shape to expect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResponsePrelude {
+    /// Correlation generation echoed by the helper.
+    pub(crate) generation: u64,
+    /// Payload length in bytes, guaranteed within every structural rule.
+    pub(crate) payload_len: usize,
+    /// Raw outcome tag; always one of the six defined response tags.
+    pub(crate) tag: u8,
+}
+
+/// Why a response header was rejected before any payload allocation.
+///
+/// Every variant is a framing fault carrying only structural facts; none
+/// includes stream bytes or filesystem text.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub(crate) enum ResponseHeaderFault {
+    /// The input was not exactly [`HEADER_LEN`]: too short or longer than
+    /// one header.
+    #[error("response header is truncated")]
+    Truncated,
+    /// The magic bytes were not exactly `ASDR`.
+    #[error("response frame does not carry the helper response magic")]
+    ForeignMagic,
+    /// The version byte named a protocol this build never spoke.
+    #[error("response names unsupported protocol version {found}")]
+    UnsupportedVersion {
+        /// The offending version byte.
+        found: u8,
+    },
+    /// The tag byte is outside the six defined response tags.
+    #[error("response names unknown tag {found}")]
+    UnsupportedTag {
+        /// The offending tag byte.
+        found: u8,
+    },
+    /// The declared payload exceeds [`ROOT_PATH_MAX_BYTES`].
+    #[error("response declares {declared} payload bytes beyond the shared bound")]
+    PayloadBeyondBound {
+        /// The declared payload length in bytes.
+        declared: u32,
+    },
+    /// One of the empty-payload tags 2 through 6 declared payload bytes;
+    /// only `Selected` may carry them.
+    #[error("empty-payload response tag {found} declared payload bytes")]
+    TagCarriesPayload {
+        /// The offending tag byte.
+        found: u8,
+    },
+}
+
+/// Parses one complete response header without touching any payload byte.
+///
+/// The input must be exactly the leading [`HEADER_LEN`] bytes of the frame;
+/// callers read them with an exact-length read so a short stream surfaces as
+/// an I/O classification rather than a fabricated verdict. All structural
+/// rejection happens here—magic, version, tag range, the shared payload
+/// ceiling, and the tags-2-through-6 emptiness rule—so the caller learns a
+/// safe payload size and the expected outcome shape before allocating.
+///
+/// # Errors
+///
+/// Returns [`ResponseHeaderFault`] for input that is not exactly one header,
+/// foreign magic, unsupported versions, unknown tags, payloads beyond
+/// [`ROOT_PATH_MAX_BYTES`], or an empty-payload tag that declared bytes.
+pub(crate) fn parse_response_header(header: &[u8]) -> Result<ResponsePrelude, ResponseHeaderFault> {
+    let (&magic, rest) = header
+        .split_first_chunk::<4>()
+        .ok_or(ResponseHeaderFault::Truncated)?;
+    if magic != RESPONSE_MAGIC {
+        return Err(ResponseHeaderFault::ForeignMagic);
+    }
+
+    let (&[version], rest) = rest
+        .split_first_chunk::<1>()
+        .ok_or(ResponseHeaderFault::Truncated)?;
+    if version != PROTOCOL_VERSION {
+        return Err(ResponseHeaderFault::UnsupportedVersion { found: version });
+    }
+
+    let (&[tag], rest) = rest
+        .split_first_chunk::<1>()
+        .ok_or(ResponseHeaderFault::Truncated)?;
+    if !(RESPONSE_TAG_SELECTED..=Response::DialogFailed.tag()).contains(&tag) {
+        return Err(ResponseHeaderFault::UnsupportedTag { found: tag });
+    }
+
+    let (&generation_bytes, rest) = rest
+        .split_first_chunk::<8>()
+        .ok_or(ResponseHeaderFault::Truncated)?;
+    let (&length_bytes, tail) = rest
+        .split_first_chunk::<4>()
+        .ok_or(ResponseHeaderFault::Truncated)?;
+    // The defined header ends exactly here; anything longer was not a
+    // header. Payload bytes and trailing input belong to the caller's exact
+    // reads, never to this function.
+    if !tail.is_empty() {
+        return Err(ResponseHeaderFault::Truncated);
+    }
+
+    let generation = u64::from_le_bytes(generation_bytes);
+    let declared = u32::from_le_bytes(length_bytes);
+    let Ok(payload_len) = usize::try_from(declared) else {
+        return Err(ResponseHeaderFault::PayloadBeyondBound { declared });
+    };
+    if payload_len > ROOT_PATH_MAX_BYTES {
+        return Err(ResponseHeaderFault::PayloadBeyondBound { declared });
+    }
+    if tag != RESPONSE_TAG_SELECTED && payload_len != 0 {
+        return Err(ResponseHeaderFault::TagCarriesPayload { found: tag });
+    }
+
+    Ok(ResponsePrelude {
+        generation,
+        payload_len,
+        tag,
+    })
+}

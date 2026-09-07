@@ -5,7 +5,11 @@ load("@rules_rust//rust:defs.bzl", "rust_test")
 # (declared there), and the `tinted_svg_unit_test` target in
 # //modules/ui/BUILD.bazel builds it via `crate = ":ui"`.
 exports_files(
-    ["tinted_svg.rs"],
+    [
+        "command.rs",
+        "tinted_svg.rs",
+        "typography_gradient.rs",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -64,10 +68,91 @@ rust_test(
 )
 
 rust_test(
+    name = "accordion_test",
+    srcs = ["accordion.rs"],
+    crate_name = "accordion_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "alert_test",
+    srcs = ["alert.rs"],
+    crate_name = "alert_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "alert_dialog_test",
+    srcs = ["alert_dialog.rs"],
+    crate_name = "alert_dialog_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "gpui_harness_test",
     srcs = ["gpui_harness.rs"],
     crate_name = "gpui_harness_test",
     deps = [
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "input_state_test",
+    srcs = ["input_state.rs"],
+    crate_name = "input_state_test",
+    deps = ["//modules/ui:ui"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "input_test",
+    srcs = ["input.rs"],
+    crate_name = "input_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "input_group_test",
+    srcs = ["input_group.rs"],
+    crate_name = "input_group_test",
+    deps = [
+        "//modules/ui:ui",
         "@crates//:gpui",
     ],
     edition = "2024",
@@ -102,9 +187,205 @@ rust_test(
 )
 
 rust_test(
+    name = "switch_test",
+    srcs = ["switch.rs"],
+    crate_name = "switch_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "shimmer_text_test",
+    srcs = ["shimmer_text.rs"],
+    crate_name = "shimmer_text_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "collapsible_test",
+    srcs = ["collapsible.rs"],
+    crate_name = "collapsible_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "context_menu_test",
+    srcs = ["context_menu.rs"],
+    crate_name = "context_menu_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "dialog_test",
+    srcs = ["dialog.rs"],
+    crate_name = "dialog_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "dropdown_menu_test",
+    srcs = ["dropdown_menu.rs"],
+    crate_name = "dropdown_menu_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "fade_arc_test",
+    srcs = ["fade_arc.rs"],
+    crate_name = "fade_arc_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "tabs_test",
+    srcs = ["tabs.rs"],
+    crate_name = "tabs_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "textarea_test",
+    srcs = ["textarea.rs"],
+    crate_name = "textarea_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "toggle_group_test",
+    srcs = ["toggle_group.rs"],
+    crate_name = "toggle_group_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "toggle_test",
+    srcs = ["toggle.rs"],
+    crate_name = "toggle_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "card_test",
     srcs = ["card.rs"],
     crate_name = "card_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "lip_card_test",
+    srcs = ["lip_card.rs"],
+    crate_name = "lip_card_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "link_preview_test",
+    srcs = ["link_preview.rs"],
+    crate_name = "link_preview_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "avatar_test",
+    srcs = ["avatar.rs"],
+    crate_name = "avatar_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",
@@ -130,9 +411,51 @@ rust_test(
 )
 
 rust_test(
+    name = "scroll_area_test",
+    srcs = ["scroll_area.rs"],
+    crate_name = "scroll_area_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "select_test",
+    srcs = ["select.rs"],
+    crate_name = "select_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "separator_test",
     srcs = ["separator.rs"],
     crate_name = "separator_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "sheet_test",
+    srcs = ["sheet.rs"],
+    crate_name = "sheet_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",
@@ -158,6 +481,20 @@ rust_test(
 )
 
 rust_test(
+    name = "popover_test",
+    srcs = ["popover.rs"],
+    crate_name = "popover_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "progress_test",
     srcs = ["progress.rs"],
     crate_name = "progress_test",
@@ -172,9 +509,65 @@ rust_test(
 )
 
 rust_test(
+    name = "skeleton_test",
+    srcs = ["skeleton.rs"],
+    crate_name = "skeleton_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "slider_test",
+    srcs = ["slider.rs"],
+    crate_name = "slider_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "icon_test",
     srcs = ["icon.rs"],
     crate_name = "icon_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "list_row_test",
+    srcs = ["list_row.rs"],
+    crate_name = "list_row_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "native_select_test",
+    srcs = ["native_select.rs"],
+    crate_name = "native_select_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",

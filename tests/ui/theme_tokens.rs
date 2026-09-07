@@ -309,11 +309,11 @@ fn paint_color_round_trips_through_gpui_without_drift() {
         ArtisanTheme::for_mode(ThemeMode::Dark).colors.border,
     ] {
         let direct = source.to_srgb();
-        let through_gpui = source.to_paint().to_rgb();
-        assert_channel_close("round-trip r", through_gpui.r, direct.r);
-        assert_channel_close("round-trip g", through_gpui.g, direct.g);
-        assert_channel_close("round-trip b", through_gpui.b, direct.b);
-        assert_channel_close("round-trip a", through_gpui.a, direct.a);
+        let through_gpui = gpui::hsla_to_rgba(source.to_paint());
+        assert_channel_close("round-trip r", through_gpui.color.red, direct.r);
+        assert_channel_close("round-trip g", through_gpui.color.green, direct.g);
+        assert_channel_close("round-trip b", through_gpui.color.blue, direct.b);
+        assert_channel_close("round-trip a", through_gpui.alpha, direct.a);
     }
 }
 
@@ -332,7 +332,7 @@ fn out_of_gamut_values_clamp_at_the_final_boundary_only() {
     // Alpha survives conversion untouched, including fractional legacy alphas.
     let selection = Oklch::new(0.48, 0.13, 250.0).with_alpha(0.42);
     let painted = selection.to_paint();
-    assert_channel_close("alpha preserved", painted.a, 0.42);
+    assert_channel_close("alpha preserved", painted.alpha, 0.42);
 }
 
 #[test]

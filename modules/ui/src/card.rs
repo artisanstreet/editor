@@ -110,6 +110,7 @@ impl CardStyle {
             offset: point(px(0.0), px(0.0)),
             blur_radius: px(0.0),
             spread_radius: self.ring_spread,
+            inset: false,
         }
     }
 }

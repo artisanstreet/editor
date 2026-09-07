@@ -7,7 +7,10 @@ version.workspace = true
 
 [dependencies]
 artisan-domain = { path = "../domain" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json.workspace = true
 sea-orm.workspace = true
+sha2.workspace = true
 # Crate Universe resolves SQLx's target-specific `sqlx-core/offline` edge on
 # Windows. Enabling the driver's paired feature keeps its `Executor` impl and
 # optional serde edge coherent in the Bazel graph.
@@ -45,6 +48,10 @@ name = "command_receipt_entities"
 path = "../../tests/database/command_receipt_entities.rs"
 
 [[test]]
+name = "thread_engine_config"
+path = "../../tests/database/thread_engine_config.rs"
+
+[[test]]
 name = "conversation_execution_core_entities"
 path = "../../tests/database/conversation_execution_core_entities.rs"
 
@@ -65,8 +72,36 @@ name = "queue_first_message"
 path = "../../tests/database/queue_first_message.rs"
 
 [[test]]
+name = "run_launch"
+path = "../../tests/database/run_launch.rs"
+
+[[test]]
+name = "run_binding"
+path = "../../tests/database/run_binding.rs"
+
+[[test]]
+name = "run_observation"
+path = "../../tests/database/run_observation.rs"
+
+[[test]]
+name = "run_terminal"
+path = "../../tests/database/run_terminal.rs"
+
+[[test]]
 name = "project_catalog"
 path = "../../tests/database/project_catalog.rs"
+
+[[test]]
+name = "startup_reconciliation"
+path = "../../tests/database/startup_reconciliation.rs"
+
+[[test]]
+name = "startup_reconciliation_disposition"
+path = "../../tests/database/startup_reconciliation_disposition.rs"
+
+[[test]]
+name = "conversation_patch_replay"
+path = "../../tests/database/conversation_patch_replay.rs"
 
 [lints]
 workspace = true

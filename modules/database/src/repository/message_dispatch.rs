@@ -210,7 +210,7 @@ impl DispatchLeaseOwner {
         bool::from(self.0.ct_eq(&other.0))
     }
 
-    fn to_storage(&self) -> String {
+    pub(super) fn to_storage(&self) -> String {
         let mut encoded = String::with_capacity(OWNER_STORAGE_BYTES);
         for &byte in &self.0 {
             encoded.push(hex_digit(byte >> 4));
@@ -219,7 +219,7 @@ impl DispatchLeaseOwner {
         encoded
     }
 
-    fn from_storage(encoded: &str) -> Result<Self, DispatchLeaseOwnerError> {
+    pub(super) fn from_storage(encoded: &str) -> Result<Self, DispatchLeaseOwnerError> {
         if encoded.len() != OWNER_STORAGE_BYTES {
             return Err(DispatchLeaseOwnerError::InvalidLength {
                 actual: encoded.len(),

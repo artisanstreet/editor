@@ -154,6 +154,9 @@ enum ErrorCode {
   # the six-code contract was committed; fresh ordinal, existing ordinals
   # frozen.
   idempotencyConflict @6;
+  unsupportedFeature @7;
+  lifecycleBusy @8;
+  engineConfigConflict @9;
 }
 
 # One Forge-visible directory in a listing.
@@ -313,6 +316,12 @@ struct Hello {
     # enforcement lands in Phase 3.
     reconnect @2 :Data;
   }
+
+  # Optional feature offer. An absent field decodes as false, so peers that
+  # predate lifecycle control remain compatible. A client must not send the
+  # Request.lifecycleControl arm unless the Welcome negotiated support; the
+  # transport and backend enforce that authorization in later packets.
+  supportsLifecycleControl @3 :Bool;
 }
 
 # Server answer: the single negotiated application protocol version plus the
@@ -331,6 +340,69 @@ struct Welcome {
   # the Data wire type alone does not. Appended at a fresh ordinal so existing
   # readers see empty bytes and reject them at the owned boundary.
   reconnectCapability @2 :Data;
+
+  # Optional feature acceptance. An absent field decodes as false, so peers
+  # that predate lifecycle control remain compatible. Only a true negotiated
+  # value authorizes a client to send Request.lifecycleControl; enforcement is
+  # outside this wire-only packet.
+  lifecycleControlSupported @3 :Bool;
+}
+
+# ---------------------------------------------------------------------------
+# Negotiated Forge lifecycle control
+# ---------------------------------------------------------------------------
+
+# Empty status request. Lifecycle control is available only after the hello /
+# welcome feature negotiation above; no request id is nested here because the
+# enclosing Envelope.messageId supplies the request correlation.
+struct LifecycleStatusRequest {}
+
+# Request to stop lifecycle work. `requireIdle` is the only peer-controlled
+# option; transport and backend policy remain outside this wire-only packet.
+struct LifecycleStopRequest {
+  requireIdle @0 :Bool;
+}
+
+# Native lifecycle control request selected by Request.lifecycleControl.
+struct LifecycleRequest {
+  union {
+    status @0 :LifecycleStatusRequest;
+    stop @1 :LifecycleStopRequest;
+  }
+}
+
+# Coarse Forge lifecycle state reported by status and stop receipts.
+enum LifecycleState {
+  ready @0;
+  busy @1;
+  draining @2;
+}
+
+# Current lifecycle state and bounded active-work count.
+struct LifecycleStatus {
+  state @0 :LifecycleState;
+  activeWorkCount @1 :UInt32;
+}
+
+# Result of a lifecycle stop request.
+enum LifecycleStopDisposition {
+  accepted @0;
+  duplicate @1;
+  alreadyStopping @2;
+}
+
+# Lifecycle stop result. The state is reported independently of disposition.
+struct LifecycleStopReceipt {
+  disposition @0 :LifecycleStopDisposition;
+  state @1 :LifecycleState;
+}
+
+# Native lifecycle control response selected by Response.lifecycleControl.
+struct LifecycleResponse {
+  union {
+    status @0 :LifecycleStatus;
+    stop @1 :LifecycleStopReceipt;
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -387,10 +459,101 @@ struct QueueFirstMessageRequest {
 # complete catalog, so stale or unknown ids can never fail this request.
 struct ListAttachedProjectsRequest {}
 
-# The request arms of the native protocol: the six of the first workflow,
-# the three conversation read/subscription requests appended below them, and
-# the explicit host-interaction pickDirectory request appended last as the
-# tenth arm.
+struct SetThreadEngineConfigRequest {
+  threadId @0 :Text;
+  precondition @1 :EngineConfigPrecondition;
+  config @2 :EngineRunConfig;
+}
+
+struct EngineConfigPrecondition {
+  kind @0 :Text;
+  revision @1 :UInt64;
+}
+
+struct EngineRunConfig {
+  schemaVersion @0 :UInt16;
+  engine @1 :Text;
+  profileId @2 :Text;
+  modelId @3 :Text;
+  routeId @4 :Text;
+  variant @5 :EngineVariant;
+  permission @6 :EnginePermissionPolicy;
+  runtime @7 :EngineRuntimeControls;
+}
+
+struct EngineVariant {
+  kind @0 :Text;
+  id @1 :Text;
+}
+
+struct EnginePermissionPolicy {
+  permissionId @0 :Text;
+  agentId @1 :Text;
+  approval @2 :Text;
+  filesystem @3 :Text;
+  network @4 :Text;
+  webSearch @5 :Text;
+}
+
+struct EngineRuntimeControls {
+  attemptBudgetMs @0 :UInt64;
+  readinessBudgetMs @1 :UInt64;
+  healthBudgetMs @2 :UInt64;
+  promptBudgetMs @3 :UInt64;
+  streamBudgetMs @4 :UInt64;
+  closeBudgetMs @5 :UInt64;
+  maxJsonBodyBytes @6 :UInt64;
+  maxSseLineBytes @7 :UInt64;
+  maxSseEventBytes @8 :UInt64;
+  maxReadinessLineBytes @9 :UInt64;
+  maxHeaderCount @10 :UInt64;
+  maxHttpBufferBytes @11 :UInt64;
+  maxStderrBytes @12 :UInt64;
+  observationCapacity @13 :UInt64;
+}
+
+struct SetThreadEngineConfigResult {
+  requestId @0 :Text;
+  threadId @1 :Text;
+  revision @2 :UInt64;
+  disposition @3 :ReceiptDisposition;
+}
+
+struct ReadThreadEngineSettingsRequest {
+  threadId @0 :Text;
+}
+
+struct ThreadEngineSettingsResult {
+  threadId @0 :Text;
+  state :union {
+    unconfigured @1 :Void;
+    configured @2 :ConfiguredThreadEngineSettings;
+  }
+}
+
+struct ConfiguredThreadEngineSettings {
+  revision @0 :UInt64;
+  config @1 :EngineRunConfig;
+}
+
+struct ListRegisteredEngineProfilesRequest {}
+
+struct RegisteredEngineProfilesResult {
+  state :union {
+    registryMissing @0 :Void;
+    registryPresent @1 :RegisteredEngineProfileList;
+  }
+}
+
+struct RegisteredEngineProfileList {
+  profileIds @0 :List(Text);
+}
+
+# The request arms of the native protocol: the five original workflow
+# requests, project rediscovery, the three conversation read/subscription
+# requests, explicit host interaction, lifecycle control, durable engine
+# configuration at arm @11, and the authoritative thread engine settings read
+# appended at arm @12; existing ordinals remain frozen.
 struct Request {
   union {
     listDirectories @0 :ListDirectoriesRequest;
@@ -419,6 +582,15 @@ struct Request {
     # Appended after the conversation requests; fresh ordinal, existing
     # ordinals frozen.
     pickDirectory @9 :Void;
+
+  # Negotiated native lifecycle status/stop control. A client must not send
+  # this arm unless the preceding Welcome negotiated support; old peers
+  # remain compatible with messages that omit this fresh arm. Authorization
+  # is enforced by transport/backend packets, not by this wire-only leaf.
+    lifecycleControl @10 :LifecycleRequest;
+    setThreadEngineConfig @11 :SetThreadEngineConfigRequest;
+    readThreadEngineSettings @12 :ReadThreadEngineSettingsRequest;
+    listRegisteredEngineProfiles @13 :ListRegisteredEngineProfilesRequest;
   }
 }
 
@@ -458,6 +630,13 @@ struct Response {
     # outside this slice. Appended after the conversation responses; fresh
     # ordinal, existing ordinals frozen.
     directoryPicked @10 :DirectoryPickOutcome;
+
+    # Negotiated native lifecycle status/stop result. Appended at a fresh
+    # ordinal; existing response arms remain frozen.
+    lifecycleControl @11 :LifecycleResponse;
+    threadEngineConfigSet @12 :SetThreadEngineConfigResult;
+    threadEngineSettings @13 :ThreadEngineSettingsResult;
+    registeredEngineProfiles @14 :RegisteredEngineProfilesResult;
   }
 }
 
@@ -733,6 +912,14 @@ struct ItemAppend {
   # because a stream may open before its first visible token. Owned
   # conversion enforces the byte ceiling.
   text @2 :Text;
+
+  # Authoritative entity update time supplied by Forge. Signed Unix epoch
+  # milliseconds; every i64 value including MIN, MAX, negative and zero is
+  # legal here. An absent field decodes as exactly 0 -- indistinguishable
+  # from a sender-supplied epoch zero, since an Int64 has no presence
+  # information. No zero sentinel, clock fallback, or older-peer
+  # compatibility claim exists at this boundary.
+  updatedAtMillis @3 :Int64;
 }
 
 # Lifecycle transition applied to one renderer-visible item.
@@ -745,6 +932,14 @@ struct ItemLifecyclePatch {
 
   # New lifecycle.
   lifecycle @2 :ConversationLifecycle;
+
+  # Authoritative entity update time supplied by Forge. Signed Unix epoch
+  # milliseconds; every i64 value including MIN, MAX, negative and zero is
+  # legal here. An absent field decodes as exactly 0 -- indistinguishable
+  # from a sender-supplied epoch zero, since an Int64 has no presence
+  # information. No zero sentinel, clock fallback, or older-peer
+  # compatibility claim exists at this boundary.
+  updatedAtMillis @3 :Int64;
 }
 
 # Lifecycle transition applied to one canonical turn.
@@ -757,6 +952,14 @@ struct TurnLifecyclePatch {
 
   # New lifecycle.
   lifecycle @2 :ConversationLifecycle;
+
+  # Authoritative entity update time supplied by Forge. Signed Unix epoch
+  # milliseconds; every i64 value including MIN, MAX, negative and zero is
+  # legal here. An absent field decodes as exactly 0 -- indistinguishable
+  # from a sender-supplied epoch zero, since an Int64 has no presence
+  # information. No zero sentinel, clock fallback, or older-peer
+  # compatibility claim exists at this boundary.
+  updatedAtMillis @3 :Int64;
 }
 
 # One sequenced mutation against a conversation snapshot.

@@ -1,13 +1,14 @@
 //! Conversation snapshot, cursor, and replay-boundary coverage.
 
 use artisan_domain::{
+    AssistantBody, AssistantMessageItem, AssistantMessagePhase,
     CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
     CONVERSATION_TEXT_FRAGMENT_MAX_BYTES, ConversationCursor, ConversationItem,
     ConversationLifecycle, ConversationPatch, ConversationQuery, ConversationQueryBounds,
     ConversationRequest, ConversationSnapshot, ConversationSnapshotError, ConversationSubscribe,
     ConversationSubscriptionStart, ConversationUnsubscribe, CounterError, IncrementalText,
     IncrementalTextError, ItemId, ItemOrdinal, LifecycleTransitionError, MessageBody, PatchBatch,
-    PatchBatchError, PatchId, PatchSequence, QueryTurnCount, QueryTurnCountError, Revision,
+    PatchBatchError, PatchId, PatchSequence, QueryTurnCount, QueryTurnCountError, Revision, RunId,
     ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
 
@@ -42,6 +43,7 @@ fn append_patch(id: impl Into<String>, sequence: u64) -> ConversationPatch {
         item_id: ItemId::parse("item-1").expect("fixture item id is valid"),
         revision: Revision::new(sequence),
         text: IncrementalText::parse("delta").expect("fixture fragment is valid"),
+        updated_at: UnixMillis::from_millis(40),
     }
 }
 
@@ -480,4 +482,110 @@ fn interrupted_stays_resumable_and_open_transitions_remain_permitted() {
         ConversationLifecycle::Waiting.validate_transition(ConversationLifecycle::Failed),
         Ok(())
     );
+}
+
+#[test]
+fn patch_updated_at_accessor_covers_all_five_kinds_and_both_item_roles() {
+    // Distinct per-kind instants expose any copy/paste wiring slip between
+    // the variants: upserts read their complete value's own time, the three
+    // deltas read their explicit Forge-supplied field.
+    let stamp = UnixMillis::from_millis;
+    let make_turn = |updated_at: i64| artisan_domain::ConversationTurn {
+        turn_id: TurnId::parse("turn-accessor").expect("fixture turn id is valid"),
+        ordinal: TurnOrdinal::new(0),
+        revision: Revision::default(),
+        lifecycle: ConversationLifecycle::Active,
+        created_at: stamp(-10),
+        updated_at: stamp(updated_at),
+    };
+    let make_user = |updated_at: i64| {
+        ConversationItem::UserMessage(UserMessageItem {
+            item_id: ItemId::parse("item-user-accessor").expect("fixture item id is valid"),
+            turn_id: TurnId::parse("turn-accessor").expect("fixture turn id is valid"),
+            ordinal: ItemOrdinal::new(1),
+            revision: Revision::default(),
+            lifecycle: ConversationLifecycle::Completed,
+            body: MessageBody::parse("Queued question").expect("fixture body is valid"),
+            created_at: stamp(-5),
+            updated_at: stamp(updated_at),
+        })
+    };
+    let make_assistant = |updated_at: i64| {
+        ConversationItem::AssistantMessage(AssistantMessageItem {
+            item_id: ItemId::parse("item-assist-accessor").expect("fixture item id is valid"),
+            turn_id: TurnId::parse("turn-accessor").expect("fixture turn id is valid"),
+            run_id: RunId::parse("run-accessor").expect("fixture run id is valid"),
+            ordinal: ItemOrdinal::new(2),
+            revision: Revision::default(),
+            lifecycle: ConversationLifecycle::Streaming,
+            body: AssistantBody::parse("partial answer").expect("fixture body is valid"),
+            phase: AssistantMessagePhase::Commentary,
+            created_at: stamp(-5),
+            updated_at: stamp(updated_at),
+        })
+    };
+
+    let patches = [
+        (
+            ConversationPatch::TurnUpsert {
+                patch_id: PatchId::parse("patch-turn-upd").expect("fixture patch id is valid"),
+                sequence: PatchSequence::new(1).expect("fixture sequence is positive"),
+                turn: make_turn(11),
+            },
+            stamp(11),
+        ),
+        (
+            ConversationPatch::ItemUpsert {
+                patch_id: PatchId::parse("patch-user-upd").expect("fixture patch id is valid"),
+                sequence: PatchSequence::new(2).expect("fixture sequence is positive"),
+                item: make_user(22),
+            },
+            stamp(22),
+        ),
+        (
+            ConversationPatch::ItemUpsert {
+                patch_id: PatchId::parse("patch-assist-upd").expect("fixture patch id is valid"),
+                sequence: PatchSequence::new(3).expect("fixture sequence is positive"),
+                item: make_assistant(33),
+            },
+            stamp(33),
+        ),
+        (
+            ConversationPatch::ItemAppend {
+                patch_id: PatchId::parse("patch-append-upd").expect("fixture patch id is valid"),
+                sequence: PatchSequence::new(4).expect("fixture sequence is positive"),
+                item_id: ItemId::parse("item-user-accessor").expect("fixture item id is valid"),
+                revision: Revision::new(4),
+                text: IncrementalText::parse("delta").expect("fixture fragment is valid"),
+                updated_at: stamp(44),
+            },
+            stamp(44),
+        ),
+        (
+            ConversationPatch::ItemLifecycle {
+                patch_id: PatchId::parse("patch-item-lc-upd").expect("fixture patch id is valid"),
+                sequence: PatchSequence::new(5).expect("fixture sequence is positive"),
+                item_id: ItemId::parse("item-user-accessor").expect("fixture item id is valid"),
+                revision: Revision::new(5),
+                lifecycle: ConversationLifecycle::Failed,
+                updated_at: stamp(55),
+            },
+            stamp(55),
+        ),
+        (
+            ConversationPatch::TurnLifecycle {
+                patch_id: PatchId::parse("patch-turn-lc-upd").expect("fixture patch id is valid"),
+                sequence: PatchSequence::new(6).expect("fixture sequence is positive"),
+                turn_id: TurnId::parse("turn-accessor").expect("fixture turn id is valid"),
+                revision: Revision::new(6),
+                lifecycle: ConversationLifecycle::Cancelled,
+                updated_at: stamp(66),
+            },
+            stamp(66),
+        ),
+    ];
+
+    for (patch, expected) in &patches {
+        assert_eq!(patch.updated_at(), *expected);
+    }
 }

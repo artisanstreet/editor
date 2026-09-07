@@ -5,15 +5,29 @@
 //! repositories, and transaction boundaries.
 
 mod connection;
+mod engine_run_config;
 pub mod entities;
 mod repository;
 
 pub use artisan_domain::WorkspaceId;
 pub use connection::{ConnectError, SqliteConfig, connect};
 pub use repository::{
-    AttachProjectInput, AttachProjectResult, ClaimMessageDispatch, ClaimedMessageDispatch,
-    CompleteMessageDispatch, CreateThreadInput, CreateThreadResult, DispatchFailureReason,
-    DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch,
-    MessageDispatchPayload, QueueFirstMessageInput, QueueFirstMessageResult, Repository,
-    RepositoryError, RequeueMessageDispatch, TransitionedMessageDispatch,
+    AssistantChange, AttachProjectInput, AttachProjectResult, AuxiliaryTerminalError,
+    BindRunProvider, BindRunProviderOutcome, BoundRunReceipt, CancelRun, CancelRunError,
+    CancelRunOutcome, CheckpointUpdate, ClaimMessageDispatch, ClaimedMessageDispatch,
+    CommitRunBatch, CommitRunBatchOutcome, CompleteMessageDispatch, CompleteRun, CompleteRunError,
+    CompleteRunOutcome, ConversationPatchReplay, CreateThreadInput, CreateThreadResult,
+    DispatchFailureReason, DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError,
+    EngineCheckpoint, FailMessageDispatch, FailRun, FailRunError, FailRunOutcome, InterruptRun,
+    InterruptRunError, InterruptRunOutcome, InterruptedRunReceipt, LaunchClaimedRun,
+    LaunchClaimedRunOutcome, LaunchedRunReceipt, MessageDispatchPayload, ProviderBindingBytes,
+    QueueFirstMessageInput, QueueFirstMessageResult, Repository, RepositoryError,
+    RequeueMessageDispatch, RunBatchReceiptInfo, RunBatchScope, RunBindingError, RunErrorCode,
+    RunErrorMessage, RunLaunchCredentials, RunLaunchError, RunObservationError, RunStartKey,
+    SetThreadEngineConfigInput, SetThreadEngineConfigResult, StartupReconciliationCandidate,
+    StartupReconciliationCandidates, StartupReconciliationDisposition,
+    StartupReconciliationDispositionError, StartupReconciliationDispositionOutcome,
+    StartupReconciliationDispositionReceipt, StartupReconciliationError,
+    StartupReconciliationQuery, StartupRunLifecycle, TerminalRunReceipt, ThreadEngineSettings,
+    TransitionedMessageDispatch,
 };

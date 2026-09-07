@@ -1,40 +1,89 @@
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{Read, Seek, SeekFrom},
+    net::SocketAddr,
+    num::NonZeroU32,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use artisan_domain::{RequestId, UnixMillis};
+use artisan_protocol::{
+    ClientRequest, ErrorCode, FrameId, Hello, HelloCredential, LifecycleRequest, LifecycleResponse,
+    LifecycleState, LifecycleStatus, LifecycleStopDisposition, LifecycleStopReceipt,
+    ProtocolVersion, ResponsePayload, VersionOffer, WireEnvelope, WireEnvelopeBody,
+};
+use artisan_transport::{
+    CancelHandle, ClientRequestError, ClientSession, ClientSessionError, ClientSessionLimits,
+    LoopbackTarget, PinnedIdentity, RequestOutcome,
+};
+#[cfg(test)]
+use artisan_transport::{DeadlineError, OperationKind};
 use clap::{Parser, Subcommand, ValueEnum};
+use rustls_pki_types::CertificateDer;
+use serde::Serialize;
 
 use crate::{
     CliError, Result,
+    credentials::{
+        self, ForgeCredentialError, ForgeCredentialPaths, ReconnectAttempt, ReconnectBinding,
+        ReconnectCapabilityStore,
+    },
+    engine_catalog::{NativeOpenCode2Authority, OpenCode2Inspection},
+    engine_install::{self, InstallOutcome},
     error::io,
     http::{self, PairResponse},
-    instance::{self, ForgeMode, State},
-    manifest::InstallationManifest,
+    instance::{
+        self, NativeInstanceConfig, NativeListenerConfig, NativeRunConfig, NativeRunConfigInput,
+    },
+    manifest::{InstallationFinalization, InstallationManifest},
     paths::Layout,
     payload, process,
     telemetry::{self, Preference},
 };
+
+pub use crate::engine_profiles::{EngineProfileCommand, EngineProfileHomeArg};
 
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const MAX_FOLLOW_BYTES: u64 = 64 * 1024;
 // A cold installed Forge can take more than 20 seconds to initialize its SEA
 // runtime and durable state; leave enough time for the first editor handoff.
 const FORGE_READY_TIMEOUT: Duration = Duration::from_secs(30);
-const FORGE_READY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
-const FORGE_READY_INTERVAL: Duration = Duration::from_millis(100);
 const FORGE_START_LAUNCH_URL: &str = "artisan://forge/start";
 const AUTOSTART_TASK_NAME: &str = "Artisan Forge";
+const INCOMPLETE_INSTALLATION_GUIDANCE: &str =
+    "installation finalization is incomplete; rerun the installer or run `ae doctor --fix`";
+const INVALID_INSTALLATION_GUIDANCE: &str =
+    "installation finalization state is invalid; rerun the installer or run `ae doctor --fix`";
+static NEXT_LIFECYCLE_FRAME: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Parser)]
 #[command(name = "ae", version, about = "Artisan Editor and Forge")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+}
+
+#[derive(Clone)]
+pub struct NativeRunPromptDelivery(String);
+
+impl std::fmt::Debug for NativeRunPromptDelivery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeRunPromptDelivery")
+            .field("byte_length", &self.0.len())
+            .field("category", &"validated")
+            .finish()
+    }
+}
+
+impl NativeRunPromptDelivery {
+    fn into_string(self) -> String {
+        self.0
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -46,34 +95,82 @@ pub enum Commands {
     },
     /// Explicitly create or update this home's Forge configuration.
     Setup {
-        #[arg(long, default_value_t = 0)]
-        listen_port: u16,
-        #[arg(long, value_enum, default_value_t = Mode::Local)]
-        mode: Mode,
-        #[arg(long)]
-        data_root: Option<PathBuf>,
+        #[arg(long, required = true, value_name = "PATH")]
+        database_path: PathBuf,
+        #[arg(long, required = true, value_name = "PATH")]
+        custody_path: PathBuf,
+        #[arg(long, required = true, value_name = "PATH")]
+        readiness_path: PathBuf,
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
+        admission_timeout_ms: u64,
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
+        handshake_timeout_ms: u64,
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
+        request_timeout_ms: u64,
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
+        drain_timeout_ms: u64,
+        #[arg(long, required = true, value_parser = parse_nonzero_u32)]
+        admission_capacity: NonZeroU32,
+        #[arg(long, required = true, value_parser = parse_nonzero_u32)]
+        requests_per_connection: NonZeroU32,
+        #[arg(
+            long = "native-run-claim-lease-ms",
+            required = true,
+            value_parser = parse_native_run_duration_ms
+        )]
+        native_run_claim_lease_ms: u64,
+        #[arg(
+            long = "native-run-poll-interval-ms",
+            required = true,
+            value_parser = parse_native_run_duration_ms
+        )]
+        native_run_poll_interval_ms: u64,
+        #[arg(
+            long = "native-run-retry-backoff-ms",
+            required = true,
+            value_parser = parse_native_run_duration_ms
+        )]
+        native_run_retry_backoff_ms: u64,
+        #[arg(
+            long = "native-run-shutdown-budget-ms",
+            required = true,
+            value_parser = parse_native_run_duration_ms
+        )]
+        native_run_shutdown_budget_ms: u64,
+        #[arg(
+            long = "native-run-queue-capacity",
+            required = true,
+            value_parser = parse_nonzero_u32
+        )]
+        native_run_queue_capacity: NonZeroU32,
+        #[arg(
+            long = "native-run-max-command-retries",
+            required = true,
+            value_parser = parse_nonzero_u32
+        )]
+        native_run_max_command_retries: NonZeroU32,
+        #[arg(
+            long = "native-run-prompt-delivery",
+            required = true,
+            value_parser = parse_native_run_prompt_delivery
+        )]
+        native_run_prompt_delivery: NativeRunPromptDelivery,
+        #[arg(long = "native-run-stream-after", required = true)]
+        native_run_stream_after: u64,
         #[arg(long)]
         autostart: bool,
-        /// Serve the bundled web frontend from this Forge (development homes
-        /// only; installed homes render through the editor).
-        #[arg(long)]
-        serve_frontend: bool,
     },
     Start {
         #[arg(long)]
         foreground: bool,
     },
     Stop {
-        /// Stop only this exact Forge instance. Intended for editor cleanup.
-        #[arg(long, hide = true, conflicts_with = "pid")]
-        instance_id: Option<String>,
-        /// Stop only the authenticated Forge with this process identity.
-        /// Intended for installer retirement.
-        #[arg(long, hide = true, conflicts_with = "instance_id")]
-        pid: Option<u32>,
+        /// Stop only the authenticated Forge with this readiness process identity.
+        #[arg(long, hide = true, required = true, value_parser = parse_nonzero_u32)]
+        pid: NonZeroU32,
         /// Refuse shutdown when Forge reports live model work. Intended for
         /// installer retirement before an update is activated.
-        #[arg(long, hide = true, requires = "pid")]
+        #[arg(long, hide = true, required = true)]
         if_idle: bool,
     },
     Restart {
@@ -95,6 +192,13 @@ pub enum Commands {
         fix: bool,
         #[arg(long)]
         json: bool,
+        #[arg(
+            long = "finalization-check",
+            hide = true,
+            requires = "json",
+            conflicts_with = "fix"
+        )]
+        finalization_check: bool,
     },
     Open {
         /// Open a paired browser at this loopback origin instead of the editor.
@@ -121,6 +225,11 @@ pub enum Commands {
         #[arg(long)]
         remove_data: bool,
     },
+    /// Inspect the managed native engine catalog.
+    Engine {
+        #[command(subcommand)]
+        command: EngineCommand,
+    },
     /// Inspect or change privacy-preserving observability preferences.
     Telemetry {
         #[command(subcommand)]
@@ -129,6 +238,22 @@ pub enum Commands {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum EngineCommand {
+    /// List installed native engines and their verified generation metadata.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install the certified native `OpenCode2` engine.
+    Install,
+    /// Manage explicit certified `OpenCode2` profile homes.
+    Profile {
+        #[command(subcommand)]
+        command: EngineProfileCommand,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Subcommand)]
 pub enum TelemetryCommand {
     /// Print the two independent consent choices without exposing installation identity.
     Status {
@@ -169,24 +294,35 @@ impl From<TelemetryChoice> for Preference {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
-pub enum Mode {
-    #[default]
-    Local,
-    Headless,
-}
-
-impl From<Mode> for ForgeMode {
-    fn from(value: Mode) -> Self {
-        match value {
-            Mode::Local => Self::Local,
-            Mode::Headless => Self::Headless,
+fn discover_layout(command: Option<&Commands>) -> Result<Layout> {
+    let is_install = matches!(
+        command,
+        Some(Commands::Engine {
+            command: EngineCommand::Install,
+        })
+    );
+    let is_profile = matches!(
+        command,
+        Some(Commands::Engine {
+            command: EngineCommand::Profile { .. },
+        })
+    );
+    let layout = Layout::discover().map_err(|error| {
+        if is_install {
+            CliError::OpenCode2Install {
+                reason: "installation_invalid",
+            }
+        } else if is_profile {
+            profile_surface_error()
+        } else {
+            error
         }
-    }
+    })?;
+    Ok(layout)
 }
 
 pub fn run(cli: Cli) -> Result<()> {
-    let layout = Layout::discover()?;
+    let layout = discover_layout(cli.command.as_ref())?;
     match cli.command.unwrap_or(Commands::Open {
         origin: None,
         browser: false,
@@ -194,20 +330,51 @@ pub fn run(cli: Cli) -> Result<()> {
     }) {
         Commands::Protocol { url } => handle_protocol(&layout, &url),
         Commands::Setup {
-            listen_port,
-            mode,
-            data_root,
+            database_path,
+            custody_path,
+            readiness_path,
+            admission_timeout_ms,
+            handshake_timeout_ms,
+            request_timeout_ms,
+            drain_timeout_ms,
+            admission_capacity,
+            requests_per_connection,
+            native_run_claim_lease_ms,
+            native_run_poll_interval_ms,
+            native_run_retry_backoff_ms,
+            native_run_shutdown_budget_ms,
+            native_run_queue_capacity,
+            native_run_max_command_retries,
+            native_run_prompt_delivery,
+            native_run_stream_after,
             autostart,
-            serve_frontend,
         } => {
             require_installation(&layout)?;
-            let data_root = data_root.as_deref().map(validate_data_root).transpose()?;
-            instance::setup(
+            setup_native(
                 &layout,
-                mode.into(),
-                listen_port,
-                data_root.as_deref(),
-                serve_frontend,
+                NativeSetupValues {
+                    database_path,
+                    custody_path,
+                    readiness_path,
+                    listener: NativeListenerConfig::new(
+                        admission_timeout_ms,
+                        handshake_timeout_ms,
+                        request_timeout_ms,
+                        drain_timeout_ms,
+                        admission_capacity,
+                        requests_per_connection,
+                    ),
+                    native_run: NativeRunConfig::new(NativeRunConfigInput {
+                        claim_lease_ms: native_run_claim_lease_ms,
+                        poll_interval_ms: native_run_poll_interval_ms,
+                        retry_backoff_ms: native_run_retry_backoff_ms,
+                        shutdown_budget_ms: native_run_shutdown_budget_ms,
+                        queue_capacity: native_run_queue_capacity.get(),
+                        max_command_retries: native_run_max_command_retries.get(),
+                        prompt_delivery: native_run_prompt_delivery.into_string(),
+                        stream_after: native_run_stream_after,
+                    })?,
+                },
             )?;
             delegate_installer(&layout, "repair", false)?;
             if autostart {
@@ -217,21 +384,15 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Commands::Start { foreground } => start(&layout, foreground).map(|_| ()),
-        Commands::Stop {
-            instance_id,
-            pid,
-            if_idle,
-        } => match pid {
-            Some(pid) => stop_pid(&layout, pid, if_idle),
-            None => stop(&layout, instance_id.as_deref()),
-        },
-        Commands::Restart { foreground } => {
-            let _ = stop(&layout, None);
-            start(&layout, foreground).map(|_| ())
-        }
+        Commands::Stop { pid, if_idle } => stop(&layout, pid, if_idle),
+        Commands::Restart { .. } | Commands::Uninstall { .. } => unsupported_lifecycle_control(),
         Commands::Status { json } => status(&layout, json),
         Commands::Logs { lines, follow } => logs(&layout, lines, follow),
-        Commands::Doctor { fix, json } => doctor(&layout, fix, json),
+        Commands::Doctor {
+            fix,
+            json,
+            finalization_check,
+        } => doctor(&layout, fix, json, finalization_check),
         Commands::Open {
             origin,
             browser,
@@ -248,15 +409,8 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Commands::Autostart { disable } => autostart(disable),
         Commands::Update => delegate_installer(&layout, "update", false),
+        Commands::Engine { command } => engine_command(&layout, &command),
         Commands::Telemetry { command } => telemetry_command(&layout, command),
-        Commands::Uninstall { remove_data } => {
-            match stop(&layout, None) {
-                Ok(()) | Err(CliError::NotRunning | CliError::MissingInstance) => {}
-                Err(error) => return Err(error),
-            }
-            disable_autostart_if_supported()?;
-            delegate_installer(&layout, "uninstall", remove_data)
-        }
     }
 }
 
@@ -304,25 +458,270 @@ fn require_installation(layout: &Layout) -> Result<InstallationManifest> {
     InstallationManifest::load(&layout.manifest)
 }
 
-fn start(layout: &Layout, foreground: bool) -> Result<process::StartResult> {
-    let manifest = require_installation(layout)?;
-    telemetry::load_or_create(layout)?;
-    let (paths, config, secrets) = instance::load(layout)?;
-    process::start(&manifest, &paths, &config, &secrets, foreground)
-}
-
-fn stop(layout: &Layout, instance_id: Option<&str>) -> Result<()> {
-    let (paths, _, secrets) = instance::load(layout)?;
-    process::stop_with_instance_id(&paths, &secrets, instance_id)
-}
-
-fn stop_pid(layout: &Layout, pid: u32, if_idle: bool) -> Result<()> {
-    let (paths, _, secrets) = instance::load(layout)?;
-    if if_idle {
-        process::stop_with_pid_if_idle(&paths, &secrets, pid)
-    } else {
-        process::stop_with_pid(&paths, &secrets, pid)
+fn require_launchable_installation(layout: &Layout) -> Result<InstallationManifest> {
+    let (finalization, manifest) = InstallationManifest::inspect(&layout.manifest);
+    match finalization {
+        InstallationFinalization::Complete => {
+            manifest.ok_or_else(|| CliError::Installation(INVALID_INSTALLATION_GUIDANCE.to_owned()))
+        }
+        InstallationFinalization::Pending | InstallationFinalization::Missing => Err(
+            CliError::Installation(INCOMPLETE_INSTALLATION_GUIDANCE.to_owned()),
+        ),
+        InstallationFinalization::Invalid => Err(CliError::Installation(
+            INVALID_INSTALLATION_GUIDANCE.to_owned(),
+        )),
     }
+}
+
+fn engine_command(layout: &Layout, command: &EngineCommand) -> Result<()> {
+    if matches!(command, EngineCommand::Install) {
+        require_installation(layout).map_err(|_| CliError::OpenCode2Install {
+            reason: "installation_invalid",
+        })?;
+        let instance = load_native_instance(layout).map_err(|_| CliError::OpenCode2Install {
+            reason: "instance_invalid",
+        })?;
+        return match engine_install::install(&instance).map_err(|error| {
+            CliError::OpenCode2Install {
+                reason: error.cli_reason(),
+            }
+        })? {
+            InstallOutcome::Installed => {
+                println!("OpenCode2 installed");
+                Ok(())
+            }
+            InstallOutcome::AlreadyInstalled => {
+                println!("OpenCode2 already installed");
+                Ok(())
+            }
+        };
+    }
+
+    let is_profile = matches!(command, EngineCommand::Profile { .. });
+    if is_profile {
+        require_installation(layout).map_err(|_| profile_surface_error())?;
+    } else {
+        require_installation(layout)?;
+    }
+    let instance = load_native_instance(layout).map_err(|error| {
+        if is_profile {
+            profile_surface_error()
+        } else {
+            match error {
+                CliError::MissingInstance => CliError::MissingInstance,
+                _ => CliError::OpenCode2Authority {
+                    reason: "instance_invalid",
+                },
+            }
+        }
+    })?;
+    match command {
+        EngineCommand::List { json } => list_engines(&instance, *json),
+        EngineCommand::Install => unreachable!("install is handled above"),
+        EngineCommand::Profile { command } => crate::engine_profiles::run(&instance, command),
+    }
+}
+
+fn profile_surface_error() -> CliError {
+    CliError::OpenCode2Profile {
+        reason: "profile_registry_invalid",
+    }
+}
+
+fn list_engines(instance: &NativeInstanceConfig, json: bool) -> Result<()> {
+    let authority = NativeOpenCode2Authority::new();
+    let spec = NativeOpenCode2Authority::certified_install_spec();
+    let inspection = authority.inspect(instance.database_path());
+    match inspection {
+        Ok(OpenCode2Inspection::UnsupportedPlatform) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": "artisan-engine-list-v1",
+                        "engines": [{
+                            "engine_id": spec.engine_id(),
+                            "status": "unsupported_platform",
+                        }],
+                    })
+                );
+            } else {
+                println!("OpenCode2: unsupported platform");
+            }
+            Ok(())
+        }
+        Ok(OpenCode2Inspection::NotInstalled) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": "artisan-engine-list-v1",
+                        "engines": [{
+                            "engine_id": spec.engine_id(),
+                            "status": "not_installed",
+                        }],
+                    })
+                );
+            } else {
+                println!("OpenCode2: not installed");
+            }
+            Ok(())
+        }
+        Ok(OpenCode2Inspection::Ready(generation)) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": "artisan-engine-list-v1",
+                        "engines": [{
+                            "engine_id": spec.engine_id(),
+                            "status": "ready",
+                            "generation": generation.generation_id(),
+                            "version": spec.version(),
+                            "upstream_commit": spec.upstream_commit(),
+                            "binary": spec.binary(),
+                            "size_bytes": spec.executable_size_bytes(),
+                            "sha256": spec.executable_sha256_hex(),
+                        }],
+                    })
+                );
+            } else {
+                println!(
+                    "OpenCode2: ready ({}, generation {})",
+                    spec.version(),
+                    generation.generation_id()
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let reason = error.cli_reason();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": "artisan-engine-list-v1",
+                        "engines": [{
+                            "engine_id": spec.engine_id(),
+                            "status": "invalid",
+                            "reason": reason,
+                        }],
+                    })
+                );
+            }
+            Err(CliError::OpenCode2Authority { reason })
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NativeSetupValues {
+    database_path: PathBuf,
+    custody_path: PathBuf,
+    readiness_path: PathBuf,
+    listener: NativeListenerConfig,
+    native_run: NativeRunConfig,
+}
+
+fn parse_nonzero_u32(value: &str) -> std::result::Result<NonZeroU32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|_| "must be a positive 32-bit integer".to_owned())?;
+    NonZeroU32::new(value).ok_or_else(|| "must be greater than zero".to_owned())
+}
+
+fn parse_positive_u64(value: &str) -> std::result::Result<u64, String> {
+    let value = value
+        .parse::<u64>()
+        .map_err(|_| "must be a positive 64-bit integer".to_owned())?;
+    if value == 0 {
+        return Err("must be greater than zero".to_owned());
+    }
+    Ok(value)
+}
+
+fn parse_native_run_duration_ms(value: &str) -> std::result::Result<u64, String> {
+    let value = value
+        .parse::<u64>()
+        .map_err(|_| "must be a positive 64-bit duration in milliseconds".to_owned())?;
+    if !instance::is_valid_native_run_duration_ms(value) {
+        return Err("must be positive and fit the native-run duration range".to_owned());
+    }
+    Ok(value)
+}
+
+fn parse_native_run_prompt_delivery(
+    value: &str,
+) -> std::result::Result<NativeRunPromptDelivery, String> {
+    if !instance::is_valid_native_run_prompt_delivery(value) {
+        return Err(
+            "must be nonempty, at most 256 bytes, and contain no control characters or line breaks"
+                .to_owned(),
+        );
+    }
+    Ok(NativeRunPromptDelivery(value.to_owned()))
+}
+
+fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result<()> {
+    let credential_paths = ForgeCredentialPaths::from_home(&layout.root)?;
+    let instance_path = layout.native_instance_path();
+    let instance_id = match fs::symlink_metadata(&instance_path) {
+        Ok(_) => NativeInstanceConfig::load(&instance_path)?.instance_id(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => instance::mint_instance_id()?,
+        Err(source) => {
+            return Err(CliError::Io {
+                context: "inspect native Forge instance",
+                source,
+            });
+        }
+    };
+    let config = NativeInstanceConfig::new_with_instance_id(
+        instance_id,
+        values.database_path,
+        values.custody_path,
+        values.readiness_path,
+        credential_paths.manifest_path().to_path_buf(),
+        values.listener,
+        values.native_run,
+    )?;
+    fs::create_dir_all(&layout.root).map_err(io("create Artisan home directory"))?;
+    let provisioned = credentials::provision_or_load(&layout.root)?;
+    process::validate_credential_manifest(&config, &provisioned)?;
+    config.write_to_home(&layout.root)?;
+    Ok(())
+}
+
+fn load_native_instance(layout: &Layout) -> Result<NativeInstanceConfig> {
+    let path = layout.native_instance_path();
+    match fs::symlink_metadata(&path) {
+        Ok(_) => instance::load_native_config(&path).map_err(CliError::NativeInstance),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(CliError::MissingInstance)
+        }
+        Err(source) => Err(CliError::Io {
+            context: "inspect native Forge instance",
+            source,
+        }),
+    }
+}
+
+fn native_launch_spec(layout: &Layout) -> Result<process::ForgeLaunchSpec> {
+    let manifest = require_launchable_installation(layout)?;
+    let config = load_native_instance(layout)?;
+    let credentials = credentials::provision_or_load(&layout.root)?;
+    process::ForgeLaunchSpec::new(&manifest, &config, &credentials)
+}
+
+fn start(layout: &Layout, foreground: bool) -> Result<process::StartResult> {
+    let manifest = require_launchable_installation(layout)?;
+    telemetry::load_or_create(layout)?;
+    payload::require_verified(&manifest.version_root())?;
+    let spec = native_launch_spec(layout)?;
+    process::start_until(&spec, foreground, Instant::now() + FORGE_READY_TIMEOUT)
+}
+
+fn unsupported_lifecycle_control() -> Result<()> {
+    Err(CliError::UnsupportedLifecycleControl)
 }
 
 fn autostart(disable: bool) -> Result<()> {
@@ -496,13 +895,6 @@ fn create_autostart_task(_: &str) -> Result<()> {
     ))
 }
 
-fn disable_autostart_if_supported() -> Result<()> {
-    #[cfg(target_os = "windows")]
-    return disable_autostart();
-    #[cfg(not(target_os = "windows"))]
-    Ok(())
-}
-
 #[cfg(target_os = "windows")]
 fn disable_autostart() -> Result<()> {
     let query_status = hidden_schtasks(
@@ -591,26 +983,574 @@ fn hidden_schtasks(
         .map_err(io(context))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecycleOperation {
+    Status,
+    Stop,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LifecycleResult {
+    Status(LifecycleStatus),
+    Stop(LifecycleStopReceipt),
+}
+
+struct LifecycleMaterial {
+    certificate: CertificateDer<'static>,
+    pinned_identity: PinnedIdentity,
+    target: LoopbackTarget,
+    binding: ReconnectBinding,
+    limits: ClientSessionLimits,
+}
+
 fn status(layout: &Layout, json: bool) -> Result<()> {
-    let (paths, _, secrets) = instance::load(layout)?;
-    let running = process::live_state_until(
-        &paths,
-        &secrets,
-        None,
-        std::time::Instant::now() + Duration::from_secs(2),
-    )?
-    .is_some();
+    let manifest = require_launchable_installation(layout)?;
+    let config = load_lifecycle_instance(layout)?;
+    match process::readiness_status(config.readiness_path(), &manifest.forge_executable()) {
+        process::ForgeReadinessStatus::Ready(readiness) => {
+            let result =
+                authenticated_lifecycle(layout, &config, &readiness, LifecycleOperation::Status)?;
+            let LifecycleResult::Status(lifecycle) = result else {
+                return Err(CliError::LifecycleService {
+                    reason: "unexpected lifecycle response",
+                });
+            };
+            print_lifecycle_status(&readiness, &lifecycle, json);
+            Ok(())
+        }
+        process::ForgeReadinessStatus::Missing => {
+            if json {
+                println!(r#"{{"readiness":"missing"}}"#);
+            } else {
+                println!("missing");
+            }
+            Ok(())
+        }
+        process::ForgeReadinessStatus::Invalid => {
+            if json {
+                println!(r#"{{"readiness":"invalid"}}"#);
+            } else {
+                println!("invalid");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn stop(layout: &Layout, pid: NonZeroU32, if_idle: bool) -> Result<()> {
+    if !if_idle {
+        return Err(CliError::Unsupported("stop requires --if-idle".to_owned()));
+    }
+
+    let manifest = require_launchable_installation(layout)?;
+    let config = load_lifecycle_instance(layout)?;
+    match process::readiness_status(config.readiness_path(), &manifest.forge_executable()) {
+        process::ForgeReadinessStatus::Missing => Err(CliError::NotRunning),
+        process::ForgeReadinessStatus::Invalid => Err(CliError::LifecycleReadiness {
+            reason: "readiness receipt is invalid or stale",
+        }),
+        process::ForgeReadinessStatus::Ready(readiness) => {
+            if readiness.pid() != pid.get() {
+                return Err(CliError::LifecycleReadiness {
+                    reason: "PID does not match the readiness receipt",
+                });
+            }
+            let result =
+                authenticated_lifecycle(layout, &config, &readiness, LifecycleOperation::Stop)?;
+            let LifecycleResult::Stop(receipt) = result else {
+                return Err(CliError::LifecycleService {
+                    reason: "unexpected lifecycle response",
+                });
+            };
+            print_stop_receipt(&receipt);
+            Ok(())
+        }
+    }
+}
+
+fn load_lifecycle_instance(layout: &Layout) -> Result<NativeInstanceConfig> {
+    match load_native_instance(layout) {
+        Ok(config) => Ok(config),
+        Err(CliError::MissingInstance) => Err(CliError::MissingInstance),
+        Err(_) => Err(CliError::LifecycleService {
+            reason: "native instance configuration is unavailable",
+        }),
+    }
+}
+
+fn authenticated_lifecycle(
+    layout: &Layout,
+    config: &NativeInstanceConfig,
+    readiness: &process::ForgeReadiness,
+    operation: LifecycleOperation,
+) -> Result<LifecycleResult> {
+    let material = lifecycle_material(layout, config, readiness)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| CliError::LifecycleService {
+            reason: "create lifecycle runtime",
+        })?;
+    let store = ReconnectCapabilityStore::from_home(&layout.root)
+        .map_err(|error| lifecycle_credential_error(&error))?;
+    let attempt = store
+        .checkout(material.binding, credentials::RECONNECT_LOCK_TIMEOUT)
+        .map_err(|error| lifecycle_credential_error(&error))?;
+    runtime.block_on(authenticated_lifecycle_session(
+        material, operation, attempt,
+    ))
+}
+
+fn lifecycle_material(
+    layout: &Layout,
+    config: &NativeInstanceConfig,
+    readiness: &process::ForgeReadiness,
+) -> Result<LifecycleMaterial> {
+    let identity = credentials::load_existing_client_identity(&layout.root)
+        .map_err(|error| lifecycle_credential_error(&error))?;
+    if config.credentials_manifest() != identity.paths().manifest_path() {
+        return Err(CliError::LifecycleCredentialState {
+            reason: "credential manifest does not match the instance",
+        });
+    }
+
+    let certificate = identity.certificate().clone();
+    let pinned_identity = PinnedIdentity::from_certificate(&certificate);
+    let expected_pin = pinned_identity.to_hex();
+    if readiness.certificate_sha256() != expected_pin
+        || readiness.certificate_sha256() != readiness.certificate_sha256().to_ascii_lowercase()
+    {
+        return Err(CliError::LifecycleReadiness {
+            reason: "readiness certificate does not match the client identity",
+        });
+    }
+
+    let address =
+        readiness
+            .endpoint()
+            .parse::<SocketAddr>()
+            .map_err(|_| CliError::LifecycleReadiness {
+                reason: "readiness endpoint is invalid",
+            })?;
+    let target = LoopbackTarget::new(address).map_err(|_| CliError::LifecycleReadiness {
+        reason: "readiness endpoint is not exact loopback",
+    })?;
+    let pid = NonZeroU32::new(readiness.pid()).ok_or(CliError::LifecycleReadiness {
+        reason: "readiness PID is zero",
+    })?;
+    let binding = ReconnectBinding::new(
+        config.instance_id(),
+        target.addr().port(),
+        *pinned_identity.as_bytes(),
+        pid,
+    )
+    .map_err(|error| lifecycle_credential_error(&error))?;
+    let listener = config.listener();
+    let limits = ClientSessionLimits {
+        connect: lifecycle_duration(listener.admission_timeout_ms())?,
+        handshake: lifecycle_duration(listener.handshake_timeout_ms())?,
+        request: lifecycle_duration(listener.request_timeout_ms())?,
+        shutdown: lifecycle_duration(listener.drain_timeout_ms())?,
+        admission_budget: usize::try_from(listener.requests_per_connection().get()).map_err(
+            |_| CliError::LifecycleService {
+                reason: "request admission budget is not representable",
+            },
+        )?,
+    };
+
+    Ok(LifecycleMaterial {
+        certificate,
+        pinned_identity,
+        target,
+        binding,
+        limits,
+    })
+}
+
+fn lifecycle_duration(milliseconds: u64) -> Result<Duration> {
+    if milliseconds == 0 {
+        return Err(CliError::LifecycleService {
+            reason: "listener timeout is zero",
+        });
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
+async fn authenticated_lifecycle_session(
+    material: LifecycleMaterial,
+    operation: LifecycleOperation,
+    mut attempt: ReconnectAttempt,
+) -> Result<LifecycleResult> {
+    let cancel = CancelHandle::new();
+    let capability = match attempt.take_credential() {
+        Ok(capability) => capability,
+        Err(error) => {
+            let primary = lifecycle_credential_error(&error);
+            return match attempt.quarantine() {
+                Ok(()) => Err(primary),
+                Err(custody) => Err(lifecycle_credential_error(&custody)),
+            };
+        }
+    };
+    let hello = match lifecycle_hello_with_capability(capability) {
+        Ok(hello) => hello,
+        Err((failure, capability)) => {
+            return match attempt.restore_before_handshake(capability) {
+                Ok(_) => Err(failure),
+                Err(custody) => Err(lifecycle_credential_error(&custody)),
+            };
+        }
+    };
+
+    let connected = ClientSession::connect(
+        material.target,
+        material.certificate.clone(),
+        material.pinned_identity,
+        hello,
+        material.limits,
+        &cancel,
+    )
+    .await;
+    let (session, welcome) = match connected {
+        Ok(connected) => connected,
+        Err(error) => {
+            let failure = lifecycle_connect_error(&error);
+            return match attempt.quarantine() {
+                Ok(()) => Err(failure),
+                Err(custody) => Err(lifecycle_credential_error(&custody)),
+            };
+        }
+    };
+    let reconnect_lease =
+        match attempt.publish_next(material.binding, welcome.welcome.reconnect_capability) {
+            Ok(lease) => lease,
+            Err(error) => {
+                let _ = session.shutdown(&cancel).await;
+                return Err(lifecycle_credential_error(&error));
+            }
+        };
+
+    if !session.lifecycle_control_supported() {
+        let _ = session.shutdown(&cancel).await;
+        drop(reconnect_lease);
+        return Err(CliError::UnsupportedLifecycleControl);
+    }
+
+    let (request, expected_request_id) = match lifecycle_request(operation) {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = session.shutdown(&cancel).await;
+            drop(reconnect_lease);
+            return Err(error);
+        }
+    };
+    let (session, resolved) = match session
+        .request_acknowledging_response(request, &cancel)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let quarantine = lifecycle_request_requires_quarantine(&error);
+            let failure = lifecycle_request_error(&error);
+            if quarantine {
+                return match reconnect_lease.quarantine() {
+                    Ok(()) => Err(failure),
+                    Err(custody) => Err(lifecycle_credential_error(&custody)),
+                };
+            }
+            drop(reconnect_lease);
+            return Err(failure);
+        }
+    };
+    let result = classify_lifecycle_response(operation, &expected_request_id, &resolved);
+    // The request stage has already settled its terminal outcome. Shutdown is
+    // best-effort here; it cannot turn an acknowledged stop into a retryable
+    // operation and the session is consumed even if the bounded drain fails.
+    let _ = session.shutdown(&cancel).await;
+    if lifecycle_response_requires_quarantine(&expected_request_id, &resolved, &result) {
+        return match reconnect_lease.quarantine() {
+            Ok(()) => result,
+            Err(custody) => Err(lifecycle_credential_error(&custody)),
+        };
+    }
+    drop(reconnect_lease);
+    result
+}
+
+fn lifecycle_hello_with_capability(
+    capability: artisan_protocol::ReconnectCapability,
+) -> std::result::Result<WireEnvelope, (CliError, artisan_protocol::ReconnectCapability)> {
+    let (frame_id, sent_at) = match lifecycle_frame_stamp() {
+        Ok(stamp) => stamp,
+        Err(error) => return Err((error, capability)),
+    };
+    let Ok(supported_versions) = VersionOffer::new(vec![1]) else {
+        return Err((
+            CliError::LifecycleService {
+                reason: "build protocol version offer",
+            },
+            capability,
+        ));
+    };
+    Ok(WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id,
+        sent_at,
+        body: WireEnvelopeBody::Hello(Hello {
+            supported_versions,
+            credential: HelloCredential::Reconnect(capability),
+            supports_lifecycle_control: true,
+        }),
+    })
+}
+
+fn lifecycle_request(operation: LifecycleOperation) -> Result<(WireEnvelope, RequestId)> {
+    let (frame_id, sent_at) = lifecycle_frame_stamp()?;
+    let request_id = frame_id
+        .to_request_id()
+        .map_err(|_| CliError::LifecycleService {
+            reason: "build request correlation",
+        })?;
+    let request = match operation {
+        LifecycleOperation::Status => LifecycleRequest::Status,
+        LifecycleOperation::Stop => LifecycleRequest::Stop { require_idle: true },
+    };
+    let envelope = WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id,
+        sent_at,
+        body: WireEnvelopeBody::Request(ClientRequest::Lifecycle(request)),
+    };
+    envelope
+        .validate_correlation()
+        .map_err(|_| CliError::LifecycleService {
+            reason: "validate request correlation",
+        })?;
+    Ok((envelope, request_id))
+}
+
+fn lifecycle_frame_stamp() -> Result<(FrameId, UnixMillis)> {
+    let sent_at = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => {
+            UnixMillis::from_millis(i64::try_from(duration.as_millis()).map_err(|_| {
+                CliError::LifecycleService {
+                    reason: "build frame timestamp",
+                }
+            })?)
+        }
+        Err(error) => UnixMillis::from_millis(
+            i64::try_from(error.duration().as_millis())
+                .map_err(|_| CliError::LifecycleService {
+                    reason: "build frame timestamp",
+                })?
+                .saturating_neg(),
+        ),
+    };
+    let sequence = NEXT_LIFECYCLE_FRAME
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| CliError::LifecycleService {
+            reason: "lifecycle frame sequence exhausted",
+        })?
+        .checked_add(1)
+        .ok_or(CliError::LifecycleService {
+            reason: "lifecycle frame sequence exhausted",
+        })?;
+    let text = format!(
+        "native-{}-{}-{}",
+        std::process::id(),
+        sent_at.as_millis(),
+        sequence
+    );
+    let frame_id = FrameId::parse(text).map_err(|_| CliError::LifecycleService {
+        reason: "build frame identity",
+    })?;
+    frame_id
+        .to_request_id()
+        .map_err(|_| CliError::LifecycleService {
+            reason: "build frame correlation",
+        })?;
+    Ok((frame_id, sent_at))
+}
+
+fn classify_lifecycle_response(
+    operation: LifecycleOperation,
+    expected_request_id: &RequestId,
+    resolved: &artisan_transport::ResolvedRequest,
+) -> Result<LifecycleResult> {
+    if resolved.request_id() != expected_request_id {
+        return Err(CliError::LifecycleService {
+            reason: "response correlation failed",
+        });
+    }
+    match resolved.outcome() {
+        RequestOutcome::Failure(failure) => classify_lifecycle_failure(operation, failure.code),
+        RequestOutcome::Response(response) => match (&operation, &response.payload) {
+            (
+                LifecycleOperation::Status,
+                ResponsePayload::Lifecycle(LifecycleResponse::Status(status)),
+            ) => {
+                if status.validate().is_err() {
+                    return Err(CliError::LifecycleService {
+                        reason: "lifecycle status was invalid",
+                    });
+                }
+                Ok(LifecycleResult::Status(status.clone()))
+            }
+            (
+                LifecycleOperation::Stop,
+                ResponsePayload::Lifecycle(LifecycleResponse::Stop(receipt)),
+            ) => {
+                classify_stop_receipt(receipt)?;
+                Ok(LifecycleResult::Stop(receipt.clone()))
+            }
+            _ => Err(CliError::LifecycleService {
+                reason: "unexpected lifecycle response payload",
+            }),
+        },
+    }
+}
+
+fn classify_stop_receipt(receipt: &LifecycleStopReceipt) -> Result<()> {
+    if receipt.state != LifecycleState::Draining {
+        return Err(CliError::LifecycleService {
+            reason: "stop response did not enter draining",
+        });
+    }
+    Ok(())
+}
+
+fn classify_lifecycle_failure(
+    operation: LifecycleOperation,
+    code: ErrorCode,
+) -> Result<LifecycleResult> {
+    match code {
+        ErrorCode::UnsupportedFeature => Err(CliError::UnsupportedLifecycleControl),
+        ErrorCode::LifecycleBusy if operation == LifecycleOperation::Stop => {
+            Err(CliError::LifecycleBusy)
+        }
+        _ => Err(CliError::LifecycleService {
+            reason: "Forge rejected the lifecycle request",
+        }),
+    }
+}
+
+fn lifecycle_connect_error(error: &ClientSessionError) -> CliError {
+    if matches!(error, ClientSessionError::Handshake(_)) {
+        CliError::LifecycleAmbiguous
+    } else {
+        CliError::LifecycleService {
+            reason: "lifecycle connection failed",
+        }
+    }
+}
+
+fn lifecycle_request_error(error: &ClientRequestError) -> CliError {
+    match error {
+        ClientRequestError::UnsupportedFeature => CliError::UnsupportedLifecycleControl,
+        ClientRequestError::Exchange(_) => CliError::LifecycleService {
+            reason: "lifecycle response exchange failed",
+        },
+        ClientRequestError::Reply(_) => CliError::LifecycleService {
+            reason: "lifecycle response was invalid",
+        },
+        ClientRequestError::NotARequest { .. }
+        | ClientRequestError::VersionMismatch { .. }
+        | ClientRequestError::Correlation(_)
+        | ClientRequestError::Admission(_) => CliError::LifecycleService {
+            reason: "lifecycle request was invalid",
+        },
+    }
+}
+
+fn lifecycle_request_requires_quarantine(error: &ClientRequestError) -> bool {
+    matches!(
+        error,
+        ClientRequestError::Correlation(_)
+            | ClientRequestError::Exchange(_)
+            | ClientRequestError::Reply(_)
+    )
+}
+
+fn lifecycle_response_requires_quarantine(
+    expected_request_id: &RequestId,
+    resolved: &artisan_transport::ResolvedRequest,
+    result: &Result<LifecycleResult>,
+) -> bool {
+    if resolved.request_id() != expected_request_id {
+        return true;
+    }
+    matches!(resolved.outcome(), RequestOutcome::Response(_)) && result.is_err()
+}
+
+fn lifecycle_credential_error(error: &ForgeCredentialError) -> CliError {
+    match error {
+        ForgeCredentialError::CapabilityBusy
+        | ForgeCredentialError::ReconnectCapabilityUnavailable
+        | ForgeCredentialError::ReconnectBindingMismatch
+        | ForgeCredentialError::ReconnectStaleWriter
+        | ForgeCredentialError::ReconnectGenerationOverflow
+        | ForgeCredentialError::ReconnectInvalidBinding
+        | ForgeCredentialError::ReconnectAttemptComplete
+        | ForgeCredentialError::ReconnectRecordExists => CliError::LifecycleCustody {
+            reason: "reconnect capability custody is unavailable",
+        },
+        _ => CliError::LifecycleCredentialState {
+            reason: "reconnect capability or client identity is unavailable",
+        },
+    }
+}
+
+fn print_lifecycle_status(
+    readiness: &process::ForgeReadiness,
+    lifecycle: &LifecycleStatus,
+    json: bool,
+) {
     if json {
         println!(
             "{}",
             serde_json::json!({
-                "state": if running { "running" } else { "stopped" },
+                "certificate_sha256": readiness.certificate_sha256(),
+                "endpoint": readiness.endpoint(),
+                "lifecycle": {
+                    "active_work_count": lifecycle.active_work_count,
+                    "state": lifecycle_state_name(lifecycle.state),
+                },
+                "pid": readiness.pid(),
+                "readiness": "ready",
+                "schema": readiness.schema(),
             })
         );
     } else {
-        println!("{}", if running { "running" } else { "stopped" });
+        println!(
+            "ready (pid {} at {})",
+            readiness.pid(),
+            readiness.endpoint()
+        );
+        println!(
+            "lifecycle: {} ({} active work item(s))",
+            lifecycle_state_name(lifecycle.state),
+            lifecycle.active_work_count
+        );
     }
-    Ok(())
+}
+
+fn print_stop_receipt(receipt: &LifecycleStopReceipt) {
+    match receipt.disposition {
+        LifecycleStopDisposition::Accepted => println!("stop accepted (draining)"),
+        LifecycleStopDisposition::Duplicate | LifecycleStopDisposition::AlreadyStopping => {
+            println!("stop already in progress (draining)");
+        }
+    }
+}
+
+const fn lifecycle_state_name(state: LifecycleState) -> &'static str {
+    match state {
+        LifecycleState::Ready => "ready",
+        LifecycleState::Busy => "busy",
+        LifecycleState::Draining => "draining",
+    }
 }
 
 fn logs(layout: &Layout, lines: usize, follow: bool) -> Result<()> {
@@ -662,7 +1602,10 @@ fn follow_log(mut file: File, mut offset: u64) -> Result<()> {
     }
 }
 
-fn doctor(layout: &Layout, fix: bool, json: bool) -> Result<()> {
+fn doctor(layout: &Layout, fix: bool, json: bool, finalization_check: bool) -> Result<()> {
+    if finalization_check {
+        return doctor_finalization(layout);
+    }
     if fix {
         delegate_installer(layout, "repair", false)?;
     }
@@ -739,6 +1682,135 @@ fn doctor(layout: &Layout, fix: bool, json: bool) -> Result<()> {
     }
 }
 
+#[derive(Serialize)]
+struct DoctorFinalizationReport {
+    schema: &'static str,
+    healthy: bool,
+    finalization: &'static str,
+    installation: &'static str,
+    protocol: &'static str,
+    instance: &'static str,
+    credentials: &'static str,
+    payload: &'static str,
+    payload_issues: Vec<DoctorPayloadIssue>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorPayloadIssue {
+    Missing,
+    Modified,
+    Unreadable,
+    Unexpected,
+    Invalid,
+}
+
+fn doctor_finalization(layout: &Layout) -> Result<()> {
+    let report = doctor_finalization_report(layout);
+    let healthy = report.healthy;
+    println!(
+        "{}",
+        serde_json::to_string(&report)
+            .map_err(|_| CliError::Installation("could not serialize doctor report".into()))?
+    );
+    if healthy {
+        Ok(())
+    } else {
+        Err(CliError::Installation(
+            "doctor found unresolved issues".into(),
+        ))
+    }
+}
+
+fn doctor_finalization_report(layout: &Layout) -> DoctorFinalizationReport {
+    let (finalization, installation) = InstallationManifest::inspect(&layout.manifest);
+    let installation_state = if installation.is_some() {
+        "ok"
+    } else {
+        "error"
+    };
+    let (instance_state, instance) = inspect_native_instance(layout);
+    let credentials_state = instance.as_ref().map_or("not_checked", |instance| {
+        inspect_existing_credentials(layout, instance)
+    });
+    let (payload_state, payload_issues) = inspect_payload(installation.as_ref());
+    let healthy = installation_state == "ok"
+        && matches!(
+            finalization,
+            InstallationFinalization::Complete | InstallationFinalization::Pending
+        )
+        && instance_state == "ok"
+        && credentials_state == "ok"
+        && payload_state == "ok";
+    DoctorFinalizationReport {
+        schema: "artisan-doctor-finalization-v1",
+        healthy,
+        finalization: finalization.as_str(),
+        installation: installation_state,
+        protocol: "deferred",
+        instance: instance_state,
+        credentials: credentials_state,
+        payload: payload_state,
+        payload_issues,
+    }
+}
+
+fn inspect_native_instance(layout: &Layout) -> (&'static str, Option<NativeInstanceConfig>) {
+    match load_native_instance(layout) {
+        Ok(instance) => ("ok", Some(instance)),
+        Err(CliError::MissingInstance) => ("missing", None),
+        Err(_) => ("invalid", None),
+    }
+}
+
+fn inspect_existing_credentials(layout: &Layout, instance: &NativeInstanceConfig) -> &'static str {
+    let Ok(paths) = ForgeCredentialPaths::from_home(&layout.root) else {
+        return "invalid";
+    };
+    if instance.credentials_manifest() != paths.manifest_path() {
+        return "invalid";
+    }
+    match credentials::load_existing_client_identity(&layout.root) {
+        Ok(identity) if identity.paths().manifest_path() == instance.credentials_manifest() => "ok",
+        Err(ForgeCredentialError::IdentityBundleMissing) => "missing",
+        Ok(_) | Err(_) => "invalid",
+    }
+}
+
+fn inspect_payload(
+    installation: Option<&InstallationManifest>,
+) -> (&'static str, Vec<DoctorPayloadIssue>) {
+    let Some(installation) = installation else {
+        return ("not_checked", Vec::new());
+    };
+    match payload::verify(&installation.version_root()) {
+        payload::PayloadHealth::Verified => ("ok", Vec::new()),
+        payload::PayloadHealth::Modified(issues) => ("modified", payload_issue_codes(&issues)),
+        payload::PayloadHealth::Unverifiable => ("unverifiable", Vec::new()),
+    }
+}
+
+fn payload_issue_codes(issues: &[String]) -> Vec<DoctorPayloadIssue> {
+    let mut codes = Vec::new();
+    for issue in issues {
+        let code = if issue.starts_with("missing") {
+            DoctorPayloadIssue::Missing
+        } else if issue.starts_with("modified") {
+            DoctorPayloadIssue::Modified
+        } else if issue.starts_with("unreadable") {
+            DoctorPayloadIssue::Unreadable
+        } else if issue.starts_with("unexpected") {
+            DoctorPayloadIssue::Unexpected
+        } else {
+            DoctorPayloadIssue::Invalid
+        };
+        if !codes.contains(&code) {
+            codes.push(code);
+        }
+    }
+    codes
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OpenFlow {
     /// Launch the installed Electron editor; it obtains its own handoff.
@@ -760,85 +1832,56 @@ fn handle_protocol(layout: &Layout, url: &str) -> Result<()> {
 
 #[derive(Clone, Debug)]
 struct ReadyState {
-    state: State,
-    owned_instance_id: Option<String>,
+    readiness: process::ForgeReadiness,
 }
 
 fn ready_state(layout: &Layout) -> Result<ReadyState> {
+    require_launchable_installation(layout)?;
     let deadline = std::time::Instant::now() + FORGE_READY_TIMEOUT;
-    // An already-healthy Forge needs no launch, so opening against one works
-    // even in homes without an installation manifest (the repo development
-    // Forge runs from `.dist/forge`, started by its own CLI).
-    if !layout.manifest.is_file() {
-        let (paths, _, secrets) = instance::load(layout)?;
-        if let Some(candidate) =
-            process::live_state_until(&paths, &secrets, None, probe_deadline(deadline))?
-        {
-            return Ok(ReadyState {
-                state: candidate,
-                owned_instance_id: None,
-            });
+    start_until(layout, false, deadline)?;
+    let manifest = require_launchable_installation(layout)?;
+    let config = load_native_instance(layout)?;
+    match process::readiness_status(config.readiness_path(), &manifest.forge_executable()) {
+        process::ForgeReadinessStatus::Ready(readiness) => Ok(ReadyState { readiness }),
+        process::ForgeReadinessStatus::Missing | process::ForgeReadinessStatus::Invalid => {
+            Err(CliError::ForgeReadinessTimeout)
         }
     }
-    let start_result = start_until(layout, false, deadline)?;
-    let (paths, _, secrets) = instance::load(layout)?;
-    while std::time::Instant::now() < deadline {
-        if let Some(candidate) =
-            process::live_state_until(&paths, &secrets, None, probe_deadline(deadline))?
-        {
-            return Ok(ReadyState {
-                owned_instance_id: owned_instance_id(start_result, &candidate),
-                state: candidate,
-            });
-        }
-        sleep_until(deadline, FORGE_READY_INTERVAL);
-    }
-    Err(CliError::Control("Forge did not become ready".into()))
 }
 
 fn start_until(
     layout: &Layout,
     foreground: bool,
-    health_deadline: std::time::Instant,
+    readiness_deadline: std::time::Instant,
 ) -> Result<process::StartResult> {
-    let manifest = require_installation(layout)?;
-    let (paths, config, secrets) = instance::load(layout)?;
-    process::start_until(
-        &manifest,
-        &paths,
-        &config,
-        &secrets,
-        foreground,
-        health_deadline,
-    )
+    let manifest = require_launchable_installation(layout)?;
+    payload::require_verified(&manifest.version_root())?;
+    let spec = native_launch_spec(layout)?;
+    process::start_until(&spec, foreground, readiness_deadline)
 }
 
-fn probe_deadline(deadline: std::time::Instant) -> std::time::Instant {
-    deadline.min(std::time::Instant::now() + FORGE_READY_PROBE_TIMEOUT)
+fn forge_http_endpoint(readiness: &process::ForgeReadiness) -> String {
+    format!("http://{}", readiness.endpoint())
 }
 
-fn sleep_until(deadline: std::time::Instant, interval: Duration) {
-    if let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
-        thread::sleep(interval.min(remaining));
-    }
-}
-
-fn mint_pair_code(layout: &Layout, state: &State) -> Result<String> {
+fn mint_pair_code(layout: &Layout, readiness: &process::ForgeReadiness) -> Result<String> {
+    require_launchable_installation(layout)?;
     let (paths, _, secrets) = instance::load(layout)?;
     let body = http::request(
-        &state.endpoint,
+        &forge_http_endpoint(readiness),
         "/api/pair/request",
         &secrets.auth_token,
         "POST",
     )?;
     let pair: PairResponse = serde_json::from_slice(&body).map_err(|source| CliError::Json {
-        path: paths.state,
+        path: paths.config,
         source,
     })?;
     Ok(pair.code)
 }
 
 fn open(layout: &Layout, origin: Option<&str>, flow: OpenFlow) -> Result<()> {
+    require_launchable_installation(layout)?;
     // A home without an installation has no editor payload to launch; the
     // paired browser against the (already running) Forge is the only
     // renderer there, so the default flow degrades to it instead of failing.
@@ -877,18 +1920,15 @@ fn open_ready(
     match flow {
         OpenFlow::Editor => launch_editor(layout),
         OpenFlow::Browser => {
-            let code = mint_pair_code(layout, &ready.state)?;
-            let origin = resolve_browser_origin(origin, &ready.state.endpoint)?;
+            require_launchable_installation(layout)?;
+            let code = mint_pair_code(layout, &ready.readiness)?;
+            let endpoint = forge_http_endpoint(&ready.readiness);
+            let origin = resolve_browser_origin(origin, &endpoint)?;
             launch_url(&format!("{origin}/#pair={code}"))
         }
         OpenFlow::Handoff => {
-            let code = match mint_pair_code(layout, &ready.state) {
-                Ok(code) => code,
-                Err(error) => {
-                    cleanup_failed_handoff(layout, ready);
-                    return Err(error);
-                }
-            };
+            require_launchable_installation(layout)?;
+            let code = mint_pair_code(layout, &ready.readiness)?;
             // The capability is one-time and short-lived; stdout reaches only
             // the trusted local process that invoked this hidden mode.
             println!("{}", handoff_json(ready, &code));
@@ -897,48 +1937,22 @@ fn open_ready(
     }
 }
 
-fn cleanup_failed_handoff(layout: &Layout, ready: &ReadyState) {
-    if let Some(instance_id) = handoff_cleanup_instance_id(ready) {
-        // Preserve the pairing error: cleanup is best-effort and exact, never
-        // an ordinary shutdown that could affect a replacement Forge.
-        let _ = stop(layout, Some(instance_id));
-    }
-}
-
-fn handoff_cleanup_instance_id(ready: &ReadyState) -> Option<&str> {
-    ready.owned_instance_id.as_deref()
-}
-
-fn owned_instance_id(start_result: process::StartResult, state: &State) -> Option<String> {
-    match start_result {
-        process::StartResult::Spawned { pid } if pid == state.pid => {
-            Some(state.instance_id.clone())
-        }
-        process::StartResult::AlreadyRunning
-        | process::StartResult::Spawned { .. }
-        | process::StartResult::ForegroundExited => None,
-    }
-}
-
 fn handoff_json(ready: &ReadyState, pair_code: &str) -> serde_json::Value {
-    let mut handoff = serde_json::json!({
-        "endpoint": ready.state.endpoint,
+    serde_json::json!({
+        "endpoint": forge_http_endpoint(&ready.readiness),
         "pair_code": pair_code,
         "version": 1,
-    });
-    if let Some(owned_instance_id) = &ready.owned_instance_id {
-        handoff["owned_instance_id"] = serde_json::Value::String(owned_instance_id.clone());
-    }
-    handoff
+    })
 }
 
 /// The installed editor renders the bundled frontend itself and performs its
 /// own `ae open --handoff` exchange against this home's single Forge, so no
 /// capability travels through argv.
 fn launch_editor(layout: &Layout) -> Result<()> {
-    let manifest = require_installation(layout)?;
+    let manifest = require_launchable_installation(layout)?;
     telemetry::load_or_create(layout)?;
     let editor = manifest.editor_executable();
+    payload::require_verified(&manifest.version_root())?;
     if !editor.is_file() {
         return Err(CliError::Installation(format!(
             "the Artisan editor is missing at {}; run `ae doctor --fix` or use `ae open --browser`",
@@ -993,13 +2007,6 @@ fn detach_editor(_: &mut Command) {}
 
 fn resolve_browser_origin(origin: Option<&str>, forge_endpoint: &str) -> Result<String> {
     validate_origin(origin.unwrap_or(forge_endpoint))
-}
-
-fn validate_data_root(path: &Path) -> Result<PathBuf> {
-    if !path.is_absolute() || path.parent().is_none() {
-        return Err(CliError::UnsafePath(path.to_path_buf()));
-    }
-    Ok(path.to_path_buf())
 }
 
 fn validate_origin(origin: &str) -> Result<String> {
@@ -1059,6 +2066,9 @@ fn launch_url(url: &str) -> Result<()> {
 }
 
 fn delegate_installer(layout: &Layout, operation: &str, remove_data: bool) -> Result<()> {
+    if operation == "update" {
+        require_launchable_installation(layout)?;
+    }
     let manifest = require_installation(layout)?;
     let bootstrap = manifest.installer_executable();
     if !bootstrap.is_file() {
@@ -1090,7 +2100,77 @@ fn delegate_installer(layout: &Layout, operation: &str, remove_data: bool) -> Re
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::Path};
+
+    use serde_json::json;
+
     use super::*;
+
+    fn test_layout(root: &Path) -> Layout {
+        Layout {
+            manifest: root.join("installation.json"),
+            root: root.to_path_buf(),
+        }
+    }
+
+    fn native_permanent_path(root: &Path) -> PathBuf {
+        root.join("bin")
+            .join(if cfg!(windows) { "ae.exe" } else { "ae" })
+    }
+
+    fn write_test_manifest(
+        root: &Path,
+        activation_state: &str,
+        finalization_state: Option<&str>,
+    ) -> PathBuf {
+        fs::create_dir_all(root).unwrap();
+        let mut value = json!({
+            "activation_state": activation_state,
+            "active_version": "1.2.3",
+            "install_root": root,
+            "permanent_ae_path": native_permanent_path(root),
+        });
+        if let Some(finalization_state) = finalization_state {
+            value["finalization_state"] = json!(finalization_state);
+        }
+        let path = root.join("installation.json");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        path
+    }
+
+    fn assert_installation_error(error: CliError, guidance: &str) {
+        assert_eq!(error.exit_code(), 4);
+        assert!(matches!(error, CliError::Installation(message) if message == guidance));
+    }
+
+    fn test_native_config(root: &Path, credentials_manifest: PathBuf) -> NativeInstanceConfig {
+        NativeInstanceConfig::new(
+            root.join("data").join("forge.sqlite3"),
+            root.join("custody").join("forge.lock"),
+            root.join("readiness").join("forge.json"),
+            credentials_manifest,
+            NativeListenerConfig::new(
+                1,
+                2,
+                3,
+                4,
+                NonZeroU32::new(1).unwrap(),
+                NonZeroU32::new(1).unwrap(),
+            ),
+            NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: 1,
+                poll_interval_ms: 2,
+                retry_backoff_ms: 3,
+                shutdown_budget_ms: 4,
+                queue_capacity: 1,
+                max_command_retries: 1,
+                prompt_delivery: "queue".to_owned(),
+                stream_after: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn telemetry_commands_are_explicit_and_reset_requires_confirmation() {
@@ -1112,6 +2192,44 @@ mod tests {
     fn plain_invocation_maps_to_open() {
         let cli = Cli::try_parse_from(["ae"]).unwrap();
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn finalization_check_has_a_hidden_json_only_grammar() {
+        let cli = Cli::try_parse_from(["ae", "doctor", "--json", "--finalization-check"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Doctor {
+                fix: false,
+                json: true,
+                finalization_check: true,
+            })
+        ));
+        assert!(Cli::try_parse_from(["ae", "doctor", "--finalization-check"]).is_err());
+        assert!(
+            Cli::try_parse_from(["ae", "doctor", "--json", "--fix", "--finalization-check"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ae",
+                "doctor",
+                "--json",
+                "--finalization-check",
+                "--finalization-check",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ae",
+                "doctor",
+                "--json",
+                "--finalization-check",
+                "--unknown"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -1145,39 +2263,21 @@ mod tests {
     }
 
     #[test]
-    fn hidden_exact_stop_and_autostart_commands_parse_without_widening_stop() {
-        let exact_stop = Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1"]).unwrap();
-        assert!(matches!(
-            exact_stop.command,
-            Some(Commands::Stop {
-                instance_id: Some(id),
-                pid: None,
-                if_idle: false,
-            }) if id == "forge-1"
-        ));
+    fn idle_pid_stop_is_the_only_supported_stop_syntax() {
         let pid_stop = Cli::try_parse_from(["ae", "stop", "--pid", "6172", "--if-idle"]).unwrap();
         assert!(matches!(
             pid_stop.command,
             Some(Commands::Stop {
-                instance_id: None,
-                pid: Some(6172),
+                pid,
                 if_idle: true,
-            })
+            }) if pid.get() == 6172
         ));
-        assert!(
-            Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1", "--pid", "6172",])
-                .is_err()
-        );
-        let ordinary_stop = Cli::try_parse_from(["ae", "stop"]).unwrap();
-        assert!(matches!(
-            ordinary_stop.command,
-            Some(Commands::Stop {
-                instance_id: None,
-                pid: None,
-                if_idle: false,
-            })
-        ));
+        assert!(Cli::try_parse_from(["ae", "stop"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "6172"]).is_err());
         assert!(Cli::try_parse_from(["ae", "stop", "--if-idle"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "0", "--if-idle"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "6172", "--force"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1"]).is_err());
         let disable = Cli::try_parse_from(["ae", "autostart", "--disable"]).unwrap();
         assert!(matches!(
             disable.command,
@@ -1199,6 +2299,246 @@ mod tests {
         );
     }
 
+    #[test]
+    fn launch_admission_accepts_only_a_complete_canonical_pointer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("Artisan Street");
+        let layout = test_layout(&root);
+
+        let error = require_launchable_installation(&layout).unwrap_err();
+        assert_installation_error(error, INCOMPLETE_INSTALLATION_GUIDANCE);
+
+        write_test_manifest(&root, "active", Some("pending"));
+        let error = require_launchable_installation(&layout).unwrap_err();
+        assert_installation_error(error, INCOMPLETE_INSTALLATION_GUIDANCE);
+
+        write_test_manifest(&root, "active", None);
+        let error = require_launchable_installation(&layout).unwrap_err();
+        assert_installation_error(error, INCOMPLETE_INSTALLATION_GUIDANCE);
+
+        write_test_manifest(&root, "active", Some("unknown"));
+        let error = require_launchable_installation(&layout).unwrap_err();
+        assert_installation_error(error, INVALID_INSTALLATION_GUIDANCE);
+
+        write_test_manifest(&root, "inactive", Some("complete"));
+        let error = require_launchable_installation(&layout).unwrap_err();
+        assert_installation_error(error, INVALID_INSTALLATION_GUIDANCE);
+
+        write_test_manifest(&root, "active", Some("complete"));
+        let manifest = require_launchable_installation(&layout).unwrap();
+        assert_eq!(
+            manifest.finalization_status(),
+            InstallationFinalization::Complete
+        );
+        assert_eq!(manifest.install_root, root);
+    }
+
+    #[test]
+    fn pending_admission_fails_before_every_forge_capable_entry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("Artisan Street");
+        let manifest_path = write_test_manifest(&root, "active", Some("pending"));
+        let layout = test_layout(&root);
+        let before = fs::read(&manifest_path).unwrap();
+
+        for result in [
+            start(&layout, false).map(|_| ()),
+            start_until(&layout, false, Instant::now()).map(|_| ()),
+            ready_state(&layout).map(|_| ()),
+            status(&layout, false),
+            stop(&layout, NonZeroU32::new(1).unwrap(), true),
+            open(&layout, None, OpenFlow::Editor),
+            open(&layout, None, OpenFlow::Browser),
+            open(&layout, None, OpenFlow::Handoff),
+            handle_protocol(&layout, FORGE_START_LAUNCH_URL),
+            launch_editor(&layout),
+            native_launch_spec(&layout).map(|_| ()),
+            delegate_installer(&layout, "update", false),
+        ] {
+            let error = result.expect_err("pending installation was admitted");
+            assert_installation_error(error, INCOMPLETE_INSTALLATION_GUIDANCE);
+        }
+
+        let readiness = process::ForgeReadiness::new(
+            "artisan-forge-ready-v1",
+            "127.0.0.1:4317",
+            "a".repeat(64),
+            42,
+        )
+        .unwrap();
+        let error = mint_pair_code(&layout, &readiness)
+            .expect_err("pending installation reached pair-code connection");
+        assert_installation_error(error, INCOMPLETE_INSTALLATION_GUIDANCE);
+        for flow in [OpenFlow::Browser, OpenFlow::Handoff] {
+            let error = open_ready(
+                &layout,
+                None,
+                flow,
+                &ReadyState {
+                    readiness: readiness.clone(),
+                },
+            )
+            .expect_err("pending installation reached pair-code connection");
+            assert_installation_error(error, INCOMPLETE_INSTALLATION_GUIDANCE);
+        }
+
+        assert_eq!(fs::read(&manifest_path).unwrap(), before);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn doctor_keeps_unverifiable_payload_diagnostic_while_launch_admission_rejects_it() {
+        let root = tempfile::tempdir().unwrap();
+        let health = payload::verify(root.path());
+
+        assert_eq!(health, payload::PayloadHealth::Unverifiable);
+        assert_eq!(health.as_str(), "unverifiable");
+        assert!(!matches!(health, payload::PayloadHealth::Modified(_)));
+
+        let error = payload::require_verified(root.path()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Artisan is not installed correctly: active version payload is not verified"
+        );
+    }
+
+    #[test]
+    fn finalization_report_is_stable_enum_only_and_redacts_payload_paths() {
+        let report = DoctorFinalizationReport {
+            schema: "artisan-doctor-finalization-v1",
+            healthy: false,
+            finalization: "pending",
+            installation: "ok",
+            protocol: "deferred",
+            instance: "ok",
+            credentials: "ok",
+            payload: "modified",
+            payload_issues: vec![DoctorPayloadIssue::Modified],
+        };
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"schema":"artisan-doctor-finalization-v1","healthy":false,"finalization":"pending","installation":"ok","protocol":"deferred","instance":"ok","credentials":"ok","payload":"modified","payload_issues":["modified"]}"#
+        );
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let mut keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys.as_slice(),
+            &[
+                "credentials",
+                "finalization",
+                "healthy",
+                "installation",
+                "instance",
+                "payload",
+                "payload_issues",
+                "protocol",
+                "schema",
+            ]
+        );
+        let canary = "payload-secret-canary";
+        let source_issues = vec![
+            format!("modified: {canary}"),
+            format!("missing: {canary}"),
+            format!("unexpected: {canary}"),
+        ];
+        assert_eq!(
+            payload_issue_codes(&source_issues),
+            vec![
+                DoctorPayloadIssue::Modified,
+                DoctorPayloadIssue::Missing,
+                DoctorPayloadIssue::Unexpected,
+            ]
+        );
+        assert!(
+            !serde_json::to_string(&payload_issue_codes(&source_issues))
+                .unwrap()
+                .contains(canary)
+        );
+    }
+
+    #[test]
+    fn finalization_doctor_uses_read_only_native_v2_checks_without_legacy_fallback() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("Artisan Street");
+        let layout = test_layout(&root);
+        let manifest_path = write_test_manifest(&root, "active", Some("pending"));
+        let legacy_config = root.join("config.json");
+        let legacy_secrets = root.join("secrets.json");
+        fs::write(&legacy_config, b"legacy-config-secret-canary").unwrap();
+        fs::write(&legacy_secrets, b"legacy-secrets-secret-canary").unwrap();
+        let before_manifest = fs::read(&manifest_path).unwrap();
+        let before_config = fs::read(&legacy_config).unwrap();
+        let before_secrets = fs::read(&legacy_secrets).unwrap();
+        let mut before_entries = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        before_entries.sort();
+
+        let error = doctor(&layout, false, true, true).unwrap_err();
+        assert_installation_error(error, "doctor found unresolved issues");
+        assert_eq!(fs::read(&manifest_path).unwrap(), before_manifest);
+        assert_eq!(fs::read(&legacy_config).unwrap(), before_config);
+        assert_eq!(fs::read(&legacy_secrets).unwrap(), before_secrets);
+        let mut after_entries = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        after_entries.sort();
+        assert_eq!(after_entries, before_entries);
+        assert!(!root.join("instance-v2.json").exists());
+        assert!(!root.join("credentials").exists());
+        assert_eq!(inspect_native_instance(&layout).0, "missing");
+    }
+
+    #[test]
+    fn native_v2_and_credential_inspection_are_typed_and_path_fenced() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("Artisan Street");
+        let layout = test_layout(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("config.json"), b"legacy config").unwrap();
+        fs::write(root.join("secrets.json"), b"legacy secrets").unwrap();
+        assert_eq!(inspect_native_instance(&layout).0, "missing");
+
+        let credentials = ForgeCredentialPaths::from_home(&root).unwrap();
+        let config = test_native_config(&root, credentials.manifest_path().to_path_buf());
+        config.write_to_home(&root).unwrap();
+        let (state, loaded) = inspect_native_instance(&layout);
+        assert_eq!(state, "ok");
+        let loaded = loaded.unwrap();
+        assert_eq!(inspect_existing_credentials(&layout, &loaded), "missing");
+
+        let mismatch = test_native_config(&root, root.join("wrong-credentials.json"));
+        assert_eq!(inspect_existing_credentials(&layout, &mismatch), "invalid");
+
+        fs::create_dir_all(root.join("credentials")).unwrap();
+        fs::write(
+            root.join("credentials").join("manifest.json"),
+            b"credential-secret-canary",
+        )
+        .unwrap();
+        assert_eq!(inspect_existing_credentials(&layout, &loaded), "invalid");
+
+        let legacy_config = fs::read(root.join("config.json")).unwrap();
+        let legacy_secrets = fs::read(root.join("secrets.json")).unwrap();
+        fs::write(
+            layout.native_instance_path(),
+            br#"{"schema":"artisan-instance-v2","version":2,"unknown":true}"#,
+        )
+        .unwrap();
+        assert_eq!(inspect_native_instance(&layout).0, "invalid");
+        assert_eq!(fs::read(root.join("config.json")).unwrap(), legacy_config);
+        assert_eq!(fs::read(root.join("secrets.json")).unwrap(), legacy_secrets);
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn installed_editor_is_detached_from_the_ae_launcher() {
@@ -1209,39 +2549,187 @@ mod tests {
     }
 
     #[test]
-    fn handoff_ownership_is_emitted_only_for_the_spawned_ready_pid() {
-        let state = State {
-            endpoint: "http://127.0.0.1:4317".into(),
-            instance_id: "forge-owned".into(),
-            pid: 42,
+    fn restart_remains_explicitly_unsupported() {
+        assert!(matches!(
+            unsupported_lifecycle_control(),
+            Err(CliError::UnsupportedLifecycleControl)
+        ));
+        assert_eq!(
+            CliError::UnsupportedLifecycleControl.to_string(),
+            "native Forge lifecycle control is unsupported by this Forge"
+        );
+    }
+
+    #[test]
+    fn lifecycle_requests_are_correlated_and_stop_is_idle_fenced() {
+        let (status, status_id) = lifecycle_request(LifecycleOperation::Status).unwrap();
+        assert_eq!(status.frame_id.to_request_id().unwrap(), status_id);
+        assert!(matches!(
+            status.body,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(LifecycleRequest::Status))
+        ));
+
+        let (stop, stop_id) = lifecycle_request(LifecycleOperation::Stop).unwrap();
+        assert_eq!(stop.frame_id.to_request_id().unwrap(), stop_id);
+        assert_ne!(status.frame_id, stop.frame_id);
+        assert!(matches!(
+            stop.body,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(LifecycleRequest::Stop {
+                require_idle: true
+            }))
+        ));
+    }
+
+    #[test]
+    fn lifecycle_failure_boundaries_are_typed_without_retryable_outcomes() {
+        assert_eq!(
+            classify_lifecycle_failure(LifecycleOperation::Stop, ErrorCode::LifecycleBusy)
+                .unwrap_err()
+                .exit_code(),
+            5
+        );
+        assert_eq!(
+            classify_lifecycle_failure(LifecycleOperation::Status, ErrorCode::Internal)
+                .unwrap_err()
+                .exit_code(),
+            72
+        );
+        assert_eq!(
+            classify_lifecycle_failure(LifecycleOperation::Status, ErrorCode::UnsupportedFeature)
+                .unwrap_err()
+                .exit_code(),
+            1
+        );
+        assert_eq!(
+            lifecycle_connect_error(&ClientSessionError::DeliveryAlreadyTaken).exit_code(),
+            72
+        );
+    }
+
+    #[test]
+    fn lifecycle_handshake_and_request_failures_are_terminal_and_redacted() {
+        let handshake_timeout = ClientSessionError::Handshake(DeadlineError::Timeout {
+            operation: OperationKind::Handshake,
+            limit: Duration::from_millis(10),
+        });
+        assert_eq!(lifecycle_connect_error(&handshake_timeout).exit_code(), 75);
+
+        let connect_timeout = ClientSessionError::Connect(DeadlineError::Timeout {
+            operation: OperationKind::Connect,
+            limit: Duration::from_millis(10),
+        });
+        assert_eq!(lifecycle_connect_error(&connect_timeout).exit_code(), 72);
+
+        let acknowledgement_timeout = ClientRequestError::Exchange(DeadlineError::Timeout {
+            operation: OperationKind::Receive,
+            limit: Duration::from_millis(10),
+        });
+        assert!(lifecycle_request_requires_quarantine(
+            &acknowledgement_timeout
+        ));
+        let failure = lifecycle_request_error(&acknowledgement_timeout);
+        assert_eq!(failure.exit_code(), 72);
+        assert!(!failure.to_string().contains("10ms"));
+
+        let correlation_failure =
+            ClientRequestError::Correlation(artisan_domain::IdentifierError::Empty);
+        assert!(lifecycle_request_requires_quarantine(&correlation_failure));
+    }
+
+    #[test]
+    fn lifecycle_hello_advertises_control_with_only_reconnect_credential() {
+        let Ok(hello) =
+            lifecycle_hello_with_capability(artisan_protocol::ReconnectCapability::from_bytes(
+                [0xa5; artisan_protocol::RECONNECT_CAPABILITY_BYTES],
+            ))
+        else {
+            panic!("lifecycle hello construction failed");
+        };
+        let WireEnvelopeBody::Hello(hello) = hello.body else {
+            panic!("lifecycle hello body");
+        };
+        assert!(hello.supports_lifecycle_control);
+        assert!(matches!(hello.credential, HelloCredential::Reconnect(_)));
+    }
+
+    #[test]
+    fn lifecycle_custody_states_keep_missing_malformed_and_stale_fences_distinct() {
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectRecordMissing).exit_code(),
+            64
+        );
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectRecordMalformed).exit_code(),
+            64
+        );
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::CapabilityBusy).exit_code(),
+            75
+        );
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectStaleWriter).exit_code(),
+            75
+        );
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectBindingMismatch).exit_code(),
+            75
+        );
+    }
+
+    #[test]
+    fn lifecycle_status_accepts_all_valid_states_and_stop_only_drains() {
+        for (state, count) in [
+            (LifecycleState::Ready, 0),
+            (LifecycleState::Busy, 2),
+            (LifecycleState::Draining, 2),
+        ] {
+            let status = LifecycleStatus::new(state, count).unwrap();
+            assert_eq!(
+                lifecycle_state_name(state),
+                match state {
+                    LifecycleState::Ready => "ready",
+                    LifecycleState::Busy => "busy",
+                    LifecycleState::Draining => "draining",
+                }
+            );
+            assert!(status.validate().is_ok());
+        }
+        let ready_receipt = LifecycleStopReceipt {
+            disposition: LifecycleStopDisposition::Accepted,
+            state: LifecycleState::Ready,
         };
         assert_eq!(
-            owned_instance_id(process::StartResult::Spawned { pid: 42 }, &state),
-            Some("forge-owned".into())
+            classify_stop_receipt(&ready_receipt)
+                .unwrap_err()
+                .exit_code(),
+            72
         );
-        assert_eq!(
-            owned_instance_id(process::StartResult::Spawned { pid: 7 }, &state),
-            None
-        );
-        let owned = ReadyState {
-            state: state.clone(),
-            owned_instance_id: Some("forge-owned".into()),
-        };
-        assert_eq!(
-            handoff_json(&owned, "pair")["owned_instance_id"],
-            "forge-owned"
-        );
-        let existing = ReadyState {
-            state,
-            owned_instance_id: None,
-        };
-        assert!(
-            handoff_json(&existing, "pair")
-                .get("owned_instance_id")
-                .is_none()
-        );
-        assert_eq!(handoff_cleanup_instance_id(&owned), Some("forge-owned"));
-        assert_eq!(handoff_cleanup_instance_id(&existing), None);
+        for disposition in [
+            LifecycleStopDisposition::Accepted,
+            LifecycleStopDisposition::Duplicate,
+            LifecycleStopDisposition::AlreadyStopping,
+        ] {
+            let receipt = LifecycleStopReceipt {
+                disposition,
+                state: LifecycleState::Draining,
+            };
+            assert!(classify_stop_receipt(&receipt).is_ok());
+        }
+    }
+
+    #[test]
+    fn handoff_uses_only_validated_non_secret_readiness_data() {
+        let readiness = process::ForgeReadiness::new(
+            "artisan-forge-ready-v1",
+            "127.0.0.1:4317",
+            "a".repeat(64),
+            42,
+        )
+        .unwrap();
+        let handoff = handoff_json(&ReadyState { readiness }, "pair");
+        assert_eq!(handoff["endpoint"], "http://127.0.0.1:4317");
+        assert_eq!(handoff["pair_code"], "pair");
+        assert!(handoff.get("owned_instance_id").is_none());
     }
 
     #[test]
@@ -1328,27 +2816,375 @@ mod tests {
     #[test]
     fn handoff_wait_budget_covers_the_renderer_cold_start_window() {
         assert_eq!(FORGE_READY_TIMEOUT, Duration::from_secs(30));
-        assert!(FORGE_READY_PROBE_TIMEOUT < FORGE_READY_TIMEOUT);
-        assert!(FORGE_READY_INTERVAL < FORGE_READY_TIMEOUT);
+    }
+
+    fn explicit_setup_args() -> Vec<String> {
+        let (database, custody, readiness) = if cfg!(windows) {
+            (
+                r"C:\Artisan Street\data\forge.sqlite3",
+                r"C:\Artisan Street\custody\forge.lock",
+                r"C:\Artisan Street\readiness\forge.json",
+            )
+        } else {
+            (
+                "/tmp/Artisan Street/data/forge.sqlite3",
+                "/tmp/Artisan Street/custody/forge.lock",
+                "/tmp/Artisan Street/readiness/forge.json",
+            )
+        };
+        [
+            "ae",
+            "setup",
+            "--database-path",
+            database,
+            "--custody-path",
+            custody,
+            "--readiness-path",
+            readiness,
+            "--admission-timeout-ms",
+            "101",
+            "--handshake-timeout-ms",
+            "202",
+            "--request-timeout-ms",
+            "303",
+            "--drain-timeout-ms",
+            "404",
+            "--admission-capacity",
+            "3",
+            "--requests-per-connection",
+            "4",
+            "--native-run-claim-lease-ms",
+            "505",
+            "--native-run-poll-interval-ms",
+            "506",
+            "--native-run-retry-backoff-ms",
+            "507",
+            "--native-run-shutdown-budget-ms",
+            "508",
+            "--native-run-queue-capacity",
+            "9",
+            "--native-run-max-command-retries",
+            "10",
+            "--native-run-prompt-delivery",
+            "queue",
+            "--native-run-stream-after",
+            "0",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    fn replace_setup_value(arguments: &mut [String], option: &str, value: &str) {
+        let position = arguments
+            .iter()
+            .position(|argument| argument == option)
+            .expect("setup option should exist");
+        arguments[position + 1] = value.to_owned();
     }
 
     #[test]
-    fn setup_keeps_static_hosting_an_explicit_opt_in() {
-        let default_setup = Cli::try_parse_from(["ae", "setup"]).unwrap();
+    fn setup_requires_explicit_native_values_and_preserves_exact_values() {
+        let valid = Cli::try_parse_from(explicit_setup_args()).unwrap();
         assert!(matches!(
-            default_setup.command,
+            valid.command,
             Some(Commands::Setup {
-                serve_frontend: false,
-                ..
-            })
+                database_path,
+                custody_path,
+                readiness_path,
+                admission_timeout_ms: 101,
+                handshake_timeout_ms: 202,
+                request_timeout_ms: 303,
+                drain_timeout_ms: 404,
+                admission_capacity,
+                requests_per_connection,
+                native_run_claim_lease_ms: 505,
+                native_run_poll_interval_ms: 506,
+                native_run_retry_backoff_ms: 507,
+                native_run_shutdown_budget_ms: 508,
+                native_run_queue_capacity,
+                native_run_max_command_retries,
+                native_run_prompt_delivery,
+                native_run_stream_after: 0,
+                autostart: false,
+            }) if database_path.is_absolute()
+                && custody_path.is_absolute()
+                && readiness_path.is_absolute()
+                && admission_capacity.get() == 3
+                && requests_per_connection.get() == 4
+                && native_run_queue_capacity.get() == 9
+                && native_run_max_command_retries.get() == 10
+                && native_run_prompt_delivery.0 == "queue"
         ));
-        let dev_setup = Cli::try_parse_from(["ae", "setup", "--serve-frontend"]).unwrap();
-        assert!(matches!(
-            dev_setup.command,
-            Some(Commands::Setup {
-                serve_frontend: true,
-                ..
+
+        assert!(Cli::try_parse_from(["ae", "setup"]).is_err());
+        for option in [
+            "--admission-timeout-ms",
+            "--handshake-timeout-ms",
+            "--request-timeout-ms",
+            "--drain-timeout-ms",
+            "--native-run-claim-lease-ms",
+            "--native-run-poll-interval-ms",
+            "--native-run-retry-backoff-ms",
+            "--native-run-shutdown-budget-ms",
+            "--native-run-queue-capacity",
+            "--native-run-max-command-retries",
+        ] {
+            let mut arguments = explicit_setup_args();
+            replace_setup_value(&mut arguments, option, "0");
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "zero argument {option}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_rejects_native_run_boundary_and_legacy_values() {
+        assert_eq!(parse_positive_u64(&u64::MAX.to_string()), Ok(u64::MAX));
+        assert_eq!(
+            parse_native_run_duration_ms(&(u64::MAX / 2).to_string()),
+            Ok(u64::MAX / 2)
+        );
+        assert_eq!(
+            parse_native_run_prompt_delivery(&"p".repeat(256))
+                .map(NativeRunPromptDelivery::into_string),
+            Ok("p".repeat(256))
+        );
+        assert_eq!(
+            parse_native_run_duration_ms("0"),
+            Err(String::from(
+                "must be positive and fit the native-run duration range"
+            ))
+        );
+        assert_eq!(
+            parse_native_run_prompt_delivery("queue").map(NativeRunPromptDelivery::into_string),
+            Ok(String::from("queue"))
+        );
+        for (option, invalid) in [
+            ("--native-run-prompt-delivery", ""),
+            ("--native-run-prompt-delivery", "line\nbreak"),
+            ("--native-run-claim-lease-ms", "not-a-number"),
+            ("--native-run-retry-backoff-ms", "-1"),
+        ] {
+            let mut arguments = explicit_setup_args();
+            replace_setup_value(&mut arguments, option, invalid);
+            assert!(Cli::try_parse_from(arguments).is_err(), "argument {option}");
+        }
+        let too_long_prompt = "p".repeat(257);
+        let mut arguments = explicit_setup_args();
+        replace_setup_value(
+            &mut arguments,
+            "--native-run-prompt-delivery",
+            &too_long_prompt,
+        );
+        assert!(Cli::try_parse_from(arguments).is_err());
+        for option in [
+            "--native-run-claim-lease-ms",
+            "--native-run-poll-interval-ms",
+            "--native-run-retry-backoff-ms",
+            "--native-run-shutdown-budget-ms",
+        ] {
+            let mut arguments = explicit_setup_args();
+            replace_setup_value(&mut arguments, option, &(u64::MAX / 2 + 1).to_string());
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "overflow argument {option}"
+            );
+        }
+        for (option, invalid) in [
+            ("--native-run-queue-capacity", "4294967296"),
+            ("--native-run-max-command-retries", "4294967296"),
+        ] {
+            let mut arguments = explicit_setup_args();
+            replace_setup_value(&mut arguments, option, invalid);
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "overflow argument {option}"
+            );
+        }
+        for legacy in [
+            "--listen-port",
+            "--listen-host",
+            "--mode",
+            "--data-root",
+            "--serve-frontend",
+            "--token",
+        ] {
+            let mut arguments = explicit_setup_args();
+            arguments.push(legacy.to_owned());
+            arguments.push("legacy".to_owned());
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "legacy option {legacy}"
+            );
+        }
+    }
+
+    fn initial_setup_values(root: &Path) -> NativeSetupValues {
+        NativeSetupValues {
+            database_path: root.join("data").join("forge.sqlite3"),
+            custody_path: root.join("custody").join("forge.lock"),
+            readiness_path: root.join("readiness").join("forge.json"),
+            listener: NativeListenerConfig::new(
+                101,
+                202,
+                303,
+                404,
+                NonZeroU32::new(3).unwrap(),
+                NonZeroU32::new(4).unwrap(),
+            ),
+            native_run: NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: 505,
+                poll_interval_ms: 506,
+                retry_backoff_ms: 507,
+                shutdown_budget_ms: 508,
+                queue_capacity: 9,
+                max_command_retries: 10,
+                prompt_delivery: "queue".to_owned(),
+                stream_after: 0,
             })
+            .unwrap(),
+        }
+    }
+
+    fn replacement_setup_values(root: &Path) -> NativeSetupValues {
+        NativeSetupValues {
+            database_path: root.join("data").join("replacement.sqlite3"),
+            custody_path: root.join("custody").join("replacement.lock"),
+            readiness_path: root.join("readiness").join("replacement.json"),
+            listener: NativeListenerConfig::new(
+                111,
+                222,
+                333,
+                444,
+                NonZeroU32::new(5).unwrap(),
+                NonZeroU32::new(6).unwrap(),
+            ),
+            native_run: NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: 555,
+                poll_interval_ms: 556,
+                retry_backoff_ms: 557,
+                shutdown_budget_ms: 558,
+                queue_capacity: 11,
+                max_command_retries: 12,
+                prompt_delivery: "replacement".to_owned(),
+                stream_after: 1,
+            })
+            .unwrap(),
+        }
+    }
+
+    fn refused_setup_values(root: &Path) -> NativeSetupValues {
+        NativeSetupValues {
+            database_path: root.join("data").join("refused.sqlite3"),
+            custody_path: root.join("custody").join("refused.lock"),
+            readiness_path: root.join("readiness").join("refused.json"),
+            listener: NativeListenerConfig::new(
+                1,
+                2,
+                3,
+                4,
+                NonZeroU32::new(1).unwrap(),
+                NonZeroU32::new(1).unwrap(),
+            ),
+            native_run: NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: 1,
+                poll_interval_ms: 2,
+                retry_backoff_ms: 3,
+                shutdown_budget_ms: 4,
+                queue_capacity: 1,
+                max_command_retries: 1,
+                prompt_delivery: "queue".to_owned(),
+                stream_after: 0,
+            })
+            .unwrap(),
+        }
+    }
+
+    fn assert_initial_native_config(layout: &Layout, config: &NativeInstanceConfig) {
+        let credentials = ForgeCredentialPaths::from_home(&layout.root).unwrap();
+        assert_eq!(config.credentials_manifest(), credentials.manifest_path());
+        assert_eq!(config.listener().admission_timeout_ms(), 101);
+        assert_eq!(config.listener().requests_per_connection().get(), 4);
+        assert_eq!(config.native_run().claim_lease_ms(), 505);
+        assert_eq!(config.native_run().poll_interval_ms(), 506);
+        assert_eq!(config.native_run().retry_backoff_ms(), 507);
+        assert_eq!(config.native_run().shutdown_budget_ms(), 508);
+        assert_eq!(config.native_run().queue_capacity().get(), 9);
+        assert_eq!(config.native_run().max_command_retries().get(), 10);
+        assert_eq!(config.native_run().prompt_delivery(), "queue");
+        assert_eq!(config.native_run().stream_after(), 0);
+    }
+
+    #[test]
+    fn native_setup_writes_the_v2_instance_and_missing_config_is_typed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layout = Layout {
+            manifest: temporary.path().join("installation.json"),
+            root: temporary.path().join("Artisan Street"),
+        };
+        assert!(matches!(
+            load_native_instance(&layout),
+            Err(CliError::MissingInstance)
+        ));
+
+        setup_native(&layout, initial_setup_values(&layout.root)).unwrap();
+
+        let config = load_native_instance(&layout).unwrap();
+        assert_initial_native_config(&layout, &config);
+        assert!(layout.native_instance_path().is_file());
+
+        let instance_id = config.instance_id();
+        setup_native(&layout, replacement_setup_values(&layout.root)).unwrap();
+        assert_eq!(
+            load_native_instance(&layout).unwrap().instance_id(),
+            instance_id
+        );
+
+        let instance_path = layout.native_instance_path();
+        let malformed = br#"{"schema":"artisan-instance-v2","version":1}"#;
+        fs::write(&instance_path, malformed).unwrap();
+        let before = fs::read(&instance_path).unwrap();
+        let result = setup_native(&layout, refused_setup_values(&layout.root));
+        assert!(matches!(result, Err(CliError::NativeInstance(_))));
+        assert_eq!(fs::read(&instance_path).unwrap(), before);
+    }
+
+    #[test]
+    fn native_setup_rejects_invalid_explicit_paths_before_provisioning() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layout = Layout {
+            manifest: temporary.path().join("installation.json"),
+            root: temporary.path().join("Artisan Street"),
+        };
+        let values = NativeSetupValues {
+            database_path: PathBuf::from("relative.sqlite3"),
+            custody_path: layout.root.join("custody").join("forge.lock"),
+            readiness_path: layout.root.join("readiness").join("forge.json"),
+            listener: NativeListenerConfig::new(
+                1,
+                2,
+                3,
+                4,
+                NonZeroU32::new(1).unwrap(),
+                NonZeroU32::new(1).unwrap(),
+            ),
+            native_run: NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: 1,
+                poll_interval_ms: 2,
+                retry_backoff_ms: 3,
+                shutdown_budget_ms: 4,
+                queue_capacity: 1,
+                max_command_retries: 1,
+                prompt_delivery: "queue".to_owned(),
+                stream_after: 0,
+            })
+            .unwrap(),
+        };
+        assert!(matches!(
+            setup_native(&layout, values),
+            Err(CliError::NativeInstance(_))
         ));
     }
 
@@ -1412,14 +3248,16 @@ mod tests {
     }
 
     #[test]
-    fn setup_accepts_only_absolute_data_roots() {
-        assert!(validate_data_root(Path::new("relative")).is_err());
-        let absolute = if cfg!(windows) {
-            Path::new(r"C:\ArtisanData")
-        } else {
-            Path::new("/tmp/artisan")
-        };
-        assert!(validate_data_root(absolute).is_ok());
+    fn parsed_setup_debug_redacts_native_run_prompt_delivery() {
+        let canary = "native-run-prompt-delivery-canary";
+        let mut arguments = explicit_setup_args();
+        replace_setup_value(&mut arguments, "--native-run-prompt-delivery", canary);
+        let cli = Cli::try_parse_from(arguments).unwrap();
+        let debug = format!("{cli:?}");
+        assert!(!debug.contains(canary));
+        assert!(debug.contains("NativeRunPromptDelivery"));
+        assert!(debug.contains("byte_length:"));
+        assert!(debug.contains("category: \"validated\""));
     }
 
     #[test]

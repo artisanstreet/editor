@@ -63,6 +63,23 @@ rust_test(
 )
 
 rust_test(
+    name = "thread_engine_config_test",
+    srcs = ["thread_engine_config.rs"],
+    crate_name = "thread_engine_config_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "conversation_execution_migration",
     srcs = ["conversation_execution_migration.rs"],
     crate_name = "conversation_execution_migration",
@@ -215,6 +232,143 @@ rust_test(
     name = "message_dispatch_payload",
     srcs = ["message_dispatch_payload.rs"],
     crate_name = "message_dispatch_payload",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "run_launch_test",
+    srcs = ["run_launch.rs"],
+    crate_name = "run_launch_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "run_binding_test",
+    srcs = ["run_binding.rs"],
+    crate_name = "run_binding_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "run_observation_test",
+    srcs = ["run_observation.rs"],
+    crate_name = "run_observation_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:sha2-0.11.0",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "run_terminal_test",
+    srcs = ["run_terminal.rs"],
+    crate_name = "run_terminal_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "startup_reconciliation",
+    srcs = ["startup_reconciliation.rs"],
+    crate_name = "startup_reconciliation",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "startup_reconciliation_disposition",
+    srcs = ["startup_reconciliation_disposition.rs"],
+    crate_name = "startup_reconciliation_disposition",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_projection_test",
+    srcs = ["conversation_projection.rs"],
+    crate_name = "conversation_projection_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_patch_replay_test",
+    srcs = ["conversation_patch_replay.rs"],
+    crate_name = "conversation_patch_replay_test",
     deps = [
         "//modules/database:database",
         "//modules/domain:domain",

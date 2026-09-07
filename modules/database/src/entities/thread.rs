@@ -2,6 +2,8 @@
 
 use sea_orm::entity::prelude::*;
 
+use super::execution_value::OpaqueBytes;
+
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "threads")]
 pub struct Model {
@@ -11,6 +13,9 @@ pub struct Model {
     pub title: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub engine_run_config_version: Option<i64>,
+    pub engine_run_config_revision: i64,
+    pub engine_run_config: Option<OpaqueBytes>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
