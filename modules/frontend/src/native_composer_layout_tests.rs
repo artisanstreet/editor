@@ -52,8 +52,8 @@ fn composer_controls_keep_equal_edge_insets_as_the_draft_grows(cx: &mut TestAppC
         let primary_bottom = card.bottom() - primary.bottom();
         for inset in [left, right, picker_bottom, primary_bottom] {
             assert!(
-                (px(8.0)..=px(9.0)).contains(&inset),
-                "expected 8px padding plus optional hairline, got {inset:?} for {draft:?}; card={card:?} picker={picker:?} send={primary:?}"
+                (px(5.0)..=px(6.0)).contains(&inset),
+                "expected 5px padding plus optional hairline, got {inset:?} for {draft:?}; card={card:?} picker={picker:?} send={primary:?}"
             );
         }
         if draft.contains('\n') {

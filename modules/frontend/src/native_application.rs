@@ -1207,13 +1207,14 @@ impl NativeApplication {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(12.0))
-                            .line_height(px(14.0))
+                            .text_size(px(10.0))
+                            .line_height(px(12.0))
                             .text_color(theme.secondary)
                             .child(
-                                self.profile_hostname
-                                    .clone()
-                                    .unwrap_or_else(|| "This computer".into()),
+                                self.profile_hostname.clone().map_or_else(
+                                    || "This computer".into(),
+                                    |hostname| capitalize_hostname(&hostname),
+                                ),
                             ),
                     )
             }))
@@ -1326,9 +1327,9 @@ impl NativeApplication {
                                 ),
                         )
                         .children(
-                            self.profile_hostname
-                                .clone()
-                                .map(|hostname| desktop_muted(theme, hostname)),
+                            self.profile_hostname.clone().map(|hostname| {
+                                desktop_muted(theme, capitalize_hostname(&hostname))
+                            }),
                         ),
                 )
                 .child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
@@ -5343,6 +5344,19 @@ fn certified_profiles_detail(registry_view: &RegistryView) -> String {
     }
 }
 
+/// Display the OS computer name with only its first letter capitalized, so a
+/// raw value such as `DESKTOP-96USC6J` paints as `Desktop-96usc6j`. The stored
+/// hostname is left untouched so avatar seeds and identity matching stay stable.
+fn capitalize_hostname(hostname: &str) -> String {
+    let mut characters = hostname.chars();
+    match characters.next() {
+        None => String::new(),
+        Some(first) => {
+            first.to_uppercase().collect::<String>() + &characters.as_str().to_lowercase()
+        }
+    }
+}
+
 fn certified_profile_choices(
     theme: &ArtisanTheme,
     controller: &EngineSettingsController,
@@ -6276,6 +6290,16 @@ mod tests {
         cx.run_until_parked();
         assert!(!cx.update(|_, app| view.read(app).sidebar_editor));
         assert!(cx.debug_bounds(DESKTOP_COMPOSER_SELECTOR).is_some());
+    }
+
+    #[test]
+    fn profile_hostname_capitalizes_first_letter_only() {
+        assert_eq!(
+            super::capitalize_hostname("DESKTOP-96USC6J"),
+            "Desktop-96usc6j"
+        );
+        assert_eq!(super::capitalize_hostname("sander"), "Sander");
+        assert_eq!(super::capitalize_hostname(""), "");
     }
 
     #[gpui::test]

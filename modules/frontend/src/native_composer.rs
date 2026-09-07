@@ -2425,7 +2425,7 @@ impl Render for NativeComposer {
             .flex_col()
             .gap(px(8.0))
             .min_h(px(128.0))
-            .p(px(8.0))
+            .p(px(5.0))
             .rounded(px(18.0))
             .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
             .bg(glass_foreground_base(theme))
