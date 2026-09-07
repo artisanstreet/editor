@@ -11,6 +11,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]) + [
         "//tests/ui:command.rs",
         "//tests/ui:tinted_svg.rs",
+        "//tests/ui:typography_gradient.rs",
     ],
     crate_name = "artisan_ui",
     deps = [
@@ -39,6 +40,18 @@ rust_test(
 
 rust_test(
     name = "command_unit_test",
+    crate = ":ui",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+# Wave-2 typography + gradient fidelity: compiles the ui library itself in
+# test mode, so the cfg(test) child module declared in src/gradient.rs can
+# reach these helpers through the crate. See tests/ui/typography_gradient.rs.
+rust_test(
+    name = "typography_gradient_unit_test",
     crate = ":ui",
     edition = "2024",
     lint_config = "//:workspace_lints",

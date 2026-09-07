@@ -437,9 +437,7 @@ impl NativeRunDispatcher {
     /// variant). Test-only; production always uses [`Self::start`].
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn start_with_fixture_scenario_for_tests(
-        params: FixtureScenarioLaunch<'_>,
-    ) -> Self {
+    pub(crate) fn start_with_fixture_scenario_for_tests(params: FixtureScenarioLaunch<'_>) -> Self {
         let FixtureScenarioLaunch {
             repository,
             database_path,
@@ -1637,7 +1635,9 @@ async fn consume_turn(
             // `next_observation()` on a held stream that never emits a
             // terminal event.
             let observation = turn.next_observation().await;
-            let Some(observation) = observation else { break; };
+            let Some(observation) = observation else {
+                break;
+            };
             handle_observation(&context, &mut state, &mut turn, observation).await;
         } else {
             tokio::select! {

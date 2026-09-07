@@ -8,6 +8,7 @@ exports_files(
     [
         "command.rs",
         "tinted_svg.rs",
+        "typography_gradient.rs",
     ],
     visibility = ["//visibility:public"],
 )
@@ -67,9 +68,37 @@ rust_test(
 )
 
 rust_test(
+    name = "accordion_test",
+    srcs = ["accordion.rs"],
+    crate_name = "accordion_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "alert_test",
     srcs = ["alert.rs"],
     crate_name = "alert_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "alert_dialog_test",
+    srcs = ["alert_dialog.rs"],
+    crate_name = "alert_dialog_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",
@@ -108,6 +137,20 @@ rust_test(
     name = "input_test",
     srcs = ["input.rs"],
     crate_name = "input_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "input_group_test",
+    srcs = ["input_group.rs"],
+    crate_name = "input_group_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",
@@ -186,6 +229,20 @@ rust_test(
 )
 
 rust_test(
+    name = "context_menu_test",
+    srcs = ["context_menu.rs"],
+    crate_name = "context_menu_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "dialog_test",
     srcs = ["dialog.rs"],
     crate_name = "dialog_test",
@@ -242,9 +299,37 @@ rust_test(
 )
 
 rust_test(
+    name = "textarea_test",
+    srcs = ["textarea.rs"],
+    crate_name = "textarea_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "toggle_group_test",
     srcs = ["toggle_group.rs"],
     crate_name = "toggle_group_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "toggle_test",
+    srcs = ["toggle.rs"],
+    crate_name = "toggle_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",
@@ -273,6 +358,20 @@ rust_test(
     name = "lip_card_test",
     srcs = ["lip_card.rs"],
     crate_name = "lip_card_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "link_preview_test",
+    srcs = ["link_preview.rs"],
+    crate_name = "link_preview_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",
@@ -326,9 +425,37 @@ rust_test(
 )
 
 rust_test(
+    name = "select_test",
+    srcs = ["select.rs"],
+    crate_name = "select_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "separator_test",
     srcs = ["separator.rs"],
     crate_name = "separator_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "sheet_test",
+    srcs = ["sheet.rs"],
+    crate_name = "sheet_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",
@@ -396,6 +523,20 @@ rust_test(
 )
 
 rust_test(
+    name = "slider_test",
+    srcs = ["slider.rs"],
+    crate_name = "slider_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "icon_test",
     srcs = ["icon.rs"],
     crate_name = "icon_test",
@@ -413,6 +554,20 @@ rust_test(
     name = "list_row_test",
     srcs = ["list_row.rs"],
     crate_name = "list_row_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "native_select_test",
+    srcs = ["native_select.rs"],
+    crate_name = "native_select_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",

@@ -146,7 +146,7 @@ fn outline_palette_resolves_per_mode_from_exact_legacy_sources() {
         Oklch::new(1.0, 0.0, 0.0).with_alpha(0.10).to_paint()
     );
     assert_eq!(
-        dark_style.border.a.to_bits(),
+        dark_style.border.alpha.to_bits(),
         0.10_f32.to_bits(),
         "dark --border carries exactly 10% alpha"
     );

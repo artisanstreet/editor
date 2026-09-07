@@ -16,9 +16,9 @@ use conversation_scene::{
 use conversation_surface::{
     CONVERSATION_SURFACE_MAX_ACTIONS, ConversationSurface, ConversationSurfaceAction,
     ConversationSurfaceTarget, JUMP_TO_LATEST_SELECTOR, ROOT_SELECTOR, RenderedBlockKind,
-    TURN_NAVIGATOR_SELECTOR, VIEWPORT_SELECTOR, ViewportObservation,
-    block_selector, changed_file_selector, file_change_status_label, format_elapsed_millis,
-    ordered_block_kinds, steering_selector, turn_selector, turn_status_copy,
+    TURN_NAVIGATOR_SELECTOR, VIEWPORT_SELECTOR, ViewportObservation, block_selector,
+    changed_file_selector, file_change_status_label, format_elapsed_millis, ordered_block_kinds,
+    steering_selector, turn_selector, turn_status_copy,
 };
 use gpui::{KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
@@ -643,7 +643,7 @@ fn mounted_surface_exposes_root_viewport_and_keyboard_focus_bounds(cx: &mut Test
 
     cx.update(|window, app| {
         let focus = surface.read(app).transcript_focus_handle().clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
         assert!(focus.is_focused(window));
     });
 }
@@ -699,8 +699,8 @@ fn jump_to_latest_is_an_overlay_and_pointer_keyboard_activation_is_typed(cx: &mu
 
     cx.update(|window, app| {
         let focus = surface.read(app).transcript_focus_handle().clone();
-        window.focus(&focus);
-        window.focus_next();
+        window.focus(&focus, app);
+        window.focus_next(app);
     });
     complete_key_press(cx, "enter");
     complete_key_press(cx, "space");
@@ -726,7 +726,7 @@ fn viewport_geometry_reports_top_near_bottom_and_detached_positions(cx: &mut Tes
     let (max_height, viewport_height) = cx.update(|_, app| {
         let surface = surface.read(app);
         (
-            surface.scroll_handle().max_offset().height,
+            surface.scroll_handle().max_offset().y,
             surface.scroll_handle().bounds().size.height,
         )
     });
@@ -822,6 +822,10 @@ fn viewport_observations_deduplicate_and_retry_after_queue_backpressure(cx: &mut
 
 #[gpui::test]
 fn markdown_message_body_mounts_heading_paragraph_inline_code_and_fence(cx: &mut TestAppContext) {
+    // User bubbles render plain paragraphs (parity with
+    // conversation-message.svelte): no markdown subtree mounts there.
+    const USER_ITEM: &str = "artisan-conversation-surface-turn-turn_a-block-user-user";
+    const USER_BODY: &str = "artisan-conversation-surface-turn-turn_a-block-user-user-body";
     const USER_MARKDOWN: &str = "artisan-conversation-surface-turn-turn_a-block-user-user-markdown";
     const USER_HEADING: &str =
         "artisan-conversation-surface-turn-turn_a-block-user-user-markdown-block-0";
@@ -872,11 +876,20 @@ fn markdown_message_body_mounts_heading_paragraph_inline_code_and_fence(cx: &mut
     cx.simulate_resize(size(px(720.0), px(640.0)));
     cx.run_until_parked();
 
+    // Plain user paragraph mounts visibly; no markdown subtree exists there.
+    for selector in [USER_ITEM, USER_BODY] {
+        let bounds = cx
+            .debug_bounds(selector)
+            .expect("user bubble structure must paint bounds");
+        assert!(bounds.size.height > px(0.0), "{selector} must be visible");
+    }
+    for selector in [USER_MARKDOWN, USER_HEADING, USER_PARAGRAPH, USER_CODE] {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "user bubbles must not mount a markdown subtree: {selector}"
+        );
+    }
     for selector in [
-        USER_MARKDOWN,
-        USER_HEADING,
-        USER_PARAGRAPH,
-        USER_CODE,
         ASSISTANT_MARKDOWN,
         ASSISTANT_HEADING,
         ASSISTANT_PARAGRAPH,
@@ -947,26 +960,35 @@ fn markdown_open_unknown_fence_and_html_are_inert(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(720.0), px(480.0)));
     cx.run_until_parked();
 
-    for selector in [OPEN_MARKDOWN, UNKNOWN_MARKDOWN, HTML_MARKDOWN, HTML_BLOCK] {
-        assert!(
-            cx.debug_bounds(selector).is_some(),
-            "inert source must remain mounted at {selector}"
-        );
-    }
-    for selector in [OPEN_CODE, UNKNOWN_CODE, HTML_CODE] {
+    // User bubbles render plain paragraphs: no markdown or highlighted
+    // code selectors mount there at all.
+    for selector in [
+        OPEN_MARKDOWN,
+        HTML_MARKDOWN,
+        HTML_BLOCK,
+        OPEN_CODE,
+        HTML_CODE,
+    ] {
         assert!(
             cx.debug_bounds(selector).is_none(),
-            "inert source must not expose a highlighted code selector: {selector}"
+            "user bubbles must not mount markdown selectors: {selector}"
         );
     }
+    assert!(
+        cx.debug_bounds(UNKNOWN_MARKDOWN).is_some(),
+        "assistant markdown must remain mounted"
+    );
+    assert!(
+        cx.debug_bounds(UNKNOWN_CODE).is_none(),
+        "inert source must not expose a highlighted code selector"
+    );
     let _ = drain_surface_actions(&surface, cx);
     cx.update(|_, app| assert!(surface.read(app).pending_actions().is_empty()));
 }
 
 #[gpui::test]
 fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppContext) {
-    const OLD_MARKDOWN: &str =
-        "artisan-conversation-surface-turn-turn_a-block-user-old-user-markdown";
+    const OLD_BODY: &str = "artisan-conversation-surface-turn-turn_a-block-user-old-user-body";
     const NEW_MARKDOWN: &str =
         "artisan-conversation-surface-turn-turn_a-block-assistant-new-assistant-markdown";
     const DISCLOSURE_TRIGGER: &str = "artisan-conversation-surface-turn-turn_a-block-change-replacement-change-disclosure-trigger";
@@ -977,13 +999,13 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     cx.simulate_resize(size(px(720.0), px(480.0)));
     cx.run_until_parked();
     let _ = drain_surface_actions(&surface, cx);
-    assert!(cx.debug_bounds(OLD_MARKDOWN).is_some());
+    assert!(cx.debug_bounds(OLD_BODY).is_some());
 
     let mut replacement_app = (*cx).clone();
     let (_, replacement_cx) = replacement_app.add_window_view(|_, _| SurfaceWindowHost {
         surface: surface.clone(),
     });
-    assert!(replacement_cx.debug_bounds(OLD_MARKDOWN).is_some());
+    assert!(replacement_cx.debug_bounds(OLD_BODY).is_some());
 
     cx.update(|_, app| {
         surface.update(app, |surface, surface_cx| {
@@ -1002,7 +1024,7 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     // fresh test window painted the old scene once before replacement, so its
     // clean alternate frame is an honest current-frame retirement probe for
     // the same authoritative surface entity.
-    assert!(replacement_cx.debug_bounds(OLD_MARKDOWN).is_none());
+    assert!(replacement_cx.debug_bounds(OLD_BODY).is_none());
     assert!(replacement_cx.debug_bounds(NEW_MARKDOWN).is_some());
 
     let trigger = cx
@@ -1111,10 +1133,7 @@ const NAV_BLANK_CONTROL: &str = "artisan-conversation-surface-turn-navigator-con
 fn mount_navigator_scene(
     scene: ConversationScene,
     cx: &mut TestAppContext,
-) -> (
-    gpui::Entity<ConversationSurface>,
-    &mut VisualTestContext,
-) {
+) -> (gpui::Entity<ConversationSurface>, &mut VisualTestContext) {
     let (surface, cx) = cx.add_window_view(|_, surface_cx| {
         ConversationSurface::new(scene, ThemeMode::Dark, surface_cx)
     });
@@ -1287,7 +1306,7 @@ fn loaded_turn_navigator_keyboard_activation_matches_pointer(cx: &mut TestAppCon
             .read(app)
             .navigator_focus_handle(&target)
             .expect("navigator control retains its focus handle");
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     complete_key_press(cx, "enter");
     complete_key_press(cx, "space");
@@ -1302,9 +1321,7 @@ fn loaded_turn_navigator_keyboard_activation_matches_pointer(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(
-    cx: &mut TestAppContext,
-) {
+fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(cx: &mut TestAppContext) {
     let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
     let first_target = ConversationSurfaceTarget::Item(item_id("nav-first"));
     cx.update(|window, app| {
@@ -1312,14 +1329,18 @@ fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(
             .read(app)
             .navigator_focus_handle(&first_target)
             .expect("navigator control retains its focus handle");
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     cx.run_until_parked();
     let mut replacement_app = (*cx).clone();
     let (_, replacement_cx) = replacement_app.add_window_view(|_, _| SurfaceWindowHost {
         surface: surface.clone(),
     });
-    assert!(replacement_cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_some());
+    assert!(
+        replacement_cx
+            .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+            .is_some()
+    );
 
     cx.update(|_, app| {
         surface.update(app, |surface, surface_cx| {
@@ -1342,15 +1363,15 @@ fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(
     });
     cx.run_until_parked();
 
-    assert!(replacement_cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_none());
+    assert!(
+        replacement_cx
+            .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+            .is_none()
+    );
     cx.update(|window, app| {
         let surface = surface.read(app);
         assert!(surface.navigator_focus_handle(&first_target).is_none());
-        assert!(
-            surface
-                .transcript_focus_handle()
-                .is_focused(window)
-        );
+        assert!(surface.transcript_focus_handle().is_focused(window));
     });
     let _ = drain_surface_actions(&surface, cx);
 }
@@ -1381,14 +1402,12 @@ fn loaded_turn_navigator_activation_respects_action_backpressure(cx: &mut TestAp
         surface.update(app, |surface, _| {
             let pending = surface.pending_actions();
             assert_eq!(pending.len(), CONVERSATION_SURFACE_MAX_ACTIONS);
-            assert!(
-                !pending.iter().any(|action| matches!(
-                    action,
-                    ConversationSurfaceAction::ScrollIntent {
-                        target: ConversationSurfaceTarget::Item(_)
-                    }
-                ))
-            );
+            assert!(!pending.iter().any(|action| matches!(
+                action,
+                ConversationSurfaceAction::ScrollIntent {
+                    target: ConversationSurfaceTarget::Item(_)
+                }
+            )));
         });
     });
 }

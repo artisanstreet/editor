@@ -154,7 +154,9 @@ fn with_scoped_tint_delegation<R>(
     delegate: impl FnOnce(&mut Svg, &mut Window, &mut App) -> R,
 ) -> R {
     // Authored inspection on the real slot decides the pass behavior.
-    let authored = svg.text_style().as_ref().and_then(|text| text.color);
+    // The fork's `Styled::text_style` returns the live refinement directly
+    // (an empty refinement means "absent slot").
+    let authored = svg.text_style().color;
 
     if authored.is_some() {
         // Authored own/caller/Muted color wins outright: the slot already
@@ -167,18 +169,17 @@ fn with_scoped_tint_delegation<R>(
     // pass — including the resolved default text style when no ancestor
     // refined one.
     let had_text_refinement = svg.text_style().is_some();
-    svg.text_style()
-        .get_or_insert_with(TextStyleRefinement::default)
-        .color = Some(window.text_style().color);
+    svg.text_style().color = Some(window.text_style().color);
 
     let result = delegate(svg, window, cx);
 
-    // Exact unwind of the temporary injection: an absent slot is removed
-    // again; a pre-existing colorless refinement keeps its other authored
-    // properties while its color returns to None.
-    match (had_text_refinement, svg.text_style()) {
-        (true, Some(text)) => text.color = None,
-        _ => *svg.text_style() = None,
+    // Exact unwind of the temporary injection: an absent slot is reset to
+    // the empty refinement again; a pre-existing colorless refinement keeps
+    // its other authored properties while its color returns to None.
+    if had_text_refinement {
+        svg.text_style().color = None;
+    } else {
+        *svg.text_style() = TextStyleRefinement::default();
     }
 
     result

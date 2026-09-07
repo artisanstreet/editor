@@ -17,6 +17,7 @@ artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
+gpui_platform.workspace = true
 rustls-pki-types.workspace = true
 statig.workspace = true
 thiserror.workspace = true
@@ -84,6 +85,10 @@ name = "composer_gesture"
 path = "../../tests/frontend/composer_gesture.rs"
 
 [[test]]
+name = "composer_send_readiness"
+path = "../../tests/frontend/composer_send_readiness.rs"
+
+[[test]]
 name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 
@@ -114,6 +119,10 @@ path = "../../tests/frontend/conversation_checklist.rs"
 [[test]]
 name = "conversation_delivery_machine"
 path = "../../tests/frontend/conversation_delivery_machine.rs"
+
+[[test]]
+name = "conversation_duration"
+path = "../../tests/frontend/conversation_duration.rs"
 
 [[test]]
 name = "conversation_error_card_policy"
@@ -280,6 +289,10 @@ name = "markdown_language_registry_policy"
 path = "../../tests/frontend/markdown_language_registry_policy.rs"
 
 [[test]]
+name = "markdown_streaming_words"
+path = "../../tests/frontend/markdown_streaming_words.rs"
+
+[[test]]
 name = "markdown_test_parser_policy"
 path = "../../tests/frontend/markdown_test_parser_policy.rs"
 
@@ -392,6 +405,10 @@ name = "reader_attention"
 path = "../../tests/frontend/reader_attention.rs"
 
 [[test]]
+name = "relative_time"
+path = "../../tests/frontend/relative_time.rs"
+
+[[test]]
 name = "repository_mark"
 path = "../../tests/frontend/repository_mark.rs"
 
@@ -450,6 +467,10 @@ path = "../../tests/frontend/shell_command.rs"
 [[test]]
 name = "shell_layout"
 path = "../../tests/frontend/shell_layout.rs"
+
+[[test]]
+name = "shell_presentation_preferences_policy"
+path = "../../tests/frontend/shell_presentation_preferences_policy.rs"
 
 [[test]]
 name = "shell_presentation_state"

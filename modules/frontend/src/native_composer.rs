@@ -16,14 +16,14 @@ use artisan_ui::{
     theme::{ArtisanTheme, ThemeMode},
 };
 use gpui::{
-    actions, div, point,
+    AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler,
+    Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
+    KeyBinding, LayoutId, MouseButton, Pixels, Point, Render, SharedString, StyledText,
+    UTF16Selection, Window, actions, div, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
-    px, size, AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId,
-    ElementInputHandler, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId,
-    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, Pixels, Point, Render,
-    SharedString, StyledText, UTF16Selection, Window,
+    px, size,
 };
 
 use crate::composer::{ComposerState, DraftDisposition, SubmissionBlocked, SubmissionToken};
@@ -929,18 +929,18 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use super::{
-        localize_painted_point, offset_layout_bounds, replace_text_preserving_raw,
-        utf16_offset_to_utf8, utf16_range_to_utf8, utf8_offset_to_utf16, NativeComposer,
-        NativeComposerEvent, NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
-        NATIVE_COMPOSER_SEND_SELECTOR,
+        NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
+        NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer, NativeComposerEvent, localize_painted_point,
+        offset_layout_bounds, replace_text_preserving_raw, utf8_offset_to_utf16,
+        utf16_offset_to_utf8, utf16_range_to_utf8,
     };
     use crate::composer::DraftDisposition;
     use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
     use gpui::{
-        point, px, size, Bounds, Entity, EntityInputHandler as _, KeyUpEvent, Keystroke, Modifiers,
-        Subscription, TestAppContext, VisualTestContext,
+        Bounds, Entity, EntityInputHandler as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
+        Subscription, TestAppContext, VisualTestContext, point, px, size,
     };
 
     fn set_draft(cx: &mut VisualTestContext, view: &Entity<NativeComposer>, draft: &str) {
@@ -995,7 +995,7 @@ mod tests {
     fn focus_editor(cx: &mut VisualTestContext, view: &Entity<NativeComposer>) {
         cx.update(|window, app| {
             let focus = view.read(app).focus_handle.clone();
-            window.focus(&focus);
+            window.focus(&focus, app);
         });
         cx.run_until_parked();
     }
@@ -1152,7 +1152,7 @@ mod tests {
 
         let ring_visible = cx.update(|window, app| {
             let focus = view.read(app).send_focus_handle.clone();
-            window.focus(&focus);
+            window.focus(&focus, app);
             send_button(focus).focus_ring_visible(window)
         });
         assert!(ring_visible);
@@ -1161,10 +1161,10 @@ mod tests {
             let composer = view.read(app);
             let editor_focus = composer.focus_handle.clone();
             let send_focus = composer.send_focus_handle.clone();
-            window.focus(&editor_focus);
-            window.focus_next();
+            window.focus(&editor_focus, app);
+            window.focus_next(app);
             assert!(send_focus.is_focused(window));
-            window.focus_prev();
+            window.focus_prev(app);
             assert!(editor_focus.is_focused(window));
         });
     }
@@ -1185,7 +1185,15 @@ mod tests {
                 "a pointer activation must focus the shared Send button"
             );
         });
+        // The fork only synthesizes a keyboard click for a key-up preceded
+        // by a matching key-down on the same focus generation, so each
+        // activation simulates the full press a real user produces.
         for key in ["enter", "space"] {
+            cx.simulate_event(KeyDownEvent {
+                keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
+                is_held: false,
+                prefer_character_input: false,
+            });
             cx.simulate_event(KeyUpEvent {
                 keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
             });
@@ -1471,7 +1479,7 @@ mod tests {
 
         cx.update(|window, app| {
             let focus = view.read(app).focus_handle.clone();
-            window.focus(&focus);
+            window.focus(&focus, app);
             view.update(app, |composer, _| {
                 composer.selection_reversed = true;
             });

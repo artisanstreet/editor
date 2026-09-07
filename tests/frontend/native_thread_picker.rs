@@ -226,7 +226,7 @@ impl PickerHost {
             NativeThreadPicker::new(listing, selected_thread, ThemeMode::Dark, picker_cx)
         });
         let lead_focus = cx.focus_handle().tab_index(0).tab_stop(true);
-        lead_focus.focus(window);
+        lead_focus.focus(window, cx);
         Self { picker, lead_focus }
     }
 }
@@ -256,7 +256,7 @@ fn real_gpui_surface_scrolls_256_rows_and_restores_focus_after_pointer_activatio
             .picker
             .read(app)
             .trigger_focus()
-            .focus(window);
+            .focus(window, app);
     });
     cx.run_until_parked();
 

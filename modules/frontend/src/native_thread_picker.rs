@@ -18,10 +18,11 @@ use artisan_ui::list_row::{
 };
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    AnyElement, ClickEvent, Context, Corner, Div, FocusHandle, FontWeight, InteractiveElement as _,
-    KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    SharedString, Size, Stateful, StatefulInteractiveElement as _, Styled as _, Window, anchored,
-    canvas, deferred, div, point, prelude::FluentBuilder as _, prelude::IntoElement, px,
+    Anchor, AnyElement, App, ClickEvent, Context, Div, FocusHandle, FontWeight,
+    InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point,
+    Render, ScrollHandle, SharedString, Size, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder as _,
+    prelude::IntoElement, px,
 };
 
 use crate::thread_list_selection::{
@@ -387,7 +388,7 @@ impl NativeThreadPicker {
         }
         self.suppress_trigger_release = false;
         self.state.press_trigger();
-        self.sync_focus_after_transition(window);
+        self.sync_focus_after_transition(window, cx);
         cx.notify();
     }
 
@@ -411,7 +412,7 @@ impl NativeThreadPicker {
         if event.keystroke.key == "escape" {
             self.state.dismiss();
             self.initial_reveal_flat.borrow_mut().take();
-            window.focus(&self.trigger_focus);
+            window.focus(&self.trigger_focus, cx);
             cx.notify();
             return;
         }
@@ -424,7 +425,7 @@ impl NativeThreadPicker {
             if !self.state.is_open() {
                 self.suppress_trigger_release = true;
             }
-            self.sync_focus_after_transition(window);
+            self.sync_focus_after_transition(window, cx);
         } else {
             self.reveal_highlight();
         }
@@ -442,25 +443,25 @@ impl NativeThreadPicker {
         }
         self.state.dismiss();
         self.initial_reveal_flat.borrow_mut().take();
-        window.focus(&self.trigger_focus);
+        window.focus(&self.trigger_focus, cx);
         cx.notify();
     }
 
     fn choose_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.state.activate_row(index);
-        self.sync_focus_after_transition(window);
+        self.sync_focus_after_transition(window, cx);
         cx.notify();
     }
 
-    fn sync_focus_after_transition(&mut self, window: &mut Window) {
+    fn sync_focus_after_transition(&mut self, window: &mut Window, cx: &mut App) {
         if self.state.is_open() {
-            window.focus(&self.menu_focus);
+            window.focus(&self.menu_focus, cx);
             let flat = self.state.highlighted_index().unwrap_or(0);
             *self.initial_reveal_flat.borrow_mut() = Some(flat);
             self.reveal_highlight();
         } else {
             self.initial_reveal_flat.borrow_mut().take();
-            window.focus(&self.trigger_focus);
+            window.focus(&self.trigger_focus, cx);
         }
     }
 
@@ -555,7 +556,7 @@ impl NativeThreadPicker {
 
         Some(
             anchored()
-                .anchor(Corner::BottomLeft)
+                .anchor(Anchor::BottomLeft)
                 .position(trigger_origin)
                 .offset(point(px(0.0), px(-MENU_GAP_PX)))
                 .child(body)

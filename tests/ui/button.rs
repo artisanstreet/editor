@@ -316,7 +316,7 @@ fn pointer_click_uses_the_mouse_activation_path_and_focuses(cx: &mut TestAppCont
 fn enter_and_space_activate_from_keyboard_focus_without_a_pointer_click(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| {
         let probe = ButtonProbe::new(cx, false, FocusVisibility::Visible);
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();
@@ -351,7 +351,7 @@ fn disabled_button_suppresses_pointer_keyboard_and_focus_tracking(cx: &mut TestA
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
         assert!(!focus.is_focused(window));
-        window.focus(&focus);
+        window.focus(&focus, app);
         view.update(app, |_, cx| cx.notify());
     });
     cx.run_until_parked();
@@ -379,7 +379,7 @@ fn focus_ring_requires_actual_focus_and_visible_focus_intent(cx: &mut TestAppCon
 
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     cx.run_until_parked();
     cx.update(|_, app| {

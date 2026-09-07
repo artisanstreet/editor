@@ -159,7 +159,7 @@ fn alert_variant_palette_resolves_from_exact_legacy_sources() {
             theme.colors.destructive.with_alpha(0.90).to_paint()
         );
         assert_eq!(
-            destructive.description_foreground.a.to_bits(),
+            destructive.description_foreground.alpha.to_bits(),
             0.90_f32.to_bits(),
             "destructive description carries exactly 90% alpha"
         );

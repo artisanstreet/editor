@@ -200,7 +200,7 @@ fn oversized_content_is_clipped_and_shared_handle_moves_without_scrollbar_space(
     assert_eq!(viewport.size, root.size);
     assert_eq!(content.size, size(px(240.0), px(480.0)));
     assert_eq!(handle.bounds(), viewport);
-    assert_eq!(handle.max_offset(), size(px(0.0), px(360.0)));
+    assert_eq!(handle.max_offset(), point(px(0.0), px(360.0)));
     assert_eq!(handle.offset(), point(px(0.0), px(0.0)));
 
     // A zero scrollbar width keeps the viewport at full width and no track or
@@ -252,7 +252,7 @@ fn caller_style_refinement_wins_for_both_root_and_viewport(cx: &mut TestAppConte
             .focus_visibility(FocusVisibility::Visible);
         assert!(!area.focus_ring_visible(window));
 
-        window.focus(&focus);
+        window.focus(&focus, app);
         assert!(area.focus_ring_visible(window));
         assert!(
             !area
@@ -274,8 +274,8 @@ fn independent_handles_keep_offsets_and_bounds_separate(cx: &mut TestAppContext)
         theme: ArtisanTheme::for_mode(ThemeMode::Dark),
     });
 
-    assert_eq!(first.max_offset(), size(px(0.0), px(200.0)));
-    assert_eq!(second.max_offset(), size(px(0.0), px(80.0)));
+    assert_eq!(first.max_offset(), point(px(0.0), px(200.0)));
+    assert_eq!(second.max_offset(), point(px(0.0), px(80.0)));
     assert_eq!(first.bounds().size, size(px(240.0), px(100.0)));
     assert_eq!(second.bounds().size, size(px(240.0), px(100.0)));
 
