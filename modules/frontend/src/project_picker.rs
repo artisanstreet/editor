@@ -84,10 +84,11 @@ use artisan_ui::list_row::{
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    AnyElement, ClickEvent, Context, Corner, Div, FocusHandle, FontWeight, InteractiveElement as _,
-    KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    SharedString, Size, Stateful, StatefulInteractiveElement as _, Styled as _, Window, anchored,
-    canvas, deferred, div, point, prelude::FluentBuilder as _, prelude::IntoElement, px,
+    Anchor, AnyElement, App, ClickEvent, Context, Div, FocusHandle, FontWeight,
+    InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point,
+    Render, ScrollHandle, SharedString, Size, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder as _,
+    prelude::IntoElement, px,
 };
 
 /// How long printable typeahead keeps accumulating before its buffer expires.
@@ -667,7 +668,7 @@ impl ProjectPickerView {
         }
         self.suppress_trigger_release = false;
         self.state.press_trigger();
-        self.sync_focus_after_transition(window);
+        self.sync_focus_after_transition(window, cx);
         cx.notify();
     }
 
@@ -716,7 +717,7 @@ impl ProjectPickerView {
             "enter" | "space" => {
                 self.state.activate_highlighted();
                 self.drain_actions();
-                self.sync_focus_after_transition(window);
+                self.sync_focus_after_transition(window, cx);
                 // Unconditionally fence this closing press: pinned GPUI
                 // decides whether to synthesize a focused-trigger click from
                 // the ACTUAL key-up modifiers (Ctrl may be released first),
@@ -728,7 +729,7 @@ impl ProjectPickerView {
                 true
             }
             "escape" => {
-                self.dismiss_and_settle(window);
+                self.dismiss_and_settle(window, cx);
                 true
             }
             _ => false,
@@ -773,20 +774,20 @@ impl ProjectPickerView {
         if self.menu_scroll.bounds().contains(&event.position) {
             return;
         }
-        self.dismiss_and_settle(window);
+        self.dismiss_and_settle(window, cx);
         cx.notify();
     }
 
     fn choose_row(&mut self, row: PickerRow, window: &mut Window, cx: &mut Context<Self>) {
         self.state.activate_row(row);
         self.drain_actions();
-        self.sync_focus_after_transition(window);
+        self.sync_focus_after_transition(window, cx);
         cx.notify();
     }
 
-    fn dismiss_and_settle(&mut self, window: &mut Window) {
+    fn dismiss_and_settle(&mut self, window: &mut Window, cx: &mut App) {
         self.state.dismiss();
-        window.focus(&self.trigger_focus);
+        window.focus(&self.trigger_focus, cx);
     }
 
     /// Refocuses whichever surface owns the keyboard after an open/close
@@ -794,9 +795,9 @@ impl ProjectPickerView {
     /// capture/restore policy for this leaf). Opening also arms a first-open
     /// reveal of the initial highlight, which may sit far below the fold of
     /// a long catalog.
-    fn sync_focus_after_transition(&mut self, window: &mut Window) {
+    fn sync_focus_after_transition(&mut self, window: &mut Window, cx: &mut App) {
         if self.state.is_open() {
-            window.focus(&self.menu_focus);
+            window.focus(&self.menu_focus, cx);
             // Immediate attempt: harmless once the handle has bounds from an
             // earlier open. A brand-new handle consumes this first pending
             // item before it has overflow/bounds and silently drops it, so
@@ -811,7 +812,7 @@ impl ProjectPickerView {
             self.reveal_highlight();
         } else {
             self.initial_reveal_flat.set(None);
-            window.focus(&self.trigger_focus);
+            window.focus(&self.trigger_focus, cx);
         }
     }
 
@@ -957,7 +958,7 @@ impl ProjectPickerView {
 
         Some(
             anchored()
-                .anchor(Corner::BottomLeft)
+                .anchor(Anchor::BottomLeft)
                 .position(trigger_origin)
                 .offset(point(px(0.0), px(-MENU_GAP_PX)))
                 .child(body)

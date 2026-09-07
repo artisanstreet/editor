@@ -47,12 +47,14 @@ pub enum InstallerError {
         #[source]
         source: std::io::Error,
     },
+    #[error("staging cleanup could not be completed")]
+    StageCleanupIncomplete,
     #[error("installation already exists for release {0}")]
     ExistingRelease(String),
     #[error("permanent ae executable is missing at {0}")]
     MissingCli(PathBuf),
     #[error(
-        "installer lifecycle binary is missing at {0}; release archives must contain bin/ae-installer (bin/ae-installer.exe on Windows)"
+        "installer lifecycle binary is missing at {0}; release archives must contain bin/installer (bin/installer.exe on Windows)"
     )]
     MissingInstaller(PathBuf),
     #[error("installation state is invalid: {0}")]
@@ -73,6 +75,24 @@ pub enum InstallerError {
     NonUtf8Path(PathBuf),
     #[error("could not start self-cleanup helper: {0}")]
     CleanupHelper(#[source] std::io::Error),
+    #[error("installation root is busy")]
+    InstallationRootBusy,
+    #[error("installation root is unsafe")]
+    UnsafeInstallationRoot,
+    #[error("installation root changed during operation")]
+    InstallationRootChanged,
+    #[error("installation root has a pending operation")]
+    InstallationRootPending,
+    #[error("installer pending marker is invalid")]
+    InvalidInstallerMarker,
+    #[error("installer lock sentinel is invalid")]
+    InvalidInstallerLock,
+    #[error("installation activation transaction is ambiguous; no files were changed")]
+    InstallationActivationTransactionAmbiguous,
+    #[error("installer lifecycle helper could not be started")]
+    LifecycleHelper,
+    #[error("owned installation path is unsafe")]
+    UnsafeOwnedPath,
 }
 
 pub type Result<T> = std::result::Result<T, InstallerError>;

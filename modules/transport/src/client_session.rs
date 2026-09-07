@@ -8,9 +8,9 @@
 //! inside that Welcome belongs to the trusted calling coordinator from
 //! that moment on — never to the session, any [`Debug`] output, or any
 //! cloned state. The session retains only the negotiated non-secret
-//! metadata its requests need (protocol revision and connection
-//! identity), exposes no raw Quinn getters, spawns no background reader,
-//! task, channel, queue, or runtime, and carries one accepted
+//! metadata its requests need (protocol revision, connection identity, and
+//! the accepted lifecycle feature bit), exposes no raw Quinn getters, spawns
+//! no background reader, task, channel, queue, or runtime, and carries one accepted
 //! [`ClientRequestLifecycle`] through every successful request of the
 //! connection's whole life.
 //!
@@ -41,6 +41,9 @@
 //! and the same live owner survives it. Abandoning a request locally
 //! proves nothing about durable Forge work behind it: no rollback or
 //! peer-side cancellation is claimed, observed, or implied.
+//! [`ClientSession::request_acknowledging_response`] keeps the same
+//! admission and settlement contract but waits, after settlement, for the
+//! peer's response stream to finish cleanly before returning the owner.
 //!
 //! # Whole-stage limits
 //!
@@ -53,7 +56,8 @@
 //! [`DeadlineError::InvalidLimit`]; there are no fallback limits. The
 //! closest [`OperationKind`] labels the composed stages honestly:
 //! `Handshake` for the handshake stage including its open/send/receive,
-//! `Receive` for a request stage for the same reason.
+//! `Receive` for a request stage for the same reason, including the
+//! dedicated mode's post-settlement clean-EOF wait.
 //!
 //! # Guarded abandonment
 //!
@@ -72,7 +76,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use artisan_domain::IdentifierError;
-use artisan_protocol::{ConnectionId, ProtocolVersion, WireEnvelope, WireEnvelopeBody};
+use artisan_protocol::{
+    ClientRequest, ConnectionId, ProtocolVersion, WireEnvelope, WireEnvelopeBody,
+};
 use quinn::{Connection, Endpoint, RecvStream};
 use rustls_pki_types::CertificateDer;
 use thiserror::Error;
@@ -93,7 +99,10 @@ mod link;
 
 pub use exchange::{ExchangeError, HandshakeStageError, ReplyRejection};
 
-use exchange::{SettledReply, classify_reply, handshake_stage, request_stage};
+use exchange::{
+    AcknowledgingResponseError, SettledReply, classify_reply, handshake_stage, request_stage,
+    request_stage_acknowledging_response,
+};
 use link::SessionLink;
 
 /// The one public failure condition for the consuming server-delivery
@@ -352,6 +361,10 @@ pub enum ClientRequestError {
         /// Revision negotiated during the session's handshake.
         negotiated_version: u32,
     },
+    /// Native lifecycle control was not negotiated for this session,
+    /// diagnosed before any request identity or network admission.
+    #[error("native lifecycle control was not negotiated")]
+    UnsupportedFeature,
     /// The request's frame identity could not seed its correlation
     /// identity. Unreachable for decoded envelopes, kept typed rather
     /// than panicked.
@@ -370,6 +383,34 @@ pub enum ClientRequestError {
     /// could not settle despite matching.
     #[error("reply rejected: {0}")]
     Reply(#[from] ReplyRejection),
+}
+
+/// Restores the public request error shape after the dedicated stage's
+/// single whole-operation deadline finishes. Reply validation remains a
+/// direct `Reply` error; only wire and deadline failures remain under the
+/// existing `Exchange` boundary.
+fn map_acknowledging_response_error(
+    error: DeadlineError<AcknowledgingResponseError>,
+) -> ClientRequestError {
+    match error {
+        DeadlineError::Timeout { operation, limit } => {
+            ClientRequestError::Exchange(DeadlineError::Timeout { operation, limit })
+        }
+        DeadlineError::Cancelled { operation } => {
+            ClientRequestError::Exchange(DeadlineError::Cancelled { operation })
+        }
+        DeadlineError::InvalidLimit { operation } => {
+            ClientRequestError::Exchange(DeadlineError::InvalidLimit { operation })
+        }
+        DeadlineError::Peer {
+            operation,
+            error: AcknowledgingResponseError::Exchange(error),
+        } => ClientRequestError::Exchange(DeadlineError::Peer { operation, error }),
+        DeadlineError::Peer {
+            error: AcknowledgingResponseError::Reply(error),
+            ..
+        } => ClientRequestError::Reply(error),
+    }
 }
 
 /// One authenticated client session owning exactly one private loopback
@@ -395,6 +436,8 @@ pub struct ClientSession {
     negotiated_version: ProtocolVersion,
     /// Negotiated non-secret connection diagnostic identity.
     connection_id: ConnectionId,
+    /// Whether native lifecycle control was accepted during this handshake.
+    lifecycle_control_supported: bool,
     /// Whether the one server-delivery receiver has already been acquired.
     delivery_taken: bool,
 }
@@ -483,6 +526,7 @@ impl ClientSession {
         let (endpoint, connection) = link.disband();
         let negotiated_version = welcome.protocol_version;
         let connection_id = welcome.welcome.connection_id.clone();
+        let lifecycle_control_supported = welcome.welcome.lifecycle_control_supported;
         Ok((
             Self {
                 endpoint,
@@ -491,6 +535,7 @@ impl ClientSession {
                 limits,
                 negotiated_version,
                 connection_id,
+                lifecycle_control_supported,
                 delivery_taken: false,
             },
             welcome,
@@ -501,6 +546,13 @@ impl ClientSession {
     #[must_use]
     pub const fn protocol_version(&self) -> ProtocolVersion {
         self.negotiated_version
+    }
+
+    /// Returns whether native lifecycle control was negotiated for this
+    /// session.
+    #[must_use]
+    pub const fn lifecycle_control_supported(&self) -> bool {
+        self.lifecycle_control_supported
     }
 
     /// Returns the server-assigned connection diagnostic identity.
@@ -573,7 +625,8 @@ impl ClientSession {
     /// # Errors
     ///
     /// Returns [`ClientRequestError::NotARequest`] and
-    /// [`ClientRequestError::VersionMismatch`] before any network
+    /// [`ClientRequestError::VersionMismatch`] and
+    /// [`ClientRequestError::UnsupportedFeature`] before any network
     /// attempt, [`ClientRequestError::Correlation`] for an unusable
     /// frame identity, [`ClientRequestError::Admission`] when the
     /// registry rejects the identity, [`ClientRequestError::Exchange`]
@@ -592,8 +645,8 @@ impl ClientSession {
         cancel: &CancelHandle,
     ) -> Result<(Self, ResolvedRequest), ClientRequestError> {
         // Pre-I/O validation, in order: family, negotiated version,
-        // correlation seeding, admission. Nothing touches the network
-        // before all four pass.
+        // negotiated lifecycle feature, correlation seeding, admission.
+        // Nothing touches the network before all five pass.
         if !matches!(&envelope.body, WireEnvelopeBody::Request(_)) {
             let received = message_kind(&envelope.body);
             return Err(ClientRequestError::NotARequest { received });
@@ -603,6 +656,13 @@ impl ClientSession {
                 envelope_version: envelope.protocol_version.get(),
                 negotiated_version: self.negotiated_version.get(),
             });
+        }
+        if matches!(
+            &envelope.body,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(_))
+        ) && !self.lifecycle_control_supported
+        {
+            return Err(ClientRequestError::UnsupportedFeature);
         }
         let request_id = envelope
             .frame_id
@@ -648,6 +708,104 @@ impl ClientSession {
         let resolved = waiter
             .take_outcome()
             .expect("the admitted request settled exactly once into its private waiter");
+        Ok((self, resolved))
+    }
+
+    /// Runs exactly one sequential request, settles its correlated reply,
+    /// and then waits for the peer to finish the response stream cleanly.
+    ///
+    /// This mode is for mutations whose server-side commit is released only
+    /// after the peer observes the response FIN. It preserves the ordinary
+    /// request's pre-I/O validation, admission, settlement, cancellation,
+    /// deadline, and terminal-error policy. The admitted reply is settled
+    /// before the inbound stream is read for its end marker. A clean FIN is
+    /// the only successful stream completion; trailing data or any other
+    /// stream failure consumes the session and emits the private STOP.
+    ///
+    /// The operation consumes `self` for its whole duration and returns the
+    /// same live owner with the settled outcome on success. Dropping the
+    /// future, caller cancellation, timeout, malformed input, wrong family,
+    /// wrong correlation, or failed settlement all retain the existing
+    /// terminal session behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed pre-I/O, admission, exchange, and reply errors
+    /// as [`ClientSession::request`]. The request exchange deadline covers
+    /// stream open, send, reply receive, reply settlement, and clean response
+    /// EOF as one total budget.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the just-settled waiter cannot deliver its one outcome,
+    /// which would mean lifecycle bookkeeping diverged from its registry
+    /// mirror; no decoded input reaches that invariant violation.
+    pub async fn request_acknowledging_response(
+        mut self,
+        envelope: WireEnvelope,
+        cancel: &CancelHandle,
+    ) -> Result<(Self, ResolvedRequest), ClientRequestError> {
+        // Keep the ordinary request's pre-I/O order and policy exactly:
+        // family, negotiated version, lifecycle feature, correlation
+        // seeding, admission. Nothing touches the network before all five
+        // pass.
+        if !matches!(&envelope.body, WireEnvelopeBody::Request(_)) {
+            let received = message_kind(&envelope.body);
+            return Err(ClientRequestError::NotARequest { received });
+        }
+        if envelope.protocol_version != self.negotiated_version {
+            return Err(ClientRequestError::VersionMismatch {
+                envelope_version: envelope.protocol_version.get(),
+                negotiated_version: self.negotiated_version.get(),
+            });
+        }
+        if matches!(
+            &envelope.body,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(_))
+        ) && !self.lifecycle_control_supported
+        {
+            return Err(ClientRequestError::UnsupportedFeature);
+        }
+        let request_id = envelope
+            .frame_id
+            .to_request_id()
+            .map_err(ClientRequestError::Correlation)?;
+        let mut waiter = self
+            .lifecycle
+            .admit(request_id.clone())
+            .map_err(ClientRequestError::Admission)?;
+
+        let negotiated_version = self.negotiated_version;
+        let resolved = run_with_deadline(
+            OperationKind::Receive,
+            self.limits.request,
+            cancel,
+            request_stage_acknowledging_response(&self.connection, envelope, |reply| {
+                // Validation and lifecycle settlement happen before the
+                // stage is allowed to observe response EOF/FIN.
+                let settled = classify_reply(reply, negotiated_version, &request_id)
+                    .map_err(AcknowledgingResponseError::Reply)?;
+                match settled {
+                    SettledReply::Response(response) => {
+                        self.lifecycle
+                            .resolve_on_response(&response)
+                            .map_err(ReplyRejection::Settle)
+                            .map_err(AcknowledgingResponseError::Reply)?;
+                    }
+                    SettledReply::Failure(failure) => {
+                        self.lifecycle
+                            .resolve_on_failure(&failure)
+                            .map_err(ReplyRejection::Settle)
+                            .map_err(AcknowledgingResponseError::Reply)?;
+                    }
+                }
+                Ok(waiter
+                    .take_outcome()
+                    .expect("the admitted request settled exactly once into its private waiter"))
+            }),
+        )
+        .await
+        .map_err(map_acknowledging_response_error)?;
         Ok((self, resolved))
     }
 

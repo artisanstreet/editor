@@ -12,5 +12,9 @@ thiserror.workspace = true
 name = "assistant_message"
 path = "../../tests/domain/assistant_message.rs"
 
+[[test]]
+name = "engine_profile_id"
+path = "../../tests/domain/engine_profile_id.rs"
+
 [lints]
 workspace = true

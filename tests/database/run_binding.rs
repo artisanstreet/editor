@@ -8,11 +8,16 @@ use artisan_database::entities::{self, AssistantRunLifecycle, DispatchState};
 use artisan_database::{
     BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch, ClaimedMessageDispatch,
     CreateThreadInput, ProviderBindingBytes, QueueFirstMessageInput, Repository, RepositoryError,
-    RunBindingError, RunLaunchCredentials, RunStartKey, SqliteConfig, connect,
+    RunBindingError, RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
+    ThreadEngineSettings, connect,
 };
 use artisan_domain::{
-    ItemId, MessageBody, MessageId, PatchId, ProjectId, RequestId, RunId, ThreadId, ThreadTitle,
-    TurnId, UnixMillis,
+    ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigUpdatePrecondition,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
+    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
+    FiniteMillis, ItemId, MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PatchId,
+    PermissionId, ProjectId, RequestId, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis,
+    WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -113,7 +118,10 @@ impl Drop for TempDatabase {
     }
 }
 
-async fn seed_project_and_thread(database: &DatabaseConnection, repository: &Repository) {
+async fn seed_project_and_thread(
+    database: &DatabaseConnection,
+    repository: &Repository,
+) -> ThreadEngineSettings {
     entities::attached_project::ActiveModel {
         project_id: Set("project-1".to_owned()),
         root_path: Set("C:/repos/artisan".to_owned()),
@@ -134,6 +142,61 @@ async fn seed_project_and_thread(database: &DatabaseConnection, repository: &Rep
         })
         .await
         .expect("thread");
+    let thread_id = ThreadId::parse(THREAD_ID).expect("thread id");
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("seed-engine-config").expect("request id"),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: launch_config(),
+            accepted_at: UnixMillis::from_millis(THREAD_CREATED_AT_MS),
+        })
+        .await
+        .expect("engine configuration should create");
+    repository
+        .read_thread_engine_settings(&thread_id)
+        .await
+        .expect("engine configuration should read")
+        .expect("engine configuration should be present")
+}
+
+fn launch_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-launch").expect("permission id is valid"),
+        EngineAgentId::parse("agent-launch").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-launch").expect("profile id is valid"),
+            EngineModelId::parse("model-launch").expect("model id is valid"),
+            EngineRouteId::parse("route-launch").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
 }
 
 fn queue_input() -> QueueFirstMessageInput {
@@ -183,12 +246,14 @@ fn launch_identity() -> LaunchIdentityFixture {
 struct LaunchContext {
     start_key: RunStartKey,
     credentials: RunLaunchCredentials,
+    engine_settings: ThreadEngineSettings,
 }
 impl LaunchContext {
-    fn fixture() -> Self {
+    fn fixture(engine_settings: ThreadEngineSettings) -> Self {
         Self {
             start_key: RunStartKey::new(START_KEY_BYTES),
             credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
+            engine_settings,
         }
     }
 }
@@ -207,6 +272,7 @@ fn launch_command<'a>(
         operated_at: UnixMillis::from_millis(OPERATED_AT_MS),
         run_start_key: &context.start_key,
         credentials: &context.credentials,
+        engine_settings: &context.engine_settings,
     }
 }
 
@@ -259,7 +325,7 @@ async fn seeded_repository() -> (
     LaunchIdentityFixture,
 ) {
     let (database, repository) = memory_database().await;
-    seed_project_and_thread(&database, &repository).await;
+    let engine_settings = seed_project_and_thread(&database, &repository).await;
     repository
         .queue_first_message(queue_input())
         .await
@@ -270,7 +336,7 @@ async fn seeded_repository() -> (
         .expect("claim")
         .expect("claimed");
     let identity = launch_identity();
-    let context = LaunchContext::fixture();
+    let context = LaunchContext::fixture(engine_settings);
     let artisan_database::LaunchClaimedRunOutcome::Started(receipt) = repository
         .launch_claimed_run(launch_command(&claimed, &identity, &context))
         .await
@@ -330,6 +396,7 @@ async fn assert_generation_rejections(
     let bad_ctx = LaunchContext {
         start_key: RunStartKey::new([0x99; 32]),
         credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -349,6 +416,7 @@ async fn assert_generation_rejections(
     let bad_ctx2 = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: bad_cred,
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -616,6 +684,7 @@ async fn check_remaining_owner_erased(
     repository: &Repository,
     replay_claimed: &ClaimedMessageDispatch,
     receipt: &artisan_database::LaunchedRunReceipt,
+    context: &LaunchContext,
     binding: &ProviderBindingBytes,
     before: &PersistedRows,
     database: &DatabaseConnection,
@@ -625,6 +694,7 @@ async fn check_remaining_owner_erased(
     let different_ctx = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: different_owner_cred,
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -644,6 +714,7 @@ async fn check_remaining_owner_erased(
     let different_claim_ctx = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: different_claim,
+        engine_settings: context.engine_settings.clone(),
     };
     let replay_with_different_claim = repository
         .bind_run_provider(bind_command(
@@ -815,11 +886,12 @@ async fn successful_bind_writes_exact_blob_version_time() {
 
 #[tokio::test]
 async fn post_dispatch_fence_failure_rolls_back_dispatch_stamp() {
-    let (database, repository, claimed, receipt, _context, _) = seeded_repository().await;
+    let (database, repository, claimed, receipt, context, _) = seeded_repository().await;
     let before = persisted_rows(&database).await;
     let wrong_context = LaunchContext {
         start_key: RunStartKey::new([0xff; 32]),
         credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let binding = ProviderBindingBytes::new(vec![1, 2, 3]).expect("binding");
     let err = repository
@@ -1037,6 +1109,7 @@ async fn changed_version_payload_time_credential_rejection_and_erased_token_limi
         &repository,
         &replay_claimed,
         &receipt,
+        &context,
         &binding,
         &before,
         &database,
@@ -1100,7 +1173,7 @@ async fn file_backed_two_connection_race_proves_first_write_ownership() {
     .expect("setup");
     migrate_to_current(&setup_db).await.expect("migrate");
     let setup_repo = Repository::new(setup_db.clone());
-    seed_project_and_thread(&setup_db, &setup_repo).await;
+    let engine_settings = seed_project_and_thread(&setup_db, &setup_repo).await;
     setup_repo
         .queue_first_message(queue_input())
         .await
@@ -1111,7 +1184,7 @@ async fn file_backed_two_connection_race_proves_first_write_ownership() {
         .expect("claim")
         .expect("claimed");
     let identity = launch_identity();
-    let context = LaunchContext::fixture();
+    let context = LaunchContext::fixture(engine_settings);
     let artisan_database::LaunchClaimedRunOutcome::Started(receipt) = setup_repo
         .launch_claimed_run(launch_command(&claimed, &identity, &context))
         .await
@@ -1506,12 +1579,13 @@ async fn max_attempt_binds_independent_of_generation() {
 
 #[tokio::test]
 async fn fresh_run_owner_lease_rejected() {
-    let (database, repository, claimed, receipt, _, _) = seeded_repository().await;
+    let (database, repository, claimed, receipt, context, _) = seeded_repository().await;
     let before = persisted_rows(&database).await;
     let binding = ProviderBindingBytes::new(vec![9; 8]).expect("binding");
     let ctx_owner = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: RunLaunchCredentials::new([0x99; 32], LEASE_BYTES, CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -1532,6 +1606,7 @@ async fn fresh_run_owner_lease_rejected() {
     let ctx_lease = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: RunLaunchCredentials::new(OWNER_BYTES, [0x88; 32], CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -1574,6 +1649,7 @@ async fn replay_remaining_capabilities_rejected() {
         let ctx = LaunchContext {
             start_key: RunStartKey::new(START_KEY_BYTES),
             credentials: cred,
+            engine_settings: context.engine_settings.clone(),
         };
         let err = repository
             .bind_run_provider(bind_command(
@@ -1595,6 +1671,7 @@ async fn replay_remaining_capabilities_rejected() {
     let bad_key_ctx = LaunchContext {
         start_key: RunStartKey::new([0xff; 32]),
         credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -1661,6 +1738,7 @@ async fn erased_claim_exact_receipt_and_rows() {
     let different_ctx = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: different_claim,
+        engine_settings: context.engine_settings.clone(),
     };
     let replay = repository
         .bind_run_provider(bind_command(

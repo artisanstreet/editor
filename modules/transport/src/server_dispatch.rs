@@ -120,6 +120,76 @@ pub enum ServerDispatchError<E> {
     Finish(#[from] ClosedStream),
 }
 
+/// Dispatches exactly one server-side request over one accepted stream pair
+/// and returns a local receipt only after the reply has been written and the
+/// send side finished.
+///
+/// Reads one envelope through [`receive_envelope`], requires its body to be a
+/// request, invokes `handle` exactly once with the owned
+/// [`IncomingRequest`], validates the produced reply envelope's family and
+/// correlation, writes it through [`send_envelope`], and finishes the server
+/// send side so the peer observes end-of-stream behind exactly one reply.
+/// One request per stream is the whole contract: callers decide everything
+/// about accepting streams, deadlines, cancellation, retries, and whether a
+/// failed dispatch should be reported to the peer.
+///
+/// The receipt `R` is local only and never encoded, cloned, logged, inspected,
+/// or exposed before successful `send.finish()`. Receipt release proves reply
+/// write and send-side finish, not peer application or durable acknowledgement.
+/// Any receipt already produced by the handler is dropped on every later
+/// validation, send, or finish failure and is never returned on a partial
+/// wire outcome.
+///
+/// # Errors
+///
+/// Returns [`ServerDispatchError::Receive`] for bounded receive failures,
+/// [`ServerDispatchError::UnexpectedMessage`] when the first valid envelope
+/// is not a request (the handler is never invoked),
+/// [`ServerDispatchError::Correlation`] if the frame identity cannot be
+/// reused as a correlation id, [`ServerDispatchError::Local`] when `handle`
+/// fails, [`ServerDispatchError::Reply`] when the handler's reply is the
+/// wrong family, uncorrelated, or settles a different request (nothing is
+/// written), [`ServerDispatchError::Send`] when the validated reply cannot be
+/// encoded or written, and [`ServerDispatchError::Finish`] when the send side
+/// cannot be finished after the reply.
+pub async fn dispatch_server_request_with_receipt<F, Fut, E, R>(
+    send: &mut SendStream,
+    receive: &mut RecvStream,
+    handle: F,
+) -> Result<R, ServerDispatchError<E>>
+where
+    F: FnOnce(IncomingRequest) -> Fut,
+    Fut: Future<Output = Result<(WireEnvelope, R), E>>,
+{
+    let WireEnvelope {
+        protocol_version,
+        frame_id,
+        sent_at,
+        body,
+    } = receive_envelope(receive).await?;
+    let WireEnvelopeBody::Request(request) = body else {
+        return Err(ServerDispatchError::UnexpectedMessage {
+            received: kind(&body),
+        });
+    };
+    let request_id = frame_id
+        .to_request_id()
+        .map_err(|source| ServerDispatchError::Correlation { source })?;
+    let incoming = IncomingRequest {
+        protocol_version,
+        frame_id,
+        sent_at,
+        request_id: request_id.clone(),
+        request,
+    };
+
+    let (reply, receipt) = handle(incoming).await.map_err(ServerDispatchError::Local)?;
+    validate_reply(&reply.body, &request_id)?;
+    send_envelope(send, &reply).await?;
+    send.finish()?;
+    Ok(receipt)
+}
+
 /// Dispatches exactly one server-side request over one accepted stream pair.
 ///
 /// Reads one envelope through [`receive_envelope`], requires its body to be a
@@ -152,33 +222,11 @@ where
     F: FnOnce(IncomingRequest) -> Fut,
     Fut: Future<Output = Result<WireEnvelope, E>>,
 {
-    let WireEnvelope {
-        protocol_version,
-        frame_id,
-        sent_at,
-        body,
-    } = receive_envelope(receive).await?;
-    let WireEnvelopeBody::Request(request) = body else {
-        return Err(ServerDispatchError::UnexpectedMessage {
-            received: kind(&body),
-        });
-    };
-    let request_id = frame_id
-        .to_request_id()
-        .map_err(|source| ServerDispatchError::Correlation { source })?;
-    let incoming = IncomingRequest {
-        protocol_version,
-        frame_id,
-        sent_at,
-        request_id: request_id.clone(),
-        request,
-    };
-
-    let reply = handle(incoming).await.map_err(ServerDispatchError::Local)?;
-    validate_reply(&reply.body, &request_id)?;
-    send_envelope(send, &reply).await?;
-    send.finish()?;
-    Ok(())
+    dispatch_server_request_with_receipt(send, receive, |incoming| async move {
+        let envelope = handle(incoming).await?;
+        Ok((envelope, ()))
+    })
+    .await
 }
 
 /// Validates that one handler-produced envelope is a correlated reply for

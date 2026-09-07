@@ -6,14 +6,20 @@ use artisan_database::entities::{
     self, AssistantRunLifecycle, ConversationPatchKind, DispatchState, EntityLifecycle, RenderPhase,
 };
 use artisan_database::{
-    AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch,
-    ClaimedMessageDispatch, CommitRunBatch, CompleteRun, CompleteRunOutcome, FailRun,
-    FailRunOutcome, ProviderBindingBytes, QueueFirstMessageInput, Repository, RunBatchScope,
-    RunErrorCode, RunErrorMessage, RunLaunchCredentials, RunStartKey, SqliteConfig, connect,
+    AssistantChange, BindRunProvider, CancelRun, CancelRunOutcome, CheckpointUpdate,
+    ClaimMessageDispatch, ClaimedMessageDispatch, CommitRunBatch, CompleteRun, CompleteRunOutcome,
+    FailRun, FailRunOutcome, InterruptRun, InterruptRunOutcome, InterruptedRunReceipt,
+    ProviderBindingBytes, QueueFirstMessageInput, Repository, RunBatchScope, RunErrorCode,
+    RunErrorMessage, RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
+    TerminalRunReceipt, ThreadEngineSettings, connect,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, ItemId, MessageId, PatchId, ProjectId, RequestId,
-    Revision, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis,
+    ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, CountLimit, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageId, NetworkAccess,
+    OpenCode2Selection, PatchId, PermissionId, ProjectId, RequestId, Revision, RunId, ThreadId,
+    ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -55,7 +61,10 @@ async fn memory_database() -> (DatabaseConnection, Repository) {
     (database.clone(), Repository::new(database))
 }
 
-async fn seed_project_and_thread(database: &DatabaseConnection, repository: &Repository) {
+async fn seed_project_and_thread(
+    database: &DatabaseConnection,
+    repository: &Repository,
+) -> ThreadEngineSettings {
     entities::attached_project::ActiveModel {
         project_id: Set("project-1".to_owned()),
         root_path: Set("C:/repos/artisan".to_owned()),
@@ -76,6 +85,61 @@ async fn seed_project_and_thread(database: &DatabaseConnection, repository: &Rep
         })
         .await
         .expect("thread");
+    let thread_id = ThreadId::parse(THREAD_ID).expect("thread id");
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("seed-engine-config").expect("request id"),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: launch_config(),
+            accepted_at: UnixMillis::from_millis(THREAD_CREATED_AT_MS),
+        })
+        .await
+        .expect("engine configuration should create");
+    repository
+        .read_thread_engine_settings(&thread_id)
+        .await
+        .expect("engine configuration should read")
+        .expect("engine configuration should be present")
+}
+
+fn launch_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-launch").expect("permission id is valid"),
+        EngineAgentId::parse("agent-launch").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-launch").expect("profile id is valid"),
+            EngineModelId::parse("model-launch").expect("model id is valid"),
+            EngineRouteId::parse("route-launch").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
 }
 
 fn queue_input() -> QueueFirstMessageInput {
@@ -114,12 +178,14 @@ fn launch_identity() -> LaunchIdentityFixture {
 struct LaunchContext {
     start_key: RunStartKey,
     credentials: RunLaunchCredentials,
+    engine_settings: ThreadEngineSettings,
 }
 impl LaunchContext {
-    fn fixture() -> Self {
+    fn fixture(engine_settings: ThreadEngineSettings) -> Self {
         Self {
             start_key: RunStartKey::new(START_KEY_BYTES),
             credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
+            engine_settings,
         }
     }
 }
@@ -134,7 +200,7 @@ struct SeededPair {
 }
 async fn seeded_pair() -> SeededPair {
     let (database, repository) = memory_database().await;
-    seed_project_and_thread(&database, &repository).await;
+    let engine_settings = seed_project_and_thread(&database, &repository).await;
     repository
         .queue_first_message(queue_input())
         .await
@@ -145,7 +211,7 @@ async fn seeded_pair() -> SeededPair {
         .expect("claim")
         .expect("claimed");
     let identity = launch_identity();
-    let context = LaunchContext::fixture();
+    let context = LaunchContext::fixture(engine_settings);
     let artisan_database::LaunchClaimedRunOutcome::Started(launched) = repository
         .launch_claimed_run(artisan_database::LaunchClaimedRun {
             claimed: &claimed,
@@ -157,6 +223,7 @@ async fn seeded_pair() -> SeededPair {
             operated_at: UnixMillis::from_millis(OPERATED_AT_MS),
             run_start_key: &context.start_key,
             credentials: &context.credentials,
+            engine_settings: &context.engine_settings,
         })
         .await
         .expect("launch")
@@ -427,6 +494,158 @@ async fn fail_pair_records_error_and_failed_state() {
         .find(|t| t.turn_id == TURN_ID)
         .expect("turn");
     assert_eq!(turn.lifecycle, EntityLifecycle::Failed);
+}
+
+#[tokio::test]
+async fn cancel_pair_is_distinct_and_idempotent() {
+    let (pair, assistant_item, _, _) = seeded_with_item().await;
+    let body = assistant_body("cancelled body");
+    let item_patch = PatchId::parse("patch-item-cancel").expect("p");
+    let turn_patch = PatchId::parse("patch-turn-cancel").expect("p");
+
+    let first = pair
+        .repository
+        .cancel_run(CancelRun {
+            scope: terminal_scope(&pair),
+            operated_at: UnixMillis::from_millis(TERMINAL_AT_MS),
+            item_id: &assistant_item,
+            expected_revision: Revision::new(0),
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+        })
+        .await
+        .expect("cancel");
+    let receipt = match first {
+        CancelRunOutcome::Cancelled(receipt) => receipt,
+        CancelRunOutcome::AlreadyCancelled(_) => panic!("should cancel"),
+    };
+    let before_replay = persisted_rows(&pair.database).await;
+    let replay = pair
+        .repository
+        .cancel_run(CancelRun {
+            scope: terminal_scope(&pair),
+            operated_at: UnixMillis::from_millis(TERMINAL_AT_MS),
+            item_id: &assistant_item,
+            expected_revision: Revision::new(0),
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+        })
+        .await
+        .expect("cancel replay");
+    assert_eq!(replay, CancelRunOutcome::AlreadyCancelled(receipt));
+    assert_eq!(before_replay, persisted_rows(&pair.database).await);
+
+    let after = persisted_rows(&pair.database).await;
+    let run = after.runs.iter().find(|r| r.run_id == RUN_ID).expect("run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Cancelled);
+    assert_eq!(run.terminal_at_ms, Some(TERMINAL_AT_MS));
+    assert!(run.error_code.is_none() && run.error_message.is_none());
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == MESSAGE_ID)
+        .expect("dispatch");
+    assert_eq!(dispatch.state, DispatchState::Failed);
+    assert_eq!(dispatch.last_error.as_deref(), Some("run cancelled"));
+    let item = after
+        .items
+        .iter()
+        .find(|i| i.item_id == "assistant-1")
+        .expect("item");
+    assert_eq!(item.lifecycle, EntityLifecycle::Cancelled);
+    assert_eq!(item.body, "cancelled body");
+    let turn = after
+        .turns
+        .iter()
+        .find(|t| t.turn_id == TURN_ID)
+        .expect("turn");
+    assert_eq!(turn.lifecycle, EntityLifecycle::Cancelled);
+}
+
+#[tokio::test]
+async fn interrupt_pair_is_distinct_and_idempotent() {
+    let (pair, assistant_item, _, _) = seeded_with_item().await;
+    let body = assistant_body("interrupted body");
+    let item_patch = PatchId::parse("patch-item-interrupt").expect("p");
+    let turn_patch = PatchId::parse("patch-turn-interrupt").expect("p");
+    let code = RunErrorCode::parse("provider_interrupted".to_owned()).expect("code");
+    let message = RunErrorMessage::parse("provider turn interrupted".to_owned()).expect("message");
+
+    let first = pair
+        .repository
+        .interrupt_run(InterruptRun {
+            scope: terminal_scope(&pair),
+            operated_at: UnixMillis::from_millis(TERMINAL_AT_MS),
+            item_id: &assistant_item,
+            expected_revision: Revision::new(0),
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+            error_code: &code,
+            error_message: &message,
+        })
+        .await
+        .expect("interrupt");
+    let receipt = match first {
+        InterruptRunOutcome::Interrupted(receipt) => receipt,
+        InterruptRunOutcome::AlreadyInterrupted(_) => panic!("should interrupt"),
+    };
+    let before_replay = persisted_rows(&pair.database).await;
+    let replay = pair
+        .repository
+        .interrupt_run(InterruptRun {
+            scope: terminal_scope(&pair),
+            operated_at: UnixMillis::from_millis(TERMINAL_AT_MS),
+            item_id: &assistant_item,
+            expected_revision: Revision::new(0),
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+            error_code: &code,
+            error_message: &message,
+        })
+        .await
+        .expect("interrupt replay");
+    assert_eq!(replay, InterruptRunOutcome::AlreadyInterrupted(receipt));
+    assert_eq!(before_replay, persisted_rows(&pair.database).await);
+
+    let after = persisted_rows(&pair.database).await;
+    let run = after.runs.iter().find(|r| r.run_id == RUN_ID).expect("run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
+    assert_eq!(run.terminal_at_ms, None);
+    assert_eq!(run.error_code.as_deref(), Some("provider_interrupted"));
+    assert_eq!(
+        run.error_message.as_deref(),
+        Some("provider turn interrupted")
+    );
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == MESSAGE_ID)
+        .expect("dispatch");
+    assert_eq!(dispatch.state, DispatchState::Failed);
+    assert_eq!(
+        dispatch.last_error.as_deref(),
+        Some("provider turn interrupted")
+    );
+    let item = after
+        .items
+        .iter()
+        .find(|i| i.item_id == "assistant-1")
+        .expect("item");
+    assert_eq!(item.lifecycle, EntityLifecycle::Interrupted);
+    let turn = after
+        .turns
+        .iter()
+        .find(|t| t.turn_id == TURN_ID)
+        .expect("turn");
+    assert_eq!(turn.lifecycle, EntityLifecycle::Interrupted);
 }
 
 #[tokio::test]
@@ -797,4 +1016,36 @@ async fn failed_error_bounds_enforced() {
         .await
         .expect_err("terminal already completed should not allow fail");
     let _ = err;
+}
+
+#[test]
+fn cancellation_and_interruption_have_distinct_receipts() {
+    let run_id = artisan_domain::RunId::parse("run-terminal-test").expect("valid run id");
+    let cancelled = CancelRunOutcome::Cancelled(TerminalRunReceipt {
+        run_id: run_id.clone(),
+        generation: 1,
+        terminal_at: UnixMillis::from_millis(10),
+    });
+    let interrupted = InterruptRunOutcome::Interrupted(InterruptedRunReceipt {
+        run_id,
+        generation: 1,
+        interrupted_at: UnixMillis::from_millis(10),
+    });
+
+    assert!(matches!(cancelled, CancelRunOutcome::Cancelled(_)));
+    assert!(matches!(interrupted, InterruptRunOutcome::Interrupted(_)));
+}
+
+#[test]
+fn auxiliary_error_values_are_bounded_and_redacted_in_debug() {
+    let code = RunErrorCode::parse("provider_interrupted".to_owned()).expect("bounded code");
+    let message =
+        RunErrorMessage::parse("provider turn interrupted".to_owned()).expect("bounded message");
+
+    assert_eq!(code.as_str(), "provider_interrupted");
+    assert_eq!(message.as_str(), "provider turn interrupted");
+    assert!(!format!("{code:?}").contains("provider_interrupted"));
+    assert!(!format!("{message:?}").contains("provider turn interrupted"));
+    assert!(RunErrorCode::parse(String::new()).is_err());
+    assert!(RunErrorMessage::parse(String::new()).is_err());
 }

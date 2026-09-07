@@ -13,11 +13,16 @@ use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch,
     ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome, CreateThreadInput,
     EngineCheckpoint, ProviderBindingBytes, QueueFirstMessageInput, Repository, RepositoryError,
-    RunBatchScope, RunLaunchCredentials, RunObservationError, RunStartKey, SqliteConfig, connect,
+    RunBatchScope, RunLaunchCredentials, RunObservationError, RunStartKey,
+    SetThreadEngineConfigInput, SqliteConfig, ThreadEngineSettings, connect,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, IncrementalText, ItemId, MessageBody, MessageId, PatchId,
-    ProjectId, RequestId, Revision, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis,
+    ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, CountLimit, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, IncrementalText, ItemId, MessageBody,
+    MessageId, NetworkAccess, OpenCode2Selection, PatchId, PermissionId, ProjectId, RequestId,
+    Revision, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
@@ -126,7 +131,10 @@ impl Drop for TempDatabase {
     }
 }
 
-async fn seed_project_and_thread(database: &DatabaseConnection, repository: &Repository) {
+async fn seed_project_and_thread(
+    database: &DatabaseConnection,
+    repository: &Repository,
+) -> ThreadEngineSettings {
     entities::attached_project::ActiveModel {
         project_id: Set("project-1".to_owned()),
         root_path: Set("C:/repos/artisan".to_owned()),
@@ -147,6 +155,61 @@ async fn seed_project_and_thread(database: &DatabaseConnection, repository: &Rep
         })
         .await
         .expect("thread");
+    let thread_id = ThreadId::parse(THREAD_ID).expect("thread id");
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("seed-engine-config").expect("request id"),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: launch_config(),
+            accepted_at: UnixMillis::from_millis(THREAD_CREATED_AT_MS),
+        })
+        .await
+        .expect("engine configuration should create");
+    repository
+        .read_thread_engine_settings(&thread_id)
+        .await
+        .expect("engine configuration should read")
+        .expect("engine configuration should be present")
+}
+
+fn launch_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-launch").expect("permission id is valid"),
+        EngineAgentId::parse("agent-launch").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-launch").expect("profile id is valid"),
+            EngineModelId::parse("model-launch").expect("model id is valid"),
+            EngineRouteId::parse("route-launch").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
 }
 
 fn queue_input() -> QueueFirstMessageInput {
@@ -197,12 +260,14 @@ fn launch_identity() -> LaunchIdentityFixture {
 struct LaunchContext {
     start_key: RunStartKey,
     credentials: RunLaunchCredentials,
+    engine_settings: ThreadEngineSettings,
 }
 impl LaunchContext {
-    fn fixture() -> Self {
+    fn fixture(engine_settings: ThreadEngineSettings) -> Self {
         Self {
             start_key: RunStartKey::new(START_KEY_BYTES),
             credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
+            engine_settings,
         }
     }
 }
@@ -221,6 +286,7 @@ fn launch_command<'a>(
         operated_at: UnixMillis::from_millis(OPERATED_AT_MS),
         run_start_key: &context.start_key,
         credentials: &context.credentials,
+        engine_settings: &context.engine_settings,
     }
 }
 
@@ -302,7 +368,7 @@ struct SeededPair {
 }
 async fn seeded_pair() -> SeededPair {
     let (database, repository) = memory_database().await;
-    seed_project_and_thread(&database, &repository).await;
+    let engine_settings = seed_project_and_thread(&database, &repository).await;
     repository
         .queue_first_message(queue_input())
         .await
@@ -313,7 +379,7 @@ async fn seeded_pair() -> SeededPair {
         .expect("claim")
         .expect("claimed");
     let identity = launch_identity();
-    let context = LaunchContext::fixture();
+    let context = LaunchContext::fixture(engine_settings);
     let artisan_database::LaunchClaimedRunOutcome::Started(launched) = repository
         .launch_claimed_run(launch_command(&claimed, &identity, &context))
         .await
@@ -1602,7 +1668,7 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
     assert_duplicate_patch_conflict(&pair, &body).await;
     verify_wrong_targets_sealed_and_checkpoint(&body).await;
 }
-async fn assert_user_item_target_conflict(pair: &SeededPair, body: &AssistantBody) {
+async fn assert_user_item_target_conflict(pair: &SeededPair, _body: &AssistantBody) {
     let user_item = ItemId::parse(ITEM_ID).expect("user item");
     let frag = incremental_text("frag");
     let append_patch = PatchId::parse("p-append-user").expect("p");
@@ -2019,7 +2085,7 @@ async fn file_backed_races_identical_and_conflicting() {
     .expect("setup");
     migrate_to_current(&setup_db).await.expect("migrate");
     let setup_repo = Repository::new(setup_db.clone());
-    seed_project_and_thread(&setup_db, &setup_repo).await;
+    let engine_settings = seed_project_and_thread(&setup_db, &setup_repo).await;
     setup_repo
         .queue_first_message(queue_input())
         .await
@@ -2030,7 +2096,7 @@ async fn file_backed_races_identical_and_conflicting() {
         .expect("claim")
         .expect("claimed");
     let identity = launch_identity();
-    let context = LaunchContext::fixture();
+    let context = LaunchContext::fixture(engine_settings);
     let artisan_database::LaunchClaimedRunOutcome::Started(launched) = setup_repo
         .launch_claimed_run(launch_command(&claimed, &identity, &context))
         .await
@@ -2204,7 +2270,7 @@ async fn verify_conflicting_race(binding: &ProviderBindingBytes) {
     .expect("setup2");
     migrate_to_current(&setup_db2).await.expect("migrate2");
     let setup_repo2 = Repository::new(setup_db2.clone());
-    seed_project_and_thread(&setup_db2, &setup_repo2).await;
+    let engine_settings2 = seed_project_and_thread(&setup_db2, &setup_repo2).await;
     setup_repo2
         .queue_first_message(queue_input())
         .await
@@ -2215,7 +2281,7 @@ async fn verify_conflicting_race(binding: &ProviderBindingBytes) {
         .expect("claim2")
         .expect("cl2");
     let identity2 = launch_identity();
-    let context2 = LaunchContext::fixture();
+    let context2 = LaunchContext::fixture(engine_settings2);
     let artisan_database::LaunchClaimedRunOutcome::Started(launched2) = setup_repo2
         .launch_claimed_run(launch_command(&claimed2, &identity2, &context2))
         .await

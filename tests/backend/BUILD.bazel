@@ -54,10 +54,16 @@ exports_files([
     "directory_helper_fixture.rs",
     "directory_helper_unit.rs",
     "engine_owner_configuration.rs",
+    "engine_owner_configured.rs",
     "engine_owner_custody.rs",
     "engine_owner_readiness.rs",
     "engine_owner_streaming.rs",
+    "forge_configured_run.rs",
+    "lifecycle_control.rs",
+    "lifecycle_connection.rs",
+    "lifecycle_listener.rs",
     "listener_configuration.rs",
+    "native_run_dispatch.rs",
 ])
 
 # TEST-ONLY protocol child fixture: one ordinary main, no libtest harness,
@@ -215,10 +221,34 @@ rust_test(
         "//modules/domain:domain",
         "//modules/protocol:protocol",
         "//modules/transport:transport",
-        "@crates//:getrandom",
+        "@crates//:getrandom-0.4.3",
         "@crates//:quinn",
         "@crates//:rcgen",
         "@crates//:rustls-pki-types",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "forge_runtime_test",
+    srcs = ["forge_runtime.rs"],
+    crate_name = "forge_runtime_test",
+    deps = [
+        "//modules/backend:backend",
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/native_engine:native_engine",
+        "//modules/protocol:protocol",
+        "//modules/transport:transport",
+        "@crates//:quinn",
+        "@crates//:rcgen",
+        "@crates//:rustls-pki-types",
+        "@crates//:sea-orm",
+        "@crates//:serde_json",
         "@crates//:tokio",
     ],
     edition = "2024",
@@ -331,6 +361,67 @@ rust_test(
 )
 
 rust_test(
+    name = "conversation_commit_notifier_test",
+    srcs = ["conversation_commit_notifier.rs"],
+    crate_name = "conversation_commit_notifier_test",
+    deps = [
+        "//modules/domain:domain",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_delivery_driver_test",
+    srcs = ["conversation_delivery_driver.rs"],
+    crate_name = "conversation_delivery_driver_test",
+    deps = [
+        "//modules/backend:backend",
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "//modules/protocol:protocol",
+        "//modules/transport:transport",
+        "@crates//:quinn",
+        "@crates//:rcgen",
+        "@crates//:rustls-pki-types",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_delivery_writer_test",
+    srcs = ["conversation_delivery_writer.rs"],
+    crate_name = "conversation_delivery_writer_test",
+    deps = [
+        "//modules/backend:backend",
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "//modules/protocol:protocol",
+        "//modules/transport:transport",
+        "@crates//:quinn",
+        "@crates//:rcgen",
+        "@crates//:rustls-pki-types",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "storage_test",
     srcs = ["storage.rs"],
     crate_name = "storage_test",
@@ -359,6 +450,17 @@ rust_test(
 )
 
 rust_test(
+    name = "process_custody_test",
+    srcs = ["process_custody.rs"],
+    crate_name = "process_custody_test",
+    deps = ["//modules/backend:backend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "product_telemetry_capture_policy_test",
     srcs = ["product_telemetry_capture_policy.rs"],
     crate_name = "product_telemetry_capture_policy_test",
@@ -378,7 +480,7 @@ rust_test(
         "//modules/database:database",
         "//modules/domain:domain",
         "//modules/protocol:protocol",
-        "@crates//:getrandom",
+        "@crates//:getrandom-0.4.3",
         "@crates//:tokio",
     ],
     edition = "2024",
@@ -392,6 +494,76 @@ rust_test(
     srcs = ["sqlite_write_retry_policy.rs"],
     crate_name = "sqlite_write_retry_policy_test",
     deps = ["//modules/backend:backend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "startup_reconciliation_sweep_test",
+    srcs = ["startup_reconciliation_sweep.rs"],
+    crate_name = "startup_reconciliation_sweep_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "activated_conversation_replay_test",
+    srcs = ["activated_conversation_replay.rs"],
+    crate_name = "activated_conversation_replay_test",
+    deps = [
+        "//modules/backend:backend",
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "//modules/protocol:protocol",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_subscription_preparation_test",
+    srcs = ["conversation_subscription_preparation.rs"],
+    crate_name = "conversation_subscription_preparation_test",
+    deps = [
+        "//modules/backend:backend",
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "//modules/protocol:protocol",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "conversation_subscription_registry_test",
+    srcs = ["conversation_subscription_registry.rs"],
+    crate_name = "conversation_subscription_registry_test",
+    deps = [
+        "//modules/domain:domain",
+        "@crates//:thiserror",
+    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",

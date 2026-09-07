@@ -1,13 +1,18 @@
 //! TEST-ONLY engine-owner protocol child fixture.
 //!
 //! One ordinary `main` in a `testonly` Bazel `rust_binary`: no libtest
-//! harness, no banner, never shipped. It implements seven frozen scenarios:
-//! six P0 first-wave readiness/health cases plus one finite P4 transport
+//! harness, no banner, never shipped. It implements nine frozen scenarios:
+//! six P0 first-wave readiness/health cases, one finite P4 transport
 //! prerequisite `prompt_text_then_terminal` that serves a bounded
 //! `GET /api/health` → `POST /api/session/test-session/prompt` →
 //! `GET /api/experimental/session/test-session/log?after=0&follow=true` SSE
-//! sequence. No product module is imported; the only non-`std` dependency is
-//! the pinned `@crates//:serde_json` (1.0.151).
+//! sequence, one deterministic mid-turn hold variant
+//! `prompt_text_then_hold_after_first_delta` that serves the same health /
+//! session / prompt prefix but streams only the first assistant delta and
+//! then holds its log connection open until lifeline EOF (never a terminal
+//! event), and one child-custody proof scenario. No product module is
+//! imported; the only non-`std` dependency is the pinned
+//! `@crates//:serde_json` (1.0.151).
 //!
 //! Selector is child-only `ARTISAN_ENGINE_OWNER_TEST_SCENARIO` set on the
 //! spawned `Command` environment. Missing, non-Unicode or unknown exits 87
@@ -19,16 +24,18 @@
 //!
 //! Main is dedicated to the stdin lifeline: EOF exits 3; any unexpected
 //! input byte or read error exits 87. A fixture-local 20s watchdog exits
-//! 99 and is always failure. At most one server thread plus the watchdog
-//! exists; no thread-per-request, nested processes, temporary directories,
-//! marker files or recursive discovery. Connections are sequential with
-//! `Connection: close`. Blocking accept/read cannot prevent main from
-//! observing lifeline EOF. OS sockets/threads die with this test process;
-//! parent must observe `Child::wait`.
+//! 99 and is always failure. Ordinary scenarios use at most one server
+//! thread; the custody proof alone starts one explicit descendant helper and
+//! writes one marker file. There is no thread-per-request or recursive
+//! discovery. Connections are sequential with `Connection: close`.
+//! Blocking accept/read cannot prevent main from observing lifeline EOF. OS
+//! sockets/threads die with the fixture process; the parent must observe
+//! process custody completion.
 
-use std::io::{Read, Write};
+use std::fs::OpenOptions;
+use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process;
+use std::process::{self, Command, Stdio};
 use std::time::Duration;
 
 /// Fixture-local lifeline-lost exit code (mirrors helper contract value 3).
@@ -43,6 +50,10 @@ const ABRUPT_EXIT_CODE: i32 = 7;
 const SCENARIO_ENV: &str = "ARTISAN_ENGINE_OWNER_TEST_SCENARIO";
 /// Child-only expected Authorization credential for health scenarios.
 const AUTH_ENV: &str = "ARTISAN_ENGINE_OWNER_TEST_AUTHORIZATION";
+/// Child-only marker path for the descendant-custody proof.
+const DESCENDANT_SENTINEL_MARKER_ENV: &str = "ARTISAN_ENGINE_OWNER_DESCENDANT_SENTINEL_MARKER";
+/// Fixed response served by the descendant helper.
+const DESCENDANT_SENTINEL_RESPONSE: &[u8] = b"descendant-alive";
 
 // Synthetic fixture values — private, never product defaults.
 /// Expected health version for `ready_ok`.
@@ -68,6 +79,10 @@ const FIXTURE_RUN_ID: &str = "fixture-run";
 const WATCHDOG_SECS: u64 = 20;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--descendant-sentinel") {
+        run_descendant_sentinel_helper();
+    }
+
     std::thread::Builder::new()
         .name("engine-owner-fixture-watchdog".to_owned())
         .spawn(|| {
@@ -96,6 +111,8 @@ fn main() {
         "hang_until_lifeline" => run_hang_until_lifeline(),
         "abrupt_child_exit_nonzero" => process::exit(ABRUPT_EXIT_CODE),
         "prompt_text_then_terminal" => run_prompt_text_then_terminal(),
+        "prompt_text_then_hold_after_first_delta" => run_prompt_text_then_hold_after_first_delta(),
+        "descendant_holds_sentinel" => run_descendant_holds_sentinel(),
         _ => process::exit(SCENARIO_REFUSED_EXIT),
     }
 }
@@ -173,6 +190,116 @@ fn run_prompt_text_then_terminal() -> ! {
         .spawn(move || p4_server_loop(&listener, &expected_auth))
         .expect("p4 thread should spawn");
     wait_for_lifeline_eof();
+}
+
+fn run_prompt_text_then_hold_after_first_delta() -> ! {
+    let expected_auth = get_expected_auth_or_exit();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+    assert!(port != 0, "advertised port must be nonzero");
+    let readiness = build_readiness_line(port);
+    debug_assert!(readiness.len() <= READINESS_LIMIT);
+    {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{readiness}").expect("readiness write");
+        out.flush().expect("readiness flush");
+    }
+    std::thread::Builder::new()
+        .name("engine-owner-fixture-p4-hold".to_owned())
+        .spawn(move || p4_hold_server_loop(&listener, &expected_auth))
+        .expect("p4 hold thread should spawn");
+    wait_for_lifeline_eof();
+}
+
+fn run_descendant_holds_sentinel() -> ! {
+    let expected_auth = get_expected_auth_or_exit();
+    let marker_path = match std::env::var_os(DESCENDANT_SENTINEL_MARKER_ENV) {
+        Some(path) if !path.is_empty() => path,
+        _ => process::exit(SCENARIO_REFUSED_EXIT),
+    };
+    let executable = std::env::current_exe().expect("fixture executable path");
+    let mut helper_command = Command::new(executable);
+    helper_command
+        .env_clear()
+        .arg("--descendant-sentinel")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    if let Some(system_root) = std::env::var_os("SYSTEMROOT") {
+        helper_command.env("SYSTEMROOT", system_root);
+    }
+    let mut helper = helper_command
+        .spawn()
+        .expect("descendant helper should spawn");
+    let helper_stdout = helper
+        .stdout
+        .take()
+        .expect("descendant helper stdout should be piped");
+    let mut helper_ready = String::new();
+    std::io::BufReader::new(helper_stdout)
+        .read_line(&mut helper_ready)
+        .expect("descendant helper readiness should be readable");
+    let port = parse_descendant_ready(&helper_ready)
+        .expect("descendant helper readiness should be READY <port>");
+    if let Some(status) = helper
+        .try_wait()
+        .expect("descendant helper status observation should succeed")
+    {
+        panic!("descendant helper exited before marker creation: {status:?}");
+    }
+
+    let mut marker = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker_path)
+        .expect("descendant marker should be created once");
+    writeln!(marker, "{port}").expect("descendant marker should be written");
+    marker
+        .sync_all()
+        .expect("descendant marker should be durable");
+    drop(marker);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+    assert!(port != 0, "advertised port must be nonzero");
+    let readiness = build_readiness_line(port);
+    debug_assert!(readiness.len() <= READINESS_LIMIT);
+    {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{readiness}").expect("readiness write");
+        out.flush().expect("readiness flush");
+    }
+    std::thread::Builder::new()
+        .name("engine-owner-fixture-descendant-proof".to_owned())
+        .spawn(move || p4_server_loop(&listener, &expected_auth))
+        .expect("descendant proof server thread should spawn");
+    wait_for_lifeline_eof();
+}
+
+fn parse_descendant_ready(line: &str) -> Option<u16> {
+    let port_text = line.strip_prefix("READY ")?.strip_suffix('\n')?;
+    let port_text = port_text.strip_suffix('\r').unwrap_or(port_text);
+    let port = port_text.parse().ok()?;
+    (port != 0).then_some(port)
+}
+
+fn run_descendant_sentinel_helper() -> ! {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("descendant bind");
+    let port = listener.local_addr().expect("descendant local_addr").port();
+    assert!(port != 0, "descendant port must be nonzero");
+    {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "READY {port}").expect("descendant readiness write");
+        out.flush().expect("descendant readiness flush");
+    }
+    loop {
+        let Ok((mut stream, _)) = listener.accept() else {
+            process::exit(SCENARIO_REFUSED_EXIT);
+        };
+        let _ = stream.write_all(DESCENDANT_SENTINEL_RESPONSE);
+        let _ = stream.flush();
+    }
 }
 
 fn build_readiness_line(port: u16) -> String {
@@ -400,6 +527,32 @@ fn prompt_success_body() -> String {
     r#"{"ok":true}"#.to_owned()
 }
 
+fn create_session_route() -> String {
+    "/api/session".to_owned()
+}
+
+fn create_session_success_body() -> String {
+    r#"{"id":"test-session"}"#.to_owned()
+}
+
+fn create_session_http_response() -> Vec<u8> {
+    let body = create_session_success_body();
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut out = Vec::with_capacity(header.len() + body.len());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(body.as_bytes());
+    out
+}
+
+fn send_create_session_ok(stream: &mut TcpStream) {
+    let bytes = create_session_http_response();
+    let _ = stream.write_all(&bytes);
+    let _ = stream.flush();
+}
+
 fn sse_body_bytes() -> Vec<u8> {
     // Deterministic SSE stream:
     // : keepalive (comment)
@@ -408,14 +561,18 @@ fn sse_body_bytes() -> Vec<u8> {
     // blank
     // terminal succeeded event (sequence 2)
     // blank
-    // The two data lines join with \n to valid JSON with run_id fixture-run.
+    // The two data lines join with \n to valid JSON with run_id fixture-run
+    // and session_id test-session (required by configured turn's
+    // decode_sse_event_for_run which enforces both identities).
     let mut s = String::new();
     s.push_str(": keepalive\n");
     s.push('\n');
-    s.push_str("data: {\"run_id\":\"fixture-run\",\"sequence\":1,\n");
+    s.push_str(
+        "data: {\"run_id\":\"fixture-run\",\"session_id\":\"test-session\",\"sequence\":1,\n",
+    );
     s.push_str("data: \"delta\":\"hello world\"}\n");
     s.push('\n');
-    s.push_str("data: {\"run_id\":\"fixture-run\",\"sequence\":2,\"state\":\"succeeded\"}\n");
+    s.push_str("data: {\"run_id\":\"fixture-run\",\"session_id\":\"test-session\",\"sequence\":2,\"state\":\"succeeded\"}\n");
     s.push('\n');
     s.into_bytes()
 }
@@ -550,6 +707,44 @@ fn validate_prompt_request(raw: &[u8], expected_auth: &str) -> Result<usize, u16
     Ok(n)
 }
 
+fn validate_create_session_request(raw: &[u8], expected_auth: &str) -> Result<usize, u16> {
+    let headers = parse_common_headers(raw, expected_auth)?;
+    if headers.method != "POST" {
+        return Err(405);
+    }
+    if headers.path != create_session_route() {
+        return Err(404);
+    }
+    if headers.version != "HTTP/1.1" {
+        return Err(400);
+    }
+    let Some(n) = headers.content_length else {
+        return Err(400);
+    };
+    if n > PROMPT_BODY_CAP {
+        return Err(400);
+    }
+    if n == 0 {
+        return Err(400);
+    }
+    Ok(n)
+}
+
+fn validate_create_session_json(body: &[u8]) -> Result<(), u16> {
+    if body.len() > PROMPT_BODY_CAP {
+        return Err(400);
+    }
+    let v: serde_json::Value = serde_json::from_slice(body).map_err(|_| 400_u16)?;
+    let obj = v.as_object().ok_or(400_u16)?;
+    // Minimal check: must contain profile/model/permission like the real owner.
+    // Accept any that is a valid JSON object with at least one key; strict
+    // shape is not needed for the fixture seam but we ensure it's not empty.
+    if obj.is_empty() {
+        return Err(400);
+    }
+    Ok(())
+}
+
 fn validate_log_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
     let headers = parse_common_headers(raw, expected_auth)?;
     if headers.method != "GET" {
@@ -568,54 +763,130 @@ fn validate_log_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
 }
 
 fn p4_server_loop(listener: &TcpListener, expected_auth: &str) {
+    if !serve_p4_health_phase(listener, expected_auth) {
+        return;
+    }
+    if !serve_p4_prompt_phase(listener, expected_auth) {
+        return;
+    }
+    serve_p4_log_phase(listener, expected_auth);
+}
+
+fn serve_p4_health_phase(listener: &TcpListener, expected_auth: &str) -> bool {
     // Step 1: GET /api/health
     let Ok((mut stream, _)) = listener.accept() else {
-        return;
+        return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let Ok(raw) = read_bounded_headers(&mut stream) else {
         send_error(&mut stream, 400);
-        return;
+        return false;
     };
     match validate_health_request(&raw, expected_auth) {
         Ok(()) => send_health_ok(&mut stream, EXPECTED_HEALTH_VERSION),
         Err(code) => {
             send_error(&mut stream, code);
-            return;
+            return false;
         }
     }
     drop(stream);
-    // Step 2: POST /api/session/test-session/prompt
+    true
+}
+
+fn serve_p4_prompt_phase(listener: &TcpListener, expected_auth: &str) -> bool {
+    // Step 2 is flexible: either POST /api/session (configured create) or
+    // POST /api/session/test-session/prompt (smoke direct). The smoke harness
+    // historically sent prompt immediately after health, so we accept either to
+    // keep the fixture backward compatible.
     let Ok((mut stream2, _)) = listener.accept() else {
-        return;
+        return false;
     };
     let _ = stream2.set_read_timeout(Some(Duration::from_secs(5)));
-    let Ok((raw2, body_prefix)) = read_bounded_headers_with_remainder(&mut stream2) else {
+    let Ok((raw2, body_prefix2)) = read_bounded_headers_with_remainder(&mut stream2) else {
         send_error(&mut stream2, 400);
-        return;
+        return false;
     };
-    let declared = match validate_prompt_request(&raw2, expected_auth) {
-        Ok(n) => n,
+
+    // Try create-session first.
+    if let Ok(declared_create) = validate_create_session_request(&raw2, expected_auth) {
+        if !serve_p4_create_session(&mut stream2, declared_create, body_prefix2) {
+            return false;
+        }
+        drop(stream2);
+
+        // Step 3: POST /api/session/test-session/prompt (after create)
+        serve_p4_prompt_after_create(listener, expected_auth)
+    } else if let Ok(declared_prompt) = validate_prompt_request(&raw2, expected_auth) {
+        // Smoke path: prompt directly without prior create.
+        if !serve_p4_prompt_body(&mut stream2, declared_prompt, body_prefix2) {
+            return false;
+        }
+        drop(stream2);
+        true
+    } else {
+        // Neither create nor prompt matches.
+        send_error(&mut stream2, 400);
+        false
+    }
+}
+
+fn serve_p4_create_session(stream: &mut TcpStream, declared: usize, body_prefix: Vec<u8>) -> bool {
+    let body = match read_exact_body_with_prefix(stream, declared, PROMPT_BODY_CAP, body_prefix) {
+        Ok(body) => body,
         Err(code) => {
-            send_error(&mut stream2, code);
-            return;
+            send_error(stream, code);
+            return false;
         }
     };
-    let body =
-        match read_exact_body_with_prefix(&mut stream2, declared, PROMPT_BODY_CAP, body_prefix) {
-            Ok(b) => b,
-            Err(code) => {
-                send_error(&mut stream2, code);
-                return;
-            }
-        };
-    if validate_prompt_json(&body).is_err() {
-        send_error(&mut stream2, 400);
-        return;
+    if validate_create_session_json(&body).is_err() {
+        send_error(stream, 400);
+        return false;
     }
-    send_prompt_ok(&mut stream2);
-    drop(stream2);
-    // Step 3: GET /api/experimental/session/test-session/log?after=0&follow=true
+    send_create_session_ok(stream);
+    true
+}
+
+fn serve_p4_prompt_after_create(listener: &TcpListener, expected_auth: &str) -> bool {
+    let Ok((mut stream, _)) = listener.accept() else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let Ok((raw, body_prefix)) = read_bounded_headers_with_remainder(&mut stream) else {
+        send_error(&mut stream, 400);
+        return false;
+    };
+    let declared = match validate_prompt_request(&raw, expected_auth) {
+        Ok(n) => n,
+        Err(code) => {
+            send_error(&mut stream, code);
+            return false;
+        }
+    };
+    if !serve_p4_prompt_body(&mut stream, declared, body_prefix) {
+        return false;
+    }
+    drop(stream);
+    true
+}
+
+fn serve_p4_prompt_body(stream: &mut TcpStream, declared: usize, body_prefix: Vec<u8>) -> bool {
+    let body = match read_exact_body_with_prefix(stream, declared, PROMPT_BODY_CAP, body_prefix) {
+        Ok(body) => body,
+        Err(code) => {
+            send_error(stream, code);
+            return false;
+        }
+    };
+    if validate_prompt_json(&body).is_err() {
+        send_error(stream, 400);
+        return false;
+    }
+    send_prompt_ok(stream);
+    true
+}
+
+fn serve_p4_log_phase(listener: &TcpListener, expected_auth: &str) {
+    // Next: GET /api/experimental/session/test-session/log?after=0&follow=true
     let Ok((mut stream3, _)) = listener.accept() else {
         return;
     };
@@ -627,6 +898,73 @@ fn p4_server_loop(listener: &TcpListener, expected_auth: &str) {
     match validate_log_request(&raw3, expected_auth) {
         Ok(()) => send_sse_ok(&mut stream3),
         Err(code) => send_error(&mut stream3, code),
+    }
+}
+
+fn p4_hold_server_loop(listener: &TcpListener, expected_auth: &str) {
+    if !serve_p4_health_phase(listener, expected_auth) {
+        return;
+    }
+    if !serve_p4_prompt_phase(listener, expected_auth) {
+        return;
+    }
+    serve_p4_log_hold_phase(listener, expected_auth);
+}
+
+fn sse_hold_first_delta_bytes() -> Vec<u8> {
+    // Same first assistant delta as the finite P4 stream, without the
+    // terminal succeeded event. The parent proves the durable delta, then
+    // stops the engine through the custody boundary; this connection holds
+    // open until lifeline EOF kills the fixture process.
+    let mut s = String::new();
+    s.push_str(": keepalive\n");
+    s.push('\n');
+    s.push_str(
+        "data: {\"run_id\":\"fixture-run\",\"session_id\":\"test-session\",\"sequence\":1,\n",
+    );
+    s.push_str("data: \"delta\":\"hello world\"}\n");
+    s.push('\n');
+    s.into_bytes()
+}
+
+fn serve_p4_log_hold_phase(listener: &TcpListener, expected_auth: &str) {
+    // Next: GET /api/experimental/session/test-session/log?after=0&follow=true
+    let Ok((mut stream, _)) = listener.accept() else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let Ok(raw) = read_bounded_headers(&mut stream) else {
+        send_error(&mut stream, 400);
+        return;
+    };
+    if validate_log_request(&raw, expected_auth).is_err() {
+        send_error(&mut stream, 400);
+        return;
+    }
+    // Close-delimited SSE framing: no Content-Length, the one delta flushes
+    // incrementally, and the connection holds open with no terminal event.
+    let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    if stream.write_all(header.as_bytes()).is_err() {
+        return;
+    }
+    if stream.write_all(&sse_hold_first_delta_bytes()).is_err() {
+        return;
+    }
+    if stream.flush().is_err() {
+        return;
+    }
+    // Deterministic hold: block on the held connection until the client
+    // closes it or lifeline EOF terminates the fixture process. The 5s read
+    // timeout only wakes the wait; the loop re-enters without any terminal
+    // event, so the hold is witnessed by the durable delta, never by time.
+    let mut buf = [0_u8; 1];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => return,
+            Ok(_) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => return,
+        }
     }
 }
 
@@ -675,6 +1013,8 @@ fn is_known_scenario(name: &str) -> bool {
             | "hang_until_lifeline"
             | "abrupt_child_exit_nonzero"
             | "prompt_text_then_terminal"
+            | "prompt_text_then_hold_after_first_delta"
+            | "descendant_holds_sentinel"
     )
 }
 
@@ -765,6 +1105,8 @@ mod tests {
             "hang_until_lifeline",
             "abrupt_child_exit_nonzero",
             "prompt_text_then_terminal",
+            "prompt_text_then_hold_after_first_delta",
+            "descendant_holds_sentinel",
         ] {
             assert!(is_known_scenario(s), "{s} should be known");
         }
@@ -1400,6 +1742,39 @@ mod tests {
         assert!(v1.get("delta").and_then(Value::as_str).is_some());
         assert_eq!(v2.get("state").and_then(Value::as_str), Some("succeeded"));
         assert_ne!(first_json, second_json);
+    }
+
+    #[test]
+    fn hold_variant_streams_only_first_delta_without_terminal() {
+        let body = String::from_utf8(sse_hold_first_delta_bytes()).unwrap();
+        assert!(body.starts_with(": keepalive\n"));
+        let events: Vec<&str> = body.split("\n\n").filter(|s| s.contains("data:")).collect();
+        assert_eq!(events.len(), 1, "hold variant should stream one data event");
+        let data_lines: Vec<&str> = events[0]
+            .lines()
+            .filter(|l| l.starts_with("data:"))
+            .collect();
+        assert_eq!(data_lines.len(), 2, "hold delta should stay multiline");
+        let json = data_lines
+            .iter()
+            .map(|l| {
+                l.strip_prefix("data: ")
+                    .unwrap_or(l.strip_prefix("data:").unwrap_or(""))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value.get("run_id").and_then(Value::as_str),
+            Some(FIXTURE_RUN_ID)
+        );
+        assert_eq!(value.get("sequence").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            value.get("delta").and_then(Value::as_str),
+            Some("hello world")
+        );
+        assert!(value.get("state").is_none());
+        assert!(!body.contains("succeeded"));
     }
 
     #[test]

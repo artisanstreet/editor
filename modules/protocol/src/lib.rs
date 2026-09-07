@@ -8,8 +8,14 @@ pub use artisan_domain::WorkspaceId;
 /// `schema/phase1_proof.capnp`. This module encodes no product API decisions;
 /// the Phase 2 protocol design replaces or removes it. Lint allowances are
 /// scoped to this module because its contents are machine-generated.
+/// `#[rustfmt::skip]` keeps `cargo fmt` off the generated file: Bazel
+/// compiles its own action output while Cargo compiles this checked-in
+/// mirror. Regenerate the mirror with the repo-pinned generator
+/// (`scripts/capnp_codegen`, `capnpc 0.27.0`) using Bazel's flags
+/// (`--no-standard-import`, `--src-prefix=schema`).
 #[allow(clippy::all)]
 #[allow(clippy::pedantic)]
+#[rustfmt::skip]
 pub mod phase1_proof_capnp;
 
 /// Product application protocol (Phase 2).
@@ -20,8 +26,14 @@ pub mod phase1_proof_capnp;
 /// contents stay behind scoped lint allowances. Application code uses the
 /// owned values and total conversion functions exported below; direct binding
 /// access remains available for schema conformance and malformed-input tests.
+/// `#[rustfmt::skip]` keeps `cargo fmt` off the generated file: Bazel
+/// compiles its own action output while Cargo compiles this checked-in
+/// mirror. Regenerate the mirror with the repo-pinned generator
+/// (`scripts/capnp_codegen`, `capnpc 0.27.0`) using Bazel's flags
+/// (`--no-standard-import`, `--src-prefix=schema`).
 #[allow(clippy::all)]
 #[allow(clippy::pedantic)]
+#[rustfmt::skip]
 pub mod artisan_capnp;
 
 /// Dependency-free classification and presentation for conversation activity rows.
@@ -38,8 +50,11 @@ pub use types::{
     APPLICATION_PROTOCOL_VERSION, ClientRequest, ConnectionId, ConversationSubscriptionStarted,
     ConversationSubscriptionStopped, DirectoryPickOutcome, DispatchFailure, ERROR_DETAIL_MAX_BYTES,
     ErrorCode, ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, HELLO_VERSION_MAX_ENTRIES,
-    Hello, HelloCredential, LOCAL_CAPABILITY_BYTES, LocalCapability, LocalCapabilityError,
-    ProtocolFailure, ProtocolValueError, ProtocolVersion, RECONNECT_CAPABILITY_BYTES,
-    ReconnectCapability, ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse,
-    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
+    Hello, HelloCredential, LOCAL_CAPABILITY_BYTES, LifecycleRequest, LifecycleResponse,
+    LifecycleState, LifecycleStatus, LifecycleStopDisposition, LifecycleStopReceipt,
+    LocalCapability, LocalCapabilityError, ProtocolFailure, ProtocolValueError, ProtocolVersion,
+    RECONNECT_CAPABILITY_BYTES, ReconnectCapability, ReconnectCapabilityError,
+    RegisteredEngineProfilesResult, ResponsePayload, ServerEvent, ServerResponse,
+    SetThreadEngineConfigResult, ThreadEngineSettingsResult, VersionOffer, VersionOfferError,
+    Welcome, WireEnvelope, WireEnvelopeBody,
 };

@@ -1,0 +1,2157 @@
+diff --git a/src/scene.rs b/src/scene.rs
+index 758d06e5..ef05b9e1 100644
+--- a/src/scene.rs
++++ b/src/scene.rs
+@@ -26,6 +26,7 @@ pub(crate) struct Scene {
+     primitive_bounds: BoundsTree<ScaledPixels>,
+     layer_stack: Vec<DrawOrder>,
+     pub(crate) shadows: Vec<Shadow>,
++    pub(crate) blur_rects: Vec<BlurRect>,
+     pub(crate) quads: Vec<Quad>,
+     pub(crate) paths: Vec<Path<ScaledPixels>>,
+     pub(crate) underlines: Vec<Underline>,
+@@ -41,6 +42,7 @@ impl Scene {
+         self.layer_stack.clear();
+         self.paths.clear();
+         self.shadows.clear();
++        self.blur_rects.clear();
+         self.quads.clear();
+         self.underlines.clear();
+         self.monochrome_sprites.clear();
+@@ -84,6 +86,10 @@ impl Scene {
+                 shadow.order = order;
+                 self.shadows.push(shadow.clone());
+             }
++            Primitive::BlurRect(blur) => {
++                blur.order = order;
++                self.blur_rects.push(blur.clone());
++            }
+             Primitive::Quad(quad) => {
+                 quad.order = order;
+                 self.quads.push(quad.clone());
+@@ -126,6 +132,7 @@ impl Scene {
+
+     pub fn finish(&mut self) {
+         self.shadows.sort_by_key(|shadow| shadow.order);
++        self.blur_rects.sort_by_key(|blur| blur.order);
+         self.quads.sort_by_key(|quad| quad.order);
+         self.paths.sort_by_key(|path| path.order);
+         self.underlines.sort_by_key(|underline| underline.order);
+@@ -148,6 +155,9 @@ impl Scene {
+             shadows: &self.shadows,
+             shadows_start: 0,
+             shadows_iter: self.shadows.iter().peekable(),
++            blur_rects: &self.blur_rects,
++            blur_rects_start: 0,
++            blur_rects_iter: self.blur_rects.iter().peekable(),
+             quads: &self.quads,
+             quads_start: 0,
+             quads_iter: self.quads.iter().peekable(),
+@@ -180,6 +190,7 @@ impl Scene {
+ )]
+ pub(crate) enum PrimitiveKind {
+     Shadow,
++    BlurRect,
+     #[default]
+     Quad,
+     Path,
+@@ -198,6 +209,7 @@ pub(crate) enum PaintOperation {
+ #[derive(Clone)]
+ pub(crate) enum Primitive {
+     Shadow(Shadow),
++    BlurRect(BlurRect),
+     Quad(Quad),
+     Path(Path<ScaledPixels>),
+     Underline(Underline),
+@@ -210,6 +222,7 @@ impl Primitive {
+     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
+         match self {
+             Primitive::Shadow(shadow) => &shadow.bounds,
++            Primitive::BlurRect(blur) => &blur.bounds,
+             Primitive::Quad(quad) => &quad.bounds,
+             Primitive::Path(path) => &path.bounds,
+             Primitive::Underline(underline) => &underline.bounds,
+@@ -222,6 +235,7 @@ impl Primitive {
+     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {
+         match self {
+             Primitive::Shadow(shadow) => &shadow.content_mask,
++            Primitive::BlurRect(blur) => &blur.content_mask,
+             Primitive::Quad(quad) => &quad.content_mask,
+             Primitive::Path(path) => &path.content_mask,
+             Primitive::Underline(underline) => &underline.content_mask,
+@@ -243,6 +257,9 @@ struct BatchIterator<'a> {
+     shadows: &'a [Shadow],
+     shadows_start: usize,
+     shadows_iter: Peekable<slice::Iter<'a, Shadow>>,
++    blur_rects: &'a [BlurRect],
++    blur_rects_start: usize,
++    blur_rects_iter: Peekable<slice::Iter<'a, BlurRect>>,
+     quads: &'a [Quad],
+     quads_start: usize,
+     quads_iter: Peekable<slice::Iter<'a, Quad>>,
+@@ -272,6 +289,10 @@ impl<'a> Iterator for BatchIterator<'a> {
+                 self.shadows_iter.peek().map(|s| s.order),
+                 PrimitiveKind::Shadow,
+             ),
++            (
++                self.blur_rects_iter.peek().map(|b| b.order),
++                PrimitiveKind::BlurRect,
++            ),
+             (self.quads_iter.peek().map(|q| q.order), PrimitiveKind::Quad),
+             (self.paths_iter.peek().map(|q| q.order), PrimitiveKind::Path),
+             (
+@@ -318,6 +339,22 @@ impl<'a> Iterator for BatchIterator<'a> {
+                     &self.shadows[shadows_start..shadows_end],
+                 ))
+             }
++            PrimitiveKind::BlurRect => {
++                let blur_rects_start = self.blur_rects_start;
++                let mut blur_rects_end = blur_rects_start + 1;
++                self.blur_rects_iter.next();
++                while self
++                    .blur_rects_iter
++                    .next_if(|blur| (blur.order, batch_kind) < max_order_and_kind)
++                    .is_some()
++                {
++                    blur_rects_end += 1;
++                }
++                self.blur_rects_start = blur_rects_end;
++                Some(PrimitiveBatch::BlurRects(
++                    &self.blur_rects[blur_rects_start..blur_rects_end],
++                ))
++            }
+             PrimitiveKind::Quad => {
+                 let quads_start = self.quads_start;
+                 let mut quads_end = quads_start + 1;
+@@ -434,6 +471,7 @@ impl<'a> Iterator for BatchIterator<'a> {
+ )]
+ pub(crate) enum PrimitiveBatch<'a> {
+     Shadows(&'a [Shadow]),
++    BlurRects(&'a [BlurRect]),
+     Quads(&'a [Quad]),
+     Paths(&'a [Path<ScaledPixels>]),
+     Underlines(&'a [Underline]),
+@@ -502,6 +540,26 @@ impl From<Shadow> for Primitive {
+     }
+ }
+
++#[derive(Debug, Clone)]
++#[repr(C)]
++pub(crate) struct BlurRect {
++    pub order: DrawOrder,
++    pub blur_radius: ScaledPixels,
++    pub bounds: Bounds<ScaledPixels>,
++    pub corner_radii: Corners<ScaledPixels>,
++    pub content_mask: ContentMask<ScaledPixels>,
++    pub opacity: f32,
++    /// Pads the struct to a multiple of 8 bytes so its stride matches the
++    /// WGSL layout rules used by the Blade backend.
++    pub pad: f32,
++}
++
++impl From<BlurRect> for Primitive {
++    fn from(blur: BlurRect) -> Self {
++        Primitive::BlurRect(blur)
++    }
++}
++
+ /// The style of a border.
+ #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+ #[repr(C)]
+@@ -831,3 +889,136 @@ impl PathVertex<Pixels> {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::{Background, BorderStyle, point, size};
++
++    fn scaled(value: f32) -> ScaledPixels {
++        ScaledPixels::from(value)
++    }
++
++    fn test_bounds(x: f32) -> Bounds<ScaledPixels> {
++        Bounds::new(
++            point(scaled(x), scaled(0.)),
++            size(scaled(100.), scaled(100.)),
++        )
++    }
++
++    fn test_mask() -> ContentMask<ScaledPixels> {
++        ContentMask {
++            bounds: Bounds::new(
++                point(scaled(-1000.), scaled(-1000.)),
++                size(scaled(100_000.), scaled(100_000.)),
++            ),
++        }
++    }
++
++    fn test_shadow(x: f32) -> Shadow {
++        Shadow {
++            order: 0,
++            blur_radius: scaled(4.),
++            bounds: test_bounds(x),
++            corner_radii: Corners::default(),
++            content_mask: test_mask(),
++            color: Hsla::default(),
++        }
++    }
++
++    fn test_blur(x: f32, radius: f32) -> BlurRect {
++        BlurRect {
++            order: 0,
++            blur_radius: scaled(radius),
++            bounds: test_bounds(x),
++            corner_radii: Corners::default(),
++            content_mask: test_mask(),
++            opacity: 1.0,
++            pad: 0.0,
++        }
++    }
++
++    fn test_quad(x: f32) -> Quad {
++        Quad {
++            order: 0,
++            border_style: BorderStyle::default(),
++            bounds: test_bounds(x),
++            content_mask: test_mask(),
++            background: Background::default(),
++            border_color: Hsla::default(),
++            corner_radii: Corners::default(),
++            border_widths: Edges::default(),
++        }
++    }
++
++    fn batch_summary(scene: &Scene) -> Vec<String> {
++        scene
++            .batches()
++            .map(|batch| match batch {
++                PrimitiveBatch::Shadows(shadows) => format!("shadows:{}", shadows.len()),
++                PrimitiveBatch::BlurRects(blurs) => {
++                    let radii: Vec<String> = blurs
++                        .iter()
++                        .map(|blur| format!("{:?}", blur.blur_radius))
++                        .collect();
++                    format!("blurs:{}:{}", blurs.len(), radii.join(","))
++                }
++                PrimitiveBatch::Quads(quads) => format!("quads:{}", quads.len()),
++                batch => panic!("unexpected batch in blur ordering test: {batch:?}"),
++            })
++            .collect()
++    }
++
++    #[test]
++    fn blur_rects_sort_after_shadows_and_before_quads_in_draw_order() {
++        let mut scene = Scene::default();
++
++        // First layer takes draw order 1.
++        scene.push_layer(test_bounds(0.));
++        scene.insert_primitive(test_shadow(0.));
++        scene.insert_primitive(test_blur(0., 4.));
++        scene.insert_primitive(test_quad(0.));
++        scene.pop_layer();
++
++        // Overlapping second layer takes draw order 2.
++        scene.push_layer(test_bounds(50.));
++        scene.insert_primitive(test_blur(50., 12.));
++        scene.insert_primitive(test_quad(50.));
++        scene.pop_layer();
++
++        scene.finish();
++
++        assert_eq!(scene.blur_rects.len(), 2);
++        assert!(scene.blur_rects[0].order < scene.blur_rects[1].order);
++
++        assert_eq!(
++            batch_summary(&scene),
++            vec![
++                "shadows:1".to_string(),
++                format!("blurs:1:{:?}", scaled(4.)),
++                "quads:1".to_string(),
++                format!("blurs:1:{:?}", scaled(12.)),
++                "quads:1".to_string(),
++            ]
++        );
++    }
++
++    #[test]
++    fn blur_rects_with_empty_clipped_bounds_are_skipped() {
++        let mut scene = Scene::default();
++
++        let mut clipped = test_blur(0., 8.);
++        clipped.content_mask = ContentMask {
++            bounds: test_bounds(1000.),
++        };
++        scene.insert_primitive(clipped);
++
++        assert_eq!(scene.len(), 0);
++        assert!(scene.blur_rects.is_empty());
++
++        scene.insert_primitive(test_blur(0., 8.));
++        assert_eq!(scene.len(), 1);
++        assert_eq!(scene.blur_rects.len(), 1);
++        assert_eq!(scene.blur_rects[0].blur_radius, scaled(8.));
++    }
++}
+diff --git a/src/window.rs b/src/window.rs
+index 6d74a0e1..ed5c0459 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -2,8 +2,8 @@
+ use crate::Inspector;
+ use crate::{
+     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
+-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
+-    Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
++    AsyncWindowContext, AvailableSpace, Background, BlurRect, BorderStyle, Bounds, BoxShadow,
++    Capslock, Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
+     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
+     FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
+     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
+@@ -2827,6 +2827,33 @@ impl Window {
+         }
+     }
+
++    /// Paint a backdrop-blur region into the scene for the next frame at the current z-index.
++    ///
++    /// The blur applies to content painted behind `bounds` and is clipped to `corner_radii`.
++    /// Renderers without blur support skip these primitives without failing the frame.
++    ///
++    /// This method should only be called as part of the paint phase of element drawing.
++    pub fn paint_backdrop_blur(
++        &mut self,
++        bounds: Bounds<Pixels>,
++        corner_radii: Corners<Pixels>,
++        blur_radius: Pixels,
++    ) {
++        self.invalidator.debug_assert_paint();
++
++        let scale_factor = self.scale_factor();
++        let content_mask = self.content_mask();
++        self.next_frame.scene.insert_primitive(BlurRect {
++            order: 0,
++            blur_radius: blur_radius.scale(scale_factor),
++            bounds: bounds.scale(scale_factor),
++            content_mask: content_mask.scale(scale_factor),
++            corner_radii: corner_radii.scale(scale_factor),
++            opacity: self.element_opacity(),
++            pad: 0.0,
++        });
++    }
++
+     /// Paint one or more quads into the scene for the next frame at the current stacking context.
+     /// Quads are colored rectangular regions with an optional background, border, and corner radius.
+     /// see [`fill`], [`outline`], and [`quad`] to construct this type.
+diff --git a/src/style.rs b/src/style.rs
+index 42f8f25e..6c8366e5 100644
+--- a/src/style.rs
++++ b/src/style.rs
+@@ -251,6 +251,11 @@ pub struct Style {
+     /// Box shadow of the element
+     pub box_shadow: Vec<BoxShadow>,
+
++    /// Backdrop blur radius applied behind the element, painted before its background.
++    ///
++    /// Corners come from the element's own clamped corner radii.
++    pub backdrop_blur: Option<Pixels>,
++
+     /// The text style of this element
+     pub text: TextStyleRefinement,
+
+@@ -626,6 +631,10 @@ impl Style {
+
+         window.paint_shadows(bounds, corner_radii, &self.box_shadow);
+
++        if let Some(blur_radius) = self.backdrop_blur {
++            window.paint_backdrop_blur(bounds, corner_radii, blur_radius);
++        }
++
+         let background_color = self.background.as_ref().and_then(Fill::color);
+         if background_color.is_some_and(|color| !color.is_transparent()) {
+             let mut border_color = match background_color {
+@@ -766,6 +775,7 @@ impl Default for Style {
+             border_style: BorderStyle::default(),
+             corner_radii: Corners::default(),
+             box_shadow: Default::default(),
++            backdrop_blur: None,
+             text: TextStyleRefinement::default(),
+             mouse_cursor: None,
+             opacity: None,
+@@ -1290,7 +1300,7 @@ impl From<Position> for taffy::style::Position {
+
+ #[cfg(test)]
+ mod tests {
+-    use crate::{blue, green, px, red, yellow};
++    use crate::{TestAppContext, blue, green, px, red, yellow};
+
+     use super::*;
+
+@@ -1469,4 +1479,49 @@ mod tests {
+             ]
+         );
+     }
++
++    #[gpui::test]
++    async fn style_paint_emits_blur_before_the_background_quad(cx: &mut TestAppContext) {
++        use crate::{AvailableSpace, PrimitiveBatch, div, point, size};
++
++        let cx = cx.add_empty_window();
++        cx.draw(
++            point(px(0.), px(0.)),
++            size(
++                AvailableSpace::Definite(px(200.)),
++                AvailableSpace::Definite(px(200.)),
++            ),
++            |_, _| {
++                div()
++                    .w(px(200.))
++                    .h(px(200.))
++                    .bg(red())
++                    .backdrop_blur(px(8.))
++            },
++        );
++
++        cx.update(|window, _| {
++            // `draw` above leaves the window dirty, so its own update cycle
++            // runs a full frame: the painted scene is finished and swapped
++            // into `rendered_frame` while `next_frame` is cleared.
++            let scale_factor = window.scale_factor();
++            let scene = &window.rendered_frame.scene;
++
++            assert_eq!(scene.blur_rects.len(), 1);
++            assert_eq!(scene.quads.len(), 1);
++            assert_eq!(scene.blur_rects[0].blur_radius, px(8.).scale(scale_factor));
++            assert_eq!(scene.blur_rects[0].bounds, scene.quads[0].bounds);
++            assert_eq!(scene.blur_rects[0].opacity, 1.0);
++
++            let summary: Vec<String> = scene
++                .batches()
++                .map(|batch| match batch {
++                    PrimitiveBatch::BlurRects(blurs) => format!("blurs:{}", blurs.len()),
++                    PrimitiveBatch::Quads(quads) => format!("quads:{}", quads.len()),
++                    batch => panic!("unexpected batch in backdrop blur paint test: {batch:?}"),
++                })
++                .collect();
++            assert_eq!(summary, vec!["blurs:1".to_string(), "quads:1".to_string()]);
++        });
++    }
+ }
+diff --git a/src/styled.rs b/src/styled.rs
+index 44757186..8f9b6bdd 100644
+--- a/src/styled.rs
++++ b/src/styled.rs
+@@ -1,8 +1,9 @@
+ use crate::{
+     self as gpui, AbsoluteLength, AlignContent, AlignItems, BorderStyle, CursorStyle,
+     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontStyle, FontWeight,
+-    GridPlacement, Hsla, JustifyContent, Length, SharedString, StrikethroughStyle, StyleRefinement,
+-    TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
++    GridPlacement, Hsla, JustifyContent, Length, Pixels, SharedString, StrikethroughStyle,
++    StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px,
++    relative, rems,
+ };
+ pub use gpui_macros::{
+     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
+@@ -654,6 +655,14 @@ pub trait Styled: Sized {
+         self
+     }
+
++    /// Sets a backdrop blur applied behind this element, painted before its background.
++    ///
++    /// Corners come from the element's own corner radii.
++    fn backdrop_blur(mut self, radius: impl Into<Pixels>) -> Self {
++        self.style().backdrop_blur = Some(radius.into());
++        self
++    }
++
+     /// Sets the grid columns of this element.
+     fn grid_cols(mut self, cols: u16) -> Self {
+         self.style().grid_cols = Some(cols);
+@@ -764,3 +773,18 @@ pub trait Styled: Sized {
+         self
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::px;
++
++    #[test]
++    fn backdrop_blur_sets_the_style_field() {
++        let refined = StyleRefinement::default().backdrop_blur(px(8.));
++        assert_eq!(refined.backdrop_blur, Some(px(8.)));
++
++        let refined = StyleRefinement::default().backdrop_blur(12.5);
++        assert_eq!(refined.backdrop_blur, Some(px(12.5)));
++    }
++}
+diff --git a/src/platform/windows/directx_renderer.rs b/src/platform/windows/directx_renderer.rs
+index 2baa237c..f8033c74 100644
+--- a/src/platform/windows/directx_renderer.rs
++++ b/src/platform/windows/directx_renderer.rs
+@@ -69,10 +69,23 @@ struct DirectXResources {
+     path_intermediate_msaa_texture: ID3D11Texture2D,
+     path_intermediate_msaa_view: [Option<ID3D11RenderTargetView>; 1],
+
++    // Backdrop-blur textures: full-window snapshot plus half/quarter
++    // resolution pyramid levels for the dual-Kawase passes.
++    blur_snapshot_texture: ID3D11Texture2D,
++    blur_snapshot_srv: [Option<ID3D11ShaderResourceView>; 1],
++    blur_half_texture: ID3D11Texture2D,
++    blur_half_srv: [Option<ID3D11ShaderResourceView>; 1],
++    blur_half_view: [Option<ID3D11RenderTargetView>; 1],
++    blur_quarter_texture: ID3D11Texture2D,
++    blur_quarter_srv: [Option<ID3D11ShaderResourceView>; 1],
++    blur_quarter_view: [Option<ID3D11RenderTargetView>; 1],
++
+     // Cached window size and viewport
+     width: u32,
+     height: u32,
+     viewport: [D3D11_VIEWPORT; 1],
++    viewport_half: [D3D11_VIEWPORT; 1],
++    viewport_quarter: [D3D11_VIEWPORT; 1],
+ }
+
+ struct DirectXRenderPipelines {
+@@ -83,6 +96,9 @@ struct DirectXRenderPipelines {
+     underline_pipeline: PipelineState<Underline>,
+     mono_sprites: PipelineState<MonochromeSprite>,
+     poly_sprites: PipelineState<PolychromeSprite>,
++    blur_downsample_pipeline: PipelineState<BlurPyramidSprite>,
++    blur_upsample_pipeline: PipelineState<BlurPyramidSprite>,
++    blur_composite_pipeline: PipelineState<BlurRect>,
+ }
+
+ struct DirectXGlobalElements {
+@@ -288,6 +304,7 @@ impl DirectXRenderer {
+         for batch in scene.batches() {
+             match batch {
+                 PrimitiveBatch::Shadows(shadows) => self.draw_shadows(shadows),
++                PrimitiveBatch::BlurRects(blurs) => self.draw_blur_rects(blurs),
+                 PrimitiveBatch::Quads(quads) => self.draw_quads(quads),
+                 PrimitiveBatch::Paths(paths) => {
+                     self.draw_paths_to_intermediate(paths)?;
+@@ -303,10 +320,11 @@ impl DirectXRenderer {
+                     sprites,
+                 } => self.draw_polychrome_sprites(texture_id, sprites),
+                 PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(surfaces),
+-            }.context(format!("scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces",
++            }.context(format!("scene too large: {} paths, {} shadows, {} quads, {} blurs, {} underlines, {} mono, {} poly, {} surfaces",
+                     scene.paths.len(),
+                     scene.shadows.len(),
+                     scene.quads.len(),
++                    scene.blur_rects.len(),
+                     scene.underlines.len(),
+                     scene.monochrome_sprites.len(),
+                     scene.polychrome_sprites.len(),
+@@ -576,6 +594,181 @@ impl DirectXRenderer {
+         Ok(())
+     }
+
++    /// Paints a batch of backdrop-blur rects with a dual-Kawase pyramid:
++    /// the framebuffer region behind the batch (which, by batch order, holds
++    /// exactly the lower-order content) is snapshotted once, downsampled to
++    /// half and quarter resolution, upsampled back to half, then composited
++    /// per rect with a rounded-rect mask. Later batches paint over the result,
++    /// preserving draw-order interleave.
++    fn draw_blur_rects(&mut self, blurs: &[BlurRect]) -> Result<()> {
++        if blurs.is_empty() {
++            return Ok(());
++        }
++        let viewport_width = self.resources.width;
++        let viewport_height = self.resources.height;
++
++        // Keep only rects with a non-empty dilated snapshot region and find
++        // their union plus the batch's maximum radius.
++        let mut composite: Vec<BlurRect> = Vec::with_capacity(blurs.len());
++        let mut union_box: Option<BlurCopyBox> = None;
++        let mut max_radius = 0.0f32;
++        for blur in blurs {
++            max_radius = max_radius.max(blur.blur_radius.0.max(0.0));
++            if let Some(copy_box) = blur_copy_box(
++                &blur.bounds,
++                blur.blur_radius,
++                viewport_width,
++                viewport_height,
++            ) {
++                union_box = Some(match union_box {
++                    Some(union_box) => union_box.union(&copy_box),
++                    None => copy_box,
++                });
++                composite.push(blur.clone());
++            }
++        }
++        let Some(union_box) = union_box else {
++            return Ok(());
++        };
++
++        // Snapshot the union region into the snapshot texture.
++        unsafe {
++            let src_box = D3D11_BOX {
++                left: union_box.left,
++                top: union_box.top,
++                front: 0,
++                right: union_box.right,
++                bottom: union_box.bottom,
++                back: 1,
++            };
++            self.devices.device_context.CopySubresourceRegion(
++                &self.resources.blur_snapshot_texture,
++                0,
++                union_box.left,
++                union_box.top,
++                0,
++                &*self.resources.render_target,
++                0,
++                Some(&src_box),
++            );
++        }
++
++        let clamp_min = [
++            union_box.left as f32 / viewport_width as f32,
++            union_box.top as f32 / viewport_height as f32,
++        ];
++        let clamp_max = [
++            union_box.right as f32 / viewport_width as f32,
++            union_box.bottom as f32 / viewport_height as f32,
++        ];
++
++        // Pass 1: downsample snapshot (full res) to half res.
++        self.pipelines.blur_downsample_pipeline.update_buffer(
++            &self.devices.device,
++            &self.devices.device_context,
++            &[BlurPyramidSprite {
++                src_texel_size: [1.0 / viewport_width as f32, 1.0 / viewport_height as f32],
++                sample_offset: [
++                    (max_radius / 4.0).clamp(0.5, 4.0),
++                    (max_radius / 4.0).clamp(0.5, 4.0),
++                ],
++                clamp_min,
++                clamp_max,
++            }],
++        )?;
++        unsafe {
++            self.devices
++                .device_context
++                .OMSetRenderTargets(Some(&self.resources.blur_half_view), None);
++        }
++        self.pipelines.blur_downsample_pipeline.draw_fullscreen(
++            &self.devices.device_context,
++            &self.resources.blur_snapshot_srv,
++            &self.resources.viewport_half,
++            &self.globals.global_params_buffer,
++            &self.globals.sampler,
++        )?;
++
++        // Pass 2: downsample half res to quarter res.
++        let half_width = (viewport_width / 2).max(1) as f32;
++        let half_height = (viewport_height / 2).max(1) as f32;
++        self.pipelines.blur_downsample_pipeline.update_buffer(
++            &self.devices.device,
++            &self.devices.device_context,
++            &[BlurPyramidSprite {
++                src_texel_size: [1.0 / half_width, 1.0 / half_height],
++                sample_offset: [
++                    (max_radius / 8.0).clamp(0.5, 4.0),
++                    (max_radius / 8.0).clamp(0.5, 4.0),
++                ],
++                clamp_min,
++                clamp_max,
++            }],
++        )?;
++        unsafe {
++            self.devices
++                .device_context
++                .OMSetRenderTargets(Some(&self.resources.blur_quarter_view), None);
++        }
++        self.pipelines.blur_downsample_pipeline.draw_fullscreen(
++            &self.devices.device_context,
++            &self.resources.blur_half_srv,
++            &self.resources.viewport_quarter,
++            &self.globals.global_params_buffer,
++            &self.globals.sampler,
++        )?;
++
++        // Pass 3: upsample quarter res back to half res.
++        let quarter_width = (viewport_width / 4).max(1) as f32;
++        let quarter_height = (viewport_height / 4).max(1) as f32;
++        self.pipelines.blur_upsample_pipeline.update_buffer(
++            &self.devices.device,
++            &self.devices.device_context,
++            &[BlurPyramidSprite {
++                src_texel_size: [1.0 / quarter_width, 1.0 / quarter_height],
++                sample_offset: [0.5, 0.5],
++                clamp_min,
++                clamp_max,
++            }],
++        )?;
++        unsafe {
++            self.devices
++                .device_context
++                .OMSetRenderTargets(Some(&self.resources.blur_half_view), None);
++        }
++        self.pipelines.blur_upsample_pipeline.draw_fullscreen(
++            &self.devices.device_context,
++            &self.resources.blur_quarter_srv,
++            &self.resources.viewport_half,
++            &self.globals.global_params_buffer,
++            &self.globals.sampler,
++        )?;
++
++        // Pass 4: composite each rect over the framebuffer, sampling the
++        // blurred half-res pyramid with a rounded-rect mask. Restores the
++        // main render target so later batches paint over the result.
++        self.pipelines.blur_composite_pipeline.update_buffer(
++            &self.devices.device,
++            &self.devices.device_context,
++            &composite,
++        )?;
++        unsafe {
++            self.devices
++                .device_context
++                .OMSetRenderTargets(Some(&self.resources.render_target_view), None);
++        }
++        self.pipelines.blur_composite_pipeline.draw_with_texture(
++            &self.devices.device_context,
++            &self.resources.blur_half_srv,
++            &self.resources.viewport,
++            &self.globals.global_params_buffer,
++            &self.globals.sampler,
++            composite.len() as u32,
++        )?;
++
++        Ok(())
++    }
++
+     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
+         let desc = unsafe { self.devices.adapter.GetDesc1() }?;
+         let is_software_emulated = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
+@@ -679,6 +872,16 @@ impl DirectXResources {
+             path_intermediate_msaa_texture,
+             path_intermediate_msaa_view,
+             viewport,
++            blur_snapshot_texture,
++            blur_snapshot_srv,
++            blur_half_texture,
++            blur_half_srv,
++            blur_half_view,
++            blur_quarter_texture,
++            blur_quarter_srv,
++            blur_quarter_view,
++            viewport_half,
++            viewport_quarter,
+         ) = create_resources(devices, &swap_chain, width, height)?;
+         set_rasterizer_state(&devices.device, &devices.device_context)?;
+
+@@ -690,7 +893,17 @@ impl DirectXResources {
+             path_intermediate_msaa_texture,
+             path_intermediate_msaa_view,
+             path_intermediate_srv,
++            blur_snapshot_texture,
++            blur_snapshot_srv,
++            blur_half_texture,
++            blur_half_srv,
++            blur_half_view,
++            blur_quarter_texture,
++            blur_quarter_srv,
++            blur_quarter_view,
+             viewport,
++            viewport_half,
++            viewport_quarter,
+             width,
+             height,
+         }))
+@@ -711,6 +924,16 @@ impl DirectXResources {
+             path_intermediate_msaa_texture,
+             path_intermediate_msaa_view,
+             viewport,
++            blur_snapshot_texture,
++            blur_snapshot_srv,
++            blur_half_texture,
++            blur_half_srv,
++            blur_half_view,
++            blur_quarter_texture,
++            blur_quarter_srv,
++            blur_quarter_view,
++            viewport_half,
++            viewport_quarter,
+         ) = create_resources(devices, &self.swap_chain, width, height)?;
+         self.render_target = render_target;
+         self.render_target_view = render_target_view;
+@@ -718,7 +941,17 @@ impl DirectXResources {
+         self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
+         self.path_intermediate_msaa_view = path_intermediate_msaa_view;
+         self.path_intermediate_srv = path_intermediate_srv;
++        self.blur_snapshot_texture = blur_snapshot_texture;
++        self.blur_snapshot_srv = blur_snapshot_srv;
++        self.blur_half_texture = blur_half_texture;
++        self.blur_half_srv = blur_half_srv;
++        self.blur_half_view = blur_half_view;
++        self.blur_quarter_texture = blur_quarter_texture;
++        self.blur_quarter_srv = blur_quarter_srv;
++        self.blur_quarter_view = blur_quarter_view;
+         self.viewport = viewport;
++        self.viewport_half = viewport_half;
++        self.viewport_quarter = viewport_quarter;
+         Ok(())
+     }
+ }
+@@ -774,6 +1007,27 @@ impl DirectXRenderPipelines {
+             16,
+             create_blend_state(device)?,
+         )?;
++        let blur_downsample_pipeline = PipelineState::new(
++            device,
++            "blur_downsample_pipeline",
++            ShaderModule::BlurDownsample,
++            4,
++            create_blend_state_disabled(device)?,
++        )?;
++        let blur_upsample_pipeline = PipelineState::new(
++            device,
++            "blur_upsample_pipeline",
++            ShaderModule::BlurUpsample,
++            4,
++            create_blend_state_disabled(device)?,
++        )?;
++        let blur_composite_pipeline = PipelineState::new(
++            device,
++            "blur_composite_pipeline",
++            ShaderModule::BlurComposite,
++            4,
++            create_blend_state(device)?,
++        )?;
+
+         Ok(Self {
+             shadow_pipeline,
+@@ -783,6 +1037,9 @@ impl DirectXRenderPipelines {
+             underline_pipeline,
+             mono_sprites,
+             poly_sprites,
++            blur_downsample_pipeline,
++            blur_upsample_pipeline,
++            blur_composite_pipeline,
+         })
+     }
+ }
+@@ -977,6 +1234,37 @@ impl<T> PipelineState<T> {
+         }
+         Ok(())
+     }
++
++    /// Draws a single fullscreen triangle, used by the backdrop-blur pyramid
++    /// passes. The vertex shader derives clip-space position and texture
++    /// coordinates from `SV_VertexID`, so no vertex buffer is needed.
++    fn draw_fullscreen(
++        &self,
++        device_context: &ID3D11DeviceContext,
++        texture: &[Option<ID3D11ShaderResourceView>],
++        viewport: &[D3D11_VIEWPORT],
++        global_params: &[Option<ID3D11Buffer>],
++        sampler: &[Option<ID3D11SamplerState>],
++    ) -> Result<()> {
++        set_pipeline_state(
++            device_context,
++            &self.view,
++            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
++            viewport,
++            &self.vertex,
++            &self.fragment,
++            global_params,
++            &self.blend_state,
++        );
++        unsafe {
++            device_context.PSSetSamplers(0, Some(sampler));
++            device_context.VSSetShaderResources(0, Some(texture));
++            device_context.PSSetShaderResources(0, Some(texture));
++
++            device_context.DrawInstanced(3, 1, 0, 0);
++        }
++        Ok(())
++    }
+ }
+
+ #[derive(Clone, Copy)]
+@@ -994,6 +1282,73 @@ struct PathSprite {
+     bounds: Bounds<ScaledPixels>,
+ }
+
++/// Per-pass parameters for the backdrop-blur pyramid shaders, uploaded as a
++/// single structured-buffer instance for each fullscreen pass.
++#[derive(Clone, Copy)]
++#[repr(C)]
++struct BlurPyramidSprite {
++    /// UV size of one source texel, used to scale texel offsets.
++    src_texel_size: [f32; 2],
++    /// Kawase sample offset in source texels.
++    sample_offset: [f32; 2],
++    /// Valid source region in UV space; samples are clamped into it so
++    /// uninitialized texels outside the copied union never bleed in.
++    clamp_min: [f32; 2],
++    clamp_max: [f32; 2],
++}
++
++/// Integer texel box copied from the framebuffer into the blur snapshot
++/// texture for one blur rect, dilated by the blur margin and clamped to the
++/// viewport.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct BlurCopyBox {
++    pub left: u32,
++    pub top: u32,
++    pub right: u32,
++    pub bottom: u32,
++}
++
++impl BlurCopyBox {
++    fn union(&self, other: &Self) -> Self {
++        Self {
++            left: self.left.min(other.left),
++            top: self.top.min(other.top),
++            right: self.right.max(other.right),
++            bottom: self.bottom.max(other.bottom),
++        }
++    }
++}
++
++/// Computes the snapshot region for one blur rect: its bounds dilated by
++/// three times the blur radius (matching the shadow shader's 3-sigma margin),
++/// rounded out to whole texels and clamped to the viewport. Returns `None`
++/// when the dilated region is empty or fully off-viewport.
++pub(crate) fn blur_copy_box(
++    bounds: &Bounds<ScaledPixels>,
++    blur_radius: ScaledPixels,
++    viewport_width: u32,
++    viewport_height: u32,
++) -> Option<BlurCopyBox> {
++    let margin = (blur_radius.0 * 3.0).max(0.0);
++    let left = (bounds.origin.x.0 - margin).floor().max(0.0) as u32;
++    let top = (bounds.origin.y.0 - margin).floor().max(0.0) as u32;
++    let right = (bounds.origin.x.0 + bounds.size.width.0 + margin)
++        .ceil()
++        .clamp(0.0, viewport_width as f32) as u32;
++    let bottom = (bounds.origin.y.0 + bounds.size.height.0 + margin)
++        .ceil()
++        .clamp(0.0, viewport_height as f32) as u32;
++    if left >= right || top >= bottom {
++        return None;
++    }
++    Some(BlurCopyBox {
++        left,
++        top,
++        right,
++        bottom,
++    })
++}
++
+ impl Drop for DirectXRenderer {
+     fn drop(&mut self) {
+         #[cfg(debug_assertions)]
+@@ -1089,6 +1444,16 @@ fn create_resources(
+     ID3D11Texture2D,
+     [Option<ID3D11RenderTargetView>; 1],
+     [D3D11_VIEWPORT; 1],
++    ID3D11Texture2D,
++    [Option<ID3D11ShaderResourceView>; 1],
++    ID3D11Texture2D,
++    [Option<ID3D11ShaderResourceView>; 1],
++    [Option<ID3D11RenderTargetView>; 1],
++    ID3D11Texture2D,
++    [Option<ID3D11ShaderResourceView>; 1],
++    [Option<ID3D11RenderTargetView>; 1],
++    [D3D11_VIEWPORT; 1],
++    [D3D11_VIEWPORT; 1],
+ )> {
+     let (render_target, render_target_view) =
+         create_render_target_and_its_view(swap_chain, &devices.device)?;
+@@ -1097,6 +1462,14 @@ fn create_resources(
+     let (path_intermediate_msaa_texture, path_intermediate_msaa_view) =
+         create_path_intermediate_msaa_texture_and_view(&devices.device, width, height)?;
+     let viewport = set_viewport(&devices.device_context, width as f32, height as f32);
++    let (blur_snapshot_texture, blur_snapshot_srv) =
++        create_blur_snapshot_texture(&devices.device, width, height)?;
++    let (blur_half_texture, blur_half_srv, blur_half_view) =
++        create_blur_pyramid_texture(&devices.device, (width / 2).max(1), (height / 2).max(1))?;
++    let (blur_quarter_texture, blur_quarter_srv, blur_quarter_view) =
++        create_blur_pyramid_texture(&devices.device, (width / 4).max(1), (height / 4).max(1))?;
++    let viewport_half = viewports_for_size((width / 2).max(1), (height / 2).max(1));
++    let viewport_quarter = viewports_for_size((width / 4).max(1), (height / 4).max(1));
+     Ok((
+         render_target,
+         render_target_view,
+@@ -1105,6 +1478,16 @@ fn create_resources(
+         path_intermediate_msaa_texture,
+         path_intermediate_msaa_view,
+         viewport,
++        blur_snapshot_texture,
++        blur_snapshot_srv,
++        blur_half_texture,
++        blur_half_srv,
++        blur_half_view,
++        blur_quarter_texture,
++        blur_quarter_srv,
++        blur_quarter_view,
++        viewport_half,
++        viewport_quarter,
+     ))
+ }
+
+@@ -1189,6 +1572,99 @@ fn create_path_intermediate_msaa_texture_and_view(
+     Ok((msaa_texture, [Some(msaa_view.unwrap())]))
+ }
+
++/// Creates the full-window snapshot texture that a backdrop-blur batch copies
++/// the current framebuffer region into. Never bound as a render target, only
++/// copied into and sampled from.
++#[inline]
++fn create_blur_snapshot_texture(
++    device: &ID3D11Device,
++    width: u32,
++    height: u32,
++) -> Result<(ID3D11Texture2D, [Option<ID3D11ShaderResourceView>; 1])> {
++    let texture = unsafe {
++        let mut output = None;
++        let desc = D3D11_TEXTURE2D_DESC {
++            Width: width,
++            Height: height,
++            MipLevels: 1,
++            ArraySize: 1,
++            Format: RENDER_TARGET_FORMAT,
++            SampleDesc: DXGI_SAMPLE_DESC {
++                Count: 1,
++                Quality: 0,
++            },
++            Usage: D3D11_USAGE_DEFAULT,
++            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
++            CPUAccessFlags: 0,
++            MiscFlags: 0,
++        };
++        device.CreateTexture2D(&desc, None, Some(&mut output))?;
++        output.unwrap()
++    };
++
++    let mut shader_resource_view = None;
++    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut shader_resource_view))? };
++
++    Ok((texture, [Some(shader_resource_view.unwrap())]))
++}
++
++/// Creates one level of the backdrop-blur pyramid (half or quarter
++/// resolution). Levels are both rendered into and sampled from.
++#[inline]
++fn create_blur_pyramid_texture(
++    device: &ID3D11Device,
++    width: u32,
++    height: u32,
++) -> Result<(
++    ID3D11Texture2D,
++    [Option<ID3D11ShaderResourceView>; 1],
++    [Option<ID3D11RenderTargetView>; 1],
++)> {
++    let texture = unsafe {
++        let mut output = None;
++        let desc = D3D11_TEXTURE2D_DESC {
++            Width: width,
++            Height: height,
++            MipLevels: 1,
++            ArraySize: 1,
++            Format: RENDER_TARGET_FORMAT,
++            SampleDesc: DXGI_SAMPLE_DESC {
++                Count: 1,
++                Quality: 0,
++            },
++            Usage: D3D11_USAGE_DEFAULT,
++            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
++            CPUAccessFlags: 0,
++            MiscFlags: 0,
++        };
++        device.CreateTexture2D(&desc, None, Some(&mut output))?;
++        output.unwrap()
++    };
++
++    let mut shader_resource_view = None;
++    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut shader_resource_view))? };
++    let mut render_target_view = None;
++    unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut render_target_view))? };
++
++    Ok((
++        texture,
++        [Some(shader_resource_view.unwrap())],
++        [Some(render_target_view.unwrap())],
++    ))
++}
++
++#[inline]
++fn viewports_for_size(width: u32, height: u32) -> [D3D11_VIEWPORT; 1] {
++    [D3D11_VIEWPORT {
++        TopLeftX: 0.0,
++        TopLeftY: 0.0,
++        Width: width as f32,
++        Height: height as f32,
++        MinDepth: 0.0,
++        MaxDepth: 1.0,
++    }]
++}
++
+ #[inline]
+ fn set_viewport(
+     device_context: &ID3D11DeviceContext,
+@@ -1291,6 +1767,20 @@ fn create_blend_state_for_path_sprite(device: &ID3D11Device) -> Result<ID3D11Ble
+     }
+ }
+
++/// Blend state for the backdrop-blur pyramid passes, which overwrite their
++/// target instead of compositing onto it.
++#[inline]
++fn create_blend_state_disabled(device: &ID3D11Device) -> Result<ID3D11BlendState> {
++    let mut desc = D3D11_BLEND_DESC::default();
++    desc.RenderTarget[0].BlendEnable = false.into();
++    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
++    unsafe {
++        let mut state = None;
++        device.CreateBlendState(&desc, Some(&mut state))?;
++        Ok(state.unwrap())
++    }
++}
++
+ #[inline]
+ fn create_vertex_shader(device: &ID3D11Device, bytes: &[u8]) -> Result<ID3D11VertexShader> {
+     unsafe {
+@@ -1410,6 +1900,9 @@ pub(crate) mod shader_resources {
+         MonochromeSprite,
+         PolychromeSprite,
+         EmojiRasterization,
++        BlurDownsample,
++        BlurUpsample,
++        BlurComposite,
+     }
+
+     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+@@ -1483,6 +1976,18 @@ pub(crate) mod shader_resources {
+                     ShaderTarget::Vertex => EMOJI_RASTERIZATION_VERTEX_BYTES,
+                     ShaderTarget::Fragment => EMOJI_RASTERIZATION_FRAGMENT_BYTES,
+                 },
++                ShaderModule::BlurDownsample => match target {
++                    ShaderTarget::Vertex => BLUR_DOWNSAMPLE_VERTEX_BYTES,
++                    ShaderTarget::Fragment => BLUR_DOWNSAMPLE_FRAGMENT_BYTES,
++                },
++                ShaderModule::BlurUpsample => match target {
++                    ShaderTarget::Vertex => BLUR_UPSAMPLE_VERTEX_BYTES,
++                    ShaderTarget::Fragment => BLUR_UPSAMPLE_FRAGMENT_BYTES,
++                },
++                ShaderModule::BlurComposite => match target {
++                    ShaderTarget::Vertex => BLUR_COMPOSITE_VERTEX_BYTES,
++                    ShaderTarget::Fragment => BLUR_COMPOSITE_FRAGMENT_BYTES,
++                },
+             };
+             Self { inner: bytes }
+         }
+@@ -1569,6 +2074,9 @@ pub(crate) mod shader_resources {
+                 ShaderModule::MonochromeSprite => "monochrome_sprite",
+                 ShaderModule::PolychromeSprite => "polychrome_sprite",
+                 ShaderModule::EmojiRasterization => "emoji_rasterization",
++                ShaderModule::BlurDownsample => "blur_downsample",
++                ShaderModule::BlurUpsample => "blur_upsample",
++                ShaderModule::BlurComposite => "blur_composite",
+             }
+         }
+     }
+@@ -1756,3 +2264,135 @@ mod dxgi {
+         ))
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::{BlurCopyBox, blur_copy_box};
++    use crate::{Bounds, ScaledPixels, point, size};
++
++    fn test_bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
++        Bounds::new(
++            point(ScaledPixels::from(x), ScaledPixels::from(y)),
++            size(ScaledPixels::from(width), ScaledPixels::from(height)),
++        )
++    }
++
++    #[test]
++    fn blur_copy_box_dilates_by_three_radii() {
++        // 100x100 rect at (10, 10) with radius 8 dilates by 24 on each side.
++        let copy_box = blur_copy_box(
++            &test_bounds(10., 10., 100., 100.),
++            ScaledPixels::from(8.),
++            1000,
++            1000,
++        );
++        assert_eq!(
++            copy_box,
++            Some(BlurCopyBox {
++                left: 0,
++                top: 0,
++                right: 134,
++                bottom: 134,
++            })
++        );
++    }
++
++    #[test]
++    fn blur_copy_box_clamps_to_the_viewport() {
++        // Rect overflowing the bottom-right corner clamps into the viewport.
++        let copy_box = blur_copy_box(
++            &test_bounds(950., 900., 100., 100.),
++            ScaledPixels::from(8.),
++            1000,
++            1000,
++        );
++        assert_eq!(
++            copy_box,
++            Some(BlurCopyBox {
++                left: 926,
++                top: 876,
++                right: 1000,
++                bottom: 1000,
++            })
++        );
++    }
++
++    #[test]
++    fn blur_copy_box_rejects_empty_and_offscreen_regions() {
++        // Zero-size rect still dilates by the margin.
++        assert_eq!(
++            blur_copy_box(
++                &test_bounds(10., 10., 0., 0.),
++                ScaledPixels::from(8.),
++                1000,
++                1000
++            ),
++            Some(BlurCopyBox {
++                left: 0,
++                top: 0,
++                right: 34,
++                bottom: 34,
++            })
++        );
++        // Zero-size rect with zero radius dilates to nothing.
++        assert_eq!(
++            blur_copy_box(
++                &test_bounds(10., 10., 0., 0.),
++                ScaledPixels::from(0.),
++                1000,
++                1000
++            ),
++            None
++        );
++        // Fully off-viewport rect clamps to nothing.
++        assert_eq!(
++            blur_copy_box(
++                &test_bounds(2000., 2000., 100., 100.),
++                ScaledPixels::from(8.),
++                1000,
++                1000
++            ),
++            None
++        );
++        // Zero radius keeps the rect itself.
++        assert_eq!(
++            blur_copy_box(
++                &test_bounds(10., 10., 100., 100.),
++                ScaledPixels::from(0.),
++                1000,
++                1000
++            ),
++            Some(BlurCopyBox {
++                left: 10,
++                top: 10,
++                right: 110,
++                bottom: 110,
++            })
++        );
++    }
++
++    #[test]
++    fn blur_copy_boxes_union() {
++        let first = BlurCopyBox {
++            left: 0,
++            top: 0,
++            right: 100,
++            bottom: 100,
++        };
++        let second = BlurCopyBox {
++            left: 50,
++            top: 60,
++            right: 200,
++            bottom: 300,
++        };
++        assert_eq!(
++            first.union(&second),
++            BlurCopyBox {
++                left: 0,
++                top: 0,
++                right: 200,
++                bottom: 300,
++            }
++        );
++    }
++}
+diff --git a/src/platform/blade/blade_renderer.rs b/src/platform/blade/blade_renderer.rs
+index d00fbdc7..453bcb68 100644
+--- a/src/platform/blade/blade_renderer.rs
++++ b/src/platform/blade/blade_renderer.rs
+@@ -3,8 +3,8 @@
+
+ use super::{BladeAtlas, BladeContext};
+ use crate::{
+-    Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point, PolychromeSprite,
+-    PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, Underline,
++    Background, BlurRect, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
++    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, Underline,
+ };
+ use blade_graphics as gpu;
+ use blade_util::{BufferBelt, BufferBeltDescriptor};
+@@ -107,12 +107,60 @@ struct ShaderSurfacesData {
+     s_surface: gpu::Sampler,
+ }
+
++#[derive(blade_macros::ShaderData)]
++struct ShaderBlurPyramidData {
++    t_sprite: gpu::TextureView,
++    s_sprite: gpu::Sampler,
++    blur_pyramid_params: BlurPyramidParams,
++}
++
++#[derive(blade_macros::ShaderData)]
++struct ShaderBlurCompositeData {
++    globals: GlobalParams,
++    t_sprite: gpu::TextureView,
++    s_sprite: gpu::Sampler,
++    b_blur_rects: gpu::BufferPiece,
++}
++
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ #[repr(C)]
+ struct PathSprite {
+     bounds: Bounds<ScaledPixels>,
+ }
+
++/// Per-pass parameters for the backdrop-blur pyramid shaders, uploaded as
++/// uniforms. Sizes must match the WGSL `BlurPyramidParams` struct.
++#[repr(C)]
++#[derive(Clone, Copy, Pod, Zeroable)]
++struct BlurPyramidParams {
++    /// UV size of one source texel, used to scale texel offsets.
++    src_texel_size: [f32; 2],
++    /// Kawase sample offset in source texels.
++    sample_offset: [f32; 2],
++    /// Valid source region in UV space; samples are clamped into it.
++    clamp_min: [f32; 2],
++    clamp_max: [f32; 2],
++}
++
++/// Kawase sample offset in texels for one pyramid level, derived from the
++/// blur radius in full-resolution pixels. `level_scale` is 1 for the full to
++/// half pass and 2 for the half to quarter pass.
++pub(crate) fn blur_sample_offset(blur_radius_px: f32, level_scale: f32) -> f32 {
++    (blur_radius_px / (4.0 * level_scale)).clamp(0.5, 4.0)
++}
++
++/// Half and quarter pyramid dimensions for a window, never dropping below
++/// one texel. Returns `(half_width, half_height, quarter_width,
++/// quarter_height)`.
++pub(crate) fn blur_pyramid_extent(width: u32, height: u32) -> (u32, u32, u32, u32) {
++    (
++        (width / 2).max(1),
++        (height / 2).max(1),
++        (width / 4).max(1),
++        (height / 4).max(1),
++    )
++}
++
+ #[derive(Clone, Debug)]
+ #[repr(C)]
+ struct PathRasterizationVertex {
+@@ -131,6 +179,9 @@ struct BladePipelines {
+     mono_sprites: gpu::RenderPipeline,
+     poly_sprites: gpu::RenderPipeline,
+     surfaces: gpu::RenderPipeline,
++    blur_downsample: gpu::RenderPipeline,
++    blur_upsample: gpu::RenderPipeline,
++    blur_composite: gpu::RenderPipeline,
+ }
+
+ impl BladePipelines {
+@@ -153,6 +204,8 @@ impl BladePipelines {
+         shader.check_struct_size::<Underline>();
+         shader.check_struct_size::<MonochromeSprite>();
+         shader.check_struct_size::<PolychromeSprite>();
++        shader.check_struct_size::<BlurRect>();
++        shader.check_struct_size::<BlurPyramidParams>();
+
+         // See https://apoorvaj.io/alpha-compositing-opengl-blending-and-premultiplied-alpha/
+         let blend_mode = match surface_info.alpha {
+@@ -300,6 +353,56 @@ impl BladePipelines {
+                 color_targets,
+                 multisample_state: gpu::MultisampleState::default(),
+             }),
++            blur_downsample: gpu.create_render_pipeline(gpu::RenderPipelineDesc {
++                name: "blur-downsample",
++                data_layouts: &[&ShaderBlurPyramidData::layout()],
++                vertex: shader.at("vs_blur_downsample"),
++                vertex_fetches: &[],
++                primitive: gpu::PrimitiveState {
++                    topology: gpu::PrimitiveTopology::TriangleList,
++                    ..Default::default()
++                },
++                depth_stencil: None,
++                fragment: Some(shader.at("fs_blur_downsample")),
++                color_targets: &[gpu::ColorTargetState {
++                    format: surface_info.format,
++                    blend: Some(gpu::BlendState::REPLACE),
++                    write_mask: gpu::ColorWrites::default(),
++                }],
++                multisample_state: gpu::MultisampleState::default(),
++            }),
++            blur_upsample: gpu.create_render_pipeline(gpu::RenderPipelineDesc {
++                name: "blur-upsample",
++                data_layouts: &[&ShaderBlurPyramidData::layout()],
++                vertex: shader.at("vs_blur_upsample"),
++                vertex_fetches: &[],
++                primitive: gpu::PrimitiveState {
++                    topology: gpu::PrimitiveTopology::TriangleList,
++                    ..Default::default()
++                },
++                depth_stencil: None,
++                fragment: Some(shader.at("fs_blur_upsample")),
++                color_targets: &[gpu::ColorTargetState {
++                    format: surface_info.format,
++                    blend: Some(gpu::BlendState::REPLACE),
++                    write_mask: gpu::ColorWrites::default(),
++                }],
++                multisample_state: gpu::MultisampleState::default(),
++            }),
++            blur_composite: gpu.create_render_pipeline(gpu::RenderPipelineDesc {
++                name: "blur-composite",
++                data_layouts: &[&ShaderBlurCompositeData::layout()],
++                vertex: shader.at("vs_blur_composite"),
++                vertex_fetches: &[],
++                primitive: gpu::PrimitiveState {
++                    topology: gpu::PrimitiveTopology::TriangleStrip,
++                    ..Default::default()
++                },
++                depth_stencil: None,
++                fragment: Some(shader.at("fs_blur_composite")),
++                color_targets,
++                multisample_state: gpu::MultisampleState::default(),
++            }),
+         }
+     }
+
+@@ -312,6 +415,9 @@ impl BladePipelines {
+         gpu.destroy_render_pipeline(&mut self.mono_sprites);
+         gpu.destroy_render_pipeline(&mut self.poly_sprites);
+         gpu.destroy_render_pipeline(&mut self.surfaces);
++        gpu.destroy_render_pipeline(&mut self.blur_downsample);
++        gpu.destroy_render_pipeline(&mut self.blur_upsample);
++        gpu.destroy_render_pipeline(&mut self.blur_composite);
+     }
+ }
+
+@@ -340,6 +446,12 @@ pub struct BladeRenderer {
+     path_intermediate_texture_view: gpu::TextureView,
+     path_intermediate_msaa_texture: Option<gpu::Texture>,
+     path_intermediate_msaa_texture_view: Option<gpu::TextureView>,
++    blur_snapshot_texture: gpu::Texture,
++    blur_snapshot_texture_view: gpu::TextureView,
++    blur_half_texture: gpu::Texture,
++    blur_half_texture_view: gpu::TextureView,
++    blur_quarter_texture: gpu::Texture,
++    blur_quarter_texture_view: gpu::TextureView,
+     rendering_parameters: RenderingParameters,
+ }
+
+@@ -402,6 +514,23 @@ impl BladeRenderer {
+             )
+             .unzip();
+
++        let (blur_snapshot_texture, blur_snapshot_texture_view) = create_blur_texture(
++            &context.gpu,
++            surface.info().format,
++            config.size.width,
++            config.size.height,
++        );
++        let (half_width, half_height, quarter_width, quarter_height) =
++            blur_pyramid_extent(config.size.width, config.size.height);
++        let (blur_half_texture, blur_half_texture_view) =
++            create_blur_texture(&context.gpu, surface.info().format, half_width, half_height);
++        let (blur_quarter_texture, blur_quarter_texture_view) = create_blur_texture(
++            &context.gpu,
++            surface.info().format,
++            quarter_width,
++            quarter_height,
++        );
++
+         #[cfg(target_os = "macos")]
+         let core_video_texture_cache = unsafe {
+             CVMetalTextureCache::new(
+@@ -426,6 +555,12 @@ impl BladeRenderer {
+             path_intermediate_texture_view,
+             path_intermediate_msaa_texture,
+             path_intermediate_msaa_texture_view,
++            blur_snapshot_texture,
++            blur_snapshot_texture_view,
++            blur_half_texture,
++            blur_half_texture_view,
++            blur_quarter_texture,
++            blur_quarter_texture_view,
+             rendering_parameters,
+         })
+     }
+@@ -508,9 +643,39 @@ impl BladeRenderer {
+                 .unzip();
+             self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
+             self.path_intermediate_msaa_texture_view = path_intermediate_msaa_texture_view;
++            self.recreate_blur_textures(gpu_size.width, gpu_size.height);
+         }
+     }
+
++    /// Recreates the backdrop-blur snapshot and pyramid textures for a new
++    /// drawable size, destroying the previous ones first.
++    fn recreate_blur_textures(&mut self, width: u32, height: u32) {
++        self.gpu.destroy_texture(self.blur_snapshot_texture);
++        self.gpu
++            .destroy_texture_view(self.blur_snapshot_texture_view);
++        self.gpu.destroy_texture(self.blur_half_texture);
++        self.gpu.destroy_texture_view(self.blur_half_texture_view);
++        self.gpu.destroy_texture(self.blur_quarter_texture);
++        self.gpu
++            .destroy_texture_view(self.blur_quarter_texture_view);
++
++        let format = self.surface.info().format;
++        let (blur_snapshot_texture, blur_snapshot_texture_view) =
++            create_blur_texture(&self.gpu, format, width, height);
++        let (half_width, half_height, quarter_width, quarter_height) =
++            blur_pyramid_extent(width, height);
++        let (blur_half_texture, blur_half_texture_view) =
++            create_blur_texture(&self.gpu, format, half_width, half_height);
++        let (blur_quarter_texture, blur_quarter_texture_view) =
++            create_blur_texture(&self.gpu, format, quarter_width, quarter_height);
++        self.blur_snapshot_texture = blur_snapshot_texture;
++        self.blur_snapshot_texture_view = blur_snapshot_texture_view;
++        self.blur_half_texture = blur_half_texture;
++        self.blur_half_texture_view = blur_half_texture_view;
++        self.blur_quarter_texture = blur_quarter_texture;
++        self.blur_quarter_texture_view = blur_quarter_texture_view;
++    }
++
+     pub fn update_transparency(&mut self, transparent: bool) {
+         if transparent != self.surface_config.transparent {
+             self.wait_for_gpu();
+@@ -621,6 +786,119 @@ impl BladeRenderer {
+         }
+     }
+
++    /// Runs the backdrop-blur pyramid for one batch: snapshots the given
++    /// frame texture in full, downsamples snapshot to half and quarter
++    /// resolution with Kawase filtering, then upsamples quarter back to
++    /// half. Callers composite the half-resolution result per rect and
++    /// reopen the main pass themselves (see the `BlurRects` batch arm).
++    fn draw_blur_pyramid(&mut self, frame_texture: gpu::Texture, max_radius: f32) {
++        let size = self.surface_config.size;
++        self.command_encoder
++            .init_texture(self.blur_snapshot_texture);
++        self.command_encoder.init_texture(self.blur_half_texture);
++        self.command_encoder.init_texture(self.blur_quarter_texture);
++
++        // Snapshot the whole framebuffer; the snapshot is fully valid, so
++        // pyramid samples only need edge clamping, never a union region.
++        {
++            let mut transfers = self.command_encoder.transfer("blur snapshot");
++            transfers.copy_texture_to_texture(
++                frame_texture.into(),
++                self.blur_snapshot_texture.into(),
++                size,
++            );
++        }
++
++        let (half_width, half_height, quarter_width, quarter_height) =
++            blur_pyramid_extent(size.width, size.height);
++        let edge = |texel: f32| {
++            (
++                [texel * 0.5, texel * 0.5],
++                [1.0 - texel * 0.5, 1.0 - texel * 0.5],
++            )
++        };
++
++        // Pass 1: downsample snapshot (full res) to half res.
++        let (clamp_min, clamp_max) = edge(1.0 / (size.width as f32).min(size.height as f32));
++        self.draw_blur_fullscreen(
++            true,
++            self.blur_snapshot_texture_view,
++            self.blur_half_texture_view,
++            BlurPyramidParams {
++                src_texel_size: [1.0 / size.width as f32, 1.0 / size.height as f32],
++                sample_offset: [blur_sample_offset(max_radius, 1.0); 2],
++                clamp_min,
++                clamp_max,
++            },
++        );
++
++        // Pass 2: downsample half res to quarter res.
++        let (clamp_min, clamp_max) = edge(1.0 / (half_width as f32).min(half_height as f32));
++        self.draw_blur_fullscreen(
++            true,
++            self.blur_half_texture_view,
++            self.blur_quarter_texture_view,
++            BlurPyramidParams {
++                src_texel_size: [1.0 / half_width as f32, 1.0 / half_height as f32],
++                sample_offset: [blur_sample_offset(max_radius, 2.0); 2],
++                clamp_min,
++                clamp_max,
++            },
++        );
++
++        // Pass 3: upsample quarter res back to half res.
++        let (clamp_min, clamp_max) = edge(1.0 / (quarter_width as f32).min(quarter_height as f32));
++        self.draw_blur_fullscreen(
++            false,
++            self.blur_quarter_texture_view,
++            self.blur_half_texture_view,
++            BlurPyramidParams {
++                src_texel_size: [1.0 / quarter_width as f32, 1.0 / quarter_height as f32],
++                sample_offset: [0.5, 0.5],
++                clamp_min,
++                clamp_max,
++            },
++        );
++    }
++
++    /// Runs one fullscreen backdrop-blur pyramid pass from the given source
++    /// view into a fresh render pass over the given target view.
++    fn draw_blur_fullscreen(
++        &mut self,
++        downsample: bool,
++        source_view: gpu::TextureView,
++        target_view: gpu::TextureView,
++        params: BlurPyramidParams,
++    ) {
++        let pipeline = if downsample {
++            &self.pipelines.blur_downsample
++        } else {
++            &self.pipelines.blur_upsample
++        };
++        if let mut pass = self.command_encoder.render(
++            "blur pyramid",
++            gpu::RenderTargetSet {
++                colors: &[gpu::RenderTarget {
++                    view: target_view,
++                    init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
++                    finish_op: gpu::FinishOp::Store,
++                }],
++                depth_stencil: None,
++            },
++        ) {
++            let mut encoder = pass.with(pipeline);
++            encoder.bind(
++                0,
++                &ShaderBlurPyramidData {
++                    t_sprite: source_view,
++                    s_sprite: self.atlas_sampler,
++                    blur_pyramid_params: params,
++                },
++            );
++            encoder.draw(0, 3, 0, 1);
++        }
++    }
++
+     pub fn destroy(&mut self) {
+         self.wait_for_gpu();
+         self.atlas.destroy();
+@@ -638,6 +916,14 @@ impl BladeRenderer {
+         if let Some(msaa_view) = self.path_intermediate_msaa_texture_view {
+             self.gpu.destroy_texture_view(msaa_view);
+         }
++        self.gpu.destroy_texture(self.blur_snapshot_texture);
++        self.gpu
++            .destroy_texture_view(self.blur_snapshot_texture_view);
++        self.gpu.destroy_texture(self.blur_half_texture);
++        self.gpu.destroy_texture_view(self.blur_half_texture_view);
++        self.gpu.destroy_texture(self.blur_quarter_texture);
++        self.gpu
++            .destroy_texture_view(self.blur_quarter_texture_view);
+     }
+
+     pub fn draw(&mut self, scene: &Scene) {
+@@ -702,6 +988,50 @@ impl BladeRenderer {
+                     );
+                     encoder.draw(0, 4, 0, shadows.len() as u32);
+                 }
++                // Backdrop blur snapshots exactly the lower-order content by
++                // construction (batches arrive in draw order), so one full
++                // snapshot per batch preserves interleave. Later batches
++                // paint over the composited result.
++                PrimitiveBatch::BlurRects(blurs) => {
++                    let composite: Vec<BlurRect> = blurs
++                        .iter()
++                        .filter(|blur| !blur.bounds.is_empty())
++                        .cloned()
++                        .collect();
++                    if composite.is_empty() {
++                        continue;
++                    }
++                    drop(pass);
++                    let max_radius = composite
++                        .iter()
++                        .map(|blur| blur.blur_radius.0.max(0.0))
++                        .fold(0.0f32, f32::max);
++                    self.draw_blur_pyramid(frame.texture(), max_radius);
++                    pass = self.command_encoder.render(
++                        "main",
++                        gpu::RenderTargetSet {
++                            colors: &[gpu::RenderTarget {
++                                view: frame.texture_view(),
++                                init_op: gpu::InitOp::Load,
++                                finish_op: gpu::FinishOp::Store,
++                            }],
++                            depth_stencil: None,
++                        },
++                    );
++                    let instance_buf =
++                        unsafe { self.instance_belt.alloc_typed(&composite, &self.gpu) };
++                    let mut encoder = pass.with(&self.pipelines.blur_composite);
++                    encoder.bind(
++                        0,
++                        &ShaderBlurCompositeData {
++                            globals,
++                            t_sprite: self.blur_half_texture_view,
++                            s_sprite: self.atlas_sampler,
++                            b_blur_rects: instance_buf,
++                        },
++                    );
++                    encoder.draw(0, 4, 0, composite.len() as u32);
++                }
+                 PrimitiveBatch::Paths(paths) => {
+                     let Some(first_path) = paths.first() else {
+                         continue;
+@@ -989,6 +1319,42 @@ fn create_msaa_texture_if_needed(
+     Some((texture_msaa, texture_view_msaa))
+ }
+
++/// Creates one backdrop-blur texture (snapshot or pyramid level) with a
++/// matching view. Levels are rendered into and sampled from, so they carry
++/// both usages; the snapshot is only copied into and sampled from.
++fn create_blur_texture(
++    gpu: &gpu::Context,
++    format: gpu::TextureFormat,
++    width: u32,
++    height: u32,
++) -> (gpu::Texture, gpu::TextureView) {
++    let texture = gpu.create_texture(gpu::TextureDesc {
++        name: "blur",
++        format,
++        size: gpu::Extent {
++            width,
++            height,
++            depth: 1,
++        },
++        array_layer_count: 1,
++        mip_level_count: 1,
++        sample_count: 1,
++        dimension: gpu::TextureDimension::D2,
++        usage: gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE | gpu::TextureUsage::TARGET,
++        external: None,
++    });
++    let texture_view = gpu.create_texture_view(
++        texture,
++        gpu::TextureViewDesc {
++            name: "blur view",
++            format,
++            dimension: gpu::ViewDimension::D2,
++            subresources: &Default::default(),
++        },
++    );
++    (texture, texture_view)
++}
++
+ /// A set of parameters that can be set using a corresponding environment variable.
+ struct RenderingParameters {
+     // Env var: ZED_PATH_SAMPLE_COUNT
+@@ -1070,3 +1436,29 @@ impl RenderingParameters {
+         ]
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::{blur_pyramid_extent, blur_sample_offset};
++
++    #[test]
++    fn blur_sample_offset_scales_with_radius_and_level() {
++        // Full-res level divides the radius by four.
++        assert_eq!(blur_sample_offset(8.0, 1.0), 2.0);
++        assert_eq!(blur_sample_offset(16.0, 1.0), 4.0);
++        // Half-res level divides by eight.
++        assert_eq!(blur_sample_offset(16.0, 2.0), 2.0);
++        // Offsets never drop below half a texel or exceed four texels.
++        assert_eq!(blur_sample_offset(0.0, 1.0), 0.5);
++        assert_eq!(blur_sample_offset(1.0, 2.0), 0.5);
++        assert_eq!(blur_sample_offset(1000.0, 1.0), 4.0);
++    }
++
++    #[test]
++    fn blur_pyramid_extent_halves_dimensions() {
++        assert_eq!(blur_pyramid_extent(1920, 1080), (960, 540, 480, 270));
++        // Odd dimensions truncate; tiny windows never drop below one texel.
++        assert_eq!(blur_pyramid_extent(101, 51), (50, 25, 25, 12));
++        assert_eq!(blur_pyramid_extent(1, 1), (1, 1, 1, 1));
++    }
++}
+diff --git a/src/platform/blade/shaders.wgsl b/src/platform/blade/shaders.wgsl
+index 1de8ad44..61fc22a0 100644
+--- a/src/platform/blade/shaders.wgsl
++++ b/src/platform/blade/shaders.wgsl
+@@ -1294,3 +1294,112 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
+
+     return ycbcr_to_RGB * y_cb_cr;
+ }
++
++// --- backdrop blur --- //
++
++// Mirrors the Rust `BlurRect` scene primitive field-for-field.
++struct BlurRect {
++    order: u32,
++    blur_radius: f32,
++    bounds: Bounds,
++    corner_radii: Corners,
++    content_mask: Bounds,
++    opacity: f32,
++    // Pads the struct to a multiple of 8 bytes to match the Rust layout.
++    pad: f32,
++}
++var<storage, read> b_blur_rects: array<BlurRect>;
++
++// Per-pass parameters for the pyramid shaders, uploaded as uniforms.
++struct BlurPyramidParams {
++    src_texel_size: vec2<f32>,
++    sample_offset: vec2<f32>,
++    clamp_min: vec2<f32>,
++    clamp_max: vec2<f32>,
++}
++var<uniform> blur_pyramid_params: BlurPyramidParams;
++
++fn blur_clamp_uv(uv: vec2<f32>) -> vec2<f32> {
++    return clamp(uv, blur_pyramid_params.clamp_min, blur_pyramid_params.clamp_max);
++}
++
++struct BlurPyramidVarying {
++    @builtin(position) position: vec4<f32>,
++    @location(0) uv: vec2<f32>,
++}
++
++// Fullscreen triangle: vertex ids 0,1,2 map to NDC (-1,1),(3,1),(-1,-3)
++// with matching 0..2 UVs (clamped to the valid region when sampling).
++@vertex
++fn vs_blur_downsample(@builtin(vertex_index) vertex_id: u32) -> BlurPyramidVarying {
++    let ndc = vec2<f32>(f32((vertex_id << 1u) & 2u), f32(vertex_id & 2u)) * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
++    var out = BlurPyramidVarying();
++    out.position = vec4<f32>(ndc, 0.0, 1.0);
++    out.uv = ndc * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
++    return out;
++}
++
++@fragment
++fn fs_blur_downsample(input: BlurPyramidVarying) -> @location(0) vec4<f32> {
++    let offset = blur_pyramid_params.sample_offset * blur_pyramid_params.src_texel_size;
++    let uv = input.uv;
++    var color = textureSample(t_sprite, s_sprite, blur_clamp_uv(uv)) * 4.0;
++    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(offset.x, offset.y)));
++    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(-offset.x, offset.y)));
++    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(offset.x, -offset.y)));
++    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(-offset.x, -offset.y)));
++    return color / 8.0;
++}
++
++@vertex
++fn vs_blur_upsample(@builtin(vertex_index) vertex_id: u32) -> BlurPyramidVarying {
++    let ndc = vec2<f32>(f32((vertex_id << 1u) & 2u), f32(vertex_id & 2u)) * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
++    var out = BlurPyramidVarying();
++    out.position = vec4<f32>(ndc, 0.0, 1.0);
++    out.uv = ndc * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
++    return out;
++}
++
++@fragment
++fn fs_blur_upsample(input: BlurPyramidVarying) -> @location(0) vec4<f32> {
++    let offset = blur_pyramid_params.sample_offset * blur_pyramid_params.src_texel_size;
++    let uv = input.uv;
++    var color = textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(-offset.x, -offset.y)));
++    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(offset.x, -offset.y)));
++    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(-offset.x, offset.y)));
++    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(offset.x, offset.y)));
++    return color / 4.0;
++}
++
++struct BlurCompositeVarying {
++    @builtin(position) position: vec4<f32>,
++    @location(0) @interpolate(flat) blur_id: u32,
++    @location(1) uv: vec2<f32>,
++    @location(2) clip_distances: vec4<f32>,
++}
++
++@vertex
++fn vs_blur_composite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> BlurCompositeVarying {
++    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
++    let blur = b_blur_rects[instance_id];
++
++    var out = BlurCompositeVarying();
++    out.position = to_device_position(unit_vertex, blur.bounds);
++    // Full-window UVs into the half-resolution blurred pyramid texture.
++    out.uv = (blur.bounds.origin + unit_vertex * blur.bounds.size) / globals.viewport_size;
++    out.blur_id = instance_id;
++    out.clip_distances = distance_from_clip_rect(unit_vertex, blur.bounds, blur.content_mask);
++    return out;
++}
++
++@fragment
++fn fs_blur_composite(input: BlurCompositeVarying) -> @location(0) vec4<f32> {
++    if (any(input.clip_distances < vec4<f32>(0.0))) {
++        return vec4<f32>(0.0);
++    }
++
++    let blur = b_blur_rects[input.blur_id];
++    let distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
++    let blurred = textureSample(t_sprite, s_sprite, input.uv);
++    return blend_color(blurred, blur.opacity * saturate(0.5 - distance));
++}
+diff --git a/src/platform/mac/metal_renderer.rs b/src/platform/mac/metal_renderer.rs
+index 9e5d6ec5..6596baed 100644
+--- a/src/platform/mac/metal_renderer.rs
++++ b/src/platform/mac/metal_renderer.rs
+@@ -447,6 +447,8 @@ impl MetalRenderer {
+                     viewport_size,
+                     command_encoder,
+                 ),
++                // Backdrop blur is not implemented on Metal yet; skip without failing the frame.
++                PrimitiveBatch::BlurRects(_) => true,
+                 PrimitiveBatch::Quads(quads) => self.draw_quads(
+                     quads,
+                     instance_buffer,
+diff --git a/src/platform/windows/shaders.hlsl b/src/platform/windows/shaders.hlsl
+index d6168eea..007dc51c 100644
+--- a/src/platform/windows/shaders.hlsl
++++ b/src/platform/windows/shaders.hlsl
+@@ -1180,3 +1180,131 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
+     color.a *= sprite.opacity * saturate(0.5 - distance);
+     return color;
+ }
++
++/*
++**
++**              Backdrop Blur
++**
++*/
++
++// Mirrors the Rust `BlurRect` scene primitive field-for-field.
++struct BlurRect {
++    uint order;
++    float blur_radius;
++    Bounds bounds;
++    Corners corner_radii;
++    Bounds content_mask;
++    float opacity;
++    // Pads the struct to 64 bytes to match the Rust layout.
++    float pad;
++};
++
++// Per-pass parameters for the pyramid shaders, uploaded as a single
++// structured-buffer instance per fullscreen pass.
++struct BlurPyramidSprite {
++    float2 src_texel_size;
++    float2 sample_offset;
++    float2 clamp_min;
++    float2 clamp_max;
++};
++
++StructuredBuffer<BlurPyramidSprite> blur_pyramid_sprites: register(t1);
++StructuredBuffer<BlurRect> blur_rects: register(t1);
++
++float2 blur_clamp_uv(float2 uv, BlurPyramidSprite params) {
++    return clamp(uv, params.clamp_min, params.clamp_max);
++}
++
++struct BlurPyramidVertexOutput {
++    float4 position: SV_Position;
++    float2 uv: TEXCOORD0;
++};
++
++// Fullscreen triangle: vertex ids 0,1,2 map to NDC (-1,1),(3,1),(-1,-3)
++// with matching 0..2 UVs (clamped to 0..1 when sampling).
++BlurPyramidVertexOutput blur_downsample_vertex(uint vertex_id: SV_VertexID) {
++    float2 ndc = float2(float((vertex_id << 1) & 2u), float(vertex_id & 2u));
++    ndc = ndc * float2(2.0, -2.0) + float2(-1.0, 1.0);
++    BlurPyramidVertexOutput output;
++    output.position = float4(ndc, 0.0, 1.0);
++    output.uv = ndc * float2(0.5, -0.5) + 0.5;
++    return output;
++}
++
++struct BlurPyramidFragmentInput {
++    float4 position: SV_Position;
++    float2 uv: TEXCOORD0;
++};
++
++// Five-tap Kawase downsample.
++float4 blur_downsample_fragment(BlurPyramidFragmentInput input): SV_Target {
++    BlurPyramidSprite params = blur_pyramid_sprites[0];
++    float2 offset = params.sample_offset * params.src_texel_size;
++    float2 uv = input.uv;
++    float4 color = t_sprite.Sample(s_sprite, blur_clamp_uv(uv, params)) * 4.0;
++    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(offset.x, offset.y), params));
++    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(-offset.x, offset.y), params));
++    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(offset.x, -offset.y), params));
++    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(-offset.x, -offset.y), params));
++    return color / 8.0;
++}
++
++BlurPyramidVertexOutput blur_upsample_vertex(uint vertex_id: SV_VertexID) {
++    float2 ndc = float2(float((vertex_id << 1) & 2u), float(vertex_id & 2u));
++    ndc = ndc * float2(2.0, -2.0) + float2(-1.0, 1.0);
++    BlurPyramidVertexOutput output;
++    output.position = float4(ndc, 0.0, 1.0);
++    output.uv = ndc * float2(0.5, -0.5) + 0.5;
++    return output;
++}
++
++// Four-tap bilinear upsample.
++float4 blur_upsample_fragment(BlurPyramidFragmentInput input): SV_Target {
++    BlurPyramidSprite params = blur_pyramid_sprites[0];
++    float2 offset = params.sample_offset * params.src_texel_size;
++    float2 uv = input.uv;
++    float4 color = t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(-offset.x, -offset.y), params));
++    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(offset.x, -offset.y), params));
++    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(-offset.x, offset.y), params));
++    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(offset.x, offset.y), params));
++    return color / 4.0;
++}
++
++struct BlurCompositeVertexOutput {
++    nointerpolation uint blur_id: TEXCOORD0;
++    float4 position: SV_Position;
++    float2 uv: TEXCOORD1;
++    float4 clip_distance: SV_ClipDistance;
++};
++
++struct BlurCompositeFragmentInput {
++    nointerpolation uint blur_id: TEXCOORD0;
++    float4 position: SV_Position;
++    float2 uv: TEXCOORD1;
++};
++
++BlurCompositeVertexOutput blur_composite_vertex(uint vertex_id: SV_VertexID, uint blur_id: SV_InstanceID) {
++    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
++    BlurRect blur = blur_rects[blur_id];
++    float4 device_position = to_device_position(unit_vertex, blur.bounds);
++    float4 clip_distance = distance_from_clip_rect(unit_vertex, blur.bounds, blur.content_mask);
++    // Full-window UVs into the half-resolution blurred pyramid texture.
++    float2 uv = (blur.bounds.origin + unit_vertex * blur.bounds.size) / global_viewport_size;
++
++    BlurCompositeVertexOutput output;
++    output.position = device_position;
++    output.uv = uv;
++    output.blur_id = blur_id;
++    output.clip_distance = clip_distance;
++    return output;
++}
++
++float4 blur_composite_fragment(BlurCompositeFragmentInput input): SV_Target {
++    BlurRect blur = blur_rects[input.blur_id];
++    // Snapshot content is premultiplied, so the mask rides the alpha channel
++    // exactly like the sprite shaders.
++    float distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
++    float4 blurred = t_sprite.Sample(s_sprite, input.uv);
++    blurred.a *= blur.opacity * saturate(0.5 - distance);
++    return blurred;
++}
+diff --git a/build.rs b/build.rs
+index 83aea8a1..d70d39d1 100644
+--- a/build.rs
++++ b/build.rs
+@@ -295,6 +295,9 @@ mod windows {
+             "underline",
+             "monochrome_sprite",
+             "polychrome_sprite",
++            "blur_downsample",
++            "blur_upsample",
++            "blur_composite",
+         ];
+
+         let rust_binding_path = format!("{}/shaders_bytes.rs", out_dir);
+diff --git a/Cargo.toml b/Cargo.toml
+index 38430636..f3bcbac9 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -108,6 +108,10 @@ doctest = false
+ name = "animation"
+ path = "examples/animation.rs"
+
++[[example]]
++name = "backdrop_blur"
++path = "examples/backdrop_blur.rs"
++
+ [[example]]
+ name = "data_table"
+ path = "examples/data_table.rs"
+diff --git a/examples/backdrop_blur.rs b/examples/backdrop_blur.rs
+new file mode 100644
+index 00000000..a33da24c
+--- /dev/null
++++ b/examples/backdrop_blur.rs
+@@ -0,0 +1,49 @@
++use gpui::{
++    App, Application, Bounds, Context, Window, WindowBounds, WindowOptions, div, hsla, prelude::*,
++    px, rgb, size,
++};
++
++struct BackdropBlur {}
++
++impl Render for BackdropBlur {
++    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
++        // Three saturated bands form the backdrop; the translucent card in
++        // front blurs whatever is behind it.
++        div()
++            .size_full()
++            .flex()
++            .flex_row()
++            .children(vec![
++                div().flex_1().bg(rgb(0xef4444)),
++                div().flex_1().bg(rgb(0x22c55e)),
++                div().flex_1().bg(rgb(0x3b82f6)),
++            ])
++            .child(
++                div()
++                    .absolute()
++                    .left(px(80.))
++                    .top(px(60.))
++                    .w(px(320.))
++                    .h(px(140.))
++                    .rounded(px(16.))
++                    .bg(hsla(0.0, 0.0, 1.0, 0.35))
++                    .backdrop_blur(px(16.)),
++            )
++    }
++}
++
++fn main() {
++    Application::new().run(|cx: &mut App| {
++        let bounds = Bounds::centered(None, size(px(900.0), px(600.0)), cx);
++        cx.open_window(
++            WindowOptions {
++                window_bounds: Some(WindowBounds::Windowed(bounds)),
++                ..Default::default()
++            },
++            |_, cx| cx.new(|_| BackdropBlur {}),
++        )
++        .unwrap();
++
++        cx.activate(true);
++    });
++}

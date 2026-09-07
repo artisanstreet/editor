@@ -1,23 +1,27 @@
 //! Total conversion between owned protocol values and generated Cap'n Proto.
 
 use artisan_domain::{
-    AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase, AttachProject,
-    CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS, Command,
-    ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
+    ApprovalMode, AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
+    AttachProject, ByteLimit, CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
+    Command, ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
     ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
-    ConversationTurn, ConversationUnsubscribe, CounterError, CreateThread,
+    ConversationTurn, ConversationUnsubscribe, CountLimit, CounterError, CreateThread,
     DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DirectoryEntry, DirectoryId,
     DirectoryKind, DirectoryListing, DirectoryListingError, DirectoryPlace, DisplayName,
-    DisplayNameError, Event, FirstMessageQueued, IdentifierError, IncrementalText,
-    IncrementalTextError, ItemId, ItemOrdinal, ListAttachedProjects, ListDirectories,
-    ListProjectThreads, MessageBody, MessageBodyError, MessageId, PROJECT_LISTING_MAX_PROJECTS,
-    PatchBatch, PatchBatchError, PatchId, PatchSequence, PlaceKind, ProjectAttached, ProjectId,
+    DisplayNameError, EngineAgentId, EngineConfigError, EngineConfigReason, EngineConfigRevision,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, EngineVariantId, Event, FilesystemAccess, FiniteMillis, FirstMessageQueued,
+    IdentifierError, IncrementalText, IncrementalTextError, ItemId, ItemOrdinal,
+    ListAttachedProjects, ListDirectories, ListProjectThreads, MessageBody, MessageBodyError,
+    MessageId, NetworkAccess, OpenCode2Selection, PROJECT_LISTING_MAX_PROJECTS, PatchBatch,
+    PatchBatchError, PatchId, PatchSequence, PermissionId, PlaceKind, ProjectAttached, ProjectId,
     ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
     QueryTurnCountError, QueueFirstMessage, QueuedMessage, ReceiptDisposition, RequestId, Revision,
-    RootPath, RootPathError, RunId, THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId,
-    ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId,
-    TurnOrdinal, UnixMillis, UserMessageItem,
+    RootPath, RootPathError, RunId, SetThreadEngineConfig, THREAD_LISTING_MAX_THREADS,
+    ThreadCreated, ThreadId, ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle,
+    ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem, WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -26,15 +30,19 @@ use thiserror::Error;
 use crate::artisan_capnp::{
     self, conversation_item, conversation_patch, conversation_query_request,
     conversation_subscribe_request, conversation_subscription_started, directory_listing,
-    directory_pick_outcome, envelope, event, list_directories_request, protocol_error, query_range,
-    request, response,
+    directory_pick_outcome, engine_config_precondition, engine_run_config, envelope, event,
+    lifecycle_request, lifecycle_response, list_directories_request, protocol_error, query_range,
+    request, response, set_thread_engine_config_request,
 };
 use crate::types::{
     ClientRequest, ConnectionId, ConversationSubscriptionStarted, ConversationSubscriptionStopped,
     DirectoryPickOutcome, ErrorCode, ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello,
-    HelloCredential, LocalCapability, LocalCapabilityError, ProtocolFailure, ProtocolValueError,
-    ProtocolVersion, ReconnectCapability, ReconnectCapabilityError, ResponsePayload, ServerEvent,
-    ServerResponse, VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
+    HelloCredential, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
+    LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, LocalCapabilityError,
+    ProtocolFailure, ProtocolValueError, ProtocolVersion, ReconnectCapability,
+    ReconnectCapabilityError, RegisteredEngineProfilesResult, ResponsePayload, ServerEvent,
+    ServerResponse, SetThreadEngineConfigResult, VersionOffer, VersionOfferError, Welcome,
+    WireEnvelope, WireEnvelopeBody,
 };
 
 /// Maximum Cap'n Proto graph traversal for one already-framed application
@@ -59,6 +67,14 @@ pub enum ProtocolEncodeError {
         field: &'static str,
         /// Offending native length.
         length: usize,
+    },
+    /// A collection contained a duplicate entry.
+    #[error("{field} contains duplicate entry {value:?}")]
+    Duplicate {
+        /// Name of the collection.
+        field: &'static str,
+        /// Duplicate value.
+        value: String,
     },
 }
 
@@ -235,6 +251,13 @@ pub enum ProtocolDecodeError {
         /// Nested correlation field.
         field: &'static str,
     },
+    /// An engine configuration field failed its bounded domain validation.
+    #[error("invalid engine configuration: {source}")]
+    EngineConfig {
+        /// Domain-owned bounded configuration failure.
+        #[source]
+        source: EngineConfigError,
+    },
 }
 
 impl From<capnp::Error> for ProtocolDecodeError {
@@ -300,6 +323,12 @@ impl From<ConversationSnapshotError> for ProtocolDecodeError {
 impl From<PatchBatchError> for ProtocolDecodeError {
     fn from(source: PatchBatchError) -> Self {
         Self::PatchBatch { source }
+    }
+}
+
+impl From<EngineConfigError> for ProtocolDecodeError {
+    fn from(source: EngineConfigError) -> Self {
+        Self::EngineConfig { source }
     }
 }
 
@@ -438,21 +467,25 @@ fn encode_body(
             match &value.credential {
                 HelloCredential::Initial(capability) => {
                     hello
+                        .reborrow()
                         .init_credential()
                         .set_initial(capability.expose_for_wire());
                 }
                 HelloCredential::Reconnect(capability) => {
                     hello
+                        .reborrow()
                         .init_credential()
                         .set_reconnect(capability.expose_for_wire());
                 }
             }
+            hello.set_supports_lifecycle_control(value.supports_lifecycle_control);
         }
         WireEnvelopeBody::Welcome(value) => {
             let mut welcome = root.reborrow().init_body().init_welcome();
             welcome.set_negotiated_version(value.negotiated_version.get());
             welcome.set_connection_id(value.connection_id.as_str());
             welcome.set_reconnect_capability(value.reconnect_capability.expose_for_wire());
+            welcome.set_lifecycle_control_supported(value.lifecycle_control_supported);
         }
         WireEnvelopeBody::Request(value) => {
             encode_request(root.reborrow().init_body().init_request(), value);
@@ -508,32 +541,11 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             queue.set_thread_id(command.thread_id.as_str());
             queue.set_body(command.body.as_str());
         }
+        ClientRequest::Command(Command::SetThreadEngineConfig(command)) => {
+            encode_set_thread_engine_config(builder.reborrow(), command.as_ref());
+        }
         ClientRequest::Conversation(ConversationRequest::Query(query)) => {
-            let mut encoded = builder.reborrow().init_conversation_query();
-            encoded.set_thread_id(query.thread_id.as_str());
-            match query.bounds {
-                ConversationQueryBounds::Window { maximum_turn_count } => {
-                    encoded
-                        .init_bounds()
-                        .init_window()
-                        .set_maximum_turn_count(maximum_turn_count.get());
-                }
-                ConversationQueryBounds::Range {
-                    before_turn_ordinal,
-                    minimum_turn_ordinal,
-                    maximum_turn_count,
-                } => {
-                    let mut range = encoded.init_bounds().init_range();
-                    range.set_before_turn_ordinal(before_turn_ordinal.get());
-                    let mut minimum = range.reborrow().init_minimum_turn_ordinal();
-                    if let Some(minimum_turn_ordinal) = minimum_turn_ordinal {
-                        minimum.set_minimum(minimum_turn_ordinal.get());
-                    } else {
-                        minimum.set_no_minimum(());
-                    }
-                    range.set_maximum_turn_count(maximum_turn_count.get());
-                }
-            }
+            encode_conversation_query_request(builder, query);
         }
         ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)) => {
             let mut encoded = builder.reborrow().init_conversation_subscribe();
@@ -554,6 +566,56 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
         ClientRequest::PickDirectory => {
             builder.reborrow().set_pick_directory(());
         }
+        ClientRequest::Lifecycle(LifecycleRequest::Status) => {
+            builder.reborrow().init_lifecycle_control().init_status();
+        }
+        ClientRequest::Lifecycle(LifecycleRequest::Stop { require_idle }) => {
+            builder
+                .reborrow()
+                .init_lifecycle_control()
+                .init_stop()
+                .set_require_idle(*require_idle);
+        }
+        ClientRequest::Query(Query::ReadThreadEngineSettings(query)) => {
+            builder
+                .reborrow()
+                .init_read_thread_engine_settings()
+                .set_thread_id(query.thread_id().as_str());
+        }
+        ClientRequest::Query(Query::ListRegisteredEngineProfiles(_)) => {
+            builder.reborrow().init_list_registered_engine_profiles();
+        }
+    }
+}
+
+fn encode_conversation_query_request(
+    mut builder: artisan_capnp::request::Builder<'_>,
+    query: &ConversationQuery,
+) {
+    let mut encoded = builder.reborrow().init_conversation_query();
+    encoded.set_thread_id(query.thread_id.as_str());
+    match query.bounds {
+        ConversationQueryBounds::Window { maximum_turn_count } => {
+            encoded
+                .init_bounds()
+                .init_window()
+                .set_maximum_turn_count(maximum_turn_count.get());
+        }
+        ConversationQueryBounds::Range {
+            before_turn_ordinal,
+            minimum_turn_ordinal,
+            maximum_turn_count,
+        } => {
+            let mut range = encoded.init_bounds().init_range();
+            range.set_before_turn_ordinal(before_turn_ordinal.get());
+            let mut minimum = range.reborrow().init_minimum_turn_ordinal();
+            if let Some(minimum_turn_ordinal) = minimum_turn_ordinal {
+                minimum.set_minimum(minimum_turn_ordinal.get());
+            } else {
+                minimum.set_no_minimum(());
+            }
+            range.set_maximum_turn_count(maximum_turn_count.get());
+        }
     }
 }
 
@@ -562,26 +624,19 @@ fn encode_response(
     value: &ServerResponse,
 ) -> Result<(), ProtocolEncodeError> {
     builder.set_request_id(value.request_id.as_str());
-    match &value.payload {
+    encode_response_payload(builder, &value.payload)
+}
+
+fn encode_response_payload(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    payload: &ResponsePayload,
+) -> Result<(), ProtocolEncodeError> {
+    match payload {
         ResponsePayload::DirectoryListing(listing) => {
             encode_directory_listing(builder.reborrow().init_directory_list(), listing)?;
         }
         ResponsePayload::ProjectListing(listing) => {
-            let mut projects = builder
-                .reborrow()
-                .init_project_list()
-                .init_projects(list_length(
-                    "response.projectList.projects",
-                    listing.projects().len(),
-                )?);
-            for (index, project) in listing.projects().iter().enumerate() {
-                encode_project(
-                    projects
-                        .reborrow()
-                        .get(list_index("response.projectList.projects", index)?),
-                    project,
-                );
-            }
+            encode_project_listing_response(builder.reborrow(), listing)?;
         }
         ResponsePayload::AttachedProject {
             project,
@@ -651,6 +706,204 @@ fn encode_response(
         }
         ResponsePayload::DirectoryPicked(outcome) => {
             encode_directory_picked(builder.reborrow().init_directory_picked(), outcome);
+        }
+        ResponsePayload::Lifecycle(value) => {
+            encode_lifecycle_response(builder.reborrow().init_lifecycle_control(), value)?;
+        }
+        ResponsePayload::ThreadEngineConfigSet(result) => {
+            encode_thread_engine_config_result(builder.reborrow(), result);
+        }
+        ResponsePayload::ThreadEngineSettings(result) => {
+            encode_thread_engine_settings_result(builder.reborrow(), result);
+        }
+        ResponsePayload::RegisteredEngineProfiles(result) => {
+            encode_registered_engine_profiles_result(
+                builder.reborrow().init_registered_engine_profiles(),
+                result,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_project_listing_response(
+    builder: artisan_capnp::response::Builder<'_>,
+    listing: &ProjectListing,
+) -> Result<(), ProtocolEncodeError> {
+    let mut projects = builder.init_project_list().init_projects(list_length(
+        "response.projectList.projects",
+        listing.projects().len(),
+    )?);
+    for (index, project) in listing.projects().iter().enumerate() {
+        encode_project(
+            projects
+                .reborrow()
+                .get(list_index("response.projectList.projects", index)?),
+            project,
+        );
+    }
+    Ok(())
+}
+
+fn encode_set_thread_engine_config(
+    mut builder: artisan_capnp::request::Builder<'_>,
+    command: &SetThreadEngineConfig,
+) {
+    let mut encoded = builder.reborrow().init_set_thread_engine_config();
+    encoded.set_thread_id(command.thread_id().as_str());
+    encode_engine_config_precondition(
+        encoded.reborrow().init_precondition(),
+        command.precondition(),
+    );
+    encode_engine_run_config(encoded.init_config(), command.config());
+}
+
+fn encode_thread_engine_config_result(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    result: &SetThreadEngineConfigResult,
+) {
+    let mut encoded = builder.reborrow().init_thread_engine_config_set();
+    encoded.set_request_id(result.request_id.as_str());
+    encoded.set_thread_id(result.thread_id.as_str());
+    encoded.set_revision(result.revision.get());
+    encoded.set_disposition(encode_disposition(result.disposition));
+}
+
+fn encode_thread_engine_settings_result(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    value: &crate::types::ThreadEngineSettingsResult,
+) {
+    let mut encoded = builder.reborrow().init_thread_engine_settings();
+    encoded.set_thread_id(value.thread_id().as_str());
+    match value {
+        crate::types::ThreadEngineSettingsResult::Unconfigured { .. } => {
+            encoded.init_state().set_unconfigured(());
+        }
+        crate::types::ThreadEngineSettingsResult::Configured {
+            revision, config, ..
+        } => {
+            let mut configured = encoded.init_state().init_configured();
+            configured.set_revision(revision.get());
+            encode_engine_run_config(configured.init_config(), config);
+        }
+    }
+}
+
+fn encode_registered_engine_profiles_result(
+    builder: artisan_capnp::registered_engine_profiles_result::Builder<'_>,
+    value: &RegisteredEngineProfilesResult,
+) -> Result<(), ProtocolEncodeError> {
+    match value {
+        RegisteredEngineProfilesResult::RegistryMissing => {
+            builder.init_state().set_registry_missing(());
+        }
+        RegisteredEngineProfilesResult::RegistryPresent { profile_ids } => {
+            if profile_ids.len() > 64 {
+                return Err(ProtocolEncodeError::CollectionTooLarge {
+                    field: "response.registeredEngineProfiles.profileIds",
+                    length: profile_ids.len(),
+                });
+            }
+            let mut seen = std::collections::HashSet::with_capacity(profile_ids.len());
+            for id in profile_ids {
+                if !seen.insert(id.as_str()) {
+                    return Err(ProtocolEncodeError::Duplicate {
+                        field: "response.registeredEngineProfiles.profileIds",
+                        value: id.as_str().to_owned(),
+                    });
+                }
+            }
+            let mut list = builder
+                .init_state()
+                .init_registry_present()
+                .init_profile_ids(list_length(
+                    "response.registeredEngineProfiles.profileIds",
+                    profile_ids.len(),
+                )?);
+            for (index, id) in profile_ids.iter().enumerate() {
+                list.set(
+                    list_index("response.registeredEngineProfiles.profileIds", index)?,
+                    id.as_str(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_engine_config_precondition(
+    mut builder: engine_config_precondition::Builder<'_>,
+    value: EngineConfigUpdatePrecondition,
+) {
+    match value {
+        EngineConfigUpdatePrecondition::Unconfigured => {
+            builder.set_kind("unconfigured");
+            builder.set_revision(0);
+        }
+        EngineConfigUpdatePrecondition::Exact(revision) => {
+            builder.set_kind("exact_revision");
+            builder.set_revision(revision.get());
+        }
+    }
+}
+
+fn encode_engine_run_config(mut builder: engine_run_config::Builder<'_>, value: &EngineRunConfig) {
+    let selection = value.selection().as_opencode2();
+    builder.set_schema_version(1);
+    builder.set_engine(artisan_domain::EngineId::OpenCode2.as_str());
+    builder.set_profile_id(selection.profile_id().as_str());
+    builder.set_model_id(selection.model_id().as_str());
+    builder.set_route_id(selection.route_id().as_str());
+    let mut variant = builder.reborrow().init_variant();
+    if let Some(id) = selection.variant_id() {
+        variant.set_kind("selected");
+        variant.set_id(id.as_str());
+    } else {
+        variant.set_kind("none");
+        variant.set_id("");
+    }
+    let permission = selection.permission();
+    let mut encoded_permission = builder.reborrow().init_permission();
+    encoded_permission.set_permission_id(permission.permission_id().as_str());
+    encoded_permission.set_agent_id(permission.agent_id().as_str());
+    encoded_permission.set_approval(permission.approval().as_str());
+    encoded_permission.set_filesystem(permission.filesystem().as_str());
+    encoded_permission.set_network(permission.network().as_str());
+    encoded_permission.set_web_search(permission.web_search().as_str());
+
+    let runtime = value.runtime();
+    let mut encoded_runtime = builder.init_runtime();
+    encoded_runtime.set_attempt_budget_ms(runtime.attempt_budget().get());
+    encoded_runtime.set_readiness_budget_ms(runtime.readiness_budget().get());
+    encoded_runtime.set_health_budget_ms(runtime.health_budget().get());
+    encoded_runtime.set_prompt_budget_ms(runtime.prompt_budget().get());
+    encoded_runtime.set_stream_budget_ms(runtime.stream_budget().get());
+    encoded_runtime.set_close_budget_ms(runtime.close_budget().get());
+    encoded_runtime.set_max_json_body_bytes(runtime.max_json_body_bytes().get());
+    encoded_runtime.set_max_sse_line_bytes(runtime.max_sse_line_bytes().get());
+    encoded_runtime.set_max_sse_event_bytes(runtime.max_sse_event_bytes().get());
+    encoded_runtime.set_max_readiness_line_bytes(runtime.max_readiness_line_bytes().get());
+    encoded_runtime.set_max_header_count(runtime.max_header_count().get());
+    encoded_runtime.set_max_http_buffer_bytes(runtime.max_http_buffer_bytes().get());
+    encoded_runtime.set_max_stderr_bytes(runtime.max_stderr_bytes().get());
+    encoded_runtime.set_observation_capacity(runtime.observation_capacity().get());
+}
+
+fn encode_lifecycle_response(
+    mut builder: artisan_capnp::lifecycle_response::Builder<'_>,
+    value: &LifecycleResponse,
+) -> Result<(), ProtocolEncodeError> {
+    match value {
+        LifecycleResponse::Status(status) => {
+            status.validate()?;
+            let mut encoded = builder.reborrow().init_status();
+            encoded.set_state(encode_lifecycle_state(status.state));
+            encoded.set_active_work_count(status.active_work_count);
+        }
+        LifecycleResponse::Stop(receipt) => {
+            let mut encoded = builder.reborrow().init_stop();
+            encoded.set_disposition(encode_lifecycle_stop_disposition(receipt.disposition));
+            encoded.set_state(encode_lifecycle_state(receipt.state));
         }
     }
     Ok(())
@@ -966,6 +1219,26 @@ const fn encode_directory_kind(value: DirectoryKind) -> artisan_capnp::Directory
     }
 }
 
+const fn encode_lifecycle_state(value: LifecycleState) -> artisan_capnp::LifecycleState {
+    match value {
+        LifecycleState::Ready => artisan_capnp::LifecycleState::Ready,
+        LifecycleState::Busy => artisan_capnp::LifecycleState::Busy,
+        LifecycleState::Draining => artisan_capnp::LifecycleState::Draining,
+    }
+}
+
+const fn encode_lifecycle_stop_disposition(
+    value: LifecycleStopDisposition,
+) -> artisan_capnp::LifecycleStopDisposition {
+    match value {
+        LifecycleStopDisposition::Accepted => artisan_capnp::LifecycleStopDisposition::Accepted,
+        LifecycleStopDisposition::Duplicate => artisan_capnp::LifecycleStopDisposition::Duplicate,
+        LifecycleStopDisposition::AlreadyStopping => {
+            artisan_capnp::LifecycleStopDisposition::AlreadyStopping
+        }
+    }
+}
+
 const fn encode_error_code(value: ErrorCode) -> artisan_capnp::ErrorCode {
     match value {
         ErrorCode::UnsupportedVersion => artisan_capnp::ErrorCode::UnsupportedVersion,
@@ -975,6 +1248,9 @@ const fn encode_error_code(value: ErrorCode) -> artisan_capnp::ErrorCode {
         ErrorCode::ThreadUnknown => artisan_capnp::ErrorCode::ThreadUnknown,
         ErrorCode::Internal => artisan_capnp::ErrorCode::Internal,
         ErrorCode::IdempotencyConflict => artisan_capnp::ErrorCode::IdempotencyConflict,
+        ErrorCode::UnsupportedFeature => artisan_capnp::ErrorCode::UnsupportedFeature,
+        ErrorCode::LifecycleBusy => artisan_capnp::ErrorCode::LifecycleBusy,
+        ErrorCode::EngineConfigConflict => artisan_capnp::ErrorCode::EngineConfigConflict,
     }
 }
 
@@ -1025,6 +1301,7 @@ fn decode_hello(value: artisan_capnp::hello::Reader<'_>) -> Result<Hello, Protoc
     Ok(Hello {
         supported_versions,
         credential,
+        supports_lifecycle_control: value.get_supports_lifecycle_control(),
     })
 }
 
@@ -1040,6 +1317,7 @@ fn decode_welcome(
         reconnect_capability: ReconnectCapability::try_from_slice(
             value.get_reconnect_capability()?,
         )?,
+        lifecycle_control_supported: value.get_lifecycle_control_supported(),
     })
 }
 
@@ -1125,6 +1403,9 @@ fn decode_request(
         request::Which::QueueFirstMessage(command) => {
             decode_queue_first_message(command?, request_id)
         }
+        request::Which::SetThreadEngineConfig(command) => {
+            decode_set_thread_engine_config(command?, request_id)
+        }
         request::Which::ConversationQuery(query) => decode_conversation_query_request(query?),
         request::Which::ConversationSubscribe(subscribe) => {
             decode_conversation_subscribe_request(subscribe?)
@@ -1133,7 +1414,32 @@ fn decode_request(
             decode_conversation_unsubscribe_request(unsubscribe?)
         }
         request::Which::PickDirectory(()) => Ok(ClientRequest::PickDirectory),
+        request::Which::LifecycleControl(lifecycle) => decode_lifecycle_request(lifecycle?),
+        request::Which::ReadThreadEngineSettings(query) => {
+            decode_read_thread_engine_settings(query?)
+        }
+        request::Which::ListRegisteredEngineProfiles(query) => {
+            query?;
+            Ok(ClientRequest::Query(Query::ListRegisteredEngineProfiles(
+                artisan_domain::commands::ListRegisteredEngineProfiles,
+            )))
+        }
     }
+}
+
+fn decode_lifecycle_request(
+    value: artisan_capnp::lifecycle_request::Reader<'_>,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let request = match value.which()? {
+        lifecycle_request::Which::Status(status) => {
+            status?;
+            LifecycleRequest::Status
+        }
+        lifecycle_request::Which::Stop(stop) => LifecycleRequest::Stop {
+            require_idle: stop?.get_require_idle(),
+        },
+    };
+    Ok(ClientRequest::Lifecycle(request))
 }
 
 fn decode_queue_first_message(
@@ -1157,6 +1463,338 @@ fn decode_queue_first_message(
             .map_err(|source| ProtocolDecodeError::MessageBody { source })?,
         },
     )))
+}
+
+fn decode_set_thread_engine_config(
+    command: set_thread_engine_config_request::Reader<'_>,
+    request_id: RequestId,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(
+            command.get_thread_id(),
+            "request.setThreadEngineConfig.threadId",
+        )?,
+        "request.setThreadEngineConfig.threadId",
+    )?;
+    let precondition = decode_engine_config_precondition(command.get_precondition()?)?;
+    let config = decode_engine_run_config(command.get_config()?)?;
+    Ok(ClientRequest::Command(Command::SetThreadEngineConfig(
+        Box::new(SetThreadEngineConfig::new(
+            request_id,
+            thread_id,
+            precondition,
+            config,
+        )),
+    )))
+}
+
+fn decode_read_thread_engine_settings(
+    query: artisan_capnp::read_thread_engine_settings_request::Reader<'_>,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(
+            query.get_thread_id(),
+            "request.readThreadEngineSettings.threadId",
+        )?,
+        "request.readThreadEngineSettings.threadId",
+    )?;
+    Ok(ClientRequest::Query(
+        artisan_domain::Query::ReadThreadEngineSettings(
+            artisan_domain::commands::ReadThreadEngineSettings::new(thread_id),
+        ),
+    ))
+}
+
+fn engine_config_error(field: &'static str, reason: EngineConfigReason) -> ProtocolDecodeError {
+    ProtocolDecodeError::EngineConfig {
+        source: EngineConfigError::new(field, reason),
+    }
+}
+
+fn decode_engine_config_precondition(
+    value: artisan_capnp::engine_config_precondition::Reader<'_>,
+) -> Result<EngineConfigUpdatePrecondition, ProtocolDecodeError> {
+    let kind = read_text(
+        value.get_kind(),
+        "request.setThreadEngineConfig.precondition.kind",
+    )?;
+    match kind.as_str() {
+        "unconfigured" if value.get_revision() == 0 => {
+            Ok(EngineConfigUpdatePrecondition::Unconfigured)
+        }
+        "exact_revision" => Ok(EngineConfigUpdatePrecondition::Exact(
+            EngineConfigRevision::new(value.get_revision())
+                .map_err(|error| ProtocolDecodeError::EngineConfig { source: error })?,
+        )),
+        "unconfigured" => Err(engine_config_error(
+            "request.setThreadEngineConfig.precondition.revision",
+            EngineConfigReason::Inconsistent,
+        )),
+        _ => Err(engine_config_error(
+            "request.setThreadEngineConfig.precondition.kind",
+            EngineConfigReason::Unsupported,
+        )),
+    }
+}
+
+fn decode_engine_run_config(
+    value: artisan_capnp::engine_run_config::Reader<'_>,
+) -> Result<EngineRunConfig, ProtocolDecodeError> {
+    if value.get_schema_version() != 1 {
+        return Err(engine_config_error(
+            "request.setThreadEngineConfig.config.schemaVersion",
+            EngineConfigReason::Unsupported,
+        ));
+    }
+    let engine = read_text(
+        value.get_engine(),
+        "request.setThreadEngineConfig.config.engine",
+    )?;
+    if engine != artisan_domain::EngineId::OpenCode2.as_str() {
+        return Err(engine_config_error(
+            "request.setThreadEngineConfig.config.engine",
+            EngineConfigReason::Unsupported,
+        ));
+    }
+    let profile_id = EngineProfileId::parse(read_text(
+        value.get_profile_id(),
+        "request.setThreadEngineConfig.config.profileId",
+    )?)
+    .map_err(|_| {
+        engine_config_error(
+            "request.setThreadEngineConfig.config.profileId",
+            EngineConfigReason::InvalidIdentifier,
+        )
+    })?;
+    let model_id = EngineModelId::parse(read_text(
+        value.get_model_id(),
+        "request.setThreadEngineConfig.config.modelId",
+    )?)
+    .map_err(|_| {
+        engine_config_error(
+            "request.setThreadEngineConfig.config.modelId",
+            EngineConfigReason::InvalidIdentifier,
+        )
+    })?;
+    let route_id = EngineRouteId::parse(read_text(
+        value.get_route_id(),
+        "request.setThreadEngineConfig.config.routeId",
+    )?)
+    .map_err(|_| {
+        engine_config_error(
+            "request.setThreadEngineConfig.config.routeId",
+            EngineConfigReason::InvalidIdentifier,
+        )
+    })?;
+    let variant = decode_engine_variant(value.get_variant()?)?;
+    let permission = decode_engine_permission(value.get_permission()?)?;
+    let runtime = decode_engine_runtime(value.get_runtime()?)?;
+    Ok(EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            profile_id, model_id, route_id, variant, permission,
+        )),
+        runtime,
+    ))
+}
+
+fn decode_engine_variant(
+    value: artisan_capnp::engine_variant::Reader<'_>,
+) -> Result<Option<EngineVariantId>, ProtocolDecodeError> {
+    let kind = read_text(
+        value.get_kind(),
+        "request.setThreadEngineConfig.config.variant.kind",
+    )?;
+    let id = read_text(
+        value.get_id(),
+        "request.setThreadEngineConfig.config.variant.id",
+    )?;
+    match kind.as_str() {
+        "none" if id.is_empty() => Ok(None),
+        "none" => Err(engine_config_error(
+            "request.setThreadEngineConfig.config.variant.id",
+            EngineConfigReason::Inconsistent,
+        )),
+        "selected" => EngineVariantId::parse(id).map(Some).map_err(|_| {
+            engine_config_error(
+                "request.setThreadEngineConfig.config.variant.id",
+                EngineConfigReason::InvalidIdentifier,
+            )
+        }),
+        _ => Err(engine_config_error(
+            "request.setThreadEngineConfig.config.variant.kind",
+            EngineConfigReason::Unsupported,
+        )),
+    }
+}
+
+fn decode_engine_permission(
+    value: artisan_capnp::engine_permission_policy::Reader<'_>,
+) -> Result<EnginePermissionPolicy, ProtocolDecodeError> {
+    let permission_id = PermissionId::parse(read_text(
+        value.get_permission_id(),
+        "request.setThreadEngineConfig.config.permission.permissionId",
+    )?)
+    .map_err(|_| {
+        engine_config_error(
+            "request.setThreadEngineConfig.config.permission.permissionId",
+            EngineConfigReason::InvalidIdentifier,
+        )
+    })?;
+    let agent_id = EngineAgentId::parse(read_text(
+        value.get_agent_id(),
+        "request.setThreadEngineConfig.config.permission.agentId",
+    )?)
+    .map_err(|_| {
+        engine_config_error(
+            "request.setThreadEngineConfig.config.permission.agentId",
+            EngineConfigReason::InvalidIdentifier,
+        )
+    })?;
+    let approval = parse_approval(&read_text(
+        value.get_approval(),
+        "request.setThreadEngineConfig.config.permission.approval",
+    )?)?;
+    let filesystem = parse_filesystem(&read_text(
+        value.get_filesystem(),
+        "request.setThreadEngineConfig.config.permission.filesystem",
+    )?)?;
+    let network = parse_network(&read_text(
+        value.get_network(),
+        "request.setThreadEngineConfig.config.permission.network",
+    )?)?;
+    let web_search = parse_web_search(&read_text(
+        value.get_web_search(),
+        "request.setThreadEngineConfig.config.permission.webSearch",
+    )?)?;
+    Ok(EnginePermissionPolicy::new(
+        permission_id,
+        agent_id,
+        approval,
+        filesystem,
+        network,
+        web_search,
+    ))
+}
+
+fn parse_approval(value: &str) -> Result<ApprovalMode, ProtocolDecodeError> {
+    match value {
+        "never" => Ok(ApprovalMode::Never),
+        "on_request" => Ok(ApprovalMode::OnRequest),
+        "always" => Ok(ApprovalMode::Always),
+        _ => Err(engine_config_error(
+            "request.setThreadEngineConfig.config.permission.approval",
+            EngineConfigReason::Unsupported,
+        )),
+    }
+}
+
+fn parse_filesystem(value: &str) -> Result<FilesystemAccess, ProtocolDecodeError> {
+    match value {
+        "none" => Ok(FilesystemAccess::None),
+        "workspace" => Ok(FilesystemAccess::Workspace),
+        "host" => Ok(FilesystemAccess::Host),
+        _ => Err(engine_config_error(
+            "request.setThreadEngineConfig.config.permission.filesystem",
+            EngineConfigReason::Unsupported,
+        )),
+    }
+}
+
+fn parse_network(value: &str) -> Result<NetworkAccess, ProtocolDecodeError> {
+    match value {
+        "disabled" => Ok(NetworkAccess::Disabled),
+        "enabled" => Ok(NetworkAccess::Enabled),
+        _ => Err(engine_config_error(
+            "request.setThreadEngineConfig.config.permission.network",
+            EngineConfigReason::Unsupported,
+        )),
+    }
+}
+
+fn parse_web_search(value: &str) -> Result<WebSearchAccess, ProtocolDecodeError> {
+    match value {
+        "disabled" => Ok(WebSearchAccess::Disabled),
+        "enabled" => Ok(WebSearchAccess::Enabled),
+        _ => Err(engine_config_error(
+            "request.setThreadEngineConfig.config.permission.webSearch",
+            EngineConfigReason::Unsupported,
+        )),
+    }
+}
+
+fn decode_engine_runtime(
+    value: artisan_capnp::engine_runtime_controls::Reader<'_>,
+) -> Result<EngineRuntimeControls, ProtocolDecodeError> {
+    let millis = |value: u64, field: &'static str| {
+        FiniteMillis::new(value)
+            .map_err(|_| engine_config_error(field, EngineConfigReason::OutOfRange))
+    };
+    let bytes = |value: u64, field: &'static str| {
+        ByteLimit::new(value)
+            .map_err(|_| engine_config_error(field, EngineConfigReason::OutOfRange))
+    };
+    let count = |value: u64, field: &'static str| {
+        CountLimit::new(value)
+            .map_err(|_| engine_config_error(field, EngineConfigReason::OutOfRange))
+    };
+    Ok(EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: millis(
+            value.get_attempt_budget_ms(),
+            "request.setThreadEngineConfig.config.runtime.attemptBudgetMs",
+        )?,
+        readiness_budget: millis(
+            value.get_readiness_budget_ms(),
+            "request.setThreadEngineConfig.config.runtime.readinessBudgetMs",
+        )?,
+        health_budget: millis(
+            value.get_health_budget_ms(),
+            "request.setThreadEngineConfig.config.runtime.healthBudgetMs",
+        )?,
+        prompt_budget: millis(
+            value.get_prompt_budget_ms(),
+            "request.setThreadEngineConfig.config.runtime.promptBudgetMs",
+        )?,
+        stream_budget: millis(
+            value.get_stream_budget_ms(),
+            "request.setThreadEngineConfig.config.runtime.streamBudgetMs",
+        )?,
+        close_budget: millis(
+            value.get_close_budget_ms(),
+            "request.setThreadEngineConfig.config.runtime.closeBudgetMs",
+        )?,
+        max_json_body_bytes: bytes(
+            value.get_max_json_body_bytes(),
+            "request.setThreadEngineConfig.config.runtime.maxJsonBodyBytes",
+        )?,
+        max_sse_line_bytes: bytes(
+            value.get_max_sse_line_bytes(),
+            "request.setThreadEngineConfig.config.runtime.maxSseLineBytes",
+        )?,
+        max_sse_event_bytes: bytes(
+            value.get_max_sse_event_bytes(),
+            "request.setThreadEngineConfig.config.runtime.maxSseEventBytes",
+        )?,
+        max_readiness_line_bytes: bytes(
+            value.get_max_readiness_line_bytes(),
+            "request.setThreadEngineConfig.config.runtime.maxReadinessLineBytes",
+        )?,
+        max_header_count: count(
+            value.get_max_header_count(),
+            "request.setThreadEngineConfig.config.runtime.maxHeaderCount",
+        )?,
+        max_http_buffer_bytes: bytes(
+            value.get_max_http_buffer_bytes(),
+            "request.setThreadEngineConfig.config.runtime.maxHttpBufferBytes",
+        )?,
+        max_stderr_bytes: bytes(
+            value.get_max_stderr_bytes(),
+            "request.setThreadEngineConfig.config.runtime.maxStderrBytes",
+        )?,
+        observation_capacity: count(
+            value.get_observation_capacity(),
+            "request.setThreadEngineConfig.config.runtime.observationCapacity",
+        )?,
+    })?)
 }
 
 fn decode_conversation_query_request(
@@ -1313,11 +1951,149 @@ fn decode_response(
             )
         }
         response::Which::DirectoryPicked(picked) => decode_directory_picked(picked?)?,
+        response::Which::LifecycleControl(lifecycle) => {
+            ResponsePayload::Lifecycle(decode_lifecycle_response(lifecycle?)?)
+        }
+        response::Which::ThreadEngineConfigSet(result) => {
+            decode_thread_engine_config_set(result?, &request_id)?
+        }
+        response::Which::ThreadEngineSettings(result) => {
+            decode_thread_engine_settings_result(result?)?
+        }
+        response::Which::RegisteredEngineProfiles(result) => {
+            decode_registered_engine_profiles_result(result?)?
+        }
     };
     Ok(ServerResponse {
         request_id,
         payload,
     })
+}
+
+fn decode_thread_engine_config_set(
+    value: artisan_capnp::set_thread_engine_config_result::Reader<'_>,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let nested_request_id = parse_request_id(
+        read_text(
+            value.get_request_id(),
+            "response.threadEngineConfigSet.requestId",
+        )?,
+        "response.threadEngineConfigSet.requestId",
+    )?;
+    if &nested_request_id != request_id {
+        return Err(ProtocolDecodeError::CorrelationMismatch {
+            field: "response.threadEngineConfigSet.requestId",
+        });
+    }
+    let revision = EngineConfigRevision::new(value.get_revision())?;
+    Ok(ResponsePayload::ThreadEngineConfigSet(
+        SetThreadEngineConfigResult {
+            request_id: nested_request_id,
+            thread_id: parse_thread_id(
+                read_text(
+                    value.get_thread_id(),
+                    "response.threadEngineConfigSet.threadId",
+                )?,
+                "response.threadEngineConfigSet.threadId",
+            )?,
+            revision,
+            disposition: decode_disposition(value.get_disposition()?),
+        },
+    ))
+}
+
+fn decode_thread_engine_settings_result(
+    value: artisan_capnp::thread_engine_settings_result::Reader<'_>,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(
+            value.get_thread_id(),
+            "response.threadEngineSettings.threadId",
+        )?,
+        "response.threadEngineSettings.threadId",
+    )?;
+    let result = match value.get_state().which()? {
+        artisan_capnp::thread_engine_settings_result::state::Which::Unconfigured(()) => {
+            crate::types::ThreadEngineSettingsResult::Unconfigured { thread_id }
+        }
+        artisan_capnp::thread_engine_settings_result::state::Which::Configured(configured) => {
+            let configured = configured?;
+            let revision = EngineConfigRevision::new(configured.get_revision())
+                .map_err(|source| ProtocolDecodeError::EngineConfig { source })?;
+            let config = decode_engine_run_config(configured.get_config()?)?;
+            crate::types::ThreadEngineSettingsResult::Configured {
+                thread_id,
+                revision,
+                config: Box::new(config),
+            }
+        }
+    };
+    Ok(ResponsePayload::ThreadEngineSettings(result))
+}
+
+fn decode_registered_engine_profiles_result(
+    value: artisan_capnp::registered_engine_profiles_result::Reader<'_>,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let result = match value.get_state().which()? {
+        artisan_capnp::registered_engine_profiles_result::state::Which::RegistryMissing(()) => {
+            RegisteredEngineProfilesResult::RegistryMissing
+        }
+        artisan_capnp::registered_engine_profiles_result::state::Which::RegistryPresent(
+            present,
+        ) => {
+            let present = present?;
+            let ids = present.get_profile_ids()?;
+            let count = ids.len() as usize;
+            if count > 64 {
+                return Err(engine_config_error(
+                    "response.registeredEngineProfiles.profileIds",
+                    EngineConfigReason::OutOfRange,
+                ));
+            }
+            let mut profile_ids = Vec::with_capacity(count);
+            let mut seen = std::collections::HashSet::with_capacity(count);
+            for raw in ids {
+                let text = read_text(raw, "response.registeredEngineProfiles.profileIds")?;
+                let id = EngineProfileId::parse(text).map_err(|_| {
+                    engine_config_error(
+                        "response.registeredEngineProfiles.profileIds",
+                        EngineConfigReason::InvalidIdentifier,
+                    )
+                })?;
+                if !seen.insert(id.as_str().to_owned()) {
+                    return Err(engine_config_error(
+                        "response.registeredEngineProfiles.profileIds",
+                        EngineConfigReason::Inconsistent,
+                    ));
+                }
+                profile_ids.push(id);
+            }
+            RegisteredEngineProfilesResult::RegistryPresent { profile_ids }
+        }
+    };
+    Ok(ResponsePayload::RegisteredEngineProfiles(result))
+}
+
+fn decode_lifecycle_response(
+    value: artisan_capnp::lifecycle_response::Reader<'_>,
+) -> Result<LifecycleResponse, ProtocolDecodeError> {
+    match value.which()? {
+        lifecycle_response::Which::Status(status) => {
+            let status = status?;
+            Ok(LifecycleResponse::Status(LifecycleStatus::new(
+                decode_lifecycle_state(status.get_state()?),
+                status.get_active_work_count(),
+            )?))
+        }
+        lifecycle_response::Which::Stop(receipt) => {
+            let receipt = receipt?;
+            Ok(LifecycleResponse::Stop(LifecycleStopReceipt {
+                disposition: decode_lifecycle_stop_disposition(receipt.get_disposition()?),
+                state: decode_lifecycle_state(receipt.get_state()?),
+            }))
+        }
+    }
 }
 
 fn decode_queued_receipt(
@@ -1872,6 +2648,26 @@ const fn decode_directory_kind(value: artisan_capnp::DirectoryEntryKind) -> Dire
     }
 }
 
+const fn decode_lifecycle_state(value: artisan_capnp::LifecycleState) -> LifecycleState {
+    match value {
+        artisan_capnp::LifecycleState::Ready => LifecycleState::Ready,
+        artisan_capnp::LifecycleState::Busy => LifecycleState::Busy,
+        artisan_capnp::LifecycleState::Draining => LifecycleState::Draining,
+    }
+}
+
+const fn decode_lifecycle_stop_disposition(
+    value: artisan_capnp::LifecycleStopDisposition,
+) -> LifecycleStopDisposition {
+    match value {
+        artisan_capnp::LifecycleStopDisposition::Accepted => LifecycleStopDisposition::Accepted,
+        artisan_capnp::LifecycleStopDisposition::Duplicate => LifecycleStopDisposition::Duplicate,
+        artisan_capnp::LifecycleStopDisposition::AlreadyStopping => {
+            LifecycleStopDisposition::AlreadyStopping
+        }
+    }
+}
+
 const fn decode_error_code(value: artisan_capnp::ErrorCode) -> ErrorCode {
     match value {
         artisan_capnp::ErrorCode::UnsupportedVersion => ErrorCode::UnsupportedVersion,
@@ -1881,5 +2677,8 @@ const fn decode_error_code(value: artisan_capnp::ErrorCode) -> ErrorCode {
         artisan_capnp::ErrorCode::ThreadUnknown => ErrorCode::ThreadUnknown,
         artisan_capnp::ErrorCode::Internal => ErrorCode::Internal,
         artisan_capnp::ErrorCode::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+        artisan_capnp::ErrorCode::UnsupportedFeature => ErrorCode::UnsupportedFeature,
+        artisan_capnp::ErrorCode::LifecycleBusy => ErrorCode::LifecycleBusy,
+        artisan_capnp::ErrorCode::EngineConfigConflict => ErrorCode::EngineConfigConflict,
     }
 }

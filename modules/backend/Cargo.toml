@@ -5,33 +5,44 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
 [dependencies]
 artisan-database = { path = "../database" }
 artisan-domain = { path = "../domain" }
 artisan-migrations = { path = "../migrations" }
+artisan-native-engine = { path = "../native_engine" }
 artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 base64.workspace = true
 bytes.workspace = true
+fs2.workspace = true
 getrandom.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 quinn.workspace = true
+rustls-pki-types.workspace = true
 sea-orm.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 zeroize.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+command-group.workspace = true
 native-dialog.workspace = true
 winapi-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
-rustls-pki-types.workspace = true
+
+[[test]]
+name = "activated_conversation_replay"
+path = "../../tests/backend/activated_conversation_replay.rs"
 
 [[test]]
 name = "agent_name_catalog_policy"
@@ -50,6 +61,26 @@ name = "connection"
 path = "../../tests/backend/connection.rs"
 
 [[test]]
+name = "conversation_commit_notifier"
+path = "../../tests/backend/conversation_commit_notifier.rs"
+
+[[test]]
+name = "conversation_delivery_driver"
+path = "../../tests/backend/conversation_delivery_driver.rs"
+
+[[test]]
+name = "conversation_delivery_writer"
+path = "../../tests/backend/conversation_delivery_writer.rs"
+
+[[test]]
+name = "conversation_subscription_preparation"
+path = "../../tests/backend/conversation_subscription_preparation.rs"
+
+[[test]]
+name = "conversation_subscription_registry"
+path = "../../tests/backend/conversation_subscription_registry.rs"
+
+[[test]]
 name = "directory_selection"
 path = "../../tests/backend/directory_selection.rs"
 
@@ -66,6 +97,10 @@ name = "file_identity_policy"
 path = "../../tests/backend/file_identity_policy.rs"
 
 [[test]]
+name = "forge_runtime"
+path = "../../tests/backend/forge_runtime.rs"
+
+[[test]]
 name = "git_remote_url_policy"
 path = "../../tests/backend/git_remote_url_policy.rs"
 
@@ -76,6 +111,10 @@ path = "../../tests/backend/harness_config_registry_policy.rs"
 [[test]]
 name = "host_machines_policy"
 path = "../../tests/backend/host_machines_policy.rs"
+
+[[test]]
+name = "startup_reconciliation_sweep"
+path = "../../tests/backend/startup_reconciliation_sweep.rs"
 
 [[test]]
 name = "subscription_patch_selection_policy"
@@ -100,6 +139,10 @@ path = "../../tests/backend/listener.rs"
 [[test]]
 name = "preview_service_policy"
 path = "../../tests/backend/preview_service_policy.rs"
+
+[[test]]
+name = "process_custody"
+path = "../../tests/backend/process_custody.rs"
 
 [[test]]
 name = "request_handler"

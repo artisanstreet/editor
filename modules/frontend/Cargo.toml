@@ -5,12 +5,23 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "editor"
+path = "src/main.rs"
+
 [dependencies]
 artisan-assets = { path = "../assets" }
 artisan-domain = { path = "../domain" }
+artisan-editor-cli = { path = "../cli" }
+artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
+gpui_platform.workspace = true
+rustls-pki-types.workspace = true
+statig.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 url.workspace = true
 
 [[test]]
@@ -74,6 +85,10 @@ name = "composer_gesture"
 path = "../../tests/frontend/composer_gesture.rs"
 
 [[test]]
+name = "composer_send_readiness"
+path = "../../tests/frontend/composer_send_readiness.rs"
+
+[[test]]
 name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 
@@ -102,8 +117,20 @@ name = "conversation_checklist"
 path = "../../tests/frontend/conversation_checklist.rs"
 
 [[test]]
+name = "conversation_delivery_machine"
+path = "../../tests/frontend/conversation_delivery_machine.rs"
+
+[[test]]
+name = "conversation_duration"
+path = "../../tests/frontend/conversation_duration.rs"
+
+[[test]]
 name = "conversation_error_card_policy"
 path = "../../tests/frontend/conversation_error_card_policy.rs"
+
+[[test]]
+name = "conversation_host"
+path = "../../tests/frontend/conversation_host.rs"
 
 [[test]]
 name = "conversation_presentation"
@@ -118,6 +145,18 @@ name = "conversation_relative_age"
 path = "../../tests/frontend/conversation_relative_age.rs"
 
 [[test]]
+name = "conversation_scene"
+path = "../../tests/frontend/conversation_scene.rs"
+
+[[test]]
+name = "conversation_state_machine"
+path = "../../tests/frontend/conversation_state_machine.rs"
+
+[[test]]
+name = "conversation_surface"
+path = "../../tests/frontend/conversation_surface.rs"
+
+[[test]]
 name = "conversation_scroll_position"
 path = "../../tests/frontend/conversation_scroll_position.rs"
 
@@ -130,12 +169,24 @@ name = "conversation_steering"
 path = "../../tests/frontend/conversation_steering.rs"
 
 [[test]]
+name = "conversation_steering_machine"
+path = "../../tests/frontend/conversation_steering_machine.rs"
+
+[[test]]
 name = "conversation_turn_footer_policy"
 path = "../../tests/frontend/conversation_turn_footer_policy.rs"
 
 [[test]]
+name = "conversation_turn_machine"
+path = "../../tests/frontend/conversation_turn_machine.rs"
+
+[[test]]
 name = "conversation_turn_navigator"
 path = "../../tests/frontend/conversation_turn_navigator.rs"
+
+[[test]]
+name = "conversation_view_machine"
+path = "../../tests/frontend/conversation_view_machine.rs"
 
 [[test]]
 name = "dev_instance_policy"
@@ -236,6 +287,10 @@ path = "../../tests/frontend/markdown_fence_policy.rs"
 [[test]]
 name = "markdown_language_registry_policy"
 path = "../../tests/frontend/markdown_language_registry_policy.rs"
+
+[[test]]
+name = "markdown_streaming_words"
+path = "../../tests/frontend/markdown_streaming_words.rs"
 
 [[test]]
 name = "markdown_test_parser_policy"
@@ -350,6 +405,10 @@ name = "reader_attention"
 path = "../../tests/frontend/reader_attention.rs"
 
 [[test]]
+name = "relative_time"
+path = "../../tests/frontend/relative_time.rs"
+
+[[test]]
 name = "repository_mark"
 path = "../../tests/frontend/repository_mark.rs"
 
@@ -408,6 +467,10 @@ path = "../../tests/frontend/shell_command.rs"
 [[test]]
 name = "shell_layout"
 path = "../../tests/frontend/shell_layout.rs"
+
+[[test]]
+name = "shell_presentation_preferences_policy"
+path = "../../tests/frontend/shell_presentation_preferences_policy.rs"
 
 [[test]]
 name = "shell_presentation_state"

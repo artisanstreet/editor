@@ -1,26 +1,33 @@
 load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_test", "rustfmt_test")
 
-# Focused Phase 9 leaf: validates the layout-only portable runtime metadata
-# contract against the existing Bazel-built Windows editor and Forge binaries.
-#
-# - `compile_data` embeds //packaging/portable:portable_layout.txt, so schema
-#   drift fails compilation of this validator.
-# - `data` wires //modules/frontend:editor and //modules/backend:forge as
-#   runfiles; resolution is test-only (manifest or directory layout) with no
-#   production fallback.
-# - The test never launches either executable, touches no network, writes no
-#   installer or user state, and claims no end-to-end workflow coverage:
-#   installer, archive producer, updater, signing, distribution, supervisor,
-#   authenticated handoff, and clean-host smoke remain deferred decisions.
+# Closed v2 naming and path-safety contract for the approved versioned
+# installation layout. This is a pure source-only proof: binary convergence,
+# payload assembly, signing, installation, and launch behavior remain later
+# packaging packets.
 rust_test(
-    name = "portable_layout_test",
-    srcs = ["portable_layout.rs"],
-    compile_data = ["//packaging/portable:portable_layout.txt"],
-    crate_name = "portable_layout_test",
-    data = [
-        "//modules/backend:forge",
-        "//modules/frontend:editor",
+    name = "versioned_layout_test",
+    srcs = ["versioned_layout.rs"],
+    compile_data = ["//packaging/portable:versioned_layout.txt"],
+    crate_name = "versioned_layout_test",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+# Freezes the four Cargo output identities independently from Bazel target
+# convergence. The manifests are compile-time inputs; the test never invokes
+# Cargo, executes a binary, or inspects the host filesystem.
+rust_test(
+    name = "cargo_binary_identity_test",
+    srcs = ["cargo_binary_identity.rs"],
+    compile_data = [
+        "//modules/cli:Cargo.toml",
+        "//modules/installer:Cargo.toml",
+        "//modules/backend:Cargo.toml",
+        "//modules/frontend:Cargo.toml",
     ],
+    crate_name = "cargo_binary_identity_test",
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",
@@ -28,31 +35,69 @@ rust_test(
 )
 
 # Deterministic archive proof: validates the stored ZIP produced by
-# //packaging/portable:portable_archive contains exactly the two Bazel-built
-# binaries under contract-derived names with deterministic metadata.
-# Layout proof and archive proof remain separate claim surfaces.
+# //packaging/portable:versioned_payload_archive contains exactly the four
+# authoritative Bazel binaries and generated payload manifest at the version
+# payload root. The archive is also compared with an independently named
+# action so output paths cannot influence the bytes.
 rust_test(
-    name = "portable_archive_test",
+    name = "versioned_payload_archive_test",
     srcs = ["portable_archive.rs"],
-    compile_data = ["//packaging/portable:portable_layout.txt"],
-    crate_name = "portable_archive_test",
+    compile_data = ["//packaging/portable:versioned_layout.txt"],
+    crate_name = "versioned_payload_archive_test",
     data = [
-        "//modules/backend:forge",
+        "//modules/cli:ae",
         "//modules/frontend:editor",
-        "//packaging/portable:portable_archive",
-        "//packaging/portable:portable_archive_reproducibility_fixture",
+        "//modules/backend:forge",
+        "//modules/installer:installer",
+        "//packaging/portable:versioned_payload_archive",
+        "//packaging/portable:versioned_payload_archive_reproducibility_fixture",
     ],
     edition = "2024",
     env = {
-        "ARTISAN_PORTABLE_ARCHIVE": "$(rlocationpath //packaging/portable:portable_archive)",
-        "ARTISAN_PORTABLE_ARCHIVE_REPRODUCIBILITY": "$(rlocationpath //packaging/portable:portable_archive_reproducibility_fixture)",
-        "ARTISAN_PORTABLE_EDITOR_BINARY": "$(rlocationpath //modules/frontend:editor)",
-        "ARTISAN_PORTABLE_FORGE_BINARY": "$(rlocationpath //modules/backend:forge)",
+        "ARTISAN_VERSIONED_PAYLOAD_ARCHIVE": "$(rlocationpath //packaging/portable:versioned_payload_archive)",
+        "ARTISAN_VERSIONED_PAYLOAD_ARCHIVE_REPRODUCIBILITY": "$(rlocationpath //packaging/portable:versioned_payload_archive_reproducibility_fixture)",
+        "ARTISAN_VERSIONED_PAYLOAD_AE_BINARY": "$(rlocationpath //modules/cli:ae)",
+        "ARTISAN_VERSIONED_PAYLOAD_EDITOR_BINARY": "$(rlocationpath //modules/frontend:editor)",
+        "ARTISAN_VERSIONED_PAYLOAD_FORGE_BINARY": "$(rlocationpath //modules/backend:forge)",
+        "ARTISAN_VERSIONED_PAYLOAD_INSTALLER_BINARY": "$(rlocationpath //modules/installer:installer)",
     },
     lint_config = "//:workspace_lints",
     size = "small",
     visibility = ["//:__pkg__"],
-    deps = ["@rules_rust//rust/runfiles"],
+    deps = [
+        "@crates//:serde_json",
+        "@crates//:sha2-0.10.9",
+        "@rules_rust//rust/runfiles",
+    ],
+)
+
+# Negative producer fixtures that cannot be expressed as successful archive
+# targets run the exact hermetic manifest generator's pure validation tests.
+rust_test(
+    name = "payload_manifest_test",
+    crate = "//packaging/portable:payload_manifest_generator",
+    crate_name = "payload_manifest_test",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+# Source-level boundary proof: the packaging rule exposes only public metadata
+# and one archive to generate, while signing remains a runtime-only tool mode.
+rust_test(
+    name = "release_manifest_test",
+    srcs = ["release_manifest.rs"],
+    compile_data = [
+        "//packaging/release:release_build_source",
+        "//packaging/release:release_manifest.bzl",
+        "//packaging/release:rust/release_tool.rs",
+    ],
+    crate_name = "release_manifest_test",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
 )
 
 # Package-local focused gates so this leaf stays self-contained. Root-level
@@ -62,8 +107,11 @@ rust_clippy(
     name = "clippy",
     testonly = True,
     deps = [
-        ":portable_archive_test",
-        ":portable_layout_test",
+        ":cargo_binary_identity_test",
+        ":payload_manifest_test",
+        ":release_manifest_test",
+        ":versioned_layout_test",
+        ":versioned_payload_archive_test",
     ],
 )
 
@@ -71,8 +119,11 @@ rustfmt_test(
     name = "format_test",
     size = "small",
     targets = [
-        ":portable_archive_test",
-        ":portable_layout_test",
+        ":cargo_binary_identity_test",
+        ":payload_manifest_test",
+        ":release_manifest_test",
+        ":versioned_layout_test",
+        ":versioned_payload_archive_test",
     ],
     transitive = True,
 )
@@ -80,7 +131,10 @@ rustfmt_test(
 test_suite(
     name = "tests",
     tests = [
-        ":portable_archive_test",
-        ":portable_layout_test",
+        ":cargo_binary_identity_test",
+        ":payload_manifest_test",
+        ":release_manifest_test",
+        ":versioned_layout_test",
+        ":versioned_payload_archive_test",
     ],
 )

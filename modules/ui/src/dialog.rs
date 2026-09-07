@@ -12,14 +12,15 @@
 //! GPUI pointer hit testing. None of those mechanisms claims native window
 //! modality or automatic focus trapping.
 
-use std::{rc::Rc, time::Duration};
+use std::{rc::Rc, sync::Arc, time::Duration};
 
 use artisan_assets::AssetId;
 use gpui::prelude::Refineable;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, BoxShadow, ElementId, FocusHandle,
-    FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point,
-    RenderOnce, SharedString, Size, StyleRefinement, Styled, Window, div, point, px, size,
+    Animation, AnimationExt, AnyElement, App, Bounds, BoxShadow, ColorExt as _, ElementId,
+    FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    Pixels, Point, RenderOnce, SharedString, Size, StyleRefinement, Styled, Window, div, point, px,
+    size,
 };
 
 use crate::button::{
@@ -162,12 +163,13 @@ impl DialogFocusIntent {
         previous_open: bool,
         next_open: bool,
         window: &mut Window,
+        cx: &mut App,
     ) -> DialogFocusTransition {
         let transition = focus_transition(previous_open, next_open);
         match transition {
             DialogFocusTransition::Unchanged => {}
-            DialogFocusTransition::Enter => self.entry.focus(window),
-            DialogFocusTransition::Restore => self.restore.focus(window),
+            DialogFocusTransition::Enter => self.entry.focus(window, cx),
+            DialogFocusTransition::Restore => self.restore.focus(window, cx),
         }
         transition
     }
@@ -343,7 +345,7 @@ impl DialogStyle {
     pub fn resolve(theme: ArtisanTheme, motion: MotionPolicy) -> Self {
         let padding = theme.spacing.steps(6.0);
         Self {
-            overlay: Hsla::black().opacity(BACKDROP_OPACITY),
+            overlay: gpui::black().opacity(BACKDROP_OPACITY),
             overlay_opacity: BACKDROP_OPACITY,
             background: theme.colors.popover.to_paint(),
             foreground: theme.colors.popover_foreground.to_paint(),
@@ -378,6 +380,7 @@ impl DialogStyle {
             offset: point(px(0.0), px(0.0)),
             blur_radius: px(0.0),
             spread_radius: self.ring_spread,
+            inset: false,
         }
     }
 }
@@ -581,7 +584,7 @@ impl RenderOnce for Dialog {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         if !self.state.is_open() {
             let mut closed = div()
-                .id(ElementId::NamedChild(Box::new(self.id), "closed".into()))
+                .id(ElementId::NamedChild(Arc::new(self.id), "closed".into()))
                 .absolute()
                 .w(px(0.0))
                 .h(px(0.0));

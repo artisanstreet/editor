@@ -8,6 +8,7 @@
 //! Queries cover exactly what this milestone selects: attached-project
 //! rediscovery, directory browsing, and project-scoped thread listing.
 
+use crate::engine_config::{EngineConfigUpdatePrecondition, EngineRunConfig};
 use crate::identifiers::{DirectoryId, ProjectId, RequestId, ThreadId};
 use crate::text::{MessageBody, ThreadTitle};
 
@@ -52,6 +53,60 @@ pub struct QueueFirstMessage {
     pub body: MessageBody,
 }
 
+/// Changes the complete engine configuration for one existing thread.
+///
+/// The fields remain private so a caller cannot accidentally omit the
+/// optimistic precondition or mutate a configuration after it is accepted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetThreadEngineConfig {
+    request_id: RequestId,
+    thread_id: ThreadId,
+    precondition: EngineConfigUpdatePrecondition,
+    config: EngineRunConfig,
+}
+
+impl SetThreadEngineConfig {
+    /// Constructs a complete authenticated configuration mutation.
+    #[must_use]
+    pub fn new(
+        request_id: RequestId,
+        thread_id: ThreadId,
+        precondition: EngineConfigUpdatePrecondition,
+        config: EngineRunConfig,
+    ) -> Self {
+        Self {
+            request_id,
+            thread_id,
+            precondition,
+            config,
+        }
+    }
+
+    /// Returns the request identity.
+    #[must_use]
+    pub const fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+
+    /// Returns the target thread identity.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+
+    /// Returns the optimistic precondition.
+    #[must_use]
+    pub const fn precondition(&self) -> EngineConfigUpdatePrecondition {
+        self.precondition
+    }
+
+    /// Returns the immutable configuration.
+    #[must_use]
+    pub const fn config(&self) -> &EngineRunConfig {
+        &self.config
+    }
+}
+
 /// Every mutation of the first native workflow.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -61,6 +116,8 @@ pub enum Command {
     CreateThread(CreateThread),
     /// See [`QueueFirstMessage`].
     QueueFirstMessage(QueueFirstMessage),
+    /// See [`SetThreadEngineConfig`].
+    SetThreadEngineConfig(Box<SetThreadEngineConfig>),
 }
 
 impl Command {
@@ -71,6 +128,7 @@ impl Command {
             Self::AttachProject(command) => &command.request_id,
             Self::CreateThread(command) => &command.request_id,
             Self::QueueFirstMessage(command) => &command.request_id,
+            Self::SetThreadEngineConfig(command) => command.request_id(),
         }
     }
 }
@@ -98,6 +156,35 @@ pub struct ListProjectThreads {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ListAttachedProjects;
 
+/// Reads the persisted engine configuration for one existing thread.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ReadThreadEngineSettings {
+    thread_id: ThreadId,
+}
+
+impl ReadThreadEngineSettings {
+    /// Constructs a pure read naming exactly one existing thread.
+    #[must_use]
+    pub fn new(thread_id: ThreadId) -> Self {
+        Self { thread_id }
+    }
+
+    /// Returns the target thread identity.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+}
+
+/// Lists every registered native engine profile.
+///
+/// The registry may be absent, empty, or contain up to 64 ordered profile
+/// identifiers. This query carries no thread, database path, home kind,
+/// engine path, or request identity; correlation stays on the triggering
+/// frame.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ListRegisteredEngineProfiles;
+
 /// Every query of the first native workflow.
 ///
 /// Queries carry no [`RequestId`]: they are pure reads with no durable effect
@@ -110,4 +197,8 @@ pub enum Query {
     ListProjectThreads(ListProjectThreads),
     /// See [`ListAttachedProjects`].
     ListAttachedProjects(ListAttachedProjects),
+    /// See [`ReadThreadEngineSettings`].
+    ReadThreadEngineSettings(ReadThreadEngineSettings),
+    /// See [`ListRegisteredEngineProfiles`].
+    ListRegisteredEngineProfiles(ListRegisteredEngineProfiles),
 }

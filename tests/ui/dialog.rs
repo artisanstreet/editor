@@ -11,7 +11,8 @@ use artisan_ui::dialog::{
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::{
-    Bounds, Context, FocusHandle, Hsla, InteractiveElement, IntoElement, Modifiers, ParentElement,
+    Bounds, ColorExt as _, Context, FocusHandle, Hsla, InteractiveElement, IntoElement, Modifiers,
+    ParentElement,
     Render, Styled, TestAppContext, Window, div, point, px, size,
 };
 
@@ -223,19 +224,19 @@ fn focus_intent_applies_entry_and_restore_once_per_controlled_edge(cx: &mut Test
         let intent = DialogFocusIntent::new(probe.entry.clone(), probe.restore.clone());
 
         assert_eq!(
-            intent.apply(false, true, window),
+            intent.apply(false, true, window, app),
             DialogFocusTransition::Enter
         );
         assert!(probe.entry.is_focused(window));
 
         assert_eq!(
-            intent.apply(true, true, window),
+            intent.apply(true, true, window, app),
             DialogFocusTransition::Unchanged
         );
         assert!(probe.entry.is_focused(window));
 
         assert_eq!(
-            intent.apply(true, false, window),
+            intent.apply(true, false, window, app),
             DialogFocusTransition::Restore
         );
         assert!(probe.restore.is_focused(window));
@@ -303,7 +304,7 @@ fn backdrop_and_escape_request_dismissal_without_mutating_controlled_open_state(
 
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     cx.simulate_keystrokes("escape");
     assert_eq!(dismissals.count.get(), 2);

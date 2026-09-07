@@ -43,40 +43,23 @@ use crate::theme::{ArtisanTheme, ThemeMode};
 use super::{GlyphRoute, TintedSvg, with_scoped_tint_delegation};
 
 /// Pure red used as an unambiguous ambient input.
-const RED: Hsla = Hsla {
-    h: 0.,
-    s: 1.,
-    l: 0.5,
-    a: 1.,
-};
+const RED: Hsla = gpui::hsla(0., 1., 0.5, 1.);
 
 /// Pure green, distinct from red and blue in hue.
-const GREEN: Hsla = Hsla {
-    h: 1. / 3.,
-    s: 1.,
-    l: 0.5,
-    a: 1.,
-};
+const GREEN: Hsla = gpui::hsla(1. / 3., 1., 0.5, 1.);
 
 /// Pure blue, distinct from red and green in hue.
-const BLUE: Hsla = Hsla {
-    h: 2. / 3.,
-    s: 1.,
-    l: 0.5,
-    a: 1.,
-};
+const BLUE: Hsla = gpui::hsla(2. / 3., 1., 0.5, 1.);
 
 /// The effective text color on the real inner Svg slot right now.
 fn slot_color(svg: &mut super::Svg) -> Option<Hsla> {
-    svg.text_style().as_ref().and_then(|text| text.color)
+    svg.text_style().color
 }
 
 /// Seed the inner slot of a tinted adapter with an authored text color,
 /// exactly like a caller's `.text_color(..)` or a Muted recipe application.
 fn author_color(svg: &mut TintedSvg, color: Hsla) {
-    svg.text_style()
-        .get_or_insert_with(gpui::TextStyleRefinement::default)
-        .color = Some(color);
+    svg.text_style().color = Some(color);
 }
 
 /// A fresh production tinted adapter over a real routed catalog asset.
@@ -370,10 +353,7 @@ fn pre_existing_colorless_refinement_preserves_its_property_and_none_color(
 ) {
     let observation = PassObservation::default();
     let svg = Rc::new(RefCell::new(fresh_tinted()));
-    svg.borrow_mut()
-        .text_style()
-        .get_or_insert_with(Default::default)
-        .font_weight = Some(FontWeight::BOLD);
+    svg.borrow_mut().text_style().font_weight = Some(FontWeight::BOLD);
 
     observation.draw_under(cx, &svg, &[RED]);
 
@@ -391,12 +371,7 @@ fn pre_existing_colorless_refinement_preserves_its_property_and_none_color(
         observation.post_slot_present.get(),
         "a pre-existing refinement must survive the scoped pass"
     );
-    let refinement = svg
-        .borrow_mut()
-        .text_style()
-        .as_ref()
-        .expect("refinement presence recorded above")
-        .clone();
+    let refinement = svg.borrow_mut().text_style().clone();
     assert_eq!(
         refinement.font_weight,
         Some(FontWeight::BOLD),

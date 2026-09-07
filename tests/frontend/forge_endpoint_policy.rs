@@ -4,11 +4,11 @@
 mod forge_endpoint_policy;
 
 use forge_endpoint_policy::{
-    adopt_forge_endpoint, complete_forge_endpoint_adoption, decode_loopback_forge_endpoint,
-    endpoint_bearing_page, forge_http_url, is_endpoint_bearing_page, resolve_forge_endpoint,
-    ForgeEndpointAdoptionResult, ForgeEndpointStorageIntent, ForgeEndpointStorageReadResult,
-    ForgeEndpointStorageWriteOutcome, ForgeEndpointStorageWriteResult, FORGE_ENDPOINT_STORAGE_KEY,
-    MAX_FORGE_ENDPOINT_CODE_UNITS,
+    FORGE_ENDPOINT_STORAGE_KEY, ForgeEndpointAdoptionResult, ForgeEndpointStorageIntent,
+    ForgeEndpointStorageReadResult, ForgeEndpointStorageWriteOutcome,
+    ForgeEndpointStorageWriteResult, MAX_FORGE_ENDPOINT_CODE_UNITS, adopt_forge_endpoint,
+    complete_forge_endpoint_adoption, decode_loopback_forge_endpoint, endpoint_bearing_page,
+    forge_http_url, is_endpoint_bearing_page, resolve_forge_endpoint,
 };
 
 #[test]

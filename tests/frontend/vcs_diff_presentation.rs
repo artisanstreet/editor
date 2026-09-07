@@ -6,8 +6,8 @@
 //! zero-line binary or rename-only change cannot regress to "clean".
 
 use artisan_frontend::vcs_diff_presentation::{
-    comparison_label, diff_count, diff_file_count, format_diff_count, format_file_count,
-    has_reportable_work, BranchComparison, ComparisonKind, DiffCounts, DiffSnapshot,
+    BranchComparison, ComparisonKind, DiffCounts, DiffSnapshot, comparison_label, diff_count,
+    diff_file_count, format_diff_count, format_file_count, has_reportable_work,
 };
 
 fn snapshot(
