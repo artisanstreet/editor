@@ -676,8 +676,8 @@ fn unknown_observation_union_discriminant_is_rejected() {
 
 #[test]
 fn unknown_observation_enum_ordinal_is_rejected() {
-    let started = raw_tool_event("raw-enum-started", WireToolAction::Started);
-    let completed = raw_tool_event("raw-enum-completed", WireToolAction::Completed);
+    let started = raw_tool_event("raw-enum", WireToolAction::Started);
+    let completed = raw_tool_event("raw-enum", WireToolAction::Completed);
     let differing: Vec<usize> = started
         .iter()
         .zip(completed.iter())
@@ -695,7 +695,7 @@ fn unknown_observation_enum_ordinal_is_rejected() {
 
 #[test]
 fn unknown_terminal_state_ordinal_is_rejected() {
-    let started = raw_observation_event("raw-terminal-started", |observation| {
+    let started = raw_observation_event("raw-terminal", |observation| {
         let mut activity = observation.init_terminal_activity();
         activity.set_id("obs-terminal");
         activity.set_sequence(8);
@@ -705,7 +705,7 @@ fn unknown_terminal_state_ordinal_is_rejected() {
         activity.reborrow().init_exit_code().set_no_exit_code(());
         activity.set_state(WireTerminalState::Started);
     });
-    let completed = raw_observation_event("raw-terminal-completed", |observation| {
+    let completed = raw_observation_event("raw-terminal", |observation| {
         let mut activity = observation.init_terminal_activity();
         activity.set_id("obs-terminal");
         activity.set_sequence(8);
