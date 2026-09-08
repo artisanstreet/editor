@@ -1,0 +1,824 @@
+//! Finite X1 Codex lifecycle proofs without the real CLI.
+//!
+//! Pure coverage (settings, frames, tracker, domain bridging, stall
+//! predicate, binding round trip) plus fixture stdio script turns: a
+//! temporary `cmd`/`sh` script types canned app-server JSONL over stdout
+//! while the test drives initialize, thread/start, one authorized prompt,
+//! and the streaming pump through the shared [`super::codex`] helpers. No
+//! real `codex` binary, no catalog flag, no frontend selection.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use artisan_domain::{
+    ApprovalMode, CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier,
+    EngineAgentId, EngineModelId, EnginePermissionPolicy, EngineProfileId, FilesystemAccess,
+    NetworkAccess, ObservationId, ObservationSequence, PermissionId, RootPath, RunId,
+    WebSearchAccess,
+};
+use artisan_transport::CancelHandle;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::sync::mpsc;
+use tokio::time::Instant;
+
+use super::codex::{
+    CODEX_MAX_FRAME_BYTES, CodexEvent, CodexPendingTracker, CodexSettings, CodexTurnState,
+    answer_approval, answer_questions, apply_event, classify_exit, has_stalled, initialize_params,
+    interrupt_live_turn, parse_frame, request_line, steer_live_turn, terminal_observation,
+    write_line,
+};
+use super::observation::{EngineObservation, TerminalState};
+use super::operation::{codex_thread_id, is_codex_result_for};
+use crate::native_run_dispatch::{binding_bytes_vec, binding_matches_bytes};
+
+// ---------------------------------------------------------------------------
+// Selection and settings
+// ---------------------------------------------------------------------------
+
+fn permission(
+    approval: ApprovalMode,
+    filesystem: FilesystemAccess,
+    network: NetworkAccess,
+) -> EnginePermissionPolicy {
+    EnginePermissionPolicy::new(
+        PermissionId::parse("permission-codex").expect("permission id"),
+        EngineAgentId::parse("agent-codex").expect("agent id"),
+        approval,
+        filesystem,
+        network,
+        WebSearchAccess::Disabled,
+    )
+}
+
+fn codex_selection() -> CodexSelection {
+    CodexSelection::new(
+        EngineProfileId::parse("codex-fixture").expect("profile id"),
+        Some(EngineModelId::parse("codex-model").expect("model id")),
+        permission(
+            ApprovalMode::OnRequest,
+            FilesystemAccess::Workspace,
+            NetworkAccess::Enabled,
+        ),
+        Some(CodexReasoningEffort::High),
+        Some(CodexServiceTier::Fast),
+        Some(CodexModelContextWindow::new(1_000).expect("window")),
+    )
+    .expect("codex selection valid")
+}
+
+#[test]
+fn codex_settings_map_selection_without_coercion() {
+    let settings = CodexSettings::from_selection(&codex_selection()).expect("settings valid");
+    assert_eq!(settings.profile_id(), "codex-fixture");
+    let root_path = std::env::temp_dir().join("codex-fixture-settings");
+    let root = RootPath::parse(root_path.to_str().expect("temp path utf8")).expect("root");
+    let params = settings.thread_params(&root);
+    assert_eq!(params["approvalPolicy"], "on-request");
+    assert_eq!(params["sandbox"], "workspace-write");
+    assert_eq!(params["cwd"], root_path.to_str().expect("temp path utf8"));
+    assert_eq!(params["model"], "codex-model");
+    assert_eq!(params["serviceTier"], "fast");
+    assert_eq!(params["config"]["model_reasoning_effort"], "high");
+    assert_eq!(params["config"]["model_context_window"], 1_000);
+}
+
+#[test]
+fn codex_settings_reject_always_approval() {
+    let selection = CodexSelection::new(
+        EngineProfileId::parse("codex-fixture").expect("profile id"),
+        None,
+        permission(
+            ApprovalMode::Always,
+            FilesystemAccess::Workspace,
+            NetworkAccess::Enabled,
+        ),
+        None,
+        None,
+        None,
+    );
+    assert!(selection.is_err(), "always approval must fail closed");
+}
+
+#[test]
+fn initialize_params_carry_opt_out_notifications() {
+    let params = initialize_params("artisan-editor", "0.3.0");
+    let opted = params["capabilities"]["optOutNotificationMethods"]
+        .as_array()
+        .expect("opt-out list")
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        opted,
+        vec![
+            "account/rateLimits/updated",
+            "mcpServer/startupStatus/updated",
+            "remoteControl/status/changed",
+        ]
+    );
+    let line = request_line(1, "initialize", &params);
+    assert!(line.contains("\"method\":\"initialize\""));
+}
+
+// ---------------------------------------------------------------------------
+// Frame normalization
+// ---------------------------------------------------------------------------
+
+fn run_id() -> RunId {
+    RunId::parse("codex-run-1").expect("run id")
+}
+
+#[test]
+fn delta_turn_approval_question_subagent_frames_decode() {
+    let delta = parse_frame(
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"hi","itemId":"item-1","threadId":"t-1","turnId":"turn-1"}}"#,
+        1,
+    )
+    .expect("delta decodes");
+    assert!(matches!(delta, CodexEvent::AgentMessageDelta { .. }));
+
+    let completed = parse_frame(
+        r#"{"method":"turn/completed","params":{"threadId":"t-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+        2,
+    )
+    .expect("turn decodes");
+    assert!(matches!(
+        completed,
+        CodexEvent::TurnState {
+            state: CodexTurnState::Completed,
+            ..
+        }
+    ));
+
+    let approval = parse_frame(
+        r#"{"id":10,"method":"item/commandExecution/requestApproval","params":{"itemId":"cmd-1","command":"echo hi","cwd":"/tmp","reason":"say hi"}}"#,
+        3,
+    )
+    .expect("approval decodes");
+    match approval {
+        CodexEvent::ApprovalRequested(request) => {
+            assert_eq!(request.approval_id(), "10");
+            assert_eq!(request.description(), "say hi");
+            let domain = request.to_domain_request().expect("domain request");
+            assert_eq!(domain.command_text(), Some("echo hi"));
+        }
+        _ => panic!("expected approval"),
+    }
+
+    let question = parse_frame(
+        r#"{"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"t-1","turnId":"turn-1","questions":[{"header":"Pick","id":"q1","question":"Which?"}]}}"#,
+        4,
+    )
+    .expect("question decodes");
+    match question {
+        CodexEvent::QuestionRequested(request) => {
+            assert_eq!(request.questions().len(), 1);
+            let input = request.questions()[0]
+                .to_domain_input()
+                .expect("domain input");
+            assert_eq!(input.text, "Which?");
+        }
+        _ => panic!("expected question"),
+    }
+
+    let subagent = parse_frame(
+        r#"{"method":"item/subAgent/discovered","params":{"agentThreadId":"child-1","parentThreadId":"t-1"}}"#,
+        5,
+    )
+    .expect("subagent decodes");
+    assert!(matches!(subagent, CodexEvent::SubagentDiscovered { .. }));
+}
+
+#[test]
+fn unknown_opt_out_and_malformed_frames_reject_safely() {
+    let unknown = parse_frame(r#"{"method":"future/method","params":{}}"#, 1)
+        .expect("unknown stays observable");
+    assert!(matches!(unknown, CodexEvent::UnknownMethod));
+
+    let opted = parse_frame(
+        r#"{"method":"mcpServer/startupStatus/updated","params":{}}"#,
+        2,
+    )
+    .expect("opt-out stays observable");
+    assert!(matches!(opted, CodexEvent::OptedOut));
+
+    assert!(parse_frame("not json", 3).is_err());
+    assert!(parse_frame(r#"{"params":{}}"#, 4).is_err());
+    assert!(parse_frame("", 5).is_err());
+    let oversized = "x".repeat(CODEX_MAX_FRAME_BYTES + 1);
+    assert!(parse_frame(oversized.as_str(), 6).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Tracker, bridging, stall predicate
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn approval_deny_then_allow_resolves_without_side_effect() {
+    let mut tracker = CodexPendingTracker::new();
+    let (mut client, server) = tokio::io::duplex(65_536);
+    let mut server = BufReader::new(server);
+    let run = run_id();
+
+    for (approval_id, approved, decision) in [
+        ("approval-1", false, "denied"),
+        ("approval-2", true, "approved"),
+    ] {
+        let event = parse_frame(
+            &format!(
+                r#"{{"method":"item/commandExecution/requestApproval","params":{{"itemId":"{approval_id}","command":"echo hi"}}}}"#
+            ),
+            1,
+        )
+        .expect("approval decodes");
+        let CodexEvent::ApprovalRequested(request) = event else {
+            panic!("expected approval")
+        };
+        assert!(tracker.note_approval(request));
+        assert_eq!(tracker.pending_approvals(), 1);
+        answer_approval(&mut client, &mut tracker, "7", approval_id, approved)
+            .await
+            .expect("answer writes");
+        assert_eq!(tracker.pending_approvals(), 0);
+        let mut line = String::new();
+        server
+            .read_line(&mut line)
+            .await
+            .expect("response readable");
+        let value: serde_json::Value = serde_json::from_str(line.trim()).expect("response json");
+        assert_eq!(value["id"], "7");
+        assert_eq!(value["result"]["decision"], decision);
+        // The run continues: deltas still normalize after a deny.
+        let delta = parse_frame(
+            r#"{"method":"item/agentMessage/delta","params":{"delta":"onward","itemId":"item-1","threadId":"t-1","turnId":"turn-1"}}"#,
+            2,
+        )
+        .expect("delta decodes");
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut active = None;
+        let terminal = apply_event(delta, &run, &mut tracker, &mut active, &sender, 2).await;
+        assert_eq!(terminal, None);
+        let EngineObservation::TextDelta(chunk) = receiver.try_recv().expect("delta observed")
+        else {
+            panic!("expected text delta")
+        };
+        assert_eq!(chunk.delta(), "onward");
+    }
+    // A resolved target never answers twice.
+    let (mut client, _) = tokio::io::duplex(65_536);
+    let denied = answer_approval(&mut client, &mut tracker, "8", "approval-1", true).await;
+    assert!(denied.is_err(), "resolved approval must miss");
+}
+
+#[tokio::test]
+async fn question_answer_and_steer_verbs_shape_lines() {
+    let mut tracker = CodexPendingTracker::new();
+    let event = parse_frame(
+        r#"{"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"t-1","turnId":"turn-1","questions":[{"header":"Pick","id":"q1","question":"Which?"}]}}"#,
+        1,
+    )
+    .expect("question decodes");
+    let CodexEvent::QuestionRequested(request) = event else {
+        panic!("expected question")
+    };
+    assert_eq!(tracker.note_questions(&request), 1);
+
+    let (mut client, server) = tokio::io::duplex(65_536);
+    let mut server = BufReader::new(server);
+    answer_questions(
+        &mut client,
+        &mut tracker,
+        "9",
+        &[("q1".to_owned(), vec!["first".to_owned()])],
+    )
+    .await
+    .expect("question answer writes");
+    let mut line = String::new();
+    server.read_line(&mut line).await.expect("answer readable");
+    let value: serde_json::Value = serde_json::from_str(line.trim()).expect("answer json");
+    assert_eq!(value["result"]["answers"]["q1"]["answers"][0], "first");
+
+    let mut request_id = 41;
+    steer_live_turn(&mut client, &mut request_id, "t-1", "turn-1", "follow up")
+        .await
+        .expect("steer writes");
+    assert_eq!(request_id, 42);
+    line.clear();
+    server.read_line(&mut line).await.expect("steer readable");
+    let steer: serde_json::Value = serde_json::from_str(line.trim()).expect("steer json");
+    assert_eq!(steer["method"], "turn/steer");
+    assert_eq!(steer["params"]["expectedTurnId"], "turn-1");
+
+    interrupt_live_turn(&mut client, &mut request_id, "t-1", "turn-1")
+        .await
+        .expect("interrupt writes");
+    line.clear();
+    server
+        .read_line(&mut line)
+        .await
+        .expect("interrupt readable");
+    let interrupt: serde_json::Value = serde_json::from_str(line.trim()).expect("interrupt json");
+    assert_eq!(interrupt["method"], "turn/interrupt");
+}
+
+#[tokio::test]
+async fn subagent_frames_never_adopt_the_root_turn() {
+    let run = run_id();
+    let mut tracker = CodexPendingTracker::new();
+    let event = parse_frame(
+        r#"{"method":"item/subAgent/discovered","params":{"agentThreadId":"child-1","parentThreadId":"t-1"}}"#,
+        1,
+    )
+    .expect("subagent decodes");
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut active = None;
+    let terminal = apply_event(event, &run, &mut tracker, &mut active, &sender, 1).await;
+    assert_eq!(terminal, None);
+    assert!(receiver.try_recv().is_err(), "no root observation");
+    assert_eq!(tracker.subagent_count(), 1);
+    assert_eq!(active, None, "root turn untouched");
+}
+
+#[test]
+fn stall_predicate_requires_an_active_turn() {
+    let now = Instant::now();
+    assert!(!has_stalled(false, now, Duration::from_millis(1), now));
+    assert!(has_stalled(
+        true,
+        now - Duration::from_secs(1),
+        Duration::from_millis(100),
+        now
+    ));
+    assert!(!has_stalled(true, now, Duration::from_secs(60), now));
+}
+
+#[test]
+fn domain_bridging_validates_approval_and_question_rows() {
+    let approval = parse_frame(
+        r#"{"method":"item/fileChange/requestApproval","params":{"itemId":"approval-9","reason":"apply patch"}}"#,
+        1,
+    )
+    .expect("file approval decodes");
+    let CodexEvent::ApprovalRequested(request) = approval else {
+        panic!("expected approval")
+    };
+    let domain_request = request.to_domain_request().expect("domain request");
+    let observation = artisan_domain::ApprovalObservation::requested(
+        ObservationId::parse("obs-1").expect("obs id"),
+        ObservationSequence::new(1).expect("sequence"),
+        ObservationId::parse(request.approval_id()).expect("approval id"),
+        request.description().to_owned(),
+        domain_request,
+    );
+    assert!(observation.is_ok());
+
+    let question = parse_frame(
+        r#"{"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"t-1","turnId":"turn-1","questions":[{"id":"q2","question":"Which color?"}]}}"#,
+        2,
+    );
+    assert!(question.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Binding tag/format round trip plus mismatch requeue
+// ---------------------------------------------------------------------------
+
+#[test]
+fn codex_binding_round_trip_and_mismatch() {
+    let raw =
+        binding_bytes_vec("codex", "codex-fixture", "thread-fixture-1").expect("binding builds");
+    assert!(binding_matches_bytes(
+        &raw,
+        "codex",
+        "codex-fixture",
+        "thread-fixture-1"
+    ));
+    for (engine, profile, session) in [
+        ("opencode2", "codex-fixture", "thread-fixture-1"),
+        ("codex", "other-profile", "thread-fixture-1"),
+        ("codex", "codex-fixture", "other-thread"),
+    ] {
+        assert!(
+            !binding_matches_bytes(&raw, engine, profile, session),
+            "mismatch must requeue"
+        );
+    }
+    let mut tampered = raw.clone();
+    tampered.push(b'}');
+    assert!(!binding_matches_bytes(
+        &tampered,
+        "codex",
+        "codex-fixture",
+        "thread-fixture-1"
+    ));
+    assert!(
+        artisan_database::ProviderBindingBytes::new(raw).is_ok(),
+        "wrapped bytes stay valid"
+    );
+    assert!(binding_bytes_vec("", "codex-fixture", "thread-fixture-1").is_none());
+    assert!(binding_bytes_vec("codex", "", "thread-fixture-1").is_none());
+    assert!(binding_bytes_vec("codex", "codex-fixture", "").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Fixture stdio script turns (no real CLI)
+// ---------------------------------------------------------------------------
+
+struct FixtureScript {
+    directory: PathBuf,
+}
+
+impl FixtureScript {
+    fn new(responses: &str, tail: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("artisan-codex-{}-{}", std::process::id(), nonce));
+        std::fs::create_dir_all(&directory).expect("fixture dir");
+        std::fs::write(directory.join("responses.jsonl"), responses).expect("responses");
+        #[cfg(windows)]
+        {
+            let script = format!("@echo off\r\ntype \"%~dp0responses.jsonl\"\r\n{tail}\r\n");
+            std::fs::write(directory.join("fixture.cmd"), script).expect("script");
+        }
+        #[cfg(not(windows))]
+        {
+            let script = format!("#!/bin/sh\ncat \"$(dirname \"$0\")/responses.jsonl\"\n{tail}\n");
+            let path = directory.join("fixture.sh");
+            std::fs::write(&path, script).expect("script");
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut permissions = std::fs::metadata(&path).expect("meta").permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&path, permissions).expect("chmod");
+        }
+        Self { directory }
+    }
+
+    fn spawn(&self) -> tokio::process::Child {
+        #[cfg(windows)]
+        {
+            let script = self.directory.join("fixture.cmd");
+            tokio::process::Command::new("cmd")
+                .arg("/C")
+                .arg(&script)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("fixture child spawns")
+        }
+        #[cfg(not(windows))]
+        {
+            tokio::process::Command::new(self.directory.join("fixture.sh"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("fixture child spawns")
+        }
+    }
+}
+
+impl Drop for FixtureScript {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+const INIT_LINE: &str = r#"{"id":1,"result":{"codexHome":"C:\x","platformFamily":"windows","platformOs":"windows","userAgent":"test"}}"#;
+const THREAD_LINE: &str = r#"{"id":2,"result":{"thread":{"id":"thread-fixture-1"}}}"#;
+
+struct FixtureOutcome {
+    terminal: Option<TerminalState>,
+    deltas: Vec<String>,
+    tracker: CodexPendingTracker,
+    thread_id: Option<String>,
+}
+
+/// Drives one fixture script turn through initialize, thread/start, one
+/// authorized prompt, and the streaming pump with stall/cancel/EOF mapping.
+async fn run_fixture_turn(
+    responses: &str,
+    tail: &str,
+    inactivity: Duration,
+    cancel_after: Option<Duration>,
+) -> FixtureOutcome {
+    let script = FixtureScript::new(responses, tail);
+    let mut child = script.spawn();
+    let mut stdin = child.stdin.take().expect("fixture stdin");
+    let stdout = child.stdout.take().expect("fixture stdout");
+    let mut reader = BufReader::new(stdout);
+    let shutdown = CancelHandle::new();
+    let control = Arc::new(CancelHandle::new());
+    let deadline = Instant::now() + Duration::from_secs(20);
+
+    write_line(
+        &mut stdin,
+        &request_line(1, "initialize", &initialize_params("a", "0")),
+    )
+    .await
+    .expect("init writes");
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("init reads");
+    assert!(is_codex_result_for(&line, 1));
+    let root_path = std::env::temp_dir().join("codex-fixture-turn");
+    let root = RootPath::parse(root_path.to_str().expect("temp path utf8")).expect("root");
+    let settings = CodexSettings::from_selection(&codex_selection()).expect("settings");
+    write_line(
+        &mut stdin,
+        &request_line(2, "thread/start", &settings.thread_params(&root)),
+    )
+    .await
+    .expect("thread writes");
+    line.clear();
+    reader.read_line(&mut line).await.expect("thread reads");
+    let thread_id = codex_thread_id(&line, 2).expect("thread id");
+    write_line(
+        &mut stdin,
+        &request_line(3, "turn/start", &serde_json::json!({"input": []})),
+    )
+    .await
+    .expect("turn writes");
+
+    if let Some(after) = cancel_after {
+        let task_control = Arc::clone(&control);
+        // Detached: the pump below observes the cancellation mid-stream.
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            task_control.cancel();
+        });
+    }
+
+    let run = run_id();
+    let (sender, mut receiver) = mpsc::channel(64);
+    let mut tracker = CodexPendingTracker::new();
+    let mut active: Option<String> = None;
+    let mut sequence: u64 = 0;
+    let mut last_activity = Instant::now();
+    let terminal = loop {
+        if control.is_cancelled() {
+            break Some(TerminalState::Cancelled);
+        }
+        if has_stalled(active.is_some(), last_activity, inactivity, Instant::now()) {
+            break Some(TerminalState::Failed);
+        }
+        let stall_at = last_activity
+            .checked_add(inactivity)
+            .unwrap_or(deadline)
+            .min(deadline);
+        line.clear();
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => break None,
+            () = control.wait() => break Some(TerminalState::Cancelled),
+            () = tokio::time::sleep_until(deadline) => break None,
+            () = tokio::time::sleep_until(stall_at) => {
+                if has_stalled(active.is_some(), last_activity, inactivity, Instant::now()) {
+                    break Some(TerminalState::Failed);
+                }
+            }
+            read = reader.read_line(&mut line) => match read {
+                Ok(0) => break Some(TerminalState::Interrupted),
+                Ok(_) => {
+                    last_activity = Instant::now();
+                    sequence += 1;
+                    let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                    match parse_frame(&trimmed, sequence) {
+                        Ok(event) => {
+                            if let Some(state) = apply_event(
+                                event, &run, &mut tracker, &mut active, &sender, sequence,
+                            )
+                            .await
+                            {
+                                break Some(state);
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => break None,
+            },
+        }
+    };
+    drop(stdin);
+    let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    let mut deltas = Vec::new();
+    while let Ok(observation) = receiver.try_recv() {
+        if let EngineObservation::TextDelta(delta) = observation {
+            deltas.push(delta.delta().to_owned());
+        }
+    }
+    FixtureOutcome {
+        terminal,
+        deltas,
+        tracker,
+        thread_id: Some(thread_id),
+    }
+}
+
+fn joined(outcome: &FixtureOutcome) -> String {
+    outcome.deltas.join("")
+}
+
+#[tokio::test]
+async fn fixture_start_deltas_close() {
+    let responses = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"hello ","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"world","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+        r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+    );
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&responses, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("fixture finishes");
+    assert_eq!(outcome.terminal, Some(TerminalState::Completed));
+    assert_eq!(joined(&outcome), "hello world");
+    assert_eq!(
+        outcome.thread_id.as_deref(),
+        Some("thread-fixture-1"),
+        "exact native thread identity rules"
+    );
+    let terminal = terminal_observation(&run_id(), 3, TerminalState::Completed);
+    assert_eq!(terminal.state(), TerminalState::Completed);
+}
+
+#[tokio::test]
+async fn fixture_malformed_frame_rejected_without_killing_turn() {
+    let responses = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n{}\n",
+        "this is not json",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"kept","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+        r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+    );
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&responses, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("fixture finishes");
+    assert_eq!(outcome.terminal, Some(TerminalState::Completed));
+    assert_eq!(joined(&outcome), "kept");
+}
+
+#[tokio::test]
+async fn fixture_approval_question_steer_shapes_before_close() {
+    let responses = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n{}\n{}\n",
+        r#"{"id":20,"method":"item/commandExecution/requestApproval","params":{"itemId":"approval-21","command":"echo hi","reason":"say hi"}}"#,
+        r#"{"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"thread-fixture-1","turnId":"turn-1","questions":[{"id":"q1","question":"Which?"}]}}"#,
+        r#"{"method":"item/subAgent/discovered","params":{"agentThreadId":"child-9","parentThreadId":"thread-fixture-1"}}"#,
+        r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+    );
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&responses, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("fixture finishes");
+    assert_eq!(outcome.terminal, Some(TerminalState::Completed));
+    assert_eq!(outcome.tracker.pending_approvals(), 1);
+    assert_eq!(outcome.tracker.pending_questions(), 1);
+    assert_eq!(outcome.tracker.subagent_count(), 1);
+    assert!(outcome.deltas.is_empty(), "child frames never adopt root");
+}
+
+#[tokio::test]
+async fn fixture_external_kill_reports_interruption() {
+    let responses = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"prefix ","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+    );
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&responses, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("fixture finishes");
+    assert_eq!(outcome.terminal, Some(TerminalState::Interrupted));
+    assert_eq!(joined(&outcome), "prefix ");
+}
+
+#[tokio::test]
+async fn fixture_inactivity_stall_fails_turn() {
+    // One delta puts the turn in flight then the script goes silent: the
+    // inactivity deadline settles the turn as stalled (failed).
+    let responses = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"warming","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+    );
+    #[cfg(windows)]
+    let tail = "ping -n 6 127.0.0.1 >nul";
+    #[cfg(not(windows))]
+    let tail = "sleep 5";
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&responses, tail, Duration::from_millis(400), None),
+    )
+    .await
+    .expect("fixture finishes");
+    assert_eq!(outcome.terminal, Some(TerminalState::Failed));
+    assert_eq!(joined(&outcome), "warming");
+}
+
+#[tokio::test]
+async fn fixture_cancel_reports_cancellation() {
+    let responses = format!("{INIT_LINE}\n{THREAD_LINE}\n");
+    #[cfg(windows)]
+    let tail = "ping -n 6 127.0.0.1 >nul";
+    #[cfg(not(windows))]
+    let tail = "sleep 5";
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(
+            &responses,
+            tail,
+            Duration::from_secs(30),
+            Some(Duration::from_millis(300)),
+        ),
+    )
+    .await
+    .expect("fixture finishes");
+    assert_eq!(outcome.terminal, Some(TerminalState::Cancelled));
+}
+
+#[tokio::test]
+async fn fixture_restart_replays_durable_prefix() {
+    let first = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"durable-","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+    );
+    let interrupted = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&first, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("first attempt finishes");
+    assert_eq!(interrupted.terminal, Some(TerminalState::Interrupted));
+    let durable_prefix = joined(&interrupted);
+    assert_eq!(durable_prefix, "durable-");
+
+    let second = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"replayed","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+        r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+    );
+    let completed = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&second, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("restart finishes");
+    assert_eq!(completed.terminal, Some(TerminalState::Completed));
+    assert_eq!(
+        format!("{durable_prefix}{}", joined(&completed)),
+        "durable-replayed"
+    );
+}
+
+#[test]
+fn exit_classification_keeps_cancel_and_interruption_distinct() {
+    let program = if cfg!(windows) { "cmd" } else { "sh" };
+    let success = std::process::Command::new(program)
+        .args(if cfg!(windows) {
+            vec!["/C", "exit 0"]
+        } else {
+            vec!["-c", "exit 0"]
+        })
+        .status()
+        .expect("exit probe runs");
+    let failure = std::process::Command::new(program)
+        .args(if cfg!(windows) {
+            vec!["/C", "exit 3"]
+        } else {
+            vec!["-c", "exit 3"]
+        })
+        .status()
+        .expect("exit probe runs");
+    assert_eq!(classify_exit(success), TerminalState::Completed);
+    assert_eq!(classify_exit(failure), TerminalState::Failed);
+}
+
+#[test]
+fn duplex_write_shapes_jsonl_framing() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let (mut client, server) = tokio::io::duplex(65_536);
+        let mut server = BufReader::new(server);
+        write_line(&mut client, r#"{"id":1}"#).await.expect("write");
+        drop(client);
+        let mut text = String::new();
+        server.read_to_string(&mut text).await.expect("read");
+        assert_eq!(text, "{\"id\":1}\n");
+    });
+}
