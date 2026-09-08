@@ -382,10 +382,10 @@ impl Repository {
             });
         }
         self.resolve_response(
-            &command.request_id,
-            &command.thread_id,
-            &command.run_id,
-            &command.question_id,
+            command.request_id(),
+            command.thread_id(),
+            command.run_id(),
+            command.question_id(),
             StoredKind::Question,
             StoredCommandKind::RespondQuestion,
             &command.intent_key(),
@@ -457,9 +457,16 @@ impl Repository {
             "SELECT MAX(requested_at_ms) AS requested_at_ms FROM pending_run_interactions WHERE state = 'requested' GROUP BY run_id ORDER BY requested_at_ms",
             [],
         );
-        let rows = self.database.query_all(statement).await.map_err(|source| {
-            RunInteractionError::Repository(database_error("read pending request instants", source))
-        })?;
+        let rows = self
+            .database
+            .query_all(&statement)
+            .await
+            .map_err(|source| {
+                RunInteractionError::Repository(database_error(
+                    "read pending request instants",
+                    source,
+                ))
+            })?;
         let mut instants = Vec::with_capacity(rows.len());
         for row in rows {
             let instant: i64 = row.try_get("", "requested_at_ms").map_err(|source| {
