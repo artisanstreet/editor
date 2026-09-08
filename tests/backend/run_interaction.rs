@@ -31,7 +31,10 @@ use artisan_domain::{
     PermissionId, ProjectId, QuestionInput, QuestionOption, RequestId, RespondApproval,
     RespondQuestion, RootPath, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
-use artisan_protocol::{ClientRequest, ErrorCode, ResponsePayload, RunInteractionOutcome};
+use artisan_protocol::{
+    ClientRequest, ErrorCode, ProtocolFailure, ResponsePayload, RunInteractionOutcome,
+    ServerResponse,
+};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -90,9 +93,9 @@ fn target(value: &str) -> ObservationId {
     ObservationId::parse(value).expect("test target id should be valid")
 }
 
-fn approval_command(request: &str, approved: bool) -> Command {
+fn approval_command(request_id: &str, approved: bool) -> Command {
     Command::RespondApproval(RespondApproval::new(
-        request(request),
+        request(request_id),
         thread("approve-thread"),
         run("approve-run"),
         target("approval-1"),
@@ -100,10 +103,10 @@ fn approval_command(request: &str, approved: bool) -> Command {
     ))
 }
 
-fn question_command(request: &str, answers: Vec<String>) -> Command {
+fn question_command(request_id: &str, answers: Vec<String>) -> Command {
     Command::RespondQuestion(
         RespondQuestion::new(
-            request(request),
+            request(request_id),
             thread("approve-thread"),
             run("approve-run"),
             target("question-1"),
@@ -118,7 +121,7 @@ fn question_command(request: &str, answers: Vec<String>) -> Command {
 async fn respond(
     handler: &RequestHandler,
     command: Command,
-) -> Result<ServerResponse, artisan_protocol::ProtocolFailure> {
+) -> Result<ServerResponse, ProtocolFailure> {
     let request_id = command.request_id().clone();
     handler
         .respond(&request_id, &ClientRequest::Command(command))
