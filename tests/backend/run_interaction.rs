@@ -432,6 +432,7 @@ fn approval_request_fixture() -> ApprovalRequest {
 async fn unknown_target_stores_receipt_and_replays_duplicate() {
     let (_temporary, storage) = opened_storage("unknown-target").await;
     let repository = storage.repository().clone();
+    seed_running_run(&repository).await;
     let registry = RunInteractionRegistry::new(1).expect("registry capacity is valid");
     let handler =
         RequestHandler::new(repository.clone()).with_run_interaction_registry(registry.clone());
@@ -468,6 +469,7 @@ async fn unknown_target_stores_receipt_and_replays_duplicate() {
 async fn reused_request_id_with_changed_intent_conflicts() {
     let (_temporary, storage) = opened_storage("route-conflict").await;
     let repository = storage.repository().clone();
+    seed_running_run(&repository).await;
     let registry = RunInteractionRegistry::new(1).expect("registry capacity is valid");
     let handler =
         RequestHandler::new(repository.clone()).with_run_interaction_registry(registry.clone());
