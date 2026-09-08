@@ -717,6 +717,8 @@ struct Request {
     withdrawQueuedMessage @22 :ComposerState.WithdrawQueuedMessageRequest;
     readRecalledMessage @23 :ComposerState.ReadRecalledMessageRequest;
     readRunUsage @24 :ComposerState.ReadRunUsageRequest;
+    respondApproval @25 :RespondApprovalRequest;
+    respondQuestion @26 :RespondQuestionRequest;
   }
 }
 
@@ -774,6 +776,8 @@ struct Response {
     messageWithdrawn @23 :ComposerState.QueuedMessageWithdrawalResult;
     recalledMessage @24 :ComposerState.RecalledMessageResult;
     runUsage @25 :ComposerState.RunUsageResult;
+    approvalResponse @26 :RespondApprovalReceipt;
+    questionResponse @27 :RespondQuestionReceipt;
   }
 }
 
@@ -2079,4 +2083,77 @@ struct ReadMessageImageRequest {
 struct MessageImageResult {
   reference @0 :ImageAttachmentRef;
   bytes @1 :Data;
+}
+
+# ---------------------------------------------------------------------------
+# A-approve run-interaction round-trip (appended 2026-09-08).
+#
+# These declarations live at the end of the file on purpose: the schema
+# compiler assigns top-level node identities in declaration order, so
+# appending here keeps every pre-existing node identity stable. Union arms
+# above (`Request.respondApproval/respondQuestion`,
+# `Response.approvalResponse/questionResponse`) are fields, not nodes, and
+# grow by fresh ordinals with existing ordinals frozen.
+# ---------------------------------------------------------------------------
+
+# An explicit answer to one pending approval request. Like StopRun this is a
+# live routing request authenticated by its exact thread/run ownership: the
+# response receipt reports only the per-target outcome, while the owning run
+# settles the durable resolution separately. There is no default decision;
+# `approved` is always an explicit choice.
+struct RespondApprovalRequest {
+  threadId @0 :Text;
+  runId @1 :Text;
+  approvalId @2 :Text;
+  approved @3 :Bool;
+}
+
+# An explicit answer to one pending question. Same live-routing contract as
+# the approval request above. An empty answer list records an explicitly
+# skipped question.
+struct RespondQuestionRequest {
+  threadId @0 :Text;
+  runId @1 :Text;
+  questionId @2 :Text;
+  # Each answer is non-empty and bounded by owned conversion (the observation
+  # answer ceiling); the list itself is bounded to the observation answer
+  # count. An empty list is valid and means the question was skipped.
+  answers @3 :List(Text);
+}
+
+# How one live approval/question response settled its target. These are
+# per-target routing results for a well-formed, authenticated request, not
+# wire rejections: the request was valid, but its target may be absent,
+# already settled, or owned by another run.
+enum RespondInteractionOutcome {
+  applied @0;
+  unknownTarget @1;
+  alreadyResolved @2;
+  wrongRun @3;
+}
+
+# Correlated result of one approval response. The nested request id must
+# equal the enclosing Response.requestId exactly; the decision echoes so a
+# replay can prove it answers the identical intent.
+struct RespondApprovalReceipt {
+  requestId @0 :Text;
+  threadId @1 :Text;
+  runId @2 :Text;
+  approvalId @3 :Text;
+  approved @4 :Bool;
+  outcome @5 :RespondInteractionOutcome;
+  disposition @6 :ReceiptDisposition;
+}
+
+# Correlated result of one question response. Same correlation and
+# intent-echo contract as the approval receipt; an empty answer list echoes
+# an explicitly skipped question.
+struct RespondQuestionReceipt {
+  requestId @0 :Text;
+  threadId @1 :Text;
+  runId @2 :Text;
+  questionId @3 :Text;
+  answers @4 :List(Text);
+  outcome @5 :RespondInteractionOutcome;
+  disposition @6 :ReceiptDisposition;
 }

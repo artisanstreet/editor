@@ -12,8 +12,10 @@ pub mod execution_value;
 pub mod message;
 pub mod message_dispatch;
 pub mod message_image_attachment;
+pub mod pending_run_interaction;
 pub mod run_batch_receipt;
 pub mod run_checkpoint;
+pub mod run_interaction_receipt;
 pub mod thread;
 
 pub use assistant_run::Model as AssistantRun;
@@ -31,6 +33,15 @@ pub use execution_value::{
 pub use message::Model as Message;
 pub use message_dispatch::{DispatchState, Model as MessageDispatch};
 pub use message_image_attachment::Model as MessageImageAttachment;
+pub use pending_run_interaction::{
+    InteractionKind as PendingInteractionKind, InteractionState as PendingInteractionState,
+    Model as PendingRunInteraction,
+};
 pub use run_batch_receipt::Model as RunBatchReceipt;
 pub use run_checkpoint::Model as RunCheckpoint;
+pub use run_interaction_receipt::{
+    InteractionCommandKind as RunInteractionCommandKind,
+    InteractionDisposition as RunInteractionDisposition,
+    InteractionOutcomeValue as RunInteractionOutcomeValue, Model as RunInteractionReceipt,
+};
 pub use thread::Model as Thread;

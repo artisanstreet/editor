@@ -19,6 +19,7 @@ const MODEL_FAVORITES_MIGRATION: &str = "m20260905_000006_model_favorites";
 const RUN_USAGE_MIGRATION: &str = "m20260905_000007_run_usage";
 const WITHDRAWALS_MIGRATION: &str = "m20260905_000008_queued_message_withdrawals";
 const ENGINE_CONFIG_V2_MIGRATION: &str = "m20260906_000009_engine_run_config_v2";
+const RUN_INTERACTIONS_MIGRATION: &str = "m20260908_000010_run_interactions";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -105,7 +106,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        9
+        10
     );
     first
         .execute_unprepared(
@@ -139,7 +140,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        9
+        10
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -202,7 +203,8 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             MODEL_FAVORITES_MIGRATION.to_string(),
             RUN_USAGE_MIGRATION.to_string(),
             WITHDRAWALS_MIGRATION.to_string(),
-            ENGINE_CONFIG_V2_MIGRATION.to_string()
+            ENGINE_CONFIG_V2_MIGRATION.to_string(),
+            RUN_INTERACTIONS_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -538,6 +540,43 @@ async fn engine_config_migration_preserves_legacy_receipts_and_allows_set_histor
     assert!(index_sql.contains(
         "WHERE command_kind IN ('attach_project', 'create_thread', 'queue_first_message')"
     ));
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_interactions_migration_enforces_request_and_receipt_shapes() -> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    migrate_to_current(&database).await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO pending_run_interactions (run_id, interaction_id, thread_id, kind, state, request_json, requested_sequence, requested_at_ms, binding_version) VALUES ('run-1', 'approval-1', 'thread-1', 'approval', 'requested', '{\"description\":\"x\"}', 1, 100, 1)",
+        )
+        .await?;
+    // Resolving without the kind-matching decision is rejected.
+    let resolved_without_decision = database
+        .execute_unprepared(
+            "UPDATE pending_run_interactions SET state = 'resolved', resolved_at_ms = 200, resolved_sequence = 2 WHERE run_id = 'run-1'",
+        )
+        .await;
+    assert!(resolved_without_decision.is_err());
+    database
+        .execute_unprepared(
+            "UPDATE pending_run_interactions SET state = 'resolved', approved = 0, resolved_at_ms = 200, resolved_sequence = 2 WHERE run_id = 'run-1'",
+        )
+        .await?;
+    // Receipts echo the decision for approvals and the answers for questions.
+    database
+        .execute_unprepared(
+            "INSERT INTO run_interaction_receipts (request_id, command_kind, thread_id, run_id, interaction_id, outcome, disposition, intent_key, approved, binding_version, responded_at_ms) VALUES ('req-1', 'respond_approval', 'thread-1', 'run-1', 'approval-1', 'applied', 'accepted', 'intent', 0, 1, 200)",
+        )
+        .await?;
+    let question_without_answers = database
+        .execute_unprepared(
+            "INSERT INTO run_interaction_receipts (request_id, command_kind, thread_id, run_id, interaction_id, outcome, disposition, intent_key, binding_version, responded_at_ms) VALUES ('req-2', 'respond_question', 'thread-1', 'run-1', 'q-1', 'applied', 'accepted', 'intent', 1, 200)",
+        )
+        .await;
+    assert!(question_without_answers.is_err());
     database.close().await?;
     Ok(())
 }

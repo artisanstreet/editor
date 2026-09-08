@@ -24,26 +24,42 @@ pub use repository::{
     DispatchLeaseOwnerError, EngineCheckpoint, FailMessageDispatch, FailRun, FailRunError,
     FailRunOutcome, InterruptRun, InterruptRunError, InterruptRunOutcome, InterruptedRunReceipt,
     LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, MessageDispatchPayload,
-    MessageImageRead, QueueMessageDispatchPayload, ProviderBindingBytes,
-    QueueFirstMessageInput, QueueFirstMessageResult, QueueMessageInput, QueueMessageResult,
-    Repository, RepositoryError,
-    RequeueMessageDispatch, RunBatchReceiptInfo, RunBatchScope, RunBindingError, RunErrorCode,
-    RunErrorMessage, RunLaunchCredentials, RunLaunchError, RunObservationError, RunStartKey,
-    SetThreadEngineConfigInput, SetThreadEngineConfigResult, StartupReconciliationCandidate,
-    StartupReconciliationCandidates, StartupReconciliationDisposition,
-    StartupReconciliationDispositionError, StartupReconciliationDispositionOutcome,
-    StartupReconciliationDispositionReceipt, StartupReconciliationError,
-    StartupReconciliationQuery, StartupRunLifecycle, TerminalRunReceipt, ThreadEngineSettings,
-    TransitionedMessageDispatch,
+    MessageImageRead, OBSERVATION_BATCH_MAX_OBSERVATIONS, OBSERVATION_CHECKPOINT_VERSION,
+    OBSERVATION_FORMAT_TAG, ObservationCommitError, ProviderBindingBytes, QueueFirstMessageInput,
+    QueueFirstMessageResult, QueueMessageDispatchPayload, QueueMessageInput, QueueMessageResult,
+    Repository, RepositoryError, RequeueMessageDispatch, RunBatchReceiptInfo, RunBatchScope,
+    RunBindingError, RunErrorCode, RunErrorMessage, RunInteractionError, RunLaunchCredentials,
+    RunLaunchError, RunObservationError, RunStartKey, SetThreadEngineConfigInput,
+    SetThreadEngineConfigResult, StartupReconciliationCandidate, StartupReconciliationCandidates,
+    StartupReconciliationDisposition, StartupReconciliationDispositionError,
+    StartupReconciliationDispositionOutcome, StartupReconciliationDispositionReceipt,
+    StartupReconciliationError, StartupReconciliationQuery, StartupRunLifecycle,
+    TerminalRunReceipt, ThreadEngineSettings, TransitionedMessageDispatch,
     decode_observation_checkpoint, encode_observation_bytes, encode_observation_checkpoint,
-    validate_observation_bind, validate_observation_engine, OBSERVATION_BATCH_MAX_OBSERVATIONS,
-    OBSERVATION_CHECKPOINT_VERSION, OBSERVATION_FORMAT_TAG, ObservationCommitError,
+    validate_observation_bind, validate_observation_engine,
 };
 
-pub use repository::{ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult};
+pub use repository::{
+    ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult,
+};
 
-pub use repository::{RecordRunUsage,RecordRunUsageInput,RunUsageWriteReceipt,RecordRunUsageOutcome,RunUsageRepositoryError};
+pub use repository::{
+    AppliedInteraction, ApprovalSnapshot, PendingInteractionView, QuestionSnapshot,
+    RecordApprovalRequest, RecordInteractionOutcome, RecordQuestionRequest,
+    RequestedInteractionSnapshot, ResolveInteractionOutcome, ResolveScope,
+    StoredInteractionReceipt,
+};
 
-pub use repository::{QueuedMessageRepositoryError};
+pub use repository::{
+    RecordRunUsage, RecordRunUsageInput, RecordRunUsageOutcome, RunUsageRepositoryError,
+    RunUsageWriteReceipt,
+};
 
-pub use repository::{PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint, SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup, SessionContinuationQuery, SessionContinuationSequence, SessionContinuationUnavailable, SessionContinuationUnavailableReason};
+pub use repository::QueuedMessageRepositoryError;
+
+pub use repository::{
+    PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint,
+    SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup,
+    SessionContinuationQuery, SessionContinuationSequence, SessionContinuationUnavailable,
+    SessionContinuationUnavailableReason,
+};

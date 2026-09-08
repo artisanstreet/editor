@@ -46,10 +46,11 @@ use artisan_domain::{
     ProjectId, ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
     QueryTurnCountError, QueueFirstMessage, QueueMessage, QueueMessagePayload,
     QueueMessagePayloadError, QueuedMessage, ReadActiveRun, ReadComposerCatalog,
-    ReadModelFavorites, ReceiptDisposition, RequestId, Revision, RootPath, RootPathError, RunId,
-    SetModelFavorite, SetThreadEngineConfig, StopRun, THREAD_LISTING_MAX_THREADS, ThreadCreated,
-    ThreadId, ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle, ThreadTitleError,
-    TurnId, TurnOrdinal, UnixMillis, UserMessageItem, WebSearchAccess,
+    ReadModelFavorites, ReceiptDisposition, RequestId, RespondApproval, RespondQuestion, Revision,
+    RootPath, RootPathError, RunId, RunInteractionError, SetModelFavorite, SetThreadEngineConfig,
+    StopRun, THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing,
+    ThreadListingError, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal,
+    UnixMillis, UserMessageItem, WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -70,9 +71,10 @@ use crate::types::{
     LifecycleState, LifecycleStatus, LifecycleStopDisposition, LifecycleStopReceipt,
     LocalCapability, LocalCapabilityError, MessageImageResult, ModelFavoritesSnapshot,
     ProtocolFailure, ProtocolValueError, ProtocolVersion, QueueMessageReceipt, ReconnectCapability,
-    ReconnectCapabilityError, RegisteredEngineProfilesResult, ResponsePayload, ServerEvent,
-    ServerResponse, SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition,
-    StopRunReceipt, VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
+    ReconnectCapabilityError, RegisteredEngineProfilesResult, RespondApprovalReceipt,
+    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, ServerEvent, ServerResponse,
+    SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
+    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
 
 /// Maximum Cap'n Proto graph traversal for one already-framed application
@@ -115,6 +117,13 @@ pub enum ProtocolEncodeError {
         /// Domain-owned snapshot validation failure.
         #[source]
         source: ModelFavoritesSnapshotError,
+    },
+    /// A run-interaction answer list failed its domain bound.
+    #[error("invalid run interaction answers: {source}")]
+    RunInteraction {
+        /// Domain-owned interaction validation failure.
+        #[source]
+        source: RunInteractionError,
     },
 }
 
@@ -369,6 +378,13 @@ pub enum ProtocolDecodeError {
         /// Domain-owned observation validation failure.
         #[source]
         source: ObservationError,
+    },
+    /// A run-interaction answer list failed its domain bound.
+    #[error("invalid run interaction answers: {source}")]
+    RunInteraction {
+        /// Domain-owned interaction validation failure.
+        #[source]
+        source: RunInteractionError,
     },
 }
 
@@ -668,7 +684,10 @@ fn encode_body(
     Ok(())
 }
 
-fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &ClientRequest) -> Result<(), ProtocolEncodeError> {
+fn encode_request(
+    mut builder: artisan_capnp::request::Builder<'_>,
+    value: &ClientRequest,
+) -> Result<(), ProtocolEncodeError> {
     match value {
         ClientRequest::Query(Query::ListDirectories(query)) => {
             let mut scope = builder.reborrow().init_list_directories().init_scope();
@@ -724,6 +743,29 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             let mut stop = builder.reborrow().init_stop_run();
             stop.set_thread_id(command.thread_id().as_str());
             stop.set_run_id(command.run_id().as_str());
+        }
+        ClientRequest::Command(Command::RespondApproval(command)) => {
+            let mut respond = builder.reborrow().init_respond_approval();
+            respond.set_thread_id(command.thread_id().as_str());
+            respond.set_run_id(command.run_id().as_str());
+            respond.set_approval_id(command.approval_id().as_str());
+            respond.set_approved(command.approved());
+        }
+        ClientRequest::Command(Command::RespondQuestion(command)) => {
+            let mut respond = builder.reborrow().init_respond_question();
+            respond.set_thread_id(command.thread_id().as_str());
+            respond.set_run_id(command.run_id().as_str());
+            respond.set_question_id(command.question_id().as_str());
+            let mut answers = respond.reborrow().init_answers(list_length(
+                "request.respondQuestion.answers",
+                command.answers().len(),
+            )?);
+            for (index, answer) in command.answers().iter().enumerate() {
+                answers.set(
+                    list_index("request.respondQuestion.answers", index)?,
+                    answer.as_str(),
+                );
+            }
         }
         ClientRequest::Command(Command::SetModelFavorite(command)) => {
             let mut favorite = builder.reborrow().init_set_model_favorite();
@@ -798,10 +840,31 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             builder.reborrow().set_read_model_favorites(());
         }
 
-        ClientRequest::Query(Query::ListQueuedMessages(query)) => crate::composer_state_codec::encode_list_queued_messages_request(builder.reborrow().init_list_queued_messages(), query).map_err(|_| ProtocolEncodeError::ComposerState)?,
-        ClientRequest::Command(Command::WithdrawQueuedMessage(command)) => crate::composer_state_codec::encode_withdraw_queued_message_request(builder.reborrow().init_withdraw_queued_message(), command),
-        ClientRequest::Query(Query::ReadRecalledMessage(query)) => crate::composer_state_codec::encode_read_recalled_message_request(builder.reborrow().init_read_recalled_message(), query),
-        ClientRequest::Query(Query::ReadRunUsage(query)) => crate::composer_state_codec::encode_read_run_usage_request(builder.reborrow().init_read_run_usage(), query),
+        ClientRequest::Query(Query::ListQueuedMessages(query)) => {
+            crate::composer_state_codec::encode_list_queued_messages_request(
+                builder.reborrow().init_list_queued_messages(),
+                query,
+            )
+            .map_err(|_| ProtocolEncodeError::ComposerState)?
+        }
+        ClientRequest::Command(Command::WithdrawQueuedMessage(command)) => {
+            crate::composer_state_codec::encode_withdraw_queued_message_request(
+                builder.reborrow().init_withdraw_queued_message(),
+                command,
+            )
+        }
+        ClientRequest::Query(Query::ReadRecalledMessage(query)) => {
+            crate::composer_state_codec::encode_read_recalled_message_request(
+                builder.reborrow().init_read_recalled_message(),
+                query,
+            )
+        }
+        ClientRequest::Query(Query::ReadRunUsage(query)) => {
+            crate::composer_state_codec::encode_read_run_usage_request(
+                builder.reborrow().init_read_run_usage(),
+                query,
+            )
+        }
     }
     Ok(())
 }
@@ -851,10 +914,33 @@ fn encode_response_payload(
     outer_request_id: &RequestId,
 ) -> Result<(), ProtocolEncodeError> {
     match payload {
-        ResponsePayload::QueuedMessages(value) => crate::composer_state_codec::encode_queued_message_listing(builder.reborrow().init_queued_messages(), value).map_err(|_| ProtocolEncodeError::ComposerState)?,
-        ResponsePayload::MessageWithdrawn(value) => crate::composer_state_codec::encode_queued_message_withdrawal_result(builder.reborrow().init_message_withdrawn(), outer_request_id, value).map_err(|_| ProtocolEncodeError::ComposerState)?,
-        ResponsePayload::RecalledMessage(value) => crate::composer_state_codec::encode_recalled_message_result(builder.reborrow().init_recalled_message(), value).map_err(|_| ProtocolEncodeError::ComposerState)?,
-        ResponsePayload::RunUsage(value) => crate::composer_state_codec::encode_run_usage_result(builder.reborrow().init_run_usage(), value).map_err(|_| ProtocolEncodeError::ComposerState)?,
+        ResponsePayload::QueuedMessages(value) => {
+            crate::composer_state_codec::encode_queued_message_listing(
+                builder.reborrow().init_queued_messages(),
+                value,
+            )
+            .map_err(|_| ProtocolEncodeError::ComposerState)?
+        }
+        ResponsePayload::MessageWithdrawn(value) => {
+            crate::composer_state_codec::encode_queued_message_withdrawal_result(
+                builder.reborrow().init_message_withdrawn(),
+                outer_request_id,
+                value,
+            )
+            .map_err(|_| ProtocolEncodeError::ComposerState)?
+        }
+        ResponsePayload::RecalledMessage(value) => {
+            crate::composer_state_codec::encode_recalled_message_result(
+                builder.reborrow().init_recalled_message(),
+                value,
+            )
+            .map_err(|_| ProtocolEncodeError::ComposerState)?
+        }
+        ResponsePayload::RunUsage(value) => crate::composer_state_codec::encode_run_usage_result(
+            builder.reborrow().init_run_usage(),
+            value,
+        )
+        .map_err(|_| ProtocolEncodeError::ComposerState)?,
         ResponsePayload::DirectoryListing(listing) => {
             encode_directory_listing(builder.reborrow().init_directory_list(), listing)?;
         }
@@ -921,6 +1007,12 @@ fn encode_response_payload(
             encoded.set_thread_id(receipt.thread_id.as_str());
             encoded.set_run_id(receipt.run_id.as_str());
             encoded.set_disposition(encode_stop_run_disposition(receipt.disposition));
+        }
+        ResponsePayload::ApprovalResponse(receipt) => {
+            encode_respond_approval_receipt(builder.reborrow().init_approval_response(), receipt)?;
+        }
+        ResponsePayload::QuestionResponse(receipt) => {
+            encode_respond_question_receipt(builder.reborrow().init_question_response(), receipt)?;
         }
         ResponsePayload::ActiveRun(result) => {
             let mut encoded = builder.reborrow().init_active_run();
@@ -1907,6 +1999,8 @@ fn decode_request(
         }
         request::Which::QueueMessage(command) => decode_queue_message(command?, request_id),
         request::Which::StopRun(command) => decode_stop_run(command?, request_id),
+        request::Which::RespondApproval(command) => decode_respond_approval(command?, request_id),
+        request::Which::RespondQuestion(command) => decode_respond_question(command?, request_id),
         request::Which::SetThreadEngineConfig(command) => {
             decode_set_thread_engine_config(command?, request_id)
         }
@@ -1974,10 +2068,26 @@ fn decode_request(
                 ),
             )))
         }
-        request::Which::ListQueuedMessages(value) => Ok(ClientRequest::Query(Query::ListQueuedMessages(crate::composer_state_codec::decode_list_queued_messages_request(value?)?))),
-        request::Which::WithdrawQueuedMessage(value) => Ok(ClientRequest::Command(Command::WithdrawQueuedMessage(crate::composer_state_codec::decode_withdraw_queued_message_request(value?, request_id)?))),
-        request::Which::ReadRecalledMessage(value) => Ok(ClientRequest::Query(Query::ReadRecalledMessage(crate::composer_state_codec::decode_read_recalled_message_request(value?)?))),
-        request::Which::ReadRunUsage(value) => Ok(ClientRequest::Query(Query::ReadRunUsage(crate::composer_state_codec::decode_read_run_usage_request(value?)?))),
+        request::Which::ListQueuedMessages(value) => {
+            Ok(ClientRequest::Query(Query::ListQueuedMessages(
+                crate::composer_state_codec::decode_list_queued_messages_request(value?)?,
+            )))
+        }
+        request::Which::WithdrawQueuedMessage(value) => {
+            Ok(ClientRequest::Command(Command::WithdrawQueuedMessage(
+                crate::composer_state_codec::decode_withdraw_queued_message_request(
+                    value?, request_id,
+                )?,
+            )))
+        }
+        request::Which::ReadRecalledMessage(value) => {
+            Ok(ClientRequest::Query(Query::ReadRecalledMessage(
+                crate::composer_state_codec::decode_read_recalled_message_request(value?)?,
+            )))
+        }
+        request::Which::ReadRunUsage(value) => Ok(ClientRequest::Query(Query::ReadRunUsage(
+            crate::composer_state_codec::decode_read_run_usage_request(value?)?,
+        ))),
         request::Which::ReadModelFavorites(()) => Ok(ClientRequest::Query(
             Query::ReadModelFavorites(ReadModelFavorites),
         )),
@@ -2098,6 +2208,156 @@ fn decode_stop_run(
             "request.stopRun.runId",
         )?,
     ))))
+}
+
+fn decode_respond_approval(
+    command: artisan_capnp::respond_approval_request::Reader<'_>,
+    request_id: RequestId,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    Ok(ClientRequest::Command(Command::RespondApproval(
+        RespondApproval::new(
+            request_id,
+            parse_thread_id(
+                read_text(command.get_thread_id(), "request.respondApproval.threadId")?,
+                "request.respondApproval.threadId",
+            )?,
+            parse_run_id(
+                read_text(command.get_run_id(), "request.respondApproval.runId")?,
+                "request.respondApproval.runId",
+            )?,
+            parse_observation_id(
+                read_text(
+                    command.get_approval_id(),
+                    "request.respondApproval.approvalId",
+                )?,
+                "request.respondApproval.approvalId",
+            )?,
+            command.get_approved(),
+        ),
+    )))
+}
+
+fn decode_answer_list(
+    encoded: capnp::text_list::Reader<'_>,
+    field: &'static str,
+) -> Result<Vec<String>, ProtocolDecodeError> {
+    let count = encoded.len() as usize;
+    if count > OBSERVATION_ANSWERS_MAX {
+        return Err(ProtocolDecodeError::RunInteraction {
+            source: RunInteractionError::TooManyAnswers {
+                count,
+                maximum: OBSERVATION_ANSWERS_MAX,
+            },
+        });
+    }
+    let mut answers = Vec::with_capacity(count);
+    for answer in encoded.iter() {
+        answers.push(read_text(answer, field)?);
+    }
+    Ok(answers)
+}
+
+fn decode_respond_question(
+    command: artisan_capnp::respond_question_request::Reader<'_>,
+    request_id: RequestId,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(command.get_thread_id(), "request.respondQuestion.threadId")?,
+        "request.respondQuestion.threadId",
+    )?;
+    let run_id = parse_run_id(
+        read_text(command.get_run_id(), "request.respondQuestion.runId")?,
+        "request.respondQuestion.runId",
+    )?;
+    let question_id = parse_observation_id(
+        read_text(
+            command.get_question_id(),
+            "request.respondQuestion.questionId",
+        )?,
+        "request.respondQuestion.questionId",
+    )?;
+    let answers = decode_answer_list(command.get_answers()?, "request.respondQuestion.answers")?;
+    RespondQuestion::new(request_id, thread_id, run_id, question_id, answers)
+        .map(Command::RespondQuestion)
+        .map(ClientRequest::Command)
+        .map_err(|source| ProtocolDecodeError::RunInteraction { source })
+}
+
+const fn encode_run_interaction_outcome(
+    value: RunInteractionOutcome,
+) -> artisan_capnp::RespondInteractionOutcome {
+    match value {
+        RunInteractionOutcome::Applied => artisan_capnp::RespondInteractionOutcome::Applied,
+        RunInteractionOutcome::UnknownTarget => {
+            artisan_capnp::RespondInteractionOutcome::UnknownTarget
+        }
+        RunInteractionOutcome::AlreadyResolved => {
+            artisan_capnp::RespondInteractionOutcome::AlreadyResolved
+        }
+        RunInteractionOutcome::WrongRun => artisan_capnp::RespondInteractionOutcome::WrongRun,
+    }
+}
+
+const fn decode_run_interaction_outcome(
+    value: artisan_capnp::RespondInteractionOutcome,
+) -> RunInteractionOutcome {
+    match value {
+        artisan_capnp::RespondInteractionOutcome::Applied => RunInteractionOutcome::Applied,
+        artisan_capnp::RespondInteractionOutcome::UnknownTarget => {
+            RunInteractionOutcome::UnknownTarget
+        }
+        artisan_capnp::RespondInteractionOutcome::AlreadyResolved => {
+            RunInteractionOutcome::AlreadyResolved
+        }
+        artisan_capnp::RespondInteractionOutcome::WrongRun => RunInteractionOutcome::WrongRun,
+    }
+}
+
+fn encode_respond_approval_receipt(
+    mut receipt: artisan_capnp::respond_approval_receipt::Builder<'_>,
+    value: &RespondApprovalReceipt,
+) -> Result<(), ProtocolEncodeError> {
+    receipt.set_request_id(value.request_id.as_str());
+    receipt.set_thread_id(value.thread_id.as_str());
+    receipt.set_run_id(value.run_id.as_str());
+    receipt.set_approval_id(value.approval_id.as_str());
+    receipt.set_approved(value.approved);
+    receipt.set_outcome(encode_run_interaction_outcome(value.outcome));
+    receipt.set_disposition(encode_disposition(value.disposition));
+    Ok(())
+}
+
+fn encode_respond_question_receipt(
+    mut receipt: artisan_capnp::respond_question_receipt::Builder<'_>,
+    value: &RespondQuestionReceipt,
+) -> Result<(), ProtocolEncodeError> {
+    // Stored answers were validated when the response resolved; rebuilding
+    // the domain command keeps encode total for hand-built receipts too.
+    let command = RespondQuestion::new(
+        value.request_id.clone(),
+        value.thread_id.clone(),
+        value.run_id.clone(),
+        value.question_id.clone(),
+        value.answers.clone(),
+    )
+    .map_err(|source| ProtocolEncodeError::RunInteraction { source })?;
+    receipt.set_request_id(value.request_id.as_str());
+    receipt.set_thread_id(value.thread_id.as_str());
+    receipt.set_run_id(value.run_id.as_str());
+    receipt.set_question_id(value.question_id.as_str());
+    let mut answers = receipt.reborrow().init_answers(list_length(
+        "response.questionResponse.answers",
+        command.answers().len(),
+    )?);
+    for (index, answer) in command.answers().iter().enumerate() {
+        answers.set(
+            list_index("response.questionResponse.answers", index)?,
+            answer.as_str(),
+        );
+    }
+    receipt.set_outcome(encode_run_interaction_outcome(value.outcome));
+    receipt.set_disposition(encode_disposition(value.disposition));
+    Ok(())
 }
 
 fn decode_image_attachments(
@@ -3094,15 +3354,32 @@ fn decode_response(
         }
         response::Which::MessageImage(result) => decode_message_image(result?)?,
         response::Which::StopRunReceipt(receipt) => decode_stop_run_receipt(receipt?, &request_id)?,
-        response::Which::ActiveRun(result) => decode_active_run_result(result?)?,
-        response::Which::QueuedMessages(value) => ResponsePayload::QueuedMessages(crate::composer_state_codec::decode_queued_message_listing(value?)?),
-        response::Which::MessageWithdrawn(value) => ResponsePayload::MessageWithdrawn(crate::composer_state_codec::decode_queued_message_withdrawal_result(value?, &request_id)?),
-        response::Which::RecalledMessage(value) => ResponsePayload::RecalledMessage(crate::composer_state_codec::decode_recalled_message_result(value?)?),
-        response::Which::RunUsage(value) => ResponsePayload::RunUsage(crate::composer_state_codec::decode_run_usage_result(value?)?),
-        response::Which::ComposerCatalog(result) => decode_composer_catalog(result?)?,
-        response::Which::ModelFavorites(snapshot) => {
-            ResponsePayload::ModelFavorites(decode_model_favorites_snapshot(snapshot?, "response.modelFavorites.modelIds")?)
+        response::Which::ApprovalResponse(receipt) => {
+            decode_respond_approval_receipt(receipt?, &request_id)?
         }
+        response::Which::QuestionResponse(receipt) => {
+            decode_respond_question_receipt(receipt?, &request_id)?
+        }
+        response::Which::ActiveRun(result) => decode_active_run_result(result?)?,
+        response::Which::QueuedMessages(value) => ResponsePayload::QueuedMessages(
+            crate::composer_state_codec::decode_queued_message_listing(value?)?,
+        ),
+        response::Which::MessageWithdrawn(value) => ResponsePayload::MessageWithdrawn(
+            crate::composer_state_codec::decode_queued_message_withdrawal_result(
+                value?,
+                &request_id,
+            )?,
+        ),
+        response::Which::RecalledMessage(value) => ResponsePayload::RecalledMessage(
+            crate::composer_state_codec::decode_recalled_message_result(value?)?,
+        ),
+        response::Which::RunUsage(value) => ResponsePayload::RunUsage(
+            crate::composer_state_codec::decode_run_usage_result(value?)?,
+        ),
+        response::Which::ComposerCatalog(result) => decode_composer_catalog(result?)?,
+        response::Which::ModelFavorites(snapshot) => ResponsePayload::ModelFavorites(
+            decode_model_favorites_snapshot(snapshot?, "response.modelFavorites.modelIds")?,
+        ),
         response::Which::ModelFavoriteSet(receipt) => {
             decode_model_favorite_set(receipt?, &request_id)?
         }
@@ -3382,6 +3659,104 @@ fn decode_stop_run_receipt(
             "response.stopRunReceipt.runId",
         )?,
         disposition: decode_stop_run_disposition(receipt.get_disposition()?),
+    }))
+}
+
+fn decode_respond_approval_receipt(
+    receipt: artisan_capnp::respond_approval_receipt::Reader<'_>,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let nested_request_id = parse_request_id(
+        read_text(
+            receipt.get_request_id(),
+            "response.approvalResponse.requestId",
+        )?,
+        "response.approvalResponse.requestId",
+    )?;
+    if &nested_request_id != request_id {
+        return Err(ProtocolDecodeError::CorrelationMismatch {
+            field: "response.approvalResponse.requestId",
+        });
+    }
+    Ok(ResponsePayload::ApprovalResponse(RespondApprovalReceipt {
+        request_id: nested_request_id,
+        thread_id: parse_thread_id(
+            read_text(
+                receipt.get_thread_id(),
+                "response.approvalResponse.threadId",
+            )?,
+            "response.approvalResponse.threadId",
+        )?,
+        run_id: parse_run_id(
+            read_text(receipt.get_run_id(), "response.approvalResponse.runId")?,
+            "response.approvalResponse.runId",
+        )?,
+        approval_id: parse_observation_id(
+            read_text(
+                receipt.get_approval_id(),
+                "response.approvalResponse.approvalId",
+            )?,
+            "response.approvalResponse.approvalId",
+        )?,
+        approved: receipt.get_approved(),
+        outcome: decode_run_interaction_outcome(receipt.get_outcome()?),
+        disposition: decode_disposition(receipt.get_disposition()?),
+    }))
+}
+
+fn decode_respond_question_receipt(
+    receipt: artisan_capnp::respond_question_receipt::Reader<'_>,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let nested_request_id = parse_request_id(
+        read_text(
+            receipt.get_request_id(),
+            "response.questionResponse.requestId",
+        )?,
+        "response.questionResponse.requestId",
+    )?;
+    if &nested_request_id != request_id {
+        return Err(ProtocolDecodeError::CorrelationMismatch {
+            field: "response.questionResponse.requestId",
+        });
+    }
+    let thread_id = parse_thread_id(
+        read_text(
+            receipt.get_thread_id(),
+            "response.questionResponse.threadId",
+        )?,
+        "response.questionResponse.threadId",
+    )?;
+    let run_id = parse_run_id(
+        read_text(receipt.get_run_id(), "response.questionResponse.runId")?,
+        "response.questionResponse.runId",
+    )?;
+    let question_id = parse_observation_id(
+        read_text(
+            receipt.get_question_id(),
+            "response.questionResponse.questionId",
+        )?,
+        "response.questionResponse.questionId",
+    )?;
+    let answers = decode_answer_list(receipt.get_answers()?, "response.questionResponse.answers")?;
+    // The echoed answers prove the identical intent; rebuilding the domain
+    // command validates them exactly once.
+    let command = RespondQuestion::new(
+        nested_request_id.clone(),
+        thread_id.clone(),
+        run_id.clone(),
+        question_id.clone(),
+        answers,
+    )
+    .map_err(|source| ProtocolDecodeError::RunInteraction { source })?;
+    Ok(ResponsePayload::QuestionResponse(RespondQuestionReceipt {
+        request_id: nested_request_id,
+        thread_id,
+        run_id,
+        question_id,
+        answers: command.answers().clone(),
+        outcome: decode_run_interaction_outcome(receipt.get_outcome()?),
+        disposition: decode_disposition(receipt.get_disposition()?),
     }))
 }
 

@@ -23,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use artisan_domain::RunId;
+use artisan_domain::{ObservationId, RunId};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -34,6 +34,9 @@ use super::http::{
     CreateSessionInput, HealthError, HealthSecret, PromptError, PromptFile, PromptInput,
     ResumeError, ResumeInput, ResumeSelection, perform_create_session, perform_interrupt,
     perform_prompt, perform_resume,
+};
+use super::interaction::{
+    InteractionDeliveryError, InteractionTarget, TurnInteractionLedger, TurnInteractionOutcome,
 };
 use super::observation::{EngineObservation, TerminalState};
 use super::process::{
@@ -454,10 +457,12 @@ pub(crate) struct AcceptedTurn {
     observations: mpsc::Receiver<EngineObservation>,
     receiver: Option<oneshot::Receiver<TurnResult>>,
     control: Arc<CancelHandle>,
+    interactions: TurnInteractionLedger,
 }
 
 impl AcceptedTurn {
     pub(crate) fn from_parts(
+        run_id: RunId,
         prepared: oneshot::Receiver<Result<PreparedSession, EngineOperationError>>,
         authorize_sender: oneshot::Sender<()>,
         observations: mpsc::Receiver<EngineObservation>,
@@ -465,6 +470,7 @@ impl AcceptedTurn {
         control: Arc<CancelHandle>,
     ) -> Self {
         Self {
+            interactions: TurnInteractionLedger::new(run_id),
             prepared,
             authorize_sender: Some(authorize_sender),
             observations,
@@ -490,6 +496,36 @@ impl AcceptedTurn {
 
     pub(crate) async fn next_observation(&mut self) -> Option<EngineObservation> {
         self.observations.recv().await
+    }
+
+    /// Notes one pending provider target on this turn's delivery ledger.
+    ///
+    /// The owning dispatch loop seeds pending targets from durable state
+    /// before delivering their responses. Re-noting never regresses a
+    /// resolved target.
+    pub(crate) fn note_interaction_requested(
+        &mut self,
+        target_id: &ObservationId,
+        target: InteractionTarget,
+    ) {
+        self.interactions.note_requested(target_id, target);
+    }
+
+    /// Delivers one validated mid-turn response onto this turn.
+    ///
+    /// Applies idempotent command ids and per-target resolution tracking to
+    /// the turn ledger with [`CommandTargetError`] on unknown or resolved
+    /// ids. Delivery records the decision only and never disturbs control
+    /// flow: answering never cancels, interrupts, or steers the turn.
+    pub(crate) fn deliver_interaction_response(
+        &mut self,
+        command_id: &str,
+        target_id: &ObservationId,
+        target: InteractionTarget,
+        intent: &str,
+    ) -> Result<TurnInteractionOutcome, InteractionDeliveryError> {
+        self.interactions
+            .deliver(command_id, target_id, target, intent)
     }
 
     pub(crate) async fn finish(mut self) -> TurnResult {
@@ -1880,31 +1916,32 @@ async fn authorize_configured_session(
         stream_after,
     } = state;
     let initial_stream = match &input.launch {
-        super::InternalLaunch::Verified(_) => StreamState::for_run(input.run_id.clone(), session.clone(), stream_after),
+        super::InternalLaunch::Verified(_) => {
+            StreamState::for_run(input.run_id.clone(), session.clone(), stream_after)
+        }
         #[cfg(test)]
         super::InternalLaunch::Fixture(_) => Ok(StreamState::new(stream_after)),
     };
-    let stream_state =
-        match initial_stream {
-            Ok(state) => state,
-            Err(error) => {
-                return finish_configured_start(
-                    ConfiguredTurnRequest {
-                        input,
-                        deadline,
-                        control,
-                        prepared,
-                        authorize,
-                        observations,
-                        respond,
-                    },
-                    parts,
-                    map_stream_error(error),
-                    runtime.limits.close,
-                )
-                .await;
-            }
-        };
+    let stream_state = match initial_stream {
+        Ok(state) => state,
+        Err(error) => {
+            return finish_configured_start(
+                ConfiguredTurnRequest {
+                    input,
+                    deadline,
+                    control,
+                    prepared,
+                    authorize,
+                    observations,
+                    respond,
+                },
+                parts,
+                map_stream_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
     let session = ConfiguredSession {
         input,
         deadline,

@@ -42,6 +42,7 @@ pub(crate) mod catalog;
 pub(crate) mod event;
 pub(crate) mod framing;
 pub mod http;
+pub(crate) mod interaction;
 pub(crate) mod observation;
 pub(crate) mod opencode_event;
 pub(crate) mod operation;
@@ -961,6 +962,7 @@ impl EngineOwner {
         let (authorize, authorize_receiver) = oneshot::channel();
         let (respond, receiver) = oneshot::channel();
         let (observations, observation_receiver) = mpsc::channel(observation_capacity);
+        let run_id = input.run_id.clone();
         let job = Job::Turn {
             input: Box::new(input),
             deadline,
@@ -972,6 +974,7 @@ impl EngineOwner {
         };
         match self.jobs.try_send(job) {
             Ok(()) => Ok(operation::AcceptedTurn::from_parts(
+                run_id,
                 prepared_receiver,
                 authorize,
                 observation_receiver,

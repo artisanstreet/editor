@@ -34,8 +34,8 @@ pub mod engine_config;
 pub mod events;
 pub mod identifiers;
 mod legacy_workspace_id;
-pub mod model;
 pub mod message;
+pub mod model;
 pub mod observation;
 pub mod text;
 pub mod time;
@@ -47,10 +47,9 @@ pub use bounds::{
     ENGINE_PROFILE_ID_MAX_BYTES, ENGINE_RUNTIME_MAX_BODY_BYTES, ENGINE_RUNTIME_MAX_HEADER_COUNT,
     ENGINE_RUNTIME_MAX_LINE_BYTES, ENGINE_RUNTIME_MAX_MILLIS, ENGINE_RUNTIME_MAX_OBSERVATIONS,
     ENGINE_RUNTIME_MAX_SSE_EVENT_BYTES, ENGINE_RUNTIME_MAX_STDERR_BYTES, IDENTIFIER_MAX_BYTES,
-    MESSAGE_BODY_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
-    MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, MESSAGE_IMAGE_ATTACHMENT_MIME_MAX_BYTES,
-    MESSAGE_IMAGE_ATTACHMENT_NAME_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
-    PROJECT_LISTING_MAX_PROJECTS, ROOT_PATH_MAX_BYTES,
+    MESSAGE_BODY_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
+    MESSAGE_IMAGE_ATTACHMENT_MIME_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_NAME_MAX_BYTES,
+    MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES, PROJECT_LISTING_MAX_PROJECTS, ROOT_PATH_MAX_BYTES,
     THREAD_LISTING_MAX_THREADS, THREAD_TITLE_MAX_BYTES,
 };
 pub use commands::{
@@ -64,9 +63,8 @@ pub use conversation::{
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
     ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
     ConversationTurn, ConversationUnsubscribe, CounterError, IncrementalText, IncrementalTextError,
-    ItemOrdinal, LifecycleTransitionError, PatchBatch, PatchBatchError, PatchSequence,
-    MultimodalUserMessageItem, QueryTurnCount, QueryTurnCountError, Revision, TurnOrdinal,
-    UserMessageItem,
+    ItemOrdinal, LifecycleTransitionError, MultimodalUserMessageItem, PatchBatch, PatchBatchError,
+    PatchSequence, QueryTurnCount, QueryTurnCountError, Revision, TurnOrdinal, UserMessageItem,
 };
 pub use engine_config::{
     ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
@@ -86,15 +84,15 @@ pub use identifiers::{
     EngineRouteId, EngineVariantId, IdentifierError, ItemId, MessageId, PatchId, PermissionId,
     ProjectId, RequestId, RunId, ThreadId, TurnId,
 };
-pub use model::{
-    CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,
-    DirectoryPlace, PlaceKind, ProjectListing, ProjectListingError, ProjectSummary, QueuedMessage,
-    ReceiptDisposition, ThreadListing, ThreadListingError, ThreadSummary,
-};
 pub use message::{
     AuthoredText, AuthoredTextError, ImageAttachment, ImageAttachmentError, ImageAttachmentRef,
     ImageAttachmentRefError, ImageMimeType, ImageMimeTypeError, QueueMessagePayload,
     QueueMessagePayloadError,
+};
+pub use model::{
+    CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,
+    DirectoryPlace, PlaceKind, ProjectListing, ProjectListingError, ProjectSummary, QueuedMessage,
+    ReceiptDisposition, ThreadListing, ThreadListingError, ThreadSummary,
 };
 pub use observation::{
     AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalKind,
@@ -131,18 +129,40 @@ pub use time::UnixMillis;
 pub use legacy_workspace_id::{WorkspaceId, WorkspaceIdError};
 
 mod model_favorites;
-pub use model_favorites::{ModelFavoriteId, ModelFavoriteIdError, ModelFavoritesRevision, ModelFavoritesRevisionError, ModelFavoritesSnapshot, ModelFavoritesSnapshotError, MODEL_FAVORITES_MAX_MODELS, MODEL_FAVORITES_MAX_SNAPSHOT_BYTES};
+pub use model_favorites::{
+    MODEL_FAVORITES_MAX_MODELS, MODEL_FAVORITES_MAX_SNAPSHOT_BYTES, ModelFavoriteId,
+    ModelFavoriteIdError, ModelFavoritesRevision, ModelFavoritesRevisionError,
+    ModelFavoritesSnapshot, ModelFavoritesSnapshotError,
+};
 
 mod run_usage;
-pub use run_usage::{RUN_USAGE_PROVIDER_SESSION_MAX_BYTES,RUN_USAGE_PROVIDER_TURN_MAX_BYTES,RUN_USAGE_MAX_SOURCE_SEQUENCE,RUN_USAGE_MAX_TOKEN_COUNT,RunUsageBasis,RunUsageReportInput,RunUsageReport,RunUsageReportError};
+pub use run_usage::{
+    RUN_USAGE_MAX_SOURCE_SEQUENCE, RUN_USAGE_MAX_TOKEN_COUNT, RUN_USAGE_PROVIDER_SESSION_MAX_BYTES,
+    RUN_USAGE_PROVIDER_TURN_MAX_BYTES, RunUsageBasis, RunUsageReport, RunUsageReportError,
+    RunUsageReportInput,
+};
 
 mod queued_message;
-pub use queued_message::{QUEUED_MESSAGE_LIST_MAX,QueuedMessageListOrder,ListQueuedMessages,QueuedMessageListError,QueuedMessageSummary,QueuedMessageListing,QueuedMessageListingError,WithdrawQueuedMessage,QueuedMessageWithdrawalOutcome,WithdrawQueuedMessageResult};
+pub use queued_message::{
+    ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListError, QueuedMessageListOrder,
+    QueuedMessageListing, QueuedMessageListingError, QueuedMessageSummary,
+    QueuedMessageWithdrawalOutcome, WithdrawQueuedMessage, WithdrawQueuedMessageResult,
+};
+mod run_interaction;
+pub use run_interaction::{
+    InteractionKind, InteractionOutcome, RespondApproval, RespondQuestion, RunInteractionError,
+};
 
 pub use model_favorites::MODEL_FAVORITE_ID_MAX_BYTES;
 
 pub mod composer_catalog;
-pub use composer_catalog::{CATALOG_REVISION_MAX_BYTES, CatalogRevision, CatalogRevisionError, ReadComposerCatalog, ReadModelFavorites, SetModelFavorite};
+pub use composer_catalog::{
+    CATALOG_REVISION_MAX_BYTES, CatalogRevision, CatalogRevisionError, ReadComposerCatalog,
+    ReadModelFavorites, SetModelFavorite,
+};
 
 pub mod composer_state;
-pub use composer_state::{ReadRecalledMessage, ReadRunUsage, RecalledMessageResult, RunUsageResult, WithdrawQueuedMessageCommand, QueuedMessageWithdrawalResult};
+pub use composer_state::{
+    QueuedMessageWithdrawalResult, ReadRecalledMessage, ReadRunUsage, RecalledMessageResult,
+    RunUsageResult, WithdrawQueuedMessageCommand,
+};

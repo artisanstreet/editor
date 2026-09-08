@@ -125,3 +125,7 @@ path = "../../tests/database/session_continuation.rs"
 [[test]]
 name = "observations"
 path = "../../tests/database/observations.rs"
+
+[[test]]
+name = "run_interaction"
+path = "../../tests/database/run_interaction.rs"

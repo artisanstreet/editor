@@ -43,14 +43,15 @@ use artisan_database::{
 };
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
-    ConversationUnsubscribe, CreateThread, DirectoryId, EngineProfileId, MessageId, PatchBatch,
-    ProjectId, Query, QueueFirstMessage, QueueMessage, RequestId, RootPath, SetModelFavorite,
-    SetThreadEngineConfig, ThreadId, UnixMillis,
+    ConversationUnsubscribe, CreateThread, DirectoryId, EngineProfileId, InteractionOutcome,
+    MessageId, PatchBatch, ProjectId, Query, QueueFirstMessage, QueueMessage, RequestId, RootPath,
+    SetModelFavorite, SetThreadEngineConfig, ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ActiveRunResult, ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome,
     ErrorCode, ErrorDetail, FirstMessageReceipt, MessageImageResult, ProtocolFailure,
-    QueueMessageReceipt, RegisteredEngineProfilesResult, ResponsePayload, ServerResponse,
+    QueueMessageReceipt, RegisteredEngineProfilesResult, RespondApprovalReceipt,
+    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, ServerResponse,
     SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
 };
 use tokio::sync::Mutex;
@@ -60,7 +61,7 @@ use crate::command_admission::{
 };
 use crate::conversation_commit_notifier::ConversationCommitNotifier;
 use crate::conversation_subscription_preparation::{
-    prepare_conversation_subscription, stop_conversation_subscription, PrepareSubscriptionError,
+    PrepareSubscriptionError, prepare_conversation_subscription, stop_conversation_subscription,
 };
 use crate::conversation_subscription_registry::{
     ActivateError, ApplyBatchError, ApplyObservationBatchError, ConversationSubscriptionRegistry,
@@ -73,7 +74,10 @@ use crate::directory_selection::{DirectorySelectionAdmissionError, SelectedDirec
 use crate::run_cancellation::{
     CancelRequestOutcome, RunCancellationError, RunCancellationRegistry,
 };
-
+use crate::run_interaction::{
+    OwnedInteractionCommand, RunInteractionAck, RunInteractionEnvelope, RunInteractionRegistry,
+    RunInteractionRegistryError,
+};
 /// Detail used when a diagnostic text would exceed the protocol-owned
 /// error-detail ceiling. Short by construction, so parsing it cannot fail.
 const BOUNDED_DETAIL_FALLBACK: &str = "failure detail exceeded the protocol error-detail bound";
@@ -90,6 +94,16 @@ const SUBSCRIPTION_GENERATION_EXHAUSTED_DETAIL: &str =
 /// shared live-run cancellation registry.
 const RUN_CANCELLATION_UNAVAILABLE_DETAIL: &str =
     "live run cancellation is not available in this build";
+
+/// Stable detail for builds whose native dispatcher has not supplied the
+/// shared live-run interaction registry.
+const RUN_INTERACTION_UNAVAILABLE_DETAIL: &str =
+    "live run interaction is not available in this build";
+
+/// Stable detail for a response whose target run cannot accept input right
+/// now. The outcome is never stored, so the client may retry once the owning
+/// run is live.
+const RUN_INTERACTION_INBOX_BUSY_DETAIL: &str = "live run interaction inbox is busy";
 
 /// Cloneable owner of one connection-local conversation subscription table.
 ///
@@ -339,6 +353,7 @@ pub struct RequestHandler {
     directory_picker: Option<DirectoryPicker>,
     registered_engine_profiles: Option<Box<dyn RegisteredEngineProfilesReader>>,
     run_cancellation: Option<RunCancellationRegistry>,
+    run_interaction: Option<RunInteractionRegistry>,
     composer_catalog: Option<crate::composer_catalog_service::ComposerCatalogService>,
 }
 
@@ -469,6 +484,7 @@ impl RequestHandler {
             directory_picker: None,
             registered_engine_profiles: None,
             run_cancellation: None,
+            run_interaction: None,
             composer_catalog: None,
         }
     }
@@ -492,6 +508,7 @@ impl RequestHandler {
             directory_picker: None,
             registered_engine_profiles: None,
             run_cancellation: None,
+            run_interaction: None,
             composer_catalog: None,
         }
     }
@@ -516,6 +533,7 @@ impl RequestHandler {
             directory_picker: None,
             registered_engine_profiles: None,
             run_cancellation: None,
+            run_interaction: None,
             composer_catalog: None,
         }
     }
@@ -560,6 +578,17 @@ impl RequestHandler {
     #[must_use]
     pub fn with_run_cancellation_registry(mut self, registry: RunCancellationRegistry) -> Self {
         self.run_cancellation = Some(registry);
+        self
+    }
+
+    /// Attaches the one process-owned live-run interaction registry shared
+    /// with native dispatch. The registry contains only exact live
+    /// `(thread_id, run_id)` inboxes; the owning dispatch loop behind each
+    /// inbox resolves responses transactionally and owns every durable
+    /// effect.
+    #[must_use]
+    pub fn with_run_interaction_registry(mut self, registry: RunInteractionRegistry) -> Self {
+        self.run_interaction = Some(registry);
         self
     }
 
@@ -1036,7 +1065,9 @@ impl RequestHandler {
                 Ok(outcome(request_id, ResponsePayload::ActiveRun(result)))
             }
             Query::ListQueuedMessages(query) => self.read_composer_queue(request_id, query).await,
-            Query::ReadRecalledMessage(query) => self.read_recalled_composer_message(request_id, query).await,
+            Query::ReadRecalledMessage(query) => {
+                self.read_recalled_composer_message(request_id, query).await
+            }
             Query::ReadRunUsage(query) => self.read_composer_usage(request_id, query).await,
             Query::ReadComposerCatalog(read) => {
                 crate::composer_catalog_handler::read_composer_catalog(
@@ -1172,11 +1203,19 @@ impl RequestHandler {
             }
             Command::QueueMessage(queue) => self.queue_message_outcome(request_id, queue).await,
             Command::StopRun(stop) => self.stop_run_outcome(request_id, stop),
+            Command::RespondApproval(respond) => {
+                self.respond_approval_outcome(request_id, respond).await
+            }
+            Command::RespondQuestion(respond) => {
+                self.respond_question_outcome(request_id, respond).await
+            }
             Command::SetThreadEngineConfig(config) => {
                 self.set_thread_engine_config_outcome(request_id, config.as_ref())
                     .await
             }
-            Command::WithdrawQueuedMessage(command) => self.withdraw_composer_message(request_id, command).await,
+            Command::WithdrawQueuedMessage(command) => {
+                self.withdraw_composer_message(request_id, command).await
+            }
             Command::SetModelFavorite(favorite) => {
                 self.set_model_favorite_outcome(request_id, favorite).await
             }
@@ -1213,6 +1252,156 @@ impl RequestHandler {
                 disposition,
             }),
         ))
+    }
+
+    /// Answers one approval response by routing it into its owning live run.
+    ///
+    /// Receipt replay precedes routing: an exact retry answers `duplicate`
+    /// without consulting the registry, and a reused request id with a
+    /// different intent fails as an idempotency conflict. A live route miss
+    /// answers `wrong_run` without storing anything, so the client may retry
+    /// once the owning run is live. Only the owning loop's acknowledgement
+    /// settles the receipt.
+    async fn respond_approval_outcome(
+        &self,
+        request_id: &RequestId,
+        respond: &artisan_domain::RespondApproval,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        let command = OwnedInteractionCommand::RespondApproval {
+            request_id: respond.request_id().clone(),
+            approval_id: respond.approval_id().clone(),
+            approved: respond.approved(),
+        };
+        let stored = self
+            .route_interaction(
+                request_id,
+                respond.thread_id(),
+                respond.run_id(),
+                &command,
+                &respond.intent_key(),
+            )
+            .await?;
+        approval_response(request_id, &stored)
+    }
+
+    /// Answers one question response with the same routing contract as
+    /// [`Self::respond_approval_outcome`].
+    async fn respond_question_outcome(
+        &self,
+        request_id: &RequestId,
+        respond: &artisan_domain::RespondQuestion,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        let command = OwnedInteractionCommand::RespondQuestion {
+            request_id: respond.request_id().clone(),
+            question_id: respond.question_id().clone(),
+            answers: respond.answers().clone(),
+        };
+        let stored = self
+            .route_interaction(
+                request_id,
+                respond.thread_id(),
+                respond.run_id(),
+                &command,
+                &respond.intent_key(),
+            )
+            .await?;
+        question_response(request_id, &stored)
+    }
+
+    /// Routes one validated response into its owning live run and awaits the
+    /// owning loop's acknowledgement.
+    ///
+    /// The acknowledgement carries the stored durable outcome, so this route
+    /// performs no second resolution and claims no durable effect of its own.
+    async fn route_interaction(
+        &self,
+        request_id: &RequestId,
+        thread_id: &ThreadId,
+        run_id: &artisan_domain::RunId,
+        command: &OwnedInteractionCommand,
+        intent_key: &str,
+    ) -> Result<artisan_database::StoredInteractionReceipt, ProtocolFailure> {
+        let Some(registry) = self.run_interaction.as_ref() else {
+            return Err(typed_failure(
+                ErrorCode::UnsupportedFeature,
+                RUN_INTERACTION_UNAVAILABLE_DETAIL,
+                false,
+                request_id,
+            ));
+        };
+        if let Some(stored) = self
+            .repository
+            .lookup_interaction_receipt(request_id)
+            .await
+            .map_err(|error| interaction_repository_failure(&error, request_id))?
+        {
+            if interaction_intent_matches(&stored, thread_id, run_id, command, intent_key) {
+                let mut replay = stored;
+                replay.disposition = artisan_domain::ReceiptDisposition::Duplicate;
+                return Ok(replay);
+            }
+            return Err(typed_failure(
+                ErrorCode::IdempotencyConflict,
+                format!("request `{request_id}` was already accepted for a different response"),
+                false,
+                request_id,
+            ));
+        }
+        let Some(inbox) = registry
+            .route(thread_id, run_id)
+            .map_err(|error| run_interaction_failure(error, request_id))?
+        else {
+            return Ok(unsubmitted_wrong_run(
+                request_id, thread_id, run_id, command,
+            ));
+        };
+        let (respond, acknowledged) = tokio::sync::oneshot::channel();
+        let envelope = RunInteractionEnvelope {
+            thread_id: thread_id.clone(),
+            run_id: run_id.clone(),
+            command: command.clone(),
+            respond,
+        };
+        match inbox.try_send(envelope) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                return Err(typed_failure(
+                    ErrorCode::Internal,
+                    RUN_INTERACTION_INBOX_BUSY_DETAIL,
+                    true,
+                    request_id,
+                ));
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                return Ok(unsubmitted_wrong_run(
+                    request_id, thread_id, run_id, command,
+                ));
+            }
+        }
+        match acknowledged.await {
+            Ok(RunInteractionAck::Settled(stored)) => Ok(stored),
+            Ok(RunInteractionAck::Conflict) => Err(typed_failure(
+                ErrorCode::IdempotencyConflict,
+                format!("request `{request_id}` was already accepted for a different response"),
+                false,
+                request_id,
+            )),
+            Ok(RunInteractionAck::WrongRun) => Ok(unsubmitted_wrong_run(
+                request_id, thread_id, run_id, command,
+            )),
+            Ok(RunInteractionAck::Unavailable) => Err(typed_failure(
+                ErrorCode::Internal,
+                "live run interaction is temporarily unavailable",
+                true,
+                request_id,
+            )),
+            Err(_) => Err(typed_failure(
+                ErrorCode::Internal,
+                "live run interaction ended before settling the response",
+                true,
+                request_id,
+            )),
+        }
     }
 
     /// Answers one create-thread mutation from its durable receipt or a
@@ -1633,6 +1822,199 @@ fn run_cancellation_failure(
         false,
         request_id,
     )
+}
+
+/// Maps the live interaction registry's fail-closed errors to one bounded,
+/// payload-free protocol failure.
+fn run_interaction_failure(
+    _error: RunInteractionRegistryError,
+    request_id: &RequestId,
+) -> ProtocolFailure {
+    typed_failure(
+        ErrorCode::Internal,
+        "live run interaction registry is unavailable",
+        false,
+        request_id,
+    )
+}
+
+/// Maps interaction repository failures without leaking stored decisions.
+///
+/// A reused request identity for a different intent answers the dedicated
+/// non-retryable idempotency-conflict code; persisted-state problems stay
+/// internal without retry hope; only database-operation failures admit that
+/// an identical later request may succeed.
+fn interaction_repository_failure(
+    error: &artisan_database::RunInteractionError,
+    request_id: &RequestId,
+) -> ProtocolFailure {
+    use artisan_database::RunInteractionError as Failure;
+
+    let (code, retryable) = match error {
+        Failure::InvalidBindingVersion { .. }
+        | Failure::InvalidInteraction(_)
+        | Failure::InvalidObservation(_)
+        | Failure::InvalidIdentifier(_) => (ErrorCode::InvalidInput, false),
+        Failure::RequestConflict { .. } => (ErrorCode::IdempotencyConflict, false),
+        Failure::Repository(_) => (ErrorCode::Internal, true),
+    };
+    typed_failure(code, error.to_string(), retryable, request_id)
+}
+
+/// Builds the unstored `wrong_run` receipt for a response its run cannot
+/// accept right now.
+///
+/// The outcome is deliberately never stored: the run may register later (a
+/// retry can still apply) or be gone (a retry reports `wrong_run` again).
+/// The disposition marks the first answer; it never claims a stored replay.
+fn unsubmitted_wrong_run(
+    request_id: &RequestId,
+    thread_id: &ThreadId,
+    run_id: &artisan_domain::RunId,
+    command: &OwnedInteractionCommand,
+) -> artisan_database::StoredInteractionReceipt {
+    let (interaction_id, approved, answers) = match command {
+        OwnedInteractionCommand::RespondApproval {
+            approval_id,
+            approved,
+            ..
+        } => (approval_id.clone(), Some(*approved), Vec::new()),
+        OwnedInteractionCommand::RespondQuestion {
+            question_id,
+            answers,
+            ..
+        } => (question_id.clone(), None, answers.clone()),
+    };
+    artisan_database::StoredInteractionReceipt {
+        request_id: request_id.clone(),
+        thread_id: thread_id.clone(),
+        run_id: run_id.clone(),
+        interaction_id,
+        kind: match command {
+            OwnedInteractionCommand::RespondApproval { .. } => {
+                artisan_domain::InteractionKind::Approval
+            }
+            OwnedInteractionCommand::RespondQuestion { .. } => {
+                artisan_domain::InteractionKind::Question
+            }
+        },
+        outcome: InteractionOutcome::WrongRun,
+        disposition: artisan_domain::ReceiptDisposition::Accepted,
+        approved,
+        answers,
+        binding_version: 0,
+        responded_at_ms: 0,
+    }
+}
+
+/// Replays the exact intent fingerprint instead of trusting the stored row.
+///
+/// Rebuilds the domain command from the stored decision plus the supplied
+/// naming and compares fingerprints, so a reused request id with a different
+/// target or decision is a conflict even when the stored row itself is the
+/// only durable evidence.
+fn interaction_intent_matches(
+    stored: &artisan_database::StoredInteractionReceipt,
+    thread_id: &ThreadId,
+    run_id: &artisan_domain::RunId,
+    command: &OwnedInteractionCommand,
+    intent_key: &str,
+) -> bool {
+    if stored.thread_id != *thread_id || stored.run_id != *run_id {
+        return false;
+    }
+    let fingerprint = match command {
+        OwnedInteractionCommand::RespondApproval {
+            approval_id,
+            approved,
+            ..
+        } => artisan_domain::RespondApproval::new(
+            stored.request_id.clone(),
+            thread_id.clone(),
+            run_id.clone(),
+            approval_id.clone(),
+            *approved,
+        )
+        .intent_key(),
+        OwnedInteractionCommand::RespondQuestion {
+            question_id,
+            answers,
+            ..
+        } => {
+            let Ok(command) = artisan_domain::RespondQuestion::new(
+                stored.request_id.clone(),
+                thread_id.clone(),
+                run_id.clone(),
+                question_id.clone(),
+                answers.clone(),
+            ) else {
+                return false;
+            };
+            command.intent_key()
+        }
+    };
+    fingerprint == intent_key
+        && stored.interaction_id
+            == match command {
+                OwnedInteractionCommand::RespondApproval { approval_id, .. } => approval_id.clone(),
+                OwnedInteractionCommand::RespondQuestion { question_id, .. } => question_id.clone(),
+            }
+}
+
+/// Maps a stored domain outcome to its wire disposition.
+const fn map_interaction_outcome(outcome: InteractionOutcome) -> RunInteractionOutcome {
+    match outcome {
+        InteractionOutcome::Applied => RunInteractionOutcome::Applied,
+        InteractionOutcome::UnknownTarget => RunInteractionOutcome::UnknownTarget,
+        InteractionOutcome::AlreadyResolved => RunInteractionOutcome::AlreadyResolved,
+        InteractionOutcome::WrongRun => RunInteractionOutcome::WrongRun,
+    }
+}
+
+/// Builds the correlated approval response from its stored receipt.
+fn approval_response(
+    request_id: &RequestId,
+    stored: &artisan_database::StoredInteractionReceipt,
+) -> Result<ServerResponse, ProtocolFailure> {
+    let Some(approved) = stored.approved else {
+        return Err(typed_failure(
+            ErrorCode::Internal,
+            "stored approval response carries no decision",
+            false,
+            request_id,
+        ));
+    };
+    Ok(outcome(
+        request_id,
+        ResponsePayload::ApprovalResponse(RespondApprovalReceipt {
+            request_id: stored.request_id.clone(),
+            thread_id: stored.thread_id.clone(),
+            run_id: stored.run_id.clone(),
+            approval_id: stored.interaction_id.clone(),
+            approved,
+            outcome: map_interaction_outcome(stored.outcome),
+            disposition: stored.disposition,
+        }),
+    ))
+}
+
+/// Builds the correlated question response from its stored receipt.
+fn question_response(
+    request_id: &RequestId,
+    stored: &artisan_database::StoredInteractionReceipt,
+) -> Result<ServerResponse, ProtocolFailure> {
+    Ok(outcome(
+        request_id,
+        ResponsePayload::QuestionResponse(RespondQuestionReceipt {
+            request_id: stored.request_id.clone(),
+            thread_id: stored.thread_id.clone(),
+            run_id: stored.run_id.clone(),
+            question_id: stored.interaction_id.clone(),
+            answers: stored.answers.clone(),
+            outcome: map_interaction_outcome(stored.outcome),
+            disposition: stored.disposition,
+        }),
+    ))
 }
 
 /// Builds the typed failure for an unresolvable opaque directory identity.

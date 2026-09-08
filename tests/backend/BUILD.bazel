@@ -65,6 +65,7 @@ exports_files([
     "lifecycle_listener.rs",
     "listener_configuration.rs",
     "native_run_dispatch.rs",
+    "run_interaction_dispatch.rs",
 ])
 
 # TEST-ONLY protocol child fixture: one ordinary main, no libtest harness,
@@ -482,6 +483,23 @@ rust_test(
         "//modules/domain:domain",
         "//modules/protocol:protocol",
         "@crates//:getrandom-0.4.3",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "run_interaction_test",
+    srcs = ["run_interaction.rs"],
+    crate_name = "run_interaction_test",
+    deps = [
+        "//modules/backend:backend",
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/protocol:protocol",
         "@crates//:tokio",
     ],
     edition = "2024",

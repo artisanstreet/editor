@@ -1419,9 +1419,14 @@ async fn run_with_handler(
         activity,
         &tokio::runtime::Handle::current(),
     );
-    let handler = handler.with_composer_catalog(crate::composer_catalog_service::ComposerCatalogService::new(
-        native_dispatcher.catalog_client(), app.repository().clone(), database,
-    ));
+    let handler = handler.with_run_interaction_registry(native_dispatcher.interaction_registry());
+    let handler = handler.with_composer_catalog(
+        crate::composer_catalog_service::ComposerCatalogService::new(
+            native_dispatcher.catalog_client(),
+            app.repository().clone(),
+            database,
+        ),
+    );
     let primary = match listener.serve_until_cancel(&handler, &cancel).await {
         Ok(()) => None,
         Err(error) if error.is_service_failure() => Some(ForgeRuntimeError::Service(error)),

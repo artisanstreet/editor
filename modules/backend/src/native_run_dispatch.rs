@@ -22,12 +22,14 @@ use artisan_database::{
     ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome, CompleteRun,
     DispatchFailureReason, DispatchLeaseOwner, FailMessageDispatch, InterruptRun, LaunchClaimedRun,
     LaunchClaimedRunOutcome, LaunchedRunReceipt, ProviderBindingBytes, RecordRunUsage, Repository,
-    RequeueMessageDispatch, RunBatchScope, RunErrorCode, RunErrorMessage, RunLaunchCredentials,
-    RunLaunchError, RunStartKey, SessionContinuationLookup, SessionContinuationQuery,
+    RequeueMessageDispatch, ResolveInteractionOutcome, RunBatchScope, RunErrorCode,
+    RunErrorMessage, RunLaunchCredentials, RunLaunchError, RunStartKey, SessionContinuationLookup,
+    SessionContinuationQuery,
 };
 use artisan_domain::{
     AssistantBody, AssistantMessagePhase, EngineId, EngineSelection, IncrementalText, ItemId,
-    PatchId, Revision, RootPath, RunId, TurnId, UnixMillis,
+    ObservationId, ObservationSequence, PatchId, RespondApproval, RespondQuestion, Revision,
+    RootPath, RunId, TurnId, UnixMillis,
 };
 use artisan_native_engine::{NativeOpenCode2Authority, VerifiedOpenCode2ProfileLaunch};
 use artisan_transport::CancelHandle;
@@ -38,6 +40,7 @@ use crate::engine_owner::{FixtureConfiguredLaunch, FixtureTurnInput};
 use crate::{
     CommandOrigin, SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
+    engine_owner::interaction::InteractionTarget,
     engine_owner::observation::{
         EngineObservation, TerminalState, TextDelta, TextSnapshot, UsageObservation,
     },
@@ -46,6 +49,9 @@ use crate::{
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
     run_cancellation::{RunCancellationLease, RunCancellationRegistry},
+    run_interaction::{
+        OwnedInteractionCommand, RunInteractionAck, RunInteractionEnvelope, RunInteractionRegistry,
+    },
     startup_reconciliation_sweep::{
         PatchSourceError, StartupReconciliationPatchSource, StartupReconciliationPatches,
         StartupReconciliationSweepInput,
@@ -436,6 +442,7 @@ pub struct NativeRunDispatcher {
     shutdown_budget: Duration,
     join: Option<JoinHandle<DispatchLoopExit>>,
     observed: Option<NativeRunDispatcherShutdown>,
+    interactions: RunInteractionRegistry,
 }
 
 /// The production dispatcher resolves a certified profile for every claim.
@@ -609,6 +616,8 @@ impl NativeRunDispatcher {
         let stop = Arc::new(CancelHandle::new());
         let owner = EngineOwner::start_configured(config.queue_capacity, runtime);
         let catalog_client = owner.catalog_client();
+        let interactions = RunInteractionRegistry::new(config.queue_capacity.get())
+            .expect("dispatcher queue capacity should be nonzero");
         let join = runtime.spawn(dispatch_loop(DispatchLoopContext {
             repository,
             database_path,
@@ -616,6 +625,7 @@ impl NativeRunDispatcher {
             stop: Arc::clone(&stop),
             process_cancel,
             cancellation,
+            interactions: interactions.clone(),
             owner,
             activity,
             launch_mode,
@@ -626,7 +636,14 @@ impl NativeRunDispatcher {
             catalog_client,
             join: Some(join),
             observed: None,
+            interactions,
         }
+    }
+
+    /// Returns the process-owned live-run interaction registry shared with
+    /// authenticated response routes.
+    pub(crate) fn interaction_registry(&self) -> RunInteractionRegistry {
+        self.interactions.clone()
     }
 
     pub(crate) fn catalog_client(&self) -> crate::engine_owner::EngineCatalogClient {
@@ -685,6 +702,7 @@ struct DispatchLoopContext {
     stop: Arc<CancelHandle>,
     process_cancel: Arc<CancelHandle>,
     cancellation: RunCancellationRegistry,
+    interactions: RunInteractionRegistry,
     owner: EngineOwner,
     activity: ActivityGateImpl,
     launch_mode: DispatchLaunchMode,
@@ -802,6 +820,7 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
         stop,
         process_cancel,
         cancellation,
+        interactions,
         mut owner,
         activity,
         mut launch_mode,
@@ -883,6 +902,7 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
                 stop: &stop,
                 process_cancel: &process_cancel,
                 cancellation: &cancellation,
+                interactions: &interactions,
                 owner: &owner,
                 claimed,
             },
@@ -980,6 +1000,7 @@ struct ClaimExecution<'a> {
     stop: &'a CancelHandle,
     process_cancel: &'a CancelHandle,
     cancellation: &'a RunCancellationRegistry,
+    interactions: &'a RunInteractionRegistry,
     owner: &'a EngineOwner,
     claimed: ClaimedMessageDispatch,
 }
@@ -1591,6 +1612,17 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         expected_updated_at: bound_at,
     };
     let run_cancel = cancellation.cancel_handle();
+    // Register mid-turn interaction routing for the live run. A registration
+    // failure never kills the run: responses then answer `wrong_run` and the
+    // client retries once registry pressure clears.
+    let (interaction_lease, inbox) = match context
+        .interactions
+        .register(receipt.thread_id.clone(), receipt.run_id.clone())
+    {
+        Ok((lease, receiver)) => (Some(lease), Some(receiver)),
+        Err(_) => (None, None),
+    };
+    let mut inbox = inbox;
     let custody_unresolved = consume_turn(
         context.repository,
         context.config,
@@ -1600,12 +1632,34 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         run_cancel.as_ref(),
         turn,
         scope,
+        inbox.as_mut(),
     )
     .await;
+    if let Some(receiver) = inbox.as_mut() {
+        drain_interactions(receiver);
+    }
+    drop(interaction_lease);
+    // Pending rows are per-run: the settle wipes them so decisions never leak
+    // across runs. Receipts stay: replays must still answer `duplicate`.
+    // Best-effort beside terminal settlement; the delete is idempotent.
+    let _ = context
+        .repository
+        .settle_run_interactions(&receipt.run_id)
+        .await;
     if custody_unresolved {
         ClaimCustody::Retained(cancellation)
     } else {
         ClaimCustody::Released
+    }
+}
+
+/// Replies `wrong_run` to every response still queued for a settled run.
+///
+/// The run is gone, so nothing is stored: the client retries against the
+/// owning run once it is live.
+fn drain_interactions(receiver: &mut tokio::sync::mpsc::Receiver<RunInteractionEnvelope>) {
+    while let Ok(envelope) = receiver.try_recv() {
+        let _ = envelope.respond.send(RunInteractionAck::WrongRun);
     }
 }
 
@@ -1801,6 +1855,7 @@ struct CommitBatchRequest<'a> {
     operated_at: UnixMillis,
     activate_turn_patch_id: Option<&'a PatchId>,
     changes: &'a [AssistantChange<'a>],
+    checkpoint: artisan_database::CheckpointUpdate<'a>,
     retries: std::num::NonZeroUsize,
 }
 
@@ -1813,6 +1868,7 @@ async fn commit_batch_with_retry(request: CommitBatchRequest<'_>) -> bool {
         operated_at,
         activate_turn_patch_id,
         changes,
+        checkpoint,
         retries,
     } = request;
     for _ in 0..retries.get() {
@@ -1831,7 +1887,7 @@ async fn commit_batch_with_retry(request: CommitBatchRequest<'_>) -> bool {
                 operated_at,
                 activate_turn_patch_id,
                 changes,
-                checkpoint: artisan_database::CheckpointUpdate::Keep,
+                checkpoint,
             })
             .await;
         if notify_after_commit(
@@ -1910,6 +1966,7 @@ async fn consume_turn(
     run_cancel: &CancelHandle,
     mut turn: crate::engine_owner::operation::AcceptedTurn,
     scope: RunBatchScope<'_>,
+    inbox: Option<&mut tokio::sync::mpsc::Receiver<RunInteractionEnvelope>>,
 ) -> bool {
     let context = TurnConsumptionContext {
         repository,
@@ -1922,6 +1979,7 @@ async fn consume_turn(
     let mut state = TurnConsumptionState::new(scope);
 
     let mut cancel_signalled = false;
+    let mut inbox = inbox;
     loop {
         if cancel_signalled {
             // Cancellation was already delivered to the turn: drain the
@@ -1929,7 +1987,12 @@ async fn consume_turn(
             // fired cancel branches stay ready forever once cancelled, so
             // re-selecting them under `biased` would starve
             // `next_observation()` on a held stream that never emits a
-            // terminal event.
+            // terminal event. Queued responses are answered from the durable
+            // fence below: the run is dying, so they settle as `wrong_run`
+            // without storing anything.
+            if let Some(receiver) = inbox.as_mut() {
+                drain_interactions(receiver);
+            }
             let observation = turn.next_observation().await;
             let Some(observation) = observation else {
                 break;
@@ -1952,6 +2015,23 @@ async fn consume_turn(
                     cancel_signalled = true;
                     state.forced_cancelled = true;
                     turn.cancel();
+                }
+                interaction = async {
+                    match inbox.as_mut() {
+                        Some(receiver) => receiver.recv().await,
+                        // No routing registration: never resolve this branch
+                        // so observations keep flowing.
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let Some(envelope) = interaction else {
+                        // The inbox closed while its lease is still held,
+                        // which the registry cannot produce; fuse the branch
+                        // and keep consuming observations.
+                        inbox = None;
+                        continue;
+                    };
+                    handle_interaction(&context, &mut state, &mut turn, envelope).await;
                 }
                 observation = turn.next_observation() => {
                     let Some(observation) = observation else { break; };
@@ -2021,6 +2101,462 @@ async fn handle_observation(
             }
         }
     }
+}
+
+/// Handles one routed mid-turn response: durable resolve, owner delivery,
+/// and resolution-observation commit.
+///
+/// The resolve transaction is authoritative for the acknowledgement: replays
+/// and misses settle from durable state with no second effect. Only an
+/// applied decision reaches the accepted turn ledger and the S1b observation
+/// commit, and neither disturbs control flow: answering never cancels,
+/// interrupts, or steers the run, so a deny lands with no side effect while
+/// the turn continues.
+#[allow(clippy::too_many_lines)]
+async fn handle_interaction(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    envelope: RunInteractionEnvelope,
+) {
+    let RunInteractionEnvelope {
+        thread_id,
+        run_id,
+        command,
+        respond,
+    } = envelope;
+    // The registry routed the exact pair, but the scope owns the fence:
+    // never resolve for a run this turn does not own.
+    if thread_id != state.scope.launched.thread_id || run_id != state.scope.launched.run_id {
+        let _ = respond.send(RunInteractionAck::WrongRun);
+        return;
+    }
+    sync_turn_ledger(context, turn, &run_id).await;
+    let scope = artisan_database::ResolveScope {
+        binding_version: state.scope.bound.binding_version,
+        responded_at: match context.origin.acceptance_instant() {
+            Ok(instant) => instant,
+            Err(_) => {
+                // No timestamp, no settlement: nothing was stored, so the
+                // client retry stays safe.
+                let _ = respond.send(RunInteractionAck::Unavailable);
+                return;
+            }
+        },
+    };
+    let outcome = match &command {
+        OwnedInteractionCommand::RespondApproval {
+            approval_id,
+            approved,
+            ..
+        } => {
+            let approval = RespondApproval::new(
+                command.request_id().clone(),
+                thread_id.clone(),
+                run_id.clone(),
+                approval_id.clone(),
+                *approved,
+            );
+            context
+                .repository
+                .resolve_approval_response(&approval, &scope)
+                .await
+        }
+        OwnedInteractionCommand::RespondQuestion {
+            question_id,
+            answers,
+            ..
+        } => {
+            let question = match RespondQuestion::new(
+                command.request_id().clone(),
+                thread_id.clone(),
+                run_id.clone(),
+                question_id.clone(),
+                answers.clone(),
+            ) {
+                Ok(question) => question,
+                Err(_) => {
+                    let _ = respond.send(RunInteractionAck::Unavailable);
+                    return;
+                }
+            };
+            context
+                .repository
+                .resolve_question_response(&question, &scope)
+                .await
+        }
+    };
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            // A resolve failure leaves durability unknown, so the run fails
+            // safe instead of presenting a stream as durably completed.
+            mark_interrupted(state, turn, true);
+            let _ = respond.send(RunInteractionAck::Unavailable);
+            return;
+        }
+    };
+    match outcome {
+        ResolveInteractionOutcome::WrongRun => {
+            let _ = respond.send(RunInteractionAck::WrongRun);
+        }
+        ResolveInteractionOutcome::Conflict => {
+            let _ = respond.send(RunInteractionAck::Conflict);
+        }
+        ResolveInteractionOutcome::Duplicate(stored)
+        | ResolveInteractionOutcome::UnknownTarget(stored)
+        | ResolveInteractionOutcome::AlreadyResolved(stored) => {
+            let _ = respond.send(RunInteractionAck::Settled(stored));
+        }
+        ResolveInteractionOutcome::Applied(applied) => {
+            deliver_applied_response(context, state, turn, &command, applied, respond).await;
+        }
+    }
+}
+
+/// Seeds the accepted turn ledger from durable pending state.
+///
+/// Runs before the resolve transaction so the later delivery agrees with
+/// what the transaction settles. A seeding failure leaves the ledger as-is:
+/// the resolve transaction stays authoritative, and a delivery that then
+/// disagrees fails the run safe in the caller.
+async fn sync_turn_ledger(
+    context: &TurnConsumptionContext<'_>,
+    turn: &mut AcceptedTurn,
+    run_id: &RunId,
+) {
+    let pending = match context.repository.pending_interactions(run_id).await {
+        Ok(pending) => pending,
+        Err(_) => return,
+    };
+    for view in pending.iter().filter(|view| view.requested) {
+        turn.note_interaction_requested(
+            &view.interaction_id,
+            match view.kind {
+                artisan_domain::InteractionKind::Approval => InteractionTarget::Approval,
+                artisan_domain::InteractionKind::Question => InteractionTarget::Question,
+            },
+        );
+    }
+}
+
+/// Delivers one applied decision to the accepted turn, commits its
+/// resolution observation through the S1b checkpoint path, and acknowledges
+/// the stored receipt.
+///
+/// Ledger disagreement after a committed resolve cannot happen under the
+/// single-owner discipline, but if it does the run fails safe while the
+/// acknowledgement still reports the durable truth.
+async fn deliver_applied_response(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    command: &OwnedInteractionCommand,
+    applied: artisan_database::AppliedInteraction,
+    respond: tokio::sync::oneshot::Sender<RunInteractionAck>,
+) {
+    let (target_id, target, intent) = match command {
+        OwnedInteractionCommand::RespondApproval { approval_id, .. } => (
+            approval_id,
+            InteractionTarget::Approval,
+            command_request_intent(state, command),
+        ),
+        OwnedInteractionCommand::RespondQuestion { question_id, .. } => (
+            question_id,
+            InteractionTarget::Question,
+            command_request_intent(state, command),
+        ),
+    };
+    let Some(intent) = intent else {
+        mark_interrupted(state, turn, true);
+        let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
+        return;
+    };
+    if turn
+        .deliver_interaction_response(
+            applied.receipt.request_id.as_str(),
+            target_id,
+            target,
+            &intent,
+        )
+        .is_err()
+    {
+        mark_interrupted(state, turn, true);
+        let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
+        return;
+    }
+    if !commit_resolution_observation(context, state, turn, &applied).await {
+        mark_interrupted(state, turn, true);
+    }
+    let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
+}
+
+/// Rebuilds the exact intent fingerprint for one delivered envelope command.
+///
+/// Reads nothing but the envelope: the fingerprint must equal the one the
+/// resolve transaction stored.
+fn command_request_intent(
+    state: &TurnConsumptionState<'_>,
+    command: &OwnedInteractionCommand,
+) -> Option<String> {
+    match command {
+        OwnedInteractionCommand::RespondApproval {
+            request_id,
+            approval_id,
+            approved,
+        } => Some(
+            RespondApproval::new(
+                request_id.clone(),
+                state.scope.launched.thread_id.clone(),
+                state.scope.launched.run_id.clone(),
+                approval_id.clone(),
+                *approved,
+            )
+            .intent_key(),
+        ),
+        OwnedInteractionCommand::RespondQuestion {
+            request_id,
+            question_id,
+            answers,
+        } => RespondQuestion::new(
+            request_id.clone(),
+            state.scope.launched.thread_id.clone(),
+            state.scope.launched.run_id.clone(),
+            question_id.clone(),
+            answers.clone(),
+        )
+        .ok()
+        .map(|question| question.intent_key()),
+    }
+}
+
+/// Commits one applied resolution as an S1b observation checkpoint batch.
+///
+/// Encodes the resolved observation under the run's binding with the
+/// previous committed sequence as its base, then commits through the
+/// existing batch path with a content-neutral assistant change: the body is
+/// rewritten verbatim so subscribers receive the wake hint without any
+/// transcript mutation. The batch advances the scope stamps exactly like a
+/// text batch, so later commits keep fencing.
+async fn commit_resolution_observation(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    applied: &artisan_database::AppliedInteraction,
+) -> bool {
+    let base = match context
+        .repository
+        .last_committed_observation_sequence(&state.scope.launched.run_id)
+        .await
+    {
+        Ok(base) => base,
+        Err(_) => return false,
+    };
+    let Ok(observation_id) = context.origin.mint_identity() else {
+        return false;
+    };
+    let Ok(observation_id) = ObservationId::parse(observation_id) else {
+        return false;
+    };
+    let Ok(resolved_sequence) = ObservationSequence::new(applied.resolved_sequence) else {
+        return false;
+    };
+    let resolved = match build_resolved_observation(applied, &observation_id, resolved_sequence) {
+        Some(resolved) => resolved,
+        None => return false,
+    };
+    let checkpoint = match artisan_database::encode_observation_checkpoint(
+        EngineId::OpenCode2,
+        state.scope.bound.binding_version,
+        base,
+        &[resolved],
+    ) {
+        Ok(checkpoint) => checkpoint,
+        Err(_) => return false,
+    };
+    if artisan_database::validate_observation_bind(
+        state.scope.bound.binding_version,
+        &state.scope.bound,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let Ok(body) = AssistantBody::parse(state.assistant_body.clone()) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    let Some(patch_id) = mint_patch_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    if let Some(item_id) = state.assistant_item.clone() {
+        commit_resolution_replace(
+            context,
+            state,
+            turn,
+            checkpoint,
+            operated_at,
+            &item_id,
+            &body,
+            &patch_id,
+        )
+        .await
+    } else {
+        commit_resolution_start(
+            context,
+            state,
+            turn,
+            checkpoint,
+            operated_at,
+            &body,
+            &patch_id,
+        )
+        .await
+    }
+}
+
+/// Commits a resolution checkpoint beside a content-neutral body replace.
+///
+/// The body is rewritten verbatim at the next revision so subscribers
+/// receive the wake hint without any transcript mutation.
+async fn commit_resolution_replace(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    checkpoint: artisan_database::EngineCheckpoint,
+    operated_at: UnixMillis,
+    item_id: &ItemId,
+    body: &AssistantBody,
+    patch_id: &PatchId,
+) -> bool {
+    let changes = [AssistantChange::Replace {
+        item_id,
+        expected_revision: state.assistant_revision,
+        body,
+        phase: AssistantMessagePhase::Unspecified,
+        patch_id,
+    }];
+    if !commit_batch_with_retry(CommitBatchRequest {
+        repository: context.repository,
+        notifier: &context.config.notifier,
+        scope: &state.scope,
+        batch_sequence: state.batch_sequence,
+        operated_at,
+        activate_turn_patch_id: None,
+        changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+        retries: context.config.max_command_retries,
+    })
+    .await
+    {
+        return false;
+    }
+    let Ok(next_revision) = state.assistant_revision.checked_next() else {
+        mark_interrupted(state, turn, true);
+        return false;
+    };
+    state.assistant_revision = next_revision;
+    state.scope.expected_updated_at = operated_at;
+    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
+        mark_interrupted(state, turn, true);
+        return false;
+    };
+    state.batch_sequence = next_sequence;
+    true
+}
+
+/// Commits a resolution checkpoint while opening the assistant item.
+///
+/// Used only when the response arrived before any text: the item opens with
+/// the current (possibly empty) body exactly like the text path opens it,
+/// including turn activation.
+async fn commit_resolution_start(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    checkpoint: artisan_database::EngineCheckpoint,
+    operated_at: UnixMillis,
+    body: &AssistantBody,
+    patch_id: &PatchId,
+) -> bool {
+    let Some(item_id) = mint_item_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    let Some(activation_patch_id) = mint_patch_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    let changes = [AssistantChange::Start {
+        item_id: &item_id,
+        phase: AssistantMessagePhase::Unspecified,
+        body,
+        patch_id,
+    }];
+    if !commit_batch_with_retry(CommitBatchRequest {
+        repository: context.repository,
+        notifier: &context.config.notifier,
+        scope: &state.scope,
+        batch_sequence: state.batch_sequence,
+        operated_at,
+        activate_turn_patch_id: Some(&activation_patch_id),
+        changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+        retries: context.config.max_command_retries,
+    })
+    .await
+    {
+        return false;
+    }
+    state.assistant_item = Some(item_id);
+    state.assistant_revision = Revision::new(0);
+    state.scope.expected_updated_at = operated_at;
+    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
+        mark_interrupted(state, turn, true);
+        return false;
+    };
+    state.batch_sequence = next_sequence;
+    true
+}
+
+/// Builds the resolved domain observation for one applied decision.
+///
+/// The observation carries the full stored request, so the checkpoint batch
+/// preserves the complete history even though only the resolution commits.
+fn build_resolved_observation(
+    applied: &artisan_database::AppliedInteraction,
+    observation_id: &ObservationId,
+    sequence: ObservationSequence,
+) -> Option<artisan_domain::Observation> {
+    if let Some(approval) = applied.requested.approval.as_ref() {
+        let approved = applied.receipt.approved?;
+        return artisan_domain::ApprovalObservation::resolved(
+            observation_id.clone(),
+            sequence,
+            approval.approval_id.clone(),
+            approval.description.clone(),
+            approval.request.clone(),
+            approved,
+        )
+        .ok()
+        .map(artisan_domain::Observation::Approval);
+    }
+    if let Some(question) = applied.requested.question.as_ref() {
+        return artisan_domain::QuestionObservation::resolved(
+            observation_id.clone(),
+            sequence,
+            question.input.clone(),
+            applied.receipt.answers.clone(),
+        )
+        .ok()
+        .map(artisan_domain::Observation::Question);
+    }
+    None
 }
 
 async fn handle_usage(
@@ -2148,6 +2684,7 @@ async fn replace_assistant_body(
         operated_at,
         activate_turn_patch_id: None,
         changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
     })
     .await
@@ -2203,6 +2740,7 @@ async fn start_assistant_item(
         operated_at,
         activate_turn_patch_id: Some(&activation_patch_id),
         changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
     })
     .await
@@ -2256,6 +2794,7 @@ async fn append_assistant_delta(
         operated_at,
         activate_turn_patch_id: None,
         changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
     })
     .await
@@ -2349,6 +2888,7 @@ async fn ensure_assistant_item(
         operated_at,
         activate_turn_patch_id: Some(&activation_patch_id),
         changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
     })
     .await
@@ -2379,6 +2919,12 @@ async fn settle_terminal(
     state: TurnConsumptionState<'_>,
     terminal: TerminalState,
 ) {
+    // Pending rows are per-run: wipe them at settle so decisions never leak
+    // across runs. Best-effort beside terminal settlement; idempotent.
+    let _ = context
+        .repository
+        .settle_run_interactions(&state.scope.launched.run_id)
+        .await;
     let TurnConsumptionState {
         scope,
         assistant_item: Some(item_id),

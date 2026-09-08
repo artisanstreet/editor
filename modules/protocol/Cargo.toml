@@ -53,3 +53,7 @@ path = "../../tests/protocol/composer_state.rs"
 [[test]]
 name = "observation_events"
 path = "../../tests/protocol/observation_events.rs"
+
+[[test]]
+name = "run_interaction"
+path = "../../tests/protocol/run_interaction.rs"

@@ -20,5 +20,9 @@ path = "../../tests/domain/observations.rs"
 name = "engine_profile_id"
 path = "../../tests/domain/engine_profile_id.rs"
 
+[[test]]
+name = "run_interaction"
+path = "../../tests/domain/run_interaction.rs"
+
 [lints]
 workspace = true
