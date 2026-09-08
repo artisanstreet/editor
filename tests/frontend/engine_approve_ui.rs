@@ -8,7 +8,7 @@
 use artisan_domain::{
     ApprovalObservation, ApprovalRequest, Command, EngineObservationEvent, Observation,
     ObservationId, ObservationSequence, QuestionInput, QuestionObservation, QuestionOption,
-    RequestId, RunId, ThreadId,
+    ReceiptDisposition, RequestId, RunId, ThreadId,
 };
 use artisan_frontend::engine_approve_ui::{
     AnswerFlight, AnswerKind, AnswerSettlement, ApprovalAnswerView, PairedRow, QuestionAnswerView,
@@ -18,8 +18,8 @@ use artisan_frontend::engine_approve_ui::{
 };
 use artisan_frontend::engine_observation_state::EngineObservationState;
 use artisan_protocol::{
-    ErrorCode, ErrorDetail, ProtocolFailure, ReceiptDisposition, RespondApprovalReceipt,
-    RespondQuestionReceipt, RunInteractionOutcome,
+    ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt, RespondQuestionReceipt,
+    RunInteractionOutcome,
 };
 use gpui::Action as _;
 
