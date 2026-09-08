@@ -665,6 +665,15 @@ impl Repository {
             }
             return Ok(ResolveInteractionOutcome::Conflict(stored));
         }
+        if !live_run_matches(&transaction, thread_id, run_id, scope).await? {
+            transaction.rollback().await.map_err(|source| {
+                RunInteractionError::Repository(database_error(
+                    "roll back resolve interaction wrong run",
+                    source,
+                ))
+            })?;
+            return Ok(ResolveInteractionOutcome::WrongRun);
+        }
         let pending = pending_run_interaction::Entity::find()
             .filter(pending_run_interaction::Column::RunId.eq(run_id.as_str()))
             .filter(pending_run_interaction::Column::InteractionId.eq(interaction_id.as_str()))
@@ -910,6 +919,42 @@ fn sequence_i64(sequence: u64) -> Result<i64, RunInteractionError> {
             reason: "run interaction sequence is not representable",
         })
     })
+}
+
+/// Requires the NAMED run itself to be live before any pending state is
+/// consulted.
+///
+/// The row must exist, belong to the command thread, still be `running`,
+/// and carry the resolving scope's provider binding version. Any divergence
+/// is a foreign, settled, or rebound run: reject without storing so the
+/// client can retry against the owning run. This first-layer fence keeps a
+/// response for a never-launched run out of `UnknownTarget`; the pending-row
+/// bind check below stays as the second layer.
+async fn live_run_matches(
+    transaction: &sea_orm::DatabaseTransaction,
+    thread_id: &ThreadId,
+    run_id: &RunId,
+    scope: &ResolveScope,
+) -> Result<bool, RunInteractionError> {
+    let Some(run) = entities::assistant_run::Entity::find_by_id(run_id.as_str())
+        .one(transaction)
+        .await
+        .map_err(|source| {
+            RunInteractionError::Repository(database_error(
+                "fence resolve interaction live run",
+                source,
+            ))
+        })?
+    else {
+        return Ok(false);
+    };
+    if run.thread_id != thread_id.as_str() {
+        return Ok(false);
+    }
+    if run.lifecycle != AssistantRunLifecycle::Running {
+        return Ok(false);
+    }
+    Ok(run.provider_binding_version == Some(scope.binding_version))
 }
 
 /// Requires the pending row to agree with the live bound run.
