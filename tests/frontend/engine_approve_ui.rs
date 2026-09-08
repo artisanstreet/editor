@@ -53,7 +53,7 @@ fn event(observation: Observation) -> EngineObservationEvent {
 fn approval_requested(approval: &str) -> Observation {
     Observation::Approval(
         ApprovalObservation::requested(
-            observation_id(format!("obs-{approval}-requested")),
+            observation_id(&format!("obs-{approval}-requested")),
             sequence(9),
             observation_id(approval),
             String::from("Run the test suite?"),
@@ -71,7 +71,7 @@ fn approval_requested(approval: &str) -> Observation {
 fn approval_resolved(approval: &str, approved: bool) -> Observation {
     Observation::Approval(
         ApprovalObservation::resolved(
-            observation_id(format!("obs-{approval}-resolved")),
+            observation_id(&format!("obs-{approval}-resolved")),
             sequence(10),
             observation_id(approval),
             String::from("Run the test suite?"),
@@ -119,7 +119,7 @@ fn question_requested(
 ) -> Observation {
     Observation::Question(
         QuestionObservation::requested(
-            observation_id(format!("obs-{question}-requested")),
+            observation_id(&format!("obs-{question}-requested")),
             sequence(11),
             question_input(question, multi_select, options),
         )
@@ -130,7 +130,7 @@ fn question_requested(
 fn question_resolved(question: &str, answers: Vec<String>) -> Observation {
     Observation::Question(
         QuestionObservation::resolved(
-            observation_id(format!("obs-{question}-resolved")),
+            observation_id(&format!("obs-{question}-resolved")),
             sequence(12),
             question_input(question, false, Some(first_options())),
             answers,
