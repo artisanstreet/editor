@@ -1262,7 +1262,7 @@ async fn observation_batch_publishes_in_sequence_order_with_cursor_dedup() {
         ConversationDeliveryWriter::new(server_connection, registrar.clone(), ProtocolVersion::V1);
     let (writer, outcome) = tokio::time::timeout(
         TEST_DEADLINE,
-        writer.deliver_observation_batch(lease.clone(), thread_id.clone(), batch),
+        writer.deliver_observation_batch(&lease.clone(), thread_id.clone(), batch),
     )
     .await
     .expect("observation delivery should finish")
@@ -1352,7 +1352,7 @@ async fn observation_batch_publishes_in_sequence_order_with_cursor_dedup() {
     ];
     let (writer, outcome) = tokio::time::timeout(
         TEST_DEADLINE,
-        writer.deliver_observation_batch(lease, thread_id.clone(), replay),
+        writer.deliver_observation_batch(&lease, thread_id.clone(), replay),
     )
     .await
     .expect("observation redelivery should finish")
