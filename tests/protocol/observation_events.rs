@@ -24,19 +24,19 @@ use artisan_domain::{
     QuestionOption, QueuedMessage, ReasoningSummaryCompletedObservation,
     ReasoningSummaryDeltaObservation, RequestId, RetryAttemptState, RetryObservation, RootPath,
     RunState, RunStateObservation, RunTerminalObservation, RunTerminalState, SearchObservation,
-    SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentTranscriptObservation,
-    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, TerminalChannel,
-    ThreadCreated, ThreadId, ThreadSummary, ThreadTitle, ToolAction, ToolObservation,
-    TranscriptContent, TranscriptTool, TurnState, TurnStateObservation, UnixMillis, UsageBasis,
-    UsageInput, UsageObservation,
+    SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
+    SubagentTranscriptObservation, TerminalActivityInput, TerminalActivityObservation,
+    TerminalActivityState, TerminalChannel, ThreadCreated, ThreadId, ThreadSummary, ThreadTitle,
+    ToolAction, ToolObservation, TranscriptContent, TranscriptTool, TurnState,
+    TurnStateObservation, UnixMillis, UsageBasis, UsageInput, UsageObservation,
 };
 use artisan_protocol::artisan_capnp::{
     ObservationTerminalState as WireTerminalState, ObservationToolAction as WireToolAction,
     envelope,
 };
 use artisan_protocol::{
-    EventCursor, FrameId, ProtocolDecodeError, ProtocolValueError, ProtocolVersion, ServerEvent,
-    WireEnvelope, WireEnvelopeBody, decode_envelope, encode_envelope,
+    EventCursor, FrameId, ProtocolDecodeError, ProtocolVersion, ServerEvent, WireEnvelope,
+    WireEnvelopeBody, decode_envelope, encode_envelope,
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
@@ -642,8 +642,10 @@ fn raw_file_event(frame: &str) -> Vec<u8> {
         file.set_sequence(6);
         file.set_path("src/main.rs");
         file.set_action(artisan_protocol::artisan_capnp::ObservationFileAction::Modified);
-        file.init_lines_added().set_no_lines_added(());
-        file.init_lines_deleted().set_no_lines_deleted(());
+        file.reborrow().init_lines_added().set_no_lines_added(());
+        file.reborrow()
+            .init_lines_deleted()
+            .set_no_lines_deleted(());
     })
 }
 
@@ -698,9 +700,9 @@ fn unknown_terminal_state_ordinal_is_rejected() {
         activity.set_id("obs-terminal");
         activity.set_sequence(8);
         activity.set_activity_id("activity-1");
-        activity.init_channel().set_no_channel(());
-        activity.init_output().set_no_output(());
-        activity.init_exit_code().set_no_exit_code(());
+        activity.reborrow().init_channel().set_no_channel(());
+        activity.reborrow().init_output().set_no_output(());
+        activity.reborrow().init_exit_code().set_no_exit_code(());
         activity.set_state(WireTerminalState::Started);
     });
     let completed = raw_observation_event("raw-terminal-completed", |observation| {
@@ -708,9 +710,9 @@ fn unknown_terminal_state_ordinal_is_rejected() {
         activity.set_id("obs-terminal");
         activity.set_sequence(8);
         activity.set_activity_id("activity-1");
-        activity.init_channel().set_no_channel(());
-        activity.init_output().set_no_output(());
-        activity.init_exit_code().set_no_exit_code(());
+        activity.reborrow().init_channel().set_no_channel(());
+        activity.reborrow().init_output().set_no_output(());
+        activity.reborrow().init_exit_code().set_no_exit_code(());
         activity.set_state(WireTerminalState::Completed);
     });
     let differing: Vec<usize> = started
@@ -740,7 +742,7 @@ fn empty_required_observation_text_is_rejected() {
     });
     assert!(matches!(
         decode_envelope(&malformed),
-        Err(ProtocolDecodeError::Observation(_))
+        Err(ProtocolDecodeError::Observation { .. })
     ));
 }
 
@@ -757,7 +759,7 @@ fn empty_message_delta_is_rejected() {
     });
     assert!(matches!(
         decode_envelope(&malformed),
-        Err(ProtocolDecodeError::Observation(_))
+        Err(ProtocolDecodeError::Observation { .. })
     ));
 }
 
@@ -777,7 +779,7 @@ fn resolved_approval_without_a_decision_is_rejected() {
     });
     assert!(matches!(
         decode_envelope(&malformed),
-        Err(ProtocolDecodeError::Observation(_))
+        Err(ProtocolDecodeError::Observation { .. })
     ));
 }
 
@@ -795,7 +797,7 @@ fn requested_question_with_answers_is_rejected() {
     });
     assert!(matches!(
         decode_envelope(&malformed),
-        Err(ProtocolDecodeError::Observation(_))
+        Err(ProtocolDecodeError::Observation { .. })
     ));
 }
 
@@ -812,9 +814,7 @@ fn zero_event_cursor_is_rejected() {
     let encoded = serialize::write_message_to_words(&message);
     assert!(matches!(
         decode_envelope(&encoded),
-        Err(ProtocolDecodeError::ProtocolValue(
-            ProtocolValueError::ZeroEventCursor
-        ))
+        Err(ProtocolDecodeError::ProtocolValue { .. })
     ));
 }
 
