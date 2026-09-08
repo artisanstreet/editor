@@ -15,14 +15,15 @@ use artisan_domain::{
     SearchObservation, SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
     SubagentTranscriptObservation, TerminalActivityInput, TerminalActivityObservation,
     TerminalActivityState, ThreadId, ToolAction, ToolObservation, TranscriptContent,
-    TranscriptTool, TurnState, TurnStateObservation, UsageBasis, UsageInput, UsageObservation,
+    TranscriptTool, TurnState, TurnStateObservation, UnixMillis, UsageBasis, UsageInput,
+    UsageObservation,
 };
 use artisan_frontend::engine_observation_state::{
     ApplyOutcome, EngineObservationState, TimelineRow,
 };
 use artisan_frontend::native_transport_service::{UniDelivery, validate_uni_envelope};
 use artisan_protocol::{
-    EventCursor, FrameId, ProtocolVersion, ServerEvent, UnixMillis, WireEnvelope, WireEnvelopeBody,
+    EventCursor, FrameId, ProtocolVersion, ServerEvent, WireEnvelope, WireEnvelopeBody,
 };
 
 fn observation_id(value: &str) -> ObservationId {
@@ -461,7 +462,7 @@ fn question_requested_resolves_in_place_by_request_id() {
     assert_eq!(requested.text(), "Which runtime?");
     assert_eq!(requested.header(), Some("Runtime"));
     assert!(!requested.multi_select());
-    assert_eq!(requested.options().map(Vec::len), Some(2));
+    assert_eq!(requested.options().map(|options| options.len()), Some(2));
 
     let outcome = presentation.apply(12, &event(question_resolved()));
     assert!(matches!(
