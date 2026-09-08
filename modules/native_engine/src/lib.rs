@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+#[path = "claude.rs"]
+mod claude_authority;
 #[path = "codex.rs"]
 mod codex_authority;
 #[path = "install.rs"]
@@ -11,6 +13,11 @@ mod resolver;
 #[cfg(windows)]
 mod windows_private;
 
+pub use claude_authority::{
+    CLAUDE_EXECUTABLE_ENV_VAR, CLAUDE_MINIMUM_CLI_VERSION, CLAUDE_NATIVE_CONTINUATION_VERSION,
+    CLAUDE_PROTOCOL_VERSION, CLAUDE_TRANSPORT, NativeClaudeAuthority, NativeClaudeLaunchError,
+    VerifiedClaudeLaunch, compare_claude_versions,
+};
 pub use codex_authority::{
     CODEX_APP_SERVER_ARGS, CODEX_MINIMUM_CLI_VERSION, CODEX_OPT_OUT_NOTIFICATION_METHODS,
     CODEX_PROTOCOL_VERSION, CODEX_TRANSPORT, NativeCodexAuthority, NativeCodexLaunchError,

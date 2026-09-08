@@ -32,13 +32,16 @@ use std::time::{Duration, Instant};
 
 use artisan_database::ThreadEngineSettings;
 use artisan_domain::{QueueMessagePayload, RootPath, RunId, ThreadId};
-use artisan_native_engine::{VerifiedCodexLaunch, VerifiedOpenCode2ProfileLaunch};
+use artisan_native_engine::{
+    VerifiedClaudeLaunch, VerifiedCodexLaunch, VerifiedOpenCode2ProfileLaunch,
+};
 use artisan_transport::CancelHandle;
 use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub(crate) mod catalog;
+pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod event;
 pub(crate) mod framing;
@@ -79,6 +82,10 @@ mod engine_owner_preflight;
 #[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_codex.rs"]
 mod engine_owner_codex;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_claude.rs"]
+mod engine_owner_claude;
 
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
@@ -200,12 +207,14 @@ impl std::fmt::Debug for FixtureTurnInput {
 /// Private launch for the single internal configured pipeline.
 ///
 /// The `Verified` variant carries the production OpenCode2 capability, the
-/// `Codex` variant carries the production Codex capability, and the `Fixture`
+/// `Codex` variant carries the production Codex capability, the `Claude`
+/// variant carries the production Claude capability, and the `Fixture`
 /// variant is `#[cfg(test)]` only and never constructible in non-test builds.
 /// Never `Clone`.
 pub(crate) enum InternalLaunch {
     Verified(Box<VerifiedOpenCode2ProfileLaunch>),
     Codex(Box<VerifiedCodexLaunch>),
+    Claude(Box<VerifiedClaudeLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }
@@ -221,6 +230,7 @@ impl InternalLaunch {
         match self {
             Self::Verified(verified) => verified.as_ref().profile_id().as_str(),
             Self::Codex(verified) => verified.as_ref().profile_id().as_str(),
+            Self::Claude(verified) => verified.as_ref().profile_id().as_str(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.profile_id.as_str(),
         }
@@ -230,6 +240,7 @@ impl InternalLaunch {
         match self {
             Self::Verified(verified) => verified.as_ref().version(),
             Self::Codex(verified) => verified.as_ref().version(),
+            Self::Claude(verified) => verified.as_ref().version(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.version,
         }
@@ -260,10 +271,34 @@ impl std::fmt::Debug for EngineCodexTurnInput {
     }
 }
 
+/// Immutable input handed to the configured `Claude` owner.
+///
+/// The dispatcher constructs this only after reading the durable settings
+/// and resolving the exact Claude launch. The owner never rereads the thread,
+/// registry, or environment while this value is live.
+pub(crate) struct EngineClaudeTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt: QueueMessagePayload,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: VerifiedClaudeLaunch,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for EngineClaudeTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineClaudeTurnInput { <redacted> }")
+    }
+}
+
 /// Single internal input for the one configured-turn pipeline.
 ///
-/// `EngineTurnInput` and `EngineCodexTurnInput` (production) plus
-/// `FixtureTurnInput` (`#[cfg(test)]`) convert into this at admission, so the
+/// `EngineTurnInput`, `EngineCodexTurnInput`, and `EngineClaudeTurnInput`
+/// (production) plus `FixtureTurnInput` (`#[cfg(test)]`) convert into this at admission, so the
 /// queued `Job::Turn` always carries the same type and exactly one executor
 /// per engine proves the lifecycle.
 pub(crate) struct InternalTurnInput {
@@ -835,6 +870,33 @@ impl EngineOwner {
             prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Codex(Box::new(input.launch)),
+            continuation: None,
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    /// Admits one configured `Claude` turn into the single owner queue.
+    ///
+    /// Mirrors [`Self::admit_turn`] without forking the queue: the same
+    /// `Job::Turn` type carries an [`InternalLaunch::Claude`] capability and
+    /// exactly one executor proves the lifecycle. Claude turns carry no
+    /// provider continuation in this packet (later packet).
+    pub(crate) fn admit_claude_turn(
+        &self,
+        input: EngineClaudeTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            thread_id: Some(input.thread_id),
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt: input.prompt,
+            settings: input.settings,
+            launch: InternalLaunch::Claude(Box::new(input.launch)),
             continuation: None,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,

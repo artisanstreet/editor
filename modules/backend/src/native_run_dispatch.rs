@@ -32,8 +32,8 @@ use artisan_domain::{
     RootPath, RunId, TurnId, UnixMillis,
 };
 use artisan_native_engine::{
-    NativeCodexAuthority, NativeOpenCode2Authority, VerifiedCodexLaunch,
-    VerifiedOpenCode2ProfileLaunch,
+    NativeClaudeAuthority, NativeCodexAuthority, NativeOpenCode2Authority, VerifiedClaudeLaunch,
+    VerifiedCodexLaunch, VerifiedOpenCode2ProfileLaunch,
 };
 use artisan_transport::CancelHandle;
 use tokio::{runtime::Handle, task::JoinHandle};
@@ -48,7 +48,9 @@ use crate::{
         EngineObservation, TerminalState, TextDelta, TextSnapshot, UsageObservation,
     },
     engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
-    engine_owner::{EngineCodexTurnInput, EngineContinuation, EngineTurnInput},
+    engine_owner::{
+        EngineClaudeTurnInput, EngineCodexTurnInput, EngineContinuation, EngineTurnInput,
+    },
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
     run_cancellation::{RunCancellationLease, RunCancellationRegistry},
@@ -65,6 +67,7 @@ const PROMPT_DELIVERY_MAX_BYTES: usize = 256;
 const PROVIDER_BINDING_VERSION: i64 = 1;
 const PROVIDER_BINDING_ENGINE: &str = "opencode2";
 const PROVIDER_BINDING_ENGINE_CODEX: &str = "codex";
+const PROVIDER_BINDING_ENGINE_CLAUDE: &str = "claude";
 const PROVIDER_FAILURE_CODE: &str = "provider_failed";
 const PROVIDER_FAILURE_MESSAGE: &str = "OpenCode2 provider turn failed";
 const INTERRUPTED_CODE: &str = "provider_interrupted";
@@ -472,6 +475,7 @@ enum ClaimLaunchAvailability {
 enum ResolvedLaunch {
     Configured(Box<VerifiedOpenCode2ProfileLaunch>),
     Codex(Box<VerifiedCodexLaunch>),
+    Claude(Box<VerifiedClaudeLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }
@@ -1200,8 +1204,9 @@ async fn load_claim(
     // The settings fence fails closed per engine: OpenCode2 resolves through
     // the certified profile authority, Codex resolves through the Codex
     // launch authority with a bounded `--version` probe enforcing the minimum
-    // CLI, and every other newly representable engine requeues instead of
-    // running as another engine.
+    // CLI, Claude resolves through the Claude launch authority with a bounded
+    // `--version` probe enforcing the minimum CLI, and every other newly
+    // representable engine requeues instead of running as another engine.
     let launch = match settings.config().selection() {
         EngineSelection::OpenCode2(selection) => match launch_mode {
             ClaimLaunchMode::Configured => {
@@ -1242,6 +1247,22 @@ async fn load_claim(
                 return None;
             }
         },
+        EngineSelection::Claude(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let Some(launch) =
+                    resolve_claude_launch(context.database_path, selection.profile_id()).await
+                else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Claude(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
         _ => {
             context.requeue("engine unavailable").await;
             return None;
@@ -1264,9 +1285,13 @@ async fn resolve_continuation(
     if matches!(&claim.launch, ResolvedLaunch::Fixture(_)) {
         return Ok(None);
     }
-    // Codex continuation is a later packet: Codex turns always start a fresh
-    // native thread in this packet instead of resuming provider history.
-    if matches!(&claim.launch, ResolvedLaunch::Codex(_)) {
+    // Codex and Claude continuation is a later packet: those turns always
+    // start a fresh native thread in this packet instead of resuming provider
+    // history.
+    if matches!(
+        &claim.launch,
+        ResolvedLaunch::Codex(_) | ResolvedLaunch::Claude(_)
+    ) {
         return Ok(None);
     }
     let EngineSelection::OpenCode2(selection) = claim.settings.config().selection() else {
@@ -1302,7 +1327,7 @@ fn mint_claim_ids(
     launch: &ResolvedLaunch,
 ) -> Result<ClaimIds, &'static str> {
     let (run_id, turn_id, item_id, first_patch_id, second_patch_id) = match launch {
-        ResolvedLaunch::Configured(_) | ResolvedLaunch::Codex(_) => (
+        ResolvedLaunch::Configured(_) | ResolvedLaunch::Codex(_) | ResolvedLaunch::Claude(_) => (
             mint_run_id(origin).ok_or("run identity unavailable")?,
             mint_turn_id(origin).ok_or("run identity unavailable")?,
             mint_item_id(origin).ok_or("run identity unavailable")?,
@@ -1447,6 +1472,21 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
             },
             attempt_budget,
         ),
+        ResolvedLaunch::Claude(launch) => context.owner.admit_claude_turn(
+            EngineClaudeTurnInput {
+                run_id: receipt.run_id.clone(),
+                thread_id: payload.thread_id.clone(),
+                project_root,
+                prompt_id,
+                prompt,
+                settings: settings.clone(),
+                launch: *launch,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
         #[cfg(test)]
         ResolvedLaunch::Fixture(fixture) => context.owner.admit_fixture_turn(
             FixtureTurnInput {
@@ -1521,9 +1561,9 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
     if run_cancel.is_cancelled() {
         turn.cancel();
     }
-    // Provider binding bytes carry the exact engine tag (`opencode2` or
-    // `codex`) with format 1 and the native thread identity from the
-    // app-server contract. A selection for any other engine abandons the
+    // Provider binding bytes carry the exact engine tag (`opencode2`,
+    // `codex`, or `claude`) with format 1 and the native thread identity from
+    // the app-server contract. A selection for any other engine abandons the
     // turn here instead of binding as a runnable engine.
     let (binding_engine, binding_profile) = match settings.config().selection() {
         EngineSelection::OpenCode2(selection) => (
@@ -1532,6 +1572,10 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         ),
         EngineSelection::Codex(selection) => (
             PROVIDER_BINDING_ENGINE_CODEX,
+            selection.profile_id().as_str().to_owned(),
+        ),
+        EngineSelection::Claude(selection) => (
+            PROVIDER_BINDING_ENGINE_CLAUDE,
             selection.profile_id().as_str().to_owned(),
         ),
         _ => {
@@ -1674,6 +1718,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             engine: match settings.config().selection() {
                 EngineSelection::OpenCode2(_) => EngineId::OpenCode2,
                 EngineSelection::Codex(_) => EngineId::Codex,
+                EngineSelection::Claude(_) => EngineId::Claude,
                 _ => EngineId::OpenCode2,
             },
             turn,
@@ -1907,7 +1952,7 @@ async fn bind_with_retry(
 /// Builds the raw engine-tagged binding document with format 1 and the exact
 /// native thread identity from the app-server contract.
 ///
-/// The `engine` tag is `opencode2` or `codex`; the session id is the native
+/// The `engine` tag is `opencode2`, `codex`, or `claude`; the session id is the native
 /// thread id returned by `thread/start` (Codex) or `CreateSession` session
 /// (OpenCode2). Empty identities reject so a corrupt bind never persists.
 ///
@@ -1969,6 +2014,38 @@ async fn resolve_codex_launch(
     profile_id: &artisan_domain::EngineProfileId,
 ) -> Option<VerifiedCodexLaunch> {
     let authority = NativeCodexAuthority::new();
+    let executable = authority.resolve_executable().ok()?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(&executable)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    authority
+        .resolve_launch(database_path, profile_id, &stdout)
+        .ok()
+}
+
+/// Resolves one Claude profile into a verified launch with a bounded
+/// `--version` probe enforcing the minimum CLI at probe time.
+///
+/// Returns `None` when the executable is unavailable, the probe times out or
+/// fails, or the version predates the minimum; the caller requeues the claim.
+async fn resolve_claude_launch(
+    database_path: &Path,
+    profile_id: &artisan_domain::EngineProfileId,
+) -> Option<VerifiedClaudeLaunch> {
+    let authority = NativeClaudeAuthority::new();
     let executable = authority.resolve_executable().ok()?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
