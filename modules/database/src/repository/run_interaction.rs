@@ -452,14 +452,13 @@ impl Repository {
     ///
     /// Returns [`RunInteractionError`] for database failures.
     pub async fn pending_request_instants(&self) -> Result<Vec<i64>, RunInteractionError> {
-        let statement = Statement::from_sql_and_values(
-            DbBackend::Sqlite,
-            "SELECT MAX(requested_at_ms) AS requested_at_ms FROM pending_run_interactions WHERE state = 'requested' GROUP BY run_id ORDER BY requested_at_ms",
-            [],
-        );
         let rows = self
             .database
-            .query_all(&statement)
+            .query_all_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT MAX(requested_at_ms) AS requested_at_ms FROM pending_run_interactions WHERE state = 'requested' GROUP BY run_id ORDER BY requested_at_ms",
+                [],
+            ))
             .await
             .map_err(|source| {
                 RunInteractionError::Repository(database_error(
