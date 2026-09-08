@@ -1122,7 +1122,7 @@ impl fmt::Debug for MessageImageResult {
 }
 
 /// Durable Forge-originated event with its connection replay sequence.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServerEvent {
     /// One-based sequence used to detect duplicate, missing, or regressed events.
     pub cursor: EventCursor,
