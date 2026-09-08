@@ -1256,7 +1256,7 @@ impl From<DispatchFailure> for ProtocolFailure {
 }
 
 /// Owned application frame body.
-#[derive(Eq, PartialEq)]
+#[derive(PartialEq)]
 pub enum WireEnvelopeBody {
     /// Authenticated client negotiation offer.
     Hello(Hello),
@@ -1275,7 +1275,7 @@ pub enum WireEnvelopeBody {
 }
 
 /// One fully owned application-protocol frame.
-#[derive(Eq, PartialEq)]
+#[derive(PartialEq)]
 pub struct WireEnvelope {
     /// Revision stamped on this frame.
     pub protocol_version: ProtocolVersion,
