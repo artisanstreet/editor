@@ -1923,30 +1923,40 @@ fn interaction_intent_matches(
     if stored.thread_id != *thread_id || stored.run_id != *run_id {
         return false;
     }
-    let fingerprint = match command {
-        OwnedInteractionCommand::RespondApproval {
-            approval_id,
-            approved,
-            ..
-        } => artisan_domain::RespondApproval::new(
-            stored.request_id.clone(),
-            thread_id.clone(),
-            run_id.clone(),
-            approval_id.clone(),
-            *approved,
+    let kinds_agree = matches!(
+        (&stored.kind, command),
+        (
+            artisan_domain::InteractionKind::Approval,
+            OwnedInteractionCommand::RespondApproval { .. }
+        ) | (
+            artisan_domain::InteractionKind::Question,
+            OwnedInteractionCommand::RespondQuestion { .. }
         )
-        .intent_key(),
-        OwnedInteractionCommand::RespondQuestion {
-            question_id,
-            answers,
-            ..
-        } => {
+    );
+    if !kinds_agree {
+        return false;
+    }
+    let fingerprint = match stored.kind {
+        artisan_domain::InteractionKind::Approval => {
+            let Some(approved) = stored.approved else {
+                return false;
+            };
+            artisan_domain::RespondApproval::new(
+                stored.request_id.clone(),
+                thread_id.clone(),
+                run_id.clone(),
+                stored.interaction_id.clone(),
+                approved,
+            )
+            .intent_key()
+        }
+        artisan_domain::InteractionKind::Question => {
             let Ok(command) = artisan_domain::RespondQuestion::new(
                 stored.request_id.clone(),
                 thread_id.clone(),
                 run_id.clone(),
-                question_id.clone(),
-                answers.clone(),
+                stored.interaction_id.clone(),
+                stored.answers.clone(),
             ) else {
                 return false;
             };
