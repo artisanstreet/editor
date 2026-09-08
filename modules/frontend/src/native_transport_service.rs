@@ -47,7 +47,7 @@ use artisan_editor_cli::{
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ConversationSubscriptionStopped, ErrorCode,
     FirstMessageReceipt, FrameId, Hello, HelloCredential, ProtocolVersion, QueueMessageReceipt,
-    RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
+    RegisteredEngineProfilesResult, ResponsePayload, ServerEvent, SetThreadEngineConfigResult,
     ThreadEngineSettingsResult, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
@@ -385,7 +385,10 @@ pub enum ServiceStopStatus {
 }
 
 /// Events crossing from the service thread to the GPUI application.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// `Eq` is deliberately absent: the engine observation arm carries sanitized
+/// usage rows with a finite `cost_usd: f64`, so only [`PartialEq`] applies.
+#[derive(Clone, Debug, PartialEq)]
 pub enum NativeTransportEvent {
     ComposerState(ComposerStateEvent),
     ActiveRun {
@@ -603,6 +606,11 @@ pub enum NativeTransportEvent {
     },
     /// Uni-stream patch batch.
     PatchBatch(PatchBatch),
+    /// Uni-stream engine observation with its connection replay cursor.
+    ///
+    /// The application pairs the observation into presentation state and owns
+    /// reconnect replay ordering; the service never advances a cursor here.
+    EngineObservation(ServerEvent),
     /// Bounded path-free delivery loss.
     DeliveryLost(ServiceFailure),
     /// Terminal service state.
@@ -652,6 +660,8 @@ pub enum ServiceSpawnError {
 pub enum PrivateDelivery {
     /// Valid uni patch batch.
     Batch(PatchBatch),
+    /// Valid uni engine observation event.
+    Observation(ServerEvent),
     /// Bounded delivery loss.
     Lost(ServiceFailure),
 }
@@ -2625,7 +2635,20 @@ async fn establish_session(
     ))
 }
 
-/// Validates one uni-stream envelope and extracts a patch batch.
+/// One validated uni-stream delivery frame, extracted from one envelope.
+///
+/// Patch batches carry conversation replay; engine observation events carry
+/// one committed observation row with its connection replay cursor. Any other
+/// envelope family on the delivery stream fails closed as an integrity loss.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UniDelivery {
+    /// Valid uni patch batch.
+    Batch(PatchBatch),
+    /// Valid uni engine observation event.
+    Observation(ServerEvent),
+}
+
+/// Validates the delivery family of one uni-stream envelope.
 ///
 /// # Errors
 ///
@@ -2634,7 +2657,7 @@ async fn establish_session(
 pub fn validate_uni_envelope(
     envelope: &WireEnvelope,
     expected_version: ProtocolVersion,
-) -> Result<PatchBatch, ServiceFailure> {
+) -> Result<UniDelivery, ServiceFailure> {
     if envelope.protocol_version != expected_version {
         return Err(ServiceFailure::new(
             ServiceFailureStage::Request,
@@ -2642,7 +2665,18 @@ pub fn validate_uni_envelope(
         ));
     }
     match &envelope.body {
-        WireEnvelopeBody::PatchBatch(batch) => Ok(batch.clone()),
+        WireEnvelopeBody::PatchBatch(batch) => Ok(UniDelivery::Batch(batch.clone())),
+        WireEnvelopeBody::Event(server_event) => match &server_event.event {
+            artisan_domain::Event::EngineObservation(_) => {
+                Ok(UniDelivery::Observation(server_event.clone()))
+            }
+            artisan_domain::Event::ProjectAttached(_)
+            | artisan_domain::Event::ThreadCreated(_)
+            | artisan_domain::Event::FirstMessageQueued(_) => Err(ServiceFailure::new(
+                ServiceFailureStage::Delivery,
+                ServiceFailureCategory::Integrity,
+            )),
+        },
         _ => Err(ServiceFailure::new(
             ServiceFailureStage::Delivery,
             ServiceFailureCategory::Integrity,
@@ -2700,7 +2734,10 @@ pub async fn delivery_task_loop(
         if let Ok((next_receiver, envelope)) = receiver.recv(cancel.as_ref()).await {
             receiver = next_receiver;
             let result = match validate_uni_envelope(&envelope, expected_version) {
-                Ok(batch) => PrivateDelivery::Batch(batch),
+                Ok(UniDelivery::Batch(batch)) => PrivateDelivery::Batch(batch),
+                Ok(UniDelivery::Observation(observation)) => {
+                    PrivateDelivery::Observation(observation)
+                }
                 Err(failure) => PrivateDelivery::Lost(failure),
             };
             let is_lost = matches!(result, PrivateDelivery::Lost(_));
@@ -3088,6 +3125,22 @@ async fn command_loop_with_delivery(
                         }
                         // Do not advance cursor here; emit to application and wait for explicit ack
                         publish(events, NativeTransportEvent::PatchBatch(batch))?;
+                    }
+                    Some(PrivateDelivery::Observation(observation)) => {
+                        let artisan_domain::Event::EngineObservation(paired) = &observation.event
+                        else {
+                            continue;
+                        };
+                        let is_stale = runtime
+                            .custody
+                            .active_thread()
+                            .is_none_or(|active| active != &paired.thread_id);
+                        if is_stale {
+                            continue;
+                        }
+                        // The application owns cursor ordering and replay dedup;
+                        // emit without advancing custody, like patch batches.
+                        publish(events, NativeTransportEvent::EngineObservation(observation))?;
                     }
                     Some(PrivateDelivery::Lost(failure)) =>
                         handle_delivery_lost_reconnect(runtime, frames, events, failure).await?,

@@ -27,7 +27,7 @@ use artisan_domain::{
     CatalogRevision, ConversationSnapshot, EngineProfileId, ModelFavoriteId, PatchBatch, ProjectId,
     ProjectListing, QueueMessagePayload, RequestId, SetModelFavorite, ThreadId, ThreadListing,
 };
-use artisan_protocol::{ConversationSubscriptionStarted, QueueMessageReceipt};
+use artisan_protocol::{ConversationSubscriptionStarted, QueueMessageReceipt, ServerEvent};
 use artisan_ui::button::{
     AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
 };
@@ -89,6 +89,7 @@ use crate::{
     conversation_host::{CONVERSATION_HOST_MAX_EFFECTS, ConversationHost, ConversationHostEffect},
     conversation_state_machine::{ConversationStateEffect, ConversationStateEvent},
     conversation_view_machine::ViewportState,
+    engine_observation_state::{ApplyOutcome, EngineObservationState},
     engine_settings::{
         EngineSettingsController, EngineSettingsFailureOperation, EngineSettingsStatus,
         RegistryView, manual_configuration_template,
@@ -290,6 +291,13 @@ pub struct NativeApplication {
     conversation_host: Option<Entity<ConversationHost>>,
     conversation_host_subscription: Option<Subscription>,
     conversation_effects: Vec<ConversationHostEffect>,
+    /// Paired engine observation rows for the selected thread.
+    ///
+    /// Fed by uni-stream observation events keyed to the selected thread.
+    /// Cursor ordering and reconnect dedup live in the state itself, which is
+    /// independent of host mounting; the state resets when the selected
+    /// thread changes.
+    engine_observations: Option<EngineObservationState>,
     last_picker_action: Option<ProjectPickerAction>,
     state: NativeViewState,
     route_history: RouteHistory,
@@ -483,6 +491,7 @@ impl NativeApplication {
             conversation_host: None,
             conversation_host_subscription: None,
             conversation_effects: Vec::with_capacity(CONVERSATION_HOST_MAX_EFFECTS),
+            engine_observations: None,
             last_picker_action: None,
             state,
             route_history: RouteHistory::new(),
@@ -2069,6 +2078,9 @@ impl NativeApplication {
                 stopped,
             } => self.handle_subscription_stopped(&thread_id, &request_id, &stopped, cx),
             NativeTransportEvent::PatchBatch(batch) => self.handle_patch_batch(&batch, cx),
+            NativeTransportEvent::EngineObservation(observation) => {
+                self.handle_engine_observation(&observation, cx);
+            }
             NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
             NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
         }
@@ -2515,6 +2527,37 @@ impl NativeApplication {
             self.acknowledge_host_cursor(&host, cx);
             self.pump_host_boundary(&host, cx);
             cx.notify();
+        }
+    }
+
+    /// Pairs one uni-stream engine observation into presentation state.
+    ///
+    /// Only the selected thread's rows are retained; events for any other
+    /// thread are ignored. Cursor ordering and reconnect dedup are owned by
+    /// [`EngineObservationState`], which is independent of host mounting, so
+    /// unlike patch batches this path does not wait for a thread-switch
+    /// flight to settle. This path never issues commands: approvals and
+    /// questions render with their request ids for the later answer packet,
+    /// but no answer is dispatched here.
+    fn handle_engine_observation(&mut self, observation: &ServerEvent, cx: &mut Context<Self>) {
+        let artisan_domain::Event::EngineObservation(paired) = &observation.event else {
+            return;
+        };
+        if self.selected_thread.as_ref() != Some(&paired.thread_id) {
+            return;
+        }
+        let same_thread = self
+            .engine_observations
+            .as_ref()
+            .is_some_and(|retained| retained.thread_id() == &paired.thread_id);
+        if !same_thread {
+            self.engine_observations = Some(EngineObservationState::new(paired.thread_id.clone()));
+        }
+        if let Some(state) = self.engine_observations.as_mut() {
+            let outcome = state.apply(observation.cursor.get(), paired);
+            if matches!(outcome, ApplyOutcome::Applied { .. }) {
+                cx.notify();
+            }
         }
     }
 
