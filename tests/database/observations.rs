@@ -769,10 +769,12 @@ async fn continuation_batch_enforces_monotonic_sequences() {
     assert_eq!(decoded.max_sequence(), Some(26));
 
     // Stale and unordered sequences never encode, so they can never commit.
-    assert_eq!(
-        encode_observation_checkpoint(EngineId::OpenCode2, 1, Some(26), &next)
-            .expect_err("replaying the same base is not a continuation"),
-        ObservationCommitError::SequenceNotMonotonic
+    assert!(
+        matches!(
+            encode_observation_checkpoint(EngineId::OpenCode2, 1, Some(26), &next),
+            Err(ObservationCommitError::SequenceNotMonotonic)
+        ),
+        "replaying the same base is not a continuation"
     );
     let unordered = vec![
         Observation::RunState(RunStateObservation::new(
@@ -786,10 +788,12 @@ async fn continuation_batch_enforces_monotonic_sequences() {
             RunState::Running,
         )),
     ];
-    assert_eq!(
-        encode_observation_checkpoint(EngineId::OpenCode2, 1, Some(26), &unordered)
-            .expect_err("sequences must increase within a batch"),
-        ObservationCommitError::SequenceNotMonotonic
+    assert!(
+        matches!(
+            encode_observation_checkpoint(EngineId::OpenCode2, 1, Some(26), &unordered),
+            Err(ObservationCommitError::SequenceNotMonotonic)
+        ),
+        "sequences must increase within a batch"
     );
 }
 
@@ -802,12 +806,21 @@ async fn bind_mismatch_rejection() {
             .expect_err("a rebound version must not carry old observations"),
         ObservationCommitError::BindMismatch
     );
-    assert_eq!(
-        encode_observation_checkpoint(EngineId::OpenCode2, 0, None, &all_variant_observations())
-            .expect_err("binding versions are positive"),
-        ObservationCommitError::InvalidObservation(ObservationError::OutOfRange {
-            field: "binding_version"
-        })
+    assert!(
+        matches!(
+            encode_observation_checkpoint(
+                EngineId::OpenCode2,
+                0,
+                None,
+                &all_variant_observations()
+            ),
+            Err(ObservationCommitError::InvalidObservation(
+                ObservationError::OutOfRange {
+                    field: "binding_version"
+                }
+            ))
+        ),
+        "binding versions are positive"
     );
 }
 
