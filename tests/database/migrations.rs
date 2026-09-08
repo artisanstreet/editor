@@ -545,7 +545,8 @@ async fn engine_config_migration_preserves_legacy_receipts_and_allows_set_histor
 }
 
 #[tokio::test]
-async fn run_interactions_migration_enforces_request_and_receipt_shapes() -> Result<(), Box<dyn Error>> {
+async fn run_interactions_migration_enforces_request_and_receipt_shapes()
+-> Result<(), Box<dyn Error>> {
     let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
     migrate_to_current(&database).await?;
     database
@@ -819,7 +820,7 @@ async fn engine_config_v2_migration_widens_shape_guards_and_down_restores_them()
     let downgraded = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
     migrate_to_current(&downgraded).await?;
     seed_v2_guard_scope(&downgraded).await?;
-    Migrator::down(&downgraded, Some(1)).await?;
+    Migrator::down(&downgraded, Some(2)).await?;
     let v2_after_down = downgraded
         .execute_unprepared(
             "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v2-down', 'p1', 'V2 thread', 4, 4, 2, 1, X'00')",

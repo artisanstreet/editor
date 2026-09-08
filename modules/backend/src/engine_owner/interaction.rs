@@ -60,7 +60,9 @@ pub enum TargetFailure {
 /// command id, the named target, and which request kind it named, plus the
 /// precise miss reason so unknown and resolved targets stay distinguishable.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
-#[error("command `{command_id}` targets a {reason} {target} `{target_id}` on run `{run_id}`")]
+#[error(
+    "command `{command_id}` targets a {reason} {target} `{target_id}` on run `{artisan_run_id}`"
+)]
 pub struct CommandTargetError {
     artisan_run_id: RunId,
     command_id: String,

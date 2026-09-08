@@ -64,8 +64,8 @@ impl MigrationTrait for Migration {
                     CHECK (typeof(binding_version) = 'integer' AND binding_version BETWEEN 1 AND 9223372036854775807),\
                     CHECK ((state = 'requested' AND resolved_at_ms IS NULL AND resolved_sequence IS NULL AND approved IS NULL AND answers_json IS NULL) OR \
                            (state = 'resolved' AND typeof(resolved_at_ms) = 'integer' AND typeof(resolved_sequence) = 'integer' AND resolved_sequence BETWEEN 1 AND 9223372036854775807 AND \
-                            ((kind = 'approval' AND approved IN (0, 1) AND answers_json IS NULL) OR \
-                             (kind = 'question' AND approved IS NULL AND typeof(answers_json) = 'text' AND length(CAST(answers_json AS BLOB)) BETWEEN 2 AND {ANSWERS_JSON_MAX_BYTES}))))\
+                            ((kind = 'approval' AND approved IS NOT NULL AND answers_json IS NULL) OR \
+                             (kind = 'question' AND approved IS NULL AND answers_json IS NOT NULL))))\
                 )"
             ))
             .await?;

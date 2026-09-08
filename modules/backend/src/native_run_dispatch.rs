@@ -2200,7 +2200,7 @@ async fn handle_interaction(
         ResolveInteractionOutcome::WrongRun => {
             let _ = respond.send(RunInteractionAck::WrongRun);
         }
-        ResolveInteractionOutcome::Conflict => {
+        ResolveInteractionOutcome::Conflict(_) => {
             let _ = respond.send(RunInteractionAck::Conflict);
         }
         ResolveInteractionOutcome::Duplicate(stored)
