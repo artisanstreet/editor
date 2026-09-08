@@ -13,9 +13,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artisan_domain::{
     ApprovalMode, CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier,
-    EngineAgentId, EngineModelId, EnginePermissionPolicy, EngineProfileId, FilesystemAccess,
-    NetworkAccess, ObservationId, ObservationSequence, PermissionId, RootPath, RunId,
-    WebSearchAccess,
+    EngineAgentId, EngineId, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    FilesystemAccess, NetworkAccess, ObservationId, ObservationSequence, PermissionId, RootPath,
+    RunId, ThreadId, WebSearchAccess,
 };
 use artisan_transport::CancelHandle;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -821,4 +821,141 @@ fn duplex_write_shapes_jsonl_framing() {
         server.read_to_string(&mut text).await.expect("read");
         assert_eq!(text, "{\"id\":1}\n");
     });
+}
+
+// ---------------------------------------------------------------------------
+// Continuation compat: old 3-key and new 4-key binding rows both decode
+// ---------------------------------------------------------------------------
+
+fn continuation_config_blob() -> Vec<u8> {
+    r#"{"version":1,"engine":"opencode2","profile_id":"profile-fixture","model_id":"model-fixture","route_id":"route-fixture","variant_id":null,"permission":{"permission_id":"permission-fixture","agent_id":"agent-fixture","approval":"on_request","filesystem":"workspace","network":"enabled","web_search":"disabled"},"runtime":{"attempt_budget_ms":100,"readiness_budget_ms":1,"health_budget_ms":1,"prompt_budget_ms":1,"stream_budget_ms":1,"close_budget_ms":1,"max_json_body_bytes":8192,"max_sse_line_bytes":4096,"max_sse_event_bytes":8192,"max_readiness_line_bytes":4096,"max_header_count":8,"max_http_buffer_bytes":8192,"max_stderr_bytes":4096,"observation_capacity":16}}"#.into_bytes()
+}
+
+async fn seed_binding_run(
+    database: &sea_orm::DatabaseConnection,
+    run_id: &str,
+    created_at_ms: i64,
+    binding_json: &str,
+) {
+    use artisan_database::entities::{self, AssistantRunLifecycle};
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+
+    entities::assistant_run::ActiveModel {
+        run_id: Set(run_id.to_owned()),
+        thread_id: Set("thread-codex-binding".to_owned()),
+        run_start_key: Set(artisan_database::entities::OpaqueBytes::new(vec![0x11; 32])),
+        origin_message_id: Set(format!("message-{run_id}")),
+        origin_turn_id: Set(format!("turn-{run_id}")),
+        lifecycle: Set(AssistantRunLifecycle::Completed),
+        generation: Set(1),
+        owner: Set(None),
+        lease: Set(None),
+        claim_token: Set(None),
+        provider_binding_version: Set(Some(1)),
+        provider_binding: Set(Some(artisan_database::entities::OpaqueBytes::new(
+            binding_json.as_bytes().to_vec(),
+        ))),
+        provider_bound_at_ms: Set(Some(created_at_ms + 2)),
+        error_code: Set(None),
+        error_message: Set(None),
+        created_at_ms: Set(created_at_ms),
+        updated_at_ms: Set(created_at_ms + 10),
+        terminal_at_ms: Set(Some(created_at_ms + 10)),
+        engine_run_config_version: Set(Some(1)),
+        engine_run_config_revision: Set(Some(1)),
+        engine_run_config: Set(Some(artisan_database::entities::OpaqueBytes::new(
+            continuation_config_blob(),
+        ))),
+    }
+    .insert(database)
+    .await
+    .expect("bound run should insert");
+}
+
+#[tokio::test]
+async fn continuation_decodes_old_and_new_binding_rows() {
+    use artisan_database::{
+        Repository, SessionContinuationLookup, SessionContinuationQuery, SqliteConfig, connect,
+    };
+    use artisan_migrations::migrate_to_current;
+
+    let database = connect(
+        SqliteConfig::in_memory()
+            .min_connections(1)
+            .max_connections(1)
+            .sqlx_logging(false),
+    )
+    .await
+    .expect("memory database should open");
+    migrate_to_current(&database)
+        .await
+        .expect("memory database should migrate");
+    {
+        use artisan_database::entities;
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+        entities::attached_project::ActiveModel {
+            project_id: Set("project-codex-binding".to_owned()),
+            root_path: Set("C:/repos/artisan".to_owned()),
+            display_name: Set("Binding compat".to_owned()),
+            attached_at_ms: Set(1),
+        }
+        .insert(&database)
+        .await
+        .expect("project should insert");
+        entities::thread::ActiveModel {
+            thread_id: Set("thread-codex-binding".to_owned()),
+            project_id: Set("project-codex-binding".to_owned()),
+            title: Set("Binding compat".to_owned()),
+            created_at_ms: Set(10),
+            updated_at_ms: Set(10),
+            engine_run_config_version: Set(Some(1)),
+            engine_run_config_revision: Set(Some(1)),
+            engine_run_config: Set(Some(artisan_database::entities::OpaqueBytes::new(
+                continuation_config_blob(),
+            ))),
+        }
+        .insert(&database)
+        .await
+        .expect("thread should insert");
+    }
+    // Old row: bound before the format key existed.
+    seed_binding_run(
+        &database,
+        "run-binding-old",
+        100,
+        r#"{"engine":"opencode2","profile_id":"profile-fixture","session_id":"session-old"}"#,
+    )
+    .await;
+    // New row: bound with the format key.
+    seed_binding_run(
+        &database,
+        "run-binding-new",
+        200,
+        r#"{"engine":"opencode2","format":1,"profile_id":"profile-fixture","session_id":"session-new"}"#,
+    )
+    .await;
+
+    let repository = Repository::new(database);
+    let query = |exclude: Option<&str>| SessionContinuationQuery {
+        thread_id: ThreadId::parse("thread-codex-binding").expect("thread id"),
+        engine_id: EngineId::OpenCode2,
+        profile_id: EngineProfileId::parse("profile-fixture").expect("profile id"),
+        exclude_run_id: exclude.map(|value| RunId::parse(value).expect("run id")),
+    };
+    let SessionContinuationLookup::Usable(new) = repository
+        .read_session_continuation(query(None))
+        .await
+        .expect("continuation read should succeed")
+    else {
+        panic!("new 4-key binding row should be usable");
+    };
+    assert_eq!(new.session_id.as_str(), "session-new");
+    let SessionContinuationLookup::Usable(old) = repository
+        .read_session_continuation(query(Some("run-binding-new")))
+        .await
+        .expect("continuation read should succeed")
+    else {
+        panic!("old 3-key binding row should stay usable");
+    };
+    assert_eq!(old.session_id.as_str(), "session-old");
 }
