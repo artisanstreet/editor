@@ -6,13 +6,13 @@
 //! correlation exactly like the established receipt arms.
 
 use artisan_domain::{
-    Command, ObservationId, RequestId, RespondApproval, RespondQuestion, RunId, ThreadId,
-    UnixMillis,
+    Command, ObservationId, ReceiptDisposition, RequestId, RespondApproval, RespondQuestion, RunId,
+    ThreadId, UnixMillis,
 };
 use artisan_protocol::{
-    ClientRequest, FrameId, ProtocolVersion, ReceiptDisposition, RespondApprovalReceipt,
-    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, ServerResponse, WireEnvelope,
-    WireEnvelopeBody, decode_envelope, encode_envelope,
+    ClientRequest, FrameId, ProtocolVersion, RespondApprovalReceipt, RespondQuestionReceipt,
+    ResponsePayload, RunInteractionOutcome, ServerResponse, WireEnvelope, WireEnvelopeBody,
+    decode_envelope, encode_envelope,
 };
 
 fn request_id(value: &str) -> RequestId {
@@ -56,7 +56,7 @@ fn response_frame(payload: ResponsePayload, request: &str) -> WireEnvelope {
 fn assert_roundtrip(value: &WireEnvelope) {
     let bytes = encode_envelope(value).expect("new arms should encode");
     let decoded = decode_envelope(&bytes).expect("new arms should decode");
-    assert_eq!(decoded, *value, "wire changed the interaction payload");
+    assert!(decoded == *value, "wire changed the interaction payload");
 }
 
 fn approval_command(approved: bool) -> Command {
@@ -86,8 +86,8 @@ fn question_command(answers: Vec<String>) -> Command {
 fn approval_and_question_requests_roundtrip() {
     assert_roundtrip(&request_frame(approval_command(true)));
     assert_roundtrip(&request_frame(approval_command(false)));
-    assert_roundtrip(&question_command(vec!["first".to_owned()]));
-    assert_roundtrip(&question_command(Vec::new()));
+    assert_roundtrip(&request_frame(question_command(vec!["first".to_owned()])));
+    assert_roundtrip(&request_frame(question_command(Vec::new())));
 }
 
 #[test]
@@ -223,9 +223,9 @@ fn frozen_v1_stop_run_frames_survive_the_additive_arms() {
         ))),
     };
     let bytes = encode_envelope(&request).expect("v1 request should encode");
-    assert_eq!(
-        decode_envelope(&bytes).expect("v1 request should decode"),
-        request
+    assert!(
+        decode_envelope(&bytes).expect("v1 request should decode") == request,
+        "v1 request should decode"
     );
 
     let response = response_frame(
@@ -238,9 +238,9 @@ fn frozen_v1_stop_run_frames_survive_the_additive_arms() {
         "stop-run-1",
     );
     let bytes = encode_envelope(&response).expect("v1 response should encode");
-    assert_eq!(
-        decode_envelope(&bytes).expect("v1 response should decode"),
-        response
+    assert!(
+        decode_envelope(&bytes).expect("v1 response should decode") == response,
+        "v1 response should decode"
     );
 }
 
