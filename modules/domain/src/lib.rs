@@ -78,7 +78,9 @@ pub use engine_config::{
     GrokSelection, HermesPermissionMode, HermesReasoningEffort, HermesSelection, NetworkAccess,
     OpenCode2Selection, WebSearchAccess,
 };
-pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
+pub use events::{
+    EngineObservationEvent, Event, FirstMessageQueued, ProjectAttached, ThreadCreated,
+};
 pub use identifiers::{
     DirectoryId, EngineAgentId, EngineModelId, EngineProfileId, EngineProfileIdError,
     EngineRouteId, EngineVariantId, IdentifierError, ItemId, MessageId, PatchId, PermissionId,

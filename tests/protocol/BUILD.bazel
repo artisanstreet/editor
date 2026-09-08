@@ -147,3 +147,21 @@ rust_test(
     size = "small",
     visibility = ["//:__pkg__"],
 )
+
+# S1b engine-observation delivery test: every new event arm round-trips
+# through the production owned codec, malformed and unknown input rejects
+# with typed errors, and frozen v1 event bytes still decode.
+rust_test(
+    name = "observation_events_test",
+    srcs = ["observation_events.rs"],
+    crate_name = "observation_events_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/protocol:protocol",
+        "@crates//:capnp",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)

@@ -1,6 +1,24 @@
 //! Total conversion between owned protocol values and generated Cap'n Proto.
 
 use artisan_domain::{
+    AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalKind,
+    ApprovalObservation, ApprovalRequest, ApprovalState, ArtisanCode, CompactionObservation,
+    CompactionState, DiagnosticLevel, EngineErrorRef, EngineErrorRefInput, EngineObservationEvent,
+    FileAction, FileObservation, LimitScope, MessagePhase, NativeActionObservation,
+    OBSERVATION_ANSWERS_MAX, OBSERVATION_PLAN_MAX_ENTRIES, OBSERVATION_QUESTION_MAX_OPTIONS,
+    Observation, ObservationError, ObservationId, ObservationSequence, PlanEntry, PlanEntryStatus,
+    PlanObservation, ProcessDiagnosticObservation, ProtocolDiagnosticObservation, QuestionInput,
+    QuestionObservation, QuestionOption, QuestionState, ReasoningSummaryCompletedObservation,
+    ReasoningSummaryDeltaObservation, RetryAttemptState, RetryObservation, RunState,
+    RunStateObservation, RunTerminalObservation, RunTerminalState, SearchObservation, SearchScope,
+    SearchState, SubagentInput, SubagentObservation, SubagentState, SubagentTranscriptObservation,
+    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, TerminalChannel,
+    ToolAction, ToolObservation, TranscriptAgentMessageCompleted, TranscriptAgentMessageDelta,
+    TranscriptContent, TranscriptFile, TranscriptReasoningSummaryCompleted,
+    TranscriptReasoningSummaryDelta, TranscriptSearch, TranscriptTerminalActivity, TranscriptTool,
+    TurnState, TurnStateObservation, UsageBasis, UsageInput, UsageObservation,
+};
+use artisan_domain::{
     ApprovalMode, AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
     AttachProject, AuthoredText, ByteLimit, CONVERSATION_PATCH_BATCH_MAX_PATCHES,
     CONVERSATION_QUERY_MAX_TURNS, CatalogRevision, CatalogRevisionError, ClaudeEffort,
@@ -342,6 +360,16 @@ pub enum ProtocolDecodeError {
         #[source]
         source: ModelFavoritesSnapshotError,
     },
+    /// One sanitized engine observation row failed domain validation.
+    ///
+    /// Unknown provider labels, bound violations, and requested/resolved
+    /// state mismatches all arrive here without carrying provider text.
+    #[error("invalid engine observation: {source}")]
+    Observation {
+        /// Domain-owned observation validation failure.
+        #[source]
+        source: ObservationError,
+    },
 }
 
 impl From<capnp::Error> for ProtocolDecodeError {
@@ -449,6 +477,12 @@ impl From<ModelFavoritesRevisionError> for ProtocolDecodeError {
 impl From<ModelFavoritesSnapshotError> for ProtocolDecodeError {
     fn from(source: ModelFavoritesSnapshotError) -> Self {
         Self::ModelFavoritesSnapshot { source }
+    }
+}
+
+impl From<ObservationError> for ProtocolDecodeError {
+    fn from(source: ObservationError) -> Self {
+        Self::Observation { source }
     }
 }
 
@@ -622,7 +656,7 @@ fn encode_body(
             encode_response(root.reborrow().init_body().init_response(), value)?;
         }
         WireEnvelopeBody::Event(value) => {
-            encode_event(root.reborrow().init_body().init_event(), value);
+            encode_event(root.reborrow().init_body().init_event(), value)?;
         }
         WireEnvelopeBody::ProtocolError(value) => {
             encode_protocol_error(root.reborrow().init_body().init_protocol_error(), value);
@@ -1332,7 +1366,10 @@ fn encode_directory_picked(
     }
 }
 
-fn encode_event(mut builder: artisan_capnp::event::Builder<'_>, value: &ServerEvent) {
+fn encode_event(
+    mut builder: artisan_capnp::event::Builder<'_>,
+    value: &ServerEvent,
+) -> Result<(), ProtocolEncodeError> {
     builder.set_cursor(value.cursor.get());
     match &value.event {
         Event::ProjectAttached(event) => {
@@ -1348,7 +1385,13 @@ fn encode_event(mut builder: artisan_capnp::event::Builder<'_>, value: &ServerEv
             queued.set_thread_id(event.message.thread_id.as_str());
             queued.set_body(event.message.body.as_str());
         }
+        Event::EngineObservation(event) => {
+            let mut observation = builder.reborrow().init_engine_observation();
+            observation.set_thread_id(event.thread_id.as_str());
+            encode_engine_observation(observation.init_observation(), &event.observation)?;
+        }
     }
+    Ok(())
 }
 
 fn encode_protocol_error(
@@ -3535,6 +3578,17 @@ fn decode_event(
                 },
             })
         }
+        event::Which::EngineObservation(value) => {
+            let value = value?;
+            let thread_id = parse_thread_id(
+                read_text(value.get_thread_id(), "event.engineObservation.threadId")?,
+                "event.engineObservation.threadId",
+            )?;
+            Event::EngineObservation(EngineObservationEvent {
+                thread_id,
+                observation: decode_engine_observation(value.get_observation()?)?,
+            })
+        }
     };
     Ok(ServerEvent { cursor, event })
 }
@@ -4055,5 +4109,2183 @@ const fn decode_error_code(value: artisan_capnp::ErrorCode) -> ErrorCode {
         artisan_capnp::ErrorCode::UnsupportedFeature => ErrorCode::UnsupportedFeature,
         artisan_capnp::ErrorCode::LifecycleBusy => ErrorCode::LifecycleBusy,
         artisan_capnp::ErrorCode::EngineConfigConflict => ErrorCode::EngineConfigConflict,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S1b: finite engine-observation delivery.
+// ---------------------------------------------------------------------------
+//
+// Every observation below is an already-validated, sanitized S1a domain
+// value. Encoding is infallible except where a collection must fit Cap'n
+// Proto's 32-bit list length; decoding re-validates every bound through the
+// domain constructors so a hostile peer can never smuggle an over-long,
+// empty-required, unknown-label, or state-inconsistent row across the wire.
+
+fn parse_observation_id(
+    value: String,
+    field: &'static str,
+) -> Result<ObservationId, ProtocolDecodeError> {
+    ObservationId::parse(value).map_err(|source| ProtocolDecodeError::Identifier { field, source })
+}
+
+fn parse_observation_sequence(value: u64) -> Result<ObservationSequence, ProtocolDecodeError> {
+    ObservationSequence::new(value).map_err(ProtocolDecodeError::from)
+}
+
+/// Maps an empty wire string to an absent optional value.
+///
+/// Every optional text below rejects empty content at the domain boundary,
+/// so empty decodes as absent without loss. Required texts never pass
+/// through here: they go to the constructors, which reject emptiness.
+fn absent_if_empty(value: String) -> Option<String> {
+    if value.is_empty() { None } else { Some(value) }
+}
+
+const fn encode_observation_message_phase(
+    value: MessagePhase,
+) -> artisan_capnp::ObservationMessagePhase {
+    match value {
+        MessagePhase::Commentary => artisan_capnp::ObservationMessagePhase::Commentary,
+        MessagePhase::Final => artisan_capnp::ObservationMessagePhase::Final,
+        MessagePhase::Unspecified => artisan_capnp::ObservationMessagePhase::Unspecified,
+    }
+}
+
+const fn decode_observation_message_phase(
+    value: artisan_capnp::ObservationMessagePhase,
+) -> MessagePhase {
+    match value {
+        artisan_capnp::ObservationMessagePhase::Commentary => MessagePhase::Commentary,
+        artisan_capnp::ObservationMessagePhase::Final => MessagePhase::Final,
+        artisan_capnp::ObservationMessagePhase::Unspecified => MessagePhase::Unspecified,
+    }
+}
+
+const fn encode_observation_tool_action(value: ToolAction) -> artisan_capnp::ObservationToolAction {
+    match value {
+        ToolAction::Started => artisan_capnp::ObservationToolAction::Started,
+        ToolAction::Progress => artisan_capnp::ObservationToolAction::Progress,
+        ToolAction::Completed => artisan_capnp::ObservationToolAction::Completed,
+        ToolAction::Failed => artisan_capnp::ObservationToolAction::Failed,
+    }
+}
+
+const fn decode_observation_tool_action(value: artisan_capnp::ObservationToolAction) -> ToolAction {
+    match value {
+        artisan_capnp::ObservationToolAction::Started => ToolAction::Started,
+        artisan_capnp::ObservationToolAction::Progress => ToolAction::Progress,
+        artisan_capnp::ObservationToolAction::Completed => ToolAction::Completed,
+        artisan_capnp::ObservationToolAction::Failed => ToolAction::Failed,
+    }
+}
+
+const fn encode_observation_file_action(value: FileAction) -> artisan_capnp::ObservationFileAction {
+    match value {
+        FileAction::Created => artisan_capnp::ObservationFileAction::Created,
+        FileAction::Modified => artisan_capnp::ObservationFileAction::Modified,
+        FileAction::Deleted => artisan_capnp::ObservationFileAction::Deleted,
+        FileAction::Read => artisan_capnp::ObservationFileAction::Read,
+    }
+}
+
+const fn decode_observation_file_action(value: artisan_capnp::ObservationFileAction) -> FileAction {
+    match value {
+        artisan_capnp::ObservationFileAction::Created => FileAction::Created,
+        artisan_capnp::ObservationFileAction::Modified => FileAction::Modified,
+        artisan_capnp::ObservationFileAction::Deleted => FileAction::Deleted,
+        artisan_capnp::ObservationFileAction::Read => FileAction::Read,
+    }
+}
+
+const fn encode_observation_search_scope(
+    value: SearchScope,
+) -> artisan_capnp::ObservationSearchScope {
+    match value {
+        SearchScope::Workspace => artisan_capnp::ObservationSearchScope::Workspace,
+        SearchScope::Web => artisan_capnp::ObservationSearchScope::Web,
+    }
+}
+
+const fn decode_observation_search_scope(
+    value: artisan_capnp::ObservationSearchScope,
+) -> SearchScope {
+    match value {
+        artisan_capnp::ObservationSearchScope::Workspace => SearchScope::Workspace,
+        artisan_capnp::ObservationSearchScope::Web => SearchScope::Web,
+    }
+}
+
+const fn encode_observation_search_state(
+    value: SearchState,
+) -> artisan_capnp::ObservationSearchState {
+    match value {
+        SearchState::Started => artisan_capnp::ObservationSearchState::Started,
+        SearchState::Completed => artisan_capnp::ObservationSearchState::Completed,
+    }
+}
+
+const fn decode_observation_search_state(
+    value: artisan_capnp::ObservationSearchState,
+) -> SearchState {
+    match value {
+        artisan_capnp::ObservationSearchState::Started => SearchState::Started,
+        artisan_capnp::ObservationSearchState::Completed => SearchState::Completed,
+    }
+}
+
+const fn encode_observation_terminal_channel(
+    value: TerminalChannel,
+) -> artisan_capnp::ObservationTerminalChannel {
+    match value {
+        TerminalChannel::Stdout => artisan_capnp::ObservationTerminalChannel::Stdout,
+        TerminalChannel::Stderr => artisan_capnp::ObservationTerminalChannel::Stderr,
+    }
+}
+
+const fn decode_observation_terminal_channel(
+    value: artisan_capnp::ObservationTerminalChannel,
+) -> TerminalChannel {
+    match value {
+        artisan_capnp::ObservationTerminalChannel::Stdout => TerminalChannel::Stdout,
+        artisan_capnp::ObservationTerminalChannel::Stderr => TerminalChannel::Stderr,
+    }
+}
+
+const fn encode_observation_terminal_state(
+    value: TerminalActivityState,
+) -> artisan_capnp::ObservationTerminalState {
+    match value {
+        TerminalActivityState::Started => artisan_capnp::ObservationTerminalState::Started,
+        TerminalActivityState::Output => artisan_capnp::ObservationTerminalState::Output,
+        TerminalActivityState::Completed => artisan_capnp::ObservationTerminalState::Completed,
+        TerminalActivityState::Failed => artisan_capnp::ObservationTerminalState::Failed,
+    }
+}
+
+const fn decode_observation_terminal_state(
+    value: artisan_capnp::ObservationTerminalState,
+) -> TerminalActivityState {
+    match value {
+        artisan_capnp::ObservationTerminalState::Started => TerminalActivityState::Started,
+        artisan_capnp::ObservationTerminalState::Output => TerminalActivityState::Output,
+        artisan_capnp::ObservationTerminalState::Completed => TerminalActivityState::Completed,
+        artisan_capnp::ObservationTerminalState::Failed => TerminalActivityState::Failed,
+    }
+}
+
+const fn encode_observation_approval_state(
+    value: ApprovalState,
+) -> artisan_capnp::ObservationApprovalState {
+    match value {
+        ApprovalState::Requested => artisan_capnp::ObservationApprovalState::Requested,
+        ApprovalState::Resolved => artisan_capnp::ObservationApprovalState::Resolved,
+    }
+}
+
+const fn decode_observation_approval_state(
+    value: artisan_capnp::ObservationApprovalState,
+) -> ApprovalState {
+    match value {
+        artisan_capnp::ObservationApprovalState::Requested => ApprovalState::Requested,
+        artisan_capnp::ObservationApprovalState::Resolved => ApprovalState::Resolved,
+    }
+}
+
+const fn encode_observation_approval_kind(
+    value: ApprovalKind,
+) -> artisan_capnp::ObservationApprovalKind {
+    match value {
+        ApprovalKind::Command => artisan_capnp::ObservationApprovalKind::Command,
+        ApprovalKind::FileChange => artisan_capnp::ObservationApprovalKind::FileChange,
+        ApprovalKind::Action => artisan_capnp::ObservationApprovalKind::Action,
+    }
+}
+
+const fn decode_observation_approval_kind(
+    value: artisan_capnp::ObservationApprovalKind,
+) -> ApprovalKind {
+    match value {
+        artisan_capnp::ObservationApprovalKind::Command => ApprovalKind::Command,
+        artisan_capnp::ObservationApprovalKind::FileChange => ApprovalKind::FileChange,
+        artisan_capnp::ObservationApprovalKind::Action => ApprovalKind::Action,
+    }
+}
+
+const fn encode_observation_question_state(
+    value: QuestionState,
+) -> artisan_capnp::ObservationQuestionState {
+    match value {
+        QuestionState::Requested => artisan_capnp::ObservationQuestionState::Requested,
+        QuestionState::Resolved => artisan_capnp::ObservationQuestionState::Resolved,
+    }
+}
+
+const fn decode_observation_question_state(
+    value: artisan_capnp::ObservationQuestionState,
+) -> QuestionState {
+    match value {
+        artisan_capnp::ObservationQuestionState::Requested => QuestionState::Requested,
+        artisan_capnp::ObservationQuestionState::Resolved => QuestionState::Resolved,
+    }
+}
+
+const fn encode_observation_plan_entry_status(
+    value: PlanEntryStatus,
+) -> artisan_capnp::ObservationPlanEntryStatus {
+    match value {
+        PlanEntryStatus::Pending => artisan_capnp::ObservationPlanEntryStatus::Pending,
+        PlanEntryStatus::InProgress => artisan_capnp::ObservationPlanEntryStatus::InProgress,
+        PlanEntryStatus::Completed => artisan_capnp::ObservationPlanEntryStatus::Completed,
+    }
+}
+
+const fn decode_observation_plan_entry_status(
+    value: artisan_capnp::ObservationPlanEntryStatus,
+) -> PlanEntryStatus {
+    match value {
+        artisan_capnp::ObservationPlanEntryStatus::Pending => PlanEntryStatus::Pending,
+        artisan_capnp::ObservationPlanEntryStatus::InProgress => PlanEntryStatus::InProgress,
+        artisan_capnp::ObservationPlanEntryStatus::Completed => PlanEntryStatus::Completed,
+    }
+}
+
+const fn encode_observation_compaction_state(
+    value: CompactionState,
+) -> artisan_capnp::ObservationCompactionState {
+    match value {
+        CompactionState::Started => artisan_capnp::ObservationCompactionState::Started,
+        CompactionState::Completed => artisan_capnp::ObservationCompactionState::Completed,
+    }
+}
+
+const fn decode_observation_compaction_state(
+    value: artisan_capnp::ObservationCompactionState,
+) -> CompactionState {
+    match value {
+        artisan_capnp::ObservationCompactionState::Started => CompactionState::Started,
+        artisan_capnp::ObservationCompactionState::Completed => CompactionState::Completed,
+    }
+}
+
+const fn encode_observation_retry_attempt_state(
+    value: RetryAttemptState,
+) -> artisan_capnp::ObservationRetryAttemptState {
+    match value {
+        RetryAttemptState::Retrying => artisan_capnp::ObservationRetryAttemptState::Retrying,
+        RetryAttemptState::Terminal => artisan_capnp::ObservationRetryAttemptState::Terminal,
+    }
+}
+
+const fn decode_observation_retry_attempt_state(
+    value: artisan_capnp::ObservationRetryAttemptState,
+) -> RetryAttemptState {
+    match value {
+        artisan_capnp::ObservationRetryAttemptState::Retrying => RetryAttemptState::Retrying,
+        artisan_capnp::ObservationRetryAttemptState::Terminal => RetryAttemptState::Terminal,
+    }
+}
+
+const fn encode_observation_run_state(value: RunState) -> artisan_capnp::ObservationRunState {
+    match value {
+        RunState::Opening => artisan_capnp::ObservationRunState::Opening,
+        RunState::Running => artisan_capnp::ObservationRunState::Running,
+        RunState::Waiting => artisan_capnp::ObservationRunState::Waiting,
+    }
+}
+
+const fn decode_observation_run_state(value: artisan_capnp::ObservationRunState) -> RunState {
+    match value {
+        artisan_capnp::ObservationRunState::Opening => RunState::Opening,
+        artisan_capnp::ObservationRunState::Running => RunState::Running,
+        artisan_capnp::ObservationRunState::Waiting => RunState::Waiting,
+    }
+}
+
+const fn encode_observation_turn_state(value: TurnState) -> artisan_capnp::ObservationTurnState {
+    match value {
+        TurnState::Started => artisan_capnp::ObservationTurnState::Started,
+        TurnState::Waiting => artisan_capnp::ObservationTurnState::Waiting,
+        TurnState::Completed => artisan_capnp::ObservationTurnState::Completed,
+        TurnState::Cancelled => artisan_capnp::ObservationTurnState::Cancelled,
+        TurnState::Failed => artisan_capnp::ObservationTurnState::Failed,
+    }
+}
+
+const fn decode_observation_turn_state(value: artisan_capnp::ObservationTurnState) -> TurnState {
+    match value {
+        artisan_capnp::ObservationTurnState::Started => TurnState::Started,
+        artisan_capnp::ObservationTurnState::Waiting => TurnState::Waiting,
+        artisan_capnp::ObservationTurnState::Completed => TurnState::Completed,
+        artisan_capnp::ObservationTurnState::Cancelled => TurnState::Cancelled,
+        artisan_capnp::ObservationTurnState::Failed => TurnState::Failed,
+    }
+}
+
+const fn encode_observation_subagent_state(
+    value: SubagentState,
+) -> artisan_capnp::ObservationSubagentState {
+    match value {
+        SubagentState::Discovered => artisan_capnp::ObservationSubagentState::Discovered,
+        SubagentState::Running => artisan_capnp::ObservationSubagentState::Running,
+        SubagentState::Waiting => artisan_capnp::ObservationSubagentState::Waiting,
+        SubagentState::Completed => artisan_capnp::ObservationSubagentState::Completed,
+        SubagentState::Failed => artisan_capnp::ObservationSubagentState::Failed,
+        SubagentState::Interrupted => artisan_capnp::ObservationSubagentState::Interrupted,
+    }
+}
+
+const fn decode_observation_subagent_state(
+    value: artisan_capnp::ObservationSubagentState,
+) -> SubagentState {
+    match value {
+        artisan_capnp::ObservationSubagentState::Discovered => SubagentState::Discovered,
+        artisan_capnp::ObservationSubagentState::Running => SubagentState::Running,
+        artisan_capnp::ObservationSubagentState::Waiting => SubagentState::Waiting,
+        artisan_capnp::ObservationSubagentState::Completed => SubagentState::Completed,
+        artisan_capnp::ObservationSubagentState::Failed => SubagentState::Failed,
+        artisan_capnp::ObservationSubagentState::Interrupted => SubagentState::Interrupted,
+    }
+}
+
+const fn encode_observation_usage_basis(value: UsageBasis) -> artisan_capnp::ObservationUsageBasis {
+    match value {
+        UsageBasis::Delta => artisan_capnp::ObservationUsageBasis::Delta,
+        UsageBasis::Cumulative => artisan_capnp::ObservationUsageBasis::Cumulative,
+        UsageBasis::Unknown => artisan_capnp::ObservationUsageBasis::Unknown,
+    }
+}
+
+const fn decode_observation_usage_basis(value: artisan_capnp::ObservationUsageBasis) -> UsageBasis {
+    match value {
+        artisan_capnp::ObservationUsageBasis::Delta => UsageBasis::Delta,
+        artisan_capnp::ObservationUsageBasis::Cumulative => UsageBasis::Cumulative,
+        artisan_capnp::ObservationUsageBasis::Unknown => UsageBasis::Unknown,
+    }
+}
+
+const fn encode_observation_diagnostic_level(
+    value: DiagnosticLevel,
+) -> artisan_capnp::ObservationDiagnosticLevel {
+    match value {
+        DiagnosticLevel::Info => artisan_capnp::ObservationDiagnosticLevel::Info,
+        DiagnosticLevel::Warning => artisan_capnp::ObservationDiagnosticLevel::Warning,
+        DiagnosticLevel::Error => artisan_capnp::ObservationDiagnosticLevel::Error,
+    }
+}
+
+const fn decode_observation_diagnostic_level(
+    value: artisan_capnp::ObservationDiagnosticLevel,
+) -> DiagnosticLevel {
+    match value {
+        artisan_capnp::ObservationDiagnosticLevel::Info => DiagnosticLevel::Info,
+        artisan_capnp::ObservationDiagnosticLevel::Warning => DiagnosticLevel::Warning,
+        artisan_capnp::ObservationDiagnosticLevel::Error => DiagnosticLevel::Error,
+    }
+}
+
+const fn encode_observation_run_terminal_state(
+    value: RunTerminalState,
+) -> artisan_capnp::ObservationRunTerminalState {
+    match value {
+        RunTerminalState::Completed => artisan_capnp::ObservationRunTerminalState::Completed,
+        RunTerminalState::Cancelled => artisan_capnp::ObservationRunTerminalState::Cancelled,
+        RunTerminalState::Failed => artisan_capnp::ObservationRunTerminalState::Failed,
+        RunTerminalState::Interrupted => artisan_capnp::ObservationRunTerminalState::Interrupted,
+        RunTerminalState::Closed => artisan_capnp::ObservationRunTerminalState::Closed,
+    }
+}
+
+const fn decode_observation_run_terminal_state(
+    value: artisan_capnp::ObservationRunTerminalState,
+) -> RunTerminalState {
+    match value {
+        artisan_capnp::ObservationRunTerminalState::Completed => RunTerminalState::Completed,
+        artisan_capnp::ObservationRunTerminalState::Cancelled => RunTerminalState::Cancelled,
+        artisan_capnp::ObservationRunTerminalState::Failed => RunTerminalState::Failed,
+        artisan_capnp::ObservationRunTerminalState::Interrupted => RunTerminalState::Interrupted,
+        artisan_capnp::ObservationRunTerminalState::Closed => RunTerminalState::Closed,
+    }
+}
+
+const fn encode_observation_limit_scope(value: LimitScope) -> artisan_capnp::ObservationLimitScope {
+    match value {
+        LimitScope::Shared => artisan_capnp::ObservationLimitScope::Shared,
+        LimitScope::Model => artisan_capnp::ObservationLimitScope::Model,
+        LimitScope::Unknown => artisan_capnp::ObservationLimitScope::Unknown,
+    }
+}
+
+const fn decode_observation_limit_scope(value: artisan_capnp::ObservationLimitScope) -> LimitScope {
+    match value {
+        artisan_capnp::ObservationLimitScope::Shared => LimitScope::Shared,
+        artisan_capnp::ObservationLimitScope::Model => LimitScope::Model,
+        artisan_capnp::ObservationLimitScope::Unknown => LimitScope::Unknown,
+    }
+}
+
+fn encode_engine_observation(
+    mut builder: artisan_capnp::engine_observation::Builder<'_>,
+    value: &Observation,
+) -> Result<(), ProtocolEncodeError> {
+    match value {
+        Observation::AgentMessageDelta(observation) => {
+            let mut encoded = builder.reborrow().init_agent_message_delta();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_item_id(observation.item_id().as_str());
+            encoded.set_phase(encode_observation_message_phase(observation.phase()));
+            encoded.set_delta(observation.delta());
+            encoded.set_turn_id(observation.turn_id().as_str());
+        }
+        Observation::AgentMessageCompleted(observation) => {
+            let mut encoded = builder.reborrow().init_agent_message_completed();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_item_id(observation.item_id().as_str());
+            encoded.set_phase(encode_observation_message_phase(observation.phase()));
+            encoded.set_message(observation.message());
+            encoded.set_turn_id(observation.turn_id().as_str());
+        }
+        Observation::Approval(observation) => {
+            let mut encoded = builder.reborrow().init_approval();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_approval_id(observation.approval_id().as_str());
+            encoded.set_state(encode_observation_approval_state(observation.state()));
+            encoded.set_description(observation.description());
+            encode_observation_approval_request(
+                encoded.reborrow().init_request(),
+                observation.request(),
+            );
+            match observation.approved() {
+                Some(decision) => {
+                    encoded.reborrow().init_decision().set_decision(decision);
+                }
+                None => {
+                    encoded.reborrow().init_decision().set_no_decision(());
+                }
+            }
+        }
+        Observation::Compaction(observation) => {
+            let mut encoded = builder.reborrow().init_compaction();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_state(encode_observation_compaction_state(observation.state()));
+            encoded.set_compaction_id(
+                observation
+                    .compaction_id()
+                    .map(ObservationId::as_str)
+                    .unwrap_or(""),
+            );
+            match observation.duration_ms() {
+                Some(duration) => {
+                    encoded
+                        .reborrow()
+                        .init_duration_ms()
+                        .set_duration_ms(duration);
+                }
+                None => {
+                    encoded.reborrow().init_duration_ms().set_no_duration_ms(());
+                }
+            }
+            encoded.set_summary(observation.summary().unwrap_or(""));
+        }
+        Observation::File(observation) => {
+            let mut encoded = builder.reborrow().init_file();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_path(observation.path());
+            encoded.set_action(encode_observation_file_action(observation.action()));
+            match observation.lines_added() {
+                Some(count) => {
+                    encoded.reborrow().init_lines_added().set_lines_added(count);
+                }
+                None => {
+                    encoded.reborrow().init_lines_added().set_no_lines_added(());
+                }
+            }
+            match observation.lines_deleted() {
+                Some(count) => {
+                    encoded
+                        .reborrow()
+                        .init_lines_deleted()
+                        .set_lines_deleted(count);
+                }
+                None => {
+                    encoded
+                        .reborrow()
+                        .init_lines_deleted()
+                        .set_no_lines_deleted(());
+                }
+            }
+        }
+        Observation::NativeAction(observation) => {
+            let mut encoded = builder.reborrow().init_native_action();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_action(observation.action());
+            encoded.set_detail(observation.detail().unwrap_or(""));
+            encoded.set_diagnostic(observation.diagnostic());
+            match observation.error_ref() {
+                Some(error) => {
+                    encode_observation_engine_error_ref(
+                        encoded.reborrow().init_error_ref().init_error_ref(),
+                        error,
+                    );
+                }
+                None => {
+                    encoded.reborrow().init_error_ref().set_no_error_ref(());
+                }
+            }
+        }
+        Observation::Plan(observation) => {
+            let mut encoded = builder.reborrow().init_plan();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            let mut entries = encoded.reborrow().init_entries(list_length(
+                "event.engineObservation.plan.entries",
+                observation.entries().len(),
+            )?);
+            for (index, entry) in observation.entries().iter().enumerate() {
+                let mut encoded_entry = entries
+                    .reborrow()
+                    .get(list_index("event.engineObservation.plan.entries", index)?);
+                encoded_entry.set_id(entry.id().as_str());
+                encoded_entry.set_status(encode_observation_plan_entry_status(entry.status()));
+                encoded_entry.set_text(entry.text());
+            }
+            encoded.set_turn_id(
+                observation
+                    .turn_id()
+                    .map(ObservationId::as_str)
+                    .unwrap_or(""),
+            );
+        }
+        Observation::ProcessDiagnostic(observation) => {
+            let mut encoded = builder.reborrow().init_process_diagnostic();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_level(encode_observation_diagnostic_level(observation.level()));
+            encoded.set_message(observation.message());
+            match observation.error_ref() {
+                Some(error) => {
+                    encode_observation_engine_error_ref(
+                        encoded.reborrow().init_error_ref().init_error_ref(),
+                        error,
+                    );
+                }
+                None => {
+                    encoded.reborrow().init_error_ref().set_no_error_ref(());
+                }
+            }
+        }
+        Observation::ProtocolDiagnostic(observation) => {
+            let mut encoded = builder.reborrow().init_protocol_diagnostic();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_level(encode_observation_diagnostic_level(observation.level()));
+            encoded.set_message(observation.message());
+        }
+        Observation::Question(observation) => {
+            let mut encoded = builder.reborrow().init_question();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_question_id(observation.question_id().as_str());
+            encoded.set_state(encode_observation_question_state(observation.state()));
+            encoded.set_text(observation.text());
+            encoded.set_header(observation.header().unwrap_or(""));
+            encoded.set_multi_select(observation.multi_select());
+            let option_count = observation.options().map_or(0, Vec::len);
+            let mut options = encoded.reborrow().init_options(list_length(
+                "event.engineObservation.question.options",
+                option_count,
+            )?);
+            if let Some(option_list) = observation.options() {
+                for (index, option) in option_list.iter().enumerate() {
+                    let mut encoded_option = options.reborrow().get(list_index(
+                        "event.engineObservation.question.options",
+                        index,
+                    )?);
+                    encoded_option.set_label(option.label());
+                    encoded_option.set_description(option.description().unwrap_or(""));
+                }
+            }
+            match observation.answers() {
+                Some(answers) => {
+                    let mut list = encoded.reborrow().init_answers().init_answers(list_length(
+                        "event.engineObservation.question.answers",
+                        answers.len(),
+                    )?);
+                    for (index, answer) in answers.iter().enumerate() {
+                        list.set(
+                            list_index("event.engineObservation.question.answers", index)?,
+                            answer.as_str(),
+                        );
+                    }
+                }
+                None => {
+                    encoded.reborrow().init_answers().set_no_answers(());
+                }
+            }
+        }
+        Observation::ReasoningSummaryCompleted(observation) => {
+            let mut encoded = builder.reborrow().init_reasoning_summary_completed();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_item_id(observation.item_id().as_str());
+            encoded.set_text(observation.text().unwrap_or(""));
+            encoded.set_turn_id(observation.turn_id().as_str());
+        }
+        Observation::ReasoningSummaryDelta(observation) => {
+            let mut encoded = builder.reborrow().init_reasoning_summary_delta();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_item_id(observation.item_id().as_str());
+            encoded.set_summary_index(observation.summary_index());
+            encoded.set_delta(observation.delta());
+            match observation.thinking_tokens() {
+                Some(tokens) => {
+                    encoded
+                        .reborrow()
+                        .init_thinking_tokens()
+                        .set_thinking_tokens(tokens);
+                }
+                None => {
+                    encoded
+                        .reborrow()
+                        .init_thinking_tokens()
+                        .set_no_thinking_tokens(());
+                }
+            }
+            encoded.set_turn_id(observation.turn_id().as_str());
+        }
+        Observation::Retry(observation) => {
+            let mut encoded = builder.reborrow().init_retry();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_turn_id(observation.turn_id().as_str());
+            encoded.set_attempt_state(encode_observation_retry_attempt_state(
+                observation.attempt_state(),
+            ));
+            encoded.set_will_retry(observation.will_retry());
+            encoded.set_message(observation.message());
+        }
+        Observation::RunState(observation) => {
+            let mut encoded = builder.reborrow().init_run_state();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_state(encode_observation_run_state(observation.state()));
+        }
+        Observation::RunTerminal(observation) => {
+            let mut encoded = builder.reborrow().init_run_terminal();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_state(encode_observation_run_terminal_state(observation.state()));
+            match observation.error_ref() {
+                Some(error) => {
+                    encode_observation_engine_error_ref(
+                        encoded.reborrow().init_error_ref().init_error_ref(),
+                        error,
+                    );
+                }
+                None => {
+                    encoded.reborrow().init_error_ref().set_no_error_ref(());
+                }
+            }
+            encoded.set_summary_title(observation.summary_title().unwrap_or(""));
+        }
+        Observation::Search(observation) => {
+            let mut encoded = builder.reborrow().init_search();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_query(observation.query());
+            match observation.scope() {
+                Some(scope) => {
+                    encoded
+                        .reborrow()
+                        .init_scope()
+                        .set_scope(encode_observation_search_scope(scope));
+                }
+                None => {
+                    encoded.reborrow().init_scope().set_no_scope(());
+                }
+            }
+            encoded.set_search_id(
+                observation
+                    .search_id()
+                    .map(ObservationId::as_str)
+                    .unwrap_or(""),
+            );
+            encoded.set_state(encode_observation_search_state(observation.state()));
+            match observation.result_count() {
+                Some(count) => {
+                    encoded
+                        .reborrow()
+                        .init_result_count()
+                        .set_result_count(count);
+                }
+                None => {
+                    encoded
+                        .reborrow()
+                        .init_result_count()
+                        .set_no_result_count(());
+                }
+            }
+        }
+        Observation::Subagent(observation) => {
+            let mut encoded = builder.reborrow().init_subagent();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_agent_native_thread_id(observation.agent_native_thread_id().as_str());
+            encoded.set_parent_native_thread_id(observation.parent_native_thread_id().as_str());
+            encoded.set_state(encode_observation_subagent_state(observation.state()));
+            encoded.set_activity(observation.activity().unwrap_or(""));
+            encoded.set_agent_path(observation.agent_path().unwrap_or(""));
+            encoded.set_turn_id(
+                observation
+                    .turn_id()
+                    .map(ObservationId::as_str)
+                    .unwrap_or(""),
+            );
+        }
+        Observation::SubagentTranscript(observation) => {
+            let mut encoded = builder.reborrow().init_subagent_transcript();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_agent_native_thread_id(observation.agent_native_thread_id().as_str());
+            encoded.set_parent_native_thread_id(observation.parent_native_thread_id().as_str());
+            encode_transcript_content(encoded.reborrow().init_content(), observation.content());
+        }
+        Observation::TerminalActivity(observation) => {
+            let mut encoded = builder.reborrow().init_terminal_activity();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_activity_id(observation.activity_id().as_str());
+            match observation.channel() {
+                Some(channel) => {
+                    encoded
+                        .reborrow()
+                        .init_channel()
+                        .set_channel(encode_observation_terminal_channel(channel));
+                }
+                None => {
+                    encoded.reborrow().init_channel().set_no_channel(());
+                }
+            }
+            encoded.set_command(observation.command().unwrap_or(""));
+            encoded.set_shell(observation.shell().unwrap_or(""));
+            match observation.output() {
+                Some(output) => {
+                    encoded.reborrow().init_output().set_output(output);
+                }
+                None => {
+                    encoded.reborrow().init_output().set_no_output(());
+                }
+            }
+            match observation.exit_code() {
+                Some(code) => {
+                    encoded.reborrow().init_exit_code().set_exit_code(code);
+                }
+                None => {
+                    encoded.reborrow().init_exit_code().set_no_exit_code(());
+                }
+            }
+            encoded.set_state(encode_observation_terminal_state(observation.state()));
+        }
+        Observation::Tool(observation) => {
+            let mut encoded = builder.reborrow().init_tool();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_tool_id(observation.tool_id().as_str());
+            encoded.set_tool_name(observation.tool_name());
+            encoded.set_action(encode_observation_tool_action(observation.action()));
+            encoded.set_detail(observation.detail().unwrap_or(""));
+        }
+        Observation::TurnState(observation) => {
+            let mut encoded = builder.reborrow().init_turn_state();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_turn_id(observation.turn_id().as_str());
+            encoded.set_state(encode_observation_turn_state(observation.state()));
+        }
+        Observation::Usage(observation) => {
+            let mut encoded = builder.reborrow().init_usage();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_basis(encode_observation_usage_basis(observation.basis()));
+            match observation.input_tokens() {
+                Some(tokens) => {
+                    encoded
+                        .reborrow()
+                        .init_input_tokens()
+                        .set_input_tokens(tokens);
+                }
+                None => {
+                    encoded
+                        .reborrow()
+                        .init_input_tokens()
+                        .set_no_input_tokens(());
+                }
+            }
+            match observation.cached_input_tokens() {
+                Some(tokens) => {
+                    encoded
+                        .reborrow()
+                        .init_cached_input_tokens()
+                        .set_cached_input_tokens(tokens);
+                }
+                None => {
+                    encoded
+                        .reborrow()
+                        .init_cached_input_tokens()
+                        .set_no_cached_input_tokens(());
+                }
+            }
+            match observation.output_tokens() {
+                Some(tokens) => {
+                    encoded
+                        .reborrow()
+                        .init_output_tokens()
+                        .set_output_tokens(tokens);
+                }
+                None => {
+                    encoded
+                        .reborrow()
+                        .init_output_tokens()
+                        .set_no_output_tokens(());
+                }
+            }
+            match observation.context_tokens() {
+                Some(tokens) => {
+                    encoded
+                        .reborrow()
+                        .init_context_tokens()
+                        .set_context_tokens(tokens);
+                }
+                None => {
+                    encoded
+                        .reborrow()
+                        .init_context_tokens()
+                        .set_no_context_tokens(());
+                }
+            }
+            encoded.set_context_window_tokens(observation.context_window_tokens().unwrap_or(0));
+            match observation.cost_usd() {
+                Some(cost) => {
+                    encoded.reborrow().init_cost().set_cost(cost);
+                }
+                None => {
+                    encoded.reborrow().init_cost().set_no_cost(());
+                }
+            }
+            encoded.set_provider_route_id(
+                observation
+                    .provider_route_id()
+                    .map(ObservationId::as_str)
+                    .unwrap_or(""),
+            );
+            encoded.set_turn_id(
+                observation
+                    .turn_id()
+                    .map(ObservationId::as_str)
+                    .unwrap_or(""),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn encode_observation_approval_request(
+    mut builder: artisan_capnp::observation_approval_request::Builder<'_>,
+    value: &ApprovalRequest,
+) {
+    builder.set_kind(encode_observation_approval_kind(value.kind()));
+    builder.set_command(value.command_text().unwrap_or(""));
+    builder.set_cwd(value.cwd().unwrap_or(""));
+    builder.set_reason(value.reason().unwrap_or(""));
+}
+
+fn encode_observation_engine_error_ref(
+    mut builder: artisan_capnp::observation_engine_error_ref::Builder<'_>,
+    value: &EngineErrorRef,
+) {
+    builder.set_artisan_code(value.artisan_code().as_str());
+    builder.set_provider_code(value.provider_code().unwrap_or(""));
+    builder.set_detail(value.detail().unwrap_or(""));
+    builder.set_affected_model_id(value.affected_model_id().unwrap_or(""));
+    builder.set_limit_id(value.limit_id().unwrap_or(""));
+    builder.set_limit_label(value.limit_label().unwrap_or(""));
+    match value.limit_scope() {
+        Some(scope) => {
+            builder
+                .reborrow()
+                .init_limit_scope()
+                .set_limit_scope(encode_observation_limit_scope(scope));
+        }
+        None => {
+            builder.reborrow().init_limit_scope().set_no_limit_scope(());
+        }
+    }
+    builder.set_resets_at(value.resets_at().unwrap_or(""));
+}
+
+fn encode_transcript_content(
+    builder: artisan_capnp::observation_subagent_transcript_content::Builder<'_>,
+    value: &TranscriptContent,
+) {
+    match value {
+        TranscriptContent::AgentMessageDelta(content) => {
+            let mut encoded = builder.init_agent_message_delta();
+            encoded.set_item_id(content.item_id().as_str());
+            encoded.set_phase(encode_observation_message_phase(content.phase()));
+            encoded.set_delta(content.delta());
+        }
+        TranscriptContent::AgentMessageCompleted(content) => {
+            let mut encoded = builder.init_agent_message_completed();
+            encoded.set_item_id(content.item_id().as_str());
+            encoded.set_phase(encode_observation_message_phase(content.phase()));
+            encoded.set_message(content.message());
+        }
+        TranscriptContent::ReasoningSummaryDelta(content) => {
+            let mut encoded = builder.init_reasoning_summary_delta();
+            encoded.set_item_id(content.item_id().as_str());
+            encoded.set_summary_index(content.summary_index());
+            encoded.set_delta(content.delta());
+        }
+        TranscriptContent::ReasoningSummaryCompleted(content) => {
+            let mut encoded = builder.init_reasoning_summary_completed();
+            encoded.set_item_id(content.item_id().as_str());
+            encoded.set_text(content.text().unwrap_or(""));
+        }
+        TranscriptContent::TerminalActivity(content) => {
+            let mut encoded = builder.init_terminal_activity();
+            encoded.set_activity_id(content.activity_id().as_str());
+            match content.channel() {
+                Some(channel) => {
+                    encoded
+                        .reborrow()
+                        .init_channel()
+                        .set_channel(encode_observation_terminal_channel(channel));
+                }
+                None => {
+                    encoded.reborrow().init_channel().set_no_channel(());
+                }
+            }
+            encoded.set_command(content.command().unwrap_or(""));
+            match content.exit_code() {
+                Some(code) => {
+                    encoded.reborrow().init_exit_code().set_exit_code(code);
+                }
+                None => {
+                    encoded.reborrow().init_exit_code().set_no_exit_code(());
+                }
+            }
+            match content.output() {
+                Some(output) => {
+                    encoded.reborrow().init_output().set_output(output);
+                }
+                None => {
+                    encoded.reborrow().init_output().set_no_output(());
+                }
+            }
+            encoded.set_state(encode_observation_terminal_state(content.state()));
+        }
+        TranscriptContent::Tool(content) => {
+            let mut encoded = builder.init_tool();
+            encoded.set_tool_id(content.tool_id().as_str());
+            encoded.set_tool_name(content.tool_name());
+            encoded.set_action(encode_observation_tool_action(content.action()));
+            encoded.set_detail(content.detail().unwrap_or(""));
+        }
+        TranscriptContent::File(content) => {
+            let mut encoded = builder.init_file();
+            encoded.set_path(content.path());
+            encoded.set_action(encode_observation_file_action(content.action()));
+            match content.lines_added() {
+                Some(count) => {
+                    encoded.reborrow().init_lines_added().set_lines_added(count);
+                }
+                None => {
+                    encoded.reborrow().init_lines_added().set_no_lines_added(());
+                }
+            }
+            match content.lines_deleted() {
+                Some(count) => {
+                    encoded
+                        .reborrow()
+                        .init_lines_deleted()
+                        .set_lines_deleted(count);
+                }
+                None => {
+                    encoded
+                        .reborrow()
+                        .init_lines_deleted()
+                        .set_no_lines_deleted(());
+                }
+            }
+        }
+        TranscriptContent::Search(content) => {
+            let mut encoded = builder.init_search();
+            encoded.set_query(content.query());
+            match content.result_count() {
+                Some(count) => {
+                    encoded
+                        .reborrow()
+                        .init_result_count()
+                        .set_result_count(count);
+                }
+                None => {
+                    encoded
+                        .reborrow()
+                        .init_result_count()
+                        .set_no_result_count(());
+                }
+            }
+            match content.scope() {
+                Some(scope) => {
+                    encoded
+                        .reborrow()
+                        .init_scope()
+                        .set_scope(encode_observation_search_scope(scope));
+                }
+                None => {
+                    encoded.reborrow().init_scope().set_no_scope(());
+                }
+            }
+            encoded.set_search_id(content.search_id().map(ObservationId::as_str).unwrap_or(""));
+            encoded.set_state(encode_observation_search_state(content.state()));
+        }
+    }
+}
+
+fn decode_engine_observation(
+    value: artisan_capnp::engine_observation::Reader<'_>,
+) -> Result<Observation, ProtocolDecodeError> {
+    match value.which()? {
+        artisan_capnp::engine_observation::Which::AgentMessageDelta(observation) => {
+            let observation = observation?;
+            Ok(Observation::AgentMessageDelta(
+                AgentMessageDeltaObservation::new(
+                    parse_observation_id(
+                        read_text(
+                            observation.get_id(),
+                            "event.engineObservation.agentMessageDelta.id",
+                        )?,
+                        "event.engineObservation.agentMessageDelta.id",
+                    )?,
+                    parse_observation_sequence(observation.get_sequence())?,
+                    parse_observation_id(
+                        read_text(
+                            observation.get_item_id(),
+                            "event.engineObservation.agentMessageDelta.itemId",
+                        )?,
+                        "event.engineObservation.agentMessageDelta.itemId",
+                    )?,
+                    decode_observation_message_phase(observation.get_phase()?),
+                    read_text(
+                        observation.get_delta(),
+                        "event.engineObservation.agentMessageDelta.delta",
+                    )?,
+                    parse_observation_id(
+                        read_text(
+                            observation.get_turn_id(),
+                            "event.engineObservation.agentMessageDelta.turnId",
+                        )?,
+                        "event.engineObservation.agentMessageDelta.turnId",
+                    )?,
+                )?,
+            ))
+        }
+        artisan_capnp::engine_observation::Which::AgentMessageCompleted(observation) => {
+            let observation = observation?;
+            Ok(Observation::AgentMessageCompleted(
+                AgentMessageCompletedObservation::new(
+                    parse_observation_id(
+                        read_text(
+                            observation.get_id(),
+                            "event.engineObservation.agentMessageCompleted.id",
+                        )?,
+                        "event.engineObservation.agentMessageCompleted.id",
+                    )?,
+                    parse_observation_sequence(observation.get_sequence())?,
+                    parse_observation_id(
+                        read_text(
+                            observation.get_item_id(),
+                            "event.engineObservation.agentMessageCompleted.itemId",
+                        )?,
+                        "event.engineObservation.agentMessageCompleted.itemId",
+                    )?,
+                    decode_observation_message_phase(observation.get_phase()?),
+                    read_text(
+                        observation.get_message(),
+                        "event.engineObservation.agentMessageCompleted.message",
+                    )?,
+                    parse_observation_id(
+                        read_text(
+                            observation.get_turn_id(),
+                            "event.engineObservation.agentMessageCompleted.turnId",
+                        )?,
+                        "event.engineObservation.agentMessageCompleted.turnId",
+                    )?,
+                )?,
+            ))
+        }
+        artisan_capnp::engine_observation::Which::Approval(observation) => {
+            let observation = observation?;
+            let id = parse_observation_id(
+                read_text(observation.get_id(), "event.engineObservation.approval.id")?,
+                "event.engineObservation.approval.id",
+            )?;
+            let sequence = parse_observation_sequence(observation.get_sequence())?;
+            let approval_id = parse_observation_id(
+                read_text(
+                    observation.get_approval_id(),
+                    "event.engineObservation.approval.approvalId",
+                )?,
+                "event.engineObservation.approval.approvalId",
+            )?;
+            let state = decode_observation_approval_state(observation.get_state()?);
+            let description = read_text(
+                observation.get_description(),
+                "event.engineObservation.approval.description",
+            )?;
+            let request = decode_observation_approval_request(observation.get_request()?)?;
+            let decision = match observation.get_decision().which()? {
+                artisan_capnp::observation_approval::decision::Which::NoDecision(()) => None,
+                artisan_capnp::observation_approval::decision::Which::Decision(decision) => {
+                    Some(decision)
+                }
+            };
+            match (state, decision) {
+                (ApprovalState::Requested, None) => {
+                    Ok(Observation::Approval(ApprovalObservation::requested(
+                        id,
+                        sequence,
+                        approval_id,
+                        description,
+                        request,
+                    )?))
+                }
+                (ApprovalState::Resolved, Some(approved)) => {
+                    Ok(Observation::Approval(ApprovalObservation::resolved(
+                        id,
+                        sequence,
+                        approval_id,
+                        description,
+                        request,
+                        approved,
+                    )?))
+                }
+                (ApprovalState::Requested, Some(_)) => {
+                    Err(ObservationError::UnexpectedField { field: "decision" }.into())
+                }
+                (ApprovalState::Resolved, None) => {
+                    Err(ObservationError::MissingField { field: "decision" }.into())
+                }
+            }
+        }
+        artisan_capnp::engine_observation::Which::Compaction(observation) => {
+            let observation = observation?;
+            Ok(Observation::Compaction(CompactionObservation::new(
+                parse_observation_id(
+                    read_text(
+                        observation.get_id(),
+                        "event.engineObservation.compaction.id",
+                    )?,
+                    "event.engineObservation.compaction.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                decode_observation_compaction_state(observation.get_state()?),
+                parse_optional_observation_id(
+                    read_text(
+                        observation.get_compaction_id(),
+                        "event.engineObservation.compaction.compactionId",
+                    )?,
+                    "event.engineObservation.compaction.compactionId",
+                )?,
+                match observation.get_duration_ms().which()? {
+                    artisan_capnp::observation_compaction::duration_ms::Which::NoDurationMs(()) => {
+                        None
+                    }
+                    artisan_capnp::observation_compaction::duration_ms::Which::DurationMs(
+                        duration,
+                    ) => Some(duration),
+                },
+                absent_if_empty(read_text(
+                    observation.get_summary(),
+                    "event.engineObservation.compaction.summary",
+                )?),
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::File(observation) => {
+            let observation = observation?;
+            Ok(Observation::File(FileObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.file.id")?,
+                    "event.engineObservation.file.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                read_text(observation.get_path(), "event.engineObservation.file.path")?,
+                decode_observation_file_action(observation.get_action()?),
+                match observation.get_lines_added().which()? {
+                    artisan_capnp::observation_file::lines_added::Which::NoLinesAdded(()) => None,
+                    artisan_capnp::observation_file::lines_added::Which::LinesAdded(count) => {
+                        Some(count)
+                    }
+                },
+                match observation.get_lines_deleted().which()? {
+                    artisan_capnp::observation_file::lines_deleted::Which::NoLinesDeleted(()) => {
+                        None
+                    }
+                    artisan_capnp::observation_file::lines_deleted::Which::LinesDeleted(count) => {
+                        Some(count)
+                    }
+                },
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::NativeAction(observation) => {
+            let observation = observation?;
+            Ok(Observation::NativeAction(NativeActionObservation::new(
+                parse_observation_id(
+                    read_text(
+                        observation.get_id(),
+                        "event.engineObservation.nativeAction.id",
+                    )?,
+                    "event.engineObservation.nativeAction.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                read_text(
+                    observation.get_action(),
+                    "event.engineObservation.nativeAction.action",
+                )?,
+                absent_if_empty(read_text(
+                    observation.get_detail(),
+                    "event.engineObservation.nativeAction.detail",
+                )?),
+                observation.get_diagnostic(),
+                match observation.get_error_ref().which()? {
+                    artisan_capnp::observation_native_action::error_ref::Which::NoErrorRef(()) => {
+                        None
+                    }
+                    artisan_capnp::observation_native_action::error_ref::Which::ErrorRef(error) => {
+                        Some(decode_observation_engine_error_ref(
+                            error?,
+                            "event.engineObservation.nativeAction.errorRef",
+                        )?)
+                    }
+                },
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::Plan(observation) => {
+            let observation = observation?;
+            let encoded_entries = observation.get_entries()?;
+            let entry_count = encoded_entries.len() as usize;
+            if entry_count > OBSERVATION_PLAN_MAX_ENTRIES {
+                return Err(ProtocolDecodeError::Observation {
+                    source: ObservationError::TooMany {
+                        field: "entries",
+                        count: entry_count,
+                        maximum: OBSERVATION_PLAN_MAX_ENTRIES,
+                    },
+                });
+            }
+            let mut entries = Vec::with_capacity(entry_count);
+            for encoded_entry in encoded_entries.iter() {
+                entries.push(PlanEntry::new(
+                    parse_observation_id(
+                        read_text(
+                            encoded_entry.get_id(),
+                            "event.engineObservation.plan.entries.id",
+                        )?,
+                        "event.engineObservation.plan.entries.id",
+                    )?,
+                    decode_observation_plan_entry_status(encoded_entry.get_status()?),
+                    read_text(
+                        encoded_entry.get_text(),
+                        "event.engineObservation.plan.entries.text",
+                    )?,
+                )?);
+            }
+            Ok(Observation::Plan(PlanObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.plan.id")?,
+                    "event.engineObservation.plan.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                entries,
+                parse_optional_observation_id(
+                    read_text(
+                        observation.get_turn_id(),
+                        "event.engineObservation.plan.turnId",
+                    )?,
+                    "event.engineObservation.plan.turnId",
+                )?,
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::ProcessDiagnostic(observation) => {
+            let observation = observation?;
+            Ok(Observation::ProcessDiagnostic(
+                ProcessDiagnosticObservation::new(
+                    parse_observation_id(
+                        read_text(
+                            observation.get_id(),
+                            "event.engineObservation.processDiagnostic.id",
+                        )?,
+                        "event.engineObservation.processDiagnostic.id",
+                    )?,
+                    parse_observation_sequence(observation.get_sequence())?,
+                    decode_observation_diagnostic_level(observation.get_level()?),
+                    read_text(
+                        observation.get_message(),
+                        "event.engineObservation.processDiagnostic.message",
+                    )?,
+                    match observation.get_error_ref().which()? {
+                        artisan_capnp::observation_process_diagnostic::error_ref::Which::NoErrorRef(
+                            (),
+                        ) => None,
+                        artisan_capnp::observation_process_diagnostic::error_ref::Which::ErrorRef(
+                            error,
+                        ) => Some(decode_observation_engine_error_ref(
+                            error?,
+                            "event.engineObservation.processDiagnostic.errorRef",
+                        )?),
+                    },
+                )?,
+            ))
+        }
+        artisan_capnp::engine_observation::Which::ProtocolDiagnostic(observation) => {
+            let observation = observation?;
+            Ok(Observation::ProtocolDiagnostic(
+                ProtocolDiagnosticObservation::new(
+                    parse_observation_id(
+                        read_text(
+                            observation.get_id(),
+                            "event.engineObservation.protocolDiagnostic.id",
+                        )?,
+                        "event.engineObservation.protocolDiagnostic.id",
+                    )?,
+                    parse_observation_sequence(observation.get_sequence())?,
+                    decode_observation_diagnostic_level(observation.get_level()?),
+                    read_text(
+                        observation.get_message(),
+                        "event.engineObservation.protocolDiagnostic.message",
+                    )?,
+                )?,
+            ))
+        }
+        artisan_capnp::engine_observation::Which::Question(observation) => {
+            let observation = observation?;
+            let id = parse_observation_id(
+                read_text(observation.get_id(), "event.engineObservation.question.id")?,
+                "event.engineObservation.question.id",
+            )?;
+            let sequence = parse_observation_sequence(observation.get_sequence())?;
+            let question_id = parse_observation_id(
+                read_text(
+                    observation.get_question_id(),
+                    "event.engineObservation.question.questionId",
+                )?,
+                "event.engineObservation.question.questionId",
+            )?;
+            let state = decode_observation_question_state(observation.get_state()?);
+            let text = read_text(
+                observation.get_text(),
+                "event.engineObservation.question.text",
+            )?;
+            let header = absent_if_empty(read_text(
+                observation.get_header(),
+                "event.engineObservation.question.header",
+            )?);
+            let multi_select = observation.get_multi_select();
+            let encoded_options = observation.get_options()?;
+            let option_count = encoded_options.len() as usize;
+            if option_count > OBSERVATION_QUESTION_MAX_OPTIONS {
+                return Err(ProtocolDecodeError::Observation {
+                    source: ObservationError::TooMany {
+                        field: "options",
+                        count: option_count,
+                        maximum: OBSERVATION_QUESTION_MAX_OPTIONS,
+                    },
+                });
+            }
+            let options = if option_count == 0 {
+                None
+            } else {
+                let mut options = Vec::with_capacity(option_count);
+                for encoded_option in encoded_options.iter() {
+                    options.push(QuestionOption::new(
+                        read_text(
+                            encoded_option.get_label(),
+                            "event.engineObservation.question.options.label",
+                        )?,
+                        absent_if_empty(read_text(
+                            encoded_option.get_description(),
+                            "event.engineObservation.question.options.description",
+                        )?),
+                    )?);
+                }
+                Some(options)
+            };
+            let answers = match observation.get_answers().which()? {
+                artisan_capnp::observation_question::answers::Which::NoAnswers(()) => None,
+                artisan_capnp::observation_question::answers::Which::Answers(encoded) => {
+                    let encoded = encoded?;
+                    let answer_count = encoded.len() as usize;
+                    if answer_count > OBSERVATION_ANSWERS_MAX {
+                        return Err(ProtocolDecodeError::Observation {
+                            source: ObservationError::TooMany {
+                                field: "answers",
+                                count: answer_count,
+                                maximum: OBSERVATION_ANSWERS_MAX,
+                            },
+                        });
+                    }
+                    let mut answers = Vec::with_capacity(answer_count);
+                    for answer in encoded.iter() {
+                        answers.push(read_text(
+                            answer,
+                            "event.engineObservation.question.answers",
+                        )?);
+                    }
+                    Some(answers)
+                }
+            };
+            let input = QuestionInput {
+                question_id,
+                text,
+                header,
+                multi_select,
+                options,
+            };
+            match (state, answers) {
+                (QuestionState::Requested, None) => Ok(Observation::Question(
+                    QuestionObservation::requested(id, sequence, input)?,
+                )),
+                (QuestionState::Resolved, Some(answers)) => Ok(Observation::Question(
+                    QuestionObservation::resolved(id, sequence, input, answers)?,
+                )),
+                (QuestionState::Requested, Some(_)) => {
+                    Err(ObservationError::UnexpectedField { field: "answers" }.into())
+                }
+                (QuestionState::Resolved, None) => {
+                    Err(ObservationError::MissingField { field: "answers" }.into())
+                }
+            }
+        }
+        artisan_capnp::engine_observation::Which::ReasoningSummaryCompleted(observation) => {
+            let observation = observation?;
+            Ok(Observation::ReasoningSummaryCompleted(
+                ReasoningSummaryCompletedObservation::new(
+                    parse_observation_id(
+                        read_text(
+                            observation.get_id(),
+                            "event.engineObservation.reasoningSummaryCompleted.id",
+                        )?,
+                        "event.engineObservation.reasoningSummaryCompleted.id",
+                    )?,
+                    parse_observation_sequence(observation.get_sequence())?,
+                    parse_observation_id(
+                        read_text(
+                            observation.get_item_id(),
+                            "event.engineObservation.reasoningSummaryCompleted.itemId",
+                        )?,
+                        "event.engineObservation.reasoningSummaryCompleted.itemId",
+                    )?,
+                    absent_if_empty(read_text(
+                        observation.get_text(),
+                        "event.engineObservation.reasoningSummaryCompleted.text",
+                    )?),
+                    parse_observation_id(
+                        read_text(
+                            observation.get_turn_id(),
+                            "event.engineObservation.reasoningSummaryCompleted.turnId",
+                        )?,
+                        "event.engineObservation.reasoningSummaryCompleted.turnId",
+                    )?,
+                )?,
+            ))
+        }
+        artisan_capnp::engine_observation::Which::ReasoningSummaryDelta(observation) => {
+            let observation = observation?;
+            Ok(Observation::ReasoningSummaryDelta(
+                ReasoningSummaryDeltaObservation::new(
+                    parse_observation_id(
+                        read_text(
+                            observation.get_id(),
+                            "event.engineObservation.reasoningSummaryDelta.id",
+                        )?,
+                        "event.engineObservation.reasoningSummaryDelta.id",
+                    )?,
+                    parse_observation_sequence(observation.get_sequence())?,
+                    parse_observation_id(
+                        read_text(
+                            observation.get_item_id(),
+                            "event.engineObservation.reasoningSummaryDelta.itemId",
+                        )?,
+                        "event.engineObservation.reasoningSummaryDelta.itemId",
+                    )?,
+                    observation.get_summary_index(),
+                    read_text(
+                        observation.get_delta(),
+                        "event.engineObservation.reasoningSummaryDelta.delta",
+                    )?,
+                    match observation.get_thinking_tokens().which()? {
+                        artisan_capnp::observation_reasoning_summary_delta::thinking_tokens::Which::NoThinkingTokens(
+                            (),
+                        ) => None,
+                        artisan_capnp::observation_reasoning_summary_delta::thinking_tokens::Which::ThinkingTokens(
+                            tokens,
+                        ) => Some(tokens),
+                    },
+                    parse_observation_id(
+                        read_text(
+                            observation.get_turn_id(),
+                            "event.engineObservation.reasoningSummaryDelta.turnId",
+                        )?,
+                        "event.engineObservation.reasoningSummaryDelta.turnId",
+                    )?,
+                )?,
+            ))
+        }
+        artisan_capnp::engine_observation::Which::Retry(observation) => {
+            let observation = observation?;
+            Ok(Observation::Retry(RetryObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.retry.id")?,
+                    "event.engineObservation.retry.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                parse_observation_id(
+                    read_text(
+                        observation.get_turn_id(),
+                        "event.engineObservation.retry.turnId",
+                    )?,
+                    "event.engineObservation.retry.turnId",
+                )?,
+                decode_observation_retry_attempt_state(observation.get_attempt_state()?),
+                observation.get_will_retry(),
+                read_text(
+                    observation.get_message(),
+                    "event.engineObservation.retry.message",
+                )?,
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::RunState(observation) => {
+            let observation = observation?;
+            Ok(Observation::RunState(RunStateObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.runState.id")?,
+                    "event.engineObservation.runState.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                decode_observation_run_state(observation.get_state()?),
+            )))
+        }
+        artisan_capnp::engine_observation::Which::RunTerminal(observation) => {
+            let observation = observation?;
+            Ok(Observation::RunTerminal(RunTerminalObservation::new(
+                parse_observation_id(
+                    read_text(
+                        observation.get_id(),
+                        "event.engineObservation.runTerminal.id",
+                    )?,
+                    "event.engineObservation.runTerminal.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                decode_observation_run_terminal_state(observation.get_state()?),
+                match observation.get_error_ref().which()? {
+                    artisan_capnp::observation_run_terminal::error_ref::Which::NoErrorRef(()) => {
+                        None
+                    }
+                    artisan_capnp::observation_run_terminal::error_ref::Which::ErrorRef(error) => {
+                        Some(decode_observation_engine_error_ref(
+                            error?,
+                            "event.engineObservation.runTerminal.errorRef",
+                        )?)
+                    }
+                },
+                absent_if_empty(read_text(
+                    observation.get_summary_title(),
+                    "event.engineObservation.runTerminal.summaryTitle",
+                )?),
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::Search(observation) => {
+            let observation = observation?;
+            Ok(Observation::Search(SearchObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.search.id")?,
+                    "event.engineObservation.search.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                read_text(
+                    observation.get_query(),
+                    "event.engineObservation.search.query",
+                )?,
+                match observation.get_scope().which()? {
+                    artisan_capnp::observation_search::scope::Which::NoScope(()) => None,
+                    artisan_capnp::observation_search::scope::Which::Scope(scope) => {
+                        Some(decode_observation_search_scope(scope?))
+                    }
+                },
+                parse_optional_observation_id(
+                    read_text(
+                        observation.get_search_id(),
+                        "event.engineObservation.search.searchId",
+                    )?,
+                    "event.engineObservation.search.searchId",
+                )?,
+                decode_observation_search_state(observation.get_state()?),
+                match observation.get_result_count().which()? {
+                    artisan_capnp::observation_search::result_count::Which::NoResultCount(()) => {
+                        None
+                    }
+                    artisan_capnp::observation_search::result_count::Which::ResultCount(count) => {
+                        Some(count)
+                    }
+                },
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::Subagent(observation) => {
+            let observation = observation?;
+            Ok(Observation::Subagent(SubagentObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.subagent.id")?,
+                    "event.engineObservation.subagent.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                SubagentInput {
+                    agent_native_thread_id: parse_observation_id(
+                        read_text(
+                            observation.get_agent_native_thread_id(),
+                            "event.engineObservation.subagent.agentNativeThreadId",
+                        )?,
+                        "event.engineObservation.subagent.agentNativeThreadId",
+                    )?,
+                    parent_native_thread_id: parse_observation_id(
+                        read_text(
+                            observation.get_parent_native_thread_id(),
+                            "event.engineObservation.subagent.parentNativeThreadId",
+                        )?,
+                        "event.engineObservation.subagent.parentNativeThreadId",
+                    )?,
+                    state: decode_observation_subagent_state(observation.get_state()?),
+                    activity: absent_if_empty(read_text(
+                        observation.get_activity(),
+                        "event.engineObservation.subagent.activity",
+                    )?),
+                    agent_path: absent_if_empty(read_text(
+                        observation.get_agent_path(),
+                        "event.engineObservation.subagent.agentPath",
+                    )?),
+                    turn_id: parse_optional_observation_id(
+                        read_text(
+                            observation.get_turn_id(),
+                            "event.engineObservation.subagent.turnId",
+                        )?,
+                        "event.engineObservation.subagent.turnId",
+                    )?,
+                },
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::SubagentTranscript(observation) => {
+            let observation = observation?;
+            Ok(Observation::SubagentTranscript(
+                SubagentTranscriptObservation::new(
+                    parse_observation_id(
+                        read_text(
+                            observation.get_id(),
+                            "event.engineObservation.subagentTranscript.id",
+                        )?,
+                        "event.engineObservation.subagentTranscript.id",
+                    )?,
+                    parse_observation_sequence(observation.get_sequence())?,
+                    parse_observation_id(
+                        read_text(
+                            observation.get_agent_native_thread_id(),
+                            "event.engineObservation.subagentTranscript.agentNativeThreadId",
+                        )?,
+                        "event.engineObservation.subagentTranscript.agentNativeThreadId",
+                    )?,
+                    parse_observation_id(
+                        read_text(
+                            observation.get_parent_native_thread_id(),
+                            "event.engineObservation.subagentTranscript.parentNativeThreadId",
+                        )?,
+                        "event.engineObservation.subagentTranscript.parentNativeThreadId",
+                    )?,
+                    decode_transcript_content(observation.get_content()?)?,
+                ),
+            ))
+        }
+        artisan_capnp::engine_observation::Which::TerminalActivity(observation) => {
+            let observation = observation?;
+            Ok(Observation::TerminalActivity(
+                TerminalActivityObservation::new(
+                    parse_observation_id(
+                        read_text(
+                            observation.get_id(),
+                            "event.engineObservation.terminalActivity.id",
+                        )?,
+                        "event.engineObservation.terminalActivity.id",
+                    )?,
+                    parse_observation_sequence(observation.get_sequence())?,
+                    TerminalActivityInput {
+                        activity_id: parse_observation_id(
+                            read_text(
+                                observation.get_activity_id(),
+                                "event.engineObservation.terminalActivity.activityId",
+                            )?,
+                            "event.engineObservation.terminalActivity.activityId",
+                        )?,
+                        channel: match observation.get_channel().which()? {
+                            artisan_capnp::observation_terminal_activity::channel::Which::NoChannel(
+                                (),
+                            ) => None,
+                            artisan_capnp::observation_terminal_activity::channel::Which::Channel(
+                                channel,
+                            ) => Some(decode_observation_terminal_channel(channel?)),
+                        },
+                        command: absent_if_empty(read_text(
+                            observation.get_command(),
+                            "event.engineObservation.terminalActivity.command",
+                        )?),
+                        shell: absent_if_empty(read_text(
+                            observation.get_shell(),
+                            "event.engineObservation.terminalActivity.shell",
+                        )?),
+                        output: match observation.get_output().which()? {
+                            artisan_capnp::observation_terminal_activity::output::Which::NoOutput(
+                                (),
+                            ) => None,
+                            artisan_capnp::observation_terminal_activity::output::Which::Output(
+                                output,
+                            ) => Some(read_text(
+                                output,
+                                "event.engineObservation.terminalActivity.output",
+                            )?),
+                        },
+                        exit_code: match observation.get_exit_code().which()? {
+                            artisan_capnp::observation_terminal_activity::exit_code::Which::NoExitCode(
+                                (),
+                            ) => None,
+                            artisan_capnp::observation_terminal_activity::exit_code::Which::ExitCode(
+                                code,
+                            ) => Some(code),
+                        },
+                        state: decode_observation_terminal_state(observation.get_state()?),
+                    },
+                )?,
+            ))
+        }
+        artisan_capnp::engine_observation::Which::Tool(observation) => {
+            let observation = observation?;
+            Ok(Observation::Tool(ToolObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.tool.id")?,
+                    "event.engineObservation.tool.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                parse_observation_id(
+                    read_text(
+                        observation.get_tool_id(),
+                        "event.engineObservation.tool.toolId",
+                    )?,
+                    "event.engineObservation.tool.toolId",
+                )?,
+                read_text(
+                    observation.get_tool_name(),
+                    "event.engineObservation.tool.toolName",
+                )?,
+                decode_observation_tool_action(observation.get_action()?),
+                absent_if_empty(read_text(
+                    observation.get_detail(),
+                    "event.engineObservation.tool.detail",
+                )?),
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::TurnState(observation) => {
+            let observation = observation?;
+            Ok(Observation::TurnState(TurnStateObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.turnState.id")?,
+                    "event.engineObservation.turnState.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                parse_observation_id(
+                    read_text(
+                        observation.get_turn_id(),
+                        "event.engineObservation.turnState.turnId",
+                    )?,
+                    "event.engineObservation.turnState.turnId",
+                )?,
+                decode_observation_turn_state(observation.get_state()?),
+            )))
+        }
+        artisan_capnp::engine_observation::Which::Usage(observation) => {
+            let observation = observation?;
+            Ok(Observation::Usage(UsageObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.usage.id")?,
+                    "event.engineObservation.usage.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                UsageInput {
+                    basis: decode_observation_usage_basis(observation.get_basis()?),
+                    input_tokens: match observation.get_input_tokens().which()? {
+                        artisan_capnp::observation_usage::input_tokens::Which::NoInputTokens(()) => {
+                            None
+                        }
+                        artisan_capnp::observation_usage::input_tokens::Which::InputTokens(
+                            tokens,
+                        ) => Some(tokens),
+                    },
+                    cached_input_tokens: match observation.get_cached_input_tokens().which()? {
+                        artisan_capnp::observation_usage::cached_input_tokens::Which::NoCachedInputTokens(
+                            (),
+                        ) => None,
+                        artisan_capnp::observation_usage::cached_input_tokens::Which::CachedInputTokens(
+                            tokens,
+                        ) => Some(tokens),
+                    },
+                    output_tokens: match observation.get_output_tokens().which()? {
+                        artisan_capnp::observation_usage::output_tokens::Which::NoOutputTokens(
+                            (),
+                        ) => None,
+                        artisan_capnp::observation_usage::output_tokens::Which::OutputTokens(
+                            tokens,
+                        ) => Some(tokens),
+                    },
+                    context_tokens: match observation.get_context_tokens().which()? {
+                        artisan_capnp::observation_usage::context_tokens::Which::NoContextTokens(
+                            (),
+                        ) => None,
+                        artisan_capnp::observation_usage::context_tokens::Which::ContextTokens(
+                            tokens,
+                        ) => Some(tokens),
+                    },
+                    context_window_tokens: {
+                        let window = observation.get_context_window_tokens();
+                        if window == 0 { None } else { Some(window) }
+                    },
+                    cost_usd: match observation.get_cost().which()? {
+                        artisan_capnp::observation_usage::cost::Which::NoCost(()) => None,
+                        artisan_capnp::observation_usage::cost::Which::Cost(cost) => Some(cost),
+                    },
+                    provider_route_id: parse_optional_observation_id(
+                        read_text(
+                            observation.get_provider_route_id(),
+                            "event.engineObservation.usage.providerRouteId",
+                        )?,
+                        "event.engineObservation.usage.providerRouteId",
+                    )?,
+                    turn_id: parse_optional_observation_id(
+                        read_text(
+                            observation.get_turn_id(),
+                            "event.engineObservation.usage.turnId",
+                        )?,
+                        "event.engineObservation.usage.turnId",
+                    )?,
+                },
+            )?))
+        }
+    }
+}
+
+fn parse_optional_observation_id(
+    value: String,
+    field: &'static str,
+) -> Result<Option<ObservationId>, ProtocolDecodeError> {
+    match absent_if_empty(value) {
+        None => Ok(None),
+        Some(text) => parse_observation_id(text, field).map(Some),
+    }
+}
+
+fn decode_observation_approval_request(
+    value: artisan_capnp::observation_approval_request::Reader<'_>,
+) -> Result<ApprovalRequest, ProtocolDecodeError> {
+    let kind = decode_observation_approval_kind(value.get_kind()?);
+    let command = absent_if_empty(read_text(
+        value.get_command(),
+        "event.engineObservation.approval.request.command",
+    )?);
+    let cwd = absent_if_empty(read_text(
+        value.get_cwd(),
+        "event.engineObservation.approval.request.cwd",
+    )?);
+    let reason = absent_if_empty(read_text(
+        value.get_reason(),
+        "event.engineObservation.approval.request.reason",
+    )?);
+    match kind {
+        ApprovalKind::Command => {
+            let Some(command) = command else {
+                return Err(ObservationError::MissingField { field: "command" }.into());
+            };
+            Ok(ApprovalRequest::command(command, cwd, reason)?)
+        }
+        ApprovalKind::FileChange => {
+            if command.is_some() {
+                return Err(ObservationError::UnexpectedField { field: "command" }.into());
+            }
+            if cwd.is_some() {
+                return Err(ObservationError::UnexpectedField { field: "cwd" }.into());
+            }
+            Ok(ApprovalRequest::file_change(reason)?)
+        }
+        ApprovalKind::Action => {
+            if command.is_some() {
+                return Err(ObservationError::UnexpectedField { field: "command" }.into());
+            }
+            if cwd.is_some() {
+                return Err(ObservationError::UnexpectedField { field: "cwd" }.into());
+            }
+            Ok(ApprovalRequest::action(reason)?)
+        }
+    }
+}
+
+fn decode_observation_engine_error_ref(
+    value: artisan_capnp::observation_engine_error_ref::Reader<'_>,
+    field: &'static str,
+) -> Result<EngineErrorRef, ProtocolDecodeError> {
+    // Sub-field failures report the enclosing error-reference label: every
+    // label below stays a static string so no provider text ever enters an
+    // error value.
+    Ok(EngineErrorRef::new(EngineErrorRefInput {
+        artisan_code: ArtisanCode::parse(read_text(value.get_artisan_code(), field)?)
+            .map_err(ProtocolDecodeError::from)?,
+        provider_code: absent_if_empty(read_text(value.get_provider_code(), field)?),
+        detail: absent_if_empty(read_text(value.get_detail(), field)?),
+        affected_model_id: absent_if_empty(read_text(value.get_affected_model_id(), field)?),
+        limit_id: absent_if_empty(read_text(value.get_limit_id(), field)?),
+        limit_label: absent_if_empty(read_text(value.get_limit_label(), field)?),
+        limit_scope: match value.get_limit_scope().which()? {
+            artisan_capnp::observation_engine_error_ref::limit_scope::Which::NoLimitScope(()) => {
+                None
+            }
+            artisan_capnp::observation_engine_error_ref::limit_scope::Which::LimitScope(scope) => {
+                Some(decode_observation_limit_scope(scope?))
+            }
+        },
+        resets_at: absent_if_empty(read_text(value.get_resets_at(), field)?),
+    })?)
+}
+
+fn decode_transcript_content(
+    value: artisan_capnp::observation_subagent_transcript_content::Reader<'_>,
+) -> Result<TranscriptContent, ProtocolDecodeError> {
+    match value.which()? {
+        artisan_capnp::observation_subagent_transcript_content::Which::AgentMessageDelta(
+            content,
+        ) => {
+            let content = content?;
+            Ok(TranscriptContent::AgentMessageDelta(
+                TranscriptAgentMessageDelta::new(
+                    parse_observation_id(
+                        read_text(
+                            content.get_item_id(),
+                            "event.engineObservation.subagentTranscript.content.agentMessageDelta.itemId",
+                        )?,
+                        "event.engineObservation.subagentTranscript.content.agentMessageDelta.itemId",
+                    )?,
+                    decode_observation_message_phase(content.get_phase()?),
+                    read_text(
+                        content.get_delta(),
+                        "event.engineObservation.subagentTranscript.content.agentMessageDelta.delta",
+                    )?,
+                )?,
+            ))
+        }
+        artisan_capnp::observation_subagent_transcript_content::Which::AgentMessageCompleted(
+            content,
+        ) => {
+            let content = content?;
+            Ok(TranscriptContent::AgentMessageCompleted(
+                TranscriptAgentMessageCompleted::new(
+                    parse_observation_id(
+                        read_text(
+                            content.get_item_id(),
+                            "event.engineObservation.subagentTranscript.content.agentMessageCompleted.itemId",
+                        )?,
+                        "event.engineObservation.subagentTranscript.content.agentMessageCompleted.itemId",
+                    )?,
+                    decode_observation_message_phase(content.get_phase()?),
+                    read_text(
+                        content.get_message(),
+                        "event.engineObservation.subagentTranscript.content.agentMessageCompleted.message",
+                    )?,
+                )?,
+            ))
+        }
+        artisan_capnp::observation_subagent_transcript_content::Which::ReasoningSummaryDelta(
+            content,
+        ) => {
+            let content = content?;
+            Ok(TranscriptContent::ReasoningSummaryDelta(
+                TranscriptReasoningSummaryDelta::new(
+                    parse_observation_id(
+                        read_text(
+                            content.get_item_id(),
+                            "event.engineObservation.subagentTranscript.content.reasoningSummaryDelta.itemId",
+                        )?,
+                        "event.engineObservation.subagentTranscript.content.reasoningSummaryDelta.itemId",
+                    )?,
+                    content.get_summary_index(),
+                    read_text(
+                        content.get_delta(),
+                        "event.engineObservation.subagentTranscript.content.reasoningSummaryDelta.delta",
+                    )?,
+                )?,
+            ))
+        }
+        artisan_capnp::observation_subagent_transcript_content::Which::ReasoningSummaryCompleted(
+            content,
+        ) => {
+            let content = content?;
+            Ok(TranscriptContent::ReasoningSummaryCompleted(
+                TranscriptReasoningSummaryCompleted::new(
+                    parse_observation_id(
+                        read_text(
+                            content.get_item_id(),
+                            "event.engineObservation.subagentTranscript.content.reasoningSummaryCompleted.itemId",
+                        )?,
+                        "event.engineObservation.subagentTranscript.content.reasoningSummaryCompleted.itemId",
+                    )?,
+                    absent_if_empty(read_text(
+                        content.get_text(),
+                        "event.engineObservation.subagentTranscript.content.reasoningSummaryCompleted.text",
+                    )?),
+                )?,
+            ))
+        }
+        artisan_capnp::observation_subagent_transcript_content::Which::TerminalActivity(
+            content,
+        ) => {
+            let content = content?;
+            Ok(TranscriptContent::TerminalActivity(
+                TranscriptTerminalActivity::new(
+                    parse_observation_id(
+                        read_text(
+                            content.get_activity_id(),
+                            "event.engineObservation.subagentTranscript.content.terminalActivity.activityId",
+                        )?,
+                        "event.engineObservation.subagentTranscript.content.terminalActivity.activityId",
+                    )?,
+                    match content.get_channel().which()? {
+                        artisan_capnp::observation_transcript_terminal_activity::channel::Which::NoChannel(
+                            (),
+                        ) => None,
+                        artisan_capnp::observation_transcript_terminal_activity::channel::Which::Channel(
+                            channel,
+                        ) => Some(decode_observation_terminal_channel(channel?)),
+                    },
+                    absent_if_empty(read_text(
+                        content.get_command(),
+                        "event.engineObservation.subagentTranscript.content.terminalActivity.command",
+                    )?),
+                    match content.get_exit_code().which()? {
+                        artisan_capnp::observation_transcript_terminal_activity::exit_code::Which::NoExitCode(
+                            (),
+                        ) => None,
+                        artisan_capnp::observation_transcript_terminal_activity::exit_code::Which::ExitCode(
+                            code,
+                        ) => Some(code),
+                    },
+                    match content.get_output().which()? {
+                        artisan_capnp::observation_transcript_terminal_activity::output::Which::NoOutput(
+                            (),
+                        ) => None,
+                        artisan_capnp::observation_transcript_terminal_activity::output::Which::Output(
+                            output,
+                        ) => Some(read_text(
+                            output,
+                            "event.engineObservation.subagentTranscript.content.terminalActivity.output",
+                        )?),
+                    },
+                    decode_observation_terminal_state(content.get_state()?),
+                )?,
+            ))
+        }
+        artisan_capnp::observation_subagent_transcript_content::Which::Tool(content) => {
+            let content = content?;
+            Ok(TranscriptContent::Tool(TranscriptTool::new(
+                parse_observation_id(
+                    read_text(
+                        content.get_tool_id(),
+                        "event.engineObservation.subagentTranscript.content.tool.toolId",
+                    )?,
+                    "event.engineObservation.subagentTranscript.content.tool.toolId",
+                )?,
+                read_text(
+                    content.get_tool_name(),
+                    "event.engineObservation.subagentTranscript.content.tool.toolName",
+                )?,
+                decode_observation_tool_action(content.get_action()?),
+                absent_if_empty(read_text(
+                    content.get_detail(),
+                    "event.engineObservation.subagentTranscript.content.tool.detail",
+                )?),
+            )?))
+        }
+        artisan_capnp::observation_subagent_transcript_content::Which::File(content) => {
+            let content = content?;
+            Ok(TranscriptContent::File(TranscriptFile::new(
+                read_text(
+                    content.get_path(),
+                    "event.engineObservation.subagentTranscript.content.file.path",
+                )?,
+                decode_observation_file_action(content.get_action()?),
+                match content.get_lines_added().which()? {
+                    artisan_capnp::observation_transcript_file::lines_added::Which::NoLinesAdded(
+                        (),
+                    ) => None,
+                    artisan_capnp::observation_transcript_file::lines_added::Which::LinesAdded(
+                        count,
+                    ) => Some(count),
+                },
+                match content.get_lines_deleted().which()? {
+                    artisan_capnp::observation_transcript_file::lines_deleted::Which::NoLinesDeleted(
+                        (),
+                    ) => None,
+                    artisan_capnp::observation_transcript_file::lines_deleted::Which::LinesDeleted(
+                        count,
+                    ) => Some(count),
+                },
+            )?))
+        }
+        artisan_capnp::observation_subagent_transcript_content::Which::Search(content) => {
+            let content = content?;
+            Ok(TranscriptContent::Search(TranscriptSearch::new(
+                read_text(
+                    content.get_query(),
+                    "event.engineObservation.subagentTranscript.content.search.query",
+                )?,
+                match content.get_result_count().which()? {
+                    artisan_capnp::observation_transcript_search::result_count::Which::NoResultCount(
+                        (),
+                    ) => None,
+                    artisan_capnp::observation_transcript_search::result_count::Which::ResultCount(
+                        count,
+                    ) => Some(count),
+                },
+                match content.get_scope().which()? {
+                    artisan_capnp::observation_transcript_search::scope::Which::NoScope(()) => None,
+                    artisan_capnp::observation_transcript_search::scope::Which::Scope(scope) => {
+                        Some(decode_observation_search_scope(scope?))
+                    }
+                },
+                parse_optional_observation_id(
+                    read_text(
+                        content.get_search_id(),
+                        "event.engineObservation.subagentTranscript.content.search.searchId",
+                    )?,
+                    "event.engineObservation.subagentTranscript.content.search.searchId",
+                )?,
+                decode_observation_search_state(content.get_state()?),
+            )?))
+        }
     }
 }

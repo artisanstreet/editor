@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use artisan_domain::{Observation, ThreadId};
 use artisan_transport::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 
 use crate::activated_conversation_replay::read_activated_conversation_replay;
@@ -22,6 +23,7 @@ use crate::conversation_commit_notifier::{
 };
 use crate::conversation_delivery_writer::{
     ConversationDeliveryError, ConversationDeliveryWriter, ConversationReplayDelivery,
+    ObservationBatchDelivery,
 };
 use crate::request_handler::{ActivatedConversationSubscription, ConversationConnectionContext};
 
@@ -129,6 +131,59 @@ impl ConversationDeliveryDriver {
         Ok(())
     }
 
+    /// Publishes one durably committed engine-observation batch to the
+    /// thread's active subscriber, if any.
+    ///
+    /// A thread without an active subscription yields `Ok(None)`: with no
+    /// subscribers there is nothing to publish, and the durable history
+    /// stays available for reconnect replay. Otherwise every observation
+    /// newer than the subscriber's observation cursor crosses the wire in
+    /// batch order under the send deadline, and the registry advances only
+    /// after all of those sends succeed. An empty or fully delivered batch
+    /// yields `Ok(None)` without touching the wire or the writer.
+    pub(crate) async fn publish_observations<F>(
+        &mut self,
+        thread_id: ThreadId,
+        observations: Vec<Observation>,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<Option<ObservationBatchDelivery>, DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let Some(subscription) = self.active.get(&thread_id) else {
+            return Ok(None);
+        };
+        let lease = subscription.lease().clone();
+        if observations.is_empty() {
+            return Ok(None);
+        }
+        let mut batch = Vec::with_capacity(observations.len());
+        for observation in observations {
+            let stamp = stamp().map_err(|error| DeadlineError::Peer {
+                operation: OperationKind::Send,
+                error,
+            })?;
+            batch.push((stamp, observation));
+        }
+        let writer = self
+            .writer
+            .take()
+            .ok_or_else(|| delivery_failure(OperationKind::Send, DeliveryStageError::Writer))?;
+        let delivered = run_with_deadline(
+            OperationKind::Send,
+            limit,
+            cancel,
+            writer.deliver_observation_batch(&lease, thread_id, batch),
+        )
+        .await
+        .map_err(map_writer_deadline)?;
+        let (writer, delivered) = delivered;
+        self.writer = Some(writer);
+        Ok(Some(delivered))
+    }
+
     /// Finishes the one writer and then clears all connection-local registry
     /// state. For peer/error cleanup the unfinished writer is dropped so its
     /// existing guard resets any open output instead of attempting a finish.
@@ -218,7 +273,8 @@ impl ConversationDeliveryDriver {
             ConversationDeliveryError::Finish(_) => DeliveryStageError::Finish,
             ConversationDeliveryError::Open(_)
             | ConversationDeliveryError::Send(_)
-            | ConversationDeliveryError::Registry(_) => DeliveryStageError::Writer,
+            | ConversationDeliveryError::Registry(_)
+            | ConversationDeliveryError::ObservationRegistry(_) => DeliveryStageError::Writer,
         })
     }
 }
@@ -261,7 +317,8 @@ fn map_writer_deadline(
         DeadlineError::InvalidLimit { operation } => DeadlineError::InvalidLimit { operation },
         DeadlineError::Peer { operation, error } => {
             let stage = match error {
-                ConversationDeliveryError::Registry(_) => DeliveryStageError::Registry,
+                ConversationDeliveryError::Registry(_)
+                | ConversationDeliveryError::ObservationRegistry(_) => DeliveryStageError::Registry,
                 ConversationDeliveryError::Finish(_) => DeliveryStageError::Finish,
                 ConversationDeliveryError::Open(_) | ConversationDeliveryError::Send(_) => {
                     DeliveryStageError::Writer

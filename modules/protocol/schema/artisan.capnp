@@ -843,6 +843,15 @@ struct Event {
 
     # A first message was durably queued on a thread.
     firstMessageQueued @2 :FirstMessageQueued;
+
+    # Finite engine-observation delivery (S1b). One durably committed,
+    # sanitized observation row for its thread subscribers, published in
+    # durable sequence order. Fresh union member at @4: @3 is already the
+    # cursor field below, @0-@2 are the frozen first-workflow arms. Old
+    # readers that predate this member observe an unknown discriminant and
+    # surface a typed decode failure; old writers never set it, so their
+    # frames decode unchanged.
+    engineObservation @4 :EngineObservationEvent;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first
@@ -857,6 +866,645 @@ struct Event {
   # This cursor counts events only; conversation replay ordering uses
   # PatchBatch and ConversationSnapshot cursors below.
   cursor @3 :UInt64;
+}
+
+# ---------------------------------------------------------------------------
+# Engine observation delivery (S1b). Sanitized, provider-neutral rows
+# committed durably by S1a checkpoints and published to thread subscribers.
+#
+# Additive only: every struct and enum below is new. Existing field
+# types/ordinals are untouched. Every Text bound is measured in UTF-8 bytes
+# and enforced by the owned codec; an empty Text decodes as absent unless
+# the arm documents otherwise. Optional counts where zero is a measured
+# value (token counts, result counts, line counts, durations, exit codes,
+# costs, decisions, answers, output chunks, scopes) use explicit presence
+# unions so `Some(0)` never collapses into `None`.
+# ---------------------------------------------------------------------------
+
+# Renderer-disclosed display phase of one agent-authored message.
+enum ObservationMessagePhase {
+  unspecified @0;
+  commentary @1;
+  final @2;
+}
+
+# Lifecycle action of one tool invocation.
+enum ObservationToolAction {
+  started @0;
+  progress @1;
+  completed @2;
+  failed @3;
+}
+
+# File action of one file observation.
+enum ObservationFileAction {
+  created @0;
+  modified @1;
+  deleted @2;
+  read @3;
+}
+
+# Scope of one search observation.
+enum ObservationSearchScope {
+  workspace @0;
+  web @1;
+}
+
+# Lifecycle state of one search observation.
+enum ObservationSearchState {
+  started @0;
+  completed @1;
+}
+
+# Output channel of one terminal activity observation.
+enum ObservationTerminalChannel {
+  stdout @0;
+  stderr @1;
+}
+
+# Lifecycle state of one terminal activity observation.
+enum ObservationTerminalState {
+  started @0;
+  output @1;
+  completed @2;
+  failed @3;
+}
+
+# Lifecycle state of one approval observation.
+enum ObservationApprovalState {
+  requested @0;
+  resolved @1;
+}
+
+# Kind of action bound to one approval request.
+enum ObservationApprovalKind {
+  command @0;
+  fileChange @1;
+  action @2;
+}
+
+# Lifecycle state of one question observation.
+enum ObservationQuestionState {
+  requested @0;
+  resolved @1;
+}
+
+# Status of one plan entry.
+enum ObservationPlanEntryStatus {
+  pending @0;
+  inProgress @1;
+  completed @2;
+}
+
+# Lifecycle state of one compaction observation.
+enum ObservationCompactionState {
+  started @0;
+  completed @1;
+}
+
+# Provider attempt state of one retry observation.
+enum ObservationRetryAttemptState {
+  retrying @0;
+  terminal @1;
+}
+
+# Non-terminal lifecycle state of one run.
+enum ObservationRunState {
+  opening @0;
+  running @1;
+  waiting @2;
+}
+
+# Lifecycle state of one provider turn.
+enum ObservationTurnState {
+  started @0;
+  waiting @1;
+  completed @2;
+  cancelled @3;
+  failed @4;
+}
+
+# Lifecycle state of one provider-native subagent.
+enum ObservationSubagentState {
+  discovered @0;
+  running @1;
+  waiting @2;
+  completed @3;
+  failed @4;
+  interrupted @5;
+}
+
+# Provider usage accounting basis, preserved verbatim.
+enum ObservationUsageBasis {
+  delta @0;
+  cumulative @1;
+  unknown @2;
+}
+
+# Severity of one process or protocol diagnostic.
+enum ObservationDiagnosticLevel {
+  info @0;
+  warning @1;
+  error @2;
+}
+
+# The only outcomes that can complete an engine run.
+enum ObservationRunTerminalState {
+  completed @0;
+  cancelled @1;
+  failed @2;
+  interrupted @3;
+  closed @4;
+}
+
+# Scope of a depleted provider allowance, when disclosed.
+enum ObservationLimitScope {
+  shared @0;
+  model @1;
+  unknown @2;
+}
+
+# One streamed fragment of an agent-authored message.
+struct ObservationAgentMessageDelta {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  itemId @2 :Text;
+  phase @3 :ObservationMessagePhase;
+  delta @4 :Text;
+  turnId @5 :Text;
+}
+
+# One completed agent-authored message.
+struct ObservationAgentMessageCompleted {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  itemId @2 :Text;
+  phase @3 :ObservationMessagePhase;
+  message @4 :Text;
+  turnId @5 :Text;
+}
+
+# One streamed fragment of a provider-authored reasoning summary.
+struct ObservationReasoningSummaryDelta {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  itemId @2 :Text;
+  summaryIndex @3 :UInt64;
+  delta @4 :Text;
+  thinkingTokens :union {
+    noThinkingTokens @5 :Void;
+    thinkingTokens @6 :UInt64;
+  }
+  turnId @7 :Text;
+}
+
+# One settled reasoning phase for a turn.
+struct ObservationReasoningSummaryCompleted {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  itemId @2 :Text;
+  # Empty decodes as absent: a present text is never empty.
+  text @3 :Text;
+  turnId @4 :Text;
+}
+
+# One tool lifecycle event without provider-specific tool types.
+struct ObservationTool {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  toolId @2 :Text;
+  toolName @3 :Text;
+  action @4 :ObservationToolAction;
+  # Empty decodes as absent: a present detail is never empty.
+  detail @5 :Text;
+}
+
+# One file mutation or inspection performed during a run.
+struct ObservationFile {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  path @2 :Text;
+  action @3 :ObservationFileAction;
+  linesAdded :union {
+    noLinesAdded @4 :Void;
+    linesAdded @5 :UInt64;
+  }
+  linesDeleted :union {
+    noLinesDeleted @6 :Void;
+    linesDeleted @7 :UInt64;
+  }
+}
+
+# One search operation performed during a run.
+struct ObservationSearch {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  query @2 :Text;
+  scope :union {
+    noScope @3 :Void;
+    scope @4 :ObservationSearchScope;
+  }
+  # Empty decodes as absent: a present search id is never empty.
+  searchId @5 :Text;
+  state @6 :ObservationSearchState;
+  resultCount :union {
+    noResultCount @7 :Void;
+    resultCount @8 :UInt64;
+  }
+}
+
+# One shell or process activity row, independent from the run outcome.
+struct ObservationTerminalActivity {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  activityId @2 :Text;
+  channel :union {
+    noChannel @3 :Void;
+    channel @4 :ObservationTerminalChannel;
+  }
+  # Empty decodes as absent: a present command or shell is never empty.
+  command @5 :Text;
+  shell @6 :Text;
+  # An emitted output chunk may itself be empty, so presence is explicit.
+  output :union {
+    noOutput @7 :Void;
+    output @8 :Text;
+  }
+  # Exit zero is a measured outcome, so presence is explicit.
+  exitCode :union {
+    noExitCode @9 :Void;
+    exitCode @10 :Int32;
+  }
+  state @11 :ObservationTerminalState;
+}
+
+# Provider-neutral action bound to one approval request. `command` and `cwd`
+# are populated only for the command kind; other kinds must leave them
+# empty and carry only an optional reason.
+struct ObservationApprovalRequest {
+  kind @0 :ObservationApprovalKind;
+  command @1 :Text;
+  cwd @2 :Text;
+  reason @3 :Text;
+}
+
+# One approval request or its resolution. A requested row never carries a
+# decision; a resolved row always does.
+struct ObservationApproval {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  approvalId @2 :Text;
+  state @3 :ObservationApprovalState;
+  description @4 :Text;
+  request @5 :ObservationApprovalRequest;
+  decision :union {
+    noDecision @6 :Void;
+    decision @7 :Bool;
+  }
+}
+
+# One provider-offered answer to a question.
+struct ObservationQuestionOption {
+  label @0 :Text;
+  # Empty decodes as absent: a present description is never empty.
+  description @1 :Text;
+}
+
+# One question request or its resolution. A requested row never carries
+# answers; a resolved row always carries the answer list, which may itself
+# be empty for an explicitly skipped question.
+struct ObservationQuestion {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  questionId @2 :Text;
+  state @3 :ObservationQuestionState;
+  text @4 :Text;
+  # Empty decodes as absent: a present header is never empty.
+  header @5 :Text;
+  multiSelect @6 :Bool;
+  # Empty decodes as absent: a present option list is never empty.
+  options @7 :List(ObservationQuestionOption);
+  answers :union {
+    noAnswers @8 :Void;
+    answers @9 :List(Text);
+  }
+}
+
+# One provider-neutral plan entry.
+struct ObservationPlanEntry {
+  id @0 :Text;
+  status @1 :ObservationPlanEntryStatus;
+  text @2 :Text;
+}
+
+# One provider-neutral plan update.
+struct ObservationPlan {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  entries @2 :List(ObservationPlanEntry);
+  # Empty decodes as absent: a present turn id is never empty.
+  turnId @3 :Text;
+}
+
+# One provider context compaction report.
+struct ObservationCompaction {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  state @2 :ObservationCompactionState;
+  # Empty decodes as absent: a present compaction id is never empty.
+  compactionId @3 :Text;
+  durationMs :union {
+    noDurationMs @4 :Void;
+    durationMs @5 :UInt64;
+  }
+  # Empty decodes as absent: a present summary is never empty.
+  summary @6 :Text;
+}
+
+# One provider error report with its continuation intent.
+struct ObservationRetry {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  turnId @2 :Text;
+  attemptState @3 :ObservationRetryAttemptState;
+  willRetry @4 :Bool;
+  message @5 :Text;
+}
+
+# One non-terminal lifecycle change for the run.
+struct ObservationRunStateObservation {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  state @2 :ObservationRunState;
+}
+
+# One lifecycle progress report for a single provider turn.
+struct ObservationTurnStateObservation {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  turnId @2 :Text;
+  state @3 :ObservationTurnState;
+}
+
+# One provider-native subagent activity report.
+struct ObservationSubagent {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  agentNativeThreadId @2 :Text;
+  parentNativeThreadId @3 :Text;
+  state @4 :ObservationSubagentState;
+  # Empty decodes as absent: a present activity or agent path is never empty.
+  activity @5 :Text;
+  agentPath @6 :Text;
+  # Empty decodes as absent: a present turn id is never empty.
+  turnId @7 :Text;
+}
+
+# Child agent message fragment.
+struct ObservationTranscriptAgentMessageDelta {
+  itemId @0 :Text;
+  phase @1 :ObservationMessagePhase;
+  delta @2 :Text;
+}
+
+# Child completed agent message.
+struct ObservationTranscriptAgentMessageCompleted {
+  itemId @0 :Text;
+  phase @1 :ObservationMessagePhase;
+  message @2 :Text;
+}
+
+# Child reasoning summary fragment.
+struct ObservationTranscriptReasoningSummaryDelta {
+  itemId @0 :Text;
+  summaryIndex @1 :UInt64;
+  delta @2 :Text;
+}
+
+# Child settled reasoning phase.
+struct ObservationTranscriptReasoningSummaryCompleted {
+  itemId @0 :Text;
+  # Empty decodes as absent: a present text is never empty.
+  text @1 :Text;
+}
+
+# Child terminal activity row.
+struct ObservationTranscriptTerminalActivity {
+  activityId @0 :Text;
+  channel :union {
+    noChannel @1 :Void;
+    channel @2 :ObservationTerminalChannel;
+  }
+  # Empty decodes as absent: a present command is never empty.
+  command @3 :Text;
+  # Exit zero is a measured outcome, so presence is explicit.
+  exitCode :union {
+    noExitCode @4 :Void;
+    exitCode @5 :Int32;
+  }
+  # An emitted output chunk may itself be empty, so presence is explicit.
+  output :union {
+    noOutput @6 :Void;
+    output @7 :Text;
+  }
+  state @8 :ObservationTerminalState;
+}
+
+# Child tool row.
+struct ObservationTranscriptTool {
+  toolId @0 :Text;
+  toolName @1 :Text;
+  action @2 :ObservationToolAction;
+  # Empty decodes as absent: a present detail is never empty.
+  detail @3 :Text;
+}
+
+# Child file row.
+struct ObservationTranscriptFile {
+  path @0 :Text;
+  action @1 :ObservationFileAction;
+  linesAdded :union {
+    noLinesAdded @2 :Void;
+    linesAdded @3 :UInt64;
+  }
+  linesDeleted :union {
+    noLinesDeleted @4 :Void;
+    linesDeleted @5 :UInt64;
+  }
+}
+
+# Child search row.
+struct ObservationTranscriptSearch {
+  query @0 :Text;
+  resultCount :union {
+    noResultCount @1 :Void;
+    resultCount @2 :UInt64;
+  }
+  scope :union {
+    noScope @3 :Void;
+    scope @4 :ObservationSearchScope;
+  }
+  # Empty decodes as absent: a present search id is never empty.
+  searchId @5 :Text;
+  state @6 :ObservationSearchState;
+}
+
+# Renderer-safe content of one native subagent row. Only the eight
+# projectable kinds exist here.
+struct ObservationSubagentTranscriptContent {
+  union {
+    agentMessageDelta @0 :ObservationTranscriptAgentMessageDelta;
+    agentMessageCompleted @1 :ObservationTranscriptAgentMessageCompleted;
+    reasoningSummaryDelta @2 :ObservationTranscriptReasoningSummaryDelta;
+    reasoningSummaryCompleted @3 :ObservationTranscriptReasoningSummaryCompleted;
+    terminalActivity @4 :ObservationTranscriptTerminalActivity;
+    tool @5 :ObservationTranscriptTool;
+    file @6 :ObservationTranscriptFile;
+    search @7 :ObservationTranscriptSearch;
+  }
+}
+
+# One public content row emitted by a native subagent.
+struct ObservationSubagentTranscript {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  agentNativeThreadId @2 :Text;
+  parentNativeThreadId @3 :Text;
+  content @4 :ObservationSubagentTranscriptContent;
+}
+
+# One provider failure transferred into Artisan's custody. Everything
+# downstream reasons in the `AE-*` vocabulary while the provider's own code
+# rides along as evidence. Empty Text fields decode as absent.
+struct ObservationEngineErrorRef {
+  artisanCode @0 :Text;
+  providerCode @1 :Text;
+  detail @2 :Text;
+  affectedModelId @3 :Text;
+  limitId @4 :Text;
+  limitLabel @5 :Text;
+  limitScope :union {
+    noLimitScope @6 :Void;
+    limitScope @7 :ObservationLimitScope;
+  }
+  resetsAt @8 :Text;
+}
+
+# One provider usage measurement for the run or one turn. Context tokens
+# are a gauge and must never be summed across reports, no matter the basis.
+struct ObservationUsage {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  basis @2 :ObservationUsageBasis;
+  inputTokens :union {
+    noInputTokens @3 :Void;
+    inputTokens @4 :UInt64;
+  }
+  cachedInputTokens :union {
+    noCachedInputTokens @5 :Void;
+    cachedInputTokens @6 :UInt64;
+  }
+  outputTokens :union {
+    noOutputTokens @7 :Void;
+    outputTokens @8 :UInt64;
+  }
+  contextTokens :union {
+    noContextTokens @9 :Void;
+    contextTokens @10 :UInt64;
+  }
+  # Zero decodes as absent: a present window is never zero.
+  contextWindowTokens @11 :UInt64;
+  # A reported cost may itself be zero, so presence is explicit.
+  cost :union {
+    noCost @12 :Void;
+    cost @13 :Float64;
+  }
+  # Empty decodes as absent: a present route or turn id is never empty.
+  providerRouteId @14 :Text;
+  turnId @15 :Text;
+}
+
+# One provider-native action with no canonical tool equivalent.
+struct ObservationNativeAction {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  action @2 :Text;
+  # Empty decodes as absent: a present detail is never empty.
+  detail @3 :Text;
+  diagnostic @4 :Bool;
+  errorRef :union {
+    noErrorRef @5 :Void;
+    errorRef @6 :ObservationEngineErrorRef;
+  }
+}
+
+# One process-level diagnostic from the engine host.
+struct ObservationProcessDiagnostic {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  level @2 :ObservationDiagnosticLevel;
+  message @3 :Text;
+  errorRef :union {
+    noErrorRef @4 :Void;
+    errorRef @5 :ObservationEngineErrorRef;
+  }
+}
+
+# One decoded transport or protocol diagnostic.
+struct ObservationProtocolDiagnostic {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  level @2 :ObservationDiagnosticLevel;
+  message @3 :Text;
+}
+
+# The sole terminal outcome emitted by a run.
+struct ObservationRunTerminal {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  state @2 :ObservationRunTerminalState;
+  errorRef :union {
+    noErrorRef @3 :Void;
+    errorRef @4 :ObservationEngineErrorRef;
+  }
+  # Empty decodes as absent: a present session title is never empty.
+  summaryTitle @5 :Text;
+}
+
+# One sanitized engine observation row. Member ordinals follow the domain
+# `Observation` variant order and are frozen once committed.
+struct EngineObservation {
+  union {
+    agentMessageDelta @0 :ObservationAgentMessageDelta;
+    agentMessageCompleted @1 :ObservationAgentMessageCompleted;
+    approval @2 :ObservationApproval;
+    compaction @3 :ObservationCompaction;
+    file @4 :ObservationFile;
+    nativeAction @5 :ObservationNativeAction;
+    plan @6 :ObservationPlan;
+    processDiagnostic @7 :ObservationProcessDiagnostic;
+    protocolDiagnostic @8 :ObservationProtocolDiagnostic;
+    question @9 :ObservationQuestion;
+    reasoningSummaryCompleted @10 :ObservationReasoningSummaryCompleted;
+    reasoningSummaryDelta @11 :ObservationReasoningSummaryDelta;
+    retry @12 :ObservationRetry;
+    runState @13 :ObservationRunStateObservation;
+    runTerminal @14 :ObservationRunTerminal;
+    search @15 :ObservationSearch;
+    subagent @16 :ObservationSubagent;
+    subagentTranscript @17 :ObservationSubagentTranscript;
+    terminalActivity @18 :ObservationTerminalActivity;
+    tool @19 :ObservationTool;
+    turnState @20 :ObservationTurnStateObservation;
+    usage @21 :ObservationUsage;
+  }
+}
+
+# One committed engine observation routed to its thread subscribers.
+struct EngineObservationEvent {
+  # Thread whose subscribers receive the observation. Identifier rule.
+  threadId @0 :Text;
+  observation @1 :EngineObservation;
 }
 
 # ---------------------------------------------------------------------------

@@ -63,8 +63,8 @@ use crate::conversation_subscription_preparation::{
     prepare_conversation_subscription, stop_conversation_subscription, PrepareSubscriptionError,
 };
 use crate::conversation_subscription_registry::{
-    ActivateError, ApplyBatchError, ConversationSubscriptionRegistry, RegisterError,
-    SubscriptionLease, SubscriptionView,
+    ActivateError, ApplyBatchError, ApplyObservationBatchError, ConversationSubscriptionRegistry,
+    RegisterError, SubscriptionLease, SubscriptionView,
 };
 use crate::directory_controller::{
     AdmissionError, DirectoryController, DirectoryPickOutcome, HelperOperationError, ShutdownReport,
@@ -143,6 +143,30 @@ impl ConversationSubscriptionRegistrar {
     ) -> Result<ConversationCursor, ApplyBatchError> {
         let mut registry = self.registry.lock().await;
         registry.publish_batch(lease, batch)
+    }
+
+    /// Records an observation batch whose wire publication has already succeeded.
+    ///
+    /// Callers must invoke this only after the later writer reports
+    /// successful wire publication of every observation in the batch. This
+    /// method performs no publication, retry, or cursor reinterpretation; it
+    /// applies the exact registry lease, thread, state, and
+    /// `from_sequence` fences once.
+    ///
+    /// # Errors
+    ///
+    /// Returns the exact [`ApplyObservationBatchError`] from the private
+    /// registry when the lease, thread, lifecycle state, or cursor fence is
+    /// not accepted.
+    pub async fn record_published_observation_batch(
+        &self,
+        lease: &SubscriptionLease,
+        thread_id: &ThreadId,
+        from_sequence: u64,
+        to_sequence: u64,
+    ) -> Result<u64, ApplyObservationBatchError> {
+        let mut registry = self.registry.lock().await;
+        registry.publish_observation_batch(lease, thread_id, from_sequence, to_sequence)
     }
 
     /// Clears every entry owned by this connection's registrar.

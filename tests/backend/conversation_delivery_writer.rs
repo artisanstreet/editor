@@ -17,6 +17,7 @@ use artisan_backend::activated_conversation_replay::{
 };
 use artisan_backend::conversation_delivery_writer::{
     ConversationDeliveryError, ConversationDeliveryWriter, ConversationReplayDelivery,
+    ObservationBatchDelivery,
 };
 use artisan_backend::conversation_subscription_registry::ApplyBatchError;
 use artisan_backend::request_handler::{
@@ -29,13 +30,15 @@ use artisan_database::{
     SetThreadEngineConfigInput, SqliteConfig, connect,
 };
 use artisan_domain::{
-    ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, ConversationCursor,
-    ConversationRequest, ConversationSubscribe, ConversationUnsubscribe, CountLimit, EngineAgentId,
+    AgentMessageCompletedObservation, ApprovalMode, ApprovalObservation, ApprovalRequest,
+    AssistantBody, AssistantMessagePhase, ByteLimit, ConversationCursor, ConversationRequest,
+    ConversationSubscribe, ConversationUnsubscribe, CountLimit, EngineAgentId,
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
     EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody, MessageId, NetworkAccess,
-    OpenCode2Selection, PatchBatch, PatchId, PermissionId, ProjectId, RequestId, RootPath,
-    ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
+    EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody, MessageId, MessagePhase,
+    NetworkAccess, Observation, ObservationId, ObservationSequence, OpenCode2Selection, PatchBatch,
+    PatchId, PermissionId, ProjectId, RequestId, RootPath, ThreadId, ThreadTitle, ToolAction,
+    ToolObservation, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_protocol::{ClientRequest, FrameId, ProtocolVersion, WireEnvelope, WireEnvelopeBody};
@@ -1126,6 +1129,252 @@ async fn cancelling_an_in_flight_first_write_resets_the_installed_direction() {
             .cursor(),
         ConversationCursor::default()
     );
+    drop(incoming);
+    drop(client_connection);
+    loopback.drain().await;
+}
+
+// ---------------------------------------------------------------------------
+// S1b engine-observation batch delivery: ordering, cursor dedup, request ids
+// ---------------------------------------------------------------------------
+
+fn observation_id(value: &str) -> ObservationId {
+    ObservationId::parse(value).expect("fixture observation id is valid")
+}
+
+fn observation_sequence(value: u64) -> ObservationSequence {
+    ObservationSequence::new(value).expect("fixture observation sequence is valid")
+}
+
+fn wire_tool_observation(id: &str, sequence_value: u64) -> Observation {
+    Observation::Tool(
+        ToolObservation::new(
+            observation_id(id),
+            observation_sequence(sequence_value),
+            observation_id("tool-wire-1"),
+            String::from("read"),
+            ToolAction::Completed,
+            Some(String::from("read 42 lines")),
+        )
+        .expect("fixture wire tool row is valid"),
+    )
+}
+
+fn wire_approval_requested(id: &str, sequence_value: u64, approval: &str) -> Observation {
+    Observation::Approval(
+        ApprovalObservation::requested(
+            observation_id(id),
+            observation_sequence(sequence_value),
+            observation_id(approval),
+            String::from("Run the test suite?"),
+            ApprovalRequest::command(
+                String::from("cargo test"),
+                Some(String::from("C:/repos/demo")),
+                None,
+            )
+            .expect("fixture wire approval request is valid"),
+        )
+        .expect("fixture wire requested approval is valid"),
+    )
+}
+
+fn wire_message_completed(id: &str, sequence_value: u64) -> Observation {
+    Observation::AgentMessageCompleted(
+        AgentMessageCompletedObservation::new(
+            observation_id(id),
+            observation_sequence(sequence_value),
+            observation_id("item-wire-1"),
+            MessagePhase::Final,
+            String::from("settled reply"),
+            observation_id("turn-wire-1"),
+        )
+        .expect("fixture wire completed message is valid"),
+    )
+}
+
+fn assert_observation_frame(
+    envelope: WireEnvelope,
+    thread_id: &ThreadId,
+    frame_id: &str,
+    sent_at: i64,
+    event_cursor: u64,
+    sequence_value: u64,
+) -> Observation {
+    assert_eq!(envelope.protocol_version, ProtocolVersion::V1);
+    assert_eq!(envelope.frame_id.as_str(), frame_id);
+    assert_eq!(envelope.sent_at, UnixMillis::from_millis(sent_at));
+    match envelope.body {
+        WireEnvelopeBody::Event(event) => {
+            assert_eq!(event.cursor.get(), event_cursor);
+            match event.event {
+                artisan_domain::Event::EngineObservation(delivered) => {
+                    assert_eq!(&delivered.thread_id, thread_id);
+                    assert_eq!(delivered.observation.sequence().get(), sequence_value);
+                    delivered.observation
+                }
+                _ => panic!("an observation delivery must send an engine observation"),
+            }
+        }
+        WireEnvelopeBody::Hello(_)
+        | WireEnvelopeBody::Welcome(_)
+        | WireEnvelopeBody::Request(_)
+        | WireEnvelopeBody::Response(_)
+        | WireEnvelopeBody::ProtocolError(_)
+        | WireEnvelopeBody::PatchBatch(_) => {
+            panic!("an observation delivery must send events, not patch batches")
+        }
+    }
+}
+
+#[tokio::test]
+async fn observation_batch_publishes_in_sequence_order_with_cursor_dedup() {
+    let (_database, repository) = memory_repository().await;
+    let thread_id = seed_thread(&repository, "obs-wire").await;
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let subscription = activate(
+        &repository,
+        &registrar,
+        "request-obs-wire",
+        ConversationSubscribe::fresh(thread_id.clone()),
+    )
+    .await;
+    let lease = subscription.lease().clone();
+
+    let batch = vec![
+        (
+            stamp("frame-obs-1", 5_001),
+            wire_tool_observation("obs-wire-1", 1),
+        ),
+        (
+            stamp("frame-obs-2", 5_002),
+            wire_approval_requested("obs-wire-2", 2, "approval-wire-1"),
+        ),
+        (
+            stamp("frame-obs-3", 5_003),
+            wire_message_completed("obs-wire-3", 3),
+        ),
+    ];
+
+    let mut loopback = spawn_loopback(false);
+    let (server_connection, client_connection) = connected(&mut loopback).await;
+    let _server_keepalive = server_connection.clone();
+    let writer =
+        ConversationDeliveryWriter::new(server_connection, registrar.clone(), ProtocolVersion::V1);
+    let (writer, outcome) = tokio::time::timeout(
+        TEST_DEADLINE,
+        writer.deliver_observation_batch(lease.clone(), thread_id.clone(), batch),
+    )
+    .await
+    .expect("observation delivery should finish")
+    .expect("observation delivery should succeed");
+    match outcome {
+        ObservationBatchDelivery::Published {
+            delivered,
+            from_sequence,
+            to_sequence,
+        } => {
+            assert_eq!(from_sequence, 0);
+            assert_eq!(to_sequence, 3);
+            assert_eq!(delivered.len(), 3);
+            for (index, event) in delivered.iter().enumerate() {
+                let expected = u64::try_from(index + 1).expect("fixture index fits");
+                assert_eq!(event.cursor.get(), expected);
+            }
+        }
+        ObservationBatchDelivery::Current { .. } => {
+            panic!("a fresh subscriber must receive the committed batch")
+        }
+    }
+
+    let mut incoming = tokio::time::timeout(TEST_DEADLINE, client_connection.accept_uni())
+        .await
+        .expect("one incoming uni stream should become visible")
+        .expect("incoming uni stream should be accepted");
+    let first = assert_observation_frame(
+        receive_envelope(&mut incoming).await,
+        &thread_id,
+        "frame-obs-1",
+        5_001,
+        1,
+        1,
+    );
+    assert!(matches!(first, Observation::Tool(_)));
+    let second = assert_observation_frame(
+        receive_envelope(&mut incoming).await,
+        &thread_id,
+        "frame-obs-2",
+        5_002,
+        2,
+        2,
+    );
+    match second {
+        Observation::Approval(approval) => {
+            assert_eq!(
+                approval.approval_id().as_str(),
+                "approval-wire-1",
+                "the approval request id must survive for A-approve"
+            );
+            assert_eq!(approval.request().command_text(), Some("cargo test"));
+        }
+        other => panic!("second row must stay an approval, got {}", other.tag()),
+    }
+    let third = assert_observation_frame(
+        receive_envelope(&mut incoming).await,
+        &thread_id,
+        "frame-obs-3",
+        5_003,
+        3,
+        3,
+    );
+    assert!(matches!(third, Observation::AgentMessageCompleted(_)));
+
+    let view = registrar
+        .subscription_view(&thread_id)
+        .await
+        .expect("published subscription should remain registered");
+    assert_eq!(view.observation_cursor(), 3);
+
+    // Replaying the committed batch deduplicates by cursor: nothing new
+    // crosses the wire and the registrar is untouched.
+    let replay = vec![
+        (
+            stamp("frame-obs-replay-1", 5_011),
+            wire_tool_observation("obs-wire-1", 1),
+        ),
+        (
+            stamp("frame-obs-replay-2", 5_012),
+            wire_approval_requested("obs-wire-2", 2, "approval-wire-1"),
+        ),
+        (
+            stamp("frame-obs-replay-3", 5_013),
+            wire_message_completed("obs-wire-3", 3),
+        ),
+    ];
+    let (writer, outcome) = tokio::time::timeout(
+        TEST_DEADLINE,
+        writer.deliver_observation_batch(lease, thread_id.clone(), replay),
+    )
+    .await
+    .expect("observation redelivery should finish")
+    .expect("observation redelivery should succeed");
+    match outcome {
+        ObservationBatchDelivery::Current { observation_cursor } => {
+            assert_eq!(observation_cursor, 3);
+        }
+        ObservationBatchDelivery::Published { .. } => {
+            panic!("a fully delivered batch must deduplicate")
+        }
+    }
+    assert_no_uni(&client_connection).await;
+    let view = registrar
+        .subscription_view(&thread_id)
+        .await
+        .expect("subscription should remain registered");
+    assert_eq!(view.observation_cursor(), 3);
+    writer
+        .finish()
+        .expect("observation stream should finish cleanly");
+    assert_clean_eof(&mut incoming).await;
     drop(incoming);
     drop(client_connection);
     loopback.drain().await;
