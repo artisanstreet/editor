@@ -355,17 +355,9 @@ pub(crate) struct EngineCursorTurnInput {
     pub(crate) control_capacity: usize,
 }
 
-impl std::fmt::Debug for EngineGrokTurnInput {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("EngineGrokTurnInput { <redacted> }")
-    }
-}
-
 impl std::fmt::Debug for EngineCursorTurnInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("EngineCursorTurnInput { <redacted> }")
-    }
-}
     }
 }
 
