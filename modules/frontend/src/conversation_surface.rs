@@ -3575,7 +3575,7 @@ mod tests {
         use crate::engine_observation_state::EngineObservationState;
         use crate::native_transport_service::{CommandSendError, NativeTransportCommand};
         use artisan_ui::theme::ThemeMode;
-        use gpui::{Entity, KeyDownEvent, Keystroke, TestAppContext};
+        use gpui::{Entity, KeyDownEvent, Keystroke, TestAppContext, VisualTestContext};
 
         fn observation_id(value: &str) -> ObservationId {
             ObservationId::parse(value).expect("fixture observation id is valid")
@@ -4189,7 +4189,7 @@ mod tests {
             ])
         }
 
-        fn press_key(cx: &mut TestAppContext, key: &str) {
+        fn press_key(cx: &mut VisualTestContext, key: &str) {
             cx.simulate_event(KeyDownEvent {
                 keystroke: Keystroke::parse(key).expect("known test key"),
                 is_held: false,
@@ -4197,7 +4197,11 @@ mod tests {
             });
         }
 
-        fn focus_row(cx: &mut TestAppContext, surface: &Entity<ConversationSurface>, block: &str) {
+        fn focus_row(
+            cx: &mut VisualTestContext,
+            surface: &Entity<ConversationSurface>,
+            block: &str,
+        ) {
             cx.update(|window, app| {
                 window.focus(
                     &surface
@@ -4211,7 +4215,7 @@ mod tests {
         }
 
         fn row_draft(
-            cx: &mut TestAppContext,
+            cx: &mut VisualTestContext,
             surface: &Entity<ConversationSurface>,
             block: &str,
         ) -> String {
