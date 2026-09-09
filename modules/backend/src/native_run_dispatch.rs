@@ -54,7 +54,8 @@ use crate::{
     engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
     engine_owner::{
         EngineClaudeTurnInput, EngineCodexTurnInput, EngineContinuation, EngineCursorTurnInput,
-        EngineGrokTurnInput, EngineTurnInput,
+        EngineGrokTurnInput, EngineHermesTurnInput, EngineTurnInput,
+        hermes::{VerifiedHermesLaunch, resolve_service_executable},
     },
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
@@ -75,6 +76,7 @@ const PROVIDER_BINDING_ENGINE_CODEX: &str = "codex";
 const PROVIDER_BINDING_ENGINE_CLAUDE: &str = "claude";
 const PROVIDER_BINDING_ENGINE_CURSOR: &str = "cursor";
 const PROVIDER_BINDING_ENGINE_GROK: &str = "grok";
+const PROVIDER_BINDING_ENGINE_HERMES: &str = "hermes";
 const PROVIDER_FAILURE_CODE: &str = "provider_failed";
 const PROVIDER_FAILURE_MESSAGE: &str = "OpenCode2 provider turn failed";
 const INTERRUPTED_CODE: &str = "provider_interrupted";
@@ -485,6 +487,7 @@ enum ResolvedLaunch {
     Claude(Box<VerifiedClaudeLaunch>),
     Cursor(Box<CursorLaunch>),
     Grok(Box<GrokLaunch>),
+    Hermes(Box<VerifiedHermesLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }
@@ -1308,6 +1311,20 @@ async fn load_claim(
                 return None;
             }
         },
+        EngineSelection::Hermes(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let Some(launch) = resolve_hermes_launch(selection.profile_id()).await else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Hermes(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
         _ => {
             context.requeue("engine unavailable").await;
             return None;
@@ -1341,6 +1358,37 @@ async fn resolve_continuation(
             | ResolvedLaunch::Cursor(_)
     ) {
         return Ok(None);
+    }
+    // Hermes resumes its durable gateway session: the lookup is scoped to the
+    // Hermes engine tag and the selecting profile, and the owner enforces the
+    // original model selection after `session.resume` (mirroring
+    // `CheckNativeContinuation`: compatible only on identical selection).
+    if matches!(&claim.launch, ResolvedLaunch::Hermes(_)) {
+        let EngineSelection::Hermes(selection) = claim.settings.config().selection() else {
+            return Err("engine unavailable");
+        };
+        let profile_id = selection.profile_id().clone();
+        let lookup = claim
+            .context
+            .repository
+            .read_session_continuation(SessionContinuationQuery {
+                thread_id: claim.payload.thread_id.clone(),
+                engine_id: EngineId::Hermes,
+                profile_id,
+                exclude_run_id: Some(ids.run_id.clone()),
+            })
+            .await
+            .map_err(|_| "provider continuation lookup failed")?;
+        return match lookup {
+            SessionContinuationLookup::NoHistory => Ok(None),
+            SessionContinuationLookup::Usable(continuation) => {
+                EngineContinuation::new(continuation.session_id.as_str().to_owned())
+                    .map(Some)
+                    .ok_or("provider continuation corrupt")
+            }
+            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
+            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+        };
     }
     let EngineSelection::OpenCode2(selection) = claim.settings.config().selection() else {
         return Err("engine unavailable");
@@ -1379,7 +1427,8 @@ fn mint_claim_ids(
         | ResolvedLaunch::Codex(_)
         | ResolvedLaunch::Claude(_)
         | ResolvedLaunch::Cursor(_)
-        | ResolvedLaunch::Grok(_) => (
+        | ResolvedLaunch::Grok(_)
+        | ResolvedLaunch::Hermes(_) => (
             mint_run_id(origin).ok_or("run identity unavailable")?,
             mint_turn_id(origin).ok_or("run identity unavailable")?,
             mint_item_id(origin).ok_or("run identity unavailable")?,
@@ -1569,6 +1618,22 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
             },
             attempt_budget,
         ),
+        ResolvedLaunch::Hermes(launch) => context.owner.admit_hermes_turn(
+            EngineHermesTurnInput {
+                run_id: receipt.run_id.clone(),
+                thread_id: payload.thread_id.clone(),
+                project_root,
+                prompt_id,
+                prompt,
+                settings: settings.clone(),
+                launch: *launch,
+                continuation,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
         #[cfg(test)]
         ResolvedLaunch::Fixture(fixture) => context.owner.admit_fixture_turn(
             FixtureTurnInput {
@@ -1644,7 +1709,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         turn.cancel();
     }
     // Provider binding bytes carry the exact engine tag (`opencode2`,
-    // `codex`, `claude`, `grok`, or `cursor`) with format 1 and the native thread identity from
+    // `codex`, `claude`, `grok`, `cursor`, or `hermes`) with format 1 and the native thread identity from
     // the app-server contract. A selection for any other engine abandons the
     // turn here instead of binding as a runnable engine.
     let (binding_engine, binding_profile) = match settings.config().selection() {
@@ -1666,6 +1731,10 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         ),
         EngineSelection::Grok(selection) => (
             PROVIDER_BINDING_ENGINE_GROK,
+            selection.profile_id().as_str().to_owned(),
+        ),
+        EngineSelection::Hermes(selection) => (
+            PROVIDER_BINDING_ENGINE_HERMES,
             selection.profile_id().as_str().to_owned(),
         ),
         _ => {
@@ -1811,6 +1880,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
                 EngineSelection::Claude(_) => EngineId::Claude,
                 EngineSelection::Cursor(_) => EngineId::Cursor,
                 EngineSelection::Grok(_) => EngineId::Grok,
+                EngineSelection::Hermes(_) => EngineId::Hermes,
                 _ => EngineId::OpenCode2,
             },
             turn,
@@ -2044,11 +2114,12 @@ async fn bind_with_retry(
 /// Builds the raw engine-tagged binding document with format 1 and the exact
 /// native thread identity from the app-server contract.
 ///
-/// The `engine` tag is `opencode2`, `codex`, `claude`, `grok`, or `cursor`;
-/// the session id is the native thread id returned by `thread/start` (Codex),
-/// `CreateSession` session (OpenCode2), `system/init` session (Claude),
-/// `session/new` session (Grok), or the ACP `session/new` result (Cursor).
-/// Empty identities reject so a corrupt bind never persists.
+/// The `engine` tag is `opencode2`, `codex`, `claude`, `grok`, `cursor`, or
+/// `hermes`; the session id is the native thread id returned by
+/// `thread/start` (Codex), `CreateSession` session (OpenCode2), `system/init`
+/// session (Claude), `session/new` session (Grok), the ACP `session/new`
+/// result (Cursor), or the durable stored session (Hermes). Empty identities
+/// reject so a corrupt bind never persists.
 ///
 /// Split from the [`ProviderBindingBytes`] wrap so the tag/format/profile
 /// round trip is provable over plain bytes: [`ProviderBindingBytes`]
@@ -2195,6 +2266,44 @@ async fn resolve_grok_launch(profile_id: &artisan_domain::EngineProfileId) -> Op
     let version = artisan_native_engine::grok::parse_grok_version(&stdout)?;
     Some(GrokLaunch::new(executable, profile_id.clone(), version))
 }
+/// Resolves one Hermes profile into a verified launch with a bounded
+/// `--version` probe enforcing the minimum gateway at probe time.
+///
+/// Executable resolution follows discovery precedence (`HERMES_EXECUTABLE`,
+/// installed local-app-data, `PATH`); authentication stays owned by the
+/// installed Hermes profile and is never probed here.
+///
+/// Returns `None` when no executable resolves, the probe times out or fails,
+/// or the version predates the minimum; the caller requeues the claim.
+async fn resolve_hermes_launch(
+    profile_id: &artisan_domain::EngineProfileId,
+) -> Option<VerifiedHermesLaunch> {
+    let resolved = resolve_service_executable()?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(&resolved)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let version = artisan_native_engine::hermes::parse_hermes_version(&stdout).ok()?;
+    artisan_native_engine::hermes::check_minimum_version(&version).ok()?;
+    VerifiedHermesLaunch::new(
+        resolved,
+        profile_id.as_str().to_owned(),
+        version.to_string(),
+    )
+}
+
 /// Resolves one Cursor profile into a C1 launch.
 ///
 /// C1 owns the definition row but no launch authority yet: the probe and

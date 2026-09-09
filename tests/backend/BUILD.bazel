@@ -59,6 +59,7 @@ exports_files([
     "engine_owner_codex.rs",
     "engine_owner_claude.rs",
     "engine_owner_grok.rs",
+    "engine_owner_hermes.rs",
     "engine_owner_custody.rs",
     "engine_owner_readiness.rs",
     "engine_owner_streaming.rs",
