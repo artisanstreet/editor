@@ -1158,7 +1158,7 @@ impl NativeApplication {
         cx.notify();
     }
 
-    fn desktop_profile_usage(&self, theme: DesktopTheme) -> Div {
+    fn desktop_profile_usage(&self, theme: DesktopTheme) -> gpui::Stateful<Div> {
         let mut section = div()
             .id(crate::native_profile_usage::PROFILE_USAGE_SELECTOR)
             .debug_selector(|| crate::native_profile_usage::PROFILE_USAGE_SELECTOR.to_owned())
@@ -1433,6 +1433,7 @@ impl NativeApplication {
                 )
                 .child(
                     div()
+                        .id("artisan-profile-usage-scroll")
                         .min_h(px(0.0))
                         .max_h(px(280.0))
                         .overflow_y_scroll()
