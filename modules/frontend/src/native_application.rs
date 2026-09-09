@@ -1135,8 +1135,8 @@ impl NativeApplication {
                     .debug_selector(|| "artisan-brand-home".to_owned())
                     .flex_shrink_0()
                     .text_size(px(20.0))
-                    .font_family("Cal Sans")
-                    .font_weight(FontWeight::BOLD)
+                    .font_family("Artisan Neo")
+                    .font_weight(FontWeight::SEMIBOLD)
                     // -0.05em tracking at 20px: 20 * -0.05 = -1.0px.
                     .letter_spacing(px(-1.0))
                     .text_color(self.desktop_theme.foreground)

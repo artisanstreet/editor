@@ -1,4 +1,5 @@
-//! Bundled Cal Sans, Spline Sans and Spline Sans Mono TrueType fonts.
+//! Bundled Artisan Neo, Cal Sans, Spline Sans and Spline Sans Mono
+//! TrueType fonts.
 //!
 //! Files are embedded at compile time and registered once through
 //! `artisan_ui::fonts::register_bundled_fonts`. Family names and weight ranges
@@ -50,6 +51,15 @@ impl std::error::Error for UnknownFont {}
 
 /// Every bundled typeface, ordered by family name so lookups binary search.
 pub const ALL: &[BundledFont] = &[
+    BundledFont {
+        file_name: "artisan-neo-600.ttf",
+        family: "Artisan Neo",
+        weights: (600, 600),
+        license_path: "licenses/artisan-neo-OFL.txt",
+        license_text: include_str!("../licenses/artisan-neo-OFL.txt"),
+        bytes: include_bytes!("../fonts/artisan-neo-600.ttf"),
+        static_faces: &[include_bytes!("../fonts/artisan-neo-600.ttf")],
+    },
     BundledFont {
         file_name: "cal-sans-700.ttf",
         family: "Cal Sans",
@@ -124,19 +134,20 @@ mod tests {
     /// Expected `(file name, byte length)` pins: any truncation or
     /// re-encode of a vendored binary fails here before it can reach a
     /// renderer and silently fall back to a system face.
-    const EXPECTED_LENGTHS: [(&str, usize); 3] = [
+    const EXPECTED_LENGTHS: [(&str, usize); 4] = [
+        ("artisan-neo-600.ttf", 343_516),
         ("cal-sans-700.ttf", 219_644),
         ("spline-sans-variable.ttf", 146_896),
         ("spline-sans-mono-variable.ttf", 118_744),
     ];
 
     #[test]
-    fn catalog_carries_exactly_the_three_declared_faces() {
-        assert_eq!(ALL.len(), 3, "Cal Sans plus the two Spline families");
+    fn catalog_carries_exactly_the_four_declared_faces() {
+        assert_eq!(ALL.len(), 4, "Artisan Neo plus Cal Sans plus the two Spline families");
         let families: Vec<&str> = ALL.iter().map(|font| font.family).collect();
         assert_eq!(
             families,
-            vec!["Cal Sans", "Spline Sans", "Spline Sans Mono"],
+            vec!["Artisan Neo", "Cal Sans", "Spline Sans", "Spline Sans Mono"],
             "catalog order is by family name for binary search"
         );
         for (font, (file_name, length)) in ALL.iter().zip(EXPECTED_LENGTHS) {
@@ -174,7 +185,7 @@ mod tests {
     #[test]
     fn bundled_fonts_shapes_borrowed_slices_for_add_fonts() {
         let shaped = bundled_fonts();
-        assert_eq!(shaped.len(), 11);
+        assert_eq!(shaped.len(), 12);
         let expected = ALL.iter().flat_map(|font| font.static_faces.iter());
         for (shaped, bytes) in shaped.iter().zip(expected) {
             assert_eq!(shaped.as_ref(), *bytes);
@@ -197,6 +208,31 @@ mod tests {
                 id: String::from("Segoe UI"),
             }
         );
+    }
+
+    #[test]
+    fn artisan_neo_registers_its_verified_semibold_static_face() {
+        // Internal name-table identity `Artisan Neo` / `SemiBold` with OS/2
+        // `usWeightClass` 600, instantiated from the variable source with
+        // wght pinned at 600 and opsz at its default 14 so no fvar axis
+        // remains. The native wordmark requests exactly this family at
+        // weight 600 so the platform matcher cannot silently fall back to
+        // a system face.
+        let font = lookup_family("Artisan Neo").expect("bundled Artisan Neo face");
+        assert_eq!(font.file_name, "artisan-neo-600.ttf");
+        assert_eq!(font.weights, (600, 600));
+        assert_eq!(font.bytes.len(), 343_516);
+        assert_eq!(
+            &font.bytes[0..4],
+            b"\x00\x01\x00\x00",
+            "artisan-neo-600.ttf: missing TrueType sfnt magic"
+        );
+        assert_eq!(
+            font.static_faces.len(),
+            1,
+            "Artisan Neo ships one static SemiBold face"
+        );
+        assert_eq!(font.static_faces[0], font.bytes);
     }
 
     #[test]
