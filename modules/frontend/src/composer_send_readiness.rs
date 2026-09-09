@@ -122,18 +122,28 @@ impl<'a> ModelCapabilities<'a> {
 /// One model entry in the runtime catalog manifest.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ModelDefinition<'a> {
+    /// Stable catalog model identifier selected by a session policy.
+    pub id: &'a str,
     /// Harness/engine that owns this catalog model.
     pub harness: &'a str,
     /// Provider-native model identifier.
     pub native_model_id: &'a str,
     /// Route-aware native identity, when the model is scoped to a selection.
     pub native_selection: Option<NativeSelection<'a>>,
+    /// Live unavailability reason, when Forge marked this model disabled.
+    pub disabled_reason: Option<&'a str>,
     /// Model capabilities needed by this policy.
     pub capabilities: ModelCapabilities<'a>,
 }
 
 impl<'a> ModelDefinition<'a> {
     /// Creates a minimal catalog model entry.
+    ///
+    /// The catalog identity defaults to the native model id and the model
+    /// carries no live disabled reason; projections that read either use
+    /// [`Self::with_catalog_identity`]. The default keeps context-window
+    /// tests focused: they match policies against native model ids exactly
+    /// like the TypeScript counterpart does.
     #[must_use]
     pub const fn new(
         harness: &'a str,
@@ -142,11 +152,25 @@ impl<'a> ModelDefinition<'a> {
         capabilities: ModelCapabilities<'a>,
     ) -> Self {
         Self {
+            id: native_model_id,
             harness,
             native_model_id,
             native_selection,
+            disabled_reason: None,
             capabilities,
         }
+    }
+
+    /// Attaches the stable catalog identity and live disabled reason.
+    #[must_use]
+    pub const fn with_catalog_identity(
+        mut self,
+        id: &'a str,
+        disabled_reason: Option<&'a str>,
+    ) -> Self {
+        self.id = id;
+        self.disabled_reason = disabled_reason;
+        self
     }
 }
 
@@ -170,6 +194,42 @@ impl<'a> ModelManifest<'a> {
     }
 }
 
+/// The live availability of one scoped execution route.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CatalogRouteStatus {
+    /// The route can serve runs.
+    Available,
+    /// The route cannot serve runs.
+    Unavailable,
+}
+
+/// One scoped execution route in the runtime catalog.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CatalogRoute<'a> {
+    /// Harness/engine that owns this route.
+    pub engine_id: &'a str,
+    /// Live availability of the route.
+    pub status: CatalogRouteStatus,
+    /// Live reason, when the route is unavailable.
+    pub unavailable_reason: Option<&'a str>,
+}
+
+impl<'a> CatalogRoute<'a> {
+    /// Creates a catalog route projection.
+    #[must_use]
+    pub const fn new(
+        engine_id: &'a str,
+        status: CatalogRouteStatus,
+        unavailable_reason: Option<&'a str>,
+    ) -> Self {
+        Self {
+            engine_id,
+            status,
+            unavailable_reason,
+        }
+    }
+}
+
 /// The runtime catalog projection needed by composer send readiness.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RuntimeCatalog<'a> {
@@ -177,6 +237,8 @@ pub struct RuntimeCatalog<'a> {
     pub manifest: ModelManifest<'a>,
     /// Harnesses that the currently connected Forge can actually run.
     pub runnable_harness_ids: &'a [&'a str],
+    /// Scoped live execution routes, when the catalog carried any.
+    pub routes: &'a [CatalogRoute<'a>],
 }
 
 impl<'a> RuntimeCatalog<'a> {
@@ -186,10 +248,52 @@ impl<'a> RuntimeCatalog<'a> {
         harnesses: &'a [HarnessDefinition<'a>],
         models: &'a [ModelDefinition<'a>],
         runnable_harness_ids: &'a [&'a str],
+        routes: &'a [CatalogRoute<'a>],
     ) -> Self {
         Self {
             manifest: ModelManifest::new(harnesses, models),
             runnable_harness_ids,
+            routes,
+        }
+    }
+}
+
+/// Renderer-observed provisioning for one engine.
+///
+/// This is the installer's answer, not the catalog's: whether Artisan's
+/// managed binary is present, whether a failure or an in-flight install was
+/// observed, and whether a previous version proves a binary went missing
+/// rather than never existing.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct EngineProvisioning<'a> {
+    /// Whether Artisan's managed binary is installed and active.
+    pub managed: bool,
+    /// Active managed version, when one is installed.
+    pub active_version: Option<&'a str>,
+    /// Previously active version, when a binary went missing.
+    pub previous_version: Option<&'a str>,
+    /// User-facing install failure, when the last attempt failed.
+    pub failure: Option<&'a str>,
+    /// Whether an install or sign-in is still running for this engine.
+    pub busy: bool,
+}
+
+impl<'a> EngineProvisioning<'a> {
+    /// Creates an engine provisioning projection.
+    #[must_use]
+    pub const fn new(
+        managed: bool,
+        active_version: Option<&'a str>,
+        previous_version: Option<&'a str>,
+        failure: Option<&'a str>,
+        busy: bool,
+    ) -> Self {
+        Self {
+            managed,
+            active_version,
+            previous_version,
+            failure,
+            busy,
         }
     }
 }
@@ -293,14 +397,20 @@ impl<'a> SurfaceUsageAggregate<'a> {
 /// Returns the exact reason a composer send must stay disabled.
 ///
 /// Forge being offline has precedence over every catalog or policy detail.
-/// Once Forge is available, an absent policy engine is allowed through, and a
-/// listed runnable harness is allowed through.  An otherwise known harness is
-/// named with its catalog label; an unknown harness falls back to its id.
+/// Once Forge is available, an absent policy engine is allowed through.  Live
+/// catalog unavailability (a disabled policy model, or every scoped route for
+/// the engine unavailable) and renderer-observed provisioning (a failed,
+/// in-flight, missing, or never-set-up managed binary) block with their
+/// honest reason even when the harness is listed runnable, so a missing
+/// binary is never reported ready.  A listed runnable harness with none of
+/// those conditions is allowed through.  An otherwise known harness is named
+/// with its catalog label; an unknown harness falls back to its id.
 #[must_use]
 pub fn composer_send_blocked_reason(
     forge_available: bool,
     catalog: &RuntimeCatalog<'_>,
     policy: Option<&ThreadSessionPolicy<'_>>,
+    provisioning: Option<&EngineProvisioning<'_>>,
 ) -> Option<String> {
     if !forge_available {
         return Some("Forge is offline — reconnect to send".to_owned());
@@ -308,16 +418,81 @@ pub fn composer_send_blocked_reason(
 
     let policy = policy?;
     let engine_id = policy.engine_id;
-    if catalog.runnable_harness_ids.contains(&engine_id) {
-        return None;
-    }
-
     let label = catalog
         .manifest
         .harnesses
         .iter()
         .find(|harness| harness.id == engine_id)
         .map_or(engine_id, |harness| harness.label);
+
+    let policy_model = policy.model.or(policy.model_id);
+    if let Some(model) = catalog.manifest.models.iter().find(|model| {
+        if model.harness != engine_id {
+            return false;
+        }
+        if Some(model.id) == policy_model || Some(model.native_model_id) == policy_model {
+            return true;
+        }
+        match model.native_selection {
+            None => false,
+            Some(selection) => Some(selection.model_id) == policy.model_id.or(policy.model),
+        }
+    }) && let Some(reason) = model.disabled_reason
+    {
+        return Some(reason.to_owned());
+    }
+
+    let has_engine_routes = catalog
+        .routes
+        .iter()
+        .any(|route| route.engine_id == engine_id);
+    if has_engine_routes
+        && catalog
+            .routes
+            .iter()
+            .filter(|route| route.engine_id == engine_id)
+            .all(|route| route.status == CatalogRouteStatus::Unavailable)
+    {
+        return Some(
+            catalog
+                .routes
+                .iter()
+                .filter(|route| route.engine_id == engine_id)
+                .filter_map(|route| route.unavailable_reason)
+                .next()
+                .map_or_else(
+                    || format!("{label} is unavailable on this Forge right now"),
+                    str::to_owned,
+                ),
+        );
+    }
+
+    if let Some(provisioning) = provisioning
+        && !provisioning.managed
+        && provisioning.active_version.is_none()
+    {
+        if let Some(failure) = provisioning.failure {
+            return Some(format!("{label} could not start — {failure}"));
+        }
+        if provisioning.busy {
+            return Some(format!(
+                "{label} is still installing — try again when it finishes"
+            ));
+        }
+        if provisioning.previous_version.is_some() {
+            return Some(format!(
+                "{label}'s installed binary is missing — repair it to send"
+            ));
+        }
+        return Some(format!(
+            "{label} is not set up on this machine yet — install it to send"
+        ));
+    }
+
+    if catalog.runnable_harness_ids.contains(&engine_id) {
+        return None;
+    }
+
     Some(format!(
         "{label} models are preview-only — this engine cannot run in Artisan yet"
     ))
