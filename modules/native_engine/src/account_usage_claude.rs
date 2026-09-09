@@ -141,14 +141,14 @@ pub fn read_claude_usage(config: &ClaudeUsageConfig) -> Result<ProviderUsage, Us
     };
     join_thread_bounded(stderr_drain, USAGE_TEARDOWN_GRACE);
     join_thread_bounded(stdout_reader, USAGE_TEARDOWN_GRACE);
-    if !status.success() {
-        return Err(UsageReaderError::ExitStatus);
-    }
     let remaining = deadline.saturating_duration_since(Instant::now());
     let (outcome, stdout_bytes) = receiver
         .recv_timeout(remaining)
         .map_err(|_| UsageReaderError::Timeout)?;
     outcome?;
+    if !status.success() {
+        return Err(UsageReaderError::ExitStatus);
+    }
     // The CLI's contract is one JSON object on stdout; slice it out of any
     // surrounding banner text (version notices in production, harness
     // preamble in fixtures) instead of failing on the first foreign byte.
