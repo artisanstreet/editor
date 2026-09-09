@@ -24,11 +24,11 @@ request id; correlation is the outer frame identity only.
 | Field       | Type             | Required | Bounds                                                     |
 | ----------- | ---------------- | -------- | ---------------------------------------------------------- |
 | `engine_id` | string           | no       | Shared identifier rule: non-empty, no whitespace/control, ≤128 UTF-8 bytes. Absent means every registered engine. Unknown ids do **not** fail the query (see below). |
-| `force`     | boolean          | no       | Defaults to `false`. `true` bypasses the 60-second backend freshness window. |
+| `force`     | boolean          | no       | Defaults to `false`. `true` bypasses the 180-second backend freshness window. |
 
-Recommended client behavior: one query with absent `engine_id` for the first
-paint, then per-engine narrowed queries (`engine_id` set) to repaint single
-rows. `force: true` only on explicit user refresh. A narrowed single-engine
+The profile menu issues per-engine narrowed queries (`engine_id` set) for
+both initial loading and individual row updates. `force: true` is used on
+explicit user refresh. A narrowed single-engine
 snapshot carries exactly that engine's observation time in `fetched_at`;
 an aggregate snapshot carries the latest observation time across its
 reports, so clients that need exact per-engine freshness issue one narrowed
@@ -99,9 +99,9 @@ Window fields:
 
 ## Failure rendering rules
 
-1. `failure != null` → render the row in its failure state with the
-   `failure` string verbatim and no meters. The string is Artisan-owned and
-   safe to display.
+1. `failure != null` → display the failure alongside any retained last-good
+   meters and their original observation time. When no reading exists,
+   show the failure without meters. The string is Artisan-owned.
 2. `authentication == "unauthenticated"` → render the sign-in state with
    `auth_reason` (e.g. `Sign in to Cursor from Settings.`,
    `Cursor sign-in is no longer valid.`, `Codex account sign-in is
@@ -122,9 +122,8 @@ Window fields:
    non-retryable). Render the whole surface unavailable, not per-row
    failures.
 7. Never substitute token run-usage (per-turn/per-run token counts) for
-   these account reads, and never render an empty `windows` list with
-   `quota_surface == "supported"` as "no quota": it means the account has no
-   configured spend limit.
+   these account reads. An empty `windows` list means no windows were
+   reported; it does not establish that the account has unlimited usage.
 
 ## Freshness contract
 
@@ -137,9 +136,9 @@ Window fields:
   never stamped with the current clock. A `failure` string on a report that
   still carries windows means exactly this: render the last-good meters with
   a stale warning, not an empty failure state.
-- `fetched_at` identifies the snapshot; rows from one snapshot are mutually
-  consistent. Do not mix rows across snapshots when painting per-engine
-  fan-out results.
+- Each narrowed response supplies its engine's observation time. The menu
+  combines these independent rows, accepting replies only when the engine,
+  connection generation, and current request sequence match.
 
 ## Known backend limitations (visible to UI copy)
 
