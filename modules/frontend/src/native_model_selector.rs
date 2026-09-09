@@ -42,8 +42,8 @@ use crate::native_model_catalog::{
 
 #[path = "native_picker_motion.rs"]
 mod native_picker_motion;
-pub(crate) use self::native_picker_motion::{HoverRect, SlidingHoverState};
-use self::native_picker_motion::{PickerMenuMotion, PickerMenuPhase, PickerScrollState};
+pub(crate) use self::native_picker_motion::{HoverRect, PickerScrollState, SlidingHoverState};
+use self::native_picker_motion::{PickerMenuMotion, PickerMenuPhase};
 
 /// Stable selector painted on the compact composer trigger.
 pub const NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR: &str = "artisan-native-model-selector-trigger";

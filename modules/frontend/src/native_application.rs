@@ -39,9 +39,9 @@ use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
-    FocusHandle, FontWeight, KeyBinding, Render, SharedString, Stateful,
-    StatefulInteractiveElement, StyledImage as _, Subscription, Task, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, canvas, div,
+    FocusHandle, FontWeight, KeyBinding, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    Stateful, StatefulInteractiveElement, StyledImage as _, Subscription, Task, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, actions, canvas, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
 };
@@ -66,8 +66,8 @@ use crate::native_composer_material::{
 use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent};
 use crate::native_model_catalog::NativeModelCatalog;
 use crate::native_model_selector::{
-    HoverRect, NativeModelSelector, NativeModelSelectorStatus, SlidingHoverState,
-    render_picker_hover_pill,
+    HoverRect, NativeModelSelector, NativeModelSelectorStatus, PickerScrollState,
+    SlidingHoverState, render_picker_hover_pill,
 };
 use crate::native_profile_usage::{
     NativeProfileUsageState, NativeUsageAuthentication, NativeUsageEntry, NativeUsageWindow,
@@ -142,6 +142,15 @@ const SIDEBAR_NEW_THREAD_HOVER_ID: &str = "new-thread";
 const SIDEBAR_MARKETPLACE_HOVER_ID: &str = "marketplace";
 const PROFILE_SETTINGS_HOVER_ID: &str = "profile-settings";
 const PROFILE_USAGE_HOVER_ID: &str = "profile-usage";
+/// Breathing room kept between the profile panel top edge and the viewport.
+const PROFILE_MENU_VIEWPORT_MARGIN_PX: f32 = 8.0;
+/// Vertical gap between the panel bottom and the profile trigger top,
+/// matching the anchored offset applied when placing the panel.
+const PROFILE_MENU_ANCHOR_GAP_PX: f32 = 10.0;
+/// Fixed vertical chrome inside the profile panel: outer padding (12),
+/// header (avatar 32 + vertical padding 16), divider (1 + margins 8),
+/// and the two 34px action rows.
+const PROFILE_MENU_FIXED_CHROME_PX: f32 = 12.0 + 48.0 + 9.0 + 68.0;
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -279,6 +288,9 @@ pub struct NativeApplication {
     /// after a keyboard move even though the pointer never left; the mode
     /// keeps that recomputation from discarding a keyboard-owned pill.
     profile_hover_keyboard: Cell<bool>,
+    profile_usage_scroll: ScrollHandle,
+    profile_usage_scroll_state: PickerScrollState,
+    profile_usage_scroll_frame_scheduled: bool,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
@@ -485,6 +497,9 @@ impl NativeApplication {
             profile_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             profile_hover_surface_bounds: Rc::new(RefCell::new(None)),
             profile_hover_keyboard: Cell::new(false),
+            profile_usage_scroll: ScrollHandle::new(),
+            profile_usage_scroll_state: PickerScrollState::default(),
+            profile_usage_scroll_frame_scheduled: false,
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
@@ -985,7 +1000,7 @@ impl NativeApplication {
         )
     }
 
-    fn desktop_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
+    fn desktop_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = self.desktop_theme;
         let sidebar_item_radius = px(6.0);
         let visible_hover_ids = vec![
@@ -1152,7 +1167,7 @@ impl NativeApplication {
             .p(px(10.0))
             .child(navigation)
             .child(div().flex_1().min_h(px(0.0)))
-            .child(self.desktop_profile(cx))
+            .child(self.desktop_profile(window, cx))
     }
 
     fn profile_hover_id_for_index(index: usize) -> Option<String> {
@@ -1188,6 +1203,88 @@ impl NativeApplication {
         self.profile_hover_keyboard.set(false);
     }
 
+    /// Maximum height for the scrollable usage area: the natural content
+    /// height wins until the panel would outgrow the space above the
+    /// trigger, keeping a small viewport margin. The fixed header, divider,
+    /// action rows, and panel padding are subtracted so only the usage
+    /// area scrolls. Short windows clamp at zero instead of overflowing.
+    fn profile_usage_max_height(&self, window: &Window) -> gpui::Pixels {
+        let viewport_height = f32::from(window.bounds().size.height);
+        let trigger_top = f32::from(self.profile_origin.get().top());
+        let available = trigger_top - PROFILE_MENU_ANCHOR_GAP_PX - PROFILE_MENU_VIEWPORT_MARGIN_PX;
+        px((available - PROFILE_MENU_FIXED_CHROME_PX).max(0.0))
+    }
+
+    fn handle_profile_usage_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Same contract as the model picker: this wrapper is the first
+        // bubble listener inside the scroll container, so consuming the
+        // wheel here keeps GPUI from applying its default offset update a
+        // second time.
+        cx.stop_propagation();
+        if !self.profile_menu.is_open() {
+            return;
+        }
+        let delta = event.delta.pixel_delta(window.line_height()).y;
+        let delta = f32::from(delta);
+        if delta.abs() <= f32::EPSILON {
+            return;
+        }
+        let handle = self.profile_usage_scroll.clone();
+        let offset = handle.offset();
+        let current = f32::from(offset.y);
+        let maximum = f32::from(handle.max_offset().y).max(0.0);
+        if event.delta.precise() || cx.reduce_motion() {
+            let next = (current + delta).clamp(-maximum, 0.0);
+            handle.set_offset(gpui::point(offset.x, px(next)));
+            self.profile_usage_scroll_state.cancel_to(next, maximum);
+            cx.notify();
+            return;
+        }
+        self.profile_usage_scroll_state
+            .push(current, delta, maximum);
+        self.schedule_profile_usage_scroll_frame(window, cx);
+    }
+
+    fn schedule_profile_usage_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.profile_usage_scroll_state.active() || self.profile_usage_scroll_frame_scheduled {
+            return;
+        }
+        self.profile_usage_scroll_frame_scheduled = true;
+        cx.on_next_frame(window, |application, window, cx| {
+            application.advance_profile_usage_scroll(window, cx);
+        });
+    }
+
+    fn advance_profile_usage_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile_usage_scroll_frame_scheduled = false;
+        let offset = self.profile_usage_scroll.offset();
+        let maximum = f32::from(self.profile_usage_scroll.max_offset().y).max(0.0);
+        if let Some(next) = self
+            .profile_usage_scroll_state
+            .step(f32::from(offset.y), maximum)
+        {
+            self.profile_usage_scroll
+                .set_offset(gpui::point(offset.x, px(next)));
+            cx.notify();
+        }
+        self.schedule_profile_usage_scroll_frame(window, cx);
+    }
+
+    /// Settles a queued scroll target at the current offset so dismissing
+    /// the menu cannot leave inertia pending for the next open.
+    fn cancel_profile_usage_scroll(&mut self) {
+        let offset = self.profile_usage_scroll.offset();
+        let maximum = f32::from(self.profile_usage_scroll.max_offset().y).max(0.0);
+        self.profile_usage_scroll_state
+            .cancel_to(f32::from(offset.y), maximum);
+        self.profile_usage_scroll_frame_scheduled = false;
+    }
+
     fn activate_profile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for action in self.profile_menu.take_actions() {
             match action.item_id().as_ref() {
@@ -1208,6 +1305,7 @@ impl NativeApplication {
                 }
                 "settings" => {
                     self.clear_profile_hover();
+                    self.cancel_profile_usage_scroll();
                     self.navigate(
                         NativeRoute::Settings {
                             section: SettingsRoute::Models,
@@ -1300,7 +1398,7 @@ impl NativeApplication {
         section
     }
 
-    fn desktop_profile(&self, cx: &Context<Self>) -> Div {
+    fn desktop_profile(&self, window: &Window, cx: &Context<Self>) -> Div {
         let theme = self.desktop_theme;
         let profile_feedback = self.theme.colors.foreground.with_alpha(0.08).to_paint();
         let origin = self.profile_origin.clone();
@@ -1417,6 +1515,7 @@ impl NativeApplication {
                     app.ensure_profile_usage(false, None, cx);
                 } else {
                     app.clear_profile_hover();
+                    app.cancel_profile_usage_scroll();
                 }
                 cx.notify();
             }))
@@ -1425,6 +1524,7 @@ impl NativeApplication {
                     "escape" => {
                         let _ = app.profile_menu.dismiss();
                         app.clear_profile_hover();
+                        app.cancel_profile_usage_scroll();
                     }
                     "down" => {
                         app.profile_menu.set_open(true);
@@ -1461,6 +1561,7 @@ impl NativeApplication {
                     "tab" => {
                         let _ = app.profile_menu.dismiss();
                         app.clear_profile_hover();
+                        app.cancel_profile_usage_scroll();
                         cx.notify();
                         return;
                     }
@@ -1508,11 +1609,13 @@ impl NativeApplication {
                     if !trigger.contains(&event.position) {
                         let _ = app.profile_menu.dismiss();
                         app.clear_profile_hover();
+                        app.cancel_profile_usage_scroll();
                         cx.notify();
                     }
                 }))
                 .child(
                     div()
+                        .debug_selector(|| "artisan-desktop-profile-header".to_owned())
                         .px(px(10.0))
                         .py(px(8.0))
                         .flex()
@@ -1548,7 +1651,7 @@ impl NativeApplication {
                                 .child(
                                     div()
                                         .truncate()
-                                        .text_size(px(14.0))
+                                        .text_size(px(13.0))
                                         .line_height(px(16.0))
                                         .text_color(theme.secondary)
                                         .child(
@@ -1562,10 +1665,23 @@ impl NativeApplication {
                 .child(
                     div()
                         .id("artisan-profile-usage-scroll")
+                        .debug_selector(|| "artisan-profile-usage-scroll".to_owned())
                         .min_h(px(0.0))
-                        .max_h(px(280.0))
+                        .max_h(self.profile_usage_max_height(window))
                         .overflow_y_scroll()
-                        .child(self.desktop_profile_usage(theme, cx)),
+                        .track_scroll(&self.profile_usage_scroll)
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .min_w(px(0.0))
+                                .flex_shrink_0()
+                                .on_scroll_wheel(
+                                    cx.listener(Self::handle_profile_usage_scroll_wheel),
+                                )
+                                .child(self.desktop_profile_usage(theme, cx)),
+                        ),
                 )
                 .child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
             self.profile_hover.borrow_mut().clear_if_missing(&[
@@ -1679,7 +1795,12 @@ impl NativeApplication {
                         .cursor_pointer()
                         .child(row_probe)
                         .child(desktop_nav_glyph(icon, theme))
-                        .child(desktop_muted(theme, label))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(theme.foreground)
+                                .child(label),
+                        )
                         .on_hover(cx.listener(move |app, hovered: &bool, _, cx| {
                             if *hovered {
                                 app.set_profile_highlight(index);
@@ -5542,7 +5663,7 @@ fn message_status_detail(
 impl Render for NativeApplication {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_composer_controls(cx);
-        let sidebar = self.desktop_sidebar(cx).into_any_element();
+        let sidebar = self.desktop_sidebar(window, cx).into_any_element();
         let body = self.desktop_route_body(cx);
         let identity = self.desktop_identity(cx).into_any_element();
         let search = self.command_menu.clone().into_any_element();
@@ -6474,6 +6595,7 @@ mod tests {
         DESKTOP_OFFLINE_SELECTOR, DESKTOP_SIDEBAR_SELECTOR, DESKTOP_TITLEBAR_SELECTOR,
     };
     use crate::native_command_menu::COMMAND_MENU_DROPDOWN_SELECTOR;
+    use crate::native_profile_usage::NativeUsageEntry;
     use crate::native_route::{NativeRoute, SettingsRoute};
     use crate::{
         conversation_delivery_machine::ConversationDeliveryEffect,
@@ -6563,6 +6685,23 @@ mod tests {
             outcomes: Rc::new(RefCell::new(outcomes.into_iter().collect::<VecDeque<_>>())),
         };
         (sink, commands)
+    }
+
+    fn install_connected_profile_usage(
+        application: &mut NativeApplication,
+        sink: NativeTestCommandSink,
+        engines: usize,
+    ) {
+        application.test_command_sink = Some(sink);
+        for index in 0..engines {
+            application
+                .profile_usage
+                .entries
+                .push(NativeUsageEntry::pending(
+                    format!("profile-test-engine-{index}"),
+                    format!("Profile Test Engine {index}"),
+                ));
+        }
     }
 
     fn message_failure() -> ServiceFailure {
@@ -7151,6 +7290,222 @@ mod tests {
             assert!(!application.profile_menu.is_open());
             assert_eq!(application.profile_hover.borrow().active_id(), None);
             assert!(!application.profile_hover.borrow().visible());
+        });
+    }
+
+    #[gpui::test]
+    fn profile_usage_small_content_keeps_natural_height(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        let scroller = cx
+            .debug_bounds("artisan-profile-usage-scroll")
+            .expect("usage scroller");
+        let height = f32::from(scroller.size.height);
+        assert!(
+            height > 0.0 && height < 120.0,
+            "short usage content must keep its natural height, got {height}"
+        );
+        cx.update(|_, app| {
+            assert_eq!(
+                f32::from(view.read(app).profile_usage_scroll.max_offset().y),
+                0.0
+            );
+        });
+        assert!(cx.debug_bounds("artisan-desktop-profile-header").is_some());
+        assert!(
+            cx.debug_bounds("artisan-desktop-profile-actions-hover-surface")
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn profile_usage_tall_content_caps_with_viewport(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                install_connected_profile_usage(application, sink, 16);
+            });
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        let tall = cx
+            .debug_bounds("artisan-profile-usage-scroll")
+            .expect("usage scroller");
+        assert!(
+            f32::from(tall.size.height) > 280.0,
+            "tall usage content must expand past the old 280px cap"
+        );
+        cx.update(|_, app| {
+            assert!(
+                f32::from(view.read(app).profile_usage_scroll.max_offset().y) > 0.0,
+                "the tall usage fixture must scroll"
+            );
+        });
+        assert!(cx.debug_bounds("artisan-desktop-profile-header").is_some());
+        assert!(
+            cx.debug_bounds("artisan-desktop-profile-actions-hover-surface")
+                .is_some()
+        );
+
+        cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(320.0)));
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        let capped = cx
+            .debug_bounds("artisan-profile-usage-scroll")
+            .expect("usage scroller");
+        assert!(
+            f32::from(capped.size.height) < 120.0,
+            "a short window must shrink the usage area instead of overflowing"
+        );
+        let header = cx
+            .debug_bounds("artisan-desktop-profile-header")
+            .expect("profile header");
+        assert!(
+            header.top() >= gpui::px(0.0),
+            "the header must stay inside a short window"
+        );
+        assert!(
+            cx.debug_bounds("artisan-desktop-profile-actions-hover-surface")
+                .is_some()
+        );
+
+        cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(200.0)));
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        let collapsed = cx
+            .debug_bounds("artisan-profile-usage-scroll")
+            .expect("usage scroller");
+        assert!(
+            f32::from(collapsed.size.height) <= 1.0,
+            "a tiny window must clamp the usage area instead of going negative"
+        );
+    }
+
+    #[gpui::test]
+    fn profile_usage_wheel_scrolls_once_and_dismiss_cancels(cx: &mut TestAppContext) {
+        cx.update(|app| app.set_reduce_motion(true));
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                install_connected_profile_usage(application, sink, 16);
+            });
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        let maximum = cx.update(|_, app| {
+            let maximum = f32::from(view.read(app).profile_usage_scroll.max_offset().y);
+            assert!(maximum > 0.0, "the tall usage fixture must scroll");
+            maximum
+        });
+        let scroll_center = cx
+            .debug_bounds("artisan-profile-usage-scroll")
+            .expect("usage scroller")
+            .center();
+
+        // A lines wheel queues a bounded target without jumping there.
+        cx.update(|app| app.set_reduce_motion(false));
+        let line = cx.update(|window, _| f32::from(window.line_height()));
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll_center,
+            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.update(|_, app| {
+            let application = view.read(app);
+            let target = application.profile_usage_scroll_state.target();
+            assert_eq!(target, (-3.0 * line).clamp(-maximum, 0.0));
+            let offset = f32::from(application.profile_usage_scroll.offset().y);
+            assert!(
+                offset >= target && offset <= 0.0,
+                "the wheel must not jump straight to its target"
+            );
+        });
+
+        // A precise pixel wheel applies exactly once and cancels inertia.
+        let expected_pixel = cx.update(|_, app| {
+            let application = view.read(app);
+            (f32::from(application.profile_usage_scroll.offset().y) - 7.0).clamp(
+                -f32::from(application.profile_usage_scroll.max_offset().y),
+                0.0,
+            )
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll_center,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-7.0))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert_eq!(
+                f32::from(application.profile_usage_scroll.offset().y),
+                expected_pixel
+            );
+            assert!(!application.profile_usage_scroll_state.active());
+        });
+
+        // Reduced motion settles a lines wheel directly.
+        cx.update(|app| app.set_reduce_motion(true));
+        let expected_reduced = cx.update(|_, app| {
+            let application = view.read(app);
+            (f32::from(application.profile_usage_scroll.offset().y) - line).clamp(
+                -f32::from(application.profile_usage_scroll.max_offset().y),
+                0.0,
+            )
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll_center,
+            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -1.0)),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert_eq!(
+                f32::from(application.profile_usage_scroll.offset().y),
+                expected_reduced
+            );
+            assert!(!application.profile_usage_scroll_state.active());
+        });
+
+        // Dismissing with a queued target cancels the pending motion.
+        cx.update(|app| app.set_reduce_motion(false));
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll_center,
+            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(!application.profile_menu.is_open());
+            assert_eq!(
+                application.profile_usage_scroll_state.target(),
+                f32::from(application.profile_usage_scroll.offset().y)
+            );
+            assert!(!application.profile_usage_scroll_state.active());
         });
     }
 
