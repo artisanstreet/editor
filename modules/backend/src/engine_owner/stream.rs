@@ -468,7 +468,11 @@ async fn deliver_events(
             EngineObservation::Terminal(terminal) => Some(terminal.state()),
             EngineObservation::TextDelta(_)
             | EngineObservation::TextSnapshot(_)
-            | EngineObservation::Usage(_) => None,
+            | EngineObservation::Usage(_)
+            // Subagent rows are progress observations, never terminal
+            // receipt state; they travel the Claude owner channel only.
+            | EngineObservation::Subagent(_)
+            | EngineObservation::SubagentTranscript(_) => None,
         };
         deliver_observation(
             observation,

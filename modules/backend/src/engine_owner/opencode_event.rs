@@ -935,7 +935,7 @@ mod tests {
     fn text_delta_from(observation: &EngineObservation) -> &TextDelta {
         match observation {
             EngineObservation::TextDelta(delta) => delta,
-            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) => panic!("unexpected production observation in fixture"),
+            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
             EngineObservation::Terminal(_) => panic!("expected text delta"),
         }
     }

@@ -12,10 +12,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artisan_domain::{
-    ApprovalKind, ApprovalMode, ClaudeEffort, ClaudePermissionMode, ClaudeSelection, EngineAgentId,
-    EngineModelId, EnginePermissionPolicy, EngineProfileId, FilesystemAccess, MessagePhase,
-    NetworkAccess, Observation, ObservationSequence, PermissionId, RunId, SubagentState,
-    TranscriptContent, WebSearchAccess,
+    ApprovalKind, ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
+    CountLimit, EngineAgentId, EngineConfigUpdatePrecondition, EngineId, EngineModelId,
+    EnginePermissionPolicy, EngineProfileId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, ItemId,
+    MessageBody, MessageId, MessagePhase, NetworkAccess, Observation, ObservationSequence, PatchId,
+    PermissionId, ProjectId, RequestId, Revision, RunId, SubagentState, ThreadId, ThreadTitle,
+    TranscriptContent, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_transport::CancelHandle;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -28,9 +31,27 @@ use super::claude::{
     apply_event, approval_response_line, classify_exit, has_stalled, new_session_id, parse_frame,
     steer_live_turn, terminal_observation, user_message_line, write_line,
 };
-use super::observation::{EngineObservation, TerminalState};
-use crate::native_run_dispatch::{binding_bytes_vec, binding_matches_bytes};
+use super::observation::{
+    EngineObservation, SubagentLifecycleRow, SubagentTranscriptRow, TerminalState,
+};
+use crate::SystemCommandOrigin;
+use crate::conversation_commit_notifier::ConversationCommitNotifier;
+use crate::native_run_dispatch::{
+    NativeRunDispatcherConfig, NativeRunDispatcherConfigInput, SubagentCommitCursor,
+    binding_bytes_vec, binding_matches_bytes, commit_subagent_observation,
+};
+use artisan_database::entities::ConversationItemKind;
+use artisan_database::{
+    BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch, CreateThreadInput,
+    DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome, ProviderBindingBytes,
+    QueueFirstMessageInput, Repository, RunBatchScope, RunLaunchCredentials, RunStartKey,
+    SetThreadEngineConfigInput, SqliteConfig, connect, entities,
+};
+use artisan_migrations::migrate_to_current;
 use artisan_native_engine::CLAUDE_NATIVE_CONTINUATION_VERSION;
+use artisan_native_engine::NativeOpenCode2Authority;
+use sea_orm::{ActiveValue::Set, EntityTrait};
+use std::num::NonZeroUsize;
 
 // ---------------------------------------------------------------------------
 // Selection and settings
@@ -1380,4 +1401,365 @@ fn duplex_write_shapes_stream_json_framing() {
         server.read_to_string(&mut text).await.expect("read");
         assert_eq!(text, "{\"type\":\"user\"}\n");
     });
+}
+
+#[test]
+fn duplex_write_shapes_stream_json_framing() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let (mut client, server) = tokio::io::duplex(65_536);
+        let mut server = BufReader::new(server);
+        write_line(&mut client, r#"{"type":"user"}"#)
+            .await
+            .expect("write");
+        drop(client);
+        let mut text = String::new();
+        server.read_to_string(&mut text).await.expect("read");
+        assert_eq!(text, "{\"type\":\"user\"}\n");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Owner channel plus dispatcher commit end to end (real repository)
+// ---------------------------------------------------------------------------
+
+fn subagent_test_engine_config() -> EngineRunConfig {
+    let phase = FiniteMillis::new(1).expect("phase budget is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: phase,
+        health_budget: phase,
+        prompt_budget: phase,
+        stream_budget: phase,
+        close_budget: phase,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-claude-sub").expect("permission id"),
+        EngineAgentId::parse("agent-claude-sub").expect("agent id"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::Claude(
+            ClaudeSelection::new(
+                EngineProfileId::parse("claude-fixture").expect("profile id"),
+                Some(EngineModelId::parse("model-claude-sub").expect("model id")),
+                permission,
+                None,
+                None,
+                false,
+                false,
+            )
+            .expect("claude selection valid"),
+        ),
+        runtime,
+    )
+}
+
+fn subagent_test_dispatcher_config() -> NativeRunDispatcherConfig {
+    NativeRunDispatcherConfig::new(
+        NativeOpenCode2Authority::new(),
+        ConversationCommitNotifier::new(),
+        NativeRunDispatcherConfigInput {
+            claim_lease: Duration::from_millis(10),
+            poll_interval: Duration::from_millis(10),
+            retry_backoff: Duration::from_millis(10),
+            shutdown_budget: Duration::from_millis(10),
+            queue_capacity: NonZeroUsize::new(1).expect("queue slot"),
+            max_command_retries: NonZeroUsize::new(3).expect("retries"),
+            prompt_delivery: "immediate".to_owned(),
+            stream_after: 0,
+        },
+    )
+    .expect("dispatcher config")
+}
+
+/// Proves one discovery plus one transcript row traverse the owner channel
+/// plus the dispatcher S1b commit end to end: real owner boundary rows are
+/// wrapped into channel events, cross a real channel in order, commit
+/// through the real S1b batch path against a real repository with
+/// sequencing, and leave root text durably untouched.
+#[tokio::test]
+async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
+    let database = connect(
+        SqliteConfig::in_memory()
+            .min_connections(1)
+            .max_connections(1)
+            .sqlx_logging(false),
+    )
+    .await
+    .expect("memory database should open");
+    migrate_to_current(&database)
+        .await
+        .expect("memory database should migrate");
+    let repository = Repository::new(database.clone());
+
+    let project = entities::attached_project::ActiveModel {
+        project_id: Set("project-claude-sub".to_owned()),
+        root_path: Set("C:/repos/artisan".to_owned()),
+        display_name: Set("Artisan".to_owned()),
+        attached_at_ms: Set(1),
+    };
+    entities::attached_project::Entity::insert(project)
+        .exec(&database)
+        .await
+        .expect("project should insert");
+    let thread = ThreadId::parse("thread-claude-sub").expect("thread id");
+    repository
+        .create_thread(CreateThreadInput {
+            request_id: RequestId::parse("req-thread-claude-sub").expect("request id"),
+            thread_id: thread.clone(),
+            project_id: ProjectId::parse("project-claude-sub").expect("project id"),
+            title: ThreadTitle::parse("Claude subagents").expect("title"),
+            created_at: UnixMillis::from_millis(10),
+            updated_at: UnixMillis::from_millis(10),
+        })
+        .await
+        .expect("thread should create");
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("engine-thread-claude-sub").expect("request id"),
+            thread_id: thread.clone(),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: subagent_test_engine_config(),
+            accepted_at: UnixMillis::from_millis(10),
+        })
+        .await
+        .expect("engine configuration should create");
+
+    let run = RunId::parse("run-claude-sub").expect("run id");
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("req-msg-claude-sub").expect("request id"),
+            message_id: MessageId::parse("msg-claude-sub").expect("message id"),
+            thread_id: thread.clone(),
+            body: MessageBody::parse("hello").expect("body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("message should queue");
+    let claimed = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: DispatchLeaseOwner::new([0x22; 32]),
+            claimed_at: UnixMillis::from_millis(100),
+            lease_expires_at: UnixMillis::from_millis(600),
+        })
+        .await
+        .expect("claim should read")
+        .expect("message should claim");
+    let turn = TurnId::parse("turn-claude-sub").expect("turn id");
+    let item = ItemId::parse("item-run-claude-sub").expect("item id");
+    let first_patch = PatchId::parse("patch-run-claude-sub-a").expect("patch id");
+    let second_patch = PatchId::parse("patch-run-claude-sub-b").expect("patch id");
+    let start_key = RunStartKey::new([0x5a; 32]);
+    let credentials = RunLaunchCredentials::new([0xa1; 32], [0xb2; 32], [0xc3; 32]);
+    let engine_settings = repository
+        .read_thread_engine_settings(&thread)
+        .await
+        .expect("engine configuration should read")
+        .expect("engine configuration should be present");
+    let outcome = repository
+        .launch_claimed_run(LaunchClaimedRun {
+            claimed: &claimed,
+            run_id: &run,
+            turn_id: &turn,
+            item_id: &item,
+            first_patch_id: &first_patch,
+            second_patch_id: &second_patch,
+            operated_at: UnixMillis::from_millis(150),
+            run_start_key: &start_key,
+            credentials: &credentials,
+            engine_settings: &engine_settings,
+        })
+        .await
+        .expect("launch should write");
+    let LaunchClaimedRunOutcome::Started(receipt) = outcome else {
+        panic!("run should launch");
+    };
+    let binding = ProviderBindingBytes::new(
+        binding_bytes_vec("claude", "claude-fixture", "session-native-1").expect("binding builds"),
+    )
+    .expect("binding wraps");
+    let bound = match repository
+        .bind_run_provider(BindRunProvider {
+            claimed: &claimed,
+            receipt: &receipt,
+            run_start_key: &start_key,
+            credentials: &credentials,
+            expected_launch_at: UnixMillis::from_millis(150),
+            bound_at: UnixMillis::from_millis(200),
+            binding_version: 1,
+            binding_bytes: &binding,
+        })
+        .await
+        .expect("bind should write")
+    {
+        BindRunProviderOutcome::Bound(bound) | BindRunProviderOutcome::AlreadyBound(bound) => bound,
+    };
+
+    let config = subagent_test_dispatcher_config();
+    let origin = SystemCommandOrigin;
+    let mut cursor = SubagentCommitCursor {
+        scope: RunBatchScope {
+            claimed: &claimed,
+            launched: &receipt,
+            bound: &bound,
+            run_start_key: &start_key,
+            credentials: &credentials,
+            expected_launch_at: UnixMillis::from_millis(150),
+            expected_updated_at: UnixMillis::from_millis(200),
+        },
+        engine: EngineId::Claude,
+        batch_sequence: 1,
+        assistant_item: None,
+        assistant_revision: Revision::new(0),
+        assistant_body: "root ".to_owned(),
+    };
+
+    // Rows come from the real owner boundary: parse plus apply, then wrap
+    // into channel events exactly like the pump settlement will.
+    let mut tracker = ClaudePendingTracker::new();
+    let (apply_sender, _) = mpsc::channel::<EngineObservation>(8);
+    let mut active = None;
+    for (line, sequence) in [
+        (
+            r#"{"type":"system","subtype":"task_started","task_id":"task-1","description":"Explore"}"#,
+            3,
+        ),
+        (
+            r#"{"type":"assistant","parent_tool_use_id":"tool-9","message":{"content":[{"type":"text","text":"child speaks"}]}}"#,
+            4,
+        ),
+    ] {
+        let event = parse_frame(line, sequence).expect("frame decodes");
+        let outcome = apply_event(
+            event,
+            &run,
+            "session-native-1",
+            &mut tracker,
+            &mut active,
+            &apply_sender,
+            sequence,
+        )
+        .await;
+        assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
+    }
+    let (channel_tx, mut channel_rx) = mpsc::channel::<EngineObservation>(8);
+    for row in tracker.take_subagent_rows() {
+        let event = match row {
+            Observation::Subagent(observation) => {
+                EngineObservation::Subagent(SubagentLifecycleRow::new(observation))
+            }
+            Observation::SubagentTranscript(observation) => {
+                EngineObservation::SubagentTranscript(SubagentTranscriptRow::new(observation))
+            }
+            other => panic!("unexpected row kind {}", other.tag()),
+        };
+        channel_tx.send(event).await.expect("channel carries row");
+    }
+    drop(channel_tx);
+
+    // The dispatcher commit drains the channel in order, one S1b batch per
+    // row, advancing the durable chain across batches.
+    let mut committed = 0;
+    while let Some(event) = channel_rx.recv().await {
+        let observation = match event {
+            EngineObservation::Subagent(row) => Observation::Subagent(row.into_observation()),
+            EngineObservation::SubagentTranscript(row) => {
+                Observation::SubagentTranscript(row.into_observation())
+            }
+            _ => panic!("root rows never share the subagent assertions"),
+        };
+        assert!(
+            commit_subagent_observation(&repository, &config, &origin, &mut cursor, observation)
+                .await,
+            "S1b commit persists row"
+        );
+        committed += 1;
+    }
+    assert_eq!(committed, 2);
+    assert_eq!(cursor.batch_sequence, 3);
+    assert!(cursor.assistant_item.is_some());
+    assert_eq!(cursor.assistant_body, "root ");
+    assert_eq!(
+        repository
+            .last_committed_observation_sequence(&run)
+            .await
+            .expect("sequence reads"),
+        Some(2)
+    );
+
+    // Durable history holds exactly the two re-sequenced rows in order under
+    // the Claude engine tag.
+    let checkpoint = entities::run_checkpoint::Entity::find_by_id("run-claude-sub")
+        .one(&database)
+        .await
+        .expect("checkpoint reads")
+        .expect("checkpoint row");
+    let decoded = artisan_database::decode_observation_checkpoint(
+        checkpoint
+            .engine_checkpoint_version
+            .expect("checkpoint version"),
+        checkpoint
+            .engine_checkpoint_blob
+            .as_ref()
+            .expect("checkpoint blob")
+            .as_slice(),
+    )
+    .expect("checkpoint decodes");
+    assert_eq!(decoded.engine(), EngineId::Claude);
+    assert_eq!(decoded.observations().len(), 2);
+    match &decoded.observations()[0] {
+        Observation::Subagent(observation) => {
+            assert_eq!(observation.state(), SubagentState::Discovered);
+            assert_eq!(observation.agent_native_thread_id().as_str(), "task-1");
+            assert_eq!(
+                observation.parent_native_thread_id().as_str(),
+                "session-native-1"
+            );
+        }
+        other => panic!("expected subagent row, got {}", other.tag()),
+    }
+    match &decoded.observations()[1] {
+        Observation::SubagentTranscript(observation) => {
+            assert_eq!(observation.agent_native_thread_id().as_str(), "tool-9");
+            assert_eq!(
+                observation.parent_native_thread_id().as_str(),
+                "session-native-1"
+            );
+            match observation.content() {
+                TranscriptContent::AgentMessageDelta(content) => {
+                    assert_eq!(content.delta(), "child speaks");
+                }
+                other => panic!("expected message delta, got {}", other.tag()),
+            }
+        }
+        other => panic!("expected transcript row, got {}", other.tag()),
+    }
+
+    // Root text committed verbatim beside the rows, never adopted.
+    let items = entities::conversation_item::Entity::find()
+        .all(&database)
+        .await
+        .expect("items read");
+    let assistants: Vec<_> = items
+        .iter()
+        .filter(|item| item.item_kind == ConversationItemKind::AssistantMessage)
+        .collect();
+    assert_eq!(assistants.len(), 1);
+    assert_eq!(assistants[0].body, "root ");
 }

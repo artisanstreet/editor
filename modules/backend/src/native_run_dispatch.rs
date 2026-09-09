@@ -28,8 +28,9 @@ use artisan_database::{
 };
 use artisan_domain::{
     AssistantBody, AssistantMessagePhase, EngineId, EngineSelection, IncrementalText, ItemId,
-    ObservationId, ObservationSequence, PatchId, RespondApproval, RespondQuestion, Revision,
-    RootPath, RunId, TurnId, UnixMillis,
+    Observation, ObservationId, ObservationSequence, PatchId, RespondApproval, RespondQuestion,
+    Revision, RootPath, RunId, SubagentInput, SubagentObservation, SubagentTranscriptObservation,
+    TurnId, UnixMillis,
 };
 use artisan_native_engine::{
     NativeClaudeAuthority, NativeCodexAuthority, NativeOpenCode2Authority, VerifiedClaudeLaunch,
@@ -45,7 +46,8 @@ use crate::{
     conversation_commit_notifier::ConversationCommitNotifier,
     engine_owner::interaction::InteractionTarget,
     engine_owner::observation::{
-        EngineObservation, TerminalState, TextDelta, TextSnapshot, UsageObservation,
+        EngineObservation, SubagentLifecycleRow, SubagentTranscriptRow, TerminalState, TextDelta,
+        TextSnapshot, UsageObservation,
     },
     engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
     engine_owner::{
@@ -2350,6 +2352,12 @@ async fn handle_observation(
                 turn.cancel();
             }
         }
+        EngineObservation::Subagent(row) => {
+            handle_subagent_lifecycle_row(context, state, turn, row).await;
+        }
+        EngineObservation::SubagentTranscript(row) => {
+            handle_subagent_transcript_row(context, state, turn, row).await;
+        }
     }
 }
 
@@ -2807,6 +2815,268 @@ fn build_resolved_observation(
         .map(artisan_domain::Observation::Question);
     }
     None
+}
+
+/// Mutable S1b cursor for subagent observation commits.
+///
+/// Mirrors the resolution commit shape without disturbing root text: the
+/// run-scoped batch fence plus the content-neutral assistant projection.
+/// Only the commit core mutates the cursor; the dispatch arm copies the
+/// settled cursor back onto the turn state.
+pub(crate) struct SubagentCommitCursor<'a> {
+    pub scope: RunBatchScope<'a>,
+    pub engine: EngineId,
+    pub batch_sequence: i64,
+    pub assistant_item: Option<ItemId>,
+    pub assistant_revision: Revision,
+    pub assistant_body: String,
+}
+
+/// Commits one subagent lifecycle row as an S1b observation checkpoint batch.
+async fn handle_subagent_lifecycle_row(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    row: SubagentLifecycleRow,
+) {
+    handle_subagent_row(
+        context,
+        state,
+        turn,
+        Observation::Subagent(row.into_observation()),
+    )
+    .await;
+}
+
+/// Commits one subagent transcript row as an S1b observation checkpoint batch.
+async fn handle_subagent_transcript_row(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    row: SubagentTranscriptRow,
+) {
+    handle_subagent_row(
+        context,
+        state,
+        turn,
+        Observation::SubagentTranscript(row.into_observation()),
+    )
+    .await;
+}
+
+/// Commits one subagent row through the shared S1b checkpoint batch path.
+///
+/// The row is re-sequenced onto the durable chain freshly read for this
+/// batch, encoded under the run bind, and committed with a content-neutral
+/// assistant change so the body is rewritten verbatim: subscribers receive
+/// the wake hint without any transcript mutation. Sequencing, stamps, and
+/// the assistant projection advance exactly like a text batch, so later
+/// commits keep fencing. Any failure marks the turn interrupted with
+/// uncertain progress: a valid stream must not present as durably completed
+/// when its subagent rows did not persist.
+async fn handle_subagent_row(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    observation: Observation,
+) {
+    let mut cursor = SubagentCommitCursor {
+        scope: copy_scope(&state.scope),
+        engine: state.engine,
+        batch_sequence: state.batch_sequence,
+        assistant_item: state.assistant_item.clone(),
+        assistant_revision: state.assistant_revision,
+        assistant_body: state.assistant_body.clone(),
+    };
+    if !commit_subagent_observation(
+        context.repository,
+        context.config,
+        context.origin,
+        &mut cursor,
+        observation,
+    )
+    .await
+    {
+        mark_interrupted(state, turn, true);
+        return;
+    }
+    let updated_at = cursor.scope.expected_updated_at;
+    let revision = cursor.assistant_revision;
+    let sequence = cursor.batch_sequence;
+    let item = cursor.assistant_item.clone();
+    let body = cursor.assistant_body.clone();
+    state.scope.expected_updated_at = updated_at;
+    state.assistant_revision = revision;
+    state.batch_sequence = sequence;
+    state.assistant_item = item;
+    state.assistant_body = body;
+}
+
+/// Commits one re-sequenced subagent observation through the S1b batch path.
+///
+/// Reads the durable base fresh for this batch and assigns base-plus-one, so
+/// rows stay strictly increasing across batches regardless of owner stream
+/// numbering. Returns whether the batch committed; the dispatch arm maps
+/// failure onto run custody. Fixture coverage drives this same commit against
+/// a real repository.
+pub(crate) async fn commit_subagent_observation(
+    repository: &Repository,
+    config: &NativeRunDispatcherConfig,
+    origin: &SystemCommandOrigin,
+    cursor: &mut SubagentCommitCursor<'_>,
+    observation: Observation,
+) -> bool {
+    let base = match repository
+        .last_committed_observation_sequence(&cursor.scope.launched.run_id)
+        .await
+    {
+        Ok(base) => base,
+        Err(_) => return false,
+    };
+    let sequence_value = match base {
+        None => 1,
+        Some(maximum) => maximum.saturating_add(1),
+    };
+    let Ok(sequence) = ObservationSequence::new(sequence_value) else {
+        return false;
+    };
+    let Ok(identity) = origin.mint_identity() else {
+        return false;
+    };
+    let Ok(observation_id) = ObservationId::parse(identity) else {
+        return false;
+    };
+    let Some(resequenced) =
+        resequence_subagent_observation(&observation, &observation_id, sequence)
+    else {
+        return false;
+    };
+    let Ok(checkpoint) = artisan_database::encode_observation_checkpoint(
+        cursor.engine,
+        cursor.scope.bound.binding_version,
+        base,
+        &[resequenced],
+    ) else {
+        return false;
+    };
+    if artisan_database::validate_observation_bind(
+        cursor.scope.bound.binding_version,
+        cursor.scope.bound,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let Ok(body) = AssistantBody::parse(cursor.assistant_body.clone()) else {
+        return false;
+    };
+    let Some(patch_id) = mint_patch_id(origin) else {
+        return false;
+    };
+    let Some(operated_at) = at_or_after(origin, cursor.scope.expected_updated_at) else {
+        return false;
+    };
+    if let Some(item_id) = cursor.assistant_item.clone() {
+        let changes = [AssistantChange::Replace {
+            item_id: &item_id,
+            expected_revision: cursor.assistant_revision,
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            patch_id: &patch_id,
+        }];
+        if !commit_batch_with_retry(CommitBatchRequest {
+            repository,
+            notifier: &config.notifier,
+            scope: &cursor.scope,
+            batch_sequence: cursor.batch_sequence,
+            operated_at,
+            activate_turn_patch_id: None,
+            changes: &changes,
+            checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+            retries: config.max_command_retries,
+        })
+        .await
+        {
+            return false;
+        }
+        let Ok(next_revision) = cursor.assistant_revision.checked_next() else {
+            return false;
+        };
+        cursor.assistant_revision = next_revision;
+    } else {
+        let Some(item_id) = mint_item_id(origin) else {
+            return false;
+        };
+        let Some(activation_patch_id) = mint_patch_id(origin) else {
+            return false;
+        };
+        let changes = [AssistantChange::Start {
+            item_id: &item_id,
+            phase: AssistantMessagePhase::Unspecified,
+            body: &body,
+            patch_id: &patch_id,
+        }];
+        if !commit_batch_with_retry(CommitBatchRequest {
+            repository,
+            notifier: &config.notifier,
+            scope: &cursor.scope,
+            batch_sequence: cursor.batch_sequence,
+            operated_at,
+            activate_turn_patch_id: Some(&activation_patch_id),
+            changes: &changes,
+            checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+            retries: config.max_command_retries,
+        })
+        .await
+        {
+            return false;
+        }
+        cursor.assistant_item = Some(item_id);
+        cursor.assistant_revision = Revision::new(0);
+    }
+    let Some(next_sequence) = cursor.batch_sequence.checked_add(1) else {
+        return false;
+    };
+    cursor.batch_sequence = next_sequence;
+    cursor.scope.expected_updated_at = operated_at;
+    true
+}
+
+/// Rebuilds one subagent row onto a dispatcher-assigned identity.
+///
+/// Provider stream numbering never crosses into durable history. Only
+/// lifecycle and transcript rows rebuild here; any other row rejects.
+fn resequence_subagent_observation(
+    observation: &Observation,
+    observation_id: &ObservationId,
+    sequence: ObservationSequence,
+) -> Option<Observation> {
+    match observation {
+        Observation::Subagent(row) => SubagentObservation::new(
+            observation_id.clone(),
+            sequence,
+            SubagentInput {
+                agent_native_thread_id: row.agent_native_thread_id().clone(),
+                parent_native_thread_id: row.parent_native_thread_id().clone(),
+                state: row.state(),
+                activity: row.activity().map(str::to_owned),
+                agent_path: row.agent_path().map(str::to_owned),
+                turn_id: row.turn_id().cloned(),
+            },
+        )
+        .ok()
+        .map(Observation::Subagent),
+        Observation::SubagentTranscript(row) => Some(Observation::SubagentTranscript(
+            SubagentTranscriptObservation::new(
+                observation_id.clone(),
+                sequence,
+                row.agent_native_thread_id().clone(),
+                row.parent_native_thread_id().clone(),
+                row.content().clone(),
+            ),
+        )),
+        _ => None,
+    }
 }
 
 async fn handle_usage(
