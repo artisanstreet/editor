@@ -277,7 +277,10 @@ impl InternalLaunch {
 ///
 /// The dispatcher constructs this only after reading the durable settings
 /// and resolving the exact Codex launch. The owner never rereads the thread,
-/// registry, or environment while this value is live.
+/// registry, or environment while this value is live. Unlike the Claude,
+/// Grok, and Cursor turns, Codex carries the optional provider continuation:
+/// resume reopens the durable provider thread through the X3 gate (same
+/// engine, explicit target model, CLI >= 0.145.0).
 pub(crate) struct EngineCodexTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) thread_id: ThreadId,
@@ -286,6 +289,7 @@ pub(crate) struct EngineCodexTurnInput {
     pub(crate) prompt: QueueMessagePayload,
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: VerifiedCodexLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -959,8 +963,9 @@ impl EngineOwner {
     ///
     /// Mirrors [`Self::admit_turn`] without forking the queue: the same
     /// `Job::Turn` type carries an [`InternalLaunch::Codex`] capability and
-    /// exactly one executor proves the lifecycle. Codex turns carry no
-    /// provider continuation in this packet (later packet).
+    /// exactly one executor proves the lifecycle. Codex turns carry the
+    /// optional provider continuation for `thread/resume` behind the X3 gate
+    /// (same engine, explicit target model, CLI >= 0.145.0).
     pub(crate) fn admit_codex_turn(
         &self,
         input: EngineCodexTurnInput,
@@ -974,7 +979,7 @@ impl EngineOwner {
             prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Codex(Box::new(input.launch)),
-            continuation: None,
+            continuation: input.continuation,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
