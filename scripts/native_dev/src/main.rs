@@ -2,15 +2,18 @@
 //!
 //! The binary is deliberately thin: every reusable step lives in the
 //! [`native_dev`] library so it stays covered by `tests/native_dev`. Here
-//! only process control remains — stage printing, Editor spawning, and exit
-//! code propagation.
+//! only stage printing, Editor process control, and exit code propagation
+//! remain.
 
 #![forbid(unsafe_code)]
 
+use std::time::Duration;
+
 use native_dev::{
-    Action, DevArgs, DevPaths, exe_name, launch_editor, locate_binaries, provision_forge_home,
-    provision_manifest, provision_payload, refuse_live_forge, resolve_dev_dir, stage_binaries,
-    stage_line, usage,
+    Action, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, InstanceOutcome,
+    StartupWait, locate_binaries, provision_forge_home, provision_manifest, refuse_live_forge,
+    resolve_dev_dir, spawn_editor, stage_binaries, stage_line, staged_editor, staged_forge,
+    stop_editor, usage, wait_for_startup,
 };
 
 /// Number of stages in a full stage-and-launch run.
@@ -51,7 +54,7 @@ fn run() -> Result<u8, Outcome> {
     } else {
         FULL_STAGES
     };
-    let fail = |error: native_dev::DevError| {
+    let fail = |error: DevError| {
         eprintln!("dev: error: {error}");
         Outcome::Failure
     };
@@ -74,60 +77,101 @@ fn run() -> Result<u8, Outcome> {
         stage_line(2, total, "binaries", &binaries.forge.display().to_string())
     );
 
-    let staged_forge = paths.version_bin.join(exe_name("forge"));
-    refuse_live_forge(&paths, &staged_forge).map_err(fail)?;
+    let lock = DevLock::acquire(&paths).map_err(fail)?;
+    refuse_live_forge(&paths, &staged_forge(&paths)).map_err(fail)?;
+    println!("{}", stage_line(3, total, "lock", "staging lock held"));
 
-    let staged = stage_binaries(&binaries, &paths).map_err(fail)?;
-    let rewritten = staged.iter().filter(|(_, written)| *written).count();
+    let outcome = provision_forge_home(&paths).map_err(fail)?;
+    let detail = match outcome {
+        InstanceOutcome::Created => "fresh identity minted",
+        InstanceOutcome::Preserved => "identity and data preserved",
+    };
+    println!("{}", stage_line(4, total, "provision", detail));
+
+    let counts = stage_binaries(&binaries, &paths).map_err(|error| {
+        eprintln!("dev: error: {error}");
+        eprintln!("dev: hint: the active version is untouched; fix the cause and retry");
+        Outcome::Failure
+    })?;
     println!(
         "{}",
         stage_line(
-            3,
+            5,
             total,
             "stage",
-            &format!("{rewritten} rewritten, {} reused", staged.len() - rewritten),
+            &format!("{} rewritten, {} reused", counts.rewritten, counts.reused),
         )
     );
 
     provision_manifest(&paths).map_err(fail)?;
     println!(
         "{}",
-        stage_line(4, total, "manifest", "verified by shipping loader")
+        stage_line(6, total, "manifest", "verified by shipping loader")
     );
-
-    provision_payload(&paths).map_err(|error| {
-        eprintln!("dev: error: {error}");
-        eprintln!(
-            "dev: hint: delete {} and retry",
-            paths.version_root.display()
-        );
-        Outcome::Failure
-    })?;
-    println!("{}", stage_line(5, total, "payload", "verified"));
-
-    let outcome = provision_forge_home(&paths).map_err(fail)?;
-    let detail = match outcome {
-        native_dev::InstanceOutcome::Created => "fresh identity minted",
-        native_dev::InstanceOutcome::Preserved => "identity and data preserved",
-    };
-    println!("{}", stage_line(6, total, "provision", detail));
+    drop(lock);
 
     if args.stage_only {
         println!(
             "dev: staged without launch; run with ARTISAN_HOME={} {}",
             paths.home.display(),
-            binaries.editor.display()
+            staged_editor(&paths).display()
         );
         return Ok(0);
     }
 
-    println!("dev: launching staged editor on its owned forge (close the window to stop)");
-    let code = launch_editor(&binaries.editor, &paths.home).map_err(fail)?;
-    if code == 0 {
-        println!("{}", stage_line(7, total, "editor", "exit 0"));
-        Ok(0)
-    } else {
-        eprintln!("dev: stage 7/{total} editor ... failed (exit {code})");
-        Ok(u8::try_from(code).unwrap_or(1))
+    let receipt_path = paths.receipt_path();
+    let _ = std::fs::remove_file(&receipt_path);
+    let editor = staged_editor(&paths);
+    println!(
+        "dev: launching staged editor {} on its owned forge (close the window to stop)",
+        editor.display()
+    );
+    let mut child = spawn_editor(&editor, &paths.home, &receipt_path).map_err(fail)?;
+    match wait_for_startup(
+        &mut child,
+        &receipt_path,
+        Duration::from_millis(DEV_STARTUP_TIMEOUT_MS),
+    ) {
+        StartupWait::Ready { stage } => {
+            println!("{}", stage_line(7, total, "startup", &stage));
+        }
+        StartupWait::Failed { stage, reason } => {
+            stop_editor(child);
+            eprintln!("dev: stage 7/{total} startup ... failed ({stage}: {reason})");
+            return Err(Outcome::Failure);
+        }
+        StartupWait::Timeout => {
+            stop_editor(child);
+            eprintln!(
+                "dev: stage 7/{total} startup ... failed (no receipt within {}s)",
+                DEV_STARTUP_TIMEOUT_MS / 1_000
+            );
+            return Err(Outcome::Failure);
+        }
+        StartupWait::EditorExited { code } => {
+            eprintln!(
+                "dev: stage 7/{total} startup ... failed (editor exited before confirming startup{})",
+                code.map_or(String::new(), |code| format!(" with code {code}"))
+            );
+            return Err(Outcome::Failure);
+        }
+    }
+    let status = child.wait().map_err(|_| {
+        eprintln!("dev: error: cannot wait for the staged editor");
+        Outcome::Failure
+    })?;
+    match status.code() {
+        Some(0) => {
+            println!("{}", stage_line(7, total, "editor", "exit 0"));
+            Ok(0)
+        }
+        Some(code) => {
+            eprintln!("dev: stage 7/{total} editor ... failed (exit {code})");
+            Ok(u8::try_from(code).unwrap_or(1))
+        }
+        None => {
+            eprintln!("dev: stage 7/{total} editor ... failed (terminated by signal)");
+            Err(Outcome::Failure)
+        }
     }
 }

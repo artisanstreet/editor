@@ -9,8 +9,14 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use artisan_editor_cli::{credentials::ForgeCredentialPaths, instance::NativeInstanceConfig};
-use native_dev::{DevPaths, InstanceOutcome, provision_forge_home};
+use artisan_editor_cli::{
+    credentials::ForgeCredentialPaths,
+    instance::{NativeInstanceConfig, NativeRunConfig, NativeRunConfigInput},
+};
+use native_dev::{
+    DEV_REQUESTS_PER_CONNECTION, DEV_RUN_PROMPT_DELIVERY, DevPaths, InstanceOutcome,
+    dev_run_config, provision_forge_home,
+};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -128,4 +134,47 @@ fn instance_timeouts_are_finite_and_nonzero() {
     assert_ne!(config.native_run().queue_capacity().get(), 0);
     assert_ne!(config.native_run().max_command_retries().get(), 0);
     cleanup(&dev_dir);
+}
+
+#[test]
+fn per_connection_budget_survives_normal_dev_use() {
+    let dev_dir = scratch_dev_dir("budget");
+    let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
+    provision_forge_home(&paths).expect("provision");
+    let config = NativeInstanceConfig::load_from_home(&paths.home).expect("instance loads");
+    assert!(
+        u64::from(config.listener().requests_per_connection().get())
+            >= u64::from(DEV_REQUESTS_PER_CONNECTION),
+        "lifetime budget must not disconnect normal use"
+    );
+    assert!(
+        DEV_REQUESTS_PER_CONNECTION > 32,
+        "32 requests is a disconnect budget, not a dev budget"
+    );
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn prompt_delivery_accepts_the_dev_value_and_rejects_control_text() {
+    let config = dev_run_config().expect("dev run config is valid");
+    assert_eq!(config.prompt_delivery(), DEV_RUN_PROMPT_DELIVERY);
+
+    let valid = |delivery: &str| {
+        NativeRunConfig::new(NativeRunConfigInput {
+            claim_lease_ms: 1,
+            poll_interval_ms: 1,
+            retry_backoff_ms: 1,
+            shutdown_budget_ms: 1,
+            queue_capacity: 1,
+            max_command_retries: 1,
+            prompt_delivery: delivery.to_owned(),
+            stream_after: 0,
+        })
+        .is_ok()
+    };
+    assert!(valid("queue"), "the dev value is accepted");
+    assert!(!valid(""), "empty delivery is rejected");
+    assert!(!valid("has\nnewline"), "line breaks are rejected");
+    assert!(!valid("has\tcontrol"), "control characters are rejected");
+    assert!(!valid(&"p".repeat(257)), "overlong delivery is rejected");
 }

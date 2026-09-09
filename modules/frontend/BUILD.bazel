@@ -50,6 +50,7 @@ rust_library(
         "src/conversation_turn_navigator.rs",
         "src/conversation_view_machine.rs",
         "src/dev_instance_policy.rs",
+        "src/dev_startup_receipt.rs",
         "src/dropdown_highlight_settle.rs",
         "src/editor_diagnostic_mapping.rs",
         "src/editor_language.rs",

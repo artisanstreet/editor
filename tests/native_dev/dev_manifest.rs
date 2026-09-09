@@ -3,6 +3,8 @@
 //! Both documents are validated through the shipping authorities — the
 //! installation manifest through the CLI loader and the payload through the
 //! existing verifier — so a home the Editor would refuse fails here first.
+//! Activation is verified separately: only a verified scratch tree swaps
+//! into the active version.
 
 use std::{
     path::{Path, PathBuf},
@@ -14,8 +16,8 @@ use artisan_editor_cli::{
     payload::{self, PAYLOAD_MANIFEST_NAME},
 };
 use native_dev::{
-    BinarySet, DevError, DevPaths, installation_document, provision_manifest, provision_payload,
-    stage_binaries,
+    BinarySet, DevError, DevPaths, installation_document, provision_manifest, stage_binaries,
+    verify_payload_dir, write_payload_manifest,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -28,7 +30,7 @@ fn scratch_dev_dir(case: &str) -> PathBuf {
     ))
 }
 
-fn fixture_sources(case: &str) -> (PathBuf, BinarySet) {
+fn fixture_set(case: &str) -> (PathBuf, BinarySet) {
     let root = scratch_dev_dir(case).join("sources");
     std::fs::create_dir_all(&root).expect("fixture sources");
     let mut get = |stem: &str| {
@@ -91,19 +93,15 @@ fn provisioned_manifest_passes_the_shipping_loader() {
 }
 
 #[test]
-fn staged_payload_verifies_and_tampering_is_reported() {
+fn activated_payload_verifies_and_tampering_is_reported() {
     let dev_dir = scratch_dev_dir("payload");
     let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
-    let (_sources, set) = fixture_sources("payload");
-    let staged = stage_binaries(&set, &paths).expect("binaries stage");
-    assert_eq!(staged.len(), 5);
-    assert!(staged.iter().all(|(_, written)| *written));
+    let (_sources, set) = fixture_set("payload");
+    let counts = stage_binaries(&set, &paths).expect("binaries stage");
+    assert_eq!(counts.rewritten, 4);
+    assert_eq!(counts.reused, 0);
 
-    provision_payload(&paths).expect("payload provisions");
-    assert_eq!(
-        payload::verify(&paths.version_root),
-        payload::PayloadHealth::Verified
-    );
+    verify_payload_dir(&paths.version_root).expect("activated payload verifies");
 
     let manifest_bytes =
         std::fs::read(paths.version_root.join(PAYLOAD_MANIFEST_NAME)).expect("payload manifest");
@@ -113,18 +111,12 @@ fn staged_payload_verifies_and_tampering_is_reported() {
 
     let forge = paths.version_bin.join(native_dev::exe_name("forge"));
     std::fs::write(&forge, b"tampered").expect("tamper");
-    let payload::PayloadHealth::Modified(issues) = payload::verify(&paths.version_root) else {
-        panic!("tampered payload verified");
-    };
-    assert!(
-        issues.iter().any(|issue| issue.contains("forge")),
-        "issues: {issues:?}"
-    );
-    let error = provision_payload(&paths).expect_err("re-provision reports drift");
+    let error = verify_payload_dir(&paths.version_root).expect_err("tamper is reported");
     assert!(
         matches!(error, DevError::PayloadUnverified { .. }),
         "unexpected: {error}"
     );
+    assert!(error.to_string().contains("forge"), "unexpected: {error}");
     cleanup(&dev_dir);
 }
 
@@ -132,15 +124,16 @@ fn staged_payload_verifies_and_tampering_is_reported() {
 fn repeat_staging_reuses_identical_binaries() {
     let dev_dir = scratch_dev_dir("repeat");
     let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
-    let (_sources, set) = fixture_sources("repeat");
+    let (_sources, set) = fixture_set("repeat");
     let first = stage_binaries(&set, &paths).expect("first stage");
-    assert!(first.iter().all(|(_, written)| *written));
+    assert_eq!((first.rewritten, first.reused), (4, 0));
     let second = stage_binaries(&set, &paths).expect("second stage");
-    assert!(
-        second.iter().all(|(_, written)| !written),
+    assert_eq!(
+        (second.rewritten, second.reused),
+        (0, 4),
         "identical binaries must be reused"
     );
-    provision_payload(&paths).expect("payload still verifies");
+    verify_payload_dir(&paths.version_root).expect("payload still verifies");
     cleanup(&dev_dir);
 }
 
@@ -148,13 +141,36 @@ fn repeat_staging_reuses_identical_binaries() {
 fn missing_source_binary_fails_before_any_manifest() {
     let dev_dir = scratch_dev_dir("missing-source");
     let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
-    let (_sources, set) = fixture_sources("missing-source");
+    let (_sources, set) = fixture_set("missing-source");
     std::fs::remove_file(&set.forge).expect("remove fixture");
     let error = native_dev::hash_file(&set.forge).expect_err("missing source cannot hash");
     assert!(error.to_string().contains("forge"), "unexpected: {error}");
     assert!(
+        !paths.version_root.join(PAYLOAD_MANIFEST_NAME).exists(),
+        "no payload on failed staging"
+    );
+    assert!(
         !paths.manifest_path.exists(),
         "no manifest on failed staging"
+    );
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn scratch_payload_manifest_covers_all_four_binaries() {
+    let dev_dir = scratch_dev_dir("scratch-manifest");
+    let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
+    let (_sources, set) = fixture_set("scratch-manifest");
+    for (relative, source) in set.entries() {
+        let destination = paths.staging_root().join(&relative);
+        std::fs::create_dir_all(destination.parent().expect("parent")).expect("staging parent");
+        std::fs::copy(&source, &destination).expect("scratch copy");
+    }
+    write_payload_manifest(&paths.staging_root()).expect("scratch manifest writes");
+    verify_payload_dir(&paths.staging_root()).expect("scratch payload verifies");
+    assert!(
+        !paths.version_root.exists(),
+        "scratch work never touches the active version"
     );
     cleanup(&dev_dir);
 }

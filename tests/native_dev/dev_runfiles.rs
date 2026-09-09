@@ -1,12 +1,13 @@
 //! Binary discovery for `bazel run //:dev`.
 //!
 //! The launcher must find the four Bazel-built binaries without a wrapper
-//! script: explicit `--bin-dir` first, then the Bazel runfiles directory,
-//! then the runfiles manifest, then the `bazel-bin` sibling layout.
+//! script: explicit `--bin-dir` first, then the Bazel runfiles directory
+//! (Bzlmod `_main`, legacy workspace, and flat layouts), then the runfiles
+//! manifest with the same prefixes, then the `bazel-bin` sibling layout.
 
 use std::path::PathBuf;
 
-use native_dev::{find_in_manifest, locate_in_dir, runfiles_candidates};
+use native_dev::{find_in_manifest, find_prefixed_in_manifest, locate_in_dir, runfiles_candidates};
 
 fn fixture_bin_dir(case: &str) -> PathBuf {
     let root =
@@ -103,11 +104,47 @@ fn manifest_lookup_rejects_prefix_impostors() {
 }
 
 #[test]
+fn manifest_lookup_supports_bzlmod_main_and_spaces() {
+    let manifest = if cfg!(windows) {
+        "_main/modules/backend/forge.exe C:/Program Files/artisan/out/forge.exe\n\
+         artisan_editor/modules/backend/forge.exe C:/other/forge.exe\n"
+    } else {
+        "_main/modules/backend/forge /opt/artisan dir/forge\n\
+         artisan_editor/modules/backend/forge /other/forge\n"
+    };
+    let found = find_prefixed_in_manifest(&manifest, "modules/backend/forge")
+        .expect("bzlmod entry resolves");
+    assert_eq!(
+        found,
+        if cfg!(windows) {
+            PathBuf::from("C:/Program Files/artisan/out/forge.exe")
+        } else {
+            PathBuf::from("/opt/artisan dir/forge")
+        }
+    );
+}
+
+#[test]
+fn manifest_lookup_falls_back_through_prefixes() {
+    let manifest = "artisan_editor/modules/backend/forge /fallback/forge\n";
+    assert_eq!(
+        find_prefixed_in_manifest(&manifest, "modules/backend/forge"),
+        Some(PathBuf::from("/fallback/forge"))
+    );
+    assert_eq!(
+        find_prefixed_in_manifest(&manifest, "modules/backend/editor"),
+        None
+    );
+}
+
+#[test]
 fn runfiles_candidates_cover_workspace_layouts() {
     let candidates = runfiles_candidates("modules/backend/forge", "/runfiles");
-    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates.len(), 3);
     assert!(candidates[0].starts_with("/runfiles"));
-    assert!(candidates[0].to_string_lossy().contains("artisan_editor"));
-    assert!(candidates[0].ends_with(native_dev::exe_name("forge")));
-    assert!(candidates[1].ends_with(native_dev::exe_name("forge")));
+    assert!(candidates[0].to_string_lossy().contains("_main"));
+    assert!(candidates[1].to_string_lossy().contains("artisan_editor"));
+    for candidate in &candidates {
+        assert!(candidate.ends_with(native_dev::exe_name("forge")));
+    }
 }

@@ -52,6 +52,7 @@ pub mod conversation_turn_machine;
 pub mod conversation_turn_navigator;
 pub mod conversation_view_machine;
 pub mod dev_instance_policy;
+pub mod dev_startup_receipt;
 pub mod dropdown_highlight_settle;
 pub mod editor_diagnostic_mapping;
 pub mod editor_language;

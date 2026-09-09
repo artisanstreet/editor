@@ -1,6 +1,6 @@
 [package]
 name = "artisan-native-dev"
-description = "One-command native development installation: stage Bazel-built Editor and Forge under .dist/dev and launch the Editor on its owned Forge"
+description = "One-command native development installation: stage product Editor and Forge binaries under .dist/dev and launch the staged Editor on its owned Forge with startup confirmation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,16 +17,17 @@ path = "src/main.rs"
 
 [dependencies]
 artisan-editor-cli = { path = "../../modules/cli" }
-serde_json = "1"
-sha2 = "0.10"
-thiserror = "2"
-
-[dev-dependencies]
-artisan-editor-cli = { path = "../../modules/cli" }
-serde_json = "1"
+fs2.workspace = true
+serde_json.workspace = true
+sha2 = "=0.10.9"
+thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+artisan-editor-cli = { path = "../../modules/cli" }
+serde_json.workspace = true
 
 [[test]]
 name = "dev_args"
@@ -35,6 +36,10 @@ path = "../../tests/native_dev/dev_args.rs"
 [[test]]
 name = "dev_layout"
 path = "../../tests/native_dev/dev_layout.rs"
+
+[[test]]
+name = "dev_launch"
+path = "../../tests/native_dev/dev_launch.rs"
 
 [[test]]
 name = "dev_manifest"
@@ -47,3 +52,7 @@ path = "../../tests/native_dev/dev_instance.rs"
 [[test]]
 name = "dev_runfiles"
 path = "../../tests/native_dev/dev_runfiles.rs"
+
+[[test]]
+name = "dev_stage"
+path = "../../tests/native_dev/dev_stage.rs"

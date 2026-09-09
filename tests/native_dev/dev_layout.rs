@@ -115,3 +115,23 @@ fn stage_lines_are_plain_and_numbered() {
     assert_eq!(bare, "dev: stage 1/7 resolve ... ok");
     assert!(!line.contains('\x1b'), "no TTY escape codes");
 }
+
+#[test]
+fn staging_and_lock_paths_stay_inside_the_dev_tree() {
+    let dev_dir = absolute_dev_dir("staging-layout");
+    let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
+    assert!(paths.staging_root().starts_with(&dev_dir));
+    assert!(paths.previous_root().starts_with(&dev_dir));
+    assert!(paths.lock_path().starts_with(&dev_dir));
+    assert!(paths.receipt_path().starts_with(&dev_dir));
+    assert_ne!(paths.staging_root(), paths.version_root);
+    assert_ne!(paths.previous_root(), paths.version_root);
+    assert_ne!(paths.staging_root(), paths.previous_root);
+    assert!(
+        !paths
+            .staging_root()
+            .to_string_lossy()
+            .contains("artisan street"),
+        "staging must not resemble the installed home"
+    );
+}

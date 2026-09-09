@@ -10,10 +10,21 @@ exports_files(["Cargo.toml"])
 
 rust_library(
     name = "native_dev",
-    srcs = ["src/lib.rs"],
+    srcs = [
+        "src/args.rs",
+        "src/error.rs",
+        "src/launch.rs",
+        "src/lib.rs",
+        "src/manifest.rs",
+        "src/paths.rs",
+        "src/provision.rs",
+        "src/runfiles.rs",
+        "src/stage.rs",
+    ],
     crate_name = "native_dev",
     deps = [
         "//modules/cli:cli",
+        "@crates//:fs2",
         "@crates//:serde_json",
         "@crates//:sha2-0.10.9",
         "@crates//:thiserror",

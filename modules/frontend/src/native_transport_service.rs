@@ -874,7 +874,7 @@ pub enum StartupError {
 }
 
 impl StartupError {
-    const fn failure(self) -> ServiceFailure {
+    pub(crate) const fn failure(self) -> ServiceFailure {
         match self {
             Self::PayloadUnverified => ServiceFailure::new(
                 ServiceFailureStage::Payload,
@@ -2878,13 +2878,16 @@ async fn service_main(
             };
             if let Err(failure) = delivery_started {
                 status = ServiceStopStatus::Failed;
+                crate::dev_startup_receipt::report_failed(failure);
                 let _ = publish(&events, NativeTransportEvent::Failed(failure));
             } else {
                 let run_result = load_initial_catalog(&mut runtime, &mut frames, &events).await;
                 if let Err(failure) = run_result {
                     status = ServiceStopStatus::Failed;
+                    crate::dev_startup_receipt::report_failed(failure);
                     let _ = publish(&events, NativeTransportEvent::Failed(failure));
                 } else {
+                    crate::dev_startup_receipt::report_ready();
                     let command_result = command_loop_with_delivery(
                         &mut commands,
                         &mut delivery_rx,
@@ -2912,7 +2915,9 @@ async fn service_main(
         }
         Err(error) => {
             status = ServiceStopStatus::Failed;
-            let _ = publish(&events, NativeTransportEvent::Failed(error.failure()));
+            let failure = error.failure();
+            crate::dev_startup_receipt::report_failed(failure);
+            let _ = publish(&events, NativeTransportEvent::Failed(failure));
         }
     }
     let _ = publish(&events, NativeTransportEvent::Stopped(status));
