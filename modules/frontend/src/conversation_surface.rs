@@ -14,7 +14,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use artisan_domain::{ItemId, TurnId};
+use artisan_domain::{Command, ItemId, ObservationId, RequestId, RunId, ThreadId, TurnId};
+use artisan_protocol::{ProtocolFailure, RespondApprovalReceipt, RespondQuestionReceipt};
 use artisan_ui::alert::{Alert, AlertVariant};
 use artisan_ui::badge::{BadgeStyle, outline_badge};
 use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
@@ -36,6 +37,7 @@ use gpui::{
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::approval_presentation::ApprovalKind as PresentationApprovalKind;
 use crate::conversation_scene::{
     ChangeSetBlock, CompactionBlock, ConversationScene, ErrorBlock, FileChangeStatus,
     ModelTransitionBlock, NativeFactBlock, PlanBlock, QuestionBlock, SceneDisclosure,
@@ -47,6 +49,13 @@ use crate::conversation_turn_navigator::{
     ConversationSnapshotInput, ConversationTurnInput, LoadedConversationItemInput,
     conversation_turn_markers,
 };
+use crate::engine_approve_ui::{
+    APPROVAL_DENY_LABEL, APPROVAL_DENYING_LABEL, AnswerFlight, AnswerKind, AnswerPairing,
+    AnswerSettlement, QUESTION_ANSWER_LABEL, QUESTION_INPUT_PLACEHOLDER, RespondApprovalAction,
+    RespondQuestionAction, approval_command, mint_answer_request_id, pair_answer_failure,
+    pair_approval_answer, pair_question_answer, pending_approval_label, question_command,
+};
+use crate::engine_observation_state::EngineObservationState;
 
 /// Stable debug selector for the conversation surface root.
 pub const CONVERSATION_SURFACE_SELECTOR: &str = "artisan-conversation-surface";
@@ -384,6 +393,7 @@ pub struct ConversationSurface {
     transcript_focus: FocusHandle,
     disclosure_focus: FocusHandle,
     jump_to_latest_focus: FocusHandle,
+    answer_focus: FocusHandle,
     jump_to_latest_visible: bool,
     last_viewport_observation: Option<ViewportObservation>,
     pending_viewport_observation: Option<ViewportObservation>,
@@ -409,6 +419,42 @@ pub struct ConversationSurface {
     /// pruned on scene replacement; a focused control that disappears
     /// returns focus to the transcript.
     navigator_focus: HashMap<String, FocusHandle>,
+    /// Explicit live answer context for engine approval/question rows.
+    ///
+    /// The owning thread and live run are supplied explicitly by the
+    /// controller through [`Self::set_answer_context`]; nothing ambient is
+    /// read. Submit affordances stay disabled until both are present, so a
+    /// gesture can never synthesize a decision without its owner.
+    ///
+    /// Block identities submit as the approval/question identity: the scene
+    /// projection packet must carry engine interaction ids into these block
+    /// ids ([`SceneId`] already converts domain identities losslessly). Until
+    /// then the controller sets context only for engine-backed surfaces.
+    answer_thread: Option<ThreadId>,
+    answer_run: Option<RunId>,
+    /// Per-row approval submit gates keyed by block identity text.
+    ///
+    /// Each gate mirrors [`AnswerFlight`]: at most one answer attempt is in
+    /// flight per row, so a second gesture cannot mint a second request
+    /// identity while the first awaits its receipt.
+    approval_gates: HashMap<String, ApprovalAnswerGate>,
+    /// Per-row question submit gates keyed by block identity text.
+    question_gates: HashMap<String, QuestionAnswerGate>,
+    /// Offered question options per row, supplied by the controller from the
+    /// engine observation rows.
+    ///
+    /// A row without cached options renders free-form entry, mirroring
+    /// [`crate::engine_approve_ui::question_answer_view`]: a provider that
+    /// enumerated its answers asks for a choice, otherwise prose is asked.
+    question_choices: HashMap<String, QuestionChoiceCache>,
+    /// Built answer commands awaiting controller drain to transport.
+    ///
+    /// Button gestures mint a fresh request identity and build the domain
+    /// command through the existing [`approval_command`]/[`question_command`]
+    /// constructors; the controller drains this outbox toward the existing
+    /// transport/request path. GPUI action values travel alongside each
+    /// command inside [`AnswerDispatch`].
+    pending_answer_dispatches: Vec<AnswerDispatch>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -667,6 +713,7 @@ impl ConversationSurface {
             transcript_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             disclosure_focus: cx.focus_handle().tab_index(1).tab_stop(true),
             jump_to_latest_focus: cx.focus_handle().tab_index(2).tab_stop(true),
+            answer_focus: cx.focus_handle().tab_index(3).tab_stop(true),
             jump_to_latest_visible: false,
             last_viewport_observation: Some(ViewportObservation {
                 first_visible: None,
@@ -683,6 +730,12 @@ impl ConversationSurface {
             scroll_anchors: Vec::new(),
             scroll_anchor_paint_token: None,
             navigator_focus: HashMap::new(),
+            answer_thread: None,
+            answer_run: None,
+            approval_gates: HashMap::new(),
+            question_gates: HashMap::new(),
+            question_choices: HashMap::new(),
+            pending_answer_dispatches: Vec::new(),
         }
     }
 
@@ -771,6 +824,197 @@ impl ConversationSurface {
         if self.theme_mode != theme_mode {
             self.theme_mode = theme_mode;
             cx.notify();
+        }
+    }
+
+    /// Sets the explicit live answer context for engine approval/question rows.
+    ///
+    /// Both identities join each submit at dispatch; nothing ambient is read
+    /// elsewhere. Submit affordances stay disabled until the controller
+    /// supplies the live owning thread and run.
+    pub fn set_answer_context(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        cx: &mut Context<Self>,
+    ) {
+        self.answer_thread = Some(thread_id);
+        self.answer_run = Some(run_id);
+        cx.notify();
+    }
+
+    /// Clears the live answer context, disabling submit affordances.
+    pub fn clear_answer_context(&mut self, cx: &mut Context<Self>) {
+        self.answer_thread = None;
+        self.answer_run = None;
+        cx.notify();
+    }
+
+    /// Mirrors one engine row's offered choices for choice rendering.
+    ///
+    /// Rows without cached options render free-form entry. Only labels (plus
+    /// optional descriptions) are mirrored; the authoritative option views
+    /// remain in [`EngineObservationState`].
+    pub fn set_question_choices(
+        &mut self,
+        block_id: String,
+        multi_select: bool,
+        options: Vec<(String, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.question_choices.insert(
+            block_id,
+            QuestionChoiceCache {
+                multi_select,
+                options,
+            },
+        );
+        cx.notify();
+    }
+
+    /// Stages one row's free-form draft exactly as supplied.
+    ///
+    /// GPUI text-entry binding for this draft lands with the controller input
+    /// packet; until then the controller (and tests) stage drafts through
+    /// this setter and the Answer control submits them.
+    pub fn set_question_draft(&mut self, block_id: String, draft: String, cx: &mut Context<Self>) {
+        self.question_gates
+            .entry(block_id)
+            .or_default()
+            .set_draft(draft);
+        cx.notify();
+    }
+
+    /// Returns built answer dispatches awaiting controller drain.
+    #[must_use]
+    pub fn pending_answer_dispatches(&self) -> &[AnswerDispatch] {
+        &self.pending_answer_dispatches
+    }
+
+    /// Drains built answer dispatches in FIFO order.
+    pub fn take_answer_dispatches(&mut self) -> Vec<AnswerDispatch> {
+        std::mem::take(&mut self.pending_answer_dispatches)
+    }
+
+    /// Attempts one approval gesture for a rendered row.
+    ///
+    /// Returns false when the row has no live context, no parsable approval
+    /// identity, or an outstanding flight; in all three cases nothing is
+    /// minted or dispatched. Every admitted attempt mints a fresh request
+    /// identity.
+    pub fn submit_approval_gesture(
+        &mut self,
+        block_key: &str,
+        approval_id: &ObservationId,
+        approved: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (Some(thread_id), Some(run_id)) = (self.answer_thread.clone(), self.answer_run.clone())
+        else {
+            return false;
+        };
+        let admitted = self
+            .approval_gates
+            .entry(block_key.to_owned())
+            .or_default()
+            .begin(thread_id, run_id, approval_id.clone(), approved)
+            .map(|attempt| AnswerDispatch {
+                action: AnswerDispatchAction::Approval(attempt.action),
+                command: attempt.command,
+                request_id: attempt.request_id,
+            });
+        if let Some(dispatch) = admitted {
+            self.pending_answer_dispatches.push(dispatch);
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Attempts one staged question submission for a rendered row.
+    ///
+    /// Choice rows submit the staged selection (single-select choices submit
+    /// through [`Self::submit_question_option_gesture`] at click time);
+    /// free-form rows submit the staged draft. Empty submissions are rejected
+    /// client-side with the row staying pending.
+    pub fn submit_question_gesture(&mut self, block_key: &str, cx: &mut Context<Self>) -> bool {
+        let (answer_context, is_choice) = (
+            self.answer_thread.clone().zip(self.answer_run.clone()),
+            self.question_choices
+                .get(block_key)
+                .is_some_and(|choices| choices.is_choice()),
+        );
+        let (Some((thread_id, run_id)), Some(question_id)) =
+            (answer_context, ObservationId::parse(block_key).ok())
+        else {
+            return false;
+        };
+        let gate = self.question_gates.entry(block_key.to_owned()).or_default();
+        let admitted = if is_choice {
+            gate.submit_selected(thread_id, run_id, question_id)
+        } else {
+            gate.submit_freeform(thread_id, run_id, question_id)
+        }
+        .map(|attempt| AnswerDispatch {
+            action: AnswerDispatchAction::Question(attempt.action),
+            command: attempt.command,
+            request_id: attempt.request_id,
+        });
+        if let Some(dispatch) = admitted {
+            self.pending_answer_dispatches.push(dispatch);
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Attempts one single-select option choice the moment it is clicked.
+    ///
+    /// Multi-select choices only stage through the gate; they confirm through
+    /// [`Self::submit_question_gesture`].
+    pub fn submit_question_option_gesture(
+        &mut self,
+        block_key: &str,
+        option: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let multi_select = self
+            .question_choices
+            .get(block_key)
+            .is_some_and(|choices| choices.multi_select);
+        if multi_select {
+            self.question_gates
+                .entry(block_key.to_owned())
+                .or_default()
+                .toggle_option(option, true);
+            cx.notify();
+            return true;
+        }
+        let (Some(thread_id), Some(run_id), Some(question_id)) = (
+            self.answer_thread.clone(),
+            self.answer_run.clone(),
+            ObservationId::parse(block_key).ok(),
+        ) else {
+            return false;
+        };
+        let admitted = self
+            .question_gates
+            .entry(block_key.to_owned())
+            .or_default()
+            .submit_single(thread_id, run_id, question_id, option)
+            .map(|attempt| AnswerDispatch {
+                action: AnswerDispatchAction::Question(attempt.action),
+                command: attempt.command,
+                request_id: attempt.request_id,
+            });
+        if let Some(dispatch) = admitted {
+            self.pending_answer_dispatches.push(dispatch);
+            cx.notify();
+            true
+        } else {
+            false
         }
     }
 
@@ -1127,7 +1371,9 @@ impl ConversationSurface {
         let mut turn_element = turn_element.debug_selector(move || selector.clone());
 
         for block in turn.blocks() {
-            if let Some(element) = self.render_block(&turn.turn_id, block, entity, theme, anchors, cx) {
+            if let Some(element) =
+                self.render_block(&turn.turn_id, block, entity, theme, anchors, cx)
+            {
                 turn_element = turn_element.child(element);
             }
         }
@@ -1202,19 +1448,25 @@ impl ConversationSurface {
         // pre-wrap paragraph, no title. GPUI has no gradient fill, so the
         // bubble uses the solid ramp midpoint (surface-800); documented.
         let body_selector = format!("{selector}-body");
-        let mut message = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .items_end()
-            .gap(px(8.0));
+        let mut message = div().w_full().flex().flex_col().items_end().gap(px(8.0));
         if let Some(images) = self.message_images.as_ref() {
-            let mut tray = div().flex().flex_wrap().justify_end().gap(px(8.0)).max_w(px(576.0));
+            let mut tray = div()
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .gap(px(8.0))
+                .max_w(px(576.0));
             for reference in &block.attachments {
-                let tile = images.update(cx, |images, cx| images.render_thumbnail(reference, *theme, cx).into_any_element());
+                let tile = images.update(cx, |images, cx| {
+                    images
+                        .render_thumbnail(reference, *theme, cx)
+                        .into_any_element()
+                });
                 tray = tray.child(tile);
             }
-            if !block.attachments.is_empty() { message = message.child(tray); }
+            if !block.attachments.is_empty() {
+                message = message.child(tray);
+            }
         }
         if !block.body.is_empty() {
             message = message.child(
@@ -1504,16 +1756,107 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
-        self.render_text_block(
-            TextBlockRender {
-                id: &block.id,
+        let style = CardStyle::resolve(*theme);
+        let key = block.id.as_str().to_owned();
+        let approval_id = ObservationId::parse(block.id.as_str()).ok();
+        let gate = self.approval_gates.get(&key);
+        let in_flight = gate.is_some_and(ApprovalAnswerGate::is_in_flight);
+        let pending = gate.and_then(ApprovalAnswerGate::pending_decision);
+        let failure = gate.and_then(ApprovalAnswerGate::failure_message);
+        let ready =
+            approval_id.is_some() && self.answer_thread.is_some() && self.answer_run.is_some();
+        let disabled = !ready || in_flight;
+        let approve_label = if pending == Some(true) {
+            pending_approval_label(&PresentationApprovalKind::Action, false)
+        } else {
+            "Approve"
+        };
+        let deny_label = if pending == Some(false) {
+            APPROVAL_DENYING_LABEL
+        } else {
+            APPROVAL_DENY_LABEL
+        };
+
+        let surface = entity.downgrade();
+        let approve_key = key.clone();
+        let approve_id = approval_id.clone();
+        let approve_button = Button::new(
+            SharedString::from(format!("{selector}-approve")),
+            self.answer_focus.clone(),
+            *theme,
+            MotionPolicy::Reduced,
+            ButtonVariant::Default,
+            ButtonSize::Small,
+            ButtonContent::text(approve_label),
+        )
+        .expect("static approval confirm button configuration is valid")
+        .focus_visibility(FocusVisibility::Visible)
+        .debug_selector(format!("{selector}-{APPROVAL_CONFIRM_SELECTOR_SUFFIX}"))
+        .disabled(disabled)
+        .on_activate(move |_, _, app| {
+            if let Some(approval_id) = approve_id.clone() {
+                let _ = surface.update(app, |surface, cx| {
+                    surface.submit_approval_gesture(&approve_key, &approval_id, true, cx);
+                });
+            }
+        });
+
+        let surface = entity.downgrade();
+        let deny_key = key.clone();
+        let deny_button = Button::new(
+            SharedString::from(format!("{selector}-deny")),
+            self.answer_focus.clone(),
+            *theme,
+            MotionPolicy::Reduced,
+            ButtonVariant::Outline,
+            ButtonSize::Small,
+            ButtonContent::text(deny_label),
+        )
+        .expect("static approval deny button configuration is valid")
+        .focus_visibility(FocusVisibility::Visible)
+        .debug_selector(format!("{selector}-{APPROVAL_DENY_SELECTOR_SUFFIX}"))
+        .disabled(disabled)
+        .on_activate(move |_, _, app| {
+            if let Some(approval_id) = approval_id.clone() {
+                let _ = surface.update(app, |surface, cx| {
+                    surface.submit_approval_gesture(&deny_key, &approval_id, false, cx);
+                });
+            }
+        });
+
+        let mut details = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.steps(2.0))
+            .child(body_text(&block.prompt, theme))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme.spacing.steps(2.0))
+                    .child(approve_button)
+                    .child(deny_button),
+            );
+        if let Some(failure) = failure {
+            let failure_selector = format!("{selector}-{APPROVAL_FAILURE_SELECTOR_SUFFIX}");
+            details = details
+                .child(body_text(failure, theme).debug_selector(move || failure_selector.clone()));
+        }
+        self.render_controlled_card(
+            ControlledCardOptions {
+                id: block.id.clone(),
+                item_id: item_id_for_scene_id(&block.id),
                 disclosure: block.disclosure,
                 selector,
-                title: "Approval requested",
-                body: &block.prompt,
+                style,
             },
+            compact_card_content(style).child(card_heading("Approval requested", theme)),
+            compact_card_content(style).child(details),
             entity,
-            theme,
             anchors,
         )
     }
@@ -1526,16 +1869,150 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
-        self.render_text_block(
-            TextBlockRender {
-                id: &block.id,
+        let style = CardStyle::resolve(*theme);
+        let key = block.id.as_str().to_owned();
+        let choices = self.question_choices.get(&key);
+        let gate = self.question_gates.get(&key);
+        let in_flight = gate.is_some_and(QuestionAnswerGate::is_in_flight);
+        let failure = gate.and_then(QuestionAnswerGate::failure_message);
+        let ready = ObservationId::parse(block.id.as_str()).is_ok()
+            && self.answer_thread.is_some()
+            && self.answer_run.is_some();
+        let is_choice = choices.is_some_and(QuestionChoiceCache::is_choice);
+
+        let mut details = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.steps(2.0))
+            .child(body_text(&block.prompt, theme));
+
+        if is_choice {
+            let cache = choices.expect("choice presence was checked");
+            let no_selection: &[String] = &[];
+            let selected: &[String] = gate.map_or(no_selection, QuestionAnswerGate::selected);
+            let mut options = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(theme.spacing.steps(2.0));
+            for (index, (label, description)) in cache.options.iter().enumerate() {
+                let chosen = selected.iter().any(|known| known == label);
+                let surface = entity.downgrade();
+                let option_key = key.clone();
+                let option_label = label.clone();
+                let option_selector =
+                    format!("{selector}-{QUESTION_OPTION_SELECTOR_SUFFIX}-{index}");
+                let option_button = Button::new(
+                    SharedString::from(option_selector.clone()),
+                    self.answer_focus.clone(),
+                    *theme,
+                    MotionPolicy::Reduced,
+                    if chosen {
+                        ButtonVariant::Default
+                    } else {
+                        ButtonVariant::Outline
+                    },
+                    ButtonSize::Small,
+                    ButtonContent::text(label.clone()),
+                )
+                .expect("question option button configuration is valid")
+                .focus_visibility(FocusVisibility::Visible)
+                .debug_selector(option_selector)
+                .disabled(!ready || in_flight)
+                .on_activate(move |_, _, app| {
+                    let _ = surface.update(app, |surface, cx| {
+                        surface.submit_question_option_gesture(
+                            &option_key,
+                            option_label.clone(),
+                            cx,
+                        );
+                    });
+                });
+                let mut option_row = div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(theme.spacing.steps(1.0))
+                    .child(option_button);
+                if let Some(description) = description {
+                    option_row = option_row.child(body_text(description, theme));
+                }
+                options = options.child(option_row);
+            }
+            details = details.child(options);
+            if cache.multi_select {
+                let surface = entity.downgrade();
+                let answer_key = key.clone();
+                let answer_button = Button::new(
+                    SharedString::from(format!("{selector}-answer")),
+                    self.answer_focus.clone(),
+                    *theme,
+                    MotionPolicy::Reduced,
+                    ButtonVariant::Default,
+                    ButtonSize::Small,
+                    ButtonContent::text(QUESTION_ANSWER_LABEL),
+                )
+                .expect("static question answer button configuration is valid")
+                .focus_visibility(FocusVisibility::Visible)
+                .debug_selector(format!("{selector}-{QUESTION_ANSWER_SELECTOR_SUFFIX}"))
+                .disabled(!ready || in_flight || selected.is_empty())
+                .on_activate(move |_, _, app| {
+                    let _ = surface.update(app, |surface, cx| {
+                        surface.submit_question_gesture(&answer_key, cx);
+                    });
+                });
+                details = details.child(answer_button);
+            }
+        } else {
+            let draft = gate.map_or("", QuestionAnswerGate::draft);
+            let draft_text = if draft.trim().is_empty() {
+                QUESTION_INPUT_PLACEHOLDER.to_owned()
+            } else {
+                draft.to_owned()
+            };
+            let input_selector = format!("{selector}-input");
+            details = details.child(
+                body_text(&draft_text, theme).debug_selector(move || input_selector.clone()),
+            );
+            let surface = entity.downgrade();
+            let answer_key = key.clone();
+            let answer_button = Button::new(
+                SharedString::from(format!("{selector}-answer")),
+                self.answer_focus.clone(),
+                *theme,
+                MotionPolicy::Reduced,
+                ButtonVariant::Default,
+                ButtonSize::Small,
+                ButtonContent::text(QUESTION_ANSWER_LABEL),
+            )
+            .expect("static question answer button configuration is valid")
+            .focus_visibility(FocusVisibility::Visible)
+            .debug_selector(format!("{selector}-{QUESTION_ANSWER_SELECTOR_SUFFIX}"))
+            .disabled(!ready || in_flight || draft.trim().is_empty())
+            .on_activate(move |_, _, app| {
+                let _ = surface.update(app, |surface, cx| {
+                    surface.submit_question_gesture(&answer_key, cx);
+                });
+            });
+            details = details.child(answer_button);
+        }
+        if let Some(failure) = failure {
+            let failure_selector = format!("{selector}-{QUESTION_FAILURE_SELECTOR_SUFFIX}");
+            details = details
+                .child(body_text(failure, theme).debug_selector(move || failure_selector.clone()));
+        }
+        self.render_controlled_card(
+            ControlledCardOptions {
+                id: block.id.clone(),
+                item_id: item_id_for_scene_id(&block.id),
                 disclosure: block.disclosure,
                 selector,
-                title: "Question",
-                body: &block.prompt,
+                style,
             },
+            compact_card_content(style).child(card_heading("Question", theme)),
+            compact_card_content(style).child(details),
             entity,
-            theme,
             anchors,
         )
     }
@@ -1742,6 +2219,465 @@ impl ConversationSurface {
         let card = anchors.attach(card, Some(&id), item_id.as_ref());
         let card = card.debug_selector(move || selector.clone());
         card.child(collapsible).into_any_element()
+    }
+}
+
+/// Stable debug-selector suffix for the approval confirm control.
+pub const APPROVAL_CONFIRM_SELECTOR_SUFFIX: &str = "approve-submit";
+
+/// Stable debug-selector suffix for the approval deny control.
+pub const APPROVAL_DENY_SELECTOR_SUFFIX: &str = "deny-submit";
+
+/// Stable debug-selector suffix for the question answer control.
+pub const QUESTION_ANSWER_SELECTOR_SUFFIX: &str = "question-answer";
+
+/// Stable debug-selector suffix for one question option control; the option
+/// index is appended after a `-` separator.
+pub const QUESTION_OPTION_SELECTOR_SUFFIX: &str = "question-option";
+
+/// Stable debug-selector suffix for the question failure row.
+pub const QUESTION_FAILURE_SELECTOR_SUFFIX: &str = "question-failure";
+
+/// Stable debug-selector suffix for the approval failure row.
+pub const APPROVAL_FAILURE_SELECTOR_SUFFIX: &str = "approval-failure";
+
+/// Which existing GPUI answer action a dispatched attempt carries.
+///
+/// No new actions are introduced: this enum only retains the already
+/// registered [`RespondApprovalAction`]/[`RespondQuestionAction`] value that
+/// a button gesture dispatched, alongside the domain command built for it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AnswerDispatchAction {
+    /// One explicit approval gesture (`approved` is always stated).
+    Approval(RespondApprovalAction),
+    /// One explicit question gesture with the chosen answers.
+    Question(RespondQuestionAction),
+}
+
+impl AnswerDispatchAction {
+    /// Returns the stable action name shared with the GPUI contract.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Approval(_) => "respond_approval",
+            Self::Question(_) => "respond_question",
+        }
+    }
+}
+
+/// One button gesture dispatched toward the existing transport/request path.
+///
+/// The command already carries its freshly minted request identity; the
+/// controller drains [`ConversationSurface::take_answer_dispatches`] toward
+/// transport. App-level `dispatch_action` binding for the carried GPUI action
+/// value lands with the controller transport packet; until then the outbox
+/// carries the exact action values the buttons dispatched.
+#[derive(Debug)]
+pub struct AnswerDispatch {
+    /// The existing GPUI answer action value the gesture dispatched.
+    pub action: AnswerDispatchAction,
+    /// The domain command built through the existing constructors.
+    pub command: Command,
+    /// The freshly minted request identity carried by the command.
+    pub request_id: RequestId,
+}
+
+/// Offered question options cached per row for choice rendering.
+///
+/// The full option views remain in [`EngineObservationState`]; this cache
+/// carries only the labels (plus optional descriptions) the controller
+/// mirrors for the choice buttons, with the multi-select policy.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuestionChoiceCache {
+    /// Whether more than one option may be chosen before confirming.
+    pub multi_select: bool,
+    /// Offered answers in provider order as `(label, description)` pairs.
+    pub options: Vec<(String, Option<String>)>,
+}
+
+impl QuestionChoiceCache {
+    /// Returns whether the row offers choices rather than free-form entry.
+    #[must_use]
+    pub fn is_choice(&self) -> bool {
+        !self.options.is_empty()
+    }
+}
+
+/// One approval answer attempt admitted by [`ApprovalAnswerGate`].
+///
+/// The attempt carries the dispatched GPUI action value, the domain command
+/// built with a freshly minted request identity, and that identity for
+/// receipt correlation. At most one attempt exists per row while its flight
+/// is outstanding.
+#[derive(Debug)]
+pub struct ApprovalAnswerAttempt {
+    /// The dispatched `respond_approval` action value.
+    pub action: RespondApprovalAction,
+    /// The domain command built through [`approval_command`].
+    pub command: Command,
+    /// The freshly minted request identity carried by the command.
+    pub request_id: RequestId,
+}
+
+/// Single-flight gate plus pending/failure presentation for one approval row.
+///
+/// Mirrors `submitted_decision` in `conversation-approval.svelte`: at most
+/// one answer attempt is in flight per row, so a second gesture cannot mint
+/// a second request identity while the first awaits its receipt. A settled
+/// attempt keeps the gate closed until the row resolves in place through the
+/// subscription; a failed attempt reopens the gate and surfaces the retry
+/// message from the existing pairing policy.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ApprovalAnswerGate {
+    flight: AnswerFlight,
+    pending_decision: Option<bool>,
+    failure: Option<String>,
+    last_request_id: Option<RequestId>,
+}
+
+impl ApprovalAnswerGate {
+    /// Creates a gate with no answer in flight.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns whether an answer attempt is awaiting its receipt.
+    #[must_use]
+    pub fn is_in_flight(&self) -> bool {
+        self.flight.is_in_flight()
+    }
+
+    /// Returns the submitted decision awaiting settlement, if any.
+    #[must_use]
+    pub const fn pending_decision(&self) -> Option<bool> {
+        self.pending_decision
+    }
+
+    /// Returns the surfaced retry/diagnostic message, if any.
+    #[must_use]
+    pub fn failure_message(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    /// Returns the request identity of the latest admitted attempt, if any.
+    #[must_use]
+    pub fn last_request_id(&self) -> Option<&RequestId> {
+        self.last_request_id.as_ref()
+    }
+
+    /// Attempts one explicit approval gesture.
+    ///
+    /// This is one authenticated user gesture: `approved` is always stated,
+    /// never defaulted. A refused attempt (flight outstanding or identity
+    /// exhaustion) mints nothing and dispatches nothing.
+    pub fn begin(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        approval_id: ObservationId,
+        approved: bool,
+    ) -> Option<ApprovalAnswerAttempt> {
+        if !self.flight.begin() {
+            return None;
+        }
+        let request_id = match mint_answer_request_id() {
+            Ok(request_id) => request_id,
+            Err(_) => {
+                self.flight.settle();
+                return None;
+            }
+        };
+        let action = RespondApprovalAction {
+            run_id,
+            approval_id,
+            approved,
+        };
+        let command = approval_command(thread_id, &action, request_id.clone());
+        self.pending_decision = Some(approved);
+        self.failure = None;
+        self.last_request_id = Some(request_id.clone());
+        Some(ApprovalAnswerAttempt {
+            action,
+            command,
+            request_id,
+        })
+    }
+
+    /// Pairs one correlated approval receipt onto the existing policy.
+    ///
+    /// No new pairing logic is introduced: this delegates to
+    /// [`pair_approval_answer`]. A settled attempt keeps the gate closed
+    /// until the row resolves in place; any other outcome reopens the gate
+    /// and surfaces the renderer-safe message.
+    pub fn settle_receipt(
+        &mut self,
+        state: &EngineObservationState,
+        command: &artisan_domain::RespondApproval,
+        receipt: &RespondApprovalReceipt,
+    ) -> AnswerPairing {
+        let pairing = pair_approval_answer(state, command, receipt);
+        if pairing.is_settled() {
+            self.failure = None;
+        } else {
+            self.flight.settle();
+            self.pending_decision = None;
+            self.failure = pairing.settlement.message().map(str::to_owned);
+        }
+        pairing
+    }
+
+    /// Pairs one answer failure onto the existing policy.
+    ///
+    /// The retry message comes from [`pair_answer_failure`]; the gate
+    /// reopens so the same answer may be retried explicitly with a freshly
+    /// minted identity.
+    pub fn settle_failure(
+        &mut self,
+        request_id: &RequestId,
+        failure: &ProtocolFailure,
+    ) -> AnswerSettlement {
+        let settlement = pair_answer_failure(AnswerKind::Approval, request_id, failure);
+        self.flight.settle();
+        self.pending_decision = None;
+        self.failure = settlement.message().map(str::to_owned);
+        settlement
+    }
+}
+
+/// One question answer attempt admitted by [`QuestionAnswerGate`].
+///
+/// Carries the dispatched `respond_question` action value, the domain command
+/// built with a freshly minted request identity, and that identity for
+/// receipt correlation.
+#[derive(Debug)]
+pub struct QuestionAnswerAttempt {
+    /// The dispatched `respond_question` action value.
+    pub action: RespondQuestionAction,
+    /// The domain command built through [`question_command`].
+    pub command: Command,
+    /// The freshly minted request identity carried by the command.
+    pub request_id: RequestId,
+}
+
+/// Single-flight gate plus selection/draft/failure state for one question row.
+///
+/// Mirrors `conversation-prompt.svelte`: a single-select choice submits the
+/// moment it is clicked, while a multi-select choice stages a selection until
+/// the Answer control confirms it. Free-form rows submit the typed draft;
+/// empty drafts are rejected client-side with the row staying pending, so
+/// nothing is minted or dispatched. A settled attempt keeps the gate closed
+/// until the row resolves; a failed attempt reopens it with the retry message
+/// from the existing pairing policy.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuestionAnswerGate {
+    flight: AnswerFlight,
+    selected: Vec<String>,
+    draft: String,
+    failure: Option<String>,
+    last_request_id: Option<RequestId>,
+}
+
+impl QuestionAnswerGate {
+    /// Creates a gate with no selection, draft, or flight.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns whether an answer attempt is awaiting its receipt.
+    #[must_use]
+    pub fn is_in_flight(&self) -> bool {
+        self.flight.is_in_flight()
+    }
+
+    /// Returns the staged multi-select choices in selection order.
+    #[must_use]
+    pub fn selected(&self) -> &[String] {
+        &self.selected
+    }
+
+    /// Returns the staged free-form draft exactly as set.
+    #[must_use]
+    pub fn draft(&self) -> &str {
+        &self.draft
+    }
+
+    /// Returns the surfaced retry/diagnostic message, if any.
+    #[must_use]
+    pub fn failure_message(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    /// Returns the request identity of the latest admitted attempt, if any.
+    #[must_use]
+    pub fn last_request_id(&self) -> Option<&RequestId> {
+        self.last_request_id.as_ref()
+    }
+
+    /// Stages one multi-select choice toggle without dispatching.
+    ///
+    /// Single-select rows never stage: they submit immediately through
+    /// [`Self::submit_single`].
+    pub fn toggle_option(&mut self, option: String, multi_select: bool) {
+        if !multi_select {
+            return;
+        }
+        if let Some(position) = self.selected.iter().position(|known| known == &option) {
+            self.selected.remove(position);
+        } else {
+            self.selected.push(option);
+        }
+    }
+
+    /// Replaces the staged free-form draft exactly as supplied.
+    pub fn set_draft(&mut self, draft: String) {
+        self.draft = draft;
+    }
+
+    /// Submits one single-select choice immediately.
+    ///
+    /// A refused attempt (flight outstanding or identity/bounds failure)
+    /// mints nothing and dispatches nothing.
+    pub fn submit_single(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        question_id: ObservationId,
+        option: String,
+    ) -> Option<QuestionAnswerAttempt> {
+        self.submit_answers(thread_id, run_id, question_id, vec![option])
+    }
+
+    /// Submits the staged multi-select choices.
+    ///
+    /// An empty selection is rejected client-side: the row stays pending and
+    /// nothing is minted or dispatched.
+    pub fn submit_selected(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        question_id: ObservationId,
+    ) -> Option<QuestionAnswerAttempt> {
+        let answers = self.selected.clone();
+        self.submit_answers(thread_id, run_id, question_id, answers)
+    }
+
+    /// Submits an explicit choice list without touching staged state.
+    ///
+    /// An empty list is rejected client-side, mirroring the legacy guard
+    /// that never synthesizes an answer; the empty list remains reserved for
+    /// an explicit skip gesture, which has no button on this surface.
+    pub fn submit_choice(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        question_id: ObservationId,
+        answers: Vec<String>,
+    ) -> Option<QuestionAnswerAttempt> {
+        self.submit_answers(thread_id, run_id, question_id, answers)
+    }
+
+    /// Submits the staged free-form draft.
+    ///
+    /// The draft is trimmed and empty submits are rejected client-side with
+    /// the row staying pending: no identity is minted and nothing is
+    /// dispatched. A submitted draft clears the staged draft and selection,
+    /// mirroring the legacy surface.
+    pub fn submit_freeform(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        question_id: ObservationId,
+    ) -> Option<QuestionAnswerAttempt> {
+        let trimmed = self.draft.trim().to_owned();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let attempt = self.submit_answers(thread_id, run_id, question_id, vec![trimmed])?;
+        self.draft.clear();
+        self.selected.clear();
+        Some(attempt)
+    }
+
+    fn submit_answers(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        question_id: ObservationId,
+        answers: Vec<String>,
+    ) -> Option<QuestionAnswerAttempt> {
+        if answers.is_empty() {
+            return None;
+        }
+        if !self.flight.begin() {
+            return None;
+        }
+        let request_id = match mint_answer_request_id() {
+            Ok(request_id) => request_id,
+            Err(_) => {
+                self.flight.settle();
+                return None;
+            }
+        };
+        let action = RespondQuestionAction {
+            run_id,
+            question_id,
+            answers,
+        };
+        let command = match question_command(thread_id, &action, request_id.clone()) {
+            Ok(command) => command,
+            Err(error) => {
+                self.flight.settle();
+                self.failure = Some(format!("{}{error}", AnswerKind::Question.failure_prefix()));
+                return None;
+            }
+        };
+        self.failure = None;
+        self.last_request_id = Some(request_id.clone());
+        Some(QuestionAnswerAttempt {
+            action,
+            command,
+            request_id,
+        })
+    }
+
+    /// Pairs one correlated question receipt onto the existing policy.
+    ///
+    /// No new pairing logic is introduced: this delegates to
+    /// [`pair_question_answer`]. A settled attempt keeps the gate closed
+    /// until the row resolves in place; any other outcome reopens the gate
+    /// and surfaces the renderer-safe message.
+    pub fn settle_receipt(
+        &mut self,
+        state: &EngineObservationState,
+        command: &artisan_domain::RespondQuestion,
+        receipt: &RespondQuestionReceipt,
+    ) -> AnswerPairing {
+        let pairing = pair_question_answer(state, command, receipt);
+        if pairing.is_settled() {
+            self.failure = None;
+        } else {
+            self.flight.settle();
+            self.failure = pairing.settlement.message().map(str::to_owned);
+        }
+        pairing
+    }
+
+    /// Pairs one answer failure onto the existing policy.
+    ///
+    /// The retry message comes from [`pair_answer_failure`]; the gate
+    /// reopens so the same answer may be retried explicitly with a freshly
+    /// minted identity.
+    pub fn settle_failure(
+        &mut self,
+        request_id: &RequestId,
+        failure: &ProtocolFailure,
+    ) -> AnswerSettlement {
+        let settlement = pair_answer_failure(AnswerKind::Question, request_id, failure);
+        self.flight.settle();
+        self.failure = settlement.message().map(str::to_owned);
+        settlement
     }
 }
 
@@ -2221,5 +3157,325 @@ mod tests {
                 assert_eq!(surface.pending_scroll_targets.first(), Some(&first));
             });
         });
+    }
+
+    /// Engine answer submit wiring: explicit gestures, fresh identities,
+    /// single-flight suppression, client-side empty rejection, and
+    /// settle-in-place resolution through the existing pairing policy.
+    ///
+    /// These are plain `#[test]` functions against the surface's submit gates
+    /// with no display dependencies.
+    mod approve_submit {
+        use artisan_domain::{
+            ApprovalObservation, ApprovalRequest, Command, EngineObservationEvent, Observation,
+            ObservationId, ObservationSequence, QuestionInput, QuestionObservation, QuestionOption,
+            ReceiptDisposition, RunId, ThreadId,
+        };
+        use artisan_protocol::{
+            ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt,
+            RespondQuestionReceipt, RunInteractionOutcome,
+        };
+
+        use super::super::{ApprovalAnswerGate, QuestionAnswerGate, QuestionChoiceCache};
+        use crate::engine_approve_ui::AnswerSettlement;
+        use crate::engine_observation_state::EngineObservationState;
+
+        fn observation_id(value: &str) -> ObservationId {
+            ObservationId::parse(value).expect("fixture observation id is valid")
+        }
+
+        fn sequence(value: u64) -> ObservationSequence {
+            ObservationSequence::new(value).expect("fixture sequence is valid")
+        }
+
+        fn thread_id() -> ThreadId {
+            ThreadId::parse("thread-approve").expect("fixture thread id is valid")
+        }
+
+        fn run_id() -> RunId {
+            RunId::parse("run-approve").expect("fixture run id is valid")
+        }
+
+        fn event(observation: Observation) -> EngineObservationEvent {
+            EngineObservationEvent {
+                thread_id: thread_id(),
+                observation,
+            }
+        }
+
+        fn approval_requested(approval: &str) -> Observation {
+            Observation::Approval(
+                ApprovalObservation::requested(
+                    observation_id(&format!("obs-{approval}-requested")),
+                    sequence(9),
+                    observation_id(approval),
+                    String::from("Run the test suite?"),
+                    ApprovalRequest::command(
+                        String::from("cargo test"),
+                        Some(String::from("C:/repos/demo")),
+                        Some(String::from("verify before landing")),
+                    )
+                    .expect("fixture approval request is valid"),
+                )
+                .expect("fixture requested approval is valid"),
+            )
+        }
+
+        fn approval_resolved(approval: &str, approved: bool) -> Observation {
+            Observation::Approval(
+                ApprovalObservation::resolved(
+                    observation_id(&format!("obs-{approval}-resolved")),
+                    sequence(10),
+                    observation_id(approval),
+                    String::from("Run the test suite?"),
+                    ApprovalRequest::command(
+                        String::from("cargo test"),
+                        Some(String::from("C:/repos/demo")),
+                        Some(String::from("verify before landing")),
+                    )
+                    .expect("fixture approval request is valid"),
+                    approved,
+                )
+                .expect("fixture resolved approval is valid"),
+            )
+        }
+
+        fn first_options() -> Vec<QuestionOption> {
+            vec![
+                QuestionOption::new(String::from("tokio"), None).expect("fixture option is valid"),
+                QuestionOption::new(
+                    String::from("async-std"),
+                    Some(String::from("alternative runtime")),
+                )
+                .expect("fixture option is valid"),
+            ]
+        }
+
+        fn question_input(question: &str, multi_select: bool) -> QuestionInput {
+            QuestionInput {
+                question_id: observation_id(question),
+                text: String::from("Which runtime?"),
+                header: Some(String::from("Runtime")),
+                multi_select,
+                options: Some(first_options()),
+            }
+        }
+
+        fn question_requested(question: &str, multi_select: bool) -> Observation {
+            Observation::Question(
+                QuestionObservation::requested(
+                    observation_id(&format!("obs-{question}-requested")),
+                    sequence(11),
+                    question_input(question, multi_select),
+                )
+                .expect("fixture requested question is valid"),
+            )
+        }
+
+        fn approval_command_inner(command: &Command) -> &artisan_domain::RespondApproval {
+            match command {
+                Command::RespondApproval(command) => command,
+                _ => panic!("approval gesture must build an approval command"),
+            }
+        }
+
+        fn question_command_inner(command: &Command) -> &artisan_domain::RespondQuestion {
+            match command {
+                Command::RespondQuestion(command) => command,
+                _ => panic!("question gesture must build a question command"),
+            }
+        }
+
+        #[test]
+        fn approve_submit_dispatches_with_fresh_ids() {
+            let mut first_row = ApprovalAnswerGate::new();
+            let mut second_row = ApprovalAnswerGate::new();
+            let first = first_row
+                .begin(thread_id(), run_id(), observation_id("approval-1"), true)
+                .expect("approve gesture admits an attempt");
+            let second = second_row
+                .begin(thread_id(), run_id(), observation_id("approval-2"), true)
+                .expect("second row admits its own attempt");
+            assert_ne!(first.request_id, second.request_id);
+            assert!(first.action.approved);
+            assert_eq!(first.action.approval_id.as_str(), "approval-1");
+            assert_eq!(first.action.run_id, run_id());
+            let command = approval_command_inner(&first.command);
+            assert_eq!(command.request_id(), &first.request_id);
+            assert_eq!(command.thread_id(), &thread_id());
+            assert!(command.approved());
+            assert!(first_row.is_in_flight());
+            assert_eq!(first_row.pending_decision(), Some(true));
+        }
+
+        #[test]
+        fn deny_submit_carries_an_explicit_denial() {
+            let mut gate = ApprovalAnswerGate::new();
+            let attempt = gate
+                .begin(thread_id(), run_id(), observation_id("approval-1"), false)
+                .expect("deny gesture admits an attempt");
+            assert!(!attempt.action.approved);
+            assert!(!approval_command_inner(&attempt.command).approved());
+            assert_eq!(gate.pending_decision(), Some(false));
+        }
+
+        #[test]
+        fn question_choice_submit_carries_selected_options() {
+            let mut gate = QuestionAnswerGate::new();
+            assert!(
+                QuestionChoiceCache {
+                    multi_select: true,
+                    options: vec![
+                        (String::from("tokio"), None),
+                        (
+                            String::from("async-std"),
+                            Some(String::from("alternative runtime")),
+                        ),
+                    ],
+                }
+                .is_choice()
+            );
+            gate.toggle_option(String::from("tokio"), true);
+            gate.toggle_option(String::from("async-std"), true);
+            assert_eq!(
+                gate.selected(),
+                &[String::from("tokio"), String::from("async-std")]
+            );
+            let attempt = gate
+                .submit_selected(thread_id(), run_id(), observation_id("question-1"))
+                .expect("staged choices submit");
+            assert_eq!(
+                attempt.action.answers,
+                vec![String::from("tokio"), String::from("async-std")]
+            );
+            assert_eq!(
+                question_command_inner(&attempt.command).answers(),
+                &attempt.action.answers
+            );
+            assert!(gate.is_in_flight());
+        }
+
+        #[test]
+        fn freeform_submit_carries_typed_text() {
+            let mut gate = QuestionAnswerGate::new();
+            gate.set_draft(String::from("  typed answer  "));
+            let attempt = gate
+                .submit_freeform(thread_id(), run_id(), observation_id("question-free"))
+                .expect("typed draft submits");
+            assert_eq!(attempt.action.answers, vec![String::from("typed answer")]);
+            assert_eq!(gate.draft(), "");
+            assert!(gate.is_in_flight());
+        }
+
+        #[test]
+        fn empty_freeform_rejected_without_dispatch() {
+            let mut gate = QuestionAnswerGate::new();
+            gate.set_draft(String::from("   "));
+            assert!(
+                gate.submit_freeform(thread_id(), run_id(), observation_id("question-free"))
+                    .is_none()
+            );
+            assert!(!gate.is_in_flight());
+            assert!(gate.last_request_id().is_none());
+            assert!(gate.failure_message().is_none());
+            gate.set_draft(String::from("typed"));
+            assert!(
+                gate.submit_freeform(thread_id(), run_id(), observation_id("question-free"))
+                    .is_some(),
+                "the row stays pending so a later typed submit still works"
+            );
+        }
+
+        #[test]
+        fn double_submit_suppressed_while_flight_outstanding() {
+            let mut gate = ApprovalAnswerGate::new();
+            let first = gate
+                .begin(thread_id(), run_id(), observation_id("approval-1"), true)
+                .expect("first gesture admits an attempt");
+            assert!(
+                gate.begin(thread_id(), run_id(), observation_id("approval-1"), true,)
+                    .is_none(),
+                "a second gesture mints nothing while the first is outstanding"
+            );
+            assert_eq!(gate.last_request_id(), Some(&first.request_id));
+            let failure = ProtocolFailure {
+                code: ErrorCode::Internal,
+                detail: ErrorDetail::parse("fixture unavailable").expect("fixture detail is valid"),
+                retryable: true,
+                request_id: Some(first.request_id.clone()),
+            };
+            let settlement = gate.settle_failure(&first.request_id, &failure);
+            match &settlement {
+                AnswerSettlement::RetryableFailure { message } => {
+                    assert!(message.contains("retry the same answer"));
+                }
+                _ => panic!("unavailable work must stay retryable"),
+            }
+            assert!(!gate.is_in_flight());
+            let retry = gate
+                .begin(thread_id(), run_id(), observation_id("approval-1"), true)
+                .expect("an explicit retry mints a fresh identity");
+            assert_ne!(retry.request_id, first.request_id);
+        }
+
+        #[test]
+        fn resolution_settles_the_row_via_existing_pairing() {
+            let mut state = EngineObservationState::new(thread_id());
+            state.apply(1, &event(approval_requested("approval-1")));
+            state.apply(2, &event(question_requested("question-1", false)));
+
+            let mut gate = ApprovalAnswerGate::new();
+            let attempt = gate
+                .begin(thread_id(), run_id(), observation_id("approval-1"), true)
+                .expect("approve gesture admits an attempt");
+            let receipt = RespondApprovalReceipt {
+                request_id: attempt.request_id.clone(),
+                thread_id: thread_id(),
+                run_id: run_id(),
+                approval_id: observation_id("approval-1"),
+                approved: true,
+                outcome: RunInteractionOutcome::Applied,
+                disposition: ReceiptDisposition::Accepted,
+            };
+            let pairing =
+                gate.settle_receipt(&state, approval_command_inner(&attempt.command), &receipt);
+            assert_eq!(
+                pairing.settlement,
+                AnswerSettlement::SettledInPlace { duplicate: false }
+            );
+            assert!(pairing.is_settled());
+
+            state.apply(3, &event(approval_resolved("approval-1", true)));
+            assert_eq!(
+                state.approval("approval-1").expect("row pairs").approved(),
+                Some(true)
+            );
+            assert_eq!(state.approvals_in_order().len(), 1);
+
+            let mut question_gate = QuestionAnswerGate::new();
+            let question_attempt = question_gate
+                .submit_single(
+                    thread_id(),
+                    run_id(),
+                    observation_id("question-1"),
+                    String::from("tokio"),
+                )
+                .expect("single-select choice submits immediately");
+            let question_receipt = RespondQuestionReceipt {
+                request_id: question_attempt.request_id.clone(),
+                thread_id: thread_id(),
+                run_id: run_id(),
+                question_id: observation_id("question-1"),
+                answers: vec![String::from("tokio")],
+                outcome: RunInteractionOutcome::Applied,
+                disposition: ReceiptDisposition::Accepted,
+            };
+            let question_pairing = question_gate.settle_receipt(
+                &state,
+                question_command_inner(&question_attempt.command),
+                &question_receipt,
+            );
+            assert!(question_pairing.is_settled());
+        }
     }
 }
