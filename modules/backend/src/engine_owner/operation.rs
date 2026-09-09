@@ -3370,8 +3370,9 @@ async fn execute_cursor_turn(
 /// no second queue. Mints the dashboard session token, spawns the verified
 /// service, drives `HERMES_BACKEND_READY` readiness, connects the JSON-RPC
 /// gateway, validates the live `model.options` inventory against the durable
-/// selection, opens (or resumes with original-model enforcement) exactly one
-/// session, passes the bind authorization gate, submits one prompt, then
+/// selection, opens (or resumes with original-model enforcement behind the H3
+/// gate: same engine, explicit target model, recorded service >= 0.20.0)
+/// exactly one session, passes the bind authorization gate, submits one prompt, then
 /// pumps the stream. Text deltas normalize onto the shared S1a vocabulary;
 /// approval/question frames populate the pending tracker with no
 /// control-flow side effect; images fail closed before spawn. Stall, failure,
@@ -3396,6 +3397,29 @@ async fn execute_hermes_turn(
     }
     let super::InternalLaunch::Hermes(launch) = &request.input.launch else {
         return request.fail(EngineOperationError::Configuration);
+    };
+    // H3 continuation gate: same-engine is fenced by the dispatcher (hermes
+    // bindings only); the owner additionally requires an explicit target
+    // model and service >= 0.20.0. Anything else is typed incompatible —
+    // never a silent fresh start and never a cross-engine resume. The live
+    // model.options inventory below pre-validates the exact target model
+    // before the resume request.
+    let resume_stored_session_id: Option<String> = match &request.input.continuation {
+        None => None,
+        Some(continuation) => {
+            let gate = hermes_runtime::check_hermes_native_continuation(
+                &hermes_runtime::HermesContinuationGateInput {
+                    service_version: launch.version(),
+                    target_model: Some(settings.model_id()),
+                    advertised_models: None,
+                    same_engine: true,
+                },
+            );
+            if !matches!(gate, hermes_runtime::HermesContinuationDecision::Compatible) {
+                return request.fail(EngineOperationError::Configuration);
+            }
+            Some(continuation.provider_session_id().to_owned())
+        }
     };
     if let Err(error) = hermes_runtime::reject_image_attachments(&request.input.prompt) {
         return request.fail(map_hermes_turn_error(error));
@@ -3541,11 +3565,7 @@ async fn execute_hermes_turn(
         settings: &settings,
         project_root: request.input.project_root.as_str(),
         guidance_sections: &[],
-        resume_stored_session_id: request
-            .input
-            .continuation
-            .as_ref()
-            .map(|continuation| continuation.provider_session_id()),
+        resume_stored_session_id: resume_stored_session_id.as_deref(),
     };
     let opened = match hermes_runtime::open_session(&mut client, &open_input, &provider_scope).await
     {

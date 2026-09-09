@@ -2405,3 +2405,127 @@ pub(crate) async fn apply_observations(
     }
     None
 }
+
+// H3: native continuation gate, recorded service version, and group teardown
+// ---------------------------------------------------------------------------
+
+/// Minimum Hermes service for native continuation.
+///
+/// The transport floor and the continuation floor are the same verified
+/// release (`0.20.0`): the launch authority already refuses older services
+/// at probe time, and this gate re-checks the recorded version (mirroring
+/// `minimum_hermes_version` in `modules/engines/src/hermes/service.ts`) so a
+/// stale capability can never authorize a resume the installed service no
+/// longer honors.
+pub(crate) const HERMES_CONTINUATION_MINIMUM_SERVICE_VERSION: &str = "0.20.0";
+
+/// Returns whether Hermes teardown must terminate the whole process group.
+///
+/// Always true: the owner spawns Hermes with whole-group custody (Job Object
+/// on Windows), so teardown kills hermes grandchildren that still hold pipes
+/// instead of orphaning them. Unobserved reaps quarantine through the shared
+/// `cleanup_after_abort` / `finish_turn_result` path.
+pub(crate) const fn hermes_requires_group_termination() -> bool {
+    true
+}
+
+/// Compares two service version spellings by their numeric core.
+///
+/// A leading name (`Hermes Agent v`) and any trailing pre-release suffix are
+/// ignored, so `Hermes Agent v0.20.0` compares equal to `0.20.0`. The
+/// recorded launch version is the bare `Display` form (`0.20.0`), which the
+/// unanchored TypeScript probe pattern also accepts. Returns `None` when
+/// either side has no parseable triple; callers fail closed on `None`.
+pub(crate) fn compare_hermes_service_versions(
+    left: &str,
+    right: &str,
+) -> Option<std::cmp::Ordering> {
+    Some(parse_service_triple(left)?.cmp(&parse_service_triple(right)?))
+}
+
+/// Returns whether a recorded service version meets a minimum floor.
+pub(crate) fn hermes_service_meets_minimum(version: &str, minimum: &str) -> bool {
+    matches!(
+        compare_hermes_service_versions(version, minimum),
+        Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+    )
+}
+
+fn parse_service_triple(text: &str) -> Option<[u64; 3]> {
+    let start = text.find(|character: char| character.is_ascii_digit())?;
+    let run: String = text[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '.')
+        .collect();
+    let mut parts = run.split('.');
+    Some([
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ])
+}
+
+/// Native-continuation decision for one Hermes turn.
+///
+/// `Compatible` authorizes `session.resume` against the stored durable
+/// session; `Incompatible` carries the stable reason the dispatcher surfaces
+/// instead of silently starting fresh or resuming across engines.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HermesContinuationDecision {
+    Compatible,
+    Incompatible { reason: &'static str },
+}
+
+/// Bounded input for [`check_hermes_native_continuation`].
+pub(crate) struct HermesContinuationGateInput<'a> {
+    /// Recorded service version (`VerifiedHermesLaunch::version`).
+    pub service_version: &'a str,
+    /// Explicit target model from the current selection; `None` fails closed.
+    pub target_model: Option<&'a str>,
+    /// Advertised models when a `model.options` inventory was read; `None`
+    /// skips advertisement validation (the live inventory check pre-validates
+    /// the exact target model before resume) but never skips the
+    /// explicit-model or service gates.
+    pub advertised_models: Option<&'a [&'a str]>,
+    /// Whether the stored binding names the same `hermes` engine. The
+    /// dispatcher scopes continuation reads to `EngineId::Hermes`, so a false
+    /// value fails closed instead of resuming across engines.
+    pub same_engine: bool,
+}
+
+/// Gates one Hermes native continuation without touching provider state.
+///
+/// Order is contractual: same-engine first, then the explicit target model
+/// (pre-validated before resume), then the `0.20.0` service floor, then model
+/// advertisement when an inventory is supplied. Any failure is a typed
+/// incompatible — never a silent fresh start and never a cross-engine resume.
+pub(crate) fn check_hermes_native_continuation(
+    input: &HermesContinuationGateInput<'_>,
+) -> HermesContinuationDecision {
+    if !input.same_engine {
+        return HermesContinuationDecision::Incompatible {
+            reason: "Hermes native continuation cannot resume across engines",
+        };
+    }
+    let Some(target) = input.target_model.filter(|model| !model.is_empty()) else {
+        return HermesContinuationDecision::Incompatible {
+            reason: "Hermes native continuation requires an explicit target model",
+        };
+    };
+    if !hermes_service_meets_minimum(
+        input.service_version,
+        HERMES_CONTINUATION_MINIMUM_SERVICE_VERSION,
+    ) {
+        return HermesContinuationDecision::Incompatible {
+            reason: "Hermes native continuation requires service 0.20.0 or newer",
+        };
+    }
+    if let Some(advertised) = input.advertised_models
+        && !advertised.contains(&target)
+    {
+        return HermesContinuationDecision::Incompatible {
+            reason: "Hermes does not currently advertise the target model",
+        };
+    }
+    HermesContinuationDecision::Compatible
+}
