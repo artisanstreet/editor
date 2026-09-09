@@ -98,6 +98,15 @@ impl SlidingHoverState {
         self.generation = self.generation.wrapping_add(1);
     }
 
+    /// Hides the pill while retaining its target and geometry, so a later
+    /// `set_active` plus `measure` resumes sliding from the last displayed
+    /// rectangle instead of placing instantly. Used when the pointer drifts
+    /// onto blank areas inside a shared surface; a full `clear` would snap
+    /// the next row-to-row flight.
+    pub(crate) fn hide(&mut self) {
+        self.visible = false;
+    }
+
     /// Clears a target that no longer exists after a filtered/list mutation.
     pub(crate) fn clear_if_missing(&mut self, visible_ids: &[String]) {
         if self
