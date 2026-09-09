@@ -295,6 +295,29 @@ impl NativeProfileUsageState {
         self.entries.iter().any(NativeUsageEntry::has_response)
     }
 
+    /// Returns the entries the dropdown may paint, in adapter order.
+    ///
+    /// This mirrors the Electron menu's per-row facts but applies the
+    /// requested presentation filter: only an authenticated report carrying
+    /// at least one renderable window is visible. Unsupported,
+    /// unauthenticated, failed, empty, and pending-without-data providers
+    /// are hidden; a last-good report stays visible while its refresh is
+    /// pending or has settled a failure. A zero percentage is real data and
+    /// is never filtered. Data acquisition is untouched — this only decides
+    /// dropdown presentation.
+    #[must_use]
+    pub fn visible_usage_entries(&self) -> Vec<&NativeUsageEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.report.as_ref().is_some_and(|report| {
+                    report.authentication == NativeUsageAuthentication::Authenticated
+                        && !report.renderable_windows().is_empty()
+                })
+            })
+            .collect()
+    }
+
     /// Clears incompatible cache and pending state on connection changes.
     ///
     /// Entries belong to the previous Forge connection scope and must not be
@@ -571,6 +594,20 @@ pub fn reset_duration(windows: &[NativeUsageWindow], at_ms: i64) -> Option<Strin
     usage_reset_duration(&adapters, at_ms)
 }
 
+/// Returns the tooltip's remaining quota for one meter reading.
+///
+/// This mirrors the Electron tooltip's `Math.max(0, 100 -
+/// Math.round(percent_used))`: the exact remaining percentage, while the
+/// meter itself stays ceil-quantized. Non-finite input cannot reach a meter
+/// and deterministically reads as fully used.
+#[must_use]
+pub fn usage_remaining_percent(percent_used: f64) -> i64 {
+    if !percent_used.is_finite() {
+        return 0;
+    }
+    (100.0 - percent_used.round()).clamp(0.0, 100.0) as i64
+}
+
 /// Returns the provider-specific “last checked” label used by Electron.
 #[must_use]
 pub fn checked_label(fetched_at_ms: Option<i64>, now_ms: i64) -> Option<String> {
@@ -647,6 +684,123 @@ mod tests {
         assert!(groups.is_empty());
     }
 
+    fn report(
+        engine_id: &str,
+        authentication: NativeUsageAuthentication,
+        windows: Vec<NativeUsageWindow>,
+    ) -> NativeUsageReport {
+        NativeUsageReport {
+            engine_id: engine_id.to_owned(),
+            display_name: profile_usage_display_name(engine_id).to_owned(),
+            authentication,
+            account_email: None,
+            quota_surface: NativeUsageQuotaSurface::Supported,
+            windows,
+            failure: None,
+        }
+    }
+
+    fn presented_entry(
+        engine_id: &str,
+        report: Option<NativeUsageReport>,
+        failure: Option<&str>,
+    ) -> NativeUsageEntry {
+        NativeUsageEntry {
+            engine_id: engine_id.to_owned(),
+            display_name: profile_usage_display_name(engine_id).to_owned(),
+            report,
+            failure: failure.map(str::to_owned),
+            fetched_at_ms: Some(1_000_000),
+        }
+    }
+
+    fn visible_ids(entries: &[NativeUsageEntry], refreshing: &[&str]) -> Vec<&str> {
+        NativeProfileUsageState {
+            entries: entries.to_vec(),
+            refreshing_engine_ids: refreshing.iter().map(|id| (*id).to_owned()).collect(),
+            pending_read_seq: Vec::new(),
+        }
+        .visible_usage_entries()
+        .iter()
+        .map(|entry| entry.engine_id.as_str())
+        .collect()
+    }
+
+    #[test]
+    fn dropdown_hides_providers_without_renderable_data() {
+        let zero = presented_entry(
+            "zero",
+            Some(report(
+                "zero",
+                NativeUsageAuthentication::Authenticated,
+                vec![window("session", NativeUsageCadence::Session, None, 0.0)],
+            )),
+            None,
+        );
+        let empty = presented_entry(
+            "empty",
+            Some(report(
+                "empty",
+                NativeUsageAuthentication::Authenticated,
+                Vec::new(),
+            )),
+            None,
+        );
+        let invalid = presented_entry(
+            "invalid",
+            Some(report(
+                "invalid",
+                NativeUsageAuthentication::Authenticated,
+                vec![
+                    window("nan", NativeUsageCadence::Session, None, f64::NAN),
+                    window("high", NativeUsageCadence::Session, None, 120.0),
+                ],
+            )),
+            None,
+        );
+        let unauthenticated = presented_entry(
+            "unauthenticated",
+            Some(report(
+                "unauthenticated",
+                NativeUsageAuthentication::Unauthenticated,
+                vec![window("session", NativeUsageCadence::Session, None, 40.0)],
+            )),
+            None,
+        );
+        let failed = presented_entry("failed", None, Some("transport"));
+        let pending = NativeUsageEntry::pending("pending", "Pending");
+        // A zero percentage is real data and stays visible; everything
+        // without a renderable authenticated window is hidden.
+        assert_eq!(
+            visible_ids(
+                &[zero, empty, invalid, unauthenticated, failed, pending],
+                &[]
+            ),
+            vec!["zero"]
+        );
+    }
+
+    #[test]
+    fn dropdown_keeps_last_good_windows_while_refreshing_or_failed() {
+        let windows = vec![window("session", NativeUsageCadence::Session, None, 62.0)];
+        let refreshing = presented_entry(
+            "refreshing",
+            Some(report(
+                "refreshing",
+                NativeUsageAuthentication::Authenticated,
+                windows.clone(),
+            )),
+            None,
+        );
+        let mut failed = report("failed", NativeUsageAuthentication::Authenticated, windows);
+        failed.failure = Some("stale".to_owned());
+        let failed = presented_entry("failed", Some(failed), Some("transport"));
+        assert_eq!(
+            visible_ids(&[refreshing, failed], &["refreshing"]),
+            vec!["refreshing", "failed"]
+        );
+    }
+
     #[test]
     fn reset_duration_requires_every_window_to_have_a_future_reset() {
         let mut first = window("first", NativeUsageCadence::Session, None, 25.0);
@@ -703,6 +857,15 @@ mod tests {
             checked_label(Some(0), 3_600_000),
             Some("last checked 1 hr ago".to_owned())
         );
+    }
+
+    #[test]
+    fn remaining_percent_rounds_like_the_tooltip() {
+        assert_eq!(usage_remaining_percent(62.4), 38);
+        assert_eq!(usage_remaining_percent(0.0), 100);
+        assert_eq!(usage_remaining_percent(100.0), 0);
+        assert_eq!(usage_remaining_percent(120.0), 0);
+        assert_eq!(usage_remaining_percent(f64::NAN), 0);
     }
 
     fn entry_with_time(engine_id: &str, fetched_at_ms: Option<i64>) -> NativeUsageEntry {

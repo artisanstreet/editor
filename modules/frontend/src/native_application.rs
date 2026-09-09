@@ -33,6 +33,8 @@ use artisan_ui::button::{
 };
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
+use artisan_ui::fade_arc::FadeArc;
+use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
@@ -67,12 +69,12 @@ use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent
 use crate::native_model_catalog::NativeModelCatalog;
 use crate::native_model_selector::{
     HoverRect, NativeModelSelector, NativeModelSelectorStatus, PickerScrollState,
-    SlidingHoverState, render_picker_hover_pill,
+    SlidingHoverState, engine_accent, engine_asset, render_picker_hover_pill,
 };
 use crate::native_profile_usage::{
-    NativeProfileUsageState, NativeUsageAuthentication, NativeUsageEntry, NativeUsageWindow,
-    ProfileUsageGeneration, account_usage_response_current, checked_label, group_usage_windows,
-    plan_profile_usage_loads, profile_usage_display_name, reset_duration,
+    NativeProfileUsageState, NativeUsageEntry, NativeUsageWindow, ProfileUsageGeneration,
+    account_usage_response_current, checked_label, group_usage_windows, plan_profile_usage_loads,
+    profile_usage_display_name, reset_duration, usage_remaining_percent,
 };
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::SettingsScreen;
@@ -90,6 +92,7 @@ use crate::onboarding_harness_presentation::{
 };
 use crate::onboarding_screen::{OnboardingHarnessEntry, OnboardingScreen};
 use crate::thread_screen::{ThreadScreen, ThreadScreenGate};
+use crate::usage_meter::usage_segment_fraction;
 use crate::workspace_tab_state::EditorViewState;
 use crate::{
     conversation_delivery_machine::{ConversationDeliveryEffect, ConversationDeliveryEvent},
@@ -147,10 +150,11 @@ const PROFILE_MENU_VIEWPORT_MARGIN_PX: f32 = 8.0;
 /// Vertical gap between the panel bottom and the profile trigger top,
 /// matching the anchored offset applied when placing the panel.
 const PROFILE_MENU_ANCHOR_GAP_PX: f32 = 10.0;
-/// Fixed vertical chrome inside the profile panel: outer padding (12),
-/// header (avatar 32 + vertical padding 16), divider (1 + margins 8),
-/// and the two 34px action rows.
-const PROFILE_MENU_FIXED_CHROME_PX: f32 = 12.0 + 48.0 + 9.0 + 68.0;
+/// Fixed vertical chrome inside the profile panel: header (avatar 32 +
+/// vertical padding 32), two separators (1 + margins 8 each), and the action
+/// section (container padding 8 + two 36px rows). The usage area scrolls
+/// above this chrome under the viewport cap.
+const PROFILE_MENU_FIXED_CHROME_PX: f32 = 68.0 + 18.0 + 80.0;
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -291,6 +295,12 @@ pub struct NativeApplication {
     profile_usage_scroll: ScrollHandle,
     profile_usage_scroll_state: PickerScrollState,
     profile_usage_scroll_frame_scheduled: bool,
+    /// Hovered usage meter as `(engine_id, window_id)`; the glass remaining
+    /// tooltip follows this row until the pointer leaves, the wheel moves,
+    /// or the menu closes.
+    profile_meter_hover: Rc<RefCell<Option<(String, String)>>>,
+    profile_tip_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
+    profile_tip_anchor: Rc<RefCell<Option<((String, String), HoverRect)>>>,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
@@ -500,6 +510,9 @@ impl NativeApplication {
             profile_usage_scroll: ScrollHandle::new(),
             profile_usage_scroll_state: PickerScrollState::default(),
             profile_usage_scroll_frame_scheduled: false,
+            profile_meter_hover: Rc::new(RefCell::new(None)),
+            profile_tip_surface_bounds: Rc::new(RefCell::new(None)),
+            profile_tip_anchor: Rc::new(RefCell::new(None)),
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
@@ -1201,6 +1214,9 @@ impl NativeApplication {
         }
         self.profile_hover_surface_bounds.borrow_mut().take();
         self.profile_hover_keyboard.set(false);
+        self.profile_meter_hover.borrow_mut().take();
+        self.profile_tip_surface_bounds.borrow_mut().take();
+        self.profile_tip_anchor.borrow_mut().take();
     }
 
     /// Maximum height for the scrollable usage area: the natural content
@@ -1229,6 +1245,10 @@ impl NativeApplication {
         if !self.profile_menu.is_open() {
             return;
         }
+        // A scrolling list must not keep a meter tooltip pinned to a stale
+        // row geometry.
+        self.profile_meter_hover.borrow_mut().take();
+        self.profile_tip_anchor.borrow_mut().take();
         let delta = event.delta.pixel_delta(window.line_height()).y;
         let delta = f32::from(delta);
         if delta.abs() <= f32::EPSILON {
@@ -1326,17 +1346,17 @@ impl NativeApplication {
         theme: DesktopTheme,
         cx: &Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let mut section = div()
+        let section = div()
             .id(crate::native_profile_usage::PROFILE_USAGE_SELECTOR)
             .debug_selector(|| crate::native_profile_usage::PROFILE_USAGE_SELECTOR.to_owned())
             .flex()
-            .flex_col()
-            .px(px(8.0))
-            .py(px(6.0));
+            .flex_col();
 
         if !self.profile_usage_connected() {
             return section
                 .gap(px(3.0))
+                .px(px(8.0))
+                .py(px(6.0))
                 .child(
                     div()
                         .text_size(px(12.0))
@@ -1346,56 +1366,356 @@ impl NativeApplication {
                 .child(desktop_muted(theme, "Connect to Forge to see usage.").text_size(px(11.0)));
         }
 
-        if self.profile_usage.entries.is_empty() {
-            return section
-                .gap(px(3.0))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.foreground)
-                        .child("Usage"),
-                )
-                .child(
-                    desktop_muted(theme, "Waiting for provider usage data.").text_size(px(11.0)),
-                );
+        let visible = self.profile_usage.visible_usage_entries();
+        if visible.is_empty() {
+            return section.child(
+                div()
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.secondary)
+                    .child("No engine accounts connected."),
+            );
         }
 
         let now_ms = profile_usage_now_ms();
-        for (index, entry) in self.profile_usage.entries.iter().enumerate() {
+        let mut section = section.px(px(4.0)).py(px(4.0));
+        for (index, entry) in visible.iter().enumerate() {
             if index > 0 {
                 section = section.child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
             }
-            section = section.child(desktop_profile_usage_entry(
-                entry,
-                &self.profile_usage,
-                theme,
-                now_ms,
-            ));
-            let engine_id = entry.engine_id.clone();
-            let refresh_label = if self
-                .profile_usage
-                .refreshing_engine_ids
-                .iter()
-                .any(|current| current == &engine_id)
-            {
-                "Refreshing…"
-            } else {
-                "Refresh"
-            };
-            section = section.child(
-                div()
-                    .id(("artisan-profile-usage-refresh", index))
-                    .debug_selector(|| format!("artisan-profile-usage-refresh-{}", entry.engine_id))
-                    .cursor_pointer()
-                    .text_size(px(10.0))
-                    .text_color(theme.secondary)
-                    .child(refresh_label.to_owned())
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.refresh_single_profile_engine(&engine_id, cx);
-                    })),
-            );
+            section = section.child(self.desktop_profile_usage_engine(entry, theme, now_ms, cx));
         }
         section
+    }
+
+    /// One provider block matching `sidebar-engine-usage.svelte`: the engine
+    /// mark plus name with an inline hover-swapping refresh control, one
+    /// cadence group per disclosed cadence with 12px labels and 72x8 accent
+    /// meters, and a muted reset sentence with the duration in foreground.
+    /// Entries without renderable windows never reach this renderer (see
+    /// [`NativeProfileUsageState::visible_usage_entries`]).
+    fn desktop_profile_usage_engine(
+        &self,
+        entry: &NativeUsageEntry,
+        theme: DesktopTheme,
+        now_ms: i64,
+        cx: &Context<Self>,
+    ) -> Div {
+        let engine_id = entry.engine_id.clone();
+        let Some(report) = entry.report.as_ref() else {
+            return div();
+        };
+        let refreshing = self
+            .profile_usage
+            .refreshing_engine_ids
+            .iter()
+            .any(|current| current == &engine_id);
+        let accent = engine_accent(&engine_id)
+            .map(|hex| gpui::rgb_to_hsla(gpui::rgb(hex)).to_paint())
+            .unwrap_or(theme.secondary);
+        let dim = self.theme.colors.foreground.with_alpha(0.11).to_paint();
+        let mut block = div().flex().flex_col().gap(px(6.0)).px(px(8.0)).py(px(4.0));
+        let mut title = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .min_w(px(0.0))
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        icon(IconStyle::resolve(
+                            self.theme,
+                            engine_asset(&engine_id),
+                            IconSize::Default,
+                            IconTint::Inherit,
+                        ))
+                        .size(px(16.0))
+                        .flex_shrink_0(),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child(report.display_name.clone()),
+                    ),
+            );
+        if let Some(checked) = checked_label(entry.fetched_at_ms, now_ms) {
+            title = title.child(
+                self.desktop_profile_usage_refresh(&engine_id, &checked, refreshing, theme, cx),
+            );
+        }
+        block = block.child(title);
+        for (group_index, group) in group_usage_windows(&report.windows).iter().enumerate() {
+            let mut group_view = div().flex().flex_col().gap(px(6.0));
+            if group_index > 0 {
+                group_view = group_view.mt(px(8.0));
+            }
+            group_view = group_view.child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child(group.cadence.title()),
+            );
+            for window in &group.windows {
+                group_view = group_view.child(
+                    self.desktop_profile_usage_meter(&engine_id, window, accent, dim, theme, cx),
+                );
+            }
+            if let Some(duration) = reset_duration(&group.windows, now_ms) {
+                group_view = group_view.child(
+                    div()
+                        .mt(px(8.0))
+                        .flex()
+                        .flex_row()
+                        .text_size(px(12.0))
+                        .text_color(theme.secondary)
+                        .child(format!(
+                            "Your {} limit resets in ",
+                            group.cadence.title().to_lowercase()
+                        ))
+                        .child(div().text_color(theme.foreground).child(duration))
+                        .child("."),
+                );
+            }
+            block = block.child(group_view);
+        }
+        if let Some(failure) = report.failure.as_deref() {
+            block = block.child(desktop_muted(theme, failure.to_owned()).text_size(px(11.0)));
+        }
+        if let Some(failure) = entry.failure.as_deref()
+            && Some(failure) != report.failure.as_deref()
+        {
+            block = block.child(
+                desktop_muted(theme, format!("Refresh failed: {failure}")).text_size(px(10.0)),
+            );
+        }
+        block
+    }
+
+    /// Inline checked/refresh control: the provider's own "last checked"
+    /// reading at rest, swapping to a foreground Refresh action on hover and
+    /// to a spinner while its refresh is in flight. Withheld until the
+    /// engine has answered at least once.
+    fn desktop_profile_usage_refresh(
+        &self,
+        engine_id: &str,
+        checked: &str,
+        refreshing: bool,
+        theme: DesktopTheme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let group = format!("profile-usage-refresh-{engine_id}");
+        let selector = format!("artisan-profile-usage-refresh-{engine_id}");
+        let control = div()
+            .debug_selector({
+                let selector = selector.clone();
+                move || selector.clone()
+            })
+            .group(group.clone())
+            .relative()
+            .flex()
+            .items_center()
+            .justify_end()
+            .flex_shrink_0()
+            .text_size(px(12.0));
+        if refreshing {
+            return control.child(
+                FadeArc::new(SharedString::from(selector.clone()), self.theme)
+                    .size(px(14.0))
+                    .debug_selector(selector),
+            );
+        }
+        let engine_id = engine_id.to_owned();
+        control
+            .cursor_pointer()
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .text_color(theme.secondary)
+                    .child(checked.to_owned())
+                    .group_hover(group.clone(), |style| style.opacity(0.0)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .opacity(0.0)
+                    .group_hover(group, |style| style.opacity(1.0))
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_color(theme.foreground)
+                            .child("Refresh"),
+                    ),
+            )
+            .on_click(cx.listener(move |app, _, _, cx| {
+                app.refresh_single_profile_engine(&engine_id, cx);
+            }))
+    }
+
+    /// One cadence meter row: scope label plus a fixed 72x8 provider-accent
+    /// meter with the source 14-tick quantization. Hovering arms the glass
+    /// remaining tooltip; the exact percentage lives only there, never as
+    /// inline text.
+    fn desktop_profile_usage_meter(
+        &self,
+        engine_id: &str,
+        window: &NativeUsageWindow,
+        accent: gpui::Paint,
+        dim: gpui::Paint,
+        theme: DesktopTheme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let segments = usize::from(crate::usage_meter::USAGE_METER_SEGMENTS);
+        let lit_segments =
+            (usage_segment_fraction(window.percent_used) * segments as f64).round() as usize;
+        let mut meter = div()
+            .w(px(72.0))
+            .h(px(8.0))
+            .flex_shrink_0()
+            .flex()
+            .gap(px(2.0));
+        for index in 0..segments {
+            meter = meter.child(
+                div()
+                    .flex_1()
+                    .bg(if index < lit_segments { accent } else { dim }),
+            );
+        }
+        let tip_key = (engine_id.to_owned(), window.id.clone());
+        let meter_selector = format!("artisan-profile-usage-meter-{engine_id}-{}", window.id);
+        let meter_hover = Rc::clone(&self.profile_meter_hover);
+        let tip_surface = Rc::clone(&self.profile_tip_surface_bounds);
+        let tip_anchor = Rc::clone(&self.profile_tip_anchor);
+        let probe_key = tip_key.clone();
+        let meter_probe = canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                if meter_hover.borrow().as_ref() != Some(&probe_key) {
+                    return;
+                }
+                let Some(surface) = *tip_surface.borrow() else {
+                    return;
+                };
+                let rect = HoverRect {
+                    left: f32::from(bounds.left() - surface.left()),
+                    top: f32::from(bounds.top() - surface.top()),
+                    width: f32::from(bounds.size.width),
+                    height: f32::from(bounds.size.height),
+                };
+                let mut anchor = tip_anchor.borrow_mut();
+                if anchor
+                    .as_ref()
+                    .is_some_and(|(key, current)| key == &probe_key && *current == rect)
+                {
+                    return;
+                }
+                *anchor = Some((probe_key.clone(), rect));
+                window.defer(cx, |window, _| window.refresh());
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+        div()
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(16.0))
+            .debug_selector({
+                let meter_selector = meter_selector.clone();
+                move || meter_selector.clone()
+            })
+            .child(meter_probe)
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .truncate()
+                    .pl(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.secondary)
+                    .child(window.scope_label().to_owned()),
+            )
+            .child(meter)
+            .on_hover(cx.listener({
+                let tip_key = tip_key.clone();
+                move |app, hovered: &bool, _, cx| {
+                    if *hovered {
+                        *app.profile_meter_hover.borrow_mut() = Some(tip_key.clone());
+                    } else if app.profile_meter_hover.borrow().as_ref() == Some(&tip_key) {
+                        app.profile_meter_hover.borrow_mut().take();
+                        app.profile_tip_anchor.borrow_mut().take();
+                    }
+                    cx.notify();
+                }
+            }))
+    }
+
+    /// Glass remaining tooltip for the hovered meter, anchored beside its
+    /// row. The number is the exact remaining percentage; the shared
+    /// cross-row tween from source is intentionally not replicated (see the
+    /// parity evidence notes), so this text is static per hover.
+    fn desktop_profile_usage_tooltip(&self, theme: DesktopTheme) -> Option<Div> {
+        let (engine_id, window_id) = self.profile_meter_hover.borrow().clone()?;
+        let ((anchor_engine, anchor_window), anchor) = self.profile_tip_anchor.borrow().clone()?;
+        if (engine_id.clone(), window_id.clone()) != (anchor_engine, anchor_window) {
+            return None;
+        }
+        let remaining = self
+            .profile_usage
+            .entry(&engine_id)
+            .and_then(|entry| entry.report.as_ref())
+            .and_then(|report| report.windows.iter().find(|window| window.id == window_id))
+            .map(|window| usage_remaining_percent(window.percent_used))?;
+        Some(
+            div()
+                .id("artisan-profile-usage-tooltip")
+                .debug_selector(|| "artisan-profile-usage-tooltip".to_owned())
+                .absolute()
+                .left(px(anchor.left + anchor.width + 8.0))
+                .top(px(anchor.top))
+                .max_w(px(224.0))
+                .rounded(px(16.0))
+                .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
+                .bg(glass_foreground_base(self.theme))
+                .border_1()
+                .border_color(theme.line)
+                .shadow(glass_card_shadows())
+                .child(glass_material_layer(GlassStrength::Quiet, px(16.0)))
+                .child(glass_highlight_layer(GlassStrength::Quiet, px(16.0)))
+                .child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .text_size(px(12.0))
+                        .text_color(theme.secondary)
+                        .child("You have ")
+                        .child(
+                            div()
+                                .text_color(theme.foreground)
+                                .child(format!("{remaining}%")),
+                        )
+                        .child(" left."),
+                ),
+        )
     }
 
     fn desktop_profile(&self, window: &Window, cx: &Context<Self>) -> Div {
@@ -1587,12 +1907,41 @@ impl NativeApplication {
             self.clear_profile_hover();
         }
         if self.profile_menu.is_open() {
+            // The machine line only paints when the hostname differs from
+            // the profile name, matching `show_hostname` in source.
+            let show_profile_hostname = self.profile_hostname.as_deref().is_some_and(|hostname| {
+                self.profile_name
+                    .as_deref()
+                    .is_none_or(|name| name != hostname)
+            });
+            let tip_surface = Rc::clone(&self.profile_tip_surface_bounds);
+            let tip_surface_probe = canvas(
+                |_, _, _| {},
+                move |bounds, (), window, cx| {
+                    let changed = {
+                        let mut surface = tip_surface.borrow_mut();
+                        if *surface == Some(bounds) {
+                            false
+                        } else {
+                            *surface = Some(bounds);
+                            true
+                        }
+                    };
+                    if changed {
+                        window.defer(cx, |window, _| window.refresh());
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full();
             let mut panel = div()
                 .id("artisan-desktop-profile-menu")
                 .debug_selector(|| "artisan-desktop-profile-menu".to_string())
-                .w(px(248.0))
-                .p(px(6.0))
-                .rounded(px(12.0))
+                .min_w(px(256.0))
+                .max_w(px(352.0))
+                .rounded(px(16.0))
                 .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
                 .bg(glass_foreground_base(self.theme))
                 .border_1()
@@ -1601,8 +1950,9 @@ impl NativeApplication {
                 .flex()
                 .flex_col()
                 .relative()
-                .child(glass_material_layer(GlassStrength::Quiet, px(12.0)))
-                .child(glass_highlight_layer(GlassStrength::Quiet, px(12.0)))
+                .child(glass_material_layer(GlassStrength::Quiet, px(16.0)))
+                .child(glass_highlight_layer(GlassStrength::Quiet, px(16.0)))
+                .child(tip_surface_probe)
                 .block_mouse_except_scroll()
                 .on_mouse_down_out(cx.listener(|app, event: &gpui::MouseDownEvent, _, cx| {
                     let trigger = app.profile_origin.get();
@@ -1616,11 +1966,11 @@ impl NativeApplication {
                 .child(
                     div()
                         .debug_selector(|| "artisan-desktop-profile-header".to_owned())
-                        .px(px(10.0))
-                        .py(px(8.0))
+                        .px(px(12.0))
+                        .py(px(16.0))
                         .flex()
                         .items_center()
-                        .gap(px(8.0))
+                        .gap(px(12.0))
                         .child(
                             div()
                                 .size(px(32.0))
@@ -1640,7 +1990,7 @@ impl NativeApplication {
                                     div()
                                         .truncate()
                                         .text_size(px(14.0))
-                                        .line_height(px(16.0))
+                                        .line_height(px(20.0))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(theme.foreground)
                                         .child(self.profile_name.clone().map_or_else(
@@ -1648,20 +1998,21 @@ impl NativeApplication {
                                             |name| capitalize_label(&name),
                                         )),
                                 )
-                                .child(
+                                .children(show_profile_hostname.then(|| {
                                     div()
                                         .truncate()
-                                        .text_size(px(13.0))
+                                        .text_size(px(12.0))
                                         .line_height(px(16.0))
                                         .text_color(theme.secondary)
                                         .child(
                                             self.profile_hostname
                                                 .clone()
                                                 .unwrap_or_else(|| "This computer".to_owned()),
-                                        ),
-                                ),
+                                        )
+                                })),
                         ),
                 )
+                .child(div().h(px(1.0)).bg(theme.line).my(px(4.0)))
                 .child(
                     div()
                         .id("artisan-profile-usage-scroll")
@@ -1677,6 +2028,8 @@ impl NativeApplication {
                                 .flex_col()
                                 .min_w(px(0.0))
                                 .flex_shrink_0()
+                                .px(px(4.0))
+                                .py(px(4.0))
                                 .on_scroll_wheel(
                                     cx.listener(Self::handle_profile_usage_scroll_wheel),
                                 )
@@ -1749,6 +2102,7 @@ impl NativeApplication {
                 .w_full()
                 .flex()
                 .flex_col()
+                .p(px(4.0))
                 .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
                     if !*hovered && !app.profile_hover_keyboard.get() {
                         app.profile_hover.borrow_mut().clear();
@@ -1760,7 +2114,7 @@ impl NativeApplication {
                     self.theme,
                     Rc::clone(&profile_hover),
                     "profile",
-                    px(6.0),
+                    px(12.0),
                     cx.reduce_motion(),
                 ));
             for (index, (label, icon, hover_id)) in [
@@ -1786,18 +2140,18 @@ impl NativeApplication {
                         .id(("artisan-profile-action", index))
                         .debug_selector(move || row_selector.clone())
                         .relative()
-                        .h(px(34.0))
-                        .px(px(10.0))
+                        .px(px(12.0))
+                        .py(px(8.0))
                         .flex()
                         .items_center()
-                        .gap(px(8.0))
-                        .rounded(px(6.0))
+                        .gap(px(10.0))
+                        .rounded(px(12.0))
                         .cursor_pointer()
                         .child(row_probe)
                         .child(desktop_nav_glyph(icon, theme))
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(px(14.0))
                                 .text_color(theme.foreground)
                                 .child(label),
                         )
@@ -1819,6 +2173,9 @@ impl NativeApplication {
                 );
             }
             panel = panel.child(actions);
+            if let Some(tooltip) = self.desktop_profile_usage_tooltip(theme) {
+                panel = panel.child(tooltip);
+            }
             root = root.child(gpui::deferred(
                 gpui::anchored()
                     .anchor(gpui::Anchor::BottomLeft)
@@ -5991,199 +6348,6 @@ fn profile_usage_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn desktop_profile_usage_entry(
-    entry: &NativeUsageEntry,
-    state: &NativeProfileUsageState,
-    theme: DesktopTheme,
-    now_ms: i64,
-) -> Div {
-    let refreshing = state
-        .refreshing_engine_ids
-        .iter()
-        .any(|engine_id| engine_id == &entry.engine_id);
-    let display_name = entry
-        .report
-        .as_ref()
-        .map_or(entry.display_name.as_str(), |report| {
-            report.display_name.as_str()
-        });
-    let checked = checked_label(entry.fetched_at_ms, now_ms);
-    let mut root = div()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .px(px(2.0))
-        .py(px(3.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .min_w(px(0.0))
-                        .child(desktop_nav_glyph(AssetId::TABLER_WORLD, theme))
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.foreground)
-                                .child(display_name.to_owned()),
-                        ),
-                )
-                .child(
-                    desktop_muted(
-                        theme,
-                        if refreshing {
-                            "Refreshing…".to_owned()
-                        } else {
-                            checked.unwrap_or_else(|| "Not checked".to_owned())
-                        },
-                    )
-                    .text_size(px(10.0)),
-                ),
-        );
-
-    match entry.report.as_ref() {
-        Some(report) if report.authentication == NativeUsageAuthentication::Authenticated => {
-            let groups = group_usage_windows(&report.windows);
-            if groups.is_empty() {
-                root = root.child(
-                    desktop_muted(theme, "No usage windows were reported.").text_size(px(11.0)),
-                );
-            } else {
-                for group in groups {
-                    let mut group_view = div().flex().flex_col().gap(px(4.0)).child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child(group.cadence.title()),
-                    );
-                    for window in &group.windows {
-                        group_view = group_view.child(desktop_profile_usage_window(window, theme));
-                    }
-                    if let Some(duration) = reset_duration(&group.windows, now_ms) {
-                        group_view = group_view.child(
-                            desktop_muted(
-                                theme,
-                                format!(
-                                    "Your {} limit resets in {duration}.",
-                                    group.cadence.title().to_lowercase()
-                                ),
-                            )
-                            .text_size(px(10.0)),
-                        );
-                    }
-                    root = root.child(group_view);
-                }
-            }
-            // A provider failure travels alongside retained windows; both stay
-            // visible instead of the failure hiding the meters.
-            if let Some(failure) = report.failure.as_deref() {
-                root = root.child(desktop_muted(theme, failure.to_owned()).text_size(px(11.0)));
-            }
-            if let Some(failure) = entry.failure.as_deref() {
-                root = root.child(
-                    desktop_muted(theme, format!("Refresh failed: {failure}")).text_size(px(10.0)),
-                );
-            }
-        }
-        Some(report) if report.authentication == NativeUsageAuthentication::Unauthenticated => {
-            root = root.child(
-                desktop_muted(
-                    theme,
-                    report
-                        .failure
-                        .as_deref()
-                        .unwrap_or("This provider is not authenticated."),
-                )
-                .text_size(px(11.0)),
-            );
-            if let Some(failure) = entry.failure.as_deref()
-                && Some(failure) != report.failure.as_deref()
-            {
-                root = root.child(
-                    desktop_muted(theme, format!("Refresh failed: {failure}")).text_size(px(10.0)),
-                );
-            }
-        }
-        Some(report) => {
-            root = root.child(
-                desktop_muted(
-                    theme,
-                    report
-                        .failure
-                        .as_deref()
-                        .unwrap_or("Usage is unavailable right now."),
-                )
-                .text_size(px(11.0)),
-            );
-            if let Some(failure) = entry.failure.as_deref()
-                && Some(failure) != report.failure.as_deref()
-            {
-                root = root.child(
-                    desktop_muted(theme, format!("Refresh failed: {failure}")).text_size(px(10.0)),
-                );
-            }
-        }
-        None => {
-            root = root.child(
-                desktop_muted(
-                    theme,
-                    entry
-                        .failure
-                        .as_deref()
-                        .unwrap_or("Waiting for provider usage data."),
-                )
-                .text_size(px(11.0)),
-            );
-        }
-    }
-    root
-}
-
-fn desktop_profile_usage_window(window: &NativeUsageWindow, theme: DesktopTheme) -> Div {
-    let segments = usize::from(crate::usage_meter::USAGE_METER_SEGMENTS);
-    let lit_segments = (crate::usage_meter::usage_segment_fraction(window.percent_used)
-        * segments as f64)
-        .round() as usize;
-    let mut meter = div().flex().flex_1().min_w(px(0.0)).h(px(6.0)).gap(px(1.0));
-    for index in 0..segments {
-        meter = meter.child(
-            div()
-                .flex_1()
-                .h_full()
-                .rounded(px(1.0))
-                .bg(if index < lit_segments {
-                    theme.foreground
-                } else {
-                    theme.line
-                }),
-        );
-    }
-    div()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(
-            desktop_muted(theme, window.scope_label().to_owned())
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .text_size(px(11.0)),
-        )
-        .child(meter)
-        .child(
-            desktop_muted(theme, format!("{:.0}% used", window.percent_used)).text_size(px(10.0)),
-        )
-}
-
 /// Display a raw OS account or machine string with only its first letter
 /// capitalized, so `sander` paints as `Sander`. The stored value is left
 /// untouched so avatar seeds and identity matching stay stable.
@@ -6595,7 +6759,10 @@ mod tests {
         DESKTOP_OFFLINE_SELECTOR, DESKTOP_SIDEBAR_SELECTOR, DESKTOP_TITLEBAR_SELECTOR,
     };
     use crate::native_command_menu::COMMAND_MENU_DROPDOWN_SELECTOR;
-    use crate::native_profile_usage::NativeUsageEntry;
+    use crate::native_profile_usage::{
+        NativeUsageAuthentication, NativeUsageCadence, NativeUsageEntry, NativeUsageQuotaSurface,
+        NativeUsageReport, NativeUsageWindow,
+    };
     use crate::native_route::{NativeRoute, SettingsRoute};
     use crate::{
         conversation_delivery_machine::ConversationDeliveryEffect,
@@ -6687,20 +6854,89 @@ mod tests {
         (sink, commands)
     }
 
+    fn reported_usage_window(
+        id: &str,
+        cadence: NativeUsageCadence,
+        label: Option<&str>,
+        percent_used: f64,
+    ) -> NativeUsageWindow {
+        NativeUsageWindow {
+            id: id.to_owned(),
+            cadence,
+            label: label.map(str::to_owned),
+            percent_used,
+            resets_at: None,
+            window_minutes: None,
+        }
+    }
+
+    fn reported_usage_entry(
+        engine_id: &str,
+        display_name: &str,
+        windows: Vec<NativeUsageWindow>,
+    ) -> NativeUsageEntry {
+        NativeUsageEntry {
+            engine_id: engine_id.to_owned(),
+            display_name: display_name.to_owned(),
+            report: Some(NativeUsageReport {
+                engine_id: engine_id.to_owned(),
+                display_name: display_name.to_owned(),
+                authentication: NativeUsageAuthentication::Authenticated,
+                account_email: None,
+                quota_surface: NativeUsageQuotaSurface::Supported,
+                windows,
+                failure: None,
+            }),
+            failure: None,
+            fetched_at_ms: Some(super::profile_usage_now_ms().saturating_sub(60_000)),
+        }
+    }
+
+    /// Tall real-data fixture: eight authenticated providers with three
+    /// cadence windows each (one at exactly zero, which stays visible),
+    /// replacing the old pending placeholders without weakening scroll
+    /// assertions.
     fn install_connected_profile_usage(
         application: &mut NativeApplication,
         sink: NativeTestCommandSink,
-        engines: usize,
     ) {
         application.test_command_sink = Some(sink);
-        for index in 0..engines {
-            application
-                .profile_usage
-                .entries
-                .push(NativeUsageEntry::pending(
-                    format!("profile-test-engine-{index}"),
-                    format!("Profile Test Engine {index}"),
-                ));
+        let engines = [
+            "profile-test-alpha",
+            "profile-test-beta",
+            "profile-test-gamma",
+            "profile-test-delta",
+            "profile-test-epsilon",
+            "profile-test-zeta",
+            "profile-test-eta",
+            "profile-test-theta",
+        ];
+        for (index, engine_id) in engines.iter().enumerate() {
+            let base = (index * 11) as f64;
+            application.profile_usage.entries.push(reported_usage_entry(
+                engine_id,
+                &format!("Profile Test {index}"),
+                vec![
+                    reported_usage_window(
+                        "session",
+                        NativeUsageCadence::Session,
+                        None,
+                        if index == 0 { 0.0 } else { 10.0 + base },
+                    ),
+                    reported_usage_window(
+                        "weekly-model",
+                        NativeUsageCadence::Weekly,
+                        Some("Model"),
+                        20.0 + base,
+                    ),
+                    reported_usage_window(
+                        "monthly",
+                        NativeUsageCadence::Monthly,
+                        None,
+                        30.0 + base,
+                    ),
+                ],
+            ));
         }
     }
 
@@ -7329,7 +7565,7 @@ mod tests {
         let (sink, _) = command_sink([]);
         cx.update(|_, app| {
             view.update(app, |application, _| {
-                install_connected_profile_usage(application, sink, 16);
+                install_connected_profile_usage(application, sink);
             });
         });
         cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
@@ -7358,6 +7594,27 @@ mod tests {
             cx.debug_bounds("artisan-desktop-profile-actions-hover-surface")
                 .is_some()
         );
+        // The inline refresh control is present once an engine answered.
+        assert!(
+            cx.debug_bounds("artisan-profile-usage-refresh-profile-test-alpha")
+                .is_some()
+        );
+        // The zero-percent window is real data: its meter row is rendered.
+        let zero_meter = cx
+            .debug_bounds("artisan-profile-usage-meter-profile-test-alpha-session")
+            .expect("zero-percent meter row");
+        // No tooltip until a meter is hovered.
+        assert!(cx.debug_bounds("artisan-profile-usage-tooltip").is_none());
+        cx.simulate_mouse_move(zero_meter.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("artisan-profile-usage-tooltip").is_some());
+        // Leaving the meter row dismisses its tooltip.
+        let header_top = cx
+            .debug_bounds("artisan-desktop-profile-header")
+            .expect("profile header");
+        cx.simulate_mouse_move(header_top.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("artisan-profile-usage-tooltip").is_none());
 
         cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(320.0)));
         cx.run_until_parked();
@@ -7400,7 +7657,7 @@ mod tests {
         let (sink, _) = command_sink([]);
         cx.update(|_, app| {
             view.update(app, |application, _| {
-                install_connected_profile_usage(application, sink, 16);
+                install_connected_profile_usage(application, sink);
             });
         });
         cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
@@ -7507,6 +7764,68 @@ mod tests {
             );
             assert!(!application.profile_usage_scroll_state.active());
         });
+    }
+
+    #[gpui::test]
+    fn profile_usage_hides_providers_without_data(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                application.test_command_sink = Some(sink);
+                application.profile_usage.entries.push(reported_usage_entry(
+                    "profile-test-hidden",
+                    "Hidden",
+                    Vec::new(),
+                ));
+                application.profile_usage.entries.push(NativeUsageEntry {
+                    engine_id: "profile-test-unauth".to_owned(),
+                    display_name: "Unauth".to_owned(),
+                    report: Some(NativeUsageReport {
+                        engine_id: "profile-test-unauth".to_owned(),
+                        display_name: "Unauth".to_owned(),
+                        authentication: NativeUsageAuthentication::Unauthenticated,
+                        account_email: None,
+                        quota_surface: NativeUsageQuotaSurface::Supported,
+                        windows: vec![reported_usage_window(
+                            "session",
+                            NativeUsageCadence::Session,
+                            None,
+                            40.0,
+                        )],
+                        failure: None,
+                    }),
+                    failure: None,
+                    fetched_at_ms: Some(1_000_000),
+                });
+            });
+        });
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        // Neither the empty nor the unauthenticated provider paints a meter.
+        assert!(
+            cx.debug_bounds("artisan-profile-usage-meter-profile-test-hidden-session")
+                .is_none()
+        );
+        assert!(
+            cx.debug_bounds("artisan-profile-usage-meter-profile-test-unauth-session")
+                .is_none()
+        );
+        assert!(
+            cx.debug_bounds("artisan-profile-usage-refresh-profile-test-hidden")
+                .is_none()
+        );
+        // The menu stays mounted with header and actions around the source
+        // empty state instead of fabricated rows.
+        assert!(cx.debug_bounds("artisan-desktop-profile-header").is_some());
+        assert!(
+            cx.debug_bounds("artisan-desktop-profile-actions-hover-surface")
+                .is_some()
+        );
     }
 
     #[test]

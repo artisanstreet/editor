@@ -3409,7 +3409,7 @@ fn fallback_model_view_from_state(state: &NativeModelSelectorState) -> NativeMod
     )
 }
 
-fn engine_asset(engine_id: &str) -> AssetId {
+pub(crate) fn engine_asset(engine_id: &str) -> AssetId {
     match engine_id {
         "codex" => AssetId::SVGL_OPENAI,
         "claude" => AssetId::SVGL_CLAUDE_AI,
@@ -3418,6 +3418,20 @@ fn engine_asset(engine_id: &str) -> AssetId {
         "opencode2" => AssetId::BRANDS_OPENCODE,
         "hermes" => AssetId::BRANDS_HERMES,
         _ => AssetId::TABLER_QUESTION_MARK,
+    }
+}
+
+/// Provider accent for one engine's usage meter, mirroring the accent table
+/// in `lib/engine/presentation.ts`. Unknown engines have no accent and fall
+/// back to the muted surface paint at the call site.
+#[must_use]
+pub(crate) fn engine_accent(engine_id: &str) -> Option<u32> {
+    match engine_id {
+        "claude" => Some(0xd97757),
+        "codex" => Some(0x10a37f),
+        "cursor" | "grok" | "opencode2" => Some(0x6b7280),
+        "hermes" => Some(0x8b5cf6),
+        _ => None,
     }
 }
 
