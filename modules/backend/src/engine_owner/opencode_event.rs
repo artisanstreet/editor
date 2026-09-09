@@ -97,7 +97,7 @@ pub(crate) enum OpenCodeTextReconciliation {
 /// monotonic local sequence starting at one solely for the observation's
 /// existing `sequence` field; it never reports that local value as a provider
 /// cursor.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct OpenCodeEventResult {
     pub(crate) observations: Vec<EngineObservation>,
     pub(crate) provider_cursor: Option<u64>,
