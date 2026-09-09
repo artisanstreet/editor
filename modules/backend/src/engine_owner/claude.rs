@@ -762,6 +762,7 @@ fn decode_stream_event(envelope: &Value) -> ClaudeEvent {
                     Some(text) => ClaudeEvent::TextDelta {
                         delta: text.to_owned(),
                         phase: "unspecified",
+                        usage: None,
                     },
                     None => ClaudeEvent::Unknown,
                 },
