@@ -42,9 +42,8 @@ use crate::native_model_catalog::{
 
 #[path = "native_picker_motion.rs"]
 mod native_picker_motion;
-use self::native_picker_motion::{
-    HoverRect, PickerMenuMotion, PickerMenuPhase, PickerScrollState, SlidingHoverState,
-};
+pub(crate) use self::native_picker_motion::{HoverRect, SlidingHoverState};
+use self::native_picker_motion::{PickerMenuMotion, PickerMenuPhase, PickerScrollState};
 
 /// Stable selector painted on the compact composer trigger.
 pub const NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR: &str = "artisan-native-model-selector-trigger";
@@ -1914,6 +1913,7 @@ impl NativeModelSelector {
                 self.theme,
                 Rc::clone(&self.model_hover),
                 "model",
+                cx.reduce_motion(),
             ))
             .gap(px(3.0));
         if groups.is_empty() {
@@ -2427,6 +2427,7 @@ impl NativeModelSelector {
                 self.theme,
                 Rc::clone(&self.axis_hover),
                 "axis",
+                cx.reduce_motion(),
             ));
             let dropdown_max_height = dropdown_max_height_for_viewport(viewport, trigger_bounds);
             let viewport_max_height = px((f32::from(dropdown_max_height) - 8.0).max(0.0));
@@ -2934,15 +2935,24 @@ fn render_option_tooltip_surface(
         .into_any_element()
 }
 
-fn render_picker_hover_pill(
+pub(crate) fn render_picker_hover_pill(
     theme: ArtisanTheme,
     hover: Rc<RefCell<SlidingHoverState>>,
     surface: &'static str,
+    reduce_motion: bool,
 ) -> AnyElement {
-    let (rect, visible, transition) = {
+    let (mut rect, visible, transition) = {
         let hover = hover.borrow();
         (hover.visual_rect(), hover.visible(), hover.transition())
     };
+    if reduce_motion {
+        if let Some(transition) = transition {
+            rect = transition.to;
+            hover
+                .borrow_mut()
+                .apply_progress(transition.generation, 1.0);
+        }
+    }
     let pill = div()
         .id(format!("artisan-native-model-picker-hover-{surface}"))
         .absolute()
@@ -2954,29 +2964,31 @@ fn render_picker_hover_pill(
         .bg(hover_fill_gradient(theme))
         .shadow(source_hover_highlight_shadow(theme))
         .opacity(if visible { 1.0 } else { 0.0 });
-    if let Some(transition) = transition {
-        let motion = Rc::clone(&hover);
-        let from = transition.from;
-        let to = transition.to;
-        let generation = transition.generation;
-        let animation_id = ElementId::Name(
-            format!("artisan-native-model-picker-hover-{surface}-{generation}").into(),
-        );
-        return pill
-            .with_animation(
-                animation_id,
-                Animation::new(Duration::from_millis(PICKER_HOVER_MOTION_DURATION_MS))
-                    .with_easing(engine_light_smooth_out),
-                move |pill, progress| {
-                    let rect = from.lerp(to, progress);
-                    motion.borrow_mut().apply_progress(generation, progress);
-                    pill.left(px(rect.left))
-                        .top(px(rect.top))
-                        .w(px(rect.width))
-                        .h(px(rect.height))
-                },
-            )
-            .into_any_element();
+    if !reduce_motion {
+        if let Some(transition) = transition {
+            let motion = Rc::clone(&hover);
+            let from = transition.from;
+            let to = transition.to;
+            let generation = transition.generation;
+            let animation_id = ElementId::Name(
+                format!("artisan-native-model-picker-hover-{surface}-{generation}").into(),
+            );
+            return pill
+                .with_animation(
+                    animation_id,
+                    Animation::new(Duration::from_millis(PICKER_HOVER_MOTION_DURATION_MS))
+                        .with_easing(engine_light_smooth_out),
+                    move |pill, progress| {
+                        let rect = from.lerp(to, progress);
+                        motion.borrow_mut().apply_progress(generation, progress);
+                        pill.left(px(rect.left))
+                            .top(px(rect.top))
+                            .w(px(rect.width))
+                            .h(px(rect.height))
+                    },
+                )
+                .into_any_element();
+        }
     }
     pill.into_any_element()
 }

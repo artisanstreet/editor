@@ -21,7 +21,7 @@ use gpui::{
 
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 
-/// The two reached tabs-list visual recipes.
+/// The reached tabs-list visual recipes.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum TabsVariant {
     /// A muted pill containing the active trigger.
@@ -29,6 +29,8 @@ pub enum TabsVariant {
     Default,
     /// A transparent list with an orientation-aligned active underline.
     Line,
+    /// A transparent list whose selected trigger uses the shared card lift.
+    Card,
 }
 
 /// The axis used by the list and by roving arrow-key navigation.
@@ -148,20 +150,22 @@ impl TabsStyle {
         orientation: TabsOrientation,
     ) -> Self {
         let list_corner_radius = match (variant, orientation) {
-            (TabsVariant::Default, TabsOrientation::Horizontal) => {
+            (TabsVariant::Default, TabsOrientation::Horizontal)
+            | (TabsVariant::Card, TabsOrientation::Horizontal) => {
                 RadiusTokens::value(RadiusStep::X4l)
             }
-            (TabsVariant::Default, TabsOrientation::Vertical) => {
+            (TabsVariant::Default, TabsOrientation::Vertical)
+            | (TabsVariant::Card, TabsOrientation::Vertical) => {
                 RadiusTokens::value(RadiusStep::X2l)
             }
             (TabsVariant::Line, _) => px(0.0),
         };
         let list_background = match variant {
             TabsVariant::Default => theme.colors.muted.to_paint(),
-            TabsVariant::Line => transparent_black(),
+            TabsVariant::Line | TabsVariant::Card => transparent_black(),
         };
         let active_background = match variant {
-            TabsVariant::Default => theme.colors.background.to_paint(),
+            TabsVariant::Default | TabsVariant::Card => theme.colors.background.to_paint(),
             TabsVariant::Line => transparent_black(),
         };
 
@@ -172,7 +176,7 @@ impl TabsStyle {
                 TabsOrientation::Vertical => None,
             },
             list_gap: match variant {
-                TabsVariant::Default => px(0.0),
+                TabsVariant::Default | TabsVariant::Card => px(0.0),
                 TabsVariant::Line => theme.spacing.steps(1.0),
             },
             list_corner_radius,
@@ -364,6 +368,7 @@ impl RenderOnce for Tabs {
             orientation,
             variant,
             disabled,
+            theme: self.theme,
             selected: &selected,
             focused_index: &focused_index,
             on_change: on_change.as_ref(),
@@ -469,6 +474,7 @@ struct TriggerContext<'a> {
     orientation: TabsOrientation,
     variant: TabsVariant,
     disabled: bool,
+    theme: ArtisanTheme,
     selected: &'a SharedString,
     focused_index: &'a Rc<Cell<Option<usize>>>,
     on_change: Option<&'a ChangeHandler>,
@@ -534,6 +540,18 @@ fn render_trigger(tab: &TabSpec, index: usize, context: &TriggerContext<'_>) -> 
         value = value.debug_selector(move || selector);
     }
     trigger = trigger.child(value);
+
+    if active && context.variant == TabsVariant::Card {
+        trigger = trigger.shadow(
+            context
+                .theme
+                .elevation
+                .card_shadow
+                .into_iter()
+                .map(|layer| layer.to_box_shadow())
+                .collect(),
+        );
+    }
 
     if active && context.variant == TabsVariant::Line {
         trigger = trigger.relative().child(line_indicator(style, orientation));

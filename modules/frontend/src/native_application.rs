@@ -35,14 +35,14 @@ use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::separator::{SeparatorAxis, separator};
-use artisan_ui::tabs::{TabSpec, Tabs};
+use artisan_ui::tabs::{TabSpec, Tabs, TabsVariant};
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
     FocusHandle, FontWeight, KeyBinding, Render, SharedString, Stateful,
     StatefulInteractiveElement, StyledImage as _, Subscription, Task, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, div,
+    WindowBounds, WindowOptions, actions, canvas, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
 };
@@ -66,7 +66,10 @@ use crate::native_composer_material::{
 };
 use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent};
 use crate::native_model_catalog::NativeModelCatalog;
-use crate::native_model_selector::{NativeModelSelector, NativeModelSelectorStatus};
+use crate::native_model_selector::{
+    HoverRect, NativeModelSelector, NativeModelSelectorStatus, SlidingHoverState,
+    render_picker_hover_pill,
+};
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::SettingsScreen;
 use crate::native_transport::{
@@ -131,6 +134,8 @@ const NATIVE_KEY_CONTEXT: &str = "artisan-native-application";
 const SURFACE_WIDTH: f32 = 1_024.0;
 const SURFACE_HEIGHT: f32 = 720.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
+const SIDEBAR_NEW_THREAD_HOVER_ID: &str = "new-thread";
+const SIDEBAR_MARKETPLACE_HOVER_ID: &str = "marketplace";
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -260,6 +265,8 @@ pub struct NativeApplication {
     sidebar_editor: bool,
     sidebar_tabs_focus: FocusHandle,
     sidebar_navigation_focus: FocusHandle,
+    sidebar_hover: Rc<RefCell<SlidingHoverState>>,
+    sidebar_hover_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     message_flight: Option<NativeMessageFlight>,
     message_retry: Option<NativeMessageRetry>,
     message_receipt: Option<QueueMessageReceipt>,
@@ -457,6 +464,8 @@ impl NativeApplication {
             sidebar_editor: false,
             sidebar_tabs_focus: cx.focus_handle(),
             sidebar_navigation_focus: cx.focus_handle(),
+            sidebar_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
+            sidebar_hover_surface_bounds: Rc::new(RefCell::new(None)),
             message_flight: None,
             message_retry: None,
             message_receipt: None,
@@ -993,6 +1002,72 @@ impl NativeApplication {
     fn desktop_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.desktop_theme;
         let weak = cx.entity().downgrade();
+        let visible_hover_ids = if self.sidebar_editor {
+            vec![SIDEBAR_NEW_THREAD_HOVER_ID.to_owned()]
+        } else {
+            vec![
+                SIDEBAR_NEW_THREAD_HOVER_ID.to_owned(),
+                SIDEBAR_MARKETPLACE_HOVER_ID.to_owned(),
+            ]
+        };
+        self.sidebar_hover
+            .borrow_mut()
+            .clear_if_missing(&visible_hover_ids);
+
+        let sidebar_hover = Rc::clone(&self.sidebar_hover);
+        let sidebar_hover_surface_bounds = Rc::clone(&self.sidebar_hover_surface_bounds);
+        let surface_bounds = Rc::clone(&sidebar_hover_surface_bounds);
+        let surface_probe = canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                let changed = {
+                    let mut surface = surface_bounds.borrow_mut();
+                    if *surface == Some(bounds) {
+                        false
+                    } else {
+                        *surface = Some(bounds);
+                        true
+                    }
+                };
+                if changed {
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+
+        let row_hover = Rc::clone(&sidebar_hover);
+        let row_surface_bounds = Rc::clone(&sidebar_hover_surface_bounds);
+        let sidebar_hover_probe = move |id: &'static str| {
+            let measured_id = id.to_owned();
+            let hover = Rc::clone(&row_hover);
+            let surface_bounds = Rc::clone(&row_surface_bounds);
+            canvas(
+                |_, _, _| {},
+                move |bounds, (), window, cx| {
+                    let Some(surface) = *surface_bounds.borrow() else {
+                        return;
+                    };
+                    let rect = HoverRect {
+                        left: f32::from(bounds.left() - surface.left()),
+                        top: f32::from(bounds.top() - surface.top()),
+                        width: f32::from(bounds.size.width),
+                        height: f32::from(bounds.size.height),
+                    };
+                    if hover.borrow_mut().measure(&measured_id, rect) {
+                        window.defer(cx, |window, _| window.refresh());
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+        };
+
         let tabs = Tabs::new(
             "artisan-workspace-tabs",
             self.sidebar_tabs_focus.clone(),
@@ -1007,6 +1082,7 @@ impl NativeApplication {
                 TabSpec::new("editor", "Editor"),
             ],
         )
+        .variant(TabsVariant::Card)
         .w_full()
         .rounded(px(6.0))
         .debug_selector("artisan-workspace-tabs")
@@ -1015,10 +1091,22 @@ impl NativeApplication {
                 app.select_sidebar_tab(value.as_ref() == "editor", cx)
             });
         });
+        let tabs = div()
+            .relative()
+            .w_full()
+            .rounded(px(6.0))
+            .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
+            .bg(glass_foreground_base(self.theme))
+            .shadow(glass_card_shadows())
+            .child(glass_material_layer(GlassStrength::Quiet, px(6.0)))
+            .child(glass_highlight_layer(GlassStrength::Quiet, px(6.0)))
+            .child(tabs);
+
         let mut nav_theme = theme;
         nav_theme.secondary = self.theme.colors.muted_foreground.to_paint();
         let nav = div()
             .id("artisan-workspace-navigation")
+            .relative()
             .track_focus(&self.sidebar_navigation_focus)
             .tab_index(0)
             .w_full()
@@ -1029,8 +1117,16 @@ impl NativeApplication {
             .px(px(8.0))
             .rounded(px(6.0))
             .cursor_pointer()
-            .hover(|style| style.bg(theme.selected))
             .debug_selector(|| "artisan-workspace-navigation".to_owned())
+            .on_hover(cx.listener(|app: &mut Self, hovered: &bool, _, cx| {
+                if *hovered {
+                    app.sidebar_hover
+                        .borrow_mut()
+                        .set_active(SIDEBAR_NEW_THREAD_HOVER_ID.to_owned());
+                    cx.notify();
+                }
+            }))
+            .child(sidebar_hover_probe(SIDEBAR_NEW_THREAD_HOVER_ID))
             .child(desktop_nav_glyph(
                 if self.sidebar_editor {
                     AssetId::TABLER_FOLDER_PLUS
@@ -1067,6 +1163,57 @@ impl NativeApplication {
                     }
                 }
             }));
+        let marketplace = div()
+            .id("artisan-marketplace-navigation")
+            .w_full()
+            .h(px(34.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .relative()
+            .debug_selector(|| "artisan-marketplace-navigation".to_owned())
+            .on_hover(cx.listener(|app: &mut Self, hovered: &bool, _, cx| {
+                if *hovered {
+                    app.sidebar_hover
+                        .borrow_mut()
+                        .set_active(SIDEBAR_MARKETPLACE_HOVER_ID.to_owned());
+                    cx.notify();
+                }
+            }))
+            .child(sidebar_hover_probe(SIDEBAR_MARKETPLACE_HOVER_ID))
+            .child(desktop_nav_glyph(AssetId::TABLER_SHOPPING_BAG, nav_theme))
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(theme.foreground)
+                    .child("Marketplace"),
+            );
+        let navigation = div()
+            .id("artisan-workspace-navigation-hover-surface")
+            .relative()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .on_hover(cx.listener(|app: &mut Self, hovered: &bool, _, cx| {
+                if !*hovered {
+                    app.sidebar_hover.borrow_mut().clear();
+                    cx.notify();
+                }
+            }))
+            .child(surface_probe)
+            .child(render_picker_hover_pill(
+                self.theme,
+                Rc::clone(&sidebar_hover),
+                "sidebar",
+                cx.reduce_motion(),
+            ))
+            .child(nav)
+            .when(!self.sidebar_editor, |navigation| {
+                navigation.child(marketplace)
+            });
         div()
             .h_full()
             .w_full()
@@ -1076,35 +1223,7 @@ impl NativeApplication {
             .gap(px(12.0))
             .p(px(10.0))
             .child(tabs)
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(nav)
-                    .when(!self.sidebar_editor, |navigation| {
-                        navigation.child(
-                            div()
-                                .id("artisan-marketplace-navigation")
-                                .w_full()
-                                .h(px(34.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .px(px(8.0))
-                                .rounded(px(6.0))
-                                .debug_selector(|| "artisan-marketplace-navigation".to_owned())
-                                .child(desktop_nav_glyph(AssetId::TABLER_SHOPPING_BAG, nav_theme))
-                                .child(
-                                    div()
-                                        .text_size(px(14.0))
-                                        .text_color(theme.foreground)
-                                        .child("Marketplace"),
-                                ),
-                        )
-                    }),
-            )
+            .child(navigation)
             .child(div().flex_1().min_h(px(0.0)))
             .child(self.desktop_profile(cx))
     }
