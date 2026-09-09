@@ -1659,7 +1659,7 @@ impl NativeApplication {
             }
             let elapsed = now_ms.saturating_sub(swap.started_ms).max(0) as f64;
             let progress = (elapsed / total_ms).clamp(0.0, 1.0);
-            let eased = MotionCurve::EaseInOut.sample(progress);
+            let eased = MotionCurve::EaseInOut.sample(progress) as f32;
             for index in 0..3 {
                 swap.displayed[index] =
                     swap.from[index] + (swap.to[index] - swap.from[index]) * eased;
