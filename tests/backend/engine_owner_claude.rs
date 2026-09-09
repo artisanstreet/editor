@@ -2041,7 +2041,9 @@ fn claude_usage_report_is_cumulative_with_a_replacing_gauge() {
         r#"{"input_tokens":100,"cache_creation_input_tokens":10,"cache_read_input_tokens":20,"output_tokens":5}"#,
     )
     .expect("usage json");
-    let sample = parse_claude_assistant_usage(&usage).expect("sample");
+    let sample = parse_claude_assistant_usage(&usage)
+        .expect("sample parses")
+        .expect("sample present");
     let report = claude_usage_report(&context, 3, &sample).expect("report builds");
     assert_eq!(report.basis(), RunUsageBasis::Cumulative);
     assert_eq!(report.provider_session_id(), "session-stored-1");
@@ -2059,22 +2061,26 @@ fn claude_usage_report_is_cumulative_with_a_replacing_gauge() {
         r#"{"input_tokens":1000,"cache_read_input_tokens":200,"output_tokens":50}"#,
     )
     .expect("totals json");
-    let sample = parse_claude_result_usage(&totals).expect("totals sample");
+    let sample = parse_claude_result_usage(&totals)
+        .expect("totals sample parses")
+        .expect("totals sample present");
     let report = claude_usage_report(&context, 4, &sample).expect("totals report");
     assert_eq!(report.context_tokens(), None);
 
     // Zero is preserved and distinct from absent.
     let zero: serde_json::Value =
         serde_json::from_str(r#"{"input_tokens":0,"output_tokens":0}"#).expect("zero json");
-    let sample = parse_claude_result_usage(&zero).expect("zero sample");
+    let sample = parse_claude_result_usage(&zero)
+        .expect("zero sample parses")
+        .expect("zero sample present");
     let report = claude_usage_report(&context, 5, &sample).expect("zero report");
     assert_eq!(report.input_tokens(), Some(0));
     assert_eq!(report.output_tokens(), Some(0));
 
     // Empty measurements are never reports.
     let empty: serde_json::Value = serde_json::from_str(r#"{}"#).expect("empty json");
-    assert!(parse_claude_result_usage(&empty).is_none());
-    assert!(parse_claude_assistant_usage(&empty).is_none());
+    assert_eq!(parse_claude_result_usage(&empty), Ok(None));
+    assert_eq!(parse_claude_assistant_usage(&empty), Ok(None));
 }
 
 #[tokio::test]
@@ -2340,9 +2346,13 @@ fn claude_session_title_takes_the_newest_valid_record() {
 
 #[test]
 fn claude_transcript_path_shapes_config_home_segments() {
+    // Per-character slug with no collapsing: `:` and each separator become
+    // one dash. Mirrors `claude_project_directory_name` in
+    // `modules/engines/src/claude/session-title.ts`
+    // (`working_directory.replace(/[^A-Za-z0-9]/gu, "-")`).
     assert_eq!(
         claude_project_directory_name("E:\\work\\artisan"),
-        "E--work--artisan"
+        "E--work-artisan"
     );
     assert_eq!(
         claude_project_directory_name("/home/sander/work"),

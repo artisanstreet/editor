@@ -602,6 +602,13 @@ pub(crate) fn parse_frame(
                 Some(Value::Array(denials)) => denials.len(),
                 _ => 0,
             };
+            let usage = match object.get("usage") {
+                None => None,
+                Some(value) => match parse_claude_result_usage(value) {
+                    Ok(sample) => sample,
+                    Err(_) => return Ok(ClaudeEvent::Unknown),
+                },
+            };
             return Ok(ClaudeEvent::TurnResult {
                 success: !is_error,
                 session_id: object
@@ -610,7 +617,7 @@ pub(crate) fn parse_frame(
                     .filter(|id| !id.is_empty() && id.len() <= CLAUDE_MAX_ID_BYTES)
                     .map(str::to_owned),
                 permission_denials,
-                usage: object.get("usage").and_then(parse_claude_result_usage),
+                usage,
             });
         }
         return Err(ClaudeFrameError::InvalidEnvelope);
@@ -822,11 +829,19 @@ fn decode_assistant(envelope: &Value) -> ClaudeEvent {
     }
     let message = text_parts.join("");
     // Per-response usage rides the same frame and projects beside whatever
-    // else the frame carried; see `parse_claude_assistant_usage`.
-    let usage = envelope
+    // else the frame carried; see `parse_claude_assistant_usage`. A corrupt
+    // usage value poisons the frame exactly like the TypeScript schema
+    // decode failing: nothing canonical is emitted from it.
+    let usage = match envelope
         .get("message")
         .and_then(|message| message.get("usage"))
-        .and_then(parse_claude_assistant_usage);
+    {
+        None => None,
+        Some(value) => match parse_claude_assistant_usage(value) {
+            Ok(sample) => sample,
+            Err(_) => return ClaudeEvent::Unknown,
+        },
+    };
     if !message.is_empty() {
         return ClaudeEvent::TextDelta {
             delta: message,
@@ -863,6 +878,15 @@ fn decode_result(envelope: &Value) -> ClaudeEvent {
         Some(Value::Array(denials)) => denials.len(),
         _ => 0,
     };
+    // Corrupt totals poison the frame exactly like the TypeScript schema
+    // decode failing: the turn never settles on corrupt provider numbers.
+    let usage = match envelope.get("usage") {
+        None => None,
+        Some(value) => match parse_claude_result_usage(value) {
+            Ok(sample) => sample,
+            Err(_) => return ClaudeEvent::Unknown,
+        },
+    };
     ClaudeEvent::TurnResult {
         success: subtype == "success" && !is_error,
         session_id: envelope
@@ -871,7 +895,7 @@ fn decode_result(envelope: &Value) -> ClaudeEvent {
             .filter(|id| !id.is_empty() && id.len() <= CLAUDE_MAX_ID_BYTES)
             .map(str::to_owned),
         permission_denials,
-        usage: envelope.get("usage").and_then(parse_claude_result_usage),
+        usage,
     }
 }
 
@@ -1403,29 +1427,57 @@ pub(crate) struct ClaudeUsageSample {
     pub context: Option<u64>,
 }
 
-fn claude_token_number(usage: &serde_json::Map<String, Value>, field: &str) -> Option<u64> {
-    usage.get(field).and_then(Value::as_u64)
+fn claude_token_field(
+    usage: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<u64>, ClaudeUsageCorrupt> {
+    match usage.get(field) {
+        None => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or(ClaudeUsageCorrupt),
+    }
 }
+
+/// Marker: one frame's `usage` value was present but uninterpretable.
+///
+/// A present-but-corrupt usage object poisons its whole frame (which then
+/// decodes `Unknown` at every entry point): the TypeScript adapter fails the
+/// frame's schema decode the same way, so no text, gauge, or terminal ever
+/// settles on corrupt provider numbers. Absent or empty usage stays
+/// `Ok(None)` and never disturbs its frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ClaudeUsageCorrupt;
 
 /// Extracts terminal usage totals from a `result` frame's `usage` object.
 ///
-/// Non-`u64` numerics (negatives, fractions) fail closed to absent for that
-/// field; absent stays absent rather than becoming zero. Returns `None` when
-/// no counter carries a value: an empty measurement is not a report. The
-/// terminal totals never become a context gauge: they accumulate input across
-/// every model call in the turn, re-counting the context each call resent.
-pub(crate) fn parse_claude_result_usage(usage: &Value) -> Option<ClaudeUsageSample> {
-    let object = usage.as_object()?;
+/// A non-object value or a present field outside `u64` (string, negative,
+/// fraction, boolean, null, or container) fails the whole sample closed:
+/// corrupt provider numbers never become a report and the frame carries
+/// none. Absent stays absent rather than becoming zero, and an empty
+/// measurement (`Ok(None)`) is not a report. The terminal totals never
+/// become a context gauge: they accumulate input across every model call in
+/// the turn, re-counting the context each call resent.
+///
+/// # Errors
+///
+/// Returns [`ClaudeUsageCorrupt`] when the usage value is present but
+/// uninterpretable.
+pub(crate) fn parse_claude_result_usage(
+    usage: &Value,
+) -> Result<Option<ClaudeUsageSample>, ClaudeUsageCorrupt> {
+    let object = usage.as_object().ok_or(ClaudeUsageCorrupt)?;
     let sample = ClaudeUsageSample {
-        input: claude_token_number(object, "input_tokens"),
-        cached_input: claude_token_number(object, "cache_read_input_tokens"),
-        output: claude_token_number(object, "output_tokens"),
+        input: claude_token_field(object, "input_tokens")?,
+        cached_input: claude_token_field(object, "cache_read_input_tokens")?,
+        output: claude_token_field(object, "output_tokens")?,
         context: None,
     };
-    if sample.input.is_none() && sample.cached_input.is_none() && sample.output.is_none() {
-        return None;
-    }
-    Some(sample)
+    Ok(
+        if sample.input.is_none() && sample.cached_input.is_none() && sample.output.is_none() {
+            None
+        } else {
+            Some(sample)
+        },
+    )
 }
 
 /// Extracts the per-response sample from an `assistant` frame's `usage`
@@ -1433,12 +1485,20 @@ pub(crate) fn parse_claude_result_usage(usage: &Value) -> Option<ClaudeUsageSamp
 ///
 /// The gauge is the response's input plus the cache reads and writes that
 /// carried the prior conversation — what actually occupies the window right
-/// now. Field rules match [`parse_claude_result_usage`].
-pub(crate) fn parse_claude_assistant_usage(usage: &Value) -> Option<ClaudeUsageSample> {
-    let object = usage.as_object()?;
-    let input = claude_token_number(object, "input_tokens");
-    let creation = claude_token_number(object, "cache_creation_input_tokens");
-    let read = claude_token_number(object, "cache_read_input_tokens");
+/// now. Corruption rules match [`parse_claude_result_usage`]: a present but
+/// uninterpretable value fails the whole sample closed.
+///
+/// # Errors
+///
+/// Returns [`ClaudeUsageCorrupt`] when the usage value is present but
+/// uninterpretable.
+pub(crate) fn parse_claude_assistant_usage(
+    usage: &Value,
+) -> Result<Option<ClaudeUsageSample>, ClaudeUsageCorrupt> {
+    let object = usage.as_object().ok_or(ClaudeUsageCorrupt)?;
+    let input = claude_token_field(object, "input_tokens")?;
+    let creation = claude_token_field(object, "cache_creation_input_tokens")?;
+    let read = claude_token_field(object, "cache_read_input_tokens")?;
     let context = input.and_then(|tokens| {
         tokens
             .checked_add(creation.unwrap_or(0))?
@@ -1447,17 +1507,20 @@ pub(crate) fn parse_claude_assistant_usage(usage: &Value) -> Option<ClaudeUsageS
     let sample = ClaudeUsageSample {
         input,
         cached_input: read,
-        output: claude_token_number(object, "output_tokens"),
+        output: claude_token_field(object, "output_tokens")?,
         context,
     };
-    if sample.input.is_none()
-        && sample.cached_input.is_none()
-        && sample.output.is_none()
-        && sample.context.is_none()
-    {
-        return None;
-    }
-    Some(sample)
+    Ok(
+        if sample.input.is_none()
+            && sample.cached_input.is_none()
+            && sample.output.is_none()
+            && sample.context.is_none()
+        {
+            None
+        } else {
+            Some(sample)
+        },
+    )
 }
 
 /// Immutable attribution for one Claude usage report.
