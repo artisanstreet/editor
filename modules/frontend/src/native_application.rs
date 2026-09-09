@@ -145,6 +145,39 @@ const SURFACE_HEIGHT: f32 = 720.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const SIDEBAR_NEW_THREAD_HOVER_ID: &str = "new-thread";
 const SIDEBAR_MARKETPLACE_HOVER_ID: &str = "marketplace";
+const SIDEBAR_PROFILE_HOVER_ID: &str = "profile";
+
+/// Probe measuring one sidebar row against the shared sidebar hover
+/// surface, so New thread, Marketplace, and the profile footer all drive
+/// the same sliding pill from their actual bounds.
+fn sidebar_hover_probe(
+    hover: Rc<RefCell<SlidingHoverState>>,
+    surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
+    id: &'static str,
+) -> gpui::Canvas<()> {
+    let measured_id = id.to_owned();
+    canvas(
+        |_, _, _| {},
+        move |bounds, (), window, cx| {
+            let Some(surface) = *surface_bounds.borrow() else {
+                return;
+            };
+            let rect = HoverRect {
+                left: f32::from(bounds.left() - surface.left()),
+                top: f32::from(bounds.top() - surface.top()),
+                width: f32::from(bounds.size.width),
+                height: f32::from(bounds.size.height),
+            };
+            if hover.borrow_mut().measure(&measured_id, rect) {
+                window.defer(cx, |window, _| window.refresh());
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
 const PROFILE_SETTINGS_HOVER_ID: &str = "profile-settings";
 const PROFILE_USAGE_HOVER_ID: &str = "profile-usage";
 /// Breathing room kept between the profile panel top edge and the viewport.
@@ -1132,6 +1165,7 @@ impl NativeApplication {
         let visible_hover_ids = vec![
             SIDEBAR_NEW_THREAD_HOVER_ID.to_owned(),
             SIDEBAR_MARKETPLACE_HOVER_ID.to_owned(),
+            SIDEBAR_PROFILE_HOVER_ID.to_owned(),
         ];
         self.sidebar_hover
             .borrow_mut()
@@ -1162,35 +1196,6 @@ impl NativeApplication {
         .left_0()
         .size_full();
 
-        let row_hover = Rc::clone(&sidebar_hover);
-        let row_surface_bounds = Rc::clone(&sidebar_hover_surface_bounds);
-        let sidebar_hover_probe = move |id: &'static str| {
-            let measured_id = id.to_owned();
-            let hover = Rc::clone(&row_hover);
-            let surface_bounds = Rc::clone(&row_surface_bounds);
-            canvas(
-                |_, _, _| {},
-                move |bounds, (), window, cx| {
-                    let Some(surface) = *surface_bounds.borrow() else {
-                        return;
-                    };
-                    let rect = HoverRect {
-                        left: f32::from(bounds.left() - surface.left()),
-                        top: f32::from(bounds.top() - surface.top()),
-                        width: f32::from(bounds.size.width),
-                        height: f32::from(bounds.size.height),
-                    };
-                    if hover.borrow_mut().measure(&measured_id, rect) {
-                        window.defer(cx, |window, _| window.refresh());
-                    }
-                },
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-        };
-
         let mut nav_theme = theme;
         nav_theme.secondary = self.theme.colors.muted_foreground.to_paint();
         let nav = div()
@@ -1215,7 +1220,11 @@ impl NativeApplication {
                     cx.notify();
                 }
             }))
-            .child(sidebar_hover_probe(SIDEBAR_NEW_THREAD_HOVER_ID))
+            .child(sidebar_hover_probe(
+                Rc::clone(&sidebar_hover),
+                Rc::clone(&sidebar_hover_surface_bounds),
+                SIDEBAR_NEW_THREAD_HOVER_ID,
+            ))
             .child(desktop_nav_glyph(AssetId::TABLER_EDIT, nav_theme))
             .child(
                 div()
@@ -1252,7 +1261,11 @@ impl NativeApplication {
                     cx.notify();
                 }
             }))
-            .child(sidebar_hover_probe(SIDEBAR_MARKETPLACE_HOVER_ID))
+            .child(sidebar_hover_probe(
+                Rc::clone(&sidebar_hover),
+                Rc::clone(&sidebar_hover_surface_bounds),
+                SIDEBAR_MARKETPLACE_HOVER_ID,
+            ))
             .child(desktop_nav_glyph(AssetId::TABLER_SHOPPING_BAG, nav_theme))
             .child(
                 div()
@@ -1260,13 +1273,19 @@ impl NativeApplication {
                     .text_color(theme.foreground)
                     .child("Marketplace"),
             );
+        // One shared hover surface for the whole sidebar column: the same
+        // sliding pill travels among New thread, Marketplace, and the
+        // profile footer, measured against these bounds. Entering the blank
+        // spacer clears the pill; leaving the column clears it as well.
         let navigation = div()
             .id("artisan-workspace-navigation-hover-surface")
             .relative()
             .w_full()
+            .flex_1()
+            .min_h(px(0.0))
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(px(12.0))
             .on_hover(cx.listener(|app: &mut Self, hovered: &bool, _, cx| {
                 if !*hovered {
                     app.sidebar_hover.borrow_mut().clear();
@@ -1281,8 +1300,36 @@ impl NativeApplication {
                 sidebar_item_radius,
                 cx.reduce_motion(),
             ))
-            .child(nav)
-            .child(marketplace);
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(nav)
+                    .child(marketplace),
+            )
+            .child(
+                div()
+                    .id("artisan-sidebar-spacer")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .debug_selector(|| "artisan-sidebar-spacer".to_owned())
+                    .on_hover(cx.listener(|app: &mut Self, hovered: &bool, _, cx| {
+                        if *hovered {
+                            app.sidebar_hover.borrow_mut().clear();
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .child(div().h(px(1.0)).w_full().bg(theme.line))
+                    .child(self.desktop_profile(window, cx)),
+            );
         div()
             .h_full()
             .w_full()
@@ -1292,8 +1339,6 @@ impl NativeApplication {
             .gap(px(12.0))
             .p(px(10.0))
             .child(navigation)
-            .child(div().flex_1().min_h(px(0.0)))
-            .child(self.desktop_profile(window, cx))
     }
 
     fn profile_hover_id_for_index(index: usize) -> Option<String> {
@@ -2287,7 +2332,6 @@ impl NativeApplication {
 
     fn desktop_profile(&self, window: &mut Window, cx: &Context<Self>) -> Div {
         let theme = self.desktop_theme;
-        let profile_feedback = self.theme.colors.foreground.with_alpha(0.08).to_paint();
         let origin = self.profile_origin.clone();
         let render_avatar = || {
             let avatar_theme = self.theme;
@@ -2315,6 +2359,13 @@ impl NativeApplication {
             }
         };
         let avatar = render_avatar();
+        let focus_ring = vec![gpui::BoxShadow {
+            color: self.theme.interaction.focus_ring_color.to_paint(),
+            offset: gpui::point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: self.theme.interaction.focus_ring_width,
+            inset: false,
+        }];
         let trigger = div()
             .id("artisan-desktop-profile-trigger")
             .debug_selector(|| "artisan-desktop-profile-trigger".to_string())
@@ -2325,22 +2376,24 @@ impl NativeApplication {
             .w_full()
             .h(px(44.0))
             .p(px(5.0))
-            .border_1()
-            .border_color(theme.line)
-            .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
-            .bg(glass_foreground_base(self.theme))
-            .when(self.profile_menu.is_open(), move |style| {
-                style.bg(profile_feedback)
-            })
-            .hover(move |style| style.bg(profile_feedback))
-            .shadow(glass_card_shadows())
-            .focus(move |style| style.border_color(theme.secondary))
+            .focus(move |style| style.shadow(focus_ring))
             .flex()
             .items_center()
             .gap(px(8.0))
             .relative()
-            .child(glass_material_layer(GlassStrength::Quiet, px(8.0)))
-            .child(glass_highlight_layer(GlassStrength::Quiet, px(8.0)))
+            .on_hover(cx.listener(|app: &mut Self, hovered: &bool, _, cx| {
+                if *hovered {
+                    app.sidebar_hover
+                        .borrow_mut()
+                        .set_active(SIDEBAR_PROFILE_HOVER_ID.to_owned());
+                    cx.notify();
+                }
+            }))
+            .child(sidebar_hover_probe(
+                Rc::clone(&self.sidebar_hover),
+                Rc::clone(&self.sidebar_hover_surface_bounds),
+                SIDEBAR_PROFILE_HOVER_ID,
+            ))
             .child(
                 div()
                     .size(px(32.0))
@@ -8034,6 +8087,51 @@ mod tests {
             let application = view.read(app);
             let hover = application.sidebar_hover.borrow();
             assert_eq!(hover.active_id(), Some("marketplace"));
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_footer_shares_sliding_hover_and_spacer_clears(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("artisan-desktop-profile-trigger")
+            .expect("profile footer trigger");
+        let spacer = cx
+            .debug_bounds("artisan-sidebar-spacer")
+            .expect("sidebar spacer");
+        let marketplace = cx
+            .debug_bounds("artisan-marketplace-navigation")
+            .expect("Marketplace navigation");
+
+        // The footer trigger joins the shared pill with its own target.
+        cx.simulate_mouse_move(trigger.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            let hover = application.sidebar_hover.borrow();
+            assert_eq!(hover.active_id(), Some("profile"));
+            assert!(hover.visible());
+        });
+
+        // Entering the blank spacer clears the pill instead of stranding it.
+        cx.simulate_mouse_move(spacer.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            let hover = application.sidebar_hover.borrow();
+            assert_eq!(hover.active_id(), None);
+            assert!(!hover.visible());
+        });
+
+        // Reentering a nav row retargets the same shared pill.
+        cx.simulate_mouse_move(marketplace.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            let hover = application.sidebar_hover.borrow();
+            assert_eq!(hover.active_id(), Some("marketplace"));
+            assert!(hover.visible());
         });
     }
 
