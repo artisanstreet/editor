@@ -8,6 +8,12 @@
 //! `VerifiedOpenCode2ProfileLaunch` shape but is concrete to Codex: no
 //! certified generation, no install lock, no profile registry. The capability
 //! is intentionally neither `Clone` nor serializable.
+//!
+//! Resolution precedence and version parsing are owned once by the sibling
+//! [`crate::codex`] discovery module; this shell keeps the verified-launch
+//! certification (regular-file checks, database-path checks, capability
+//! construction) plus the transport constants its backend callers use, and
+//! delegates precedence, parsing, and gating to that module.
 
 use std::{
     fmt,
@@ -184,14 +190,21 @@ impl NativeCodexAuthority {
     /// Resolves the installed Codex executable without probing its version.
     ///
     /// Honors `ARTISAN_CODEX_EXECUTABLE` when it names an existing regular
-    /// file, otherwise searches `PATH` for `codex` (`codex.exe` on Windows).
+    /// file, otherwise follows the single discovery precedence in
+    /// [`crate::codex::discovery`] (local Codex bin, versioned installs,
+    /// WinGet package, then `PATH` with the Windows App Execution Alias
+    /// rejected; the bare fallback command via `PATH` on non-Windows hosts).
+    /// Every candidate is certified as a regular file before it is returned,
+    /// so an unverified discovery fallback never becomes a launch.
     ///
     /// # Errors
     ///
     /// Returns [`NativeCodexLaunchError`] when no verifiable executable is
     /// available.
     pub fn resolve_executable(&self) -> Result<PathBuf, NativeCodexLaunchError> {
-        if let Ok(configured) = std::env::var("ARTISAN_CODEX_EXECUTABLE") {
+        if let Ok(configured) =
+            std::env::var(crate::codex::discovery::CODEX_EXECUTABLE_OVERRIDE_ENV)
+        {
             let trimmed = configured.trim();
             if !trimmed.is_empty() {
                 let path = PathBuf::from(trimmed);
@@ -199,19 +212,27 @@ impl NativeCodexAuthority {
                 return Ok(path);
             }
         }
-        let file_name = if cfg!(windows) { "codex.exe" } else { "codex" };
-        if let Some(paths) = std::env::var_os("PATH") {
-            for entry in std::env::split_paths(&paths) {
-                if entry.as_os_str().is_empty() {
-                    continue;
-                }
-                let candidate = entry.join(file_name);
-                if verify_regular_executable(&candidate).is_ok() {
-                    return Ok(candidate);
+        if !cfg!(windows) {
+            let file_name = crate::codex::discovery::CODEX_FALLBACK_COMMAND;
+            if let Some(paths) = std::env::var_os("PATH") {
+                for entry in std::env::split_paths(&paths) {
+                    if entry.as_os_str().is_empty() {
+                        continue;
+                    }
+                    let candidate = entry.join(file_name);
+                    if verify_regular_executable(&candidate).is_ok() {
+                        return Ok(candidate);
+                    }
                 }
             }
+            return Err(NativeCodexLaunchError::ExecutableUnavailable);
         }
-        Err(NativeCodexLaunchError::ExecutableUnavailable)
+        let input = live_codex_discovery_input();
+        let candidate = crate::codex::discovery::resolve_codex_executable(&input, &|path| {
+            verify_regular_executable(path).is_ok()
+        });
+        verify_regular_executable(&candidate)?;
+        Ok(candidate)
     }
 
     /// Resolves one profile into a verified launch capability.
@@ -275,6 +296,47 @@ impl NativeCodexAuthority {
     }
 }
 
+/// Builds the live Windows discovery input for
+/// [`NativeCodexAuthority::resolve_executable`].
+///
+/// The explicit override is handled (verified) by the caller, so it stays
+/// `None` here and never flows through the unverified discovery path.
+/// Versioned directory names come from one bounded read of the local Codex
+/// bin root; an unreadable root simply yields no versioned candidates.
+fn live_codex_discovery_input() -> crate::codex::discovery::CodexDiscoveryInput {
+    use crate::codex::discovery::{CodexDiscoveryInput, codex_local_root};
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty());
+    let path_entries = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    let root = codex_local_root(local_app_data.as_deref());
+    let mut directory_names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                directory_names.push(name.to_owned());
+            }
+        }
+    }
+    // Discovery maps only `arm64` to the AArch64 WinGet binary; the Rust
+    // target name for that architecture is `aarch64`.
+    let architecture = if std::env::consts::ARCH == "aarch64" {
+        String::from("arm64")
+    } else {
+        String::from(std::env::consts::ARCH)
+    };
+    CodexDiscoveryInput {
+        architecture,
+        configured_executable: None,
+        local_app_data,
+        platform_windows: true,
+        path_entries,
+        directory_names,
+    }
+}
+
 /// Parsed `X.Y.Z` Codex CLI version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct CodexVersion {
@@ -291,69 +353,54 @@ impl fmt::Display for CodexVersion {
 
 /// Parses the first `X.Y.Z` triple in `codex --version` output.
 ///
-/// Accepts trailing pre-release/build metadata on the triple (for example
-/// `0.142.5-alpha`) but records only the numeric core, matching the
-/// TypeScript `ParseCodexVersion` behaviour.
+/// Delegates to the shared [`crate::codex::version`] parser (word-boundary
+/// semantic version, `v`-prefix tolerated, trailing pre-release/build
+/// metadata ignored) and reports it as the authority's numeric triple.
 ///
 /// # Errors
 ///
 /// Returns [`NativeCodexLaunchError::VersionUnparseable`] when no triple is
 /// present or a component overflows `u64`.
 fn parse_codex_version(stdout: &str) -> Result<CodexVersion, NativeCodexLaunchError> {
-    let bytes = stdout.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index].is_ascii_digit() {
-            if let Some(version) = parse_triple_at(&bytes[index..]) {
-                return Ok(version);
-            }
-        }
-        index += 1;
+    let version = crate::codex::version::parse_codex_version(stdout.as_bytes())
+        .ok_or(NativeCodexLaunchError::VersionUnparseable)?;
+    let mut components = version.split('.');
+    match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (Some(major), Some(minor), Some(patch), None) => Ok(CodexVersion {
+            major: major
+                .parse()
+                .map_err(|_| NativeCodexLaunchError::VersionUnparseable)?,
+            minor: minor
+                .parse()
+                .map_err(|_| NativeCodexLaunchError::VersionUnparseable)?,
+            patch: patch
+                .parse()
+                .map_err(|_| NativeCodexLaunchError::VersionUnparseable)?,
+        }),
+        _ => Err(NativeCodexLaunchError::VersionUnparseable),
     }
-    Err(NativeCodexLaunchError::VersionUnparseable)
-}
-
-fn parse_triple_at(bytes: &[u8]) -> Option<CodexVersion> {
-    let (major, rest) = parse_component(bytes)?;
-    let rest = rest.strip_prefix(b".")?;
-    let (minor, rest) = parse_component(rest)?;
-    let rest = rest.strip_prefix(b".")?;
-    let (patch, _) = parse_component(rest)?;
-    Some(CodexVersion {
-        major,
-        minor,
-        patch,
-    })
-}
-
-fn parse_component(bytes: &[u8]) -> Option<(u64, &[u8])> {
-    let mut end = 0;
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    if end == 0 || end > 19 {
-        return None;
-    }
-    let value = std::str::from_utf8(&bytes[..end])
-        .ok()?
-        .parse::<u64>()
-        .ok()?;
-    Some((value, &bytes[end..]))
 }
 
 /// Enforces the minimum CLI version at probe time.
+///
+/// Delegates to the shared [`crate::codex::version`] gate against
+/// [`CODEX_MINIMUM_CLI_VERSION`].
 ///
 /// # Errors
 ///
 /// Returns [`NativeCodexLaunchError::VersionTooOld`] when the probed version
 /// predates [`CODEX_MINIMUM_CLI_VERSION`].
 fn check_minimum_version(version: &CodexVersion) -> Result<(), NativeCodexLaunchError> {
-    let minimum = parse_codex_version(CODEX_MINIMUM_CLI_VERSION)
-        .map_err(|_| NativeCodexLaunchError::VersionTooOld)?;
-    if *version < minimum {
-        return Err(NativeCodexLaunchError::VersionTooOld);
+    if crate::codex::version::meets_minimum_version(&version.to_string()) {
+        Ok(())
+    } else {
+        Err(NativeCodexLaunchError::VersionTooOld)
     }
-    Ok(())
 }
 
 fn verify_database_path(path: &Path) -> Result<(), NativeCodexLaunchError> {
@@ -400,22 +447,23 @@ fn codex_home_for_database(database_path: &Path) -> PathBuf {
 
 /// Compares two `X.Y.Z` version spellings numerically.
 ///
-/// Returns a negative value when `left` predates `right`, zero when equal,
-/// and a positive value when `left` is newer. Unparseable inputs compare as
-/// equal so callers must parse first for fallible decisions.
+/// Both spellings are normalized through the shared
+/// [`crate::codex::version`] parser before comparison, so `v`-prefixed and
+/// suffixed spellings compare by their numeric core. Unparseable inputs
+/// compare as equal so callers must parse first for fallible decisions.
 #[must_use]
 pub fn compare_codex_versions(left: &str, right: &str) -> i64 {
-    match (parse_codex_version(left), parse_codex_version(right)) {
-        (Ok(left), Ok(right)) => {
-            if left == right {
-                0
-            } else if left < right {
-                -1
-            } else {
-                1
-            }
-        }
-        _ => 0,
+    use std::cmp::Ordering;
+    let (Some(left), Some(right)) = (
+        crate::codex::version::parse_codex_version(left.as_bytes()),
+        crate::codex::version::parse_codex_version(right.as_bytes()),
+    ) else {
+        return 0;
+    };
+    match crate::codex::version::compare_semantic_versions(&left, &right) {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
     }
 }
 

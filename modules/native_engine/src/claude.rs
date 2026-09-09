@@ -15,6 +15,12 @@
 //! classification lives here. Discovery answers "what could run"; this
 //! authority answers "what is certified to spawn now", so an unverifiable
 //! file never becomes a launch capability.
+//!
+//! Resolution precedence and version parsing are owned once by the sibling
+//! [`crate::claude`] discovery module; this shell keeps the verified-launch
+//! certification (regular-file checks, database-path checks, capability
+//! construction) plus the transport constants its backend callers use, and
+//! delegates precedence, parsing, and gating to that module.
 
 use std::{
     fmt,
@@ -185,15 +191,18 @@ impl NativeClaudeAuthority {
     /// Resolves the installed Claude executable without probing its version.
     ///
     /// Honors `ARTISAN_CLAUDE_EXECUTABLE` when it names an existing regular
-    /// file, otherwise searches `PATH` for `claude` (`claude.exe` on
-    /// Windows).
+    /// file, otherwise follows the single discovery precedence in
+    /// [`crate::claude::discovery`] (`PATH` searched for the platform
+    /// candidate names in order). Every candidate is certified as a regular
+    /// file before it is returned, so an unverified discovery fallback never
+    /// becomes a launch.
     ///
     /// # Errors
     ///
     /// Returns [`NativeClaudeLaunchError`] when no verifiable executable is
     /// available.
     pub fn resolve_executable(&self) -> Result<PathBuf, NativeClaudeLaunchError> {
-        if let Ok(configured) = std::env::var(CLAUDE_EXECUTABLE_ENV_VAR) {
+        if let Ok(configured) = std::env::var(crate::claude::discovery::CLAUDE_EXECUTABLE_ENV_VAR) {
             let trimmed = configured.trim();
             if !trimmed.is_empty() {
                 let path = PathBuf::from(trimmed);
@@ -201,23 +210,21 @@ impl NativeClaudeAuthority {
                 return Ok(path);
             }
         }
-        let file_name = if cfg!(windows) {
-            "claude.exe"
-        } else {
-            "claude"
-        };
-        if let Some(paths) = std::env::var_os("PATH") {
-            for entry in std::env::split_paths(&paths) {
-                if entry.as_os_str().is_empty() {
-                    continue;
-                }
-                let candidate = entry.join(file_name);
-                if verify_regular_executable(&candidate).is_ok() {
-                    return Ok(candidate);
-                }
+        let path_entries = std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let candidate = crate::claude::discovery::search_path_for(
+            path_entries,
+            crate::claude::discovery::candidate_file_names(),
+            &|path| verify_regular_executable(path).is_ok(),
+        );
+        match candidate {
+            Some(path) => {
+                verify_regular_executable(&path)?;
+                Ok(path)
             }
+            None => Err(NativeClaudeLaunchError::ExecutableUnavailable),
         }
-        Err(NativeClaudeLaunchError::ExecutableUnavailable)
     }
 
     /// Resolves one profile into a verified launch capability.
@@ -297,57 +304,43 @@ impl fmt::Display for ClaudeVersion {
 
 /// Parses the first `X.Y.Z` triple in `claude --version` output.
 ///
-/// Accepts trailing pre-release/build metadata on the triple (for example
-/// `2.1.220-alpha`) but records only the numeric core, matching the
-/// TypeScript adapter's version match behaviour.
+/// Delegates to the shared [`crate::claude::probe`] parser (word-boundary
+/// semantic version, trailing pre-release/build metadata ignored) and
+/// reports it as the authority's numeric triple.
 ///
 /// # Errors
 ///
 /// Returns [`NativeClaudeLaunchError::VersionUnparseable`] when no triple is
 /// present or a component overflows `u64`.
 fn parse_claude_version(stdout: &str) -> Result<ClaudeVersion, NativeClaudeLaunchError> {
-    let bytes = stdout.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index].is_ascii_digit() {
-            if let Some(version) = parse_triple_at(&bytes[index..]) {
-                return Ok(version);
-            }
-        }
-        index += 1;
+    let version = crate::claude::probe::parse_claude_version(stdout)
+        .ok_or(NativeClaudeLaunchError::VersionUnparseable)?;
+    let mut components = version.split('.');
+    match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (Some(major), Some(minor), Some(patch), None) => Ok(ClaudeVersion {
+            major: major
+                .parse()
+                .map_err(|_| NativeClaudeLaunchError::VersionUnparseable)?,
+            minor: minor
+                .parse()
+                .map_err(|_| NativeClaudeLaunchError::VersionUnparseable)?,
+            patch: patch
+                .parse()
+                .map_err(|_| NativeClaudeLaunchError::VersionUnparseable)?,
+        }),
+        _ => Err(NativeClaudeLaunchError::VersionUnparseable),
     }
-    Err(NativeClaudeLaunchError::VersionUnparseable)
-}
-
-fn parse_triple_at(bytes: &[u8]) -> Option<ClaudeVersion> {
-    let (major, rest) = parse_component(bytes)?;
-    let rest = rest.strip_prefix(b".")?;
-    let (minor, rest) = parse_component(rest)?;
-    let rest = rest.strip_prefix(b".")?;
-    let (patch, _) = parse_component(rest)?;
-    Some(ClaudeVersion {
-        major,
-        minor,
-        patch,
-    })
-}
-
-fn parse_component(bytes: &[u8]) -> Option<(u64, &[u8])> {
-    let mut end = 0;
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    if end == 0 || end > 19 {
-        return None;
-    }
-    let value = std::str::from_utf8(&bytes[..end])
-        .ok()?
-        .parse::<u64>()
-        .ok()?;
-    Some((value, &bytes[end..]))
 }
 
 /// Enforces the minimum CLI version at probe time.
+///
+/// Delegates parsing to the shared [`crate::claude::probe`] parser and gates
+/// the numeric triple against [`CLAUDE_MINIMUM_CLI_VERSION`].
 ///
 /// # Errors
 ///
@@ -399,9 +392,9 @@ fn verify_regular_executable(path: &Path) -> Result<(), NativeClaudeLaunchError>
 
 /// Compares two `X.Y.Z` version spellings numerically.
 ///
-/// Returns a negative value when `left` predates `right`, zero when equal,
-/// and a positive value when `left` is newer. Unparseable inputs compare as
-/// equal so callers must parse first for fallible decisions.
+/// Both spellings are normalized through the shared
+/// [`crate::claude::probe`] parser before comparison. Unparseable inputs
+/// compare as equal so callers must parse first for fallible decisions.
 #[must_use]
 pub fn compare_claude_versions(left: &str, right: &str) -> i64 {
     match (parse_claude_version(left), parse_claude_version(right)) {
