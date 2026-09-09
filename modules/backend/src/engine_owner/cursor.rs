@@ -21,9 +21,9 @@
 //! executable this packet names; no fixture binary and no raw JSON cross into
 //! the domain.
 //!
-//! Explicit non-goals for C1: catalog flag flip, frontend selection, account
-//! usage beyond the disclosed-absent record below, and any engine beyond the
-//! cursor row.
+//! Explicit non-goals for C3: catalog flag flip, frontend selection, the live
+//! dashboard usage read and model inventory, the probe/authority launch, and
+//! any engine beyond the cursor row.
 //!
 //! Later packet: cursor-account catalog merge design (recorded, not
 //! implemented).
@@ -36,25 +36,41 @@
 //! harnesses stay readable but unavailable to new policy admission, and no
 //! thinking, speed, cost, or image-input value is inferred when the provider
 //! did not report it. Usage stays non-billable and never starts a run.
+//!
+//! C3 notes: continuation resumes provider-owned state only (never invented
+//! checkpoints) through `session/load` behind
+//! [`check_cursor_native_continuation`]; usage is collected best-effort
+//! alongside the turn (prompt-result and `usage_update` frames project to
+//! cumulative [`RunUsageReport`] rows per the TypeScript ACP disclosure,
+//! dashboard quota windows classify into diagnostics) and never blocks it;
+//! teardown terminates the whole process group so no cursor grandchild
+//! holding a pipe is orphaned; interrupted runs replay the durable prefix on
+//! resume without duplicating provider effects.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
-// C1 has no live dispatch caller yet for the extension parsers, the steer and
-// continuation checks, or the usage record: the finite dispatch arm fails
-// closed before spawning, and the fixture tests below prove the wire shape.
-// Every item is covered by the inline tests.
+// C3 wires the continuation gate into dispatch and the owner fence; the live
+// pump, dashboard read, and catalog merge still belong to later packets, so
+// the usage projectors await their first live caller. The finite dispatch
+// arm fails closed before spawning, and the fixture tests in this module
+// plus `tests/backend/engine_owner_cursor.rs` prove the wire shape.
+// Every item is covered by those tests.
 #![allow(dead_code)]
 
 use std::ffi::OsString;
 
 use artisan_domain::{
-    ApprovalRequest, CursorPermissionMode, CursorSelection, CursorSpeed, FilesystemAccess,
-    ObservationId, PlanEntry, PlanEntryStatus, QuestionInput, QuestionOption,
+    ApprovalRequest, CursorPermissionMode, CursorSelection, CursorSpeed, EngineModelId,
+    EngineRouteId, FilesystemAccess, ObservationId, PlanEntry, PlanEntryStatus, QuestionInput,
+    QuestionOption, RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId,
+    UnixMillis,
 };
 use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 use super::acp::{AcpDefinition, CURSOR_ACP, ImageMode, LaunchArgs, cursor_build_args};
+use super::observation::{EngineObservation, TerminalState, UsageObservation};
 
 /// Engine id carried by the C1 cursor definition row.
 pub(crate) const CURSOR_ENGINE_ID: &str = "cursor";
@@ -64,16 +80,9 @@ pub(crate) const CURSOR_ENGINE_ID: &str = "cursor";
 /// before any version gate reads it; the value never authorizes execution.
 pub(crate) const CURSOR_C1_UNPROBED_VERSION: &str = "0.0.0-cursor-c1-unprobed";
 
-/// Reason reported by [`check_cursor_native_continuation`], mirroring the
-/// TypeScript `native_continuation` capability: ACP does not guarantee that a
-/// loaded session may change model identity.
-pub(crate) const CURSOR_NATIVE_CONTINUATION_REASON: &str =
-    "ACP does not guarantee that a loaded session may change model identity.";
-
-/// Honest usage record: account usage is disclosed only through the
-/// authenticated dashboard surface, so this packet claims none. Usage stays
-/// exactly where the provider discloses it and never starts a run.
-pub(crate) const CURSOR_USAGE_ABSENT_REASON: &str = "Cursor account usage is disclosed only through the authenticated dashboard surface; this packet claims none.";
+/// Maximum accepted cursor session identity bytes (mirrors the ACP row bound
+/// the transport enforces for `session/load`).
+pub(crate) const CURSOR_MAX_SESSION_ID_BYTES: usize = 256;
 
 /// Payload-free failure of the cursor definition boundary.
 ///
@@ -240,32 +249,618 @@ pub(crate) const fn check_cursor_steer(prompt_active: bool) -> Result<(), Cursor
     Ok(())
 }
 
-/// The C1 native-continuation decision: always unsupported, with the
-/// capability reason. Matching engine identifiers alone are never sufficient,
-/// and ACP gives no model-identity guarantee for a loaded session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CursorContinuationDecision {
-    /// The continuation cannot proceed natively, with the stable reason.
-    Unsupported {
-        /// Why native continuation is unavailable for cursor sessions.
-        reason: &'static str,
-    },
+// ---------------------------------------------------------------------------
+// C3: native continuation gate, resume, usage, and teardown contract
+// ---------------------------------------------------------------------------
+
+/// Minimum cursor CLI for native continuation: the certified agent release.
+///
+/// Mirrors `cursor_certified_version` in
+/// `modules/engines/src/toolchain/distribution.ts`. The gate re-checks this
+/// recorded constant against the probed launch version so a stale capability
+/// can never authorize a resume the installed CLI no longer honors. Cursor
+/// versions are dated (`YYYY.M.D-suffix`); comparison uses their numeric
+/// core.
+pub(crate) const CURSOR_CONTINUATION_MINIMUM_CLI_VERSION: &str = "2026.08.11-e8db854";
+
+/// Returns whether cursor teardown must terminate the whole process group.
+///
+/// Always true: the cursor turn spawns through
+/// [`spawn_acp_child`](super::acp::spawn_acp_child) with whole-group custody
+/// (Job Object on Windows), so teardown kills cursor grandchildren that
+/// still hold pipes instead of orphaning them. Unobserved reaps surface as
+/// [`AcpShutdown::Retained`](super::acp::AcpShutdown) for owner quarantine.
+pub(crate) const fn cursor_requires_group_termination() -> bool {
+    true
 }
 
-/// Reports the C1 native-continuation decision: always unsupported.
-#[must_use]
-pub(crate) const fn check_cursor_native_continuation() -> CursorContinuationDecision {
-    CursorContinuationDecision::Unsupported {
-        reason: CURSOR_NATIVE_CONTINUATION_REASON,
+/// Compares two dated cursor CLI spellings by their numeric core.
+///
+/// A leading agent name and any trailing `-suffix` are ignored, so
+/// `agent 2026.9.6-stable.1` compares by `[2026, 9, 6]`. Returns `None` when
+/// either side has no parseable dated triple; callers fail closed on `None`.
+pub(crate) fn compare_cursor_cli_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    Some(parse_cursor_dated_triple(left)?.cmp(&parse_cursor_dated_triple(right)?))
+}
+
+/// Returns whether a probed CLI version meets a minimum floor.
+pub(crate) fn cursor_cli_meets_minimum(version: &str, minimum: &str) -> bool {
+    matches!(
+        compare_cursor_cli_versions(version, minimum),
+        Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+    )
+}
+
+fn parse_cursor_dated_triple(text: &str) -> Option<[u64; 3]> {
+    let start = text.find(|character: char| character.is_ascii_digit())?;
+    let run: String = text[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '.')
+        .collect();
+    let mut parts = run.split('.');
+    Some([
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ])
+}
+
+/// Native-continuation decision for one cursor turn.
+///
+/// `Compatible` authorizes `session/load` against the stored ACP session;
+/// `Incompatible` carries the stable reason the dispatcher surfaces instead
+/// of silently starting fresh or resuming across engines.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CursorContinuationDecision {
+    Compatible,
+    Incompatible { reason: &'static str },
+}
+
+/// Bounded input for [`check_cursor_native_continuation`].
+pub(crate) struct CursorContinuationGateInput<'a> {
+    /// Probed CLI version (`CursorLaunch::version` once the probe/authority
+    /// packet records it; the C1 unprobed sentinel fails the floor).
+    pub cli_version: &'a str,
+    /// Explicit target model from the current selection; `None` fails closed.
+    pub target_model: Option<&'a str>,
+    /// Advertised models when a model inventory was read; `None` skips
+    /// advertisement validation (live inventory is deferred) but never skips
+    /// the explicit-model or CLI gates.
+    pub advertised_models: Option<&'a [&'a str]>,
+    /// Whether the stored binding names the same `cursor` engine. The
+    /// dispatcher scopes continuation reads to `EngineId::Cursor`, so a false
+    /// value fails closed instead of resuming across engines.
+    pub same_engine: bool,
+}
+
+/// Gates one cursor native continuation without touching provider state.
+///
+/// Order is contractual: same-engine first, then the explicit target model
+/// (pre-validated before resume), then the certified CLI floor, then model
+/// advertisement when an inventory is supplied. Any failure is a typed
+/// incompatible — never a silent fresh start and never a cross-engine resume.
+pub(crate) fn check_cursor_native_continuation(
+    input: &CursorContinuationGateInput<'_>,
+) -> CursorContinuationDecision {
+    if !input.same_engine {
+        return CursorContinuationDecision::Incompatible {
+            reason: "Cursor native continuation cannot resume across engines",
+        };
+    }
+    let Some(target) = input.target_model.filter(|model| !model.is_empty()) else {
+        return CursorContinuationDecision::Incompatible {
+            reason: "Cursor native continuation requires an explicit target model",
+        };
+    };
+    if !cursor_cli_meets_minimum(input.cli_version, CURSOR_CONTINUATION_MINIMUM_CLI_VERSION) {
+        return CursorContinuationDecision::Incompatible {
+            reason: "Cursor native continuation requires CLI 2026.08.11-e8db854 or newer",
+        };
+    }
+    if let Some(advertised) = input.advertised_models
+        && !advertised.contains(&target)
+    {
+        return CursorContinuationDecision::Incompatible {
+            reason: "Cursor does not currently advertise the target model",
+        };
+    }
+    CursorContinuationDecision::Compatible
+}
+
+/// Reopens the stored ACP session for one authorized continuation.
+///
+/// Mirrors the TypeScript resume path (`session/load` with the stored session
+/// id over the same cwd a fresh `session/new` would use): the resume reopens
+/// provider-owned state only and never invents checkpoints. Returns `None`
+/// when the stored session id is outside its bounded route-segment grammar
+/// so the caller fails closed instead of resuming a corrupt session. The
+/// load then requires the agent to acknowledge exactly this session.
+pub(crate) fn cursor_resume_session_id(stored_session_id: &str) -> Option<String> {
+    if stored_session_id.is_empty() || stored_session_id.len() > CURSOR_MAX_SESSION_ID_BYTES {
+        return None;
+    }
+    Some(stored_session_id.to_owned())
+}
+
+/// Cumulative token sample from one ACP usage disclosure.
+///
+/// Mirrors the TypeScript ACP evidence: prompt-result `usage`
+/// (`inputTokens`/`outputTokens`/`cachedReadTokens`, `basis: "cumulative"` in
+/// `modules/engines/src/acp/engine.ts`) carries the running counters, while
+/// a streaming `usage_update` (`used`/`size`, `basis: "cumulative"` in
+/// `modules/engines/src/acp/normalizer.ts`) gauges the current window.
+/// Absent stays absent rather than becoming a wrong zero.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CursorUsageSample {
+    pub input: Option<u64>,
+    pub cached_input: Option<u64>,
+    pub output: Option<u64>,
+    /// Window gauge from a `usage_update` only — never a sum. Every turn
+    /// resends its context, so prompt totals keep counting while the gauge
+    /// measures what actually occupies the window right now. Absent stays
+    /// absent rather than becoming a wrong zero.
+    pub context: Option<u64>,
+    pub context_window: Option<u64>,
+}
+
+/// Extracts the cumulative sample from a prompt-result `usage` object.
+///
+/// Non-`u64` numerics (negatives, fractions) fail closed to absent for that
+/// field; absent stays absent rather than becoming zero. Returns `None` when
+/// no counter carries a value: an empty measurement is not a report.
+pub(crate) fn parse_cursor_prompt_usage(usage: &Value) -> Option<CursorUsageSample> {
+    let object = usage.as_object()?;
+    let sample = CursorUsageSample {
+        input: object.get("inputTokens").and_then(Value::as_u64),
+        cached_input: object.get("cachedReadTokens").and_then(Value::as_u64),
+        output: object.get("outputTokens").and_then(Value::as_u64),
+        context: None,
+        context_window: None,
+    };
+    if sample.input.is_none() && sample.cached_input.is_none() && sample.output.is_none() {
+        return None;
+    }
+    Some(sample)
+}
+
+/// Extracts the window gauge from a streaming `usage_update` wire update.
+///
+/// Mirrors `usage_update` in `modules/engines/src/acp/normalizer.ts` (`used`
+/// gauges the window, `size` its capacity, `basis: "cumulative"`). The gauge
+/// always replaces the previous report regardless of basis — the codec
+/// performs no arithmetic at all. Returns `None` when neither gauge carries
+/// a value: an empty measurement is not a report.
+pub(crate) fn parse_cursor_usage_update(update: &Value) -> Option<CursorUsageSample> {
+    let object = update.as_object()?;
+    let sample = CursorUsageSample {
+        input: None,
+        cached_input: None,
+        output: None,
+        context: object.get("used").and_then(Value::as_u64),
+        context_window: object.get("size").and_then(Value::as_u64),
+    };
+    if sample.context.is_none() && sample.context_window.is_none() {
+        return None;
+    }
+    Some(sample)
+}
+
+/// Immutable attribution for one cursor usage report.
+///
+/// Model and thread come from the immutable launch snapshot; the provider
+/// session is the authenticated ACP session, never an envelope claim.
+pub(crate) struct CursorUsageContext<'a> {
+    pub run_id: &'a RunId,
+    pub thread_id: &'a ThreadId,
+    pub provider_session_id: &'a str,
+    pub model_id: &'a EngineModelId,
+    pub observed_at: UnixMillis,
+}
+
+/// Best-effort usage scope carried beside the text channel.
+///
+/// `None` (no explicit model or no thread scope) skips usage projection
+/// without disturbing the turn: usage never blocks turns.
+#[derive(Clone, Debug)]
+pub(crate) struct CursorUsageAttribution {
+    pub thread_id: ThreadId,
+    pub model_id: EngineModelId,
+}
+
+/// Borrowed usage scope for one pump loop.
+pub(crate) struct CursorUsageScope<'a> {
+    pub thread_id: &'a ThreadId,
+    pub model_id: &'a EngineModelId,
+    pub provider_session_id: &'a str,
+}
+
+/// Builds the cumulative usage report for one sample.
+///
+/// Fails closed (`None`) when identities or bounds reject: usage is never
+/// synthesized from partial identities. The context gauge always replaces
+/// the previous report regardless of basis — the codec performs no
+/// arithmetic at all. Cursor names no provider route, so reports attribute
+/// to the engine's own `cursor` route namespace; dashboard quota windows are
+/// never copied here, so no quota is invented. This follows the TypeScript
+/// ACP disclosure: prompt-result and `usage_update` usage is cumulative.
+pub(crate) fn cursor_usage_report(
+    context: &CursorUsageContext<'_>,
+    provider_turn_id: Option<String>,
+    source_sequence: u64,
+    sample: &CursorUsageSample,
+) -> Option<RunUsageReport> {
+    let provider_route_id = EngineRouteId::parse("cursor").ok()?;
+    RunUsageReport::new(RunUsageReportInput {
+        run_id: context.run_id.clone(),
+        thread_id: context.thread_id.clone(),
+        provider_session_id: context.provider_session_id.to_owned(),
+        source_sequence,
+        model_id: context.model_id.clone(),
+        provider_route_id,
+        variant_id: None,
+        basis: RunUsageBasis::Cumulative,
+        provider_turn_id,
+        input_tokens: sample.input,
+        cached_input_tokens: sample.cached_input,
+        output_tokens: sample.output,
+        context_tokens: sample.context,
+        context_window_tokens: sample.context_window,
+        observed_at: context.observed_at,
+    })
+    .ok()
+}
+
+fn current_unix_millis() -> Option<UnixMillis> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let millis = i64::try_from(duration.as_millis()).ok()?;
+    Some(UnixMillis::from_millis(millis))
+}
+
+/// Projects one usage sample best-effort onto the shared usage vocabulary.
+///
+/// Returns `Some(TerminalState::Interrupted)` only when the observation sink
+/// closed mid-send. Skipping (no scope, no clock, or unattributable sample)
+/// is never terminal: usage never blocks turns.
+pub(crate) async fn project_cursor_usage_sample(
+    observations: &mpsc::Sender<EngineObservation>,
+    run_id: &RunId,
+    scope: Option<&CursorUsageScope<'_>>,
+    provider_turn_id: Option<String>,
+    source_sequence: u64,
+    sample: &CursorUsageSample,
+) -> Option<TerminalState> {
+    let scope = scope?;
+    let observed_at = current_unix_millis()?;
+    let report = cursor_usage_report(
+        &CursorUsageContext {
+            run_id,
+            thread_id: scope.thread_id,
+            provider_session_id: scope.provider_session_id,
+            model_id: scope.model_id,
+            observed_at,
+        },
+        provider_turn_id,
+        source_sequence,
+        sample,
+    )?;
+    if observations
+        .send(EngineObservation::Usage(UsageObservation::new(report)))
+        .await
+        .is_err()
+    {
+        return Some(TerminalState::Interrupted);
+    }
+    None
+}
+
+/// Kind of one cursor quota window.
+///
+/// Mirrors `map_cursor_period_usage_to_quota_windows` in
+/// `modules/engines/src/cursor/usage.ts`: the dashboard discloses monthly
+/// billing-cycle pools only (plan pools plus on-demand). Anything outside
+/// the cursor surface is unknown rather than guessed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CursorQuotaWindowKind {
+    Monthly,
+    Unknown,
+}
+
+/// Classifies one quota window id.
+///
+/// Ids emitted by [`map_cursor_quota_windows`] are monthly billing-cycle
+/// pools; anything else is unknown rather than guessed.
+pub(crate) fn classify_cursor_quota_window_kind(window_id: &str) -> CursorQuotaWindowKind {
+    match window_id {
+        "cursor:cursor-models"
+        | "cursor:other-models"
+        | "cursor:included-usage"
+        | "cursor:on-demand" => CursorQuotaWindowKind::Monthly,
+        _ => CursorQuotaWindowKind::Unknown,
     }
 }
 
-/// Reports whether this packet claims a cursor account-usage surface: never
-/// in C1. Usage stays only where the provider discloses it (the authenticated
-/// dashboard read); the runtime claims no windows and invents no percentages.
-#[must_use]
-pub(crate) const fn cursor_account_usage_supported() -> bool {
-    false
+/// Clamps one percent reading into `0..=100`.
+///
+/// Absent or non-finite readings become `0`: usage display never blocks on a
+/// corrupt gauge and never invents quota from it.
+pub(crate) fn clamp_cursor_percent_used(used_percent: Option<f64>) -> f64 {
+    match used_percent {
+        Some(value) if value.is_finite() => value.clamp(0.0, 100.0),
+        _ => 0.0,
+    }
+}
+
+/// Formats whole provider millisecond instants as an ISO-8601 UTC instant.
+///
+/// Billing-cycle bounds arrive as whole provider milliseconds and the reset
+/// instant is display-only diagnostics, never turn input. Returns `None` for
+/// negative or unrepresentable instants rather than inventing a date.
+/// Computed without a date library so the owner keeps no new dependency for
+/// one diagnostic string.
+pub(crate) fn cursor_reset_at_iso(millis: i64) -> Option<String> {
+    if millis < 0 {
+        return None;
+    }
+    let secs = millis.checked_div(1_000)?;
+    let days = secs.checked_div(86_400)?;
+    let clock = secs.checked_rem(86_400)?;
+    let shifted = days.checked_add(719_468)?;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_pair = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_pair + 2) / 5 + 1;
+    let month = if month_pair < 10 {
+        month_pair + 3
+    } else {
+        month_pair - 9
+    };
+    let display_year = if month <= 2 { year + 1 } else { year };
+    if !(0..10_000).contains(&display_year) {
+        return None;
+    }
+    Some(format!(
+        "{display_year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        clock / 3_600,
+        (clock % 3_600) / 60,
+        clock % 60
+    ))
+}
+
+/// One provider-neutral cursor quota window: diagnostics only, never quota.
+///
+/// Quota windows are read through the non-billable dashboard surface and
+/// classified here; they are never copied into [`RunUsageReport`] and never
+/// gate a turn.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CursorQuotaWindow {
+    pub id: String,
+    pub kind: CursorQuotaWindowKind,
+    pub label: Option<String>,
+    pub percent_used: f64,
+    pub resets_at: Option<String>,
+    pub window_minutes: Option<u64>,
+    /// Always `"shared"`: the dashboard reports account pools shared across
+    /// models, never per-model attribution. Mirrors the TypeScript scope
+    /// without inventing quota attribution.
+    pub scope: &'static str,
+}
+
+/// Extracts the first `N%` gauge from a provider display message.
+///
+/// Mirrors `percentage_from_display_message` in
+/// `modules/engines/src/cursor/usage.ts` (`\b(\d+(?:\.\d+)?)%`): digits must
+/// start on a word boundary and the value must be finite.
+fn cursor_percentage_from_display_message(message: &Value) -> Option<f64> {
+    let text = message.as_str()?;
+    let bytes = text.as_bytes();
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut index = 0;
+    while index < bytes.len() {
+        let is_boundary_start =
+            bytes[index].is_ascii_digit() && (index == 0 || !is_word(bytes[index - 1]));
+        if is_boundary_start {
+            let mut end = index;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end] == b'.' {
+                let mut fraction = end + 1;
+                while fraction < bytes.len() && bytes[fraction].is_ascii_digit() {
+                    fraction += 1;
+                }
+                if fraction > end + 1 {
+                    end = fraction;
+                }
+            }
+            if end < bytes.len() && bytes[end] == b'%' {
+                let parsed: f64 = text[index..end].parse().ok()?;
+                if parsed.is_finite() {
+                    return Some(parsed);
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Reads one optional provider number, mirroring `optional_number` in
+/// `modules/engines/src/cursor/usage.ts`: absent and null stay absent,
+/// numbers and numeric strings parse when finite, anything else fails the
+/// whole mapping (best-effort: the caller yields no windows).
+fn cursor_optional_number(
+    record: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<f64>, ()> {
+    let Some(value) = record.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(number) = value.as_f64() {
+        return if number.is_finite() {
+            Ok(Some(number))
+        } else {
+            Err(())
+        };
+    }
+    if let Some(text) = value.as_str() {
+        let parsed: f64 = text.parse().map_err(|_| ())?;
+        return if parsed.is_finite() {
+            Ok(Some(parsed))
+        } else {
+            Err(())
+        };
+    }
+    Err(())
+}
+
+/// Maps a decoded dashboard `GetCurrentPeriodUsage` response to
+/// provider-neutral quota windows.
+///
+/// Mirrors `map_cursor_period_usage_to_quota_windows` in
+/// `modules/engines/src/cursor/usage.ts`: split plan pools when the provider
+/// discloses them (`autoPercentUsed`/`apiPercentUsed`/`autoBucketModels`),
+/// else one included-usage pool; then the first capped on-demand pool
+/// (overall, individual, pooled). Malformed input yields no windows:
+/// collection is best-effort diagnostics and never blocks a turn.
+pub(crate) fn map_cursor_quota_windows(response: &Value) -> Vec<CursorQuotaWindow> {
+    let Some(root) = response.as_object() else {
+        return Vec::new();
+    };
+    let Some(plan) = root.get("planUsage").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let Ok(start_ms) = cursor_optional_number(root, "billingCycleStart") else {
+        return Vec::new();
+    };
+    let Ok(end_ms) = cursor_optional_number(root, "billingCycleEnd") else {
+        return Vec::new();
+    };
+    let resets_at = end_ms.and_then(|ms| {
+        if ms < 0.0 || !ms.is_finite() || ms > i64::MAX as f64 {
+            return None;
+        }
+        cursor_reset_at_iso(ms as i64)
+    });
+    let window_minutes = match (start_ms, end_ms) {
+        (Some(start), Some(end)) if end > start => {
+            let minutes = ((end - start) / 60_000.0).round();
+            if minutes > 0.0 && minutes <= u64::MAX as f64 {
+                Some(minutes as u64)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let Ok(total_spend) = cursor_optional_number(plan, "totalSpend") else {
+        return Vec::new();
+    };
+    let Ok(included_limit) = cursor_optional_number(plan, "limit") else {
+        return Vec::new();
+    };
+    let Ok(provider_percent) = cursor_optional_number(plan, "totalPercentUsed") else {
+        return Vec::new();
+    };
+    let total_spend = total_spend.unwrap_or(0.0);
+    let included_limit = included_limit.unwrap_or(0.0);
+    let plan_percent = if included_limit > 0.0 {
+        (total_spend / included_limit) * 100.0
+    } else {
+        provider_percent
+            .or_else(|| {
+                root.get("displayMessage")
+                    .and_then(cursor_percentage_from_display_message)
+            })
+            .unwrap_or(0.0)
+    };
+    let Ok(cursor_models_percent) = cursor_optional_number(plan, "autoPercentUsed") else {
+        return Vec::new();
+    };
+    let Ok(other_models_percent) = cursor_optional_number(plan, "apiPercentUsed") else {
+        return Vec::new();
+    };
+    // The dashboard reports two independent plan pools. Repeated protobuf
+    // fields survive at zero more reliably than scalar percentages, so
+    // `autoBucketModels` is also the compatibility discriminator when an
+    // unused pool's zero-valued percentage is omitted from protobuf JSON.
+    let has_split_plan_usage = cursor_models_percent.is_some()
+        || other_models_percent.is_some()
+        || root.get("autoBucketModels").is_some_and(Value::is_array);
+    let mut plan_windows: Vec<(String, String, f64)> = Vec::new();
+    if has_split_plan_usage {
+        plan_windows.push((
+            "cursor:cursor-models".to_owned(),
+            "Cursor models".to_owned(),
+            clamp_cursor_percent_used(cursor_models_percent),
+        ));
+        plan_windows.push((
+            "cursor:other-models".to_owned(),
+            "Other models".to_owned(),
+            clamp_cursor_percent_used(other_models_percent),
+        ));
+    } else {
+        plan_windows.push((
+            "cursor:included-usage".to_owned(),
+            "Included usage".to_owned(),
+            clamp_cursor_percent_used(Some(plan_percent)),
+        ));
+    }
+    let mut windows: Vec<CursorQuotaWindow> = plan_windows
+        .into_iter()
+        .map(|(id, label, percent_used)| CursorQuotaWindow {
+            kind: classify_cursor_quota_window_kind(&id),
+            id,
+            label: Some(label),
+            percent_used,
+            resets_at: resets_at.clone(),
+            window_minutes,
+            scope: "shared",
+        })
+        .collect();
+
+    let Some(spend_limit) = root.get("spendLimitUsage").and_then(Value::as_object) else {
+        return windows;
+    };
+    for (limit_key, used_key, remaining_key) in [
+        ("overallLimit", "overallUsed", "overallRemaining"),
+        ("individualLimit", "individualUsed", "individualRemaining"),
+        ("pooledLimit", "pooledUsed", "pooledRemaining"),
+    ] {
+        let Ok(limit) = cursor_optional_number(spend_limit, limit_key) else {
+            return Vec::new();
+        };
+        let limit = limit.unwrap_or(0.0);
+        if limit <= 0.0 {
+            continue;
+        }
+        let Ok(remaining) = cursor_optional_number(spend_limit, remaining_key) else {
+            return Vec::new();
+        };
+        let Ok(used) = cursor_optional_number(spend_limit, used_key) else {
+            return Vec::new();
+        };
+        let used = used.unwrap_or_else(|| remaining.map_or(0.0, |left| (limit - left).max(0.0)));
+        let id = "cursor:on-demand".to_owned();
+        windows.push(CursorQuotaWindow {
+            kind: classify_cursor_quota_window_kind(&id),
+            id,
+            label: Some("On-demand".to_owned()),
+            percent_used: clamp_cursor_percent_used(Some((used / limit) * 100.0)),
+            resets_at: resets_at.clone(),
+            window_minutes,
+            scope: "shared",
+        });
+        break;
+    }
+    windows
 }
 
 /// Typed `AE-PROVIDER-206` startup failure carrying the rejected model name.
@@ -627,12 +1222,11 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, BufReader, split};
 
     use super::{
-        CURSOR_C1_UNPROBED_VERSION, CURSOR_ENGINE_ID, CURSOR_NATIVE_CONTINUATION_REASON,
-        CURSOR_USAGE_ABSENT_REASON, CursorContinuationDecision, CursorLaunch, CursorSettings,
-        CursorTurnError, answer_cursor_plan, check_cursor_native_continuation, check_cursor_steer,
-        classify_cursor_startup_failure, cursor_account_usage_supported, cursor_plan_approval,
-        cursor_plan_description, cursor_plan_entries, cursor_question_to_domain,
-        cursor_selected_option_ids, parse_cursor_plan_request, parse_cursor_question_request,
+        CURSOR_C1_UNPROBED_VERSION, CURSOR_ENGINE_ID, CursorLaunch, CursorSettings,
+        CursorTurnError, answer_cursor_plan, check_cursor_steer, classify_cursor_startup_failure,
+        cursor_plan_approval, cursor_plan_description, cursor_plan_entries,
+        cursor_question_to_domain, cursor_selected_option_ids, parse_cursor_plan_request,
+        parse_cursor_question_request,
     };
     use crate::engine_owner::acp::{
         AcpBounds, AcpTransport, ImageBlock, ImageMode, PromptPart, UpdateEvent,
@@ -1002,26 +1596,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn native_continuation_is_always_unsupported_with_reason() {
-        assert_eq!(
-            check_cursor_native_continuation(),
-            CursorContinuationDecision::Unsupported {
-                reason: CURSOR_NATIVE_CONTINUATION_REASON,
-            }
-        );
-        assert_eq!(
-            CURSOR_NATIVE_CONTINUATION_REASON,
-            "ACP does not guarantee that a loaded session may change model identity."
-        );
-    }
+    // -----------------------------------------------------------------------
+    // Launch identity (the C3 gate matrix lives in
+    // `tests/backend/engine_owner_cursor.rs`)
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn usage_surface_stays_absent_and_honest() {
-        assert!(!cursor_account_usage_supported());
-        assert!(!CURSOR_USAGE_ABSENT_REASON.is_empty());
-
+    fn unprobed_launch_carries_profile_and_sentinel() {
         // The C1 launch carries no usage scope: profile plus sentinel only.
+        // The sentinel fails the C3 certified floor, so any continuation
+        // through an unprobed launch gates incompatible.
         let launch = CursorLaunch::unprobed("cursor-fixture".to_owned());
         assert_eq!(launch.profile_id(), "cursor-fixture");
         assert_eq!(launch.version(), CURSOR_C1_UNPROBED_VERSION);
