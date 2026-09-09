@@ -8144,7 +8144,7 @@ mod tests {
         cx.update(|_, app| {
             let application = view.read(app);
             let hover = application.sidebar_hover.borrow();
-            assert_eq!(hover.active_id(), Some("profile"));
+            assert_eq!(hover.active_id(), None);
             assert!(!hover.visible());
         });
 

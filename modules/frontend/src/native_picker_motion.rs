@@ -104,6 +104,7 @@ impl SlidingHoverState {
     /// onto blank areas inside a shared surface; a full `clear` would snap
     /// the next row-to-row flight.
     pub(crate) fn hide(&mut self) {
+        self.active_id = None;
         self.visible = false;
     }
 
