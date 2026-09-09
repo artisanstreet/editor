@@ -35,7 +35,6 @@ use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::separator::{SeparatorAxis, separator};
-use artisan_ui::tabs::{TabSpec, Tabs, TabsVariant};
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -262,8 +261,6 @@ pub struct NativeApplication {
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
-    sidebar_editor: bool,
-    sidebar_tabs_focus: FocusHandle,
     sidebar_navigation_focus: FocusHandle,
     sidebar_hover: Rc<RefCell<SlidingHoverState>>,
     sidebar_hover_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
@@ -461,8 +458,6 @@ impl NativeApplication {
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
-            sidebar_editor: false,
-            sidebar_tabs_focus: cx.focus_handle(),
             sidebar_navigation_focus: cx.focus_handle(),
             sidebar_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             sidebar_hover_surface_bounds: Rc::new(RefCell::new(None)),
@@ -587,13 +582,6 @@ impl NativeApplication {
 
     /// Navigates to `route`, retaining history, and rerenders.
     pub fn navigate(&mut self, route: NativeRoute, cx: &mut Context<Self>) {
-        match &route {
-            NativeRoute::Editor { .. } => self.sidebar_editor = true,
-            NativeRoute::Thread { .. } | NativeRoute::NewThread { .. } => {
-                self.sidebar_editor = false
-            }
-            _ => {}
-        }
         self.route_history.navigate(route);
         self.sync_composer_availability(cx);
         cx.notify();
@@ -603,13 +591,6 @@ impl NativeApplication {
     pub fn go_back(&mut self, cx: &mut Context<Self>) -> bool {
         let moved = self.route_history.go_back();
         if moved {
-            match self.route() {
-                NativeRoute::Editor { .. } => self.sidebar_editor = true,
-                NativeRoute::Thread { .. } | NativeRoute::NewThread { .. } => {
-                    self.sidebar_editor = false
-                }
-                _ => {}
-            }
             self.sync_composer_availability(cx);
             cx.notify();
         }
@@ -974,42 +955,13 @@ impl NativeApplication {
         )
     }
 
-    fn select_sidebar_tab(&mut self, editor: bool, cx: &mut Context<Self>) {
-        self.sidebar_editor = editor;
-        match (editor, self.route().clone()) {
-            (true, NativeRoute::Thread { project, thread }) => {
-                self.navigate(
-                    NativeRoute::Editor {
-                        project,
-                        thread,
-                        file: None,
-                    },
-                    cx,
-                );
-            }
-            (
-                false,
-                NativeRoute::Editor {
-                    project, thread, ..
-                },
-            ) => {
-                self.navigate(NativeRoute::Thread { project, thread }, cx);
-            }
-            _ => cx.notify(),
-        }
-    }
-
     fn desktop_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.desktop_theme;
-        let weak = cx.entity().downgrade();
-        let visible_hover_ids = if self.sidebar_editor {
-            vec![SIDEBAR_NEW_THREAD_HOVER_ID.to_owned()]
-        } else {
-            vec![
-                SIDEBAR_NEW_THREAD_HOVER_ID.to_owned(),
-                SIDEBAR_MARKETPLACE_HOVER_ID.to_owned(),
-            ]
-        };
+        let sidebar_item_radius = px(6.0);
+        let visible_hover_ids = vec![
+            SIDEBAR_NEW_THREAD_HOVER_ID.to_owned(),
+            SIDEBAR_MARKETPLACE_HOVER_ID.to_owned(),
+        ];
         self.sidebar_hover
             .borrow_mut()
             .clear_if_missing(&visible_hover_ids);
@@ -1068,40 +1020,6 @@ impl NativeApplication {
             .size_full()
         };
 
-        let tabs = Tabs::new(
-            "artisan-workspace-tabs",
-            self.sidebar_tabs_focus.clone(),
-            self.theme,
-            if self.sidebar_editor {
-                "editor"
-            } else {
-                "agents"
-            },
-            [
-                TabSpec::new("agents", "Agents"),
-                TabSpec::new("editor", "Editor"),
-            ],
-        )
-        .variant(TabsVariant::Card)
-        .w_full()
-        .rounded(px(6.0))
-        .debug_selector("artisan-workspace-tabs")
-        .on_change(move |value, _, _, cx| {
-            let _ = weak.update(cx, |app, cx| {
-                app.select_sidebar_tab(value.as_ref() == "editor", cx)
-            });
-        });
-        let tabs = div()
-            .relative()
-            .w_full()
-            .rounded(px(6.0))
-            .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
-            .bg(glass_foreground_base(self.theme))
-            .shadow(glass_card_shadows())
-            .child(glass_material_layer(GlassStrength::Quiet, px(6.0)))
-            .child(glass_highlight_layer(GlassStrength::Quiet, px(6.0)))
-            .child(tabs);
-
         let mut nav_theme = theme;
         nav_theme.secondary = self.theme.colors.muted_foreground.to_paint();
         let nav = div()
@@ -1127,40 +1045,21 @@ impl NativeApplication {
                 }
             }))
             .child(sidebar_hover_probe(SIDEBAR_NEW_THREAD_HOVER_ID))
-            .child(desktop_nav_glyph(
-                if self.sidebar_editor {
-                    AssetId::TABLER_FOLDER_PLUS
-                } else {
-                    AssetId::TABLER_EDIT
-                },
-                nav_theme,
-            ))
+            .child(desktop_nav_glyph(AssetId::TABLER_EDIT, nav_theme))
             .child(
                 div()
                     .text_size(px(14.0))
                     .text_color(theme.foreground)
-                    .child(if self.sidebar_editor {
-                        "Open project"
-                    } else {
-                        "New thread"
-                    }),
+                    .child("New thread"),
             )
             .on_click(cx.listener(|app, _, window, cx| {
                 window.focus(&app.sidebar_navigation_focus, cx);
-                if app.sidebar_editor {
-                    app.activate_add_project(cx);
-                } else {
-                    app.begin_new_task(cx);
-                }
+                app.begin_new_task(cx);
             }))
             .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     cx.stop_propagation();
-                    if app.sidebar_editor {
-                        app.activate_add_project(cx);
-                    } else {
-                        app.begin_new_task(cx);
-                    }
+                    app.begin_new_task(cx);
                 }
             }));
         let marketplace = div()
@@ -1208,12 +1107,11 @@ impl NativeApplication {
                 self.theme,
                 Rc::clone(&sidebar_hover),
                 "sidebar",
+                sidebar_item_radius,
                 cx.reduce_motion(),
             ))
             .child(nav)
-            .when(!self.sidebar_editor, |navigation| {
-                navigation.child(marketplace)
-            });
+            .child(marketplace);
         div()
             .h_full()
             .w_full()
@@ -1222,7 +1120,6 @@ impl NativeApplication {
             .flex_col()
             .gap(px(12.0))
             .p(px(10.0))
-            .child(tabs)
             .child(navigation)
             .child(div().flex_1().min_h(px(0.0)))
             .child(self.desktop_profile(cx))
@@ -1500,9 +1397,6 @@ impl NativeApplication {
     }
 
     fn desktop_route_title(&self) -> String {
-        if self.sidebar_editor && matches!(self.route(), NativeRoute::NewThread { .. }) {
-            return "Editor".into();
-        }
         let (title, _) = match self.route() {
             NativeRoute::NewThread { .. } => ("New task".to_owned(), self.selected_project_name()),
             NativeRoute::Thread { thread, .. } => {
@@ -1529,19 +1423,6 @@ impl NativeApplication {
     }
 
     fn desktop_route_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        if self.sidebar_editor && matches!(self.route(), NativeRoute::NewThread { .. }) {
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(8.0))
-                .text_color(self.desktop_theme.secondary)
-                .debug_selector(|| "artisan-editor-empty".into())
-                .child("Open a project to start editing")
-                .into_any_element();
-        }
         let route = self.route().clone();
         let route_selector = route.selector_suffix();
         let content = self.route_surface(cx);
@@ -5904,7 +5785,6 @@ mod tests {
     };
     use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
     use artisan_ui::motion::MotionPolicy;
-    use artisan_ui::tabs::{TabSpec, Tabs};
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
     use gpui::{Context, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext};
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
@@ -6345,7 +6225,6 @@ mod tests {
         assert!(cx.debug_bounds(DESKTOP_COMPOSER_SELECTOR).is_some());
         assert!(cx.debug_bounds(DESKTOP_SIDEBAR_SELECTOR).is_some());
         assert!(cx.debug_bounds(DESKTOP_TITLEBAR_SELECTOR).is_some());
-        assert!(cx.debug_bounds("artisan-workspace-tabs-list").is_some());
         assert!(
             cx.debug_bounds(NATIVE_STATUS_SELECTOR).is_none(),
             "the Ready stub must not mount beside the surface"
@@ -6397,23 +6276,32 @@ mod tests {
     }
 
     #[gpui::test]
-    fn workspace_tabs_switch_by_pointer_and_keyboard(cx: &mut TestAppContext) {
+    fn sidebar_task_links_share_sliding_hover_surface(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
         cx.run_until_parked();
-        let editor = cx
-            .debug_bounds("artisan-workspace-tabs-trigger-editor")
-            .expect("Editor tab");
-        cx.simulate_click(editor.center(), gpui::Modifiers::default());
+        let new_thread = cx
+            .debug_bounds("artisan-workspace-navigation")
+            .expect("New thread navigation");
+        let marketplace = cx
+            .debug_bounds("artisan-marketplace-navigation")
+            .expect("Marketplace navigation");
+        assert!(cx.debug_bounds("artisan-workspace-tabs-list").is_none());
+
+        cx.simulate_mouse_move(new_thread.center(), None, gpui::Modifiers::none());
         cx.run_until_parked();
-        assert!(cx.update(|_, app| view.read(app).sidebar_editor));
-        assert!(cx.debug_bounds("artisan-editor-empty").is_some());
-        cx.update(|window, app| {
-            view.update(app, |view, cx| window.focus(&view.sidebar_tabs_focus, cx));
+        cx.update(|_, app| {
+            let application = view.read(app);
+            let hover = application.sidebar_hover.borrow();
+            assert_eq!(hover.active_id(), Some("new-thread"));
         });
-        cx.simulate_keystrokes("left");
+
+        cx.simulate_mouse_move(marketplace.center(), None, gpui::Modifiers::none());
         cx.run_until_parked();
-        assert!(!cx.update(|_, app| view.read(app).sidebar_editor));
-        assert!(cx.debug_bounds(DESKTOP_COMPOSER_SELECTOR).is_some());
+        cx.update(|_, app| {
+            let application = view.read(app);
+            let hover = application.sidebar_hover.borrow();
+            assert_eq!(hover.active_id(), Some("marketplace"));
+        });
     }
 
     #[test]

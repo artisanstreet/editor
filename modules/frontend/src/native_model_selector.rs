@@ -1913,6 +1913,7 @@ impl NativeModelSelector {
                 self.theme,
                 Rc::clone(&self.model_hover),
                 "model",
+                px(14.0),
                 cx.reduce_motion(),
             ))
             .gap(px(3.0));
@@ -2427,6 +2428,7 @@ impl NativeModelSelector {
                 self.theme,
                 Rc::clone(&self.axis_hover),
                 "axis",
+                px(14.0),
                 cx.reduce_motion(),
             ));
             let dropdown_max_height = dropdown_max_height_for_viewport(viewport, trigger_bounds);
@@ -2939,6 +2941,7 @@ pub(crate) fn render_picker_hover_pill(
     theme: ArtisanTheme,
     hover: Rc<RefCell<SlidingHoverState>>,
     surface: &'static str,
+    corner_radius: Pixels,
     reduce_motion: bool,
 ) -> AnyElement {
     let (mut rect, visible, transition) = {
@@ -2960,7 +2963,7 @@ pub(crate) fn render_picker_hover_pill(
         .top(px(rect.top))
         .w(px(rect.width))
         .h(px(rect.height))
-        .rounded(px(14.0))
+        .rounded(corner_radius)
         .bg(hover_fill_gradient(theme))
         .shadow(source_hover_highlight_shadow(theme))
         .opacity(if visible { 1.0 } else { 0.0 });
