@@ -933,6 +933,10 @@ fn prepare_preflight_context(request: PreflightRequest) -> Result<PreflightConte
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
         }
+        super::InternalLaunch::Grok(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
     };
     let Ok(mut child) = child_result else {
         let _ = respond.send(Err(EngineOperationError::SpawnFailed));
@@ -1206,6 +1210,10 @@ fn prepare_catalog_context(request: CatalogRequest) -> Result<CatalogContext, Ex
             return Err(Execution::Completed);
         }
         super::InternalLaunch::Claude(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Grok(_) => {
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
         }
@@ -1521,18 +1529,21 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         artisan_domain::EngineSelection::OpenCode2(selection) => selection.profile_id().as_str(),
         artisan_domain::EngineSelection::Codex(selection) => selection.profile_id().as_str(),
         artisan_domain::EngineSelection::Claude(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Grok(selection) => selection.profile_id().as_str(),
         _ => return request.fail(EngineOperationError::Configuration),
     };
     if request.input.launch.profile_id() != selected_profile {
         return request.fail(EngineOperationError::Configuration);
     }
-    // Codex and Claude turns carry no provider continuation in this packet;
-    // a mid-turn resume here fails closed instead of executing as another
-    // engine.
+    // Codex, Claude, and Grok turns carry no provider continuation in this
+    // packet; a mid-turn resume here fails closed instead of executing as
+    // another engine.
     if request.input.continuation.is_some()
         && matches!(
             request.input.launch,
-            super::InternalLaunch::Codex(_) | super::InternalLaunch::Claude(_)
+            super::InternalLaunch::Codex(_)
+                | super::InternalLaunch::Claude(_)
+                | super::InternalLaunch::Grok(_)
         )
     {
         return request.fail(EngineOperationError::Configuration);
@@ -1549,6 +1560,9 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
     }
     if matches!(request.input.launch, super::InternalLaunch::Claude(_)) {
         return Box::pin(execute_claude_turn(request, runtime, shutdown)).await;
+    }
+    if matches!(request.input.launch, super::InternalLaunch::Grok(_)) {
+        return Box::pin(execute_grok_turn(request, runtime, shutdown)).await;
     }
     Box::pin(execute_configured_turn(request, runtime, shutdown)).await
 }
@@ -2598,6 +2612,455 @@ async fn read_claude_line(
     }
 }
 
+/// Executes one finite Grok turn over `grok agent stdio` through the shared
+/// ACP core.
+///
+/// Single-owner match arm beside the Codex/Claude executors: no second task,
+/// no second queue, no loop fork. Performs the bounded `initialize`
+/// handshake with the row's auth classifier, `session/new` (continuations
+/// fail closed at the shared fence, mirroring X1), the bind authorization
+/// gate carrying the exact native session identity, then exactly one prompt
+/// with the update pump. Streaming session updates carry no root-text
+/// projection in G1 (a later packet); permission and elicitation agent
+/// requests normalize through the A2 bridges into the pending table with no
+/// control-flow side effect and are never auto-answered. EOF before the
+/// prompt result maps to `Interrupted`, explicit cancel to `Cancelled`, and
+/// stall/failure to `Failed`. Teardown closes the stdin lifeline first and
+/// reaps within the close budget; an unobserved reap reports
+/// `UnresolvedReapDuring` without owner quarantine (see `finish_grok_turn`).
+#[allow(clippy::too_many_lines)]
+async fn execute_grok_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::acp as acp_core;
+    use super::grok as grok_runtime;
+
+    let artisan_domain::EngineSelection::Grok(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = grok_runtime::GrokSettings::from_selection(selection);
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Grok(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let definition = settings.definition();
+    let argv = (definition.build_args)(&settings.launch_args());
+    let mut child = match acp_core::spawn_acp_child(
+        launch.executable_path().as_os_str(),
+        &argv,
+        Some(std::path::Path::new(request.input.project_root.as_str())),
+    ) {
+        Ok(child) => child,
+        Err(_) => return request.fail(EngineOperationError::SpawnFailed),
+    };
+    let Some(pipes) = child.take_pipes() else {
+        let ConfiguredTurnRequest {
+            prepared, respond, ..
+        } = request;
+        let _ = prepared.send(Err(EngineOperationError::SpawnFailed));
+        return finish_grok_turn(
+            child,
+            Err(EngineOperationError::SpawnFailed),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    };
+    let acp_core::AcpPipes {
+        stdin,
+        stdout,
+        stderr,
+    } = pipes;
+    let mut stderr_counter = StderrCounter::new(Some(stderr), runtime.bounds.stderr_cap_bytes);
+    // Owner bounds map onto the caller-supplied ACP transport bounds: the
+    // SSE line ceiling bounds NDJSON lines, the generic JSON ceiling bounds
+    // envelopes, the handshake window is the prompt budget, and the stream
+    // budget arms the inactivity deadline the update loop recomputes.
+    let bounds = match acp_core::AcpBounds::new(
+        runtime.bounds.max_sse_line,
+        runtime.bounds.max_json_body,
+        grok_runtime::GROK_MAX_SESSION_ID_BYTES,
+        runtime.limits.prompt,
+        runtime.limits.sse,
+        runtime.limits.close,
+    ) {
+        Ok(bounds) => bounds,
+        Err(_) => {
+            let ConfiguredTurnRequest {
+                prepared, respond, ..
+            } = request;
+            let _ = prepared.send(Err(EngineOperationError::Configuration));
+            return finish_grok_turn(
+                child,
+                Err(EngineOperationError::Configuration),
+                respond,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut transport = acp_core::AcpTransport::new(stdout, stdin, bounds);
+
+    // initialize ----------------------------------------------------------
+    let handshake_deadline = phase_deadline(runtime.limits.prompt, request.deadline);
+    let initialize = tokio::select! {
+        biased;
+        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+        () = request.control.wait() => Err(EngineOperationError::Cancelled),
+        () = tokio::time::sleep_until(handshake_deadline) => Err(EngineOperationError::Deadline),
+        result = transport.initialize() => result.map_err(map_grok_acp_error),
+    };
+    let initialize = match initialize {
+        Ok(initialize) => initialize,
+        Err(error) => {
+            return finish_grok_start(Some(transport), child, request, error, runtime.limits.close)
+                .await;
+        }
+    };
+    let available: Vec<&str> = initialize.auth_methods.iter().map(String::as_str).collect();
+    let Some(auth_method) =
+        (definition.select_auth_method)(&available, grok_runtime::api_key_present())
+    else {
+        // No usable auth method is durable configuration state (the user
+        // must sign in), not a transient provider failure.
+        return finish_grok_start(
+            Some(transport),
+            child,
+            request,
+            EngineOperationError::Configuration,
+            runtime.limits.close,
+        )
+        .await;
+    };
+    let authenticated = tokio::select! {
+        biased;
+        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+        () = request.control.wait() => Err(EngineOperationError::Cancelled),
+        () = tokio::time::sleep_until(handshake_deadline) => Err(EngineOperationError::Deadline),
+        result = transport.authenticate(auth_method) => result.map_err(map_grok_acp_error),
+    };
+    if let Err(error) = authenticated {
+        return finish_grok_start(Some(transport), child, request, error, runtime.limits.close)
+            .await;
+    }
+
+    // session/new -----------------------------------------------------------
+    // Fresh native thread only; continuations fail closed at the shared
+    // fence above, mirroring X1.
+    let cwd = request.input.project_root.as_str().to_owned();
+    let session = tokio::select! {
+        biased;
+        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+        () = request.control.wait() => Err(EngineOperationError::Cancelled),
+        () = tokio::time::sleep_until(handshake_deadline) => Err(EngineOperationError::Deadline),
+        result = transport.new_session(cwd.as_str()) => result.map_err(map_grok_acp_error),
+    };
+    let session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            return finish_grok_start(Some(transport), child, request, error, runtime.limits.close)
+                .await;
+        }
+    };
+
+    // Bind authorization gate: the dispatcher binds the native session id
+    // before exactly one prompt is authorized. Destructure here so the
+    // prepared session carries the exact native identity.
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        mut authorize,
+        observations,
+        respond,
+    } = request;
+    if prepared
+        .send(Ok(PreparedSession::new(session.as_str().to_owned())))
+        .is_err()
+    {
+        let _ = transport.shutdown_writer().await;
+        drop(transport);
+        return finish_grok_turn(
+            child,
+            Err(EngineOperationError::Cancelled),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    let authorized = loop {
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => break Err(EngineOperationError::Shutdown),
+            () = control.wait() => break Err(EngineOperationError::Cancelled),
+            () = tokio::time::sleep_until(deadline) => break Err(EngineOperationError::Deadline),
+            result = &mut authorize => {
+                break result.map_err(|_| EngineOperationError::ProviderRequestFailed);
+            }
+            event = stderr_counter.pump(), if stderr_counter.state() == super::process::StderrState::Open => {
+                let _ = event;
+            }
+        }
+    };
+    if let Err(error) = authorized {
+        let _ = transport.shutdown_writer().await;
+        drop(transport);
+        return finish_grok_turn(child, Err(error), respond, runtime.limits.close).await;
+    }
+
+    // session/prompt + update pump -----------------------------------------
+    let prompt_text = input
+        .prompt
+        .text()
+        .map(|text| text.as_str().to_owned())
+        .unwrap_or_default();
+    let content =
+        match acp_core::build_prompt_content(definition.image_mode, &prompt_text, &[], None) {
+            Ok(content) => content,
+            Err(error) => {
+                let _ = transport.shutdown_writer().await;
+                drop(transport);
+                return finish_grok_turn(
+                    child,
+                    Err(map_grok_acp_error(error)),
+                    respond,
+                    runtime.limits.close,
+                )
+                .await;
+            }
+        };
+    let prompt_id = match transport.prompt(&session, content).await {
+        Ok(prompt_id) => prompt_id,
+        Err(error) => {
+            let _ = transport.shutdown_writer().await;
+            drop(transport);
+            return finish_grok_turn(
+                child,
+                Err(map_grok_acp_error(error)),
+                respond,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut bridges = super::acp_bridges::PendingBridgeTable::new();
+    let outcome = grok_pump_loop(
+        &mut transport,
+        &session,
+        &prompt_id,
+        &mut bridges,
+        deadline,
+        shutdown,
+        &control,
+        &mut stderr_counter,
+    )
+    .await;
+    let _ = transport.shutdown_writer().await;
+    drop(transport);
+    drop(observations);
+    match outcome {
+        GrokPumpOutcome::Terminal(state) => {
+            finish_grok_turn(
+                child,
+                Ok(EngineTurnResult { terminal: state }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        GrokPumpOutcome::Failed(error) => {
+            finish_grok_turn(child, Err(error), respond, runtime.limits.close).await
+        }
+    }
+}
+
+enum GrokPumpOutcome {
+    Terminal(super::observation::TerminalState),
+    Failed(EngineOperationError),
+}
+
+/// Drives one authorized Grok prompt round to its terminal state.
+///
+/// Mirrors the Codex pump structure over the ACP update loop: owner
+/// shutdown, explicit cancellation (with a best-effort provider cancel),
+/// and the attempt deadline preempt the transport; EOF before the prompt
+/// result is interruption, a silent window is failure, and only the matching
+/// prompt result settles the turn. Agent requests normalize into the pending
+/// bridge table; streaming updates await the later projection packet.
+#[allow(clippy::too_many_arguments)]
+async fn grok_pump_loop(
+    transport: &mut super::acp::AcpTransport<
+        tokio::process::ChildStdout,
+        tokio::process::ChildStdin,
+    >,
+    session: &super::acp::SessionId,
+    prompt: &super::acp::AcpId,
+    bridges: &mut super::acp_bridges::PendingBridgeTable,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    stderr_counter: &mut StderrCounter,
+) -> GrokPumpOutcome {
+    use super::acp::AcpError;
+    use super::acp::UpdateEvent;
+
+    loop {
+        if shutdown.is_cancelled() {
+            return GrokPumpOutcome::Failed(EngineOperationError::Shutdown);
+        }
+        if control.is_cancelled() {
+            // Best-effort provider cancel before reporting cancellation.
+            let _ = transport.cancel(session).await;
+            return GrokPumpOutcome::Terminal(TerminalState::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return GrokPumpOutcome::Failed(EngineOperationError::Deadline);
+        }
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => return GrokPumpOutcome::Failed(EngineOperationError::Shutdown),
+            () = control.wait() => {
+                let _ = transport.cancel(session).await;
+                return GrokPumpOutcome::Terminal(TerminalState::Cancelled);
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return GrokPumpOutcome::Failed(EngineOperationError::Deadline);
+            }
+            event = stderr_counter.pump(), if stderr_counter.state() == super::process::StderrState::Open => {
+                let _ = event;
+            }
+            update = transport.next_update(session, prompt) => match update {
+                Ok(UpdateEvent::SessionUpdate(_)) => {}
+                Ok(UpdateEvent::AgentRequest { id, method, params }) => {
+                    note_grok_agent_request(bridges, &id, &method, &params);
+                }
+                Ok(UpdateEvent::PromptResult(outcome)) => {
+                    return GrokPumpOutcome::Terminal(if outcome.cancelled {
+                        TerminalState::Cancelled
+                    } else {
+                        TerminalState::Completed
+                    });
+                }
+                Err(AcpError::Cancelled) => {
+                    let _ = transport.cancel(session).await;
+                    return GrokPumpOutcome::Terminal(TerminalState::Cancelled);
+                }
+                Err(AcpError::PeerClosed) => {
+                    return GrokPumpOutcome::Terminal(TerminalState::Interrupted);
+                }
+                Err(AcpError::InactivityStall) => {
+                    return GrokPumpOutcome::Terminal(TerminalState::Failed);
+                }
+                Err(error) => return GrokPumpOutcome::Failed(map_grok_acp_error(error)),
+            },
+        }
+    }
+}
+
+/// Tracks one agent-initiated ACP request in the pending bridge table.
+///
+/// Permission and elicitation frames normalize through the A2 bridges and
+/// validate fail-closed: malformed frames never reach the durable rails.
+/// Unknown methods (including cursor-specific extensions on the shared wire)
+/// stay untracked and unanswered; the bridges never auto-answer.
+fn note_grok_agent_request(
+    table: &mut super::acp_bridges::PendingBridgeTable,
+    id: &super::acp::AcpId,
+    method: &str,
+    params: &Value,
+) {
+    if method == super::grok::GROK_PERMISSION_METHOD {
+        if let Ok(pending) = super::acp_bridges::normalize_permission_request(params) {
+            let _ = table.insert_approval(super::grok::GROK_MAX_PENDING_REQUESTS, pending);
+        }
+    } else if method == super::grok::GROK_ELICITATION_METHOD {
+        let provider_id = match id {
+            super::acp::AcpId::Number(number) => number.to_string(),
+            super::acp::AcpId::Text(text) => text.clone(),
+        };
+        if let Ok(pending) =
+            super::acp_bridges::normalize_elicitation_request(provider_id.as_str(), params)
+        {
+            let _ = table.insert_elicitation(super::grok::GROK_MAX_PENDING_REQUESTS, pending);
+        }
+    }
+}
+
+/// Maps one ACP core failure onto the owner error vocabulary.
+///
+/// Cancellation stays distinct; a protocol version mismatch surfaces as
+/// `IncompatibleVersion`; every other wire failure (including auth,
+/// framing, stall, and child errors) is a provider request failure. No
+/// provider bytes cross this boundary: the core error is payload-free.
+fn map_grok_acp_error(error: super::acp::AcpError) -> EngineOperationError {
+    match error {
+        super::acp::AcpError::Cancelled => EngineOperationError::Cancelled,
+        super::acp::AcpError::UnsupportedVersion => EngineOperationError::IncompatibleVersion,
+        _ => EngineOperationError::ProviderRequestFailed,
+    }
+}
+
+/// Runs the fixed pre-prompt teardown for a faulted Grok start and settles
+/// both owner channels: the stdin lifeline closes first so an EOF-clean
+/// agent can exit on its own, then the child reaps within the close budget.
+async fn finish_grok_start(
+    transport: Option<
+        super::acp::AcpTransport<tokio::process::ChildStdout, tokio::process::ChildStdin>,
+    >,
+    child: super::acp::AcpChild,
+    request: ConfiguredTurnRequest,
+    error: EngineOperationError,
+    close_budget: Duration,
+) -> Execution {
+    if let Some(mut transport) = transport {
+        let _ = transport.shutdown_writer().await;
+    }
+    let ConfiguredTurnRequest {
+        prepared, respond, ..
+    } = request;
+    let _ = prepared.send(Err(error.clone()));
+    finish_grok_turn(child, Err(error), respond, close_budget).await
+}
+
+/// Settles one Grok turn after its transport is gone.
+///
+/// Mirrors the success path of the shared cleanup (bounded reap, then
+/// settle) over the ACP child's fixed teardown. An unobserved reap cannot
+/// quarantine through the owner `process` contract (`AcpRetainedChild`
+/// carries no observable wait): the retained handle drops — the spawn sets
+/// `kill_on_drop`, and ACP children hold no ports or secrets — while the
+/// caller still observes `UnresolvedReapDuring`. Full quarantine returns
+/// with the verified-launch authority packet.
+async fn finish_grok_turn(
+    child: super::acp::AcpChild,
+    result: TurnResult,
+    respond: oneshot::Sender<TurnResult>,
+    close_budget: Duration,
+) -> Execution {
+    match super::acp::shutdown_acp_child(child, close_budget).await {
+        super::acp::AcpShutdown::ReapedWithoutKill(_)
+        | super::acp::AcpShutdown::ReapedAfterKill(_) => {
+            let _ = respond.send(result);
+            Execution::Completed
+        }
+        super::acp::AcpShutdown::Retained(retained) => {
+            drop(retained);
+            let primary = result
+                .err()
+                .map_or_else(|| Box::new(EngineOperationError::ReapUnresolved), Box::new);
+            let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring { primary }));
+            Execution::Completed
+        }
+    }
+}
+
 async fn prepare_configured_process(
     request: ConfiguredTurnRequest,
     runtime: ConfiguredRuntime,
@@ -2624,6 +3087,9 @@ async fn prepare_configured_process(
             return Err(request.fail(EngineOperationError::Configuration));
         }
         crate::engine_owner::InternalLaunch::Claude(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
+        }
+        crate::engine_owner::InternalLaunch::Grok(_) => {
             return Err(request.fail(EngineOperationError::Configuration));
         }
     }) else {
@@ -2899,6 +3365,7 @@ async fn authorize_configured_session(
         }
         super::InternalLaunch::Codex(_) => Err(StreamError::InvalidSession),
         super::InternalLaunch::Claude(_) => Err(StreamError::InvalidSession),
+        super::InternalLaunch::Grok(_) => Err(StreamError::InvalidSession),
         #[cfg(test)]
         super::InternalLaunch::Fixture(_) => Ok(StreamState::new(stream_after)),
     };
