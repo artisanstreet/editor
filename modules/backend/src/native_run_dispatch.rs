@@ -1347,13 +1347,10 @@ async fn resolve_continuation(
     if matches!(&claim.launch, ResolvedLaunch::Fixture(_)) {
         return Ok(None);
     }
-    // Grok and Cursor continuation is a later packet: those turns
+    // Grok continuation is a later packet: those turns
     // always start a fresh native thread in this packet instead of resuming
     // provider history.
-    if matches!(
-        &claim.launch,
-        ResolvedLaunch::Grok(_) | ResolvedLaunch::Cursor(_)
-    ) {
+    if matches!(&claim.launch, ResolvedLaunch::Grok(_)) {
         return Ok(None);
     }
     // Codex resumes its durable provider thread: the lookup is scoped to the
@@ -1404,6 +1401,38 @@ async fn resolve_continuation(
             .read_session_continuation(SessionContinuationQuery {
                 thread_id: claim.payload.thread_id.clone(),
                 engine_id: EngineId::Claude,
+                profile_id,
+                exclude_run_id: Some(ids.run_id.clone()),
+            })
+            .await
+            .map_err(|_| "provider continuation lookup failed")?;
+        return match lookup {
+            SessionContinuationLookup::NoHistory => Ok(None),
+            SessionContinuationLookup::Usable(continuation) => {
+                EngineContinuation::new(continuation.session_id.as_str().to_owned())
+                    .map(Some)
+                    .ok_or("provider continuation corrupt")
+            }
+            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
+            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+        };
+    }
+    // Cursor resumes its durable ACP session: the lookup is scoped to the
+    // cursor engine tag and the selecting profile, and the owner reopens the
+    // same session through `session/load` only after the C3 gate (same
+    // engine, explicit target model, CLI >= 2026.08.11-e8db854). Incompatible
+    // bindings fail closed; a fresh session starts only with no history.
+    if matches!(&claim.launch, ResolvedLaunch::Cursor(_)) {
+        let EngineSelection::Cursor(selection) = claim.settings.config().selection() else {
+            return Err("engine unavailable");
+        };
+        let profile_id = selection.profile_id().clone();
+        let lookup = claim
+            .context
+            .repository
+            .read_session_continuation(SessionContinuationQuery {
+                thread_id: claim.payload.thread_id.clone(),
+                engine_id: EngineId::Cursor,
                 profile_id,
                 exclude_run_id: Some(ids.run_id.clone()),
             })
@@ -1675,6 +1704,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
                 prompt,
                 settings: settings.clone(),
                 launch: *launch,
+                continuation,
                 prompt_delivery,
                 stream_after,
                 control_capacity,

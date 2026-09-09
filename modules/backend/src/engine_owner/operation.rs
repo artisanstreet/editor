@@ -1553,18 +1553,14 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
     if request.input.launch.profile_id() != selected_profile {
         return request.fail(EngineOperationError::Configuration);
     }
-    // Grok and Cursor turns carry no provider continuation in this packet; a
+    // Grok turns carry no provider continuation in this packet; a
     // mid-turn resume here fails closed instead of executing as another
     // engine. Codex carries its X3 continuation and gates it at the executor;
     // Claude carries its L3 continuation and gates it at the executor below;
+    // Cursor carries its C3 continuation and gates it at the executor below;
     // Hermes carries its gateway continuation below.
     if request.input.continuation.is_some()
-        && matches!(
-            request.input.launch,
-            super::InternalLaunch::Claude(_)
-                | super::InternalLaunch::Grok(_)
-                | super::InternalLaunch::Cursor(_)
-        )
+        && matches!(request.input.launch, super::InternalLaunch::Grok(_))
     {
         return request.fail(EngineOperationError::Configuration);
     }
@@ -3321,13 +3317,15 @@ async fn finish_grok_turn(
 /// Executes one finite Cursor turn over the shared ACP core.
 ///
 /// Single-owner match arm beside the Codex and Claude executors: no second
-/// task, no second queue. C1 proves admission agreement (durable cursor
+/// task, no second queue. C3 proves admission agreement (durable cursor
 /// selection, typed [`CursorSettings`](super::cursor::CursorSettings), and
-/// the cursor launch capability carry the same managed profile, and no
-/// provider continuation travels with the turn) and then fails closed: the
-/// probe authority, live spawn/pump, catalog merge, and frontend selection
-/// belong to later packets. The cursor-shaped ACP wire itself is proven by
-/// the fixture script tests in `super::cursor`, which drive the exact
+/// the cursor launch capability carry the same managed profile) and gates a
+/// provider continuation through the C3 gate (same engine, explicit target
+/// model, CLI >= 2026.08.11-e8db854; anything else is typed incompatible),
+/// then still fails closed: the probe authority, live spawn/pump, catalog
+/// merge, and frontend selection belong to later packets. The cursor-shaped
+/// ACP wire itself is proven by the fixture script tests in `super::cursor`
+/// and `tests/backend/engine_owner_cursor.rs`, which drive the exact
 /// definition row (`--model` resolution, `--mode ask`, `--force`, `acp`;
 /// image-block mode; permission deny-then-allow; plan-approval extensions;
 /// resume; cancel/close; malformed frames; `AE-PROVIDER-206`) through the
@@ -3357,8 +3355,28 @@ async fn execute_cursor_turn(
     if launch.profile_id() != settings.profile_id() {
         return request.fail(EngineOperationError::Configuration);
     }
-    if request.input.continuation.is_some() {
-        return request.fail(EngineOperationError::Configuration);
+    // C3 continuation gate: same-engine is fenced by the dispatcher (cursor
+    // bindings only); the owner additionally requires an explicit target
+    // model and CLI >= 2026.08.11-e8db854, plus a bounded stored session id.
+    // Anything else is typed incompatible — never a silent fresh start and
+    // never a cross-engine resume. The validated session id is consumed by
+    // the live `session/load` resume once the runnable packet lands; C3 still
+    // fails closed before spawning.
+    if let Some(continuation) = request.input.continuation.as_ref() {
+        let gate = cursor_runtime::check_cursor_native_continuation(
+            &cursor_runtime::CursorContinuationGateInput {
+                cli_version: request.input.launch.version(),
+                target_model: selection.model_id().map(|model| model.as_str()),
+                advertised_models: None,
+                same_engine: true,
+            },
+        );
+        if !matches!(gate, cursor_runtime::CursorContinuationDecision::Compatible) {
+            return request.fail(EngineOperationError::Configuration);
+        }
+        if cursor_runtime::cursor_resume_session_id(continuation.provider_session_id()).is_none() {
+            return request.fail(EngineOperationError::Configuration);
+        }
     }
     let _definition = cursor_runtime::CursorSettings::definition();
     request.fail(EngineOperationError::Configuration)

@@ -93,6 +93,10 @@ mod engine_owner_codex;
 mod engine_owner_claude;
 
 #[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_cursor.rs"]
+mod engine_owner_cursor;
+
+#[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_grok.rs"]
 mod engine_owner_grok;
 
@@ -357,8 +361,10 @@ impl std::fmt::Debug for EngineGrokTurnInput {
 ///
 /// The dispatcher constructs this only after reading the durable settings
 /// and resolving the exact cursor launch. The owner never rereads the thread,
-/// registry, or environment while this value is live. Cursor turns carry no
-/// provider continuation in this packet (later packet).
+/// registry, or environment while this value is live. Unlike the Grok turns,
+/// Cursor carries the optional provider continuation: resume reopens the
+/// durable ACP session through `session/load` behind the C3 gate (same
+/// engine, explicit target model, CLI >= 2026.08.11-e8db854).
 pub(crate) struct EngineCursorTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) thread_id: ThreadId,
@@ -367,6 +373,7 @@ pub(crate) struct EngineCursorTurnInput {
     pub(crate) prompt: QueueMessagePayload,
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: cursor::CursorLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -1050,8 +1057,9 @@ impl EngineOwner {
     ///
     /// Mirrors [`Self::admit_turn`] without forking the queue: the same
     /// `Job::Turn` type carries an [`InternalLaunch::Cursor`] capability and
-    /// exactly one executor proves the lifecycle. Cursor turns carry no
-    /// provider continuation in this packet (later packet).
+    /// exactly one executor proves the lifecycle. Cursor turns carry the
+    /// optional provider continuation for `session/load` behind the C3 gate
+    /// (same engine, explicit target model, CLI >= 2026.08.11-e8db854).
     pub(crate) fn admit_cursor_turn(
         &self,
         input: EngineCursorTurnInput,
@@ -1065,7 +1073,7 @@ impl EngineOwner {
             prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Cursor(Box::new(input.launch)),
-            continuation: None,
+            continuation: input.continuation,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
