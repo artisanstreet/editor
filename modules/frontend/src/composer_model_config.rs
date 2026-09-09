@@ -818,7 +818,10 @@ mod tests {
     #[test]
     fn cursor_choice_builds_a_cursor_selection_without_speed() {
         let catalog = runnable_catalog();
-        let policy = profiled_policy(&catalog, "cursor-composer-2-5");
+        let mut policy = profiled_policy(&catalog, "cursor-composer-2-5");
+        // The fixture defaults this model to fast speed; clear it so this
+        // test exercises the no-speed path its name claims.
+        policy.speed = None;
         let config = config_for_policy(&catalog, &policy, None).unwrap();
         let EngineSelection::Cursor(selection) = config.selection() else {
             panic!("expected a Cursor selection");
