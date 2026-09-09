@@ -11,7 +11,7 @@
 use crate::engine_config::{EngineConfigUpdatePrecondition, EngineRunConfig};
 use crate::identifiers::{DirectoryId, MessageId, ProjectId, RequestId, RunId, ThreadId};
 use crate::message::QueueMessagePayload;
-use crate::{ListQueuedMessages, ReadRecalledMessage, ReadRunUsage, WithdrawQueuedMessageCommand};
+use crate::{ListQueuedMessages, ReadAccountUsage, ReadRecalledMessage, ReadRunUsage, WithdrawQueuedMessageCommand};
 use crate::text::{MessageBody, ThreadTitle};
 
 pub use crate::composer_catalog::{ReadComposerCatalog, ReadModelFavorites, SetModelFavorite};
@@ -383,4 +383,6 @@ pub enum Query {
     ListQueuedMessages(ListQueuedMessages),
     ReadRecalledMessage(ReadRecalledMessage),
     ReadRunUsage(ReadRunUsage),
+    /// See [`ReadAccountUsage`].
+    ReadAccountUsage(ReadAccountUsage),
 }

@@ -649,6 +649,12 @@ struct Request {
     withdrawQueuedMessage @22 :ComposerState.WithdrawQueuedMessageRequest;
     readRecalledMessage @23 :ComposerState.ReadRecalledMessageRequest;
     readRunUsage @24 :ComposerState.ReadRunUsageRequest;
+
+    # Provider-account usage read. The engine scope narrows the read to one
+    # engine so clients can fan out per engine; force re-asks providers even
+    # when cached reports are fresh. Appended after readRunUsage; fresh
+    # ordinal, existing ordinals frozen.
+    readAccountUsage @25 :ReadAccountUsageRequest;
   }
 }
 
@@ -706,6 +712,10 @@ struct Response {
     messageWithdrawn @23 :ComposerState.QueuedMessageWithdrawalResult;
     recalledMessage @24 :ComposerState.RecalledMessageResult;
     runUsage @25 :ComposerState.RunUsageResult;
+
+    # Provider-account usage snapshot for the requested engines. Appended
+    # after runUsage; fresh ordinal, existing ordinals frozen.
+    accountUsage @26 :EngineUsageSnapshot;
   }
 }
 
@@ -1363,4 +1373,127 @@ struct ReadMessageImageRequest {
 struct MessageImageResult {
   reference @0 :ImageAttachmentRef;
   bytes @1 :Data;
+}
+
+# ---------------------------------------------------------------------------
+# Provider-account usage. Owned conversions in `modules/protocol/src/codec.rs`
+# validate these messages before they cross application service boundaries.
+# Every Text bound below is measured in UTF-8 bytes and enforced by owned
+# conversion; the wire shapes stay finite and explicit here. Appended after
+# the image-read contract was committed; fresh ordinals throughout, existing
+# ordinals frozen. Mirrors `EngineUsageQuery`, `EngineUsageReport`, and
+# `EngineUsageSnapshot` in `modules/protocol/src/engine-usage.ts` of the
+# TypeScript reference.
+# ---------------------------------------------------------------------------
+
+# Requests provider-account usage. The scope narrows the read to one engine
+# so clients can fan out per engine; force re-asks providers even when
+# cached reports are fresh.
+struct ReadAccountUsageRequest {
+  scope :union {
+    # Every registered engine reports.
+    all @0 :Void;
+    # One engine reports. Identifier rule (for example "codex").
+    one @1 :Text;
+  }
+
+  # User-initiated refresh bypassing the backend freshness window.
+  force @2 :Bool;
+}
+
+# Classifies one provider quota window by its billing cadence.
+enum EngineUsageWindowKind {
+  session @0;
+  weekly @1;
+  monthly @2;
+  unknown @3;
+}
+
+# Reports whether the provider account behind an engine can be billed.
+enum EngineUsageAuthentication {
+  authenticated @0;
+  unauthenticated @1;
+  unknown @2;
+}
+
+# Carries the explicit quota-surface distinction. An empty window list never
+# implies anything about the provider's quota API on its own.
+enum QuotaSurface {
+  supported @0;
+  unknown @1;
+  unsupported @2;
+}
+
+# One provider-reported quota window as a used percentage. Owned conversion
+# enforces the identifier rule on id, the 0..=100 clamp on percentUsed, the
+# ISO-8601 shape on a nonempty resetsAt, and positivity on a nonzero
+# windowMinutes.
+struct EngineUsageWindow {
+  # Provider's stable bucket identifier (for example "five_hour").
+  # Identifier rule.
+  id @0 :Text;
+
+  kind @1 :EngineUsageWindowKind;
+
+  # Provider's human bucket name, when one exists. Empty means absent;
+  # otherwise at most 256 UTF-8 bytes, nonblank, no control characters.
+  label @2 :Text;
+
+  # Used percentage in 0..=100. Non-finite values are rejected, never
+  # clamped into meaning.
+  percentUsed @3 :Float64;
+
+  # ISO-8601 reset instant, when known. Empty means absent.
+  resetsAt @4 :Text;
+
+  # Provider-reported window cadence in minutes, when known. Zero means
+  # absent; otherwise strictly positive.
+  windowMinutes @5 :UInt32;
+}
+
+# One engine's provider-account usage report. Owned conversion enforces the
+# identifier rule on engineId, the display-name bound, the email bound on a
+# nonempty accountEmail, the reason bound on nonempty authReason and failure,
+# and at most 64 windows.
+struct EngineUsageReport {
+  # Stable engine id (for example "codex"). Identifier rule.
+  engineId @0 :Text;
+
+  # Engine display name. At most 256 UTF-8 bytes, nonblank.
+  displayName @1 :Text;
+
+  authentication @2 :EngineUsageAuthentication;
+
+  # Bounded human reason for the authentication state, when supplied. Empty
+  # means absent; otherwise at most 1024 UTF-8 bytes, nonblank.
+  authReason @3 :Text;
+
+  # Provider account email, when the transport discloses one. Empty means
+  # absent; otherwise at most 320 UTF-8 bytes, nonblank.
+  accountEmail @4 :Text;
+
+  # Explicit quota-surface distinction. Absent means the reader did not
+  # determine it; present carries exactly one surface.
+  quotaSurface :union {
+    absent @5 :Void;
+    present @6 :QuotaSurface;
+  }
+
+  # Artisan-owned failure reason, when the read failed. Empty means absent;
+  # otherwise at most 1024 UTF-8 bytes, nonblank. Never a provider payload.
+  failure @7 :Text;
+
+  # Bounded quota windows. At most 64 entries by owned conversion.
+  windows @8 :List(EngineUsageWindow);
+}
+
+# Provider-account usage snapshot for the requested engines. Owned conversion
+# enforces at most 16 engine reports and a valid ISO-8601 fetch instant.
+struct EngineUsageSnapshot {
+  # Per-engine reports in backend roster order. At most 16 entries by owned
+  # conversion.
+  engines @0 :List(EngineUsageReport);
+
+  # ISO-8601 fetch instant shared by every report in this snapshot.
+  fetchedAt @1 :Text;
 }

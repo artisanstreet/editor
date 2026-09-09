@@ -4,6 +4,8 @@ use std::{future::Future, process::ExitCode, sync::Arc};
 
 use artisan_transport::CancelHandle;
 
+pub mod account_usage_cursor;
+pub mod account_usage_service;
 pub mod activated_conversation_replay;
 pub mod agent_name_allocation_policy;
 pub mod agent_name_catalog_policy;
@@ -241,6 +243,8 @@ mod tests {
 }
 
 mod composer_catalog_service;
+
+mod account_usage_handler;
 
 mod native_model_catalog;
 

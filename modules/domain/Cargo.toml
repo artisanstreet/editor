@@ -16,5 +16,9 @@ path = "../../tests/domain/assistant_message.rs"
 name = "engine_profile_id"
 path = "../../tests/domain/engine_profile_id.rs"
 
+[[test]]
+name = "engine_usage"
+path = "../../tests/domain/engine_usage.rs"
+
 [lints]
 workspace = true

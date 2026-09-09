@@ -1091,6 +1091,8 @@ pub enum ResponsePayload {
     MessageWithdrawn(artisan_domain::composer_state::QueuedMessageWithdrawalResult),
     RecalledMessage(artisan_domain::RecalledMessageResult),
     RunUsage(artisan_domain::RunUsageResult),
+    /// Provider-account usage snapshot for the requested engines.
+    AccountUsage(artisan_domain::EngineUsageSnapshot),
 }
 
 /// Successful response correlated to a client request frame.

@@ -49,3 +49,7 @@ path = "../../tests/protocol/composer_catalog.rs"
 [[test]]
 name = "composer_state"
 path = "../../tests/protocol/composer_state.rs"
+
+[[test]]
+name = "engine_usage"
+path = "../../tests/protocol/engine_usage.rs"

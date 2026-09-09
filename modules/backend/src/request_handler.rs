@@ -316,6 +316,7 @@ pub struct RequestHandler {
     registered_engine_profiles: Option<Box<dyn RegisteredEngineProfilesReader>>,
     run_cancellation: Option<RunCancellationRegistry>,
     composer_catalog: Option<crate::composer_catalog_service::ComposerCatalogService>,
+    account_usage: Option<crate::account_usage_service::AccountUsageService>,
 }
 
 impl fmt::Debug for RequestHandler {
@@ -446,6 +447,7 @@ impl RequestHandler {
             registered_engine_profiles: None,
             run_cancellation: None,
             composer_catalog: None,
+            account_usage: None,
         }
     }
 
@@ -469,6 +471,7 @@ impl RequestHandler {
             registered_engine_profiles: None,
             run_cancellation: None,
             composer_catalog: None,
+            account_usage: None,
         }
     }
 
@@ -493,6 +496,7 @@ impl RequestHandler {
             registered_engine_profiles: None,
             run_cancellation: None,
             composer_catalog: None,
+            account_usage: None,
         }
     }
 
@@ -527,6 +531,21 @@ impl RequestHandler {
         service: crate::composer_catalog_service::ComposerCatalogService,
     ) -> Self {
         self.composer_catalog = Some(service);
+        self
+    }
+
+    /// Attaches the one process-owned account-usage fan-out service.
+    ///
+    /// The service fans out per requested engine with freshness caching and
+    /// per-engine failure isolation; it owns no run, provider session, or
+    /// frontend publication state. Public so tests can inject scripted
+    /// readers while production wires the provider-backed roster.
+    #[must_use]
+    pub fn with_account_usage_service(
+        mut self,
+        service: crate::account_usage_service::AccountUsageService,
+    ) -> Self {
+        self.account_usage = Some(service);
         self
     }
 
@@ -1026,6 +1045,14 @@ impl RequestHandler {
             Query::ReadModelFavorites(_) => {
                 crate::composer_catalog_handler::read_model_favorites(&self.repository, request_id)
                     .await
+            }
+            Query::ReadAccountUsage(query) => {
+                crate::account_usage_handler::read_account_usage(
+                    self.account_usage.as_ref(),
+                    request_id,
+                    query,
+                )
+                .await
             }
             Query::ListRegisteredEngineProfiles(_) => {
                 let Some(reader) = self.registered_engine_profiles.as_ref() else {

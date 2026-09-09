@@ -153,6 +153,33 @@ pub const CONVERSATION_PATCH_BATCH_MAX_PATCHES: usize = 64;
 /// Matches `conversation_query_maximum_turn_count` in the legacy protocol.
 pub const CONVERSATION_QUERY_MAX_TURNS: u16 = 512;
 
+/// Maximum quota windows carried by one engine usage report.
+///
+/// Mirrors the `EngineUsageReport.windows` ceiling of 64 in
+/// `modules/protocol/src/engine-usage.ts`: one provider bucket emits at most
+/// two slots, so 64 leaves room for large multi-bucket accounts while keeping
+/// the snapshot frame bounded.
+pub const ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE: usize = 64;
+
+/// Maximum engine reports carried by one account-usage snapshot.
+///
+/// Mirrors the `EngineUsageSnapshot.engines` ceiling of 16. Six provider
+/// adapters exist today; 16 leaves headroom without allowing unbounded
+/// growth.
+pub const ENGINE_USAGE_ENGINES_MAX: usize = 16;
+
+/// Maximum UTF-8 byte length of a provider account email in a usage report.
+///
+/// The legacy usage surface left emails unbounded; RFC 5321 caps deliverable
+/// addresses at 254 octets, so 320 is a generous finite ceiling with margin.
+pub const ENGINE_USAGE_EMAIL_MAX_BYTES: usize = 320;
+
+/// Maximum UTF-8 byte length of an Artisan-owned usage reason or failure.
+///
+/// Matches the protocol-owned error-detail ceiling so handler reasons always
+/// fit the failure vocabulary without truncation.
+pub const ENGINE_USAGE_REASON_MAX_BYTES: usize = 1_024;
+
 /// Maximum number of summaries in one attached-project listing.
 ///
 /// Deliberate improvement over legacy, whose project catalog array was

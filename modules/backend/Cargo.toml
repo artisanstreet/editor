@@ -150,6 +150,10 @@ path = "../../tests/backend/process_custody.rs"
 name = "request_handler"
 path = "../../tests/backend/request_handler.rs"
 
+[[test]]
+name = "engine_usage"
+path = "../../tests/backend/engine_usage.rs"
+
 [lints]
 workspace = true
 
