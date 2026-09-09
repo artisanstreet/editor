@@ -135,9 +135,10 @@ pub(crate) fn chunk_text(
 /// Typed terminal observation preserving caller-supplied identity and state.
 ///
 /// Keeps the provided [`RunId`], durable sequence, one of the four distinct
-/// [`TerminalState`] values, and optional reason/error reference strings.
-/// No sequence is invented, no `Interrupted` is collapsed into `Cancelled`,
-/// and no raw frames, auth, secrets, or serialization are added.
+/// [`TerminalState`] values, optional reason/error reference strings, and an
+/// optional generated session title captured at the terminal fence. No
+/// sequence is invented, no `Interrupted` is collapsed into `Cancelled`, and
+/// no raw frames, auth, secrets, or serialization are added.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TerminalObservation {
     run_id: RunId,
@@ -145,6 +146,7 @@ pub(crate) struct TerminalObservation {
     state: TerminalState,
     reason: Option<String>,
     error_ref: Option<String>,
+    summary_title: Option<String>,
 }
 
 impl TerminalObservation {
@@ -162,7 +164,16 @@ impl TerminalObservation {
             state,
             reason,
             error_ref,
+            summary_title: None,
         }
+    }
+
+    /// Attaches the harness-generated session title captured at the terminal
+    /// fence. Engines that capture no title leave the observation unchanged.
+    #[must_use]
+    pub(crate) fn with_summary_title(mut self, summary_title: Option<String>) -> Self {
+        self.summary_title = summary_title;
+        self
     }
 
     #[must_use]
@@ -188,6 +199,13 @@ impl TerminalObservation {
     #[must_use]
     pub(crate) fn error_ref(&self) -> Option<&str> {
         self.error_ref.as_deref()
+    }
+
+    /// Returns the harness-generated session title, when the engine produced
+    /// one by the time the run settled.
+    #[must_use]
+    pub(crate) fn summary_title(&self) -> Option<&str> {
+        self.summary_title.as_deref()
     }
 }
 

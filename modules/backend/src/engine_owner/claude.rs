@@ -40,23 +40,37 @@
 //! emission plus sequencing here, and the dispatcher packet wires the drain
 //! into the live pump beside the text channel.
 //!
-//! Later packets own: usage/title capture beyond this plumbing, model
-//! inventory, continuation gating on the verified `2.1.220` release
-//! (`artisan_native_engine::CLAUDE_NATIVE_CONTINUATION_VERSION`, recorded as
-//! data only), and tool/file/search projections for `assistant` tool uses and
-//! `user` result frames (currently `Unknown`).
+//! L3 notes: continuation resumes provider-owned state only (never invented
+//! checkpoints) by reopening the stored native session through `--resume`
+//! behind [`check_claude_native_continuation`]; usage is collected
+//! best-effort alongside the turn (assistant usage gauges project to
+//! cumulative [`RunUsageReport`] rows with a replacing context gauge, terminal
+//! totals project without one) and never blocks it; the `/usage` CLI buckets
+//! map to diagnostics with clamped percents and kind classification without
+//! inventing quota; the generated session title is captured best-effort from
+//! the transcript at the terminal fence into the terminal `summary_title`;
+//! teardown terminates the whole process group so no claude grandchild
+//! holding a pipe is orphaned; interrupted runs replay the durable prefix on
+//! resume without duplicating provider effects.
+//!
+//! Later packets own: model inventory, catalog flag flip, frontend selection,
+//! and dispatcher persistence of the captured title and quota diagnostics.
 
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use artisan_domain::{
-    ApprovalMode, ApprovalRequest, ClaudePermissionMode, ClaudeSelection, FilesystemAccess,
-    MessagePhase, NetworkAccess, Observation, ObservationId, ObservationSequence, QuestionInput,
-    QuestionOption, RunId, SubagentInput, SubagentObservation, SubagentState,
-    SubagentTranscriptObservation, TranscriptAgentMessageDelta, TranscriptContent,
+    ApprovalMode, ApprovalRequest, ClaudePermissionMode, ClaudeSelection, EngineModelId,
+    EngineRouteId, FilesystemAccess, MessagePhase, NetworkAccess, OBSERVATION_TITLE_MAX_BYTES,
+    Observation, ObservationId, ObservationSequence, QuestionInput, QuestionOption, RootPath,
+    RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, SubagentInput, SubagentObservation,
+    SubagentState, SubagentTranscriptObservation, ThreadId, TranscriptAgentMessageDelta,
+    TranscriptContent, UnixMillis,
 };
+use artisan_native_engine::CLAUDE_NATIVE_CONTINUATION_VERSION;
 use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -65,7 +79,7 @@ use tokio::time::Instant;
 
 #[cfg(test)]
 use super::observation::TerminalObservation;
-use super::observation::{EngineObservation, TerminalState, chunk_text};
+use super::observation::{EngineObservation, TerminalState, UsageObservation, chunk_text};
 
 /// Maximum accepted stream-JSON line bytes (mirrors the TS 1 MiB frame cap).
 pub(crate) const CLAUDE_MAX_FRAME_BYTES: usize = 1_048_576;
@@ -482,6 +496,10 @@ pub(crate) enum ClaudeEvent {
         delta: String,
         /// Verbatim TypeScript phase (`unspecified` or `commentary`).
         phase: &'static str,
+        /// Per-response usage from the same assistant frame, if any disclosed
+        /// a measurable sample. Projects best-effort beside the delta and
+        /// never disturbs it.
+        usage: Option<ClaudeUsageSample>,
     },
     /// Encrypted-thinking estimate: preserved in the tracker, never root text.
     ThinkingTokens {
@@ -490,7 +508,16 @@ pub(crate) enum ClaudeEvent {
     /// Non-empty thinking delta: counted in the tracker, never root text.
     ReasoningDelta,
     /// Buffered thinking block settled (possibly with empty encrypted text).
-    ReasoningSettled,
+    ReasoningSettled {
+        /// Per-response usage from the same assistant frame, if any.
+        usage: Option<ClaudeUsageSample>,
+    },
+    /// Usage-only assistant frame: no public text, but the provider disclosed
+    /// a measurable per-response sample, so the gauge still projects
+    /// best-effort instead of being dropped with the bookkeeping.
+    Usage {
+        sample: ClaudeUsageSample,
+    },
     ApprovalRequested(ClaudeApprovalRequest),
     QuestionRequested(ClaudeQuestionRequest),
     SubagentLifecycle {
@@ -505,6 +532,10 @@ pub(crate) enum ClaudeEvent {
         success: bool,
         session_id: Option<String>,
         permission_denials: usize,
+        /// Terminal usage totals from the same result frame, if any disclosed
+        /// a measurable sample. Projects best-effort beside settlement and
+        /// never disturbs it.
+        usage: Option<ClaudeUsageSample>,
     },
     Unknown,
 }
@@ -579,6 +610,7 @@ pub(crate) fn parse_frame(
                     .filter(|id| !id.is_empty() && id.len() <= CLAUDE_MAX_ID_BYTES)
                     .map(str::to_owned),
                 permission_denials,
+                usage: object.get("usage").and_then(parse_claude_result_usage),
             });
         }
         return Err(ClaudeFrameError::InvalidEnvelope);
@@ -614,7 +646,7 @@ fn decode_typed(kind: &str, envelope: &Value) -> ClaudeEvent {
 fn child_display_text(envelope: &Value) -> Option<(String, &'static str)> {
     let kind = envelope.get("type")?.as_str()?;
     match decode_typed(kind, envelope) {
-        ClaudeEvent::TextDelta { delta, phase } if !delta.is_empty() => Some((delta, phase)),
+        ClaudeEvent::TextDelta { delta, phase, .. } if !delta.is_empty() => Some((delta, phase)),
         _ => None,
     }
 }
@@ -730,6 +762,7 @@ fn decode_stream_event(envelope: &Value) -> ClaudeEvent {
                     Some(text) => ClaudeEvent::TextDelta {
                         delta: text.to_owned(),
                         phase: "unspecified",
+                        usage: None,
                     },
                     None => ClaudeEvent::Unknown,
                 },
@@ -788,6 +821,12 @@ fn decode_assistant(envelope: &Value) -> ClaudeEvent {
         }
     }
     let message = text_parts.join("");
+    // Per-response usage rides the same frame and projects beside whatever
+    // else the frame carried; see `parse_claude_assistant_usage`.
+    let usage = envelope
+        .get("message")
+        .and_then(|message| message.get("usage"))
+        .and_then(parse_claude_assistant_usage);
     if !message.is_empty() {
         return ClaudeEvent::TextDelta {
             delta: message,
@@ -796,12 +835,16 @@ fn decode_assistant(envelope: &Value) -> ClaudeEvent {
             } else {
                 "unspecified"
             },
+            usage,
         };
     }
     if has_thinking {
-        return ClaudeEvent::ReasoningSettled;
+        return ClaudeEvent::ReasoningSettled { usage };
     }
-    ClaudeEvent::Unknown
+    match usage {
+        Some(sample) => ClaudeEvent::Usage { sample },
+        None => ClaudeEvent::Unknown,
+    }
 }
 
 fn decode_result(envelope: &Value) -> ClaudeEvent {
@@ -828,6 +871,7 @@ fn decode_result(envelope: &Value) -> ClaudeEvent {
             .filter(|id| !id.is_empty() && id.len() <= CLAUDE_MAX_ID_BYTES)
             .map(str::to_owned),
         permission_denials,
+        usage: envelope.get("usage").and_then(parse_claude_result_usage),
     }
 }
 
@@ -947,6 +991,7 @@ pub(crate) struct ClaudePendingTracker {
     init_seen: bool,
     result_seen: bool,
     semantic_failure: bool,
+    summary_title: Option<String>,
 }
 
 impl ClaudePendingTracker {
@@ -1073,6 +1118,20 @@ impl ClaudePendingTracker {
         self.permission_denials += count;
     }
 
+    /// Retains the generated session title captured at the terminal fence.
+    ///
+    /// Later captures replace earlier ones, mirroring the TypeScript reader
+    /// that keeps the newest `ai-title` record; the title never disturbs the
+    /// turn and settles onto the terminal `summary_title`.
+    pub(crate) fn note_summary_title(&mut self, title: String) {
+        self.summary_title = Some(title);
+    }
+
+    /// Returns the captured generated session title, if any arrived.
+    pub(crate) fn summary_title(&self) -> Option<&str> {
+        self.summary_title.as_deref()
+    }
+
     /// Returns whether the terminal `result` frame arrived (pump-only).
     pub(crate) fn result_seen(&self) -> bool {
         self.result_seen
@@ -1195,13 +1254,804 @@ pub(crate) fn has_stalled(
     turn_active && now.saturating_duration_since(last_activity) >= inactivity
 }
 
+// ---------------------------------------------------------------------------
+// L3: native continuation gate, resume, usage, quota diagnostics, and title
+// ---------------------------------------------------------------------------
+
+/// Minimum Claude CLI for native continuation.
+///
+/// The transport floor and the continuation floor are the same verified
+/// release (`2.1.220`): the launch authority already refuses older CLIs at
+/// probe time, and this gate re-checks the recorded constant
+/// ([`CLAUDE_NATIVE_CONTINUATION_VERSION`], mirroring
+/// `claude_native_continuation_version` in
+/// `modules/engines/src/claude/probe.ts`) so a stale capability can never
+/// authorize a resume the installed CLI no longer honors.
+pub(crate) const CLAUDE_CONTINUATION_MINIMUM_CLI_VERSION: &str = CLAUDE_NATIVE_CONTINUATION_VERSION;
+
+/// Returns whether Claude teardown must terminate the whole process group.
+///
+/// Always true: the owner spawns Claude with whole-group custody (Job Object
+/// on Windows), so teardown kills claude grandchildren that still hold pipes
+/// instead of orphaning them. Unobserved reaps quarantine through the shared
+/// `cleanup_after_abort` / `finish_turn_result` path.
+pub(crate) const fn claude_requires_group_termination() -> bool {
+    true
+}
+
+/// Compares two `X.Y.Z` CLI spellings by their numeric core.
+///
+/// A leading name and any trailing pre-release/build suffix are ignored, so
+/// `2.1.220 (Claude Code)` compares equal to `2.1.220`. Returns `None` when
+/// either side has no parseable triple; callers fail closed on `None`.
+pub(crate) fn compare_claude_cli_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    Some(parse_cli_triple(left)?.cmp(&parse_cli_triple(right)?))
+}
+
+/// Returns whether a probed CLI version meets a minimum floor.
+pub(crate) fn claude_cli_meets_minimum(version: &str, minimum: &str) -> bool {
+    matches!(
+        compare_claude_cli_versions(version, minimum),
+        Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+    )
+}
+
+fn parse_cli_triple(text: &str) -> Option<[u64; 3]> {
+    let start = text.find(|character: char| character.is_ascii_digit())?;
+    let run: String = text[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '.')
+        .collect();
+    let mut parts = run.split('.');
+    Some([
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ])
+}
+
+/// Native-continuation decision for one Claude turn.
+///
+/// `Compatible` authorizes `--resume` against the stored native session;
+/// `Incompatible` carries the stable reason the dispatcher surfaces instead
+/// of silently starting fresh or resuming across engines.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClaudeContinuationDecision {
+    Compatible,
+    Incompatible { reason: &'static str },
+}
+
+/// Bounded input for [`check_claude_native_continuation`].
+pub(crate) struct ClaudeContinuationGateInput<'a> {
+    /// Probed CLI version (`VerifiedClaudeLaunch::version`).
+    pub cli_version: &'a str,
+    /// Explicit target model from the current selection; `None` fails closed.
+    pub target_model: Option<&'a str>,
+    /// Advertised models when a `model/list` inventory was read; `None`
+    /// skips advertisement validation (live inventory is deferred) but never
+    /// skips the explicit-model or CLI gates.
+    pub advertised_models: Option<&'a [&'a str]>,
+    /// Whether the stored binding names the same `claude` engine. The
+    /// dispatcher scopes continuation reads to `EngineId::Claude`, so a false
+    /// value fails closed instead of resuming across engines.
+    pub same_engine: bool,
+}
+
+/// Gates one Claude native continuation without touching provider state.
+///
+/// Order is contractual: same-engine first, then the explicit target model
+/// (pre-validated before resume), then the `2.1.220` CLI floor, then model
+/// advertisement when an inventory is supplied. Any failure is a typed
+/// incompatible — never a silent fresh start and never a cross-engine resume.
+pub(crate) fn check_claude_native_continuation(
+    input: &ClaudeContinuationGateInput<'_>,
+) -> ClaudeContinuationDecision {
+    if !input.same_engine {
+        return ClaudeContinuationDecision::Incompatible {
+            reason: "Claude native continuation cannot resume across engines",
+        };
+    }
+    let Some(target) = input.target_model.filter(|model| !model.is_empty()) else {
+        return ClaudeContinuationDecision::Incompatible {
+            reason: "Claude native continuation requires an explicit target model",
+        };
+    };
+    if !claude_cli_meets_minimum(input.cli_version, CLAUDE_CONTINUATION_MINIMUM_CLI_VERSION) {
+        return ClaudeContinuationDecision::Incompatible {
+            reason: "Claude native continuation requires CLI 2.1.220 or newer",
+        };
+    }
+    if let Some(advertised) = input.advertised_models
+        && !advertised.contains(&target)
+    {
+        return ClaudeContinuationDecision::Incompatible {
+            reason: "Claude does not currently advertise the target model",
+        };
+    }
+    ClaudeContinuationDecision::Compatible
+}
+
+/// Reopens the stored native session for one authorized continuation.
+///
+/// Mirrors the TypeScript open path (`--resume` with the stored session id
+/// over the same flags a fresh start would use): the resume reopens
+/// provider-owned state only and never invents checkpoints. Returns `None`
+/// when the stored session id is outside its bounded route-segment grammar
+/// so the caller fails closed instead of resuming a corrupt session. The
+/// init gate then requires the CLI to announce exactly this session.
+pub(crate) fn claude_resume_session(stored_session_id: &str) -> Option<ClaudeSession> {
+    if stored_session_id.is_empty() || stored_session_id.len() > CLAUDE_MAX_ID_BYTES {
+        return None;
+    }
+    Some(ClaudeSession::Resume(stored_session_id.to_owned()))
+}
+
+/// Cumulative usage sample from one frame's `usage` object.
+///
+/// Mirrors the TypeScript `UsageSchema` shape: terminal `result.usage`
+/// totals carry the running counters, while an assistant frame's
+/// per-response usage gauges the current window (see
+/// [`parse_claude_assistant_usage`]).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ClaudeUsageSample {
+    pub input: Option<u64>,
+    pub cached_input: Option<u64>,
+    pub output: Option<u64>,
+    /// Window gauge from one assistant response only — never a sum and never
+    /// taken from terminal totals, which re-count the context on every model
+    /// call. Absent stays absent rather than becoming a wrong zero.
+    pub context: Option<u64>,
+}
+
+fn claude_token_number(usage: &serde_json::Map<String, Value>, field: &str) -> Option<u64> {
+    usage.get(field).and_then(Value::as_u64)
+}
+
+/// Extracts terminal usage totals from a `result` frame's `usage` object.
+///
+/// Non-`u64` numerics (negatives, fractions) fail closed to absent for that
+/// field; absent stays absent rather than becoming zero. Returns `None` when
+/// no counter carries a value: an empty measurement is not a report. The
+/// terminal totals never become a context gauge: they accumulate input across
+/// every model call in the turn, re-counting the context each call resent.
+pub(crate) fn parse_claude_result_usage(usage: &Value) -> Option<ClaudeUsageSample> {
+    let object = usage.as_object()?;
+    let sample = ClaudeUsageSample {
+        input: claude_token_number(object, "input_tokens"),
+        cached_input: claude_token_number(object, "cache_read_input_tokens"),
+        output: claude_token_number(object, "output_tokens"),
+        context: None,
+    };
+    if sample.input.is_none() && sample.cached_input.is_none() && sample.output.is_none() {
+        return None;
+    }
+    Some(sample)
+}
+
+/// Extracts the per-response sample from an `assistant` frame's `usage`
+/// object, including the context-window gauge.
+///
+/// The gauge is the response's input plus the cache reads and writes that
+/// carried the prior conversation — what actually occupies the window right
+/// now. Field rules match [`parse_claude_result_usage`].
+pub(crate) fn parse_claude_assistant_usage(usage: &Value) -> Option<ClaudeUsageSample> {
+    let object = usage.as_object()?;
+    let input = claude_token_number(object, "input_tokens");
+    let creation = claude_token_number(object, "cache_creation_input_tokens");
+    let read = claude_token_number(object, "cache_read_input_tokens");
+    let context = input.and_then(|tokens| {
+        tokens
+            .checked_add(creation.unwrap_or(0))?
+            .checked_add(read.unwrap_or(0))
+    });
+    let sample = ClaudeUsageSample {
+        input,
+        cached_input: read,
+        output: claude_token_number(object, "output_tokens"),
+        context,
+    };
+    if sample.input.is_none()
+        && sample.cached_input.is_none()
+        && sample.output.is_none()
+        && sample.context.is_none()
+    {
+        return None;
+    }
+    Some(sample)
+}
+
+/// Immutable attribution for one Claude usage report.
+///
+/// Model and thread come from the immutable launch snapshot; the provider
+/// session is the authenticated native session, never an envelope claim.
+pub(crate) struct ClaudeUsageContext<'a> {
+    pub run_id: &'a RunId,
+    pub thread_id: &'a ThreadId,
+    pub provider_session_id: &'a str,
+    pub model_id: &'a EngineModelId,
+    pub observed_at: UnixMillis,
+}
+
+/// Best-effort usage scope carried beside the text channel.
+///
+/// `None` (no explicit model or no thread scope) skips usage projection
+/// without disturbing the turn: usage never blocks turns.
+#[derive(Clone, Debug)]
+pub(crate) struct ClaudeUsageAttribution {
+    pub thread_id: ThreadId,
+    pub model_id: EngineModelId,
+}
+
+/// Borrowed usage scope for one pump loop.
+pub(crate) struct ClaudeUsageScope<'a> {
+    pub thread_id: &'a ThreadId,
+    pub model_id: &'a EngineModelId,
+    pub provider_session_id: &'a str,
+}
+
+/// Builds the cumulative usage report for one sample.
+///
+/// Fails closed (`None`) when identities or bounds reject: usage is never
+/// synthesized from partial identities. The context gauge always replaces
+/// the previous report regardless of basis — the codec performs no
+/// arithmetic at all. Claude names no provider route, so reports attribute
+/// to the engine's own `claude` route namespace; quota windows are never
+/// copied here, so no quota is invented. Claude discloses no provider turn
+/// identity on usage frames, so none is attributed rather than synthesized.
+pub(crate) fn claude_usage_report(
+    context: &ClaudeUsageContext<'_>,
+    source_sequence: u64,
+    sample: &ClaudeUsageSample,
+) -> Option<RunUsageReport> {
+    let provider_route_id = EngineRouteId::parse("claude").ok()?;
+    RunUsageReport::new(RunUsageReportInput {
+        run_id: context.run_id.clone(),
+        thread_id: context.thread_id.clone(),
+        provider_session_id: context.provider_session_id.to_owned(),
+        source_sequence,
+        model_id: context.model_id.clone(),
+        provider_route_id,
+        variant_id: None,
+        basis: RunUsageBasis::Cumulative,
+        provider_turn_id: None,
+        input_tokens: sample.input,
+        cached_input_tokens: sample.cached_input,
+        output_tokens: sample.output,
+        context_tokens: sample.context,
+        context_window_tokens: None,
+        observed_at: context.observed_at,
+    })
+    .ok()
+}
+
+fn current_unix_millis() -> Option<UnixMillis> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let millis = i64::try_from(duration.as_millis()).ok()?;
+    Some(UnixMillis::from_millis(millis))
+}
+
+/// Projects one usage sample best-effort onto the shared usage vocabulary.
+///
+/// Returns `Some(TerminalState::Interrupted)` only when the observation sink
+/// closed mid-send. Skipping (no scope, no clock, or unattributable sample)
+/// is never terminal: usage never blocks turns.
+async fn project_usage_sample(
+    observations: &mpsc::Sender<EngineObservation>,
+    run_id: &RunId,
+    scope: Option<&ClaudeUsageScope<'_>>,
+    source_sequence: u64,
+    sample: &ClaudeUsageSample,
+) -> Option<TerminalState> {
+    let scope = scope?;
+    let observed_at = current_unix_millis()?;
+    let report = claude_usage_report(
+        &ClaudeUsageContext {
+            run_id,
+            thread_id: scope.thread_id,
+            provider_session_id: scope.provider_session_id,
+            model_id: scope.model_id,
+            observed_at,
+        },
+        source_sequence,
+        sample,
+    )?;
+    if observations
+        .send(EngineObservation::Usage(UsageObservation::new(report)))
+        .await
+        .is_err()
+    {
+        return Some(TerminalState::Interrupted);
+    }
+    None
+}
+
+/// Kind of one Claude quota window, classified from its provider window.
+///
+/// Mirrors `parse_claude_cli_usage_windows` in
+/// `modules/engines/src/claude/usage.ts`: 300 minutes is a session window,
+/// 10,080 a weekly window; anything else is unknown rather than guessed.
+/// Claude names no monthly bucket.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClaudeQuotaWindowKind {
+    Session,
+    Weekly,
+    Unknown,
+}
+
+/// Classifies one quota window duration.
+pub(crate) fn classify_claude_quota_window_kind(
+    window_minutes: Option<u64>,
+) -> ClaudeQuotaWindowKind {
+    match window_minutes {
+        Some(300) => ClaudeQuotaWindowKind::Session,
+        Some(10_080) => ClaudeQuotaWindowKind::Weekly,
+        _ => ClaudeQuotaWindowKind::Unknown,
+    }
+}
+
+/// Clamps one percent reading into `0..=100`.
+///
+/// Absent or non-finite readings become `0`: usage display never blocks on a
+/// corrupt gauge and never invents quota from it.
+pub(crate) fn clamp_claude_percent_used(used_percent: Option<f64>) -> f64 {
+    match used_percent {
+        Some(value) if value.is_finite() => value.clamp(0.0, 100.0),
+        _ => 0.0,
+    }
+}
+
+/// The exact non-billable CLI invocation that reads account usage.
+///
+/// Mirrors `claude_cli_usage_args` in `modules/engines/src/claude/usage.ts`
+/// (`-p /usage` over JSON): the slash command travels in argv and stdin
+/// closes immediately, so no prompt is ever billed.
+pub(crate) fn claude_cli_usage_args() -> [&'static str; 4] {
+    ["-p", "/usage", "--output-format", "json"]
+}
+
+/// One provider-neutral Claude quota window: diagnostics only, never quota.
+///
+/// Quota windows are read through the non-billable `/usage` surface and
+/// classified here; they are never copied into [`RunUsageReport`] and never
+/// gate a turn.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ClaudeQuotaWindow {
+    pub id: String,
+    pub kind: ClaudeQuotaWindowKind,
+    pub label: Option<String>,
+    pub percent_used: f64,
+    pub resets_at: Option<String>,
+    pub window_minutes: Option<u64>,
+    /// `"shared"` for the session and all-models weekly buckets, `"model"`
+    /// for per-model weekly buckets. Mirrors the TypeScript scope rule
+    /// without inventing quota attribution.
+    pub scope: &'static str,
+}
+
+/// Turns a provider-supplied weekly label into a stable id fragment.
+///
+/// Mirrors `slugify_claude_cli_label` in `modules/engines/src/claude/usage.ts`:
+/// lowercase, non-alphanumeric runs become one dash, edge dashes trimmed.
+pub(crate) fn slugify_claude_cli_label(label: &str) -> String {
+    let mut slug = String::with_capacity(label.len());
+    let mut pending_dash = false;
+    for character in label.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(character);
+        } else if !slug.is_empty() || pending_dash {
+            pending_dash = true;
+        }
+    }
+    slug
+}
+
+const CLAUDE_CLI_MONTHS: [(&str, i64); 12] = [
+    ("jan", 1),
+    ("feb", 2),
+    ("mar", 3),
+    ("apr", 4),
+    ("may", 5),
+    ("jun", 6),
+    ("jul", 7),
+    ("aug", 8),
+    ("sep", 9),
+    ("oct", 10),
+    ("nov", 11),
+    ("dec", 12),
+];
+
+fn claude_cli_month(name: &str) -> Option<i64> {
+    let prefix: String = name.chars().take(3).flat_map(char::to_lowercase).collect();
+    CLAUDE_CLI_MONTHS
+        .iter()
+        .find(|(month, _)| *month == prefix)
+        .map(|(_, number)| *number)
+}
+
+/// Converts a civil date to days since the Unix epoch (Howard Hinnant's
+/// algorithm), mirroring the epoch math behind the TypeScript reset parse
+/// without a date dependency.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let adjusted_year = if month <= 2 { year - 1 } else { year };
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year.rem_euclid(400);
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Converts days since the Unix epoch back to a civil date.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_pair = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_pair + 2) / 5 + 1;
+    let month = if month_pair < 10 {
+        month_pair + 3
+    } else {
+        month_pair - 9
+    };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// Parses the provider's English wall-clock reset clause to a UTC instant.
+///
+/// Mirrors `parse_claude_cli_reset_at` in `modules/engines/src/claude/usage.ts`
+/// (`resets <Mon> <D>, <H>[:<MM>] <am|pm> (<Zone>)` at end of line). Only
+/// `UTC`/`GMT`/`UT` zones resolve to a real instant: named IANA zones need a
+/// zone database this owner does not carry, so they stay `None` rather than
+/// becoming an invented instant. `at_ms` is the caller-observed now used for
+/// year inference (December rolling into a January reset).
+pub(crate) fn parse_claude_cli_reset_at(line: &str, at_ms: i64) -> Option<String> {
+    // Scan left to right for the first `resets <clause>` that fully parses,
+    // mirroring the unanchored regex scan in the TypeScript reader. The scan
+    // is ASCII-boundary safe: `resets ` is pure ASCII and the cursor always
+    // rests on a character boundary.
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index + 7 <= bytes.len() {
+        if bytes[index..index + 7].eq_ignore_ascii_case(b"resets ")
+            && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric())
+            && let Some(instant) = parse_reset_clause(&line[index + 7..], at_ms)
+        {
+            return Some(instant);
+        }
+        index += line[index..].chars().next()?.len_utf8();
+    }
+    None
+}
+
+fn parse_reset_clause(clause: &str, at_ms: i64) -> Option<String> {
+    let clause = clause.trim_end();
+    let (date_part, zone_part) = clause.rsplit_once('(')?;
+    let zone = zone_part.strip_suffix(')')?;
+    if !zone.eq_ignore_ascii_case("UTC")
+        && !zone.eq_ignore_ascii_case("GMT")
+        && !zone.eq_ignore_ascii_case("UT")
+    {
+        return None;
+    }
+    let mut tokens = date_part.split_whitespace();
+    let month_token = tokens.next()?;
+    if !month_token
+        .chars()
+        .all(|character| character.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let day_token = tokens.next()?.strip_suffix(',')?;
+    let month = claude_cli_month(month_token)?;
+    let day: i64 = day_token.parse().ok()?;
+    let (hour_token, minute_token, meridiem_token) = match (tokens.next(), tokens.next()) {
+        (Some(time), Some(meridiem)) => {
+            let (hour, minute) = match time.split_once(':') {
+                Some((hour, minute)) => {
+                    if minute.len() != 2 {
+                        return None;
+                    }
+                    (hour, Some(minute))
+                }
+                None => (time, None),
+            };
+            (hour, minute, meridiem)
+        }
+        _ => return None,
+    };
+    if tokens.next().is_some() {
+        return None;
+    }
+    let hour12: i64 = hour_token.parse().ok()?;
+    let minute: i64 = match minute_token {
+        Some(text) => text.parse().ok()?,
+        None => 0,
+    };
+    let meridiem = meridiem_token.to_ascii_lowercase();
+    if day < 1 || day > 31 || hour12 < 1 || hour12 > 12 || minute < 0 || minute > 59 {
+        return None;
+    }
+    let hour = match meridiem.as_str() {
+        "am" => hour12 % 12,
+        "pm" => hour12 % 12 + 12,
+        _ => return None,
+    };
+    let (current_year, current_month, _) = civil_from_days(at_ms.div_euclid(86_400_000));
+    let year = current_year + i64::from(current_month == 12 && month == 1);
+    if civil_from_days(days_from_civil(year, month, day)) != (year, month, day) {
+        return None;
+    }
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z"
+    ))
+}
+
+fn claude_usage_bucket_window(
+    id: String,
+    label: Option<String>,
+    percent_text: &str,
+    line: &str,
+    at_ms: i64,
+    scope: &'static str,
+    window_minutes: u64,
+) -> ClaudeQuotaWindow {
+    ClaudeQuotaWindow {
+        id,
+        kind: classify_claude_quota_window_kind(Some(window_minutes)),
+        label,
+        percent_used: clamp_claude_percent_used(percent_text.parse::<f64>().ok()),
+        resets_at: parse_claude_cli_reset_at(line, at_ms),
+        window_minutes: Some(window_minutes),
+        scope,
+    }
+}
+
+fn match_percent_tail(text: &str) -> Option<&str> {
+    let end = text
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(text.len());
+    if end == 0 {
+        return None;
+    }
+    let (digits, rest) = (&text[..end], &text[end..]);
+    let rest = rest.strip_prefix('%')?;
+    let rest = rest.trim_start();
+    let after_used = rest.strip_prefix("used")?;
+    if after_used
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    Some(digits)
+}
+
+/// Parses provider-owned `/usage` CLI text into quota windows.
+///
+/// Mirrors `parse_claude_cli_usage_windows` in
+/// `modules/engines/src/claude/usage.ts` without retaining credentials or raw
+/// account data: one `five_hour` session window, one shared `seven_day`
+/// weekly window, plus one per-model `seven_day:<slug>` weekly window.
+/// Duplicate ids keep the first row; malformed lines yield nothing.
+pub(crate) fn parse_claude_cli_usage_windows(
+    result_text: &str,
+    at_ms: i64,
+) -> Vec<ClaudeQuotaWindow> {
+    let mut windows: Vec<ClaudeQuotaWindow> = Vec::new();
+    for raw_line in result_text.split('\n') {
+        let line = raw_line.trim();
+        if let Some(rest) = line.strip_prefix("Current session:") {
+            let rest = rest.trim_start();
+            if let Some(percent) = match_percent_tail(rest) {
+                push_quota_window(
+                    &mut windows,
+                    claude_usage_bucket_window(
+                        "five_hour".to_owned(),
+                        None,
+                        percent,
+                        line,
+                        at_ms,
+                        "shared",
+                        300,
+                    ),
+                );
+            }
+            continue;
+        }
+        // The all-models bucket is checked before the labeled pattern below.
+        if let Some(rest) = line.strip_prefix("Current week (all models):") {
+            let rest = rest.trim_start();
+            if let Some(percent) = match_percent_tail(rest) {
+                push_quota_window(
+                    &mut windows,
+                    claude_usage_bucket_window(
+                        "seven_day".to_owned(),
+                        None,
+                        percent,
+                        line,
+                        at_ms,
+                        "shared",
+                        10_080,
+                    ),
+                );
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Current week (") {
+            let Some(close) = rest.find(')') else {
+                continue;
+            };
+            // The labeled shape requires the exact `(<Label>): N% used`
+            // form: the colon follows the parenthesis immediately.
+            let label = &rest[..close];
+            if label.is_empty() {
+                continue;
+            }
+            let Some(after) = rest[close + 1..].strip_prefix(':') else {
+                continue;
+            };
+            let after = after.trim_start();
+            if let Some(percent) = match_percent_tail(after) {
+                let slug = slugify_claude_cli_label(label);
+                push_quota_window(
+                    &mut windows,
+                    claude_usage_bucket_window(
+                        format!("seven_day:{slug}"),
+                        Some(label.to_owned()),
+                        percent,
+                        line,
+                        at_ms,
+                        "model",
+                        10_080,
+                    ),
+                );
+            }
+        }
+    }
+    windows
+}
+
+fn push_quota_window(windows: &mut Vec<ClaudeQuotaWindow>, window: ClaudeQuotaWindow) {
+    if windows.iter().any(|known| known.id == window.id) {
+        return;
+    }
+    windows.push(window);
+}
+
+/// The directory Claude Code files a working directory's transcripts under.
+///
+/// Mirrors `claude_project_directory_name` in
+/// `modules/engines/src/claude/session-title.ts`: every character outside
+/// `[A-Za-z0-9]` becomes a dash, drive colon and path separators included.
+pub(crate) fn claude_project_directory_name(working_directory: &str) -> String {
+    working_directory
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// The session transcript's path inside one Claude config home.
+///
+/// Mirrors `claude_session_transcript_path` in
+/// `modules/engines/src/claude/session-title.ts`.
+pub(crate) fn claude_session_transcript_path(
+    home: &str,
+    working_directory: &str,
+    session_id: &str,
+) -> PathBuf {
+    Path::new(home)
+        .join("projects")
+        .join(claude_project_directory_name(working_directory))
+        .join(format!("{session_id}.jsonl"))
+}
+
+/// Maximum transcript bytes read for a generated title.
+///
+/// Mirrors `maximum_transcript_bytes` in
+/// `modules/engines/src/claude/session-title.ts`: settles are seconds apart
+/// at their fastest, so the read is rare, but an unbounded read of a runaway
+/// transcript would trade a nicety for memory pressure.
+pub(crate) const CLAUDE_MAX_TRANSCRIPT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Environment variable naming the Claude config home whose transcripts carry
+/// generated titles. Mirrors the TypeScript spawn-override resolution
+/// (`CLAUDE_CONFIG_DIR` over the ambient CLI default).
+pub(crate) const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
+
+/// Returns the newest generated title across transcript lines, if any.
+///
+/// Mirrors `claude_session_title_from_lines` in
+/// `modules/engines/src/claude/session-title.ts`: the CLI appends its
+/// model-written title as `ai-title` records within the first turn and again
+/// as the conversation evolves, and resolves the current name by taking the
+/// newest — so this reader does the same. Malformed records are skipped, and
+/// titles outside the domain title bound never become observations.
+pub(crate) fn claude_session_title_from_lines(lines: &[&str]) -> Option<String> {
+    for line in lines.iter().rev() {
+        if !line.contains("ai-title") {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record.get("type").and_then(Value::as_str) != Some("ai-title") {
+            continue;
+        }
+        let Some(title) = record.get("aiTitle").and_then(Value::as_str) else {
+            continue;
+        };
+        let title = title.trim();
+        if title.is_empty() || title.len() > OBSERVATION_TITLE_MAX_BYTES {
+            continue;
+        }
+        return Some(title.to_owned());
+    }
+    None
+}
+
+/// Reads the newest generated title from one session transcript.
+///
+/// Deliberately total: a missing transcript, an unreadable file, an oversize
+/// file, or malformed records all mean "no title yet" — a run must never
+/// fail, or even complain, because a nicety could not be read.
+pub(crate) fn read_claude_session_title(transcript_path: &Path) -> Option<String> {
+    let size = std::fs::metadata(transcript_path).ok()?.len();
+    if size > CLAUDE_MAX_TRANSCRIPT_BYTES {
+        return None;
+    }
+    let text = std::fs::read_to_string(transcript_path).ok()?;
+    if u64::try_from(text.len()).ok()? > CLAUDE_MAX_TRANSCRIPT_BYTES {
+        return None;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    claude_session_title_from_lines(&lines)
+}
+
+/// Captures the generated title for one native session, if the managed config
+/// home names a readable transcript for it.
+///
+/// Best-effort beside terminal settlement: any failure means "no title yet".
+/// Only the managed `CLAUDE_CONFIG_DIR` override is consulted — ambient home
+/// resolution stays with the CLI until a home-directory source exists.
+pub(crate) fn claude_transcript_title_for_session(
+    project_root: &RootPath,
+    session_id: &str,
+) -> Option<String> {
+    let home = std::env::var(CLAUDE_CONFIG_DIR_ENV_VAR)
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    let path = claude_session_transcript_path(home.trim(), project_root.as_str(), session_id);
+    read_claude_session_title(&path)
+}
+
 /// Applies one typed event; returns how the pump continues.
 ///
 /// Text deltas chunk onto the shared vocabulary with the verbatim phase
 /// carried on the event; the current stream message id (when announced)
 /// becomes the explicit part identity so one message and its completion stay
-/// grouped. Session identity mismatches fail the turn closed: only the exact
+/// grouped. Usage samples project best-effort onto the shared usage
+/// vocabulary when a usage scope travels with the pump; without one (or on
+/// any attribution failure) they are diagnostics that never disturb the turn.
+/// Usage collection never blocks turns: only the observation sink closing is
+/// terminal. Session identity mismatches fail the turn closed: only the exact
 /// spawned session may speak for it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_event(
     event: ClaudeEvent,
     run_id: &RunId,
@@ -1210,6 +2060,7 @@ pub(crate) async fn apply_event(
     active_turn: &mut Option<String>,
     observations: &mpsc::Sender<EngineObservation>,
     frame_sequence: u64,
+    usage: Option<&ClaudeUsageScope<'_>>,
 ) -> ClaudeApplyOutcome {
     match event {
         ClaudeEvent::Init { session_id } => {
@@ -1223,7 +2074,11 @@ pub(crate) async fn apply_event(
             tracker.stream_message_id = Some(message_id);
             ClaudeApplyOutcome::Continue { end_input: false }
         }
-        ClaudeEvent::TextDelta { delta, phase } => {
+        ClaudeEvent::TextDelta {
+            delta,
+            phase,
+            usage: sample,
+        } => {
             // Both verbatim phases fold to the shared delta vocabulary here;
             // the phase stays on the typed event for later routing packets.
             let _ = phase;
@@ -1245,6 +2100,13 @@ pub(crate) async fn apply_event(
                     return ClaudeApplyOutcome::Terminal(TerminalState::Interrupted);
                 }
             }
+            if let Some(sample) = sample.as_ref() {
+                if let Some(state) =
+                    project_usage_sample(observations, run_id, usage, frame_sequence, sample).await
+                {
+                    return ClaudeApplyOutcome::Terminal(state);
+                }
+            }
             ClaudeApplyOutcome::Continue { end_input: false }
         }
         ClaudeEvent::ThinkingTokens { estimated_tokens } => {
@@ -1255,8 +2117,23 @@ pub(crate) async fn apply_event(
             tracker.note_reasoning_delta();
             ClaudeApplyOutcome::Continue { end_input: false }
         }
-        ClaudeEvent::ReasoningSettled => {
+        ClaudeEvent::ReasoningSettled { usage: sample } => {
             tracker.note_reasoning_settled();
+            if let Some(sample) = sample.as_ref() {
+                if let Some(state) =
+                    project_usage_sample(observations, run_id, usage, frame_sequence, sample).await
+                {
+                    return ClaudeApplyOutcome::Terminal(state);
+                }
+            }
+            ClaudeApplyOutcome::Continue { end_input: false }
+        }
+        ClaudeEvent::Usage { sample } => {
+            if let Some(state) =
+                project_usage_sample(observations, run_id, usage, frame_sequence, &sample).await
+            {
+                return ClaudeApplyOutcome::Terminal(state);
+            }
             ClaudeApplyOutcome::Continue { end_input: false }
         }
         ClaudeEvent::ApprovalRequested(request) => {
@@ -1292,6 +2169,7 @@ pub(crate) async fn apply_event(
             success,
             session_id,
             permission_denials,
+            usage: sample,
         } => {
             if let Some(session_id) = session_id {
                 if session_id != expected_session {
@@ -1303,6 +2181,13 @@ pub(crate) async fn apply_event(
                 tracker.semantic_failure = true;
             }
             tracker.note_permission_denials(permission_denials);
+            if let Some(sample) = sample.as_ref() {
+                if let Some(state) =
+                    project_usage_sample(observations, run_id, usage, frame_sequence, sample).await
+                {
+                    return ClaudeApplyOutcome::Terminal(state);
+                }
+            }
             ClaudeApplyOutcome::Continue { end_input: true }
         }
         ClaudeEvent::Unknown => ClaudeApplyOutcome::Continue { end_input: false },

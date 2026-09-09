@@ -305,7 +305,10 @@ impl std::fmt::Debug for EngineCodexTurnInput {
 ///
 /// The dispatcher constructs this only after reading the durable settings
 /// and resolving the exact Claude launch. The owner never rereads the thread,
-/// registry, or environment while this value is live.
+/// registry, or environment while this value is live. Unlike the Grok and
+/// Cursor turns, Claude carries the optional provider continuation: resume
+/// reopens the durable native session through `--resume` behind the L3 gate
+/// (same engine, explicit target model, CLI >= 2.1.220).
 pub(crate) struct EngineClaudeTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) thread_id: ThreadId,
@@ -314,6 +317,7 @@ pub(crate) struct EngineClaudeTurnInput {
     pub(crate) prompt: QueueMessagePayload,
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: VerifiedClaudeLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -991,8 +995,9 @@ impl EngineOwner {
     ///
     /// Mirrors [`Self::admit_turn`] without forking the queue: the same
     /// `Job::Turn` type carries an [`InternalLaunch::Claude`] capability and
-    /// exactly one executor proves the lifecycle. Claude turns carry no
-    /// provider continuation in this packet (later packet).
+    /// exactly one executor proves the lifecycle. Claude turns carry the
+    /// optional provider continuation for `--resume` behind the L3 gate
+    /// (same engine, explicit target model, CLI >= 2.1.220).
     pub(crate) fn admit_claude_turn(
         &self,
         input: EngineClaudeTurnInput,
@@ -1006,7 +1011,7 @@ impl EngineOwner {
             prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Claude(Box::new(input.launch)),
-            continuation: None,
+            continuation: input.continuation,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
