@@ -2056,6 +2056,13 @@ impl NativeApplication {
             // cannot settle a flight from the newer command family.
             NativeTransportEvent::FirstMessageQueued(_)
             | NativeTransportEvent::FirstMessageFailed { .. } => {}
+            // Answer receipts pair through the engine approve pairing in a
+            // later packet; the transport delivers them here but no gate
+            // consumes them yet.
+            NativeTransportEvent::ApprovalAnswered(_)
+            | NativeTransportEvent::ApprovalFailed { .. }
+            | NativeTransportEvent::QuestionAnswered(_)
+            | NativeTransportEvent::QuestionFailed { .. } => {}
             NativeTransportEvent::MessageQueued(receipt) => {
                 self.handle_message_receipt(receipt, cx);
                 self.schedule_composer_queue(true, cx);

@@ -31,8 +31,9 @@ use artisan_domain::{
     ConversationUnsubscribe, CreateThread, DirectoryId, EngineRunConfig, ListAttachedProjects,
     ListProjectThreads, ListRegisteredEngineProfiles, PatchBatch, ProjectId, ProjectListing,
     ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, QueueMessage, ReadComposerCatalog,
-    ReadModelFavorites, ReadThreadEngineSettings, RequestId, SetModelFavorite,
-    SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
+    ReadModelFavorites, ReadThreadEngineSettings, RequestId, RespondApproval, RespondQuestion,
+    SetModelFavorite, SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle,
+    UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{
@@ -108,6 +109,15 @@ pub enum NativeTransportCommand {
     },
     /// Signal cancellation for an exact thread/run pair.
     StopRun(artisan_domain::StopRun),
+    /// Answer one pending approval with an explicit decision.
+    ///
+    /// The client-minted request identity is preserved end to end and never
+    /// re-minted at send; the boxed wrapper follows the QueueMessage pattern
+    /// for larger command payloads.
+    RespondApproval(Box<RespondApproval>),
+    /// Answer one pending question with explicit answers; identity rules
+    /// match [`Self::RespondApproval`].
+    RespondQuestion(Box<RespondQuestion>),
     /// Start a fresh opaque-directory project intake.
     BeginProjectIntake,
     /// Continue the one retained retry plan for project intake.
@@ -186,6 +196,8 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::ComposerState(_) => "ComposerState",
             Self::ReadActiveRun { .. } => "ReadActiveRun",
             Self::StopRun(_) => "StopRun",
+            Self::RespondApproval(_) => "RespondApproval",
+            Self::RespondQuestion(_) => "RespondQuestion",
             Self::BeginProjectIntake => "BeginProjectIntake",
             Self::RetryProjectIntake => "RetryProjectIntake",
             Self::SelectProject(_) => "SelectProject",
@@ -404,6 +416,25 @@ pub enum NativeTransportEvent {
     RunStopped(artisan_protocol::StopRunReceipt),
     StopRunFailed {
         command: artisan_domain::StopRun,
+        failure: ServiceFailure,
+    },
+    /// One approval answer recorded by Forge with its correlated receipt.
+    ///
+    /// The receipt-pairing packet binds these onto the answer gates; the
+    /// application retains delivery without consuming them yet.
+    ApprovalAnswered(artisan_protocol::RespondApprovalReceipt),
+    /// One approval answer failed with a redacted diagnostic; the complete
+    /// answer intent is retained for the pairing layer.
+    ApprovalFailed {
+        command: artisan_domain::RespondApproval,
+        failure: ServiceFailure,
+    },
+    /// One question answer recorded by Forge with its correlated receipt.
+    QuestionAnswered(artisan_protocol::RespondQuestionReceipt),
+    /// One question answer failed with a redacted diagnostic; the complete
+    /// answer intent is retained for the pairing layer.
+    QuestionFailed {
+        command: artisan_domain::RespondQuestion,
         failure: ServiceFailure,
     },
     /// Original image data loaded for an exact history reference.
@@ -1153,6 +1184,44 @@ fn message_stable_mutation(command: QueueMessage) -> Result<StableMutation, Serv
     })
 }
 
+fn approval_stable_mutation(command: RespondApproval) -> Result<StableMutation, ServiceFailure> {
+    let request_id = command.request_id.clone();
+    let frame_id = FrameId::parse(request_id.as_str().to_owned())
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let frame_request_id = frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    if frame_request_id != request_id || command.request_id != request_id {
+        return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
+    }
+    let sent_at =
+        real_unix_millis().map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    Ok(StableMutation {
+        frame_id,
+        sent_at,
+        command: Command::RespondApproval(command),
+    })
+}
+
+fn question_stable_mutation(command: RespondQuestion) -> Result<StableMutation, ServiceFailure> {
+    let request_id = command.request_id.clone();
+    let frame_id = FrameId::parse(request_id.as_str().to_owned())
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let frame_request_id = frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    if frame_request_id != request_id || command.request_id != request_id {
+        return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
+    }
+    let sent_at =
+        real_unix_millis().map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    Ok(StableMutation {
+        frame_id,
+        sent_at,
+        command: Command::RespondQuestion(command),
+    })
+}
+
 fn make_request_frame(
     frames: &mut FrameFactory,
     protocol_version: ProtocolVersion,
@@ -1274,6 +1343,14 @@ enum ExpectedResponse {
         request_id: RequestId,
     },
     MessageQueued {
+        thread_id: ThreadId,
+        request_id: RequestId,
+    },
+    ApprovalAnswered {
+        thread_id: ThreadId,
+        request_id: RequestId,
+    },
+    QuestionAnswered {
         thread_id: ThreadId,
         request_id: RequestId,
     },
@@ -1697,6 +1774,24 @@ fn validate_response_family(
             ResponsePayload::MessageQueued(receipt),
         ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
             Ok(ResponsePayload::MessageQueued(receipt))
+        }
+        (
+            ExpectedResponse::ApprovalAnswered {
+                thread_id,
+                request_id,
+            },
+            ResponsePayload::ApprovalResponse(receipt),
+        ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
+            Ok(ResponsePayload::ApprovalResponse(receipt))
+        }
+        (
+            ExpectedResponse::QuestionAnswered {
+                thread_id,
+                request_id,
+            },
+            ResponsePayload::QuestionResponse(receipt),
+        ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
+            Ok(ResponsePayload::QuestionResponse(receipt))
         }
         (
             ExpectedResponse::ConversationSubscriptionStarted { thread_id },
@@ -3044,6 +3139,12 @@ async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::StopRun(command)) => {
                         composer_operations::stop_run(runtime, frames, events, command).await?;
                     }
+                    Some(NativeTransportCommand::RespondApproval(command)) => {
+                        respond_approval(runtime, frames, events, *command).await?;
+                    }
+                    Some(NativeTransportCommand::RespondQuestion(command)) => {
+                        respond_question(runtime, frames, events, *command).await?;
+                    }
                     Some(NativeTransportCommand::ReadMessageImage(reference)) => {
                         read_message_image(runtime, frames, events, reference).await?;
                     }
@@ -4102,6 +4203,150 @@ async fn queue_message(
     publish(events, NativeTransportEvent::MessageQueued(receipt))
 }
 
+async fn respond_approval(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    command: RespondApproval,
+) -> Result<(), ServiceFailure> {
+    let thread_id = command.thread_id.clone();
+    let request_id = command.request_id.clone();
+    if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
+        return publish(
+            events,
+            NativeTransportEvent::ApprovalFailed {
+                command,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    }
+    let mutation = match approval_stable_mutation(command.clone()) {
+        Ok(mutation) => mutation,
+        Err(failure) => {
+            return publish(
+                events,
+                NativeTransportEvent::ApprovalFailed { command, failure },
+            );
+        }
+    };
+    let payload = match durable_save_request(
+        runtime,
+        frames,
+        &mutation,
+        ExpectedResponse::ApprovalAnswered {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        },
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return publish(
+                events,
+                NativeTransportEvent::ApprovalFailed {
+                    command,
+                    failure: error.into(),
+                },
+            );
+        }
+    };
+    let ResponsePayload::ApprovalResponse(receipt) = payload else {
+        return publish(
+            events,
+            NativeTransportEvent::ApprovalFailed {
+                command,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    };
+    if receipt.thread_id != thread_id || receipt.request_id != request_id {
+        return publish(
+            events,
+            NativeTransportEvent::ApprovalFailed {
+                command,
+                failure: ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                ),
+            },
+        );
+    }
+    publish(events, NativeTransportEvent::ApprovalAnswered(receipt))
+}
+
+async fn respond_question(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    command: RespondQuestion,
+) -> Result<(), ServiceFailure> {
+    let thread_id = command.thread_id.clone();
+    let request_id = command.request_id.clone();
+    if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
+        return publish(
+            events,
+            NativeTransportEvent::QuestionFailed {
+                command,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    }
+    let mutation = match question_stable_mutation(command.clone()) {
+        Ok(mutation) => mutation,
+        Err(failure) => {
+            return publish(
+                events,
+                NativeTransportEvent::QuestionFailed { command, failure },
+            );
+        }
+    };
+    let payload = match durable_save_request(
+        runtime,
+        frames,
+        &mutation,
+        ExpectedResponse::QuestionAnswered {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        },
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return publish(
+                events,
+                NativeTransportEvent::QuestionFailed {
+                    command,
+                    failure: error.into(),
+                },
+            );
+        }
+    };
+    let ResponsePayload::QuestionResponse(receipt) = payload else {
+        return publish(
+            events,
+            NativeTransportEvent::QuestionFailed {
+                command,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    };
+    if receipt.thread_id != thread_id || receipt.request_id != request_id {
+        return publish(
+            events,
+            NativeTransportEvent::QuestionFailed {
+                command,
+                failure: ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                ),
+            },
+        );
+    }
+    publish(events, NativeTransportEvent::QuestionAnswered(receipt))
+}
+
 fn known_thread_for_queue(
     known_threads: &HashSet<ThreadId>,
     thread_id: &ThreadId,
@@ -4265,14 +4510,14 @@ mod tests {
     use super::{
         COMMAND_CAPACITY, ExpectedResponse, FrameFactory, IntakeRetry, NativeTransportCommand,
         PeerFailure, ReadinessValidationError, RequestAttemptError, RequestFailure, ServiceFailure,
-        ServiceFailureCategory, StartupError, ThreadSelectionDecision, attach_mutation,
-        build_reconnect_binding, contains_exact_project, contains_exact_thread,
+        ServiceFailureCategory, StartupError, ThreadSelectionDecision, approval_stable_mutation,
+        attach_mutation, build_reconnect_binding, contains_exact_project, contains_exact_thread,
         create_command_values, create_mutation, engine_config_stable_mutation, finite_duration,
         first_message_stable_mutation, known_thread_for_queue, make_request_frame,
-        message_stable_mutation, payload_health_decision, project_request, reconnect_hello,
-        session_needs_reconnect, snapshot_request, thread_engine_settings_request,
-        thread_selection_decision, threads_request, try_send_command, validate_readiness,
-        validate_response_family,
+        message_stable_mutation, payload_health_decision, project_request,
+        question_stable_mutation, reconnect_hello, session_needs_reconnect, snapshot_request,
+        thread_engine_settings_request, thread_selection_decision, threads_request,
+        try_send_command, validate_readiness, validate_response_family,
     };
     use artisan_domain::{
         AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
@@ -4769,6 +5014,136 @@ mod tests {
                     && command.thread_id == thread_id
                     && command.body == body
         ));
+    }
+
+    fn answer_thread() -> ThreadId {
+        ThreadId::parse("thread-answer").expect("answer thread")
+    }
+
+    fn answer_run() -> artisan_domain::RunId {
+        artisan_domain::RunId::parse("run-answer").expect("answer run")
+    }
+
+    fn approval_answer(request_id: RequestId) -> artisan_domain::RespondApproval {
+        artisan_domain::RespondApproval::new(
+            request_id,
+            answer_thread(),
+            answer_run(),
+            artisan_domain::ObservationId::parse("approval-1").expect("approval target"),
+            true,
+        )
+    }
+
+    fn question_answer(request_id: RequestId) -> artisan_domain::RespondQuestion {
+        artisan_domain::RespondQuestion::new(
+            request_id,
+            answer_thread(),
+            answer_run(),
+            artisan_domain::ObservationId::parse("question-1").expect("question target"),
+            vec![String::from("tokio")],
+        )
+        .expect("answer bounds")
+    }
+
+    fn approval_receipt(request_id: RequestId) -> artisan_protocol::RespondApprovalReceipt {
+        artisan_protocol::RespondApprovalReceipt {
+            request_id,
+            thread_id: answer_thread(),
+            run_id: answer_run(),
+            approval_id: artisan_domain::ObservationId::parse("approval-1")
+                .expect("approval target"),
+            approved: true,
+            outcome: artisan_protocol::RunInteractionOutcome::Applied,
+            disposition: artisan_domain::ReceiptDisposition::Accepted,
+        }
+    }
+
+    fn question_receipt(request_id: RequestId) -> artisan_protocol::RespondQuestionReceipt {
+        artisan_protocol::RespondQuestionReceipt {
+            request_id,
+            thread_id: answer_thread(),
+            run_id: answer_run(),
+            question_id: artisan_domain::ObservationId::parse("question-1")
+                .expect("question target"),
+            answers: vec![String::from("tokio")],
+            outcome: artisan_protocol::RunInteractionOutcome::Applied,
+            disposition: artisan_domain::ReceiptDisposition::Accepted,
+        }
+    }
+
+    #[test]
+    fn approval_answer_mutation_maps_to_command_with_minted_identity() {
+        let request_id = RequestId::parse("native-approve-stable").expect("request");
+        let mutation =
+            approval_stable_mutation(approval_answer(request_id.clone())).expect("mutation");
+        let (envelope, envelope_id) = mutation.envelope(ProtocolVersion::V1).expect("envelope");
+        assert_eq!(envelope_id, request_id);
+        assert!(matches!(
+            envelope.body,
+            WireEnvelopeBody::Request(ClientRequest::Command(Command::RespondApproval(answer)))
+                if answer.request_id == request_id
+                    && answer.thread_id == answer_thread()
+                    && answer.run_id == answer_run()
+                    && answer.approval_id.as_str() == "approval-1"
+                    && answer.approved
+        ));
+    }
+
+    #[test]
+    fn question_answer_mutation_maps_to_command_with_minted_identity() {
+        let request_id = RequestId::parse("native-question-stable").expect("request");
+        let mutation =
+            question_stable_mutation(question_answer(request_id.clone())).expect("mutation");
+        let (envelope, envelope_id) = mutation.envelope(ProtocolVersion::V1).expect("envelope");
+        assert_eq!(envelope_id, request_id);
+        assert!(matches!(
+            envelope.body,
+            WireEnvelopeBody::Request(ClientRequest::Command(Command::RespondQuestion(answer)))
+                if answer.request_id == request_id
+                    && answer.thread_id == answer_thread()
+                    && answer.run_id == answer_run()
+                    && answer.question_id.as_str() == "question-1"
+                    && answer.answers == vec![String::from("tokio")]
+        ));
+    }
+
+    #[test]
+    fn answer_response_family_checks_thread_and_request_correlation() {
+        let request_id = RequestId::parse("native-approve-stable").expect("request");
+        let expected = ExpectedResponse::ApprovalAnswered {
+            thread_id: answer_thread(),
+            request_id: request_id.clone(),
+        };
+        let matched = validate_response_family(
+            expected,
+            ResponsePayload::ApprovalResponse(approval_receipt(request_id.clone())),
+        )
+        .expect("correlated approval response");
+        assert!(matches!(matched, ResponsePayload::ApprovalResponse(_)));
+
+        let mismatched = ExpectedResponse::ApprovalAnswered {
+            thread_id: answer_thread(),
+            request_id: RequestId::parse("native-approve-other").expect("other request"),
+        };
+        assert!(
+            validate_response_family(
+                mismatched,
+                ResponsePayload::ApprovalResponse(approval_receipt(request_id.clone())),
+            )
+            .is_err(),
+            "a receipt echoing another request must not validate"
+        );
+
+        let expected = ExpectedResponse::QuestionAnswered {
+            thread_id: answer_thread(),
+            request_id: request_id.clone(),
+        };
+        let matched = validate_response_family(
+            expected,
+            ResponsePayload::QuestionResponse(question_receipt(request_id)),
+        )
+        .expect("correlated question response");
+        assert!(matches!(matched, ResponsePayload::QuestionResponse(_)));
     }
 
     #[test]

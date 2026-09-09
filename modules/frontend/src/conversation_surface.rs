@@ -58,7 +58,7 @@ use crate::engine_approve_ui::{
     pair_approval_answer, pair_question_answer, pending_approval_label, question_command,
 };
 use crate::engine_observation_state::EngineObservationState;
-use crate::native_transport_service::CommandSendError;
+use crate::native_transport_service::{CommandSendError, NativeTransportCommand};
 
 /// Stable debug selector for the conversation surface root.
 pub const CONVERSATION_SURFACE_SELECTOR: &str = "artisan-conversation-surface";
@@ -916,12 +916,19 @@ impl ConversationSurface {
     /// settle-in-place pairing) with no silent drop and no same-call retry:
     /// one drain attempt per controller tick scope. Resolutions continue to
     /// pair through the existing receipt path, never through the outbox.
+    ///
+    /// `submit` is the transport submit entry point (live:
+    /// [`NativeTransportService::submit`](crate::native_transport_service::NativeTransportService::submit)):
+    /// each taken dispatch is mapped to its
+    /// [`NativeTransportCommand`] through [`answer_transport_command`] with
+    /// its already-minted request id and handed over by value exactly like
+    /// the composer send path.
     pub fn drain_pending_answer_dispatches(
         &mut self,
-        send: &mut impl FnMut(&Command) -> Result<(), CommandSendError>,
+        submit: &mut impl FnMut(NativeTransportCommand) -> Result<(), CommandSendError>,
     ) -> AnswerDrainReport {
         let queue = self.take_answer_dispatches();
-        let (requeue, report) = drain_answer_queue(queue, send);
+        let (requeue, report) = drain_answer_queue(queue, submit);
         self.pending_answer_dispatches.extend(requeue);
         report
     }
@@ -2771,22 +2778,41 @@ fn answer_send_failure(
     }
 }
 
-/// Drains one taken answer queue through the mirrored send path.
+/// Maps one taken answer dispatch onto its live transport command.
 ///
-/// Every dispatch is handed to `send` at most once, in FIFO order, with its
-/// already-minted request id; the queue itself is consumed, never re-taken
-/// or cloned. Refused dispatches are returned for re-queue with the existing
-/// retry message from [`pair_answer_failure`]; an empty queue never touches
-/// `send`. Row gates are never settled here: single-flight is preserved until
-/// resolutions pair through the existing receipt path.
+/// The domain command moves across unchanged with its already-minted request
+/// id (cloned once for the by-value transport wrapper, exactly like the
+/// `StopRun` arm clones; never re-minted). The outbox carries only
+/// gate-built answer commands, so any other command is unreachable.
+fn answer_transport_command(dispatch: &AnswerDispatch) -> NativeTransportCommand {
+    match &dispatch.command {
+        Command::RespondApproval(answer) => {
+            NativeTransportCommand::RespondApproval(Box::new(answer.clone()))
+        }
+        Command::RespondQuestion(answer) => {
+            NativeTransportCommand::RespondQuestion(Box::new(answer.clone()))
+        }
+        _ => unreachable!("the answer outbox carries only answer commands"),
+    }
+}
+
+/// Drains one taken answer queue through the transport submit path.
+///
+/// Every dispatch is mapped through [`answer_transport_command`] and handed
+/// to `submit` at most once, in FIFO order; the queue itself is consumed,
+/// never re-taken or cloned. Refused dispatches are returned for re-queue
+/// with the existing retry message from [`pair_answer_failure`]; an empty
+/// queue never touches `submit`. Row gates are never settled here:
+/// single-flight is preserved until resolutions pair through the existing
+/// receipt path.
 pub fn drain_answer_queue(
     queue: Vec<AnswerDispatch>,
-    send: &mut impl FnMut(&Command) -> Result<(), CommandSendError>,
+    submit: &mut impl FnMut(NativeTransportCommand) -> Result<(), CommandSendError>,
 ) -> (Vec<AnswerDispatch>, AnswerDrainReport) {
     let mut requeue = Vec::with_capacity(queue.len());
     let mut report = AnswerDrainReport::default();
     for dispatch in queue {
-        match send(&dispatch.command) {
+        match submit(answer_transport_command(&dispatch)) {
             Ok(()) => {
                 report.sent = report.sent.saturating_add(1);
             }
@@ -3300,7 +3326,7 @@ mod tests {
         use artisan_domain::{
             ApprovalObservation, ApprovalRequest, Command, EngineObservationEvent, Observation,
             ObservationId, ObservationSequence, QuestionInput, QuestionObservation, QuestionOption,
-            ReceiptDisposition, RequestId, RunId, ThreadId,
+            ReceiptDisposition, RunId, ThreadId,
         };
         use artisan_protocol::{
             ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt,
@@ -3314,7 +3340,7 @@ mod tests {
         use super::scene;
         use crate::engine_approve_ui::AnswerSettlement;
         use crate::engine_observation_state::EngineObservationState;
-        use crate::native_transport_service::CommandSendError;
+        use crate::native_transport_service::{CommandSendError, NativeTransportCommand};
         use artisan_ui::theme::ThemeMode;
         use gpui::TestAppContext;
 
@@ -3421,6 +3447,35 @@ mod tests {
             match command {
                 Command::RespondQuestion(command) => command,
                 _ => panic!("question gesture must build a question command"),
+            }
+        }
+
+        fn approval_dispatch() -> AnswerDispatch {
+            let mut gate = ApprovalAnswerGate::new();
+            let attempt = gate
+                .begin(thread_id(), run_id(), observation_id("approval-1"), true)
+                .expect("approve gesture admits an attempt");
+            AnswerDispatch {
+                action: AnswerDispatchAction::Approval(attempt.action),
+                command: attempt.command,
+                request_id: attempt.request_id,
+            }
+        }
+
+        fn question_dispatch() -> AnswerDispatch {
+            let mut gate = QuestionAnswerGate::new();
+            let attempt = gate
+                .submit_single(
+                    thread_id(),
+                    run_id(),
+                    observation_id("question-1"),
+                    String::from("tokio"),
+                )
+                .expect("single-select choice submits immediately");
+            AnswerDispatch {
+                action: AnswerDispatchAction::Question(attempt.action),
+                command: attempt.command,
+                request_id: attempt.request_id,
             }
         }
 
@@ -3616,42 +3671,42 @@ mod tests {
             assert!(question_pairing.is_settled());
         }
 
-        fn sent_request_id(command: &Command) -> RequestId {
-            if let Command::RespondApproval(inner) = command {
-                inner.request_id().clone()
-            } else if let Command::RespondQuestion(inner) = command {
-                inner.request_id().clone()
+        /// Scripted transport submit harness mirroring the application
+        /// `test_command_sink`: records every submitted transport command and
+        /// replays scripted admission outcomes in order, defaulting to
+        /// admitted once the script runs out.
+        struct ScriptedSubmit {
+            commands: Vec<NativeTransportCommand>,
+            outcomes: std::collections::VecDeque<Result<(), CommandSendError>>,
+        }
+
+        impl ScriptedSubmit {
+            fn new(outcomes: Vec<Result<(), CommandSendError>>) -> Self {
+                Self {
+                    commands: Vec::new(),
+                    outcomes: outcomes.into(),
+                }
+            }
+
+            fn submit(&mut self, command: NativeTransportCommand) -> Result<(), CommandSendError> {
+                self.commands.push(command);
+                self.outcomes.pop_front().unwrap_or(Ok(()))
+            }
+        }
+
+        fn approval_answer(command: &NativeTransportCommand) -> &artisan_domain::RespondApproval {
+            if let NativeTransportCommand::RespondApproval(answer) = command {
+                answer
             } else {
-                panic!("drain carries only answer commands")
+                panic!("dispatch must submit an approval answer")
             }
         }
 
-        fn approval_dispatch() -> AnswerDispatch {
-            let mut gate = ApprovalAnswerGate::new();
-            let attempt = gate
-                .begin(thread_id(), run_id(), observation_id("approval-1"), true)
-                .expect("approve gesture admits an attempt");
-            AnswerDispatch {
-                action: AnswerDispatchAction::Approval(attempt.action),
-                command: attempt.command,
-                request_id: attempt.request_id,
-            }
-        }
-
-        fn question_dispatch() -> AnswerDispatch {
-            let mut gate = QuestionAnswerGate::new();
-            let attempt = gate
-                .submit_single(
-                    thread_id(),
-                    run_id(),
-                    observation_id("question-1"),
-                    String::from("tokio"),
-                )
-                .expect("single-select choice submits immediately");
-            AnswerDispatch {
-                action: AnswerDispatchAction::Question(attempt.action),
-                command: attempt.command,
-                request_id: attempt.request_id,
+        fn question_answer(command: &NativeTransportCommand) -> &artisan_domain::RespondQuestion {
+            if let NativeTransportCommand::RespondQuestion(answer) = command {
+                answer
+            } else {
+                panic!("dispatch must submit a question answer")
             }
         }
 
@@ -3659,39 +3714,38 @@ mod tests {
         fn drain_sends_taken_queue_preserving_minted_ids() {
             let approval = approval_dispatch();
             let question = question_dispatch();
-            let approval_inner = approval_command_inner(&approval.command);
-            assert_eq!(approval_inner.thread_id(), &thread_id());
-            assert_eq!(approval_inner.run_id(), &run_id());
-            assert_eq!(approval_inner.approval_id().as_str(), "approval-1");
-            let question_inner = question_command_inner(&question.command);
-            assert_eq!(question_inner.thread_id(), &thread_id());
-            assert_eq!(question_inner.run_id(), &run_id());
-            assert_eq!(question_inner.question_id().as_str(), "question-1");
-            assert_eq!(question_inner.answers(), &vec![String::from("tokio")]);
-            let expected = vec![approval.request_id.clone(), question.request_id.clone()];
-            let mut seen: Vec<RequestId> = Vec::new();
-            let mut send = |command: &Command| {
-                seen.push(sent_request_id(command));
-                Ok::<(), CommandSendError>(())
-            };
-            let (requeue, report) = drain_answer_queue(vec![approval, question], &mut send);
+            let expected_approval = approval.request_id.clone();
+            let expected_question = question.request_id.clone();
+            let mut submit = ScriptedSubmit::new(Vec::new());
+            let (requeue, report) = drain_answer_queue(vec![approval, question], &mut |command| {
+                submit.submit(command)
+            });
             assert_eq!(report.sent, 2);
             assert!(report.is_clean());
             assert!(requeue.is_empty());
-            assert_eq!(seen, expected);
+            assert_eq!(submit.commands.len(), 2);
+            let submitted = approval_answer(&submit.commands[0]);
+            assert_eq!(submitted.request_id, expected_approval);
+            assert_eq!(submitted.thread_id, thread_id());
+            assert_eq!(submitted.run_id, run_id());
+            assert_eq!(submitted.approval_id.as_str(), "approval-1");
+            assert!(submitted.approved);
+            let submitted = question_answer(&submit.commands[1]);
+            assert_eq!(submitted.request_id, expected_question);
+            assert_eq!(submitted.thread_id, thread_id());
+            assert_eq!(submitted.run_id, run_id());
+            assert_eq!(submitted.question_id.as_str(), "question-1");
+            assert_eq!(submitted.answers, vec![String::from("tokio")]);
         }
 
         #[test]
         fn drain_failure_requeues_with_retry_message() {
             let dispatch = approval_dispatch();
             let expected = dispatch.request_id.clone();
-            let mut calls = 0_usize;
-            let mut busy = |_: &Command| {
-                calls += 1;
-                Err::<(), CommandSendError>(CommandSendError::Busy)
-            };
-            let (requeue, report) = drain_answer_queue(vec![dispatch], &mut busy);
-            assert_eq!(calls, 1, "one drain attempt per dispatch per call");
+            let mut submit = ScriptedSubmit::new(vec![Err(CommandSendError::Busy)]);
+            let (requeue, report) =
+                drain_answer_queue(vec![dispatch], &mut |command| submit.submit(command));
+            assert_eq!(submit.commands.len(), 1, "one drain attempt per dispatch");
             assert_eq!(report.sent, 0);
             assert!(!report.is_clean());
             assert_eq!(report.failed.len(), 1);
@@ -3703,24 +3757,23 @@ mod tests {
             assert_eq!(requeue.len(), 1);
             assert_eq!(requeue[0].request_id, expected);
 
-            let mut seen: Vec<RequestId> = Vec::new();
-            let mut open = |command: &Command| {
-                seen.push(sent_request_id(command));
-                Ok::<(), CommandSendError>(())
-            };
-            let (requeue, report) = drain_answer_queue(requeue, &mut open);
+            let mut submit = ScriptedSubmit::new(Vec::new());
+            let (requeue, report) =
+                drain_answer_queue(requeue, &mut |command| submit.submit(command));
             assert_eq!(report.sent, 1);
             assert!(report.is_clean());
             assert!(requeue.is_empty());
-            assert_eq!(seen, vec![expected]);
+            assert_eq!(submit.commands.len(), 1);
+            assert_eq!(approval_answer(&submit.commands[0]).request_id, expected);
         }
 
         #[test]
         fn drain_stopped_reports_a_diagnostic() {
             let dispatch = question_dispatch();
             let expected = dispatch.request_id.clone();
-            let mut stopped = |_: &Command| Err::<(), CommandSendError>(CommandSendError::Stopped);
-            let (requeue, report) = drain_answer_queue(vec![dispatch], &mut stopped);
+            let mut submit = ScriptedSubmit::new(vec![Err(CommandSendError::Stopped)]);
+            let (requeue, report) =
+                drain_answer_queue(vec![dispatch], &mut |command| submit.submit(command));
             assert_eq!(report.sent, 0);
             assert_eq!(report.failed.len(), 1);
             assert_eq!(report.failed[0].request_id, expected);
@@ -3733,29 +3786,32 @@ mod tests {
 
         #[test]
         fn drain_empty_outbox_is_a_no_op() {
-            let mut send = |_: &Command| -> Result<(), CommandSendError> {
-                panic!("an empty queue never touches the send path")
-            };
-            let (requeue, report) = drain_answer_queue(Vec::new(), &mut send);
+            let mut submit = ScriptedSubmit::new(vec![Err(CommandSendError::Busy)]);
+            let (requeue, report) =
+                drain_answer_queue(Vec::new(), &mut |command| submit.submit(command));
             assert_eq!(report.sent, 0);
             assert!(report.is_clean());
             assert!(requeue.is_empty());
+            assert!(
+                submit.commands.is_empty(),
+                "an empty queue never touches submit"
+            );
         }
 
         #[test]
         fn double_drain_sends_once() {
             let dispatch = approval_dispatch();
-            let mut sends = 0_usize;
-            let mut send = |_: &Command| {
-                sends += 1;
-                Ok::<(), CommandSendError>(())
-            };
-            let (requeue, first) = drain_answer_queue(vec![dispatch], &mut send);
-            let (requeue, second) = drain_answer_queue(requeue, &mut send);
+            let expected = dispatch.request_id.clone();
+            let mut submit = ScriptedSubmit::new(Vec::new());
+            let (requeue, first) =
+                drain_answer_queue(vec![dispatch], &mut |command| submit.submit(command));
+            let (requeue, second) =
+                drain_answer_queue(requeue, &mut |command| submit.submit(command));
             assert_eq!((first.sent, second.sent), (1, 0));
-            assert_eq!(sends, 1);
             assert!(second.is_clean());
             assert!(requeue.is_empty());
+            assert_eq!(submit.commands.len(), 1);
+            assert_eq!(approval_answer(&submit.commands[0]).request_id, expected);
         }
 
         #[gpui::test]
@@ -3775,25 +3831,26 @@ mod tests {
                     assert_eq!(surface.pending_answer_dispatches().len(), 1);
                 });
             });
-            let mut seen: Vec<RequestId> = Vec::new();
+            let mut submit = ScriptedSubmit::new(Vec::new());
             cx.update(|_, app| {
                 surface.update(app, |surface, _| {
-                    let report =
-                        surface.drain_pending_answer_dispatches(&mut |command: &Command| {
-                            seen.push(sent_request_id(command));
-                            Ok::<(), CommandSendError>(())
-                        });
+                    let report = surface
+                        .drain_pending_answer_dispatches(&mut |command| submit.submit(command));
                     assert_eq!(report.sent, 1);
                     assert!(report.is_clean());
                     assert!(surface.pending_answer_dispatches().is_empty());
-                    let replay = surface.drain_pending_answer_dispatches(&mut |_: &Command| {
-                        Ok::<(), CommandSendError>(())
-                    });
+                    let replay = surface
+                        .drain_pending_answer_dispatches(&mut |command| submit.submit(command));
                     assert_eq!(replay.sent, 0);
                     assert!(surface.pending_answer_dispatches().is_empty());
                 });
             });
-            assert_eq!(seen.len(), 1);
+            assert_eq!(submit.commands.len(), 1);
+            let submitted = approval_answer(&submit.commands[0]);
+            assert_eq!(submitted.thread_id, thread_id());
+            assert_eq!(submitted.run_id, run_id());
+            assert_eq!(submitted.approval_id.as_str(), "approval-1");
+            assert!(submitted.approved);
         }
     }
 }
