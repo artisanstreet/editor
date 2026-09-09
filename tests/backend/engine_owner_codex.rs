@@ -883,7 +883,16 @@ async fn seed_binding_run(
     entities::assistant_run::ActiveModel {
         run_id: Set(run_id.to_owned()),
         thread_id: Set("thread-codex-binding".to_owned()),
-        run_start_key: Set(artisan_database::entities::OpaqueBytes::new(vec![0x11; 32])),
+        run_start_key: Set(artisan_database::entities::OpaqueBytes::new({
+            // Distinct per seeded run: the column is unique, so the shared
+            // fixture constant would collide on the second insert.
+            let mut key = [created_at_ms as u8; 32];
+            for (index, byte) in run_id.bytes().enumerate() {
+                let slot = index % key.len();
+                key[slot] = key[slot].wrapping_add(byte);
+            }
+            key.to_vec()
+        })),
         origin_message_id: Set(format!("message-{run_id}")),
         origin_turn_id: Set(format!("turn-{run_id}")),
         lifecycle: Set(AssistantRunLifecycle::Completed),
