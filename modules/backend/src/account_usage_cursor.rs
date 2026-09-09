@@ -455,7 +455,8 @@ pub async fn post_cursor_period_usage(
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
         .header("connect-protocol-version", "1")
         .header("x-cursor-client-type", "cli")
-        .json(&serde_json::json!({}))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("{}")
         .send()
         .await
         .map_err(map_request_error)?;
