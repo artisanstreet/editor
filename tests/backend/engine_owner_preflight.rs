@@ -154,7 +154,14 @@ async fn successful_preflight_health_reaps_without_session_creation() {
 
     assert_eq!(receipt.profile_id(), "fixture-preflight");
     assert_eq!(receipt.version(), "0.0.0-fixture");
-    assert_eq!(receipt.reap(), PreflightReap::WithoutKill);
+    // Windows kill-first contract in process.rs request_group_termination_before_abort_wait:
+    // configured spawns terminate the group before the abort wait, so the reap
+    // is AfterKill on Windows and WithoutKill elsewhere (wait-first ordering).
+    if cfg!(windows) {
+        assert_eq!(receipt.reap(), PreflightReap::AfterKill);
+    } else {
+        assert_eq!(receipt.reap(), PreflightReap::WithoutKill);
+    }
     let receipt_debug = format!("{receipt:?}");
     assert!(receipt_debug.contains("<redacted>"));
     assert!(!receipt_debug.contains("fixture-preflight"));
@@ -163,7 +170,13 @@ async fn successful_preflight_health_reaps_without_session_creation() {
     let counts = witness_counts();
     assert_eq!(counts.spawned, 1);
     assert_eq!(counts.reaps_observed, 1);
-    assert_eq!(counts.kills_requested, 0);
+    // Windows kill-first contract in process.rs request_group_termination_before_abort_wait:
+    // the pre-close group termination counts one requested kill on Windows.
+    if cfg!(windows) {
+        assert_eq!(counts.kills_requested, 1);
+    } else {
+        assert_eq!(counts.kills_requested, 0);
+    }
     assert_eq!(owner.health(), EngineOwnerHealth::Active);
     assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
 }
@@ -198,7 +211,13 @@ async fn readiness_failure_is_bounded_and_reaped() {
     let counts = witness_counts();
     assert_eq!(counts.spawned, 1);
     assert_eq!(counts.reaps_observed, 1);
-    assert_eq!(counts.kills_requested, 0);
+    // Windows kill-first contract in process.rs request_group_termination_before_abort_wait:
+    // the pre-close group termination counts one requested kill on Windows.
+    if cfg!(windows) {
+        assert_eq!(counts.kills_requested, 1);
+    } else {
+        assert_eq!(counts.kills_requested, 0);
+    }
     assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
 }
 
@@ -227,7 +246,13 @@ async fn incompatible_health_version_is_rejected_without_session_work() {
     let counts = witness_counts();
     assert_eq!(counts.spawned, 1);
     assert_eq!(counts.reaps_observed, 1);
-    assert_eq!(counts.kills_requested, 0);
+    // Windows kill-first contract in process.rs request_group_termination_before_abort_wait:
+    // the pre-close group termination counts one requested kill on Windows.
+    if cfg!(windows) {
+        assert_eq!(counts.kills_requested, 1);
+    } else {
+        assert_eq!(counts.kills_requested, 0);
+    }
     assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
 }
 
@@ -293,7 +318,13 @@ async fn health_auth_failure_is_typed_and_redacted() {
     let counts = witness_counts();
     assert_eq!(counts.spawned, 1);
     assert_eq!(counts.reaps_observed, 1);
-    assert_eq!(counts.kills_requested, 0);
+    // Windows kill-first contract in process.rs request_group_termination_before_abort_wait:
+    // the pre-close group termination counts one requested kill on Windows.
+    if cfg!(windows) {
+        assert_eq!(counts.kills_requested, 1);
+    } else {
+        assert_eq!(counts.kills_requested, 0);
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
