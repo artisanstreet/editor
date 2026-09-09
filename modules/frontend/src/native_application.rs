@@ -273,6 +273,12 @@ pub struct NativeApplication {
     profile_usage_next_seq: u64,
     profile_hover: Rc<RefCell<SlidingHoverState>>,
     profile_hover_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
+    /// Whether the profile action pill currently follows keyboard
+    /// navigation (`true`) or the pointer (`false`). GPUI can recompute
+    /// hover during painting, so a surface-leave callback may arrive right
+    /// after a keyboard move even though the pointer never left; the mode
+    /// keeps that recomputation from discarding a keyboard-owned pill.
+    profile_hover_keyboard: Cell<bool>,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
@@ -478,6 +484,7 @@ impl NativeApplication {
             profile_usage_next_seq: 0,
             profile_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             profile_hover_surface_bounds: Rc::new(RefCell::new(None)),
+            profile_hover_keyboard: Cell::new(false),
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
@@ -1169,6 +1176,7 @@ impl NativeApplication {
             && let Some(id) = Self::profile_hover_id_for_index(index)
         {
             self.profile_hover.borrow_mut().set_active(id);
+            self.profile_hover_keyboard.set(true);
         }
     }
 
@@ -1177,6 +1185,7 @@ impl NativeApplication {
             self.profile_hover.borrow_mut().clear();
         }
         self.profile_hover_surface_bounds.borrow_mut().take();
+        self.profile_hover_keyboard.set(false);
     }
 
     fn activate_profile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1194,6 +1203,7 @@ impl NativeApplication {
                     self.profile_hover
                         .borrow_mut()
                         .set_active(PROFILE_USAGE_HOVER_ID.to_owned());
+                    self.profile_hover_keyboard.set(false);
                     self.ensure_profile_usage(true, None, cx);
                 }
                 "settings" => {
@@ -1624,7 +1634,7 @@ impl NativeApplication {
                 .flex()
                 .flex_col()
                 .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
-                    if !*hovered {
+                    if !*hovered && !app.profile_hover_keyboard.get() {
                         app.profile_hover.borrow_mut().clear();
                         cx.notify();
                     }
@@ -1676,6 +1686,7 @@ impl NativeApplication {
                                 app.profile_hover
                                     .borrow_mut()
                                     .set_active(row_hover_id.clone());
+                                app.profile_hover_keyboard.set(false);
                                 cx.notify();
                             }
                         }))
@@ -7075,6 +7086,34 @@ mod tests {
             );
         });
 
+        // Leaving the action surface clears a pointer-owned pill while the
+        // open menu keeps its keyboard highlight.
+        let trigger = cx
+            .debug_bounds("artisan-desktop-profile-trigger")
+            .expect("profile trigger");
+        cx.simulate_mouse_move(trigger.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(application.profile_menu.is_open());
+            assert_eq!(application.profile_menu.highlighted_index(), Some(1));
+            assert_eq!(application.profile_hover.borrow().active_id(), None);
+            assert!(!application.profile_hover.borrow().visible());
+        });
+
+        // Re-entering restores the pointer-owned pill under the cursor.
+        cx.simulate_mouse_move(usage.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert_eq!(application.profile_menu.highlighted_index(), Some(1));
+            assert_eq!(
+                application.profile_hover.borrow().active_id(),
+                Some("profile-usage")
+            );
+            assert!(application.profile_hover.borrow().visible());
+        });
+
         cx.simulate_keystrokes("home");
         cx.run_until_parked();
         cx.update(|_, app| {
@@ -7084,6 +7123,25 @@ mod tests {
                 application.profile_hover.borrow().active_id(),
                 Some("profile-settings")
             );
+            assert!(application.profile_hover.borrow().visible());
+        });
+
+        // A keyboard-owned pill survives a real surface leave: the pointer
+        // resting elsewhere must not discard keyboard navigation.
+        let usage_region = cx
+            .debug_bounds(crate::native_profile_usage::PROFILE_USAGE_SELECTOR)
+            .expect("profile usage region");
+        cx.simulate_mouse_move(usage_region.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(application.profile_menu.is_open());
+            assert_eq!(application.profile_menu.highlighted_index(), Some(0));
+            assert_eq!(
+                application.profile_hover.borrow().active_id(),
+                Some("profile-settings")
+            );
+            assert!(application.profile_hover.borrow().visible());
         });
 
         cx.simulate_keystrokes("escape");
