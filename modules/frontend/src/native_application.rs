@@ -10,6 +10,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     process::ExitCode,
     rc::Rc,
     sync::{
@@ -152,6 +153,49 @@ const PROFILE_MENU_VIEWPORT_MARGIN_PX: f32 = 8.0;
 /// matching the source content `sideOffset` and the anchored offset applied
 /// when placing the panel.
 const PROFILE_MENU_ANCHOR_GAP_PX: f32 = 4.0;
+/// Swap target for one refresh control: the reading at rest, the action
+/// on hover or keyboard focus, the spinner while its refresh is in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefreshSwapTarget {
+    Reading,
+    Action,
+    Loading,
+}
+
+impl RefreshSwapTarget {
+    /// Displayed endpoints per reading in [reading, action, spinner] order.
+    fn values(self) -> [f32; 3] {
+        match self {
+            Self::Reading => [1.0, 0.0, 0.0],
+            Self::Action => [0.0, 1.0, 0.0],
+            Self::Loading => [0.0, 0.0, 1.0],
+        }
+    }
+}
+
+/// Retained interruptible swap for one refresh control. Retargets always
+/// start from the currently displayed values, so rapid hover/focus/refresh
+/// changes reverse mid-flight exactly like the source transition.
+#[derive(Clone, Copy, Debug)]
+struct RefreshSwap {
+    from: [f32; 3],
+    displayed: [f32; 3],
+    to: [f32; 3],
+    started_ms: i64,
+    hovered: bool,
+}
+
+impl RefreshSwap {
+    fn resting() -> Self {
+        Self {
+            from: [1.0, 0.0, 0.0],
+            displayed: [1.0, 0.0, 0.0],
+            to: [1.0, 0.0, 0.0],
+            started_ms: 0,
+            hovered: false,
+        }
+    }
+}
 /// Width of one meter tick: fourteen full 72/14 pitches with a 2px
 /// transparent tail inside every pitch including the last.
 const PROFILE_METER_TICK_PX: f32 = 72.0 / 14.0 - 2.0;
@@ -337,6 +381,10 @@ pub struct NativeApplication {
     /// visible provider list so Enter/Space can refresh without new menu
     /// items.
     profile_refresh_focus: Rc<RefCell<Vec<(String, FocusHandle)>>>,
+    /// Retained interruptible swap per refresh control, pruned with the
+    /// visible provider list.
+    profile_refresh_swap: Rc<RefCell<HashMap<String, RefreshSwap>>>,
+    profile_swap_frame_scheduled: Rc<Cell<bool>>,
     profile_menu_motion: Rc<RefCell<PickerMenuMotion>>,
     profile_menu_motion_task: Option<Task<()>>,
     profile_tip_tween: Rc<RefCell<ProfileTipTween>>,
@@ -553,6 +601,8 @@ impl NativeApplication {
             profile_tip_surface_bounds: Rc::new(RefCell::new(None)),
             profile_tip_anchor: Rc::new(RefCell::new(None)),
             profile_refresh_focus: Rc::new(RefCell::new(Vec::new())),
+            profile_refresh_swap: Rc::new(RefCell::new(HashMap::new())),
+            profile_swap_frame_scheduled: Rc::new(Cell::new(false)),
             profile_menu_motion: Rc::new(RefCell::new(PickerMenuMotion::default())),
             profile_menu_motion_task: None,
             profile_tip_tween: Rc::new(RefCell::new(ProfileTipTween::default())),
@@ -1056,7 +1106,7 @@ impl NativeApplication {
         )
     }
 
-    fn desktop_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn desktop_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let theme = self.desktop_theme;
         let sidebar_item_radius = px(6.0);
         let visible_hover_ids = vec![
@@ -1289,6 +1339,8 @@ impl NativeApplication {
         self.profile_tip_surface_bounds.borrow_mut().take();
         self.profile_tip_anchor.borrow_mut().take();
         *self.profile_tip_tween.borrow_mut() = ProfileTipTween::default();
+        self.profile_refresh_swap.borrow_mut().clear();
+        self.profile_swap_frame_scheduled.set(false);
     }
 
     /// Maximum height for the scrollable usage area: the natural content
@@ -1475,6 +1527,115 @@ impl NativeApplication {
         }
     }
 
+    /// Moves one refresh control toward its target state, starting from the
+    /// currently displayed values so rapid hover/focus/refresh changes
+    /// reverse mid-flight. Reduced motion settles instantly.
+    fn retarget_profile_swap(
+        &self,
+        engine_id: &str,
+        target: RefreshSwapTarget,
+        reduce_motion: bool,
+    ) {
+        let mut swaps = self.profile_refresh_swap.borrow_mut();
+        let swap = swaps
+            .entry(engine_id.to_owned())
+            .or_insert_with(RefreshSwap::resting);
+        let to = target.values();
+        if swap.to == to {
+            return;
+        }
+        swap.from = swap.displayed;
+        swap.to = to;
+        swap.started_ms = profile_usage_now_ms();
+        if reduce_motion {
+            swap.displayed = to;
+        }
+    }
+
+    /// Recomputes one control's target from its live hover/focus/refresh
+    /// inputs and ensures the frame driver runs while anything is moving.
+    /// Called from pointer events and every render so keyboard focus changes
+    /// that arrive without pointer events still animate.
+    fn refresh_profile_swap(
+        &self,
+        engine_id: &str,
+        refreshing: bool,
+        reduce_motion: bool,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) {
+        let hovered = self
+            .profile_refresh_swap
+            .borrow()
+            .get(engine_id)
+            .is_some_and(|swap| swap.hovered);
+        let focused = self
+            .profile_refresh_focus
+            .borrow()
+            .iter()
+            .find(|(id, _)| id == engine_id)
+            .is_some_and(|(_, handle)| handle.is_focused(window));
+        let target = if refreshing {
+            RefreshSwapTarget::Loading
+        } else if hovered || focused {
+            RefreshSwapTarget::Action
+        } else {
+            RefreshSwapTarget::Reading
+        };
+        self.retarget_profile_swap(engine_id, target, reduce_motion);
+        self.schedule_profile_swap_frame(window, cx);
+    }
+
+    fn schedule_profile_swap_frame(&self, window: &mut Window, cx: &Context<Self>) {
+        let pending = self
+            .profile_refresh_swap
+            .borrow()
+            .values()
+            .any(|swap| swap.displayed != swap.to);
+        if !pending || self.profile_swap_frame_scheduled.get() {
+            return;
+        }
+        self.profile_swap_frame_scheduled.set(true);
+        cx.on_next_frame(window, |application, window, cx| {
+            application.advance_profile_swap(window, cx);
+        });
+    }
+
+    fn advance_profile_swap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile_swap_frame_scheduled.set(false);
+        let running = self.step_profile_swaps(profile_usage_now_ms());
+        cx.notify();
+        if running {
+            self.schedule_profile_swap_frame(window, cx);
+        }
+    }
+
+    /// Steps every retained swap toward its target on the source 150ms
+    /// ease-in-out curve (`MotionDuration::Quick` + `MotionCurve::EaseInOut`,
+    /// matching `--text-swap-dur` and `ease-in-out`). Returns whether any
+    /// swap is still moving. Pure over the passed clock so tests can drive
+    /// interrupted transitions deterministically.
+    fn step_profile_swaps(&self, now_ms: i64) -> bool {
+        let total_ms = MotionDuration::Quick.as_duration().as_millis() as f64;
+        let mut running = false;
+        let mut swaps = self.profile_refresh_swap.borrow_mut();
+        for swap in swaps.values_mut() {
+            let elapsed = now_ms.saturating_sub(swap.started_ms).max(0) as f64;
+            let progress = (elapsed / total_ms).clamp(0.0, 1.0);
+            let eased = MotionCurve::EaseInOut.sample(progress);
+            for index in 0..3 {
+                swap.displayed[index] =
+                    swap.from[index] + (swap.to[index] - swap.from[index]) * eased;
+            }
+            if progress >= 1.0 {
+                swap.displayed = swap.to;
+            } else {
+                running = true;
+            }
+        }
+        running
+    }
+
     fn activate_profile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for action in self.profile_menu.take_actions() {
             match action.item_id().as_ref() {
@@ -1515,7 +1676,7 @@ impl NativeApplication {
     fn desktop_profile_usage(
         &self,
         theme: DesktopTheme,
-        window: &Window,
+        window: &mut Window,
         cx: &Context<Self>,
     ) -> gpui::Stateful<Div> {
         let section = div()
@@ -1545,6 +1706,11 @@ impl NativeApplication {
 
         let visible = self.profile_usage.visible_usage_entries();
         self.profile_refresh_focus.borrow_mut().retain(|(id, _)| {
+            visible
+                .iter()
+                .any(|entry| entry.engine_id.as_str() == id.as_str())
+        });
+        self.profile_refresh_swap.borrow_mut().retain(|id, _| {
             visible
                 .iter()
                 .any(|entry| entry.engine_id.as_str() == id.as_str())
@@ -1588,7 +1754,7 @@ impl NativeApplication {
         &self,
         entry: &NativeUsageEntry,
         theme: DesktopTheme,
-        window: &Window,
+        window: &mut Window,
         now_ms: i64,
         cx: &Context<Self>,
     ) -> Div {
@@ -1606,7 +1772,17 @@ impl NativeApplication {
             .map(|hex| gpui::rgb_to_hsla(gpui::rgb(hex)))
             .unwrap_or_else(|| self.theme.colors.primary.to_paint());
         let dim = self.theme.colors.foreground.with_alpha(0.11).to_paint();
-        let mut block = div().flex().flex_col().gap(px(6.0)).px(px(8.0)).py(px(4.0));
+        let block_selector = format!("artisan-profile-usage-engine-{engine_id}");
+        let mut block = div()
+            .debug_selector({
+                let block_selector = block_selector.clone();
+                move || block_selector.clone()
+            })
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .px(px(8.0))
+            .py(px(4.0));
         let mut title = div()
             .flex()
             .items_center()
@@ -1710,24 +1886,48 @@ impl NativeApplication {
     /// keyboard focus and to a spinner while its refresh is in flight. All
     /// three readings share one grid cell like the source `t-checked`
     /// grid, so the width is always the max of reading and action and the
-    /// swap never shifts layout; each state carries the source
-    /// opacity/blur(2px) values. TranslateY and the 150ms interpolation
-    /// have no GPUI counterpart and stay instant (see evidence notes).
-    /// Withheld until the engine has answered at least once. Keyboard focus
-    /// plus Enter/Space refreshes once through the same path as a click.
+    /// swap never shifts layout; each reading animates on the source 150ms
+    /// ease-in-out opacity/blur(2px)/±4px paint offset, interrupted from the
+    /// retained visual values. Withheld until the engine has answered at
+    /// least once. Keyboard focus plus Enter/Space refreshes once through
+    /// the same path as a click.
     fn desktop_profile_usage_refresh(
         &self,
         engine_id: &str,
         checked: &str,
         refreshing: bool,
         theme: DesktopTheme,
-        window: &Window,
+        window: &mut Window,
         cx: &Context<Self>,
     ) -> gpui::Stateful<Div> {
         let group = format!("profile-usage-refresh-{engine_id}");
         let selector = format!("artisan-profile-usage-refresh-{engine_id}");
         let focus = self.profile_refresh_focus_handle(engine_id, cx);
-        let focused = focus.is_focused(window);
+        self.refresh_profile_swap(engine_id, refreshing, cx.reduce_motion(), window, cx);
+        let swap = self
+            .profile_refresh_swap
+            .borrow()
+            .get(engine_id)
+            .cloned()
+            .unwrap_or_else(RefreshSwap::resting);
+        // One grid cell shared by all three readings, so the control width
+        // is always the max of reading and action like the source
+        // `t-checked` grid — never collapsing, never shifting on swap. Each
+        // reading paints from the retained tween: source 150ms ease-in-out
+        // opacity/blur(2px)/±4px paint offset, interrupted from the current
+        // visual values. The ring only attaches without pointer hover,
+        // matching source `:focus-visible` (keyboard focus, not mouse).
+        let paint = |from: f32, displayed: f32, to: f32| {
+            let hidden = 1.0 - displayed;
+            let direction = if to >= from { 1.0 } else { -1.0 };
+            (displayed, hidden * 2.0, direction * 4.0 * hidden)
+        };
+        let (reading_opacity, reading_blur, reading_top) =
+            paint(swap.from[0], swap.displayed[0], swap.to[0]);
+        let (action_opacity, action_blur, action_top) =
+            paint(swap.from[1], swap.displayed[1], swap.to[1]);
+        let (spinner_opacity, spinner_blur, spinner_top) =
+            paint(swap.from[2], swap.displayed[2], swap.to[2]);
         let ring = vec![gpui::BoxShadow {
             color: self.theme.interaction.focus_ring_color.to_paint(),
             offset: gpui::point(px(0.0), px(0.0)),
@@ -1735,9 +1935,6 @@ impl NativeApplication {
             spread_radius: self.theme.interaction.focus_ring_width,
             inset: false,
         }];
-        // One grid cell shared by all three readings, so the control width
-        // is always the max of reading and action like the source
-        // `t-checked` grid — never collapsing, never shifting on swap.
         let mut control = div()
             .id(selector.clone())
             .debug_selector({
@@ -1745,37 +1942,38 @@ impl NativeApplication {
                 move || selector.clone()
             })
             .track_focus(&focus)
-            .group(group.clone())
+            .group(group)
             .grid()
             .flex_shrink_0()
             .text_size(px(12.0))
-            .line_height(px(16.0))
-            .focus(move |style| style.shadow(ring))
+            .line_height(px(16.0));
+        if !swap.hovered {
+            control = control.focus(move |style| style.shadow(ring));
+        }
+        control = control
             .child(
                 div()
                     .col_start(1)
                     .row_start(1)
+                    .relative()
+                    .top(px(reading_top))
                     .whitespace_nowrap()
                     .text_color(theme.secondary)
                     .child(checked.to_owned())
-                    .opacity(if refreshing || focused { 0.0 } else { 1.0 })
-                    .blur(px(if refreshing || focused { 2.0 } else { 0.0 }))
-                    .group_hover(group.clone(), |style| style.opacity(0.0).blur(px(2.0))),
+                    .opacity(reading_opacity)
+                    .blur(px(reading_blur)),
             )
             .child(
                 div()
                     .col_start(1)
                     .row_start(1)
+                    .relative()
+                    .top(px(action_top))
                     .flex()
                     .items_center()
                     .justify_end()
-                    .opacity(if focused && !refreshing { 1.0 } else { 0.0 })
-                    .blur(px(if focused && !refreshing { 0.0 } else { 2.0 }))
-                    .group_hover(group.clone(), |style| {
-                        style
-                            .opacity(if refreshing { 0.0 } else { 1.0 })
-                            .blur(px(if refreshing { 2.0 } else { 0.0 }))
-                    })
+                    .opacity(action_opacity)
+                    .blur(px(action_blur))
                     .child(
                         div()
                             .whitespace_nowrap()
@@ -1787,17 +1985,43 @@ impl NativeApplication {
                 div()
                     .col_start(1)
                     .row_start(1)
+                    .relative()
+                    .top(px(spinner_top))
                     .flex()
                     .items_center()
                     .justify_end()
-                    .opacity(if refreshing { 1.0 } else { 0.0 })
-                    .blur(px(if refreshing { 0.0 } else { 2.0 }))
+                    .opacity(spinner_opacity)
+                    .blur(px(spinner_blur))
                     .child(
                         FadeArc::new(SharedString::from(selector.clone()), self.theme)
                             .size(px(14.0))
+                            .active(refreshing)
                             .debug_selector(format!("{selector}-spinner")),
                     ),
-            );
+            )
+            .on_hover(cx.listener({
+                let swap_engine_id = engine_id.to_owned();
+                let swap_focus = focus.clone();
+                move |app, hovered: &bool, window, cx| {
+                    if let Some(swap) = app
+                        .profile_refresh_swap
+                        .borrow_mut()
+                        .get_mut(swap_engine_id.as_str())
+                    {
+                        swap.hovered = *hovered;
+                    }
+                    let target = if refreshing {
+                        RefreshSwapTarget::Loading
+                    } else if *hovered || swap_focus.is_focused(window) {
+                        RefreshSwapTarget::Action
+                    } else {
+                        RefreshSwapTarget::Reading
+                    };
+                    app.retarget_profile_swap(&swap_engine_id, target, cx.reduce_motion());
+                    app.schedule_profile_swap_frame(window, cx);
+                    cx.notify();
+                }
+            }));
         if !refreshing {
             let click_engine_id = engine_id.to_owned();
             let key_engine_id = engine_id.to_owned();
@@ -2022,7 +2246,7 @@ impl NativeApplication {
         )
     }
 
-    fn desktop_profile(&self, window: &Window, cx: &Context<Self>) -> Div {
+    fn desktop_profile(&self, window: &mut Window, cx: &Context<Self>) -> Div {
         let theme = self.desktop_theme;
         let profile_feedback = self.theme.colors.foreground.with_alpha(0.08).to_paint();
         let origin = self.profile_origin.clone();
@@ -8186,6 +8410,162 @@ mod tests {
             cx.debug_bounds("artisan-desktop-profile-actions-hover-surface")
                 .is_some()
         );
+    }
+
+    #[gpui::test]
+    fn profile_refresh_swap_interrupts_from_current_values(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                application.test_command_sink = Some(sink);
+                application.profile_usage.entries.push(reported_usage_entry(
+                    "swap-test",
+                    "Swap",
+                    vec![reported_usage_window(
+                        "session",
+                        NativeUsageCadence::Session,
+                        None,
+                        40.0,
+                    )],
+                ));
+            });
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        let control = cx
+            .debug_bounds("artisan-profile-usage-refresh-swap-test")
+            .expect("refresh control");
+
+        // Hovering arms the action target from the resting reading values.
+        cx.simulate_mouse_move(control.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let swaps = view.read(app).profile_refresh_swap.borrow();
+            let swap = swaps.get("swap-test").expect("swap state");
+            assert_eq!(swap.to, [0.0, 1.0, 0.0]);
+            assert_eq!(swap.from, [1.0, 0.0, 0.0]);
+        });
+
+        // A mid-flight step moves values without jumping to either end.
+        let now = super::profile_usage_now_ms();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            application
+                .profile_refresh_swap
+                .borrow_mut()
+                .get_mut("swap-test")
+                .expect("swap state")
+                .started_ms = now - 75;
+            assert!(application.step_profile_swaps(now));
+        });
+        cx.update(|_, app| {
+            let binding = view.read(app).profile_refresh_swap.borrow();
+            let swap = binding.get("swap-test").expect("swap state");
+            assert!(swap.displayed[0] > 0.0 && swap.displayed[0] < 1.0);
+            assert!(swap.displayed[1] > 0.0 && swap.displayed[1] < 1.0);
+        });
+
+        // Leaving retargets from the mid-flight values, not from rest.
+        let header = cx
+            .debug_bounds("artisan-desktop-profile-header")
+            .expect("profile header");
+        cx.simulate_mouse_move(header.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let binding = view.read(app).profile_refresh_swap.borrow();
+            let swap = binding.get("swap-test").expect("swap state");
+            assert_eq!(swap.to, [1.0, 0.0, 0.0]);
+            assert!(swap.from[0] > 0.0 && swap.from[0] < 1.0);
+            assert!(swap.from[1] > 0.0 && swap.from[1] < 1.0);
+        });
+
+        // A far-future step settles exactly on the reading values.
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(!application.step_profile_swaps(now + 100_000));
+            let binding = application.profile_refresh_swap.borrow();
+            let swap = binding.get("swap-test").expect("swap state");
+            assert_eq!(swap.displayed, [1.0, 0.0, 0.0]);
+        });
+
+        // Reduced motion settles a retarget instantly.
+        cx.update(|_, app| app.set_reduce_motion(true));
+        cx.simulate_mouse_move(control.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let binding = view.read(app).profile_refresh_swap.borrow();
+            let swap = binding.get("swap-test").expect("swap state");
+            assert_eq!(swap.to, [0.0, 1.0, 0.0]);
+            assert_eq!(swap.displayed, [0.0, 1.0, 0.0]);
+        });
+    }
+
+    #[gpui::test]
+    fn profile_engine_blocks_share_consistent_spacing(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                application.test_command_sink = Some(sink);
+                // Three byte-identical providers in first, middle, and last
+                // position: only consistent gap/padding keeps every block
+                // the same height with the same rhythm between them.
+                for engine_id in ["spacing-a", "spacing-b", "spacing-c"] {
+                    application.profile_usage.entries.push(reported_usage_entry(
+                        engine_id,
+                        "Same",
+                        vec![
+                            reported_usage_window(
+                                "session",
+                                NativeUsageCadence::Session,
+                                None,
+                                30.0,
+                            ),
+                            reported_usage_window(
+                                "weekly-model",
+                                NativeUsageCadence::Weekly,
+                                Some("Model"),
+                                50.0,
+                            ),
+                        ],
+                    ));
+                }
+            });
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        let scroller = cx
+            .debug_bounds("artisan-profile-usage-scroll")
+            .expect("usage scroller");
+        let first = cx
+            .debug_bounds("artisan-profile-usage-engine-spacing-a")
+            .expect("first engine block");
+        let middle = cx
+            .debug_bounds("artisan-profile-usage-engine-spacing-b")
+            .expect("middle engine block");
+        let last = cx
+            .debug_bounds("artisan-profile-usage-engine-spacing-c")
+            .expect("last engine block");
+        assert_eq!(f32::from(first.size.height), f32::from(middle.size.height));
+        assert_eq!(f32::from(middle.size.height), f32::from(last.size.height));
+        // Engine separators keep one 1px rule with 4px margins on each side.
+        assert_eq!(f32::from(middle.top() - first.bottom()), 9.0);
+        assert_eq!(f32::from(last.top() - middle.bottom()), 9.0);
+        // The scroll wrapper contributes the outer 4px inset on both ends.
+        assert_eq!(f32::from(first.top() - scroller.top()), 4.0);
     }
 
     #[gpui::test]
