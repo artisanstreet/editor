@@ -264,6 +264,8 @@ fn fixture_argv() -> Vec<String> {
         FIXTURE_TEST_NAME.to_owned(),
         "--exact".to_owned(),
         "--nocapture".to_owned(),
+        "--quiet".to_owned(),
+        "--".to_owned(),
     ]
 }
 
@@ -480,7 +482,7 @@ fn claude_cmd_shim_reads_end_to_end() {
     let shim = dir.join("claude.cmd");
     fs::write(
         &shim,
-        "@echo off\r\necho {\"result\":\"Current session: 9% used\"}\r\n",
+        "@echo off\r\necho {\"result\":\"Current session: 9%% used\"}\r\n",
     )
     .expect("shim fixture should write");
     let empty_root = shim_bin("empty-root");
