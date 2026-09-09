@@ -1872,7 +1872,32 @@ impl NativeApplication {
         cx.notify();
     }
 
+    /// Drains one queued answer batch into live transport, once per tick.
+    ///
+    /// Runs at the head of the controller tick beside the sibling drains, so
+    /// a slow or failing transport cannot stall unrelated per-tick work.
+    /// Admission follows the established submit path: without it the outbox
+    /// is left untouched. Each taken dispatch submits once with its
+    /// already-minted request id; `Busy`/`Stopped` keep rows pending with the
+    /// existing retry/diagnostic texts, and single-flight holds until
+    /// receipts pair through the existing settle-in-place pairing. Draining
+    /// first also keeps a same-tick host retirement from dropping gestures.
+    fn drain_answer_dispatches(&mut self, cx: &mut Context<Self>) {
+        if !self.command_submission_is_available() {
+            return;
+        }
+        let Some(host) = self.conversation_host.clone() else {
+            return;
+        };
+        let surface = host.read(cx).surface().clone();
+        let this = &*self;
+        surface.update(cx, |surface, _| {
+            surface.drain_pending_answer_dispatches(&mut |command| this.submit_command(command));
+        });
+    }
+
     fn poll_service(&mut self, cx: &mut Context<Self>) -> bool {
+        self.drain_answer_dispatches(cx);
         let Some(service) = self.service.clone() else {
             return false;
         };
@@ -5807,8 +5832,8 @@ mod tests {
     };
     use artisan_domain::{
         ConversationCursor, ConversationSnapshot, ConversationSubscriptionStart, DisplayName,
-        ProjectId, ProjectListing, ProjectSummary, ReceiptDisposition, RequestId, RootPath,
-        ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
+        ObservationId, ProjectId, ProjectListing, ProjectSummary, ReceiptDisposition, RequestId,
+        RootPath, RunId, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
     };
     use artisan_protocol::{
         ConversationSubscriptionStarted, ConversationSubscriptionStopped, QueueMessageReceipt,
@@ -5921,6 +5946,177 @@ mod tests {
             composer_cx.notify();
         });
         application.sync_composer_availability(cx);
+    }
+
+    fn answer_thread() -> ThreadId {
+        ThreadId::parse("thread-answer").expect("answer thread")
+    }
+
+    fn answer_run() -> RunId {
+        RunId::parse("run-answer").expect("answer run")
+    }
+
+    fn answer_approval() -> ObservationId {
+        ObservationId::parse("approval-1").expect("answer approval")
+    }
+
+    fn install_answer_surface(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+        sink: NativeTestCommandSink,
+    ) {
+        let thread_id = answer_thread();
+        let host = ConversationHost::mount(thread_id.clone(), ThemeMode::Dark, &mut *cx)
+            .expect("answer host");
+        application.selected_thread = Some(thread_id);
+        application.conversation_host = Some(host);
+        application.test_command_sink = Some(sink);
+    }
+
+    fn queue_approval_answer(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+    ) -> RequestId {
+        let host = application.conversation_host.clone().expect("answer host");
+        let surface = host.read(cx).surface().clone();
+        let request_id = surface.update(cx, |surface, surface_cx| {
+            surface.set_answer_context(answer_thread(), answer_run(), surface_cx);
+            assert!(surface.submit_approval_gesture(
+                "approval-1",
+                &answer_approval(),
+                true,
+                surface_cx,
+            ));
+            surface.pending_answer_dispatches()[0].request_id.clone()
+        });
+        request_id
+    }
+
+    fn recorded_approval(commands: &[NativeTransportCommand]) -> &artisan_domain::RespondApproval {
+        assert_eq!(commands.len(), 1);
+        if let NativeTransportCommand::RespondApproval(answer) = &commands[0] {
+            answer
+        } else {
+            panic!("tick must submit an approval answer")
+        }
+    }
+
+    #[gpui::test]
+    fn tick_drains_queued_answer_into_submit_with_preserved_ids(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([]);
+        let expected = cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_answer_surface(application, cx, sink);
+                let expected = queue_approval_answer(application, cx);
+                application.poll_service(cx);
+                expected
+            })
+        });
+        let recorded = commands.borrow();
+        let submitted = recorded_approval(&recorded);
+        assert_eq!(submitted.request_id(), &expected);
+        assert_eq!(submitted.thread_id(), &answer_thread());
+        assert_eq!(submitted.run_id(), &answer_run());
+        assert_eq!(submitted.approval_id().as_str(), "approval-1");
+        assert!(submitted.approved);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let host = application.conversation_host.clone().expect("answer host");
+                assert!(
+                    host.read(cx)
+                        .surface()
+                        .read(cx)
+                        .pending_answer_dispatches()
+                        .is_empty()
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn tick_busy_keeps_row_pending_with_retry_state(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Err(super::CommandSendError::Busy)]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_answer_surface(application, cx, sink);
+                let expected = queue_approval_answer(application, cx);
+                application.poll_service(cx);
+                assert_eq!(commands.borrow().len(), 1);
+                let host = application.conversation_host.clone().expect("answer host");
+                let surface = host.read(cx).surface().clone();
+                assert_eq!(surface.read(cx).pending_answer_dispatches().len(), 1);
+                assert_eq!(
+                    surface.read(cx).pending_answer_dispatches()[0].request_id,
+                    expected,
+                    "nothing is silently dropped"
+                );
+                assert!(
+                    !surface.update(cx, |surface, surface_cx| {
+                        surface.submit_approval_gesture(
+                            "approval-1",
+                            &answer_approval(),
+                            true,
+                            surface_cx,
+                        )
+                    }),
+                    "single-flight holds across ticks until receipt pairing"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn tick_stopped_reports_diagnostic_without_drop(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_answer_surface(application, cx, sink);
+                queue_approval_answer(application, cx);
+                application.poll_service(cx);
+                assert_eq!(commands.borrow().len(), 1);
+                let host = application.conversation_host.clone().expect("answer host");
+                assert_eq!(
+                    host.read(cx)
+                        .surface()
+                        .read(cx)
+                        .pending_answer_dispatches()
+                        .len(),
+                    1,
+                    "a stopped service degrades without drop"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn tick_empty_outbox_leaves_transport_untouched(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Err(super::CommandSendError::Busy)]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_answer_surface(application, cx, sink);
+                application.poll_service(cx);
+                assert!(commands.borrow().is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn second_tick_does_not_resend_before_pairing(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_answer_surface(application, cx, sink);
+                queue_approval_answer(application, cx);
+                application.poll_service(cx);
+                application.poll_service(cx);
+                assert_eq!(commands.borrow().len(), 1);
+            });
+        });
     }
 
     #[gpui::test]
