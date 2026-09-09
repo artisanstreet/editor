@@ -1510,6 +1510,34 @@ async fn execute_legacy_job(
     handle_health_phase(parts, generation, endpoint, secret, respond, ctx).await
 }
 
+/// Per-engine image-attachment applicability enforced at owner intake.
+///
+/// Mirrors the TypeScript `image_input` evidence
+/// (`docs/plans/native-engines/README.md` section 1): Codex data-URL images,
+/// Claude base64 blocks, OpenCode2 per-model data-URI, Grok embedded
+/// resources, and Cursor native blocks are provider-supported, so those turns
+/// pass intake unchanged here. Hermes reports `image_input: false`, so any
+/// image fails the turn closed with the existing typed
+/// [`HermesTurnError::ImagesUnsupported`](super::hermes::HermesTurnError)
+/// reject instead of sending a degraded text-only prompt. Runnable catalog
+/// support never implies an installed binary: executable resolution and the
+/// readiness handshake stay the live gate in each per-engine executor.
+fn check_turn_attachment_applicability(
+    engine: artisan_domain::EngineId,
+    prompt: &artisan_domain::QueueMessagePayload,
+) -> Result<(), EngineOperationError> {
+    match engine {
+        artisan_domain::EngineId::Hermes => {
+            super::hermes::reject_image_attachments(prompt).map_err(map_hermes_turn_error)
+        }
+        artisan_domain::EngineId::OpenCode2
+        | artisan_domain::EngineId::Codex
+        | artisan_domain::EngineId::Claude
+        | artisan_domain::EngineId::Grok
+        | artisan_domain::EngineId::Cursor => Ok(()),
+    }
+}
+
 /// Executes one configured `OpenCode2` turn.  The profile capability and the
 /// settings snapshot are moved into this owner call and are never reread from
 /// durable state or ambient process configuration.
@@ -1552,6 +1580,12 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
     };
     if request.input.launch.profile_id() != selected_profile {
         return request.fail(EngineOperationError::Configuration);
+    }
+    if let Err(error) = check_turn_attachment_applicability(
+        request.input.settings.config().selection().engine_id(),
+        &request.input.prompt,
+    ) {
+        return request.fail(error);
     }
     if shutdown.is_cancelled() {
         return request.fail(EngineOperationError::Shutdown);
@@ -4911,5 +4945,65 @@ async fn finish_success(
                 Execution::Quarantined(engine)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod intake_attachment_tests {
+    use artisan_domain::{AuthoredText, EngineId, ImageAttachment, QueueMessagePayload};
+
+    use super::*;
+
+    fn text_prompt() -> QueueMessagePayload {
+        QueueMessagePayload::text_only("hello").expect("text prompt builds")
+    }
+
+    fn image_prompt() -> QueueMessagePayload {
+        let attachment = ImageAttachment::new("image/png", vec![1, 2, 3, 4], "shot.png")
+            .expect("image attachment builds");
+        QueueMessagePayload::new(
+            Some(AuthoredText::parse("see this").expect("authored text parses")),
+            vec![attachment],
+        )
+        .expect("image prompt builds")
+    }
+
+    #[test]
+    fn text_prompts_pass_intake_for_every_engine() {
+        for engine in EngineId::ALL {
+            assert!(
+                check_turn_attachment_applicability(engine, &text_prompt()).is_ok(),
+                "{engine:?} admits a text-only turn"
+            );
+        }
+    }
+
+    #[test]
+    fn image_prompts_pass_except_hermes() {
+        for engine in [
+            EngineId::OpenCode2,
+            EngineId::Codex,
+            EngineId::Claude,
+            EngineId::Grok,
+            EngineId::Cursor,
+        ] {
+            assert!(
+                check_turn_attachment_applicability(engine, &image_prompt()).is_ok(),
+                "{engine:?} supports provider images at intake"
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_images_fail_closed_with_the_typed_reject() {
+        assert_eq!(
+            check_turn_attachment_applicability(EngineId::Hermes, &image_prompt()),
+            Err(EngineOperationError::Configuration)
+        );
+        assert_eq!(
+            map_hermes_turn_error(super::hermes::HermesTurnError::ImagesUnsupported),
+            EngineOperationError::Configuration
+        );
+        assert!(check_turn_attachment_applicability(EngineId::Hermes, &text_prompt()).is_ok());
     }
 }
