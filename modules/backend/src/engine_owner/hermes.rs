@@ -937,11 +937,36 @@ impl GatewayClient {
                 return Err(GatewayError::Handshake);
             }
             let take = chunk.len().min(HERMES_MAX_HANDSHAKE_BYTES + 1 - head.len());
-            head.extend_from_slice(&chunk[..take]);
-            self.reader.consume(take);
-            if head.windows(4).any(|window| window == b"\r\n\r\n") {
+            let start = head.len().saturating_sub(3);
+            let mut header_end: Option<usize> = None;
+            for index in start..head.len().saturating_add(take).saturating_sub(3) {
+                let byte = |at: usize| {
+                    if at < head.len() {
+                        head[at]
+                    } else {
+                        chunk[at - head.len()]
+                    }
+                };
+                if byte(index) == b'\r'
+                    && byte(index + 1) == b'\n'
+                    && byte(index + 2) == b'\r'
+                    && byte(index + 3) == b'\n'
+                {
+                    header_end = Some(index + 4);
+                    break;
+                }
+            }
+            if let Some(end) = header_end {
+                if end <= head.len() {
+                    break;
+                }
+                let need = end - head.len();
+                head.extend_from_slice(&chunk[..need]);
+                self.reader.consume(need);
                 break;
             }
+            head.extend_from_slice(&chunk[..take]);
+            self.reader.consume(take);
         }
         let text = std::str::from_utf8(&head).map_err(|_| GatewayError::Handshake)?;
         let mut lines = text.split("\r\n");
