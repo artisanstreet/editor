@@ -608,7 +608,7 @@ fn cursor_quota_windows_map_split_pools_with_clamp_and_kinds() {
     );
     assert_eq!(
         windows[0].resets_at.as_deref(),
-        cursor_reset_at_iso(1_760_592_000_000)
+        cursor_reset_at_iso(1_760_592_000_000).as_deref()
     );
 
     // Foreign ids are never monthly quota.
