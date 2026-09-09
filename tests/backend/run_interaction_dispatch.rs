@@ -14,16 +14,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use artisan_database::{
-    ApprovalRequest, RecordApprovalRequest, Repository, ResolveScope, SqliteConfig,
-    StoredInteractionReceipt, connect, decode_observation_checkpoint,
+    RecordApprovalRequest, Repository, ResolveScope, SqliteConfig, StoredInteractionReceipt,
+    connect, decode_observation_checkpoint,
 };
 use artisan_domain::{
-    ApprovalMode, ByteLimit, Command, CountLimit, EngineAgentId, EngineConfigUpdatePrecondition,
-    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
-    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
-    FiniteMillis, MessageBody, MessageId, NetworkAccess, Observation, ObservationId,
-    OpenCode2Selection, PermissionId, ProjectId, ReceiptDisposition, RequestId, RespondApproval,
-    RunId, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
+    ApprovalMode, ApprovalRequest, ByteLimit, Command, CountLimit, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, MessageBody, MessageId, NetworkAccess,
+    Observation, ObservationId, OpenCode2Selection, PermissionId, ProjectId, ReceiptDisposition,
+    RequestId, RespondApproval, RunId, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_native_engine::NativeOpenCode2Authority;

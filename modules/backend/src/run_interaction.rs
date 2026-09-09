@@ -389,27 +389,27 @@ mod tests {
     #[test]
     fn exact_run_routes_its_inbox_and_wrong_pairs_do_not() {
         let registry = RunInteractionRegistry::new(2).expect("fixture capacity should be valid");
-        let thread_id = thread_id("thread-route");
-        let run_id = run_id("run-route");
+        let route_thread = thread_id("thread-route");
+        let route_run = run_id("run-route");
         let (_lease, _receiver) = registry
-            .register(thread_id.clone(), run_id.clone())
+            .register(route_thread.clone(), route_run.clone())
             .expect("exact run should register");
 
         assert!(
             registry
-                .route(&thread_id, &run_id)
+                .route(&route_thread, &route_run)
                 .expect("routing should succeed")
                 .is_some()
         );
         assert!(
             registry
-                .route(&thread_id("thread-other"), &run_id)
+                .route(&thread_id("thread-other"), &route_run)
                 .expect("routing should succeed")
                 .is_none()
         );
         assert!(
             registry
-                .route(&thread_id, &run_id("run-stale"))
+                .route(&route_thread, &run_id("run-stale"))
                 .expect("routing should succeed")
                 .is_none()
         );
@@ -455,7 +455,7 @@ mod tests {
         let old = registry
             .register(thread_id.clone(), run_id.clone())
             .expect("old run should register");
-        let old_generation = old.generation();
+        let old_generation = old.0.generation();
 
         {
             let mut state = registry.inner.state.lock().expect("test lock");
