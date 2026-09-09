@@ -11,9 +11,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use artisan_domain::{
-    EngineUsageWindow, EngineUsageWindowKind, QuotaSurface, clamp_percent_used, iso_millis,
-};
+use artisan_domain::{EngineUsageWindow, EngineUsageWindowKind, clamp_percent_used, iso_millis};
 
 use super::account_usage::{
     CallError, CliLaunch, ExchangeBounds, JsonRpcSession, ProviderUsage, UsageReaderError,
@@ -506,6 +504,6 @@ mod tests {
     #[test]
     fn quota_surface_is_supported_for_codex_reads() {
         let usage = ProviderUsage::authenticated(Vec::new());
-        assert_eq!(usage.quota_surface, QuotaSurface::Supported);
+        assert_eq!(usage.quota_surface, artisan_domain::QuotaSurface::Supported);
     }
 }

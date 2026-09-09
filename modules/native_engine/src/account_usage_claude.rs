@@ -14,8 +14,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use artisan_domain::{EngineUsageWindow, EngineUsageWindowKind, clamp_percent_used, utc_ymd};
 use crate::CliLaunch;
+use artisan_domain::{EngineUsageWindow, EngineUsageWindowKind, clamp_percent_used, utc_ymd};
 
 use super::account_usage::{
     ChildCustody, ProviderUsage, USAGE_TEARDOWN_GRACE, UsageReaderError, join_thread_bounded,
@@ -114,7 +114,7 @@ pub fn read_claude_usage(config: &ClaudeUsageConfig) -> Result<ProviderUsage, Us
         .name("claude-usage-stderr".to_owned())
         .spawn(move || {
             let mut sink = Vec::new();
-            read_bounded(stderr.as_mut(), &mut sink, max_bytes);
+            let _drain_result = read_bounded(stderr.as_mut(), &mut sink, max_bytes);
         }) {
         Ok(handle) => handle,
         Err(_) => {
