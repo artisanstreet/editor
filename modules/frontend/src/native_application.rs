@@ -1974,8 +1974,11 @@ impl NativeApplication {
         }
         let displayed = self.profile_tip_tween.borrow().displayed;
         let viewport_width = f32::from(window.bounds().size.width);
-        let max_left = (viewport_width - PROFILE_MENU_VIEWPORT_MARGIN_PX - 224.0).max(8.0);
-        let left = (anchor.left + anchor.width + 8.0).min(max_left).max(8.0);
+        let surface_left = f32::from(self.profile_tip_surface_bounds.borrow().as_ref()?.left());
+        let minimum_left = PROFILE_MENU_VIEWPORT_MARGIN_PX - surface_left;
+        let max_left = (viewport_width - PROFILE_MENU_VIEWPORT_MARGIN_PX - 224.0 - surface_left)
+            .max(minimum_left);
+        let left = (anchor.left + anchor.width + 8.0).clamp(minimum_left, max_left);
         Some(
             div()
                 .id("artisan-profile-usage-tooltip")
