@@ -206,7 +206,7 @@ impl RefreshSwap {
 }
 
 /// Paint offsets per target: shown readings sit at zero; the hidden
-/// reading exits downward while action and spinner rest above, matching the
+/// reading exits upward while action and spinner rest below, matching the
 /// source hidden frames. A reversal keeps interpolating its retained
 /// offset, so the sign can never flip mid-flight.
 fn swap_offsets_for(to: [f32; 3]) -> [f32; 3] {
@@ -1561,13 +1561,17 @@ impl NativeApplication {
             .entry(engine_id.to_owned())
             .or_insert_with(RefreshSwap::resting);
         let to = target.values();
-        // A reduced-motion change settles immediately even when the target
-        // itself is unchanged.
+        // A reduced-motion change settles everything immediately even when
+        // the target itself is unchanged, so already-queued steps observe
+        // settled endpoints instead of regressing toward stale ones.
         if reduce_motion {
-            swap.displayed = to;
-            swap.off_displayed = swap_offsets_for(to);
+            let off = swap_offsets_for(to);
             swap.from = to;
-            swap.off_from = swap.off_displayed;
+            swap.displayed = to;
+            swap.to = to;
+            swap.off_from = off;
+            swap.off_displayed = off;
+            swap.off_to = off;
             return;
         }
         if swap.to == to {
@@ -1648,6 +1652,11 @@ impl NativeApplication {
         let mut running = false;
         let mut swaps = self.profile_refresh_swap.borrow_mut();
         for swap in swaps.values_mut() {
+            // Fully settled entries are never re-driven: their clock may be
+            // newer than their values after a reduced-motion settle.
+            if swap.displayed == swap.to && swap.off_displayed == swap.off_to {
+                continue;
+            }
             let elapsed = now_ms.saturating_sub(swap.started_ms).max(0) as f64;
             let progress = (elapsed / total_ms).clamp(0.0, 1.0);
             let eased = MotionCurve::EaseInOut.sample(progress);
@@ -8499,8 +8508,8 @@ mod tests {
             assert!(swap.displayed[0] > 0.0 && swap.displayed[0] < 1.0);
             assert!(swap.displayed[1] > 0.0 && swap.displayed[1] < 1.0);
             // Offsets travel with opacity: the leaving reading heads
-            // downward from zero while the entering action arrives from
-            // above, neither jumping to an endpoint.
+            // upward from zero while the entering action arrives from
+            // below, neither jumping to an endpoint.
             assert!(swap.off_displayed[0] > -4.0 && swap.off_displayed[0] < 0.0);
             assert!(swap.off_displayed[1] > 0.0 && swap.off_displayed[1] < 4.0);
         });
@@ -8518,7 +8527,7 @@ mod tests {
             assert!(swap.from[0] > 0.0 && swap.from[0] < 1.0);
             assert!(swap.from[1] > 0.0 && swap.from[1] < 1.0);
             // The retained offsets continue without sign flips: the
-            // reading keeps leaving downward, the action returns upward.
+            // reading keeps leaving upward, the action returns downward.
             assert!(swap.off_from[0] > -4.0 && swap.off_from[0] < 0.0);
             assert!(swap.off_from[1] > 0.0 && swap.off_from[1] < 4.0);
             assert_eq!(swap.off_to, [0.0, 4.0, 4.0]);
@@ -8532,6 +8541,26 @@ mod tests {
             let swap = binding.get("swap-test").expect("swap state");
             assert_eq!(swap.displayed, [1.0, 0.0, 0.0]);
             assert_eq!(swap.off_displayed, [0.0, 4.0, 4.0]);
+        });
+
+        // A reduced-motion retarget with a changed target settles every
+        // endpoint at once, and a queued step afterwards cannot regress.
+        cx.update(|_, app| {
+            let application = view.read(app);
+            application.retarget_profile_swap("swap-test", super::RefreshSwapTarget::Loading, true);
+            let now = super::profile_usage_now_ms();
+            application
+                .profile_refresh_swap
+                .borrow_mut()
+                .get_mut("swap-test")
+                .expect("swap state")
+                .started_ms = now;
+            assert!(!application.step_profile_swaps(now));
+            let binding = application.profile_refresh_swap.borrow();
+            let swap = binding.get("swap-test").expect("swap state");
+            assert_eq!(swap.displayed, [0.0, 0.0, 1.0]);
+            assert_eq!(swap.to, [0.0, 0.0, 1.0]);
+            assert_eq!(swap.off_displayed, [-4.0, 4.0, 0.0]);
         });
 
         // A reduced-motion change settles mid-flight even though the target
