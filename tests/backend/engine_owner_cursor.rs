@@ -696,7 +696,11 @@ fn cursor_quota_windows_cover_individual_pooled_and_remaining_math() {
         json!({}),
         json!({ "planUsage": null }),
         json!({ "planUsage": { "totalSpend": "lots" } }),
-        json!({ "planUsage": { "totalSpend": 1e999 } }),
+        // The macro cannot spell 1e999 (denied as an overflowing literal),
+        // so a runtime parse supplies the same JSON text: the parser
+        // saturates it to infinity, which must also map to no windows.
+        serde_json::from_str::<Value>(r#"{"planUsage":{"totalSpend":1e999}}"#)
+            .expect("non-finite spend fixture parses"),
     ] {
         assert!(
             map_cursor_quota_windows(&malformed).is_empty(),
