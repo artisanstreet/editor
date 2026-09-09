@@ -1218,6 +1218,9 @@ fn prepare_catalog_context(request: CatalogRequest) -> Result<CatalogContext, Ex
             return Err(Execution::Completed);
         }
         super::InternalLaunch::Grok(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
         super::InternalLaunch::Cursor(_) => {
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
@@ -3147,6 +3150,8 @@ async fn prepare_configured_process(
             return Err(request.fail(EngineOperationError::Configuration));
         }
         crate::engine_owner::InternalLaunch::Grok(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
+        }
         crate::engine_owner::InternalLaunch::Cursor(_) => {
             return Err(request.fail(EngineOperationError::Configuration));
         }
