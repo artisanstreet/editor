@@ -1274,7 +1274,7 @@ impl NativeApplication {
     /// Source `bg-border/50` for dropdown separators: the shared border
     /// token with its original alpha multiplied by one half rather than
     /// overridden, so an already-translucent border stays proportional.
-    fn profile_separator_paint(&self) -> gpui::Paint {
+    fn profile_separator_paint(&self) -> gpui::Hsla {
         let border = self.theme.colors.border;
         border.with_alpha(border.a * 0.5).to_paint()
     }
@@ -1603,7 +1603,7 @@ impl NativeApplication {
             .any(|current| current == &engine_id);
         let mark_asset = engine_asset(&engine_id);
         let accent = engine_accent(&engine_id)
-            .map(|hex| gpui::rgb_to_hsla(gpui::rgb(hex)).to_paint())
+            .map(|hex| gpui::rgb_to_hsla(gpui::rgb(hex)))
             .unwrap_or_else(|| self.theme.colors.primary.to_paint());
         let dim = self.theme.colors.foreground.with_alpha(0.11).to_paint();
         let mut block = div().flex().flex_col().gap(px(6.0)).px(px(8.0)).py(px(4.0));
@@ -1707,11 +1707,14 @@ impl NativeApplication {
 
     /// Inline checked/refresh control: the provider's own "last checked"
     /// reading at rest, swapping to a foreground Refresh action on hover or
-    /// keyboard focus and to a spinner while its refresh is in flight. The
-    /// reading stays mounted under the spinner so the control never
-    /// collapses width. Withheld until the engine has answered at least
-    /// once. Keyboard focus plus Enter/Space refreshes once through the same
-    /// path as a click.
+    /// keyboard focus and to a spinner while its refresh is in flight. All
+    /// three readings share one grid cell like the source `t-checked`
+    /// grid, so the width is always the max of reading and action and the
+    /// swap never shifts layout; each state carries the source
+    /// opacity/blur(2px) values. TranslateY and the 150ms interpolation
+    /// have no GPUI counterpart and stay instant (see evidence notes).
+    /// Withheld until the engine has answered at least once. Keyboard focus
+    /// plus Enter/Space refreshes once through the same path as a click.
     fn desktop_profile_usage_refresh(
         &self,
         engine_id: &str,
@@ -1732,41 +1735,46 @@ impl NativeApplication {
             spread_radius: self.theme.interaction.focus_ring_width,
             inset: false,
         }];
+        // One grid cell shared by all three readings, so the control width
+        // is always the max of reading and action like the source
+        // `t-checked` grid — never collapsing, never shifting on swap.
         let mut control = div()
+            .id(selector.clone())
             .debug_selector({
                 let selector = selector.clone();
                 move || selector.clone()
             })
             .track_focus(&focus)
             .group(group.clone())
-            .relative()
-            .flex()
-            .items_center()
-            .justify_end()
+            .grid()
             .flex_shrink_0()
             .text_size(px(12.0))
             .line_height(px(16.0))
             .focus(move |style| style.shadow(ring))
             .child(
                 div()
+                    .col_start(1)
+                    .row_start(1)
                     .whitespace_nowrap()
                     .text_color(theme.secondary)
                     .child(checked.to_owned())
                     .opacity(if refreshing || focused { 0.0 } else { 1.0 })
-                    .group_hover(group.clone(), |style| style.opacity(0.0)),
+                    .blur(px(if refreshing || focused { 2.0 } else { 0.0 }))
+                    .group_hover(group.clone(), |style| style.opacity(0.0).blur(px(2.0))),
             )
             .child(
                 div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
+                    .col_start(1)
+                    .row_start(1)
                     .flex()
                     .items_center()
                     .justify_end()
                     .opacity(if focused && !refreshing { 1.0 } else { 0.0 })
+                    .blur(px(if focused && !refreshing { 0.0 } else { 2.0 }))
                     .group_hover(group.clone(), |style| {
-                        style.opacity(if refreshing { 0.0 } else { 1.0 })
+                        style
+                            .opacity(if refreshing { 0.0 } else { 1.0 })
+                            .blur(px(if refreshing { 2.0 } else { 0.0 }))
                     })
                     .child(
                         div()
@@ -1777,14 +1785,13 @@ impl NativeApplication {
             )
             .child(
                 div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
+                    .col_start(1)
+                    .row_start(1)
                     .flex()
                     .items_center()
                     .justify_end()
                     .opacity(if refreshing { 1.0 } else { 0.0 })
+                    .blur(px(if refreshing { 0.0 } else { 2.0 }))
                     .child(
                         FadeArc::new(SharedString::from(selector.clone()), self.theme)
                             .size(px(14.0))
@@ -1818,8 +1825,8 @@ impl NativeApplication {
         &self,
         engine_id: &str,
         window: &NativeUsageWindow,
-        accent: gpui::Paint,
-        dim: gpui::Paint,
+        accent: gpui::Hsla,
+        dim: gpui::Hsla,
         theme: DesktopTheme,
         cx: &Context<Self>,
     ) -> Div {
@@ -1884,6 +1891,7 @@ impl NativeApplication {
         .left_0()
         .size_full();
         div()
+            .id(meter_selector.clone())
             .relative()
             .flex()
             .items_center()
@@ -1945,7 +1953,11 @@ impl NativeApplication {
     /// row with the source 8px offset and clamped into the viewport. The
     /// number is the shared tweened remaining percentage, so moving across
     /// rows carries one value onto the next.
-    fn desktop_profile_usage_tooltip(&self, window: &Window, theme: DesktopTheme) -> Option<Div> {
+    fn desktop_profile_usage_tooltip(
+        &self,
+        window: &Window,
+        theme: DesktopTheme,
+    ) -> Option<Stateful<Div>> {
         let (engine_id, window_id) = self.profile_meter_hover.borrow().clone()?;
         let ((anchor_engine, anchor_window), anchor) = self.profile_tip_anchor.borrow().clone()?;
         if (engine_id.clone(), window_id.clone()) != (anchor_engine, anchor_window) {
@@ -7099,8 +7111,8 @@ mod tests {
     };
     use crate::composer::{ComposerState, DraftDisposition};
     use crate::desktop_shell::{
-        DESKTOP_COMPOSER_SELECTOR, DESKTOP_EMPTY_SELECTOR, DESKTOP_HOME_SELECTOR,
-        DESKTOP_OFFLINE_SELECTOR, DESKTOP_SIDEBAR_SELECTOR, DESKTOP_TITLEBAR_SELECTOR,
+        DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, DESKTOP_OFFLINE_SELECTOR,
+        DESKTOP_SIDEBAR_SELECTOR, DESKTOP_TITLEBAR_SELECTOR,
     };
     use crate::native_command_menu::COMMAND_MENU_DROPDOWN_SELECTOR;
     use crate::native_profile_usage::{
@@ -7130,7 +7142,6 @@ mod tests {
     use artisan_ui::button::{
         Button, ButtonContent, ButtonSize, ButtonStyle, ButtonVariant, FocusVisibility,
     };
-    use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
     use gpui::{Context, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext};
