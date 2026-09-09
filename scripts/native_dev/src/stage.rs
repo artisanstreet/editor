@@ -118,31 +118,23 @@ impl DevLock {
     }
 }
 
-/// Stages one binary into the scratch directory.
-///
-/// Copies only when the bytes differ from the currently active binary, so
-/// the rewritten/reused counts stay honest across repeat invocations.
-/// Returns `true` when the scratch copy was (re)written.
+/// Copies one file, creating its parent directory.
 ///
 /// # Errors
 ///
-/// Returns [`DevError::Stage`] when staging fails.
-pub fn stage_one_binary(source: &Path, staging: &Path, active: &Path) -> Result<bool, DevError> {
-    let incoming = hash_file(source)?;
-    if active.is_file() && hash_file(active).is_ok_and(|current| current == incoming) {
-        return Ok(false);
-    }
-    if let Some(parent) = staging.parent() {
+/// Returns [`DevError::Stage`] when the copy fails.
+fn stage_copy(source: &Path, destination: &Path) -> Result<(), DevError> {
+    if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|_| DevError::Stage {
             stage: "stage",
             reason: format!("cannot create {}", parent.display()),
         })?;
     }
-    fs::copy(source, staging).map_err(|_| DevError::Stage {
+    fs::copy(source, destination).map_err(|_| DevError::Stage {
         stage: "stage",
-        reason: format!("cannot stage {}", staging.display()),
+        reason: format!("cannot stage {}", destination.display()),
     })?;
-    Ok(true)
+    Ok(())
 }
 
 /// Outcome counts for one staging run.
@@ -176,6 +168,14 @@ pub fn stage_binaries(set: &BinarySet, paths: &DevPaths) -> Result<StageCounts, 
 }
 
 fn stage_binaries_inner(set: &BinarySet, paths: &DevPaths) -> Result<StageCounts, DevError> {
+    // Capture the source digests first: activation later asserts the
+    // staged bytes equal these, so a corrupt copy or a tampered scratch
+    // tree can never be "verified" against its own bytes.
+    let mut sources = Vec::with_capacity(4);
+    for (relative, source) in set.entries() {
+        let digest = hash_file(&source)?;
+        sources.push((relative, source, digest));
+    }
     let staging = paths.staging_root();
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|_| DevError::Stage {
@@ -185,23 +185,23 @@ fn stage_binaries_inner(set: &BinarySet, paths: &DevPaths) -> Result<StageCounts
     }
     let mut rewritten = 0_usize;
     let mut reused = 0_usize;
-    for (relative, source) in set.entries() {
-        let staged = staging.join(&relative);
-        let active = paths.version_root.join(&relative);
-        if stage_one_binary(&source, &staged, &active)? {
-            rewritten += 1;
-        } else {
+    for (relative, source, expected) in &sources {
+        let staged = staging.join(relative);
+        let active = paths.version_root.join(relative);
+        if active.is_file() && hash_file(&active).is_ok_and(|current| current == *expected) {
             reused += 1;
-            if let Some(parent) = staged.parent() {
-                fs::create_dir_all(parent).map_err(|_| DevError::Stage {
-                    stage: "stage",
-                    reason: format!("cannot create {}", parent.display()),
-                })?;
-            }
-            fs::copy(&active, &staged).map_err(|_| DevError::Stage {
+            stage_copy(&active, &staged)?;
+        } else {
+            stage_copy(source, &staged)?;
+            rewritten += 1;
+        }
+        // Changed or not, the scratch tree must equal the captured source
+        // bytes before anything verifies or activates it.
+        if hash_file(&staged)? != *expected {
+            return Err(DevError::Stage {
                 stage: "stage",
-                reason: format!("cannot stage {}", staged.display()),
-            })?;
+                reason: format!("staged copy does not match source: {}", staged.display()),
+            });
         }
     }
     write_payload_manifest(&staging)?;
@@ -223,24 +223,25 @@ fn stage_binaries_inner(set: &BinarySet, paths: &DevPaths) -> Result<StageCounts
 /// Stages the permanent `ae` launcher beside the home (outside versions).
 ///
 /// Compared by hash like the versioned binaries; identical launchers are
-/// left alone so a running session keeps its file.
+/// left alone so a running session keeps its file. The staged copy is
+/// asserted against the captured source digest before returning.
 fn permanent_launcher(set: &BinarySet, paths: &DevPaths) -> Result<(), DevError> {
+    let expected = hash_file(&set.ae)?;
     if paths.permanent_ae.is_file()
-        && hash_file(&paths.permanent_ae)
-            .is_ok_and(|current| hash_file(&set.ae).is_ok_and(|incoming| current == incoming))
+        && hash_file(&paths.permanent_ae).is_ok_and(|current| current == expected)
     {
         return Ok(());
     }
-    if let Some(parent) = paths.permanent_ae.parent() {
-        fs::create_dir_all(parent).map_err(|_| DevError::Stage {
+    stage_copy(&set.ae, &paths.permanent_ae)?;
+    if hash_file(&paths.permanent_ae)? != expected {
+        return Err(DevError::Stage {
             stage: "stage",
-            reason: format!("cannot create {}", parent.display()),
-        })?;
+            reason: format!(
+                "staged copy does not match source: {}",
+                paths.permanent_ae.display()
+            ),
+        });
     }
-    fs::copy(&set.ae, &paths.permanent_ae).map_err(|_| DevError::Stage {
-        stage: "stage",
-        reason: format!("cannot stage {}", paths.permanent_ae.display()),
-    })?;
     Ok(())
 }
 

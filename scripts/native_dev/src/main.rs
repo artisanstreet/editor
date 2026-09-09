@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use native_dev::{
     Action, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, InstanceOutcome,
-    StartupWait, locate_binaries, provision_forge_home, provision_manifest, refuse_live_forge,
-    resolve_dev_dir, spawn_editor, stage_binaries, stage_line, staged_editor, staged_forge,
-    stop_editor, usage, wait_for_startup,
+    StartupWait, clear_stale_receipt, fresh_receipt_path, locate_binaries, provision_forge_home,
+    provision_manifest, refuse_live_forge, resolve_dev_dir, spawn_editor, stage_binaries,
+    stage_line, staged_editor, staged_forge, stop_editor, usage, wait_for_startup,
 };
 
 /// Number of stages in a full stage-and-launch run.
@@ -77,10 +77,9 @@ fn run() -> Result<u8, Outcome> {
         stage_line(2, total, "binaries", &binaries.forge.display().to_string())
     );
 
-    let lock = DevLock::acquire(&paths).map_err(fail)?;
+    let _lock = DevLock::acquire(&paths).map_err(fail)?;
     refuse_live_forge(&paths, &staged_forge(&paths)).map_err(fail)?;
     println!("{}", stage_line(3, total, "lock", "staging lock held"));
-
     let outcome = provision_forge_home(&paths).map_err(fail)?;
     let detail = match outcome {
         InstanceOutcome::Created => "fresh identity minted",
@@ -108,7 +107,6 @@ fn run() -> Result<u8, Outcome> {
         "{}",
         stage_line(6, total, "manifest", "verified by shipping loader")
     );
-    drop(lock);
 
     if args.stage_only {
         println!(
@@ -119,8 +117,12 @@ fn run() -> Result<u8, Outcome> {
         return Ok(0);
     }
 
-    let receipt_path = paths.receipt_path();
-    let _ = std::fs::remove_file(&receipt_path);
+    // `_lock` stays held for the whole owned Editor lifetime: another
+    // runner must not stage or start on this home before the Forge receipt
+    // exists. It releases when this process exits; the Editor child never
+    // acquires it.
+    let receipt_path = fresh_receipt_path(&paths);
+    clear_stale_receipt(&receipt_path).map_err(fail)?;
     let editor = staged_editor(&paths);
     println!(
         "dev: launching staged editor {} on its owned forge (close the window to stop)",

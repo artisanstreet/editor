@@ -45,6 +45,40 @@ pub const DEV_STARTUP_POLL_MS: u64 = 100;
 /// Maximum receipts-stage text retained for diagnostics.
 pub const MAX_RECEIPT_TEXT: usize = 256;
 
+/// Per-launch receipt path inside the dev directory.
+///
+/// The process identity makes each launch's receipt unique, so a stale
+/// receipt from a crashed run can never confirm a new launch.
+#[must_use]
+pub fn fresh_receipt_path(paths: &DevPaths) -> PathBuf {
+    paths
+        .dev_dir
+        .join(format!("startup-receipt-{}.json", std::process::id()))
+}
+
+/// Removes a stale receipt before spawning the Editor.
+///
+/// A missing file is the expected first-launch state. Any other removal
+/// failure aborts the launch: silently waiting on an unreadable path
+/// would read a stale `ready` first.
+///
+/// # Errors
+///
+/// Returns [`DevError::Stage`] when an existing receipt cannot be removed.
+pub fn clear_stale_receipt(path: &Path) -> Result<(), DevError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DevError::Stage {
+            stage: "launch",
+            reason: format!(
+                "cannot clear stale startup receipt {}: {error}",
+                path.display()
+            ),
+        }),
+    }
+}
+
 /// Staged Editor binary launched by every run.
 #[must_use]
 pub fn staged_editor(paths: &DevPaths) -> PathBuf {
@@ -189,7 +223,7 @@ pub fn wait_for_startup(child: &mut Child, receipt_path: &Path, timeout: Duratio
             return StartupWait::Timeout;
         }
         std::thread::sleep(
-            DEV_STARTUP_POLL_MS.min(
+            Duration::from_millis(DEV_STARTUP_POLL_MS).min(
                 deadline
                     .checked_duration_since(Instant::now())
                     .unwrap_or(Duration::ZERO),

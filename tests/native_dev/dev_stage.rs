@@ -12,7 +12,10 @@ use std::{
 };
 
 use artisan_editor_cli::payload;
-use native_dev::{BinarySet, DevError, DevLock, DevPaths, stage_binaries, verify_payload_dir};
+use native_dev::{
+    BinarySet, DevError, DevLock, DevPaths, clear_stale_receipt, fresh_receipt_path,
+    stage_binaries, verify_payload_dir,
+};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -162,5 +165,62 @@ fn partially_changed_update_stages_only_differences() {
         std::fs::read(&active_forge).expect("reads"),
         b"new-forge-bytes"
     );
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn tampered_active_byte_is_repaired_from_unchanged_source() {
+    let dev_dir = scratch_dev_dir("repair");
+    let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
+    let sources = dev_dir.join("sources");
+    std::fs::create_dir_all(&sources).expect("sources");
+    let set = fixture_set("v1", &sources);
+    stage_binaries(&set, &paths).expect("first activates");
+
+    // Tamper the installed byte directly, bypassing the stager: the
+    // payload gate must refuse it, and the next stage from the unchanged
+    // source must repair exactly that byte.
+    let active_forge = paths.version_bin.join(native_dev::exe_name("forge"));
+    std::fs::write(&active_forge, b"tampered-installed-byte").expect("tamper");
+    assert!(
+        verify_payload_dir(&paths.version_root).is_err(),
+        "tampered active version must not verify"
+    );
+
+    let counts = stage_binaries(&set, &paths).expect("repair activates");
+    assert_eq!((counts.rewritten, counts.reused), (1, 3));
+    assert_eq!(
+        std::fs::read(&active_forge).expect("reads"),
+        b"fixture-v1-forge",
+        "repeat stage repairs the installed byte from the source"
+    );
+    verify_payload_dir(&paths.version_root).expect("repaired payload verifies");
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn stale_receipt_removal_is_checked_before_launch() {
+    let dev_dir = scratch_dev_dir("receipt-clear");
+    let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
+
+    let missing = fresh_receipt_path(&paths);
+    clear_stale_receipt(&missing).expect("missing receipt is the first-launch state");
+
+    let stale = fresh_receipt_path(&paths);
+    std::fs::create_dir_all(stale.parent().expect("receipt parent")).expect("receipt parent");
+    std::fs::write(&stale, b"stale ready").expect("stale receipt");
+    clear_stale_receipt(&stale).expect("stale receipt is removed");
+    assert!(!stale.exists(), "no stale ready may confirm a new launch");
+
+    // A directory at the receipt path cannot be removed as a file: the
+    // launch must fail instead of waiting on an unreadable path.
+    let blocked = dev_dir.join("blocked.json");
+    std::fs::create_dir_all(&blocked).expect("blocking directory");
+    let error = clear_stale_receipt(&blocked).expect_err("blocked removal fails");
+    assert!(
+        matches!(error, DevError::Stage { .. }),
+        "unexpected: {error}"
+    );
+    assert!(error.to_string().contains("receipt"), "unexpected: {error}");
     cleanup(&dev_dir);
 }

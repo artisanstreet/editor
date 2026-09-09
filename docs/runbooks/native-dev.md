@@ -67,7 +67,10 @@ Seven plain-text stages, no TTY codes, suitable for piping:
 6. **manifest** — write `<home>/installation.json` (`active`/`complete`,
    `active_version: "dev"`) last and validate it with the shipping
    `InstallationManifest::load` (previous manifest restored on failure).
-7. **startup/launch** — delete any stale receipt, spawn the **staged**
+7. **startup/launch** — Mint a per-launch receipt path
+   (`startup-receipt-<pid>.json`, so a stale receipt can never confirm a
+   new launch), fail closed when a stale file cannot be removed, then spawn
+   the **staged**
    Editor with `ARTISAN_HOME=<home>`, `ARTISAN_DEV_STARTUP_RECEIPT=<dev>/
    startup-receipt.json`, and the manual-forge escape hatches stripped.
    Wait up to 90 seconds for the receipt: `ready` (authenticated QUIC +
@@ -135,6 +138,7 @@ rejections hold.
 | `staged payload is not verified: ...` | Scratch tree drifted | Active version untouched; fix the cause and retry |
 | `shipping manifest loader rejected the dev home: ...` | Manifest would not launch | Previous manifest restored; report |
 | `existing dev instance is invalid: ...` | `instance-v2.json` corrupted | Delete the file (a fresh identity is minted; dev data stays) |
+| `cannot clear stale startup receipt ...` | Unremovable file at the per-launch receipt path | Remove it by hand; the launch refuses rather than reading stale `ready` |
 | `editor startup not confirmed ...` / `stage 7/7 startup ... failed` | Receipt `failed`, timeout, or early exit | Stage detail names the phase; owned Editor already stopped |
 | `path must be absolute` | Relative `--dev-dir` | Pass an absolute path |
 | `invalid arguments: ...` | Unknown flag | See `--help` |
@@ -186,5 +190,9 @@ launch, and QUIC connection await the root native gate.
 - Known follow-ups for the root/Bazel worker: `cargo generate-lockfile`
   + `Cargo.Bazel.lock` repin for the new member (workspace-pinned
   `serde_json`/`thiserror`/`fs2`, `sha2 = "=0.10.9"`); then run the
-  acceptance procedure above. `dev.ps1 --locked` requires the
-  re-resolved lock first.
+  acceptance procedure above. `dev.ps1` (both its `cargo metadata
+  --locked` target-dir probe and its `--locked` build) requires the
+  re-resolved lock first. `dev.ps1` resolves the real Cargo target
+  directory from metadata, so `CARGO_TARGET_DIR`, config `target-dir`
+  (including relative dirs and paths with spaces), and the shared
+  vendor cache all work.

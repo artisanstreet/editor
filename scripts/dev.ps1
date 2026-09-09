@@ -28,7 +28,6 @@ if ([string]::IsNullOrWhiteSpace($DevDir)) {
     $DevDir = Join-Path $repo ".dist/dev"
 }
 $config = if ($Release) { "release" } else { "debug" }
-$targetBin = Join-Path (Join-Path $repo "target") $config
 
 function Write-DevStep($message) {
     Write-Host "dev.ps1: $message"
@@ -69,6 +68,31 @@ function Ensure-VsEnvironment {
     }
 }
 
+function Get-TargetBinDir {
+    # Resolve the real Cargo target directory (CARGO_TARGET_DIR, config
+    # target-dir, or default) instead of assuming repo/target, so the
+    # shared vendor cache and paths with spaces both work.
+    Push-Location $repo
+    try {
+        $metadataJson = & cargo metadata --locked --no-deps --format-version 1 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo metadata failed with exit $LASTEXITCODE (resolve Cargo.lock first): $metadataJson"
+        }
+        $metadata = $metadataJson | ConvertFrom-Json
+        $targetDir = $metadata.target_directory
+        if ([string]::IsNullOrWhiteSpace($targetDir)) {
+            throw "cargo metadata reported no target directory"
+        }
+        if (-not [IO.Path]::IsPathRooted($targetDir)) {
+            $targetDir = Join-Path $metadata.workspace_root $targetDir
+        }
+        return Join-Path $targetDir $config
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 function Invoke-CargoBuild {
     $packages = @(
         "artisan-editor-cli",
@@ -99,6 +123,8 @@ function Invoke-CargoBuild {
 Ensure-VsEnvironment
 Invoke-CargoBuild
 
+$targetBin = Get-TargetBinDir
+Write-DevStep "target binaries in $targetBin"
 $runner = Join-Path $targetBin "dev.exe"
 if (-not (Test-Path $runner)) {
     throw "dev runner not found at $runner after a successful build"
