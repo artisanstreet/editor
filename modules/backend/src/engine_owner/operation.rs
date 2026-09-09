@@ -5001,7 +5001,7 @@ mod intake_attachment_tests {
             Err(EngineOperationError::Configuration)
         );
         assert_eq!(
-            map_hermes_turn_error(super::hermes::HermesTurnError::ImagesUnsupported),
+            map_hermes_turn_error(crate::engine_owner::hermes::HermesTurnError::ImagesUnsupported),
             EngineOperationError::Configuration
         );
         assert!(check_turn_attachment_applicability(EngineId::Hermes, &text_prompt()).is_ok());
