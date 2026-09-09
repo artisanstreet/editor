@@ -56,7 +56,7 @@ use artisan_assets::AssetId;
 use gpui::{
     App, AssetSource, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId,
     IntoElement, LayoutId, Pixels, SharedString, StyleRefinement, Styled, Svg, TextStyleRefinement,
-    Window, svg,
+    Window, point, px, size, svg,
 };
 
 #[path = "full_color_svg.rs"]
@@ -124,8 +124,78 @@ enum GlyphRoute {
 ///   duration of one delegated paint call and is re-resolved from the live
 ///   stack every pass, so recolored ancestors can never go stale through a
 ///   previously frozen value.
+///
+/// Paint fits the intrinsic catalog aspect inside the laid-out square without
+/// touching layout or hitboxes: the tinted vendor route rasterizes
+/// width-only (`SvgSize::Size` scales intrinsic height from the requested
+/// width), so a tall `viewBox` such as Cursor `0 0 466.73 532.09` would paint
+/// ~18.24 px tall in a 16 px box and center-overflow. The paint phase below
+/// instead delegates the inner `Svg` with a centered `contain` rect derived
+/// from catalog `view_box` metadata (see [`contained_tinted_bounds`]).
 struct TintedSvg {
     svg: Svg,
+    asset_id: AssetId,
+}
+
+/// Parses catalog `viewBox` metadata (`"min-x min-y width height"`) into
+/// intrinsic dimensions. Returns `None` for absent, malformed, non-finite,
+/// or non-positive values so callers fall back to the laid-out bounds
+/// unchanged.
+fn view_box_dims(view_box: Option<&str>) -> Option<(f32, f32)> {
+    let mut parts = view_box?.split_whitespace();
+    let _min_x: f32 = parts.next()?.parse().ok()?;
+    let _min_y: f32 = parts.next()?.parse().ok()?;
+    let width: f32 = parts.next()?.parse().ok()?;
+    let height: f32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some((width, height))
+}
+
+/// Contains the intrinsic catalog aspect inside `outer` and centers it,
+/// preserving the laid-out box, hitbox, and origin symmetry.
+///
+/// Square artwork returns `outer` unchanged; tall artwork stays height-bound
+/// (narrowed and horizontally centered), wide artwork stays width-bound.
+/// Malformed or absent metadata returns `outer` unchanged.
+///
+/// Rounding note: the rect is exact in logical pixels; the vendor
+/// `paint_svg` path snaps bounds and ceils the supersampled tile, so the
+/// final sprite can exceed this rect by at most one device pixel
+/// (~0.5 logical px at 1x) while staying centered — far below the ~2.24 px
+/// tall overflow this replaces for a 16 px Cursor box.
+fn contained_tinted_bounds(outer: Bounds<Pixels>, view_box: Option<&str>) -> Bounds<Pixels> {
+    let Some((intrinsic_width, intrinsic_height)) = view_box_dims(view_box) else {
+        return outer;
+    };
+    let outer_width = f32::from(outer.size.width);
+    let outer_height = f32::from(outer.size.height);
+    if !outer_width.is_finite()
+        || !outer_height.is_finite()
+        || outer_width <= 0.0
+        || outer_height <= 0.0
+    {
+        return outer;
+    }
+    let intrinsic_ratio = intrinsic_width / intrinsic_height;
+    let outer_ratio = outer_width / outer_height;
+    let inner = if outer_ratio > intrinsic_ratio {
+        size(px(outer_height * intrinsic_ratio), px(outer_height))
+    } else {
+        size(px(outer_width), px(outer_width / intrinsic_ratio))
+    };
+    Bounds::new(
+        outer.origin
+            + point(
+                (outer.size.width - inner.width) / 2.0,
+                (outer.size.height - inner.height) / 2.0,
+            ),
+        inner,
+    )
 }
 
 /// Scoped-delegation helper for the tinted route's delegated paint pass.
@@ -239,11 +309,15 @@ impl Element for TintedSvg {
         // versus live ambient, applies any temporary tint on the real inner
         // Svg, delegates exactly once via the closure below to the REAL
         // `Svg::paint`, and restores the prior refinement exactly.
+        // Layout, prepaint, and hitboxes keep the original square `bounds`;
+        // only the delegated inner paint is contained to the intrinsic
+        // catalog aspect so a tall viewBox cannot overflow its box.
+        let inner = contained_tinted_bounds(bounds, artisan_assets::get(self.asset_id).view_box);
         with_scoped_tint_delegation(&mut self.svg, window, cx, |svg, window, cx| {
             svg.paint(
                 global_id,
                 inspector_id,
-                bounds,
+                inner,
                 request_layout,
                 prepaint,
                 window,
@@ -286,6 +360,7 @@ pub fn asset_glyph(id: AssetId) -> AssetGlyph {
     match artisan_assets::get(id).presentation {
         Presentation::Tinted => AssetGlyph(GlyphRoute::Tinted(TintedSvg {
             svg: svg().path(id.as_str()),
+            asset_id: id,
         })),
         Presentation::FullColor => AssetGlyph(GlyphRoute::FullColor(FullColorSvg::new(id))),
     }

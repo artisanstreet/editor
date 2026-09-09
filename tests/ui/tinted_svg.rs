@@ -40,7 +40,7 @@ use crate::asset_seam::{AssetGlyph, asset_glyph};
 use crate::icon::{IconSize, IconStyle, IconTint, icon};
 use crate::theme::{ArtisanTheme, ThemeMode};
 
-use super::{GlyphRoute, TintedSvg, with_scoped_tint_delegation};
+use super::{GlyphRoute, TintedSvg, contained_tinted_bounds, with_scoped_tint_delegation};
 
 /// Pure red used as an unambiguous ambient input.
 const RED: Hsla = gpui::hsla(0., 1., 0.5, 1.);
@@ -68,6 +68,7 @@ fn fresh_tinted() -> TintedSvg {
         svg: gpui::svg()
             .path(crate::AssetId::TABLER_CHECK.as_str())
             .size(px(16.0)),
+        asset_id: crate::AssetId::TABLER_CHECK,
     }
 }
 
@@ -513,4 +514,80 @@ fn real_paint_lifecycle_executes_through_the_helper_without_panicking(cx: &mut T
         size(px(16.0), px(16.0)),
         |_window, _app| div().size(px(16.0)).text_color(RED).child(tinted),
     );
+}
+
+/// Catalog Cursor viewBox shared by every Cursor surface (picker,
+/// onboarding, profile): one catalog asset, so one seam fit.
+const CURSOR_VIEW_BOX: &str = "0 0 466.73 532.09";
+
+fn outer_square(edge: f32) -> Bounds<Pixels> {
+    Bounds::new(point(px(0.0), px(0.0)), size(px(edge), px(edge)))
+}
+
+fn assert_within(outer: Bounds<Pixels>, inner: Bounds<Pixels>) {
+    let outer_min_x = f32::from(outer.origin.x);
+    let outer_min_y = f32::from(outer.origin.y);
+    let outer_max_x = outer_min_x + f32::from(outer.size.width);
+    let outer_max_y = outer_min_y + f32::from(outer.size.height);
+    let inner_min_x = f32::from(inner.origin.x);
+    let inner_min_y = f32::from(inner.origin.y);
+    let inner_max_x = inner_min_x + f32::from(inner.size.width);
+    let inner_max_y = inner_min_y + f32::from(inner.size.height);
+    assert!(inner_min_x >= outer_min_x - 0.001, "inner left escapes outer");
+    assert!(inner_min_y >= outer_min_y - 0.001, "inner top escapes outer");
+    assert!(inner_max_x <= outer_max_x + 0.001, "inner right escapes outer");
+    assert!(inner_max_y <= outer_max_y + 0.001, "inner bottom escapes outer");
+}
+
+#[test]
+fn tall_cursor_stays_height_bound_and_centered() {
+    for edge in [16.0, 14.0] {
+        let outer = outer_square(edge);
+        let inner = contained_tinted_bounds(outer, Some(CURSOR_VIEW_BOX));
+        let expected_width = edge * 466.73 / 532.09;
+        assert!((f32::from(inner.size.height) - edge).abs() < 0.001);
+        assert!((f32::from(inner.size.width) - expected_width).abs() < 0.01);
+        assert!((f32::from(inner.origin.y) - 0.0).abs() < 0.001);
+        assert!((f32::from(inner.origin.x) - (edge - expected_width) / 2.0).abs() < 0.01);
+        assert_within(outer, inner);
+    }
+}
+
+#[test]
+fn square_artwork_is_unchanged() {
+    let outer = outer_square(16.0);
+    let inner = contained_tinted_bounds(outer, Some("0 0 24 24"));
+    assert!((f32::from(inner.size.width) - 16.0).abs() < 0.001);
+    assert!((f32::from(inner.size.height) - 16.0).abs() < 0.001);
+    assert!((f32::from(inner.origin.x) - 0.0).abs() < 0.001);
+    assert!((f32::from(inner.origin.y) - 0.0).abs() < 0.001);
+}
+
+#[test]
+fn wide_artwork_is_width_bound_and_centered() {
+    let outer = outer_square(16.0);
+    let inner = contained_tinted_bounds(outer, Some("0 0 48 24"));
+    assert!((f32::from(inner.size.width) - 16.0).abs() < 0.001);
+    assert!((f32::from(inner.size.height) - 8.0).abs() < 0.001);
+    assert!((f32::from(inner.origin.x) - 0.0).abs() < 0.001);
+    assert!((f32::from(inner.origin.y) - 4.0).abs() < 0.001);
+    assert_within(outer, inner);
+}
+
+#[test]
+fn malformed_or_absent_metadata_falls_back_to_outer() {
+    let outer = outer_square(16.0);
+    for view_box in [
+        None,
+        Some(""),
+        Some("0 0"),
+        Some("0 0 0 24"),
+        Some("0 0 -48 24"),
+        Some("0 0 48 24 extra"),
+        Some("garbage"),
+    ] {
+        let inner = contained_tinted_bounds(outer, view_box);
+        assert_eq!(inner.origin, outer.origin, "fallback must keep origin");
+        assert_eq!(inner.size, outer.size, "fallback must keep size");
+    }
 }
