@@ -13,8 +13,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use artisan_domain::{
     ApprovalKind, ApprovalMode, ClaudeEffort, ClaudePermissionMode, ClaudeSelection, EngineAgentId,
-    EngineModelId, EnginePermissionPolicy, EngineProfileId, FilesystemAccess, NetworkAccess,
-    PermissionId, RunId, WebSearchAccess,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, FilesystemAccess, MessagePhase,
+    NetworkAccess, Observation, ObservationSequence, PermissionId, RunId, SubagentState,
+    TranscriptContent, WebSearchAccess,
 };
 use artisan_transport::CancelHandle;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -581,6 +582,64 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
     assert_eq!(tracker.child_frame_count(), 1);
     assert_eq!(active, None, "root turn untouched");
 
+    // Discovery emitted exactly one validated subagent row; the textless
+    // child frame projected nothing.
+    let rows = tracker.take_subagent_rows();
+    assert_eq!(rows.len(), 1);
+    match &rows[0] {
+        Observation::Subagent(obs) => {
+            assert_eq!(obs.state(), SubagentState::Discovered);
+            assert_eq!(obs.agent_native_thread_id().as_str(), "task-1");
+            assert_eq!(obs.parent_native_thread_id().as_str(), "session-1");
+            assert_eq!(
+                obs.sequence(),
+                ObservationSequence::new(1).expect("sequence")
+            );
+        }
+        other => panic!("expected subagent row, got {}", other.tag()),
+    }
+
+    // A text-bearing child frame projects exactly one transcript row with
+    // renderer-safe content and its own identity.
+    let spoken = parse_frame(
+        r#"{"type":"assistant","parent_tool_use_id":"tool-9","message":{"content":[{"type":"text","text":"child speaks"}]}}"#,
+        6,
+    )
+    .expect("spoken child decodes");
+    let outcome = apply_event(
+        spoken,
+        &run,
+        "session-1",
+        &mut tracker,
+        &mut active,
+        &sender,
+        6,
+    )
+    .await;
+    assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
+    assert!(receiver.try_recv().is_err(), "no root observation");
+    assert_eq!(tracker.child_frame_count(), 2);
+    let rows = tracker.take_subagent_rows();
+    assert_eq!(rows.len(), 1);
+    match &rows[0] {
+        Observation::SubagentTranscript(obs) => {
+            assert_eq!(obs.agent_native_thread_id().as_str(), "tool-9");
+            assert_eq!(obs.parent_native_thread_id().as_str(), "session-1");
+            assert_eq!(
+                obs.sequence(),
+                ObservationSequence::new(6).expect("sequence")
+            );
+            match obs.content() {
+                TranscriptContent::AgentMessageDelta(content) => {
+                    assert_eq!(content.delta(), "child speaks");
+                    assert_eq!(content.phase(), MessagePhase::Unspecified);
+                }
+                other => panic!("expected message delta, got {}", other.tag()),
+            }
+        }
+        other => panic!("expected transcript row, got {}", other.tag()),
+    }
+
     // Encrypted-thinking plumbing is preserved without root text.
     let tokens = parse_frame(
         r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":7}"#,
@@ -876,6 +935,7 @@ struct FixtureOutcome {
     terminal: Option<TerminalState>,
     deltas: Vec<String>,
     phases: Vec<&'static str>,
+    subagent_rows: Vec<Observation>,
     tracker: ClaudePendingTracker,
     session: Option<String>,
 }
@@ -922,6 +982,7 @@ async fn run_fixture_turn(
     let mut last_activity = Instant::now();
     let mut session_seen = None;
     let mut phases = Vec::new();
+    let mut subagent_rows = Vec::new();
     let mut line = String::new();
     let terminal = loop {
         if control.is_cancelled() {
@@ -982,6 +1043,7 @@ async fn run_fixture_turn(
                                 }
                                 ClaudeApplyOutcome::Terminal(state) => break Some(state),
                             }
+                            subagent_rows.extend(tracker.take_subagent_rows());
                         }
                         Err(_) => continue,
                     }
@@ -1002,6 +1064,7 @@ async fn run_fixture_turn(
         terminal,
         deltas,
         phases,
+        subagent_rows,
         tracker,
         session: session_seen,
     }
@@ -1111,6 +1174,69 @@ async fn fixture_approval_question_steer_shapes_before_close() {
     assert_eq!(outcome.tracker.subagent_count(), 1);
     assert_eq!(outcome.tracker.child_frame_count(), 1);
     assert!(outcome.deltas.is_empty(), "child frames never adopt root");
+    // The task discovery emitted one subagent row; the textless child frame
+    // projected no transcript row.
+    assert_eq!(outcome.subagent_rows.len(), 1);
+    match &outcome.subagent_rows[0] {
+        Observation::Subagent(obs) => {
+            assert_eq!(obs.state(), SubagentState::Discovered);
+            assert_eq!(obs.agent_native_thread_id().as_str(), "task-9");
+            assert_eq!(obs.parent_native_thread_id().as_str(), SESSION);
+        }
+        other => panic!("expected subagent row, got {}", other.tag()),
+    }
+}
+
+#[tokio::test]
+async fn fixture_subagent_discovery_and_transcript_row_sequence() {
+    let responses = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        init_line(),
+        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"root "}}}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"task-1","description":"Explore"}"#,
+        r#"{"type":"assistant","parent_tool_use_id":"tool-9","message":{"content":[{"type":"text","text":"child speaks"}]}}"#,
+        result_line(),
+    );
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&responses, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("fixture finishes");
+    assert_eq!(outcome.terminal, Some(TerminalState::Completed));
+    // Child content never adopts the root turn.
+    assert_eq!(joined(&outcome), "root ");
+    assert_eq!(outcome.subagent_rows.len(), 2);
+    match &outcome.subagent_rows[0] {
+        Observation::Subagent(obs) => {
+            assert_eq!(obs.state(), SubagentState::Discovered);
+            assert_eq!(obs.agent_native_thread_id().as_str(), "task-1");
+            assert_eq!(obs.parent_native_thread_id().as_str(), SESSION);
+            assert_eq!(
+                obs.sequence(),
+                ObservationSequence::new(3).expect("sequence")
+            );
+        }
+        other => panic!("expected subagent row, got {}", other.tag()),
+    }
+    match &outcome.subagent_rows[1] {
+        Observation::SubagentTranscript(obs) => {
+            assert_eq!(obs.agent_native_thread_id().as_str(), "tool-9");
+            assert_eq!(obs.parent_native_thread_id().as_str(), SESSION);
+            assert_eq!(
+                obs.sequence(),
+                ObservationSequence::new(4).expect("sequence")
+            );
+            match obs.content() {
+                TranscriptContent::AgentMessageDelta(content) => {
+                    assert_eq!(content.delta(), "child speaks");
+                    assert_eq!(content.phase(), MessagePhase::Unspecified);
+                }
+                other => panic!("expected message delta, got {}", other.tag()),
+            }
+        }
+        other => panic!("expected transcript row, got {}", other.tag()),
+    }
 }
 
 #[tokio::test]

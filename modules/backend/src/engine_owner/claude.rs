@@ -28,10 +28,17 @@
 //! `TextDelta` on the shared vocabulary. Encrypted-thinking estimates
 //! (`system/thinking_tokens`) and reasoning settlement without delta text are
 //! preserved in the tracker as plumbing for a later packet, never as root
-//! text. Subagent lifecycle frames are tracked as discovery only and child
-//! transcript frames (`parent_tool_use_id`) are isolated per owner without
-//! ever reaching the root turn. Terminal mapping preserves interruption
-//! (external kill / EOF before `result`) vs cancel vs failure distinctly.
+//! text. Subagent lifecycle frames emit validated [`Observation::Subagent`]
+//! rows (state `Discovered`, root plus agent thread identities) and child
+//! transcript frames (`parent_tool_use_id`) project into validated
+//! [`Observation::SubagentTranscript`] rows carrying renderer-safe message
+//! content only; neither ever reaches the root turn. Terminal mapping
+//! preserves interruption (external kill / EOF before `result`) vs cancel vs
+//! failure distinctly.
+//!
+//! Rows accumulate in the tracker until drained: the fixture driver proves
+//! emission plus sequencing here, and the dispatcher packet wires the drain
+//! into the live pump beside the text channel.
 //!
 //! Later packets own: usage/title capture beyond this plumbing, model
 //! inventory, continuation gating on the verified `2.1.220` release
@@ -46,7 +53,9 @@ use std::time::Duration;
 
 use artisan_domain::{
     ApprovalMode, ApprovalRequest, ClaudePermissionMode, ClaudeSelection, FilesystemAccess,
-    NetworkAccess, ObservationId, QuestionInput, QuestionOption, RunId,
+    MessagePhase, NetworkAccess, Observation, ObservationId, ObservationSequence, QuestionInput,
+    QuestionOption, RunId, SubagentInput, SubagentObservation, SubagentState,
+    SubagentTranscriptObservation, TranscriptAgentMessageDelta, TranscriptContent,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -489,6 +498,8 @@ pub(crate) enum ClaudeEvent {
     },
     ChildTranscript {
         parent_tool_use_id: String,
+        /// Renderer-safe display text when the child frame carried any.
+        text: Option<(String, &'static str)>,
     },
     TurnResult {
         success: bool,
@@ -547,6 +558,7 @@ pub(crate) fn parse_frame(
         if !parent.is_empty() && parent.len() <= CLAUDE_MAX_ID_BYTES {
             return Ok(ClaudeEvent::ChildTranscript {
                 parent_tool_use_id: parent.to_owned(),
+                text: child_display_text(&envelope),
             });
         }
         return Err(ClaudeFrameError::InvalidEnvelope);
@@ -591,6 +603,89 @@ fn decode_typed(kind: &str, envelope: &Value) -> ClaudeEvent {
         "control_request" => decode_control(envelope),
         _ => ClaudeEvent::Unknown,
     }
+}
+
+/// Extracts renderer-safe display text from one child transcript envelope.
+///
+/// Reuses the root decoders and keeps only message text: approvals,
+/// questions, results, reasoning, and bookkeeping never project into a child
+/// transcript, following the S1a projection pattern. Empty text projects to
+/// nothing.
+fn child_display_text(envelope: &Value) -> Option<(String, &'static str)> {
+    let kind = envelope.get("type")?.as_str()?;
+    match decode_typed(kind, envelope) {
+        ClaudeEvent::TextDelta { delta, phase } if !delta.is_empty() => Some((delta, phase)),
+        _ => None,
+    }
+}
+
+/// Builds one validated subagent discovery row.
+///
+/// Fails closed (no row, discovery still tracked) when a provider identity
+/// exceeds the domain ceilings: row identities reuse the full native thread
+/// identities verbatim and are never truncated into ambiguity.
+fn discovered_subagent_row(
+    run_id: &RunId,
+    parent_session: &str,
+    task_id: &str,
+    frame_sequence: u64,
+) -> Option<Observation> {
+    let id = ObservationId::parse(format!(
+        "{}:claude:subagent:{task_id}:{frame_sequence}",
+        run_id.as_str()
+    ))
+    .ok()?;
+    let sequence = ObservationSequence::new(frame_sequence).ok()?;
+    let input = SubagentInput {
+        agent_native_thread_id: ObservationId::parse(task_id).ok()?,
+        parent_native_thread_id: ObservationId::parse(parent_session).ok()?,
+        state: SubagentState::Discovered,
+        activity: None,
+        agent_path: None,
+        turn_id: None,
+    };
+    SubagentObservation::new(id, sequence, input)
+        .ok()
+        .map(Observation::Subagent)
+}
+
+/// Projects one child text fragment into a validated transcript row.
+///
+/// The child stream is keyed by its provider tool invocation until the task
+/// lineage packet correlates invocations to agent tasks; only message text
+/// projects, never approvals, questions, results, or reasoning.
+fn child_transcript_row(
+    run_id: &RunId,
+    parent_session: &str,
+    parent_tool_use_id: &str,
+    delta: &str,
+    phase: &str,
+    frame_sequence: u64,
+) -> Option<Observation> {
+    let agent_id = ObservationId::parse(parent_tool_use_id).ok()?;
+    let parent_id = ObservationId::parse(parent_session).ok()?;
+    let phase = MessagePhase::parse(phase).ok()?;
+    let item_id = ObservationId::parse(format!(
+        "{}:claude:childmsg:{parent_tool_use_id}:{frame_sequence}",
+        run_id.as_str()
+    ))
+    .ok()?;
+    let content = TranscriptAgentMessageDelta::new(item_id, phase, delta.to_owned()).ok()?;
+    let id = ObservationId::parse(format!(
+        "{}:claude:childrow:{parent_tool_use_id}:{frame_sequence}",
+        run_id.as_str()
+    ))
+    .ok()?;
+    let sequence = ObservationSequence::new(frame_sequence).ok()?;
+    Some(Observation::SubagentTranscript(
+        SubagentTranscriptObservation::new(
+            id,
+            sequence,
+            agent_id,
+            parent_id,
+            TranscriptContent::AgentMessageDelta(content),
+        ),
+    ))
 }
 
 fn decode_system(envelope: &Value) -> ClaudeEvent {
@@ -833,15 +928,17 @@ fn decode_questions(request_id: &str, input: &Value) -> Option<ClaudeQuestionReq
 /// Permission requests land as pending approvals and `AskUserQuestion` frames
 /// land as pending questions. Resolutions apply through the durable resolve
 /// path; a deny records the decision with no turn side effect while the run
-/// continues. Subagent discoveries, child transcript frames, thinking
-/// estimates, and reasoning settlement are retained as plumbing without ever
-/// reaching the root turn.
+/// continues. Subagent discoveries emit validated `Discovered` rows and child
+/// transcript frames project validated transcript rows; both accumulate for
+/// the consumer drain without ever reaching the root turn. Thinking
+/// estimates and reasoning settlement are retained as plumbing.
 #[derive(Debug, Default)]
 pub(crate) struct ClaudePendingTracker {
     approvals: HashMap<String, ClaudeApprovalRequest>,
     questions: HashMap<String, ClaudeQuestion>,
     subagents: Vec<String>,
     child_frames: Vec<(String, u64)>,
+    subagent_rows: Vec<Observation>,
     thinking_tokens: Option<u64>,
     thinking_deltas: u64,
     reasoning_settled: bool,
@@ -892,17 +989,67 @@ impl ClaudePendingTracker {
         added
     }
 
-    /// Notes one subagent lifecycle identity without adopting the root turn.
-    pub(crate) fn note_subagent(&mut self, task_id: &str) {
-        if !self.subagents.iter().any(|known| known == task_id) {
-            self.subagents.push(task_id.to_owned());
+    /// Notes one subagent lifecycle identity and emits its `Discovered` row.
+    ///
+    /// Re-noting the same identity is a no-op and emits nothing twice. The
+    /// row carries the root session plus the agent thread identity with state
+    /// `Discovered`; row construction fails closed (discovery still tracked)
+    /// when a provider identity exceeds the domain ceilings.
+    pub(crate) fn note_subagent(
+        &mut self,
+        run_id: &RunId,
+        parent_session: &str,
+        task_id: &str,
+        frame_sequence: u64,
+    ) {
+        if self.subagents.iter().any(|known| known == task_id) {
+            return;
+        }
+        self.subagents.push(task_id.to_owned());
+        if let Some(row) = discovered_subagent_row(run_id, parent_session, task_id, frame_sequence)
+        {
+            self.subagent_rows.push(row);
         }
     }
 
-    /// Isolates one child transcript frame without emitting root content.
-    pub(crate) fn note_child_frame(&mut self, parent_tool_use_id: &str, frame_sequence: u64) {
+    /// Projects one child transcript frame into an isolated transcript row.
+    ///
+    /// The frame is always counted; a row is stored only when the frame
+    /// carried renderer-safe message text. The row never reaches the root
+    /// turn: it accumulates for the consumer drain with its own durable
+    /// identity and sequencing.
+    pub(crate) fn note_child_frame(
+        &mut self,
+        run_id: &RunId,
+        parent_session: &str,
+        parent_tool_use_id: &str,
+        text: Option<(String, &'static str)>,
+        frame_sequence: u64,
+    ) {
         self.child_frames
             .push((parent_tool_use_id.to_owned(), frame_sequence));
+        let Some((delta, phase)) = text else {
+            return;
+        };
+        if let Some(row) = child_transcript_row(
+            run_id,
+            parent_session,
+            parent_tool_use_id,
+            &delta,
+            phase,
+            frame_sequence,
+        ) {
+            self.subagent_rows.push(row);
+        }
+    }
+
+    /// Drains validated subagent rows for the consumer in emission order.
+    ///
+    /// The fixture driver proves emission plus sequencing here; the
+    /// dispatcher packet wires this drain into the live pump beside the text
+    /// channel.
+    pub(crate) fn take_subagent_rows(&mut self) -> Vec<Observation> {
+        std::mem::take(&mut self.subagent_rows)
     }
 
     /// Preserves the encrypted-thinking estimate (never root text).
@@ -1121,13 +1268,24 @@ pub(crate) async fn apply_event(
             ClaudeApplyOutcome::Continue { end_input: false }
         }
         ClaudeEvent::SubagentLifecycle { task_id } => {
-            // Discovery only: never adopt the root turn, never emit root text.
-            tracker.note_subagent(&task_id);
+            // Discovery emits its row; the root turn is never adopted and no
+            // root text is emitted.
+            tracker.note_subagent(run_id, expected_session, &task_id, frame_sequence);
             ClaudeApplyOutcome::Continue { end_input: false }
         }
-        ClaudeEvent::ChildTranscript { parent_tool_use_id } => {
-            // Isolated per owner: never the root turn, never root text.
-            tracker.note_child_frame(&parent_tool_use_id, frame_sequence);
+        ClaudeEvent::ChildTranscript {
+            parent_tool_use_id,
+            text,
+        } => {
+            // Projection isolates the child row; the root turn is never
+            // adopted and no root text is emitted.
+            tracker.note_child_frame(
+                run_id,
+                expected_session,
+                &parent_tool_use_id,
+                text,
+                frame_sequence,
+            );
             ClaudeApplyOutcome::Continue { end_input: false }
         }
         ClaudeEvent::TurnResult {
