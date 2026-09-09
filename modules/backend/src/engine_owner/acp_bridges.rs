@@ -293,7 +293,9 @@ fn elicitation_choices(
     let choices = if one_of.is_some() || enumeration.is_some() {
         one_of.or(enumeration)
     } else if schema.get("type").and_then(Value::as_str) == Some("array") {
-        let items = schema.get("items")?.as_object()?;
+        let Some(items) = schema.get("items").and_then(serde_json::Value::as_object) else {
+            return Ok(None);
+        };
         items
             .get("anyOf")
             .and_then(Value::as_array)
