@@ -26,6 +26,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 quinn.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rustls-pki-types.workspace = true
 sea-orm.workspace = true
 serde_json.workspace = true

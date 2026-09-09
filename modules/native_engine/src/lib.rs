@@ -3,10 +3,13 @@
 pub mod account_usage;
 pub mod account_usage_claude;
 pub mod account_usage_codex;
+pub mod account_usage_resolve;
 
 pub use account_usage::{
-    CallError, ExchangeBounds, JsonRpcSession, ProviderError, ProviderUsage, USAGE_MAX_LINE_BYTES,
-    USAGE_MAX_SKIPPED_FRAMES, USAGE_MAX_TOTAL_BYTES, UsageReaderError,
+    CallError, CliLaunch, CliResolveInput, ExchangeBounds, JsonRpcSession, ProviderError,
+    ProviderUsage, USAGE_MAX_LINE_BYTES, USAGE_MAX_QUEUED_LINES, USAGE_MAX_SKIPPED_FRAMES,
+    USAGE_MAX_TOTAL_BYTES, USAGE_TEARDOWN_GRACE, USAGE_TEARDOWN_POLL, UsageReaderError,
+    resolve_claude_cli, resolve_cli_with, resolve_codex_cli,
 };
 pub use account_usage_claude::{
     CLAUDE_USAGE_ARGS, CLAUDE_USAGE_MAX_BYTES, CLAUDE_USAGE_TIMEOUT, ClaudeUsageConfig,

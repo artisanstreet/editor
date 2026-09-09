@@ -16,7 +16,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use artisan_domain::{EngineUsageWindow, EngineUsageWindowKind, clamp_percent_used, utc_ymd};
 
-use super::account_usage::{ProviderUsage, UsageReaderError};
+use super::account_usage::{
+    ChildCustody, ProviderUsage, USAGE_TEARDOWN_GRACE, UsageReaderError, join_thread_bounded,
+    wait_child_bounded,
+};
 
 /// Default overall deadline for one Claude usage read (20 seconds).
 pub const CLAUDE_USAGE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -32,6 +35,9 @@ pub struct ClaudeUsageConfig {
     pub executable: PathBuf,
     /// Extra arguments before the usage arguments.
     pub executable_args: Vec<String>,
+    /// Interpreter prefix placed between the program and `executable_args`
+    /// (from [`CliLaunch`], empty for direct launches).
+    pub prefix_args: Vec<String>,
     /// Extra environment for the spawned child (fixture seam).
     pub spawn_env: Vec<(String, String)>,
     /// Caps the whole spawn-read-wait sequence.
@@ -47,10 +53,19 @@ impl ClaudeUsageConfig {
         Self {
             executable,
             executable_args: Vec::new(),
+            prefix_args: Vec::new(),
             spawn_env: Vec::new(),
             timeout: CLAUDE_USAGE_TIMEOUT,
             max_bytes: CLAUDE_USAGE_MAX_BYTES,
         }
+    }
+
+    /// Creates a read configuration from one resolved CLI launch.
+    #[must_use]
+    pub fn launched(launch: &CliLaunch) -> Self {
+        let mut config = Self::new(launch.program.clone());
+        config.prefix_args = launch.prefix_args.clone();
+        config
     }
 }
 
@@ -63,22 +78,23 @@ impl ClaudeUsageConfig {
 /// carries no usable window.
 pub fn read_claude_usage(config: &ClaudeUsageConfig) -> Result<ProviderUsage, UsageReaderError> {
     let deadline = Instant::now() + config.timeout;
-    let mut child = Command::new(&config.executable)
-        .args(&config.executable_args)
-        .args(CLAUDE_USAGE_ARGS)
+    let mut argv = config.prefix_args.clone();
+    argv.extend(config.executable_args.iter().cloned());
+    argv.extend(CLAUDE_USAGE_ARGS.iter().map(|arg| (*arg).to_owned()));
+    let mut command = Command::new(&config.executable);
+    command
+        .args(&argv)
         .envs(config.spawn_env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| UsageReaderError::Spawn)?;
+        .stderr(Stdio::piped());
+    let mut custody = ChildCustody::spawn(&mut command).map_err(|_| UsageReaderError::Spawn)?;
+    let (stdin, mut stdout, mut stderr) = custody.take_pipes();
     // `-p` reads its prompt from stdin; the slash command is already in
     // argv, so EOF goes immediately instead of paying the CLI grace period.
-    drop(child.stdin.take());
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
+    drop(stdin);
     let max_bytes = config.max_bytes;
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::sync_channel(1);
     let stdout_reader = match thread::Builder::new()
         .name("claude-usage-stdout".to_owned())
         .spawn(move || {
@@ -88,8 +104,8 @@ pub fn read_claude_usage(config: &ClaudeUsageConfig) -> Result<ProviderUsage, Us
         }) {
         Ok(handle) => handle,
         Err(_) => {
-            let _kill_result = child.kill();
-            let _reap_result = child.wait();
+            let _kill_result = custody.kill();
+            wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
             return Err(UsageReaderError::Spawn);
         }
     };
@@ -101,27 +117,29 @@ pub fn read_claude_usage(config: &ClaudeUsageConfig) -> Result<ProviderUsage, Us
         }) {
         Ok(handle) => handle,
         Err(_) => {
-            let _kill_result = child.kill();
-            let _reap_result = child.wait();
+            let _kill_result = custody.kill();
+            wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
             let _join_result = stdout_reader.join();
             return Err(UsageReaderError::Spawn);
         }
     };
     let status = loop {
-        match child.try_wait().map_err(|_| UsageReaderError::Closed)? {
+        match custody.try_wait().map_err(|_| UsageReaderError::Closed)? {
             Some(status) => break status,
             None => {
                 if Instant::now() >= deadline {
-                    let _kill_result = child.kill();
-                    let _reap_result = child.wait();
-                    let _join_result = stderr_drain.join();
+                    let _kill_result = custody.kill();
+                    wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
+                    join_thread_bounded(stderr_drain, USAGE_TEARDOWN_GRACE);
+                    join_thread_bounded(stdout_reader, USAGE_TEARDOWN_GRACE);
                     return Err(UsageReaderError::Timeout);
                 }
                 thread::sleep(Duration::from_millis(10));
             }
         }
     };
-    let _join_result = stderr_drain.join();
+    join_thread_bounded(stderr_drain, USAGE_TEARDOWN_GRACE);
+    join_thread_bounded(stdout_reader, USAGE_TEARDOWN_GRACE);
     if !status.success() {
         return Err(UsageReaderError::ExitStatus);
     }

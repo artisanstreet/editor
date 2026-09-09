@@ -1422,6 +1422,13 @@ async fn run_with_handler(
     let handler = handler.with_composer_catalog(crate::composer_catalog_service::ComposerCatalogService::new(
         native_dispatcher.catalog_client(), app.repository().clone(), database,
     ));
+    let handler = handler.with_account_usage_service(
+        crate::account_usage_service::AccountUsageService::with_defaults(
+            &artisan_native_engine::resolve_codex_cli(),
+            &artisan_native_engine::resolve_claude_cli(),
+            crate::account_usage_cursor::CursorUsageConfig::new(),
+        ),
+    );
     let primary = match listener.serve_until_cancel(&handler, &cancel).await {
         Ok(()) => None,
         Err(error) if error.is_service_failure() => Some(ForgeRuntimeError::Service(error)),

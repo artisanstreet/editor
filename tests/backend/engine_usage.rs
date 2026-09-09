@@ -15,17 +15,18 @@ use std::env;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::process;
+use std::process::{self, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use artisan_backend::account_usage_cursor::{
     CursorEndpoint, CursorUsageConfig, CursorUsageError, map_cursor_period_usage,
-    post_cursor_period_usage, read_cursor_access_token, read_cursor_usage,
+    read_cursor_access_token, read_cursor_usage,
 };
 use artisan_backend::account_usage_service::{
-    AccountUsageReader, AccountUsageService, ReaderFailure, UnsupportedAccountUsageReader,
+    ACCOUNT_USAGE_FRESHNESS, AccountUsageReader, AccountUsageService, ReaderFailure,
+    UnsupportedAccountUsageReader,
 };
 use artisan_backend::{ForgeStorage, RequestHandler};
 use artisan_database::SqliteConfig;
@@ -34,7 +35,9 @@ use artisan_domain::{
     ReadAccountUsage, RequestId, iso_millis, validate_iso_timestamp,
 };
 use artisan_native_engine::account_usage::{ProviderUsage, UsageReaderError};
-use artisan_native_engine::{ClaudeUsageConfig, CodexUsageConfig};
+use artisan_native_engine::{
+    ClaudeUsageConfig, CliResolveInput, CodexUsageConfig, resolve_cli_with,
+};
 use artisan_protocol::{ClientRequest, ErrorCode, Query, ResponsePayload};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
@@ -96,6 +99,12 @@ fn codex_rate_limits_fixture() -> serde_json::Value {
 
 fn run_codex_child(mode: &str) -> ! {
     child_watchdog();
+    if mode == "codex-inherit" {
+        spawn_pipe_holder("pipe-holder");
+    }
+    if mode == "codex-inherit-stuck" {
+        spawn_pipe_holder("pipe-holder-long");
+    }
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let line = line.unwrap_or_default();
@@ -144,7 +153,20 @@ fn run_codex_child(mode: &str) -> ! {
                     stdout.flush().expect("oversize should flush");
                     process::exit(0);
                 }
+                "codex-flood" => {
+                    // No-newline flood: the reader must stop at its byte
+                    // bound without growing the line allocation.
+                    let mut stdout = std::io::stdout().lock();
+                    let big = "y".repeat(2 * 1024 * 1024);
+                    stdout
+                        .write_all(big.as_bytes())
+                        .expect("flood should write");
+                    stdout.flush().expect("flood should flush");
+                    process::exit(0);
+                }
                 "codex-hang" => {}
+                "codex-inherit" => {}
+                "codex-inherit-stuck" => {}
                 _ => process::exit(CHILD_FAILURE_EXIT),
             },
             (_, "account/rateLimits/read") => match mode {
@@ -205,6 +227,14 @@ fn engine_usage_fixture_child() {
     let Ok(mode) = env::var(CHILD_MODE_ENV) else {
         return;
     };
+    if mode == "pipe-holder" {
+        std::thread::sleep(Duration::from_secs(1));
+        process::exit(0);
+    }
+    if mode == "pipe-holder-long" {
+        std::thread::sleep(Duration::from_secs(15));
+        process::exit(0);
+    }
     if mode.starts_with("codex-") {
         run_codex_child(&mode);
     }
@@ -212,6 +242,20 @@ fn engine_usage_fixture_child() {
         run_claude_child(&mode);
     }
     process::exit(CHILD_FAILURE_EXIT);
+}
+
+fn spawn_pipe_holder(mode: &str) {
+    let exe = env::current_exe().expect("current test executable should be available");
+    Command::new(exe)
+        .arg(FIXTURE_TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CHILD_MODE_ENV, mode)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("pipe-holder grandchild should spawn");
 }
 
 fn fixture_argv() -> Vec<String> {
@@ -311,6 +355,22 @@ fn codex_oversize_line_is_rejected() {
 }
 
 #[test]
+fn codex_no_newline_flood_is_bounded() {
+    let start = std::time::Instant::now();
+    assert_eq!(
+        artisan_native_engine::read_codex_usage(&codex_config(
+            "codex-flood",
+            Duration::from_secs(10),
+        )),
+        Err(UsageReaderError::TooLarge)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "the flood must stop at the byte bound, not at a newline"
+    );
+}
+
+#[test]
 fn codex_hang_times_out_and_reaps() {
     let start = std::time::Instant::now();
     assert_eq!(
@@ -324,6 +384,122 @@ fn codex_hang_times_out_and_reaps() {
         start.elapsed() < Duration::from_secs(10),
         "the hang must settle at the deadline"
     );
+}
+
+#[test]
+fn codex_inherited_pipe_returns_by_deadline_with_bounded_cleanup() {
+    // The fixture grandchild holds the inherited pipes ~1s while the direct
+    // child never answers. The call must return at the configured deadline
+    // and teardown (kill, bounded reap, bounded joins) must complete: the
+    // grandchild exits inside the join grace, so no drain thread lingers.
+    let start = std::time::Instant::now();
+    assert_eq!(
+        artisan_native_engine::read_codex_usage(&codex_config(
+            "codex-inherit",
+            Duration::from_millis(500),
+        )),
+        Err(UsageReaderError::Timeout)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(6),
+        "return plus bounded cleanup must settle well inside grace"
+    );
+}
+
+#[test]
+fn codex_stuck_inherited_pipe_still_returns_within_grace() {
+    // The fixture grandchild holds the inherited pipes 15s, past every
+    // join grace. Tree-kill terminates the whole job, pipes close, and
+    // teardown returns fast with no lingering reader.
+    let start = std::time::Instant::now();
+    assert_eq!(
+        artisan_native_engine::read_codex_usage(&codex_config(
+            "codex-inherit-stuck",
+            Duration::from_millis(500),
+        )),
+        Err(UsageReaderError::Timeout)
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(4),
+        "tree-kill teardown must stay fast"
+    );
+}
+
+fn shim_bin(label: &str) -> PathBuf {
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    let dir = env::temp_dir().join(format!(
+        "artisan-usage-shim-{label}-{}-{}",
+        process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&dir).expect("shim directory should be created");
+    dir
+}
+
+#[cfg(windows)]
+#[test]
+fn codex_cmd_shim_reads_end_to_end() {
+    let dir = shim_bin("codex");
+    let shim = dir.join("codex.cmd");
+    fs::write(
+        &shim,
+        "@echo off\r\necho {\"id\":1,\"result\":{\"capabilities\":{}}}\r\necho {\"id\":2,\"result\":{\"account\":{\"type\":\"chatgpt\",\"email\":\"owner@example.test\"},\"requiresOpenaiAuth\":false}}\r\necho {\"id\":3,\"result\":{\"rateLimitsByLimitId\":{\"codex\":{\"limitId\":\"codex\",\"primary\":{\"usedPercent\":5.0}}}}}\r\n",
+    )
+    .expect("shim fixture should write");
+    let empty_root = shim_bin("empty-root");
+    let launch = resolve_cli_with(&CliResolveInput {
+        tool: "codex",
+        override_var: "ARTISAN_TEST_CODEX_OVERRIDE",
+        configured: None,
+        local_app_data: Some(empty_root.clone()),
+        path_dirs: vec![dir.clone()],
+        arch: "x86_64",
+    });
+    assert_eq!(launch.program, PathBuf::from("cmd"));
+    assert!(
+        launch
+            .prefix_args
+            .contains(&shim.to_string_lossy().into_owned())
+    );
+    let mut config = CodexUsageConfig::launched(&launch);
+    config.overall_timeout = Duration::from_secs(10);
+    let usage = artisan_native_engine::read_codex_usage(&config).expect("shim should answer");
+    assert_eq!(usage.auth.state(), EngineUsageAuthentication::Authenticated);
+    assert_eq!(usage.account_email.as_deref(), Some("owner@example.test"));
+    assert_eq!(usage.windows.len(), 1);
+    assert_eq!(usage.windows[0].percent_used(), 5.0);
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&empty_root).ok();
+}
+
+#[cfg(windows)]
+#[test]
+fn claude_cmd_shim_reads_end_to_end() {
+    let dir = shim_bin("claude");
+    let shim = dir.join("claude.cmd");
+    fs::write(
+        &shim,
+        "@echo off\r\necho {\"result\":\"Current session: 9% used\"}\r\n",
+    )
+    .expect("shim fixture should write");
+    let empty_root = shim_bin("empty-root");
+    let launch = resolve_cli_with(&CliResolveInput {
+        tool: "claude",
+        override_var: "ARTISAN_TEST_CLAUDE_OVERRIDE",
+        configured: None,
+        local_app_data: Some(empty_root.clone()),
+        path_dirs: vec![dir.clone()],
+        arch: "x86_64",
+    });
+    assert_eq!(launch.program, PathBuf::from("cmd"));
+    let mut config = ClaudeUsageConfig::launched(&launch);
+    config.timeout = Duration::from_secs(10);
+    let usage = artisan_native_engine::read_claude_usage(&config).expect("shim should answer");
+    assert_eq!(usage.windows.len(), 1);
+    assert_eq!(usage.windows[0].id(), "five_hour");
+    assert_eq!(usage.windows[0].percent_used(), 9.0);
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&empty_root).ok();
 }
 
 #[test]
@@ -573,7 +749,7 @@ fn cursor_config(port: u16, token: &str) -> CursorUsageConfig {
     let file = token_file(&format!(r#"{{"accessToken": "{token}"}}"#));
     CursorUsageConfig {
         auth_file: Some(file),
-        endpoint: CursorEndpoint::plaintext("127.0.0.1", port),
+        endpoint: CursorEndpoint::loopback(port),
         timeout: Duration::from_secs(10),
         max_bytes: 1_048_576,
     }
@@ -644,7 +820,7 @@ async fn cursor_failures_are_typed() {
 
     let missing = CursorUsageConfig {
         auth_file: Some(env::temp_dir().join("artisan-usage-token-absent-2.json")),
-        endpoint: CursorEndpoint::plaintext("127.0.0.1", port),
+        endpoint: CursorEndpoint::loopback(port),
         timeout: Duration::from_secs(5),
         max_bytes: 1_048_576,
     };
@@ -658,26 +834,21 @@ async fn cursor_failures_are_typed() {
 }
 
 #[tokio::test]
-async fn cursor_production_endpoint_reports_tls_unavailable() {
-    let config = CursorUsageConfig {
-        auth_file: Some(token_file(r#"{"accessToken": "fixture-token-1"}"#)),
-        endpoint: CursorEndpoint::production(),
-        timeout: Duration::from_secs(5),
-        max_bytes: 1_048_576,
-    };
-    let auth_file = config.auth_file.clone();
-    assert!(config.endpoint.use_tls());
-    assert_eq!(
-        post_cursor_period_usage(
-            &config.endpoint,
-            "fixture-token-1",
-            Duration::from_secs(5),
-            1_048_576
+async fn cursor_endpoint_rejects_plaintext_outside_loopback() {
+    assert!(
+        CursorEndpoint::new(
+            "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage".to_owned()
         )
-        .await,
-        Err(CursorUsageError::TlsUnavailable)
+        .is_ok()
     );
-    let _ = fs::remove_file(auth_file.expect("auth file is set"));
+    assert!(CursorEndpoint::new("http://127.0.0.1:9/x".to_owned()).is_ok());
+    assert!(CursorEndpoint::new("http://localhost:9/x".to_owned()).is_ok());
+    assert_eq!(
+        CursorEndpoint::new("http://dashboard.example/x".to_owned()),
+        Err(CursorUsageError::InsecureEndpoint)
+    );
+    let production = CursorEndpoint::production();
+    assert!(production.url().starts_with("https://"));
 }
 
 #[tokio::test]
@@ -694,7 +865,7 @@ async fn cursor_hang_times_out() {
     });
     let config = CursorUsageConfig {
         auth_file: Some(token_file(r#"{"accessToken": "fixture-token-1"}"#)),
-        endpoint: CursorEndpoint::plaintext("127.0.0.1", port),
+        endpoint: CursorEndpoint::loopback(port),
         timeout: Duration::from_millis(300),
         max_bytes: 1_048_576,
     };
@@ -850,6 +1021,118 @@ async fn usage_service_caches_forces_and_narrows() {
     assert_eq!(snapshot.engines()[0].engine_id(), "claude");
     assert_eq!(StubReader::calls(&codex), 3);
     assert_eq!(StubReader::calls(&claude), 4);
+}
+
+#[test]
+fn usage_freshness_matches_the_electron_window() {
+    assert_eq!(ACCOUNT_USAGE_FRESHNESS, Duration::from_secs(180));
+}
+
+#[derive(Debug)]
+struct FlakyReader {
+    engine_id: &'static str,
+    display_name: &'static str,
+    calls: AtomicUsize,
+    failed: std::sync::atomic::AtomicBool,
+}
+
+impl FlakyReader {
+    fn codex() -> Arc<Self> {
+        Arc::new(Self {
+            engine_id: "codex",
+            display_name: "Codex",
+            calls: AtomicUsize::new(0),
+            failed: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+}
+
+impl AccountUsageReader for FlakyReader {
+    fn engine_id(&self) -> &'static str {
+        self.engine_id
+    }
+
+    fn display_name(&self) -> &'static str {
+        self.display_name
+    }
+
+    fn read(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ProviderUsage, ReaderFailure>> + Send + '_>,
+    > {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let failed = self.failed.load(Ordering::Relaxed);
+        Box::pin(async move {
+            if failed {
+                return Err(ReaderFailure::unavailable("stub provider went down"));
+            }
+            Ok(ProviderUsage::authenticated(vec![
+                EngineUsageWindow::new(
+                    "stub:window".to_owned(),
+                    EngineUsageWindowKind::Session,
+                    None,
+                    11.0,
+                    None,
+                    Some(300),
+                )
+                .expect("stub window is valid"),
+            ]))
+        })
+    }
+}
+
+fn narrowed(engine_id: &str) -> ReadAccountUsage {
+    ReadAccountUsage::new(Some(engine_id.to_owned()), true).expect("query is valid")
+}
+
+#[tokio::test]
+async fn usage_service_preserves_last_good_with_original_time() {
+    let flaky = FlakyReader::codex();
+    let erased: Vec<Arc<dyn AccountUsageReader>> =
+        vec![Arc::clone(&flaky) as Arc<dyn AccountUsageReader>];
+    let service =
+        AccountUsageService::with_readers(erased, Duration::from_secs(60), Duration::from_secs(5));
+    let first = service.read(&narrowed("codex")).await;
+    assert_eq!(first.engines().len(), 1);
+    assert!(first.engines()[0].failure().is_none());
+    assert_eq!(first.engines()[0].windows().len(), 1);
+
+    flaky.failed.store(true, Ordering::Relaxed);
+    let second = service.read(&narrowed("codex")).await;
+    assert_eq!(second.engines().len(), 1);
+    // Last-good windows survive with the original fetch time, while the
+    // refresh failure is exposed honestly on the served report.
+    assert_eq!(second.engines()[0].windows().len(), 1);
+    assert_eq!(
+        second.engines()[0].failure(),
+        Some("stub provider went down")
+    );
+    assert_eq!(second.fetched_at(), first.fetched_at());
+}
+
+#[tokio::test]
+async fn narrowed_queries_carry_per_engine_observation_time() {
+    let codex = StubReader::ok("codex", "Codex");
+    let claude = StubReader::ok("claude", "Claude");
+    let erased: Vec<Arc<dyn AccountUsageReader>> = vec![
+        Arc::clone(&codex) as Arc<dyn AccountUsageReader>,
+        Arc::clone(&claude) as Arc<dyn AccountUsageReader>,
+    ];
+    let service =
+        AccountUsageService::with_readers(erased, Duration::from_secs(60), Duration::from_secs(5));
+    let codex_snapshot = service.read(&narrowed("codex")).await;
+    let claude_snapshot = service.read(&narrowed("claude")).await;
+    assert_eq!(codex_snapshot.engines().len(), 1);
+    assert_eq!(claude_snapshot.engines().len(), 1);
+    // The aggregate snapshot carries the latest observation across its
+    // reports; exact per-engine times come from narrowed queries.
+    let aggregate = service.read(&all_query()).await;
+    let expected = codex_snapshot
+        .fetched_at()
+        .max(claude_snapshot.fetched_at())
+        .to_owned();
+    assert_eq!(aggregate.fetched_at(), expected);
 }
 
 #[tokio::test]

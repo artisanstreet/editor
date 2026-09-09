@@ -15,19 +15,38 @@
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+#[cfg(not(windows))]
+use std::process::Child;
+use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use artisan_domain::{EngineUsageAuth, EngineUsageAuthentication, QuotaSurface};
 
+#[cfg(windows)]
+use command_group::CommandGroup as _;
+
+pub use super::account_usage_resolve::{
+    CliLaunch, CliResolveInput, resolve_claude_cli, resolve_cli_with, resolve_codex_cli,
+};
+
 /// Default per-line byte ceiling for provider stdio frames (1 MiB).
+///
+/// Measured over line content without its trailing newline; one extra probe
+/// byte is read to distinguish a complete maximum-length line from an
+/// overlong one.
 pub const USAGE_MAX_LINE_BYTES: usize = 1_048_576;
 /// Default total byte ceiling for one usage exchange (8 MiB).
 pub const USAGE_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 /// Default ceiling for skipped server-initiated frames per exchange.
 pub const USAGE_MAX_SKIPPED_FRAMES: usize = 1_024;
+/// Default capacity of the bounded stdout line queue.
+pub const USAGE_MAX_QUEUED_LINES: usize = 64;
+/// Default grace for each bounded teardown step (child reap, thread join).
+pub const USAGE_TEARDOWN_GRACE: Duration = Duration::from_secs(2);
+/// Poll interval for bounded teardown waits.
+pub const USAGE_TEARDOWN_POLL: Duration = Duration::from_millis(10);
 
 /// Byte and frame bounds for one provider usage exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -234,6 +253,120 @@ impl ProviderUsage {
     }
 }
 
+/// Process-group custody for one provider child.
+///
+/// Windows holds a `command-group` Job Object exactly like the owned
+/// engine-owner launches: killing it terminates the whole descendant tree
+/// and closes inherited pipes, so drain threads always observe EOF and no
+/// reader can stay blocked past teardown. Other platforms hold the direct
+/// child, matching the existing owned custody split.
+pub(crate) struct ChildCustody {
+    #[cfg(windows)]
+    grouped: command_group::GroupChild,
+    #[cfg(not(windows))]
+    direct: Child,
+}
+
+impl ChildCustody {
+    pub(crate) fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let grouped = command
+                .group()
+                .kill_on_drop(true)
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()?;
+            Ok(Self { grouped })
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(Self {
+                direct: command.spawn()?,
+            })
+        }
+    }
+
+    pub(crate) fn take_pipes(
+        &mut self,
+    ) -> (Option<ChildStdin>, Option<ChildStdout>, Option<ChildStderr>) {
+        #[cfg(windows)]
+        {
+            let inner = self.grouped.inner();
+            (inner.stdin.take(), inner.stdout.take(), inner.stderr.take())
+        }
+        #[cfg(not(windows))]
+        {
+            (
+                self.direct.stdin.take(),
+                self.direct.stdout.take(),
+                self.direct.stderr.take(),
+            )
+        }
+    }
+
+    pub(crate) fn kill(&mut self) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.grouped.kill()
+        }
+        #[cfg(not(windows))]
+        {
+            self.direct.kill()
+        }
+    }
+
+    pub(crate) fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        #[cfg(windows)]
+        {
+            self.grouped.try_wait()
+        }
+        #[cfg(not(windows))]
+        {
+            self.direct.try_wait()
+        }
+    }
+}
+
+/// Waits for one provider child to exit within a bounded grace.
+///
+/// A killed direct child (or, on Windows, a killed job tree) reaps
+/// promptly; the poll loop only bounds the pathological case. Errors from
+/// `try_wait` end the wait: there is no handle left worth blocking on.
+pub(crate) fn wait_child_bounded(child: &mut ChildCustody, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                thread::sleep(USAGE_TEARDOWN_POLL);
+            }
+        }
+    }
+}
+
+/// Joins one drain thread within a bounded grace.
+///
+/// A finished thread is joined and its panic (a fixture bug, never provider
+/// data) is discarded. An unfinished thread is detached by dropping its
+/// handle; teardown already killed the process tree and dropped the queue
+/// receiver, so the thread exits on pipe EOF or channel disconnect and only
+/// a failed group kill could linger it, bounded by the descendant's own
+/// lifetime and never blocking the caller.
+pub(crate) fn join_thread_bounded(handle: JoinHandle<()>, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(USAGE_TEARDOWN_POLL);
+    }
+    let _join_result = handle.join();
+}
+
 enum LineEvent {
     Line(String),
     Oversize,
@@ -242,20 +375,27 @@ enum LineEvent {
 
 /// One bounded newline-delimited JSON-RPC session over a provider child.
 ///
-/// Stdout is drained on a dedicated thread and stderr on another, both
-/// concurrent with the caller's writes. Dropping the session closes stdin,
-/// kills the child, reaps it, and joins both drain threads, so no provider
-/// process outlives its exchange on any path.
+/// Stdout is drained on a dedicated thread into a bounded queue and stderr
+/// on another, both concurrent with the caller's writes. The queue applies
+/// backpressure instead of dropping frames: a full queue parks the reader
+/// until the caller consumes, and teardown drops the receiver first so a
+/// parked sender wakes instead of deadlocking. Teardown
+/// ([`JsonRpcSession::shutdown`], also run from [`Drop`]) closes stdin,
+/// drops the receiver, kills the whole process tree, reaps it within a
+/// grace, and joins both drains within the same grace: no step blocks past
+/// its bound, even when a descendant holds inherited pipes open.
 pub struct JsonRpcSession {
     stdin: Option<ChildStdin>,
-    lines: Receiver<LineEvent>,
-    child: Option<Child>,
+    lines: Option<Receiver<LineEvent>>,
+    custody: Option<ChildCustody>,
     stdout_reader: Option<JoinHandle<()>>,
     stderr_drain: Option<JoinHandle<()>>,
     next_id: u64,
     total_bytes: usize,
     skipped_frames: usize,
     bounds: ExchangeBounds,
+    teardown_grace: Duration,
+    torn_down: bool,
 }
 
 impl JsonRpcSession {
@@ -270,18 +410,16 @@ impl JsonRpcSession {
         env: &[(String, String)],
         bounds: ExchangeBounds,
     ) -> Result<Self, UsageReaderError> {
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .args(args)
             .envs(env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| UsageReaderError::Spawn)?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let (sender, lines) = mpsc::channel();
+            .stderr(Stdio::piped());
+        let mut custody = ChildCustody::spawn(&mut command).map_err(|_| UsageReaderError::Spawn)?;
+        let (stdin, stdout, stderr) = custody.take_pipes();
+        let (sender, lines) = mpsc::sync_channel(USAGE_MAX_QUEUED_LINES);
         let max_line_bytes = bounds.max_line_bytes;
         let mut stdout_reader = None;
         if let Some(stdout) = stdout {
@@ -291,8 +429,8 @@ impl JsonRpcSession {
             {
                 Ok(handle) => stdout_reader = Some(handle),
                 Err(_) => {
-                    let _kill_result = child.kill();
-                    let _reap_result = child.wait();
+                    let _kill_result = custody.kill();
+                    wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
                     return Err(UsageReaderError::Spawn);
                 }
             }
@@ -305,10 +443,10 @@ impl JsonRpcSession {
             {
                 Ok(handle) => stderr_drain = Some(handle),
                 Err(_) => {
-                    let _kill_result = child.kill();
-                    let _reap_result = child.wait();
+                    let _kill_result = custody.kill();
+                    wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
                     if let Some(reader) = stdout_reader.take() {
-                        let _join_result = reader.join();
+                        join_thread_bounded(reader, USAGE_TEARDOWN_GRACE);
                     }
                     return Err(UsageReaderError::Spawn);
                 }
@@ -316,15 +454,42 @@ impl JsonRpcSession {
         }
         Ok(Self {
             stdin,
-            lines,
-            child: Some(child),
+            lines: Some(lines),
+            custody: Some(custody),
             stdout_reader,
             stderr_drain,
             next_id: 1,
             total_bytes: 0,
             skipped_frames: 0,
             bounds,
+            teardown_grace: USAGE_TEARDOWN_GRACE,
+            torn_down: false,
         })
+    }
+
+    /// Tears the session down within a bounded grace: closes stdin, drops
+    /// the line receiver so a backpressured sender wakes, kills the whole
+    /// process tree, reaps it, and joins both drains. Idempotent. Every step
+    /// carries its own deadline, so cleanup returns even when a descendant
+    /// holds inherited pipes past the grace; killing the tree closes those
+    /// pipes, which lets the drains observe EOF and exit.
+    pub fn shutdown(&mut self) {
+        if self.torn_down {
+            return;
+        }
+        self.torn_down = true;
+        drop(self.stdin.take());
+        drop(self.lines.take());
+        if let Some(mut custody) = self.custody.take() {
+            let _kill_result = custody.kill();
+            wait_child_bounded(&mut custody, self.teardown_grace);
+        }
+        if let Some(reader) = self.stdout_reader.take() {
+            join_thread_bounded(reader, self.teardown_grace);
+        }
+        if let Some(drain) = self.stderr_drain.take() {
+            join_thread_bounded(drain, self.teardown_grace);
+        }
     }
 
     /// Sends one fire-and-forget JSON-RPC notification line.
@@ -358,17 +523,24 @@ impl JsonRpcSession {
         params: serde_json::Value,
         deadline: Instant,
     ) -> Result<serde_json::Value, CallError> {
+        if self.torn_down {
+            return Err(CallError::Transport(UsageReaderError::Closed));
+        }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let line =
             serde_json::json!({"id": id, "method": method, "params": params}).to_string() + "\n";
         self.write_line(line.as_bytes())?;
+        let lines = self
+            .lines
+            .as_ref()
+            .ok_or(CallError::Transport(UsageReaderError::Closed))?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(CallError::Transport(UsageReaderError::Timeout));
             }
-            match self.lines.recv_timeout(remaining) {
+            match lines.recv_timeout(remaining) {
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(CallError::Transport(UsageReaderError::Timeout));
                 }
@@ -461,44 +633,50 @@ impl JsonRpcSession {
 
 impl Drop for JsonRpcSession {
     fn drop(&mut self) {
-        drop(self.stdin.take());
-        if let Some(mut child) = self.child.take() {
-            let _kill_result = child.kill();
-            let _reap_result = child.wait();
-        }
-        if let Some(reader) = self.stdout_reader.take() {
-            let _join_result = reader.join();
-        }
-        if let Some(drain) = self.stderr_drain.take() {
-            let _join_result = drain.join();
-        }
+        self.shutdown();
     }
 }
 
-fn drain_stdout_lines(stdout: ChildStdout, sender: mpsc::Sender<LineEvent>, max_line_bytes: usize) {
+fn drain_stdout_lines(
+    stdout: ChildStdout,
+    sender: mpsc::SyncSender<LineEvent>,
+    max_line_bytes: usize,
+) {
     let mut reader = BufReader::new(stdout);
+    // `take` bounds every read to one line plus a probe margin: a no-newline
+    // flood can never grow this allocation past the bound, and the overlong
+    // remainder stays in the pipe for tree-kill teardown. Content is measured
+    // without its single trailing newline, so a maximum-length line still
+    // fits; an EOF-terminated tail without a newline counts fully.
+    let limit = max_line_bytes.saturating_add(2) as u64;
     loop {
         let mut line = Vec::new();
-        match reader.read_until(b'\n', &mut line) {
+        match reader.by_ref().take(limit).read_until(b'\n', &mut line) {
             Ok(0) => {
                 let _send_result = sender.send(LineEvent::Finished);
                 break;
             }
             Ok(_) => {
-                if line.len() > max_line_bytes {
+                let complete = line.ends_with(b"\n");
+                let content_len = line.len() - usize::from(complete);
+                if content_len > max_line_bytes {
                     let _send_result = sender.send(LineEvent::Oversize);
                     break;
                 }
-                match String::from_utf8(line) {
-                    Ok(text) => {
-                        if sender.send(LineEvent::Line(text)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        let _send_result = sender.send(LineEvent::Oversize);
-                        break;
-                    }
+                let event = match String::from_utf8(line) {
+                    Ok(text) => LineEvent::Line(text),
+                    Err(_) => LineEvent::Oversize,
+                };
+                // Backpressure, never silent drops: a full queue parks the
+                // reader until the caller consumes, and teardown drops the
+                // receiver first so a parked sender wakes instead of
+                // deadlocking. Every received line still counts downstream.
+                let oversize = matches!(event, LineEvent::Oversize);
+                if sender.send(event).is_err() {
+                    break;
+                }
+                if oversize {
+                    break;
                 }
             }
             Err(_) => {

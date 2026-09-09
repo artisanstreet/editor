@@ -3,19 +3,15 @@
 //! Mirrors `MakeCursorUsage` in `modules/engines/src/cursor/usage.ts`: read
 //! the stored access token strictly read-only (bounded file read, never
 //! written, refreshed, or logged in), POST an empty body to the
-//! `DashboardService/GetCurrentPeriodUsage` endpoint through workspace
-//! `hyper`, and map the billing-period pools to monthly quota windows. A
-//! missing or expired token reports unauthenticated with an Artisan-owned
-//! reason; HTTP 401/403 does the same. No token, header value, or response
-//! payload is retained in a result or an error.
+//! `DashboardService/GetCurrentPeriodUsage` endpoint, and map the
+//! billing-period pools to monthly quota windows. A missing or expired
+//! token reports unauthenticated with an Artisan-owned reason; HTTP 401/403
+//! does the same. No token, header value, or response payload is retained
+//! in a result or an error.
 //!
-//! Transport note: the production dashboard endpoint is HTTPS, and this
-//! workspace declares no TLS connector crate for `hyper`. The POST exchange
-//! therefore serves `http` endpoints (the fixture servers that prove it)
-//! and answers `https` endpoints with an explicit
-//! [`CursorUsageError::TlsUnavailable`] instead of attempting a plaintext
-//! handshake or weakening certificate verification. Wiring a TLS connector
-//! is a recorded root decision, not silent fallback behavior.
+//! Transport is the locked `reqwest` client with its default verified TLS:
+//! the production endpoint is HTTPS, certificate verification is never
+//! weakened, and plaintext is accepted only for loopback fixture servers.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -23,11 +19,6 @@ use std::time::Duration;
 
 use artisan_domain::{EngineUsageWindow, EngineUsageWindowKind, clamp_percent_used, iso_millis};
 use artisan_native_engine::account_usage::ProviderUsage;
-use bytes::Bytes;
-use http::Request;
-use http_body_util::{BodyExt, Full, Limited};
-use hyper::client::conn::http1::Builder;
-use hyper_util::rt::TokioIo;
 
 /// Production Cursor dashboard host.
 pub const CURSOR_USAGE_HOST: &str = "api2.cursor.sh";
@@ -54,8 +45,8 @@ pub enum CursorUsageError {
     TokenTooLarge,
     /// The credential file was not the expected JSON shape.
     TokenMalformed,
-    /// An `https` endpoint needs a TLS connector this build does not own.
-    TlsUnavailable,
+    /// A non-HTTPS, non-loopback endpoint was supplied.
+    InsecureEndpoint,
     /// The dashboard deadline elapsed.
     Timeout,
     /// TCP connect or the HTTP/1 handshake failed.
@@ -76,9 +67,7 @@ impl fmt::Display for CursorUsageError {
             Self::TokenIo => "cursor credential file could not be read",
             Self::TokenTooLarge => "cursor credential file exceeds its size bound",
             Self::TokenMalformed => "cursor credential file is malformed",
-            Self::TlsUnavailable => {
-                "cursor dashboard needs an https connector this build does not own"
-            }
+            Self::InsecureEndpoint => "cursor dashboard endpoint must be https or loopback",
             Self::Timeout => "cursor dashboard deadline elapsed",
             Self::ConnectFailed => "cursor dashboard connection failed",
             Self::SendFailed => "cursor dashboard request failed",
@@ -91,13 +80,13 @@ impl fmt::Display for CursorUsageError {
 
 impl std::error::Error for CursorUsageError {}
 
-/// Dashboard endpoint with an explicit plaintext/TLS distinction.
+/// Dashboard endpoint: always HTTPS except loopback fixture servers.
+///
+/// Plaintext outside loopback is rejected at construction, and TLS uses the
+/// locked `reqwest` client with default certificate verification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CursorEndpoint {
-    host: String,
-    port: u16,
-    path: String,
-    use_tls: bool,
+    url: String,
 }
 
 impl CursorEndpoint {
@@ -105,28 +94,43 @@ impl CursorEndpoint {
     #[must_use]
     pub fn production() -> Self {
         Self {
-            host: CURSOR_USAGE_HOST.to_owned(),
-            port: CURSOR_USAGE_PORT,
-            path: CURSOR_USAGE_PATH.to_owned(),
-            use_tls: true,
+            url: format!("https://{CURSOR_USAGE_HOST}:{CURSOR_USAGE_PORT}{CURSOR_USAGE_PATH}"),
         }
     }
 
     /// Returns a plaintext fixture endpoint on loopback.
     #[must_use]
-    pub fn plaintext(host: &str, port: u16) -> Self {
+    pub fn loopback(port: u16) -> Self {
         Self {
-            host: host.to_owned(),
-            port,
-            path: CURSOR_USAGE_PATH.to_owned(),
-            use_tls: false,
+            url: format!("http://127.0.0.1:{port}{CURSOR_USAGE_PATH}"),
         }
     }
 
-    /// Returns whether this endpoint requires TLS.
+    /// Validates an explicit endpoint URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CursorUsageError::InsecureEndpoint`] for non-HTTPS URLs
+    /// outside loopback (`127.0.0.1`, `localhost`, `::1`).
+    pub fn new(url: String) -> Result<Self, CursorUsageError> {
+        let lower = url.to_lowercase();
+        if lower.starts_with("https://") {
+            return Ok(Self { url });
+        }
+        for host in ["127.0.0.1", "localhost", "[::1]"] {
+            if lower.starts_with(&format!("http://{host}"))
+                || lower.starts_with(&format!("http://{host}:"))
+            {
+                return Ok(Self { url });
+            }
+        }
+        Err(CursorUsageError::InsecureEndpoint)
+    }
+
+    /// Returns the validated endpoint URL.
     #[must_use]
-    pub const fn use_tls(&self) -> bool {
-        self.use_tls
+    pub fn url(&self) -> &str {
+        &self.url
     }
 }
 
@@ -424,88 +428,65 @@ pub fn map_cursor_period_usage(
     Ok(windows)
 }
 
-/// POSTs an empty dashboard body through workspace `hyper`.
+/// POSTs an empty dashboard body through the locked `reqwest` client.
 ///
-/// Serves `http` endpoints end to end. `https` endpoints answer
-/// [`CursorUsageError::TlsUnavailable`]: this build owns no TLS connector,
-/// and neither plaintext fallback nor unverified TLS is attempted.
+/// TLS uses `reqwest`'s default verified configuration; verification is
+/// never weakened and plaintext is rejected outside loopback at endpoint
+/// construction. The client timeout bounds the whole exchange; the body is
+/// additionally checked against `max_bytes` before parsing so an oversized
+/// response cannot become an unbounded allocation.
 ///
 /// # Errors
 ///
-/// Returns [`CursorUsageError`] for TLS-gated endpoints, connect/send
-/// failures, deadlines, oversized bodies, or malformed JSON.
+/// Returns [`CursorUsageError`] for connect/send failures, deadlines,
+/// unsuccessful statuses, oversized bodies, or malformed JSON.
 pub async fn post_cursor_period_usage(
     endpoint: &CursorEndpoint,
     token: &str,
     timeout: Duration,
     max_bytes: usize,
 ) -> Result<(u16, serde_json::Value), CursorUsageError> {
-    if endpoint.use_tls {
-        return Err(CursorUsageError::TlsUnavailable);
-    }
-    let deadline = tokio::time::Instant::now() + timeout;
-    let address = format!("{}:{}", endpoint.host, endpoint.port);
-    let stream = tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(address))
-        .await
-        .map_err(|_| CursorUsageError::Timeout)?
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
         .map_err(|_| CursorUsageError::ConnectFailed)?;
-    let io = TokioIo::new(stream);
-    let (mut sender, connection) =
-        tokio::time::timeout_at(deadline, Builder::new().handshake::<_, Full<Bytes>>(io))
-            .await
-            .map_err(|_| CursorUsageError::Timeout)?
-            .map_err(|_| CursorUsageError::ConnectFailed)?;
-    let driver = tokio::spawn(connection);
-    let outcome = post_once(&mut sender, endpoint, token, deadline, max_bytes).await;
-    driver.abort();
-    let _join_result = driver.await;
-    outcome
-}
-
-async fn post_once(
-    sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
-    endpoint: &CursorEndpoint,
-    token: &str,
-    deadline: tokio::time::Instant,
-    max_bytes: usize,
-) -> Result<(u16, serde_json::Value), CursorUsageError> {
-    let host_header = format!("{}:{}", endpoint.host, endpoint.port);
-    let request = Request::builder()
-        .method("POST")
-        .uri(endpoint.path.clone())
-        .header("host", host_header)
-        .header("authorization", format!("Bearer {token}"))
+    let response = client
+        .post(endpoint.url())
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
         .header("connect-protocol-version", "1")
-        .header("content-type", "application/json")
         .header("x-cursor-client-type", "cli")
-        .header("content-length", "2")
-        .header("connection", "close")
-        .body(Full::new(Bytes::from_static(b"{}")))
-        .map_err(|_| CursorUsageError::SendFailed)?;
-    if tokio::time::Instant::now() >= deadline {
-        return Err(CursorUsageError::Timeout);
-    }
-    sender
-        .ready()
+        .json(&serde_json::json!({}))
+        .send()
         .await
-        .map_err(|_| CursorUsageError::SendFailed)?;
-    let response = tokio::time::timeout_at(deadline, sender.send_request(request))
-        .await
-        .map_err(|_| CursorUsageError::Timeout)?
-        .map_err(|_| CursorUsageError::SendFailed)?;
+        .map_err(map_request_error)?;
     let status = response.status().as_u16();
-    let body = response.into_body();
-    let collected = tokio::time::timeout_at(deadline, Limited::new(body, max_bytes).collect())
+    if let Some(length) = response.content_length() {
+        if length > max_bytes as u64 {
+            return Err(CursorUsageError::BodyTooLarge);
+        }
+    }
+    let bytes = response
+        .bytes()
         .await
-        .map_err(|_| CursorUsageError::Timeout)?
         .map_err(|_| CursorUsageError::BodyTooLarge)?;
-    let bytes = collected.to_bytes();
     if bytes.len() > max_bytes {
         return Err(CursorUsageError::BodyTooLarge);
     }
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| CursorUsageError::BodyMalformed)?;
     Ok((status, value))
+}
+
+fn map_request_error(error: reqwest::Error) -> CursorUsageError {
+    if error.is_timeout() {
+        CursorUsageError::Timeout
+    } else if error.is_connect() {
+        CursorUsageError::ConnectFailed
+    } else if error.is_body() || error.is_decode() {
+        CursorUsageError::BodyTooLarge
+    } else {
+        CursorUsageError::SendFailed
+    }
 }
 
 /// Reads Cursor billing-period usage without starting a model session.

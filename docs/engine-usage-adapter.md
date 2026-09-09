@@ -28,7 +28,11 @@ request id; correlation is the outer frame identity only.
 
 Recommended client behavior: one query with absent `engine_id` for the first
 paint, then per-engine narrowed queries (`engine_id` set) to repaint single
-rows. `force: true` only on explicit user refresh.
+rows. `force: true` only on explicit user refresh. A narrowed single-engine
+snapshot carries exactly that engine's observation time in `fetched_at`;
+an aggregate snapshot carries the latest observation time across its
+reports, so clients that need exact per-engine freshness issue one narrowed
+query per engine.
 
 ## Snapshot JSON
 
@@ -124,9 +128,15 @@ Window fields:
 
 ## Freshness contract
 
-- Reports cache per engine for 60 seconds; repeated queries inside the
-  window return identical bytes without contacting providers.
+- Reports cache per engine for 180 seconds, matching the Electron service;
+  repeated queries inside the window return identical bytes without
+  contacting providers.
 - `force: true` re-asks every selected provider even inside the window.
+- A failed refresh preserves the last-good report with its original fetch
+  time and marks the served copy with the refresh failure, so stale data is
+  never stamped with the current clock. A `failure` string on a report that
+  still carries windows means exactly this: render the last-good meters with
+  a stale warning, not an empty failure state.
 - `fetched_at` identifies the snapshot; rows from one snapshot are mutually
   consistent. Do not mix rows across snapshots when painting per-engine
   fan-out results.
@@ -135,7 +145,3 @@ Window fields:
 
 - Claude reset instants resolve only for UTC-equivalent zones; other zones
   omit `resets_at` rather than guessing. Meters still show exact percents.
-- The Cursor dashboard endpoint is HTTPS and this build owns no TLS
-  connector, so Cursor rows currently report `failure` with an explicit
-  transport reason until the connector decision lands. All other engines are
-  unaffected, and every Cursor mapping path is fixture-proven over HTTP.

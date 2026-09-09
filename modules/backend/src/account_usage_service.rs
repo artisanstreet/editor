@@ -9,6 +9,16 @@
 //! authentication state with an honest quota surface, never an inert
 //! unavailable-only response and never token run-usage.
 //!
+//! Freshness matches the Electron service (180 seconds). A failed refresh
+//! preserves the last-good report with its original fetch time while
+//! exposing the refresh failure honestly on the served report, so clients
+//! never mistake stale data for a fresh check. Each cached report keeps its
+//! own provider observation timestamp: a narrowed single-engine snapshot
+//! carries exactly that engine's observation time, while an aggregate
+//! snapshot carries the latest observation time across its reports.
+//! Clients that need exact per-engine freshness issue one narrowed query
+//! per engine.
+//!
 //! Engine coverage mirrors the TypeScript adapters: Codex reads
 //! `account/rateLimits/read`, Claude parses `claude -p /usage`, Cursor posts
 //! its dashboard endpoint, and Grok Build, Hermes, and OpenCode report
@@ -19,7 +29,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -32,10 +41,13 @@ use artisan_native_engine::account_usage::{ProviderUsage, UsageReaderError};
 use tokio::task::JoinSet;
 
 use super::account_usage_cursor::{CursorUsageConfig, CursorUsageError, read_cursor_usage};
-use artisan_native_engine::{ClaudeUsageConfig, CodexUsageConfig};
+use artisan_native_engine::{ClaudeUsageConfig, CliLaunch, CodexUsageConfig};
 
-/// Freshness window for cached per-engine reports (60 seconds).
-pub const ACCOUNT_USAGE_FRESHNESS: Duration = Duration::from_secs(60);
+/// Freshness window for cached per-engine reports (180 seconds).
+///
+/// Matches the Electron usage service and frontend controller so Forge and
+/// the legacy client agree on when a provider read goes stale.
+pub const ACCOUNT_USAGE_FRESHNESS: Duration = Duration::from_secs(180);
 /// Per-engine read deadline enforced around every reader (30 seconds).
 ///
 /// Reader-internal deadlines are shorter (Codex 15s, Claude 20s, Cursor
@@ -163,9 +175,9 @@ impl From<CursorUsageError> for ReaderFailure {
             CursorUsageError::TokenMalformed => {
                 Self::unavailable("cursor credential file is malformed")
             }
-            CursorUsageError::TlsUnavailable => Self::unavailable(
-                "cursor dashboard needs an https connector this build does not own",
-            ),
+            CursorUsageError::InsecureEndpoint => {
+                Self::unavailable("cursor dashboard endpoint must be https or loopback")
+            }
             CursorUsageError::Timeout => Self::unavailable("cursor dashboard deadline elapsed"),
             CursorUsageError::ConnectFailed => {
                 Self::unavailable("cursor dashboard connection failed")
@@ -354,27 +366,36 @@ impl AccountUsageReader for UnsupportedAccountUsageReader {
 #[derive(Debug)]
 pub struct AccountUsageService {
     readers: Vec<Arc<dyn AccountUsageReader>>,
-    cache: Mutex<HashMap<String, (Instant, EngineUsageReport)>>,
+    cache: Mutex<HashMap<String, CachedUsage>>,
     freshness: Duration,
     per_engine_timeout: Duration,
+}
+
+/// One cached provider observation with its own fetch time.
+///
+/// `observed` drives TTL expiry; `fetched_at` is the ISO instant stamped on
+/// snapshots served from this entry, so a last-good report served after a
+/// failed refresh keeps its original observation time instead of the
+/// current clock.
+#[derive(Clone, Debug)]
+struct CachedUsage {
+    observed: Instant,
+    fetched_at: String,
+    report: EngineUsageReport,
 }
 
 impl AccountUsageService {
     /// Creates the production roster: Codex, Claude, Cursor, then the
     /// unsupported Grok Build, Hermes, and OpenCode entries.
     #[must_use]
-    pub fn with_defaults(
-        codex_executable: PathBuf,
-        claude_executable: PathBuf,
-        cursor: CursorUsageConfig,
-    ) -> Self {
+    pub fn with_defaults(codex: &CliLaunch, claude: &CliLaunch, cursor: CursorUsageConfig) -> Self {
         Self::with_readers(
             vec![
-                Arc::new(CodexAccountUsageReader::new(CodexUsageConfig::new(
-                    codex_executable,
+                Arc::new(CodexAccountUsageReader::new(CodexUsageConfig::launched(
+                    codex,
                 ))) as Arc<dyn AccountUsageReader>,
-                Arc::new(ClaudeAccountUsageReader::new(ClaudeUsageConfig::new(
-                    claude_executable,
+                Arc::new(ClaudeAccountUsageReader::new(ClaudeUsageConfig::launched(
+                    claude,
                 ))) as Arc<dyn AccountUsageReader>,
                 Arc::new(CursorAccountUsageReader::new(cursor)) as Arc<dyn AccountUsageReader>,
                 Arc::new(UnsupportedAccountUsageReader::new(
@@ -421,7 +442,10 @@ impl AccountUsageService {
     /// Cached reports inside the freshness window are reused unless the
     /// query forces a refresh. Every selected engine yields exactly one
     /// report; failures stay per-engine with explicit auth and surface
-    /// states. Only successful provider reads refresh the cache.
+    /// states. A failed refresh preserves the last-good cached report with
+    /// its original fetch time and marks the served copy with the refresh
+    /// failure, so stale data is never stamped with the current clock. Only
+    /// successful provider reads refresh the cache.
     pub async fn read(&self, query: &ReadAccountUsage) -> EngineUsageSnapshot {
         let selected: Vec<usize> = match query.engine_id() {
             Some(engine_id) => match self
@@ -434,15 +458,17 @@ impl AccountUsageService {
             },
             None => (0..self.readers.len()).collect(),
         };
-        let mut cached: Vec<Option<EngineUsageReport>> = selected.iter().map(|_| None).collect();
+        // (report, observation time) pairs in selection order.
+        let mut served: Vec<Option<(EngineUsageReport, String)>> =
+            selected.iter().map(|_| None).collect();
         let mut missing: Vec<(usize, usize)> = Vec::new();
         if !query.force() {
             let cache = self.cache.lock().expect("usage cache is not poisoned");
             for (slot, reader_index) in selected.iter().enumerate() {
                 let engine_id = self.readers[*reader_index].engine_id();
                 match cache.get(engine_id) {
-                    Some((observed, report)) if observed.elapsed() < self.freshness => {
-                        cached[slot] = Some(report.clone());
+                    Some(cached) if cached.observed.elapsed() < self.freshness => {
+                        served[slot] = Some((cached.report.clone(), cached.fetched_at.clone()));
                     }
                     _ => missing.push((slot, *reader_index)),
                 }
@@ -484,37 +510,88 @@ impl AccountUsageService {
             }
         }
 
-        let mut reports: Vec<EngineUsageReport> = Vec::with_capacity(selected.len());
-        let mut fresh: Vec<(String, EngineUsageReport)> = Vec::new();
+        let mut fresh: Vec<(String, CachedUsage)> = Vec::new();
         for (slot, reader_index) in selected.iter().enumerate() {
-            let reader = &self.readers[*reader_index];
-            if let Some(report) = cached[slot].take() {
-                reports.push(report);
+            if served[slot].is_some() {
                 continue;
             }
+            let reader = &self.readers[*reader_index];
             let outcome = outcomes
                 .remove(&slot)
                 .unwrap_or_else(|| Err(ReaderFailure::unavailable(READ_FAILED)));
-            let report = match outcome {
-                Ok(usage) => match success_report(reader, &usage) {
-                    Ok(report) => {
-                        fresh.push((reader.engine_id().to_owned(), report.clone()));
-                        report
+            match outcome {
+                Ok(usage) => {
+                    let fetched_at = iso_millis(system_millis());
+                    match success_report(reader, &usage) {
+                        Ok(report) => {
+                            fresh.push((
+                                reader.engine_id().to_owned(),
+                                CachedUsage {
+                                    observed: Instant::now(),
+                                    fetched_at: fetched_at.clone(),
+                                    report: report.clone(),
+                                },
+                            ));
+                            served[slot] = Some((report, fetched_at));
+                        }
+                        Err(failure) => {
+                            served[slot] =
+                                Some(self.last_good_or_failure(reader, &failure, fetched_at));
+                        }
                     }
-                    Err(failure) => failure_report(reader, &failure),
-                },
-                Err(failure) => failure_report(reader, &failure),
-            };
-            reports.push(report);
+                }
+                Err(failure) => {
+                    served[slot] = Some(self.last_good_or_failure(
+                        reader,
+                        &failure,
+                        iso_millis(system_millis()),
+                    ));
+                }
+            }
         }
         if !fresh.is_empty() {
             let mut cache = self.cache.lock().expect("usage cache is not poisoned");
-            for (engine_id, report) in fresh {
-                cache.insert(engine_id, (Instant::now(), report));
+            for (engine_id, cached) in fresh {
+                cache.insert(engine_id, cached);
             }
         }
-        EngineUsageSnapshot::new(reports, iso_millis(system_millis()))
-            .expect("usage roster is bounded")
+        let mut reports = Vec::with_capacity(served.len());
+        let mut fetched_at = String::new();
+        for (report, observed_at) in served.into_iter().flatten() {
+            if observed_at > fetched_at {
+                fetched_at = observed_at.clone();
+            }
+            reports.push(report);
+        }
+        if fetched_at.is_empty() {
+            // No report was served (empty roster): stamp the empty snapshot
+            // with now so construction stays total. Any served report always
+            // carries its own observation time instead.
+            fetched_at = iso_millis(system_millis());
+        }
+        EngineUsageSnapshot::new(reports, fetched_at).expect("usage roster is bounded")
+    }
+
+    /// Serves the last-good cached report with its original fetch time when
+    /// one exists, marking the served copy with the refresh failure;
+    /// otherwise builds a fresh failure report stamped with `now_iso`.
+    fn last_good_or_failure(
+        &self,
+        reader: &Arc<dyn AccountUsageReader>,
+        failure: &ReaderFailure,
+        now_iso: String,
+    ) -> (EngineUsageReport, String) {
+        let cache = self.cache.lock().expect("usage cache is not poisoned");
+        if let Some(cached) = cache.get(reader.engine_id()) {
+            let marked = cached
+                .report
+                .clone()
+                .with_failure(failure.failure.clone())
+                .unwrap_or_else(|_| failure_report(reader, failure));
+            return (marked, cached.fetched_at.clone());
+        }
+        drop(cache);
+        (failure_report(reader, failure), now_iso)
     }
 
     fn unknown_engine_snapshot(engine_id: &str) -> EngineUsageSnapshot {

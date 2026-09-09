@@ -117,6 +117,7 @@ rust_library(
         "@crates//:hyper",
         "@crates//:hyper-util",
         "@crates//:quinn",
+        "@crates//:reqwest",
         "@crates//:rustls-pki-types",
         "@crates//:sea-orm",
         "@crates//:serde_json",

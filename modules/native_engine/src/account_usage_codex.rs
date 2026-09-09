@@ -16,7 +16,7 @@ use artisan_domain::{
 };
 
 use super::account_usage::{
-    CallError, ExchangeBounds, JsonRpcSession, ProviderUsage, UsageReaderError,
+    CallError, CliLaunch, ExchangeBounds, JsonRpcSession, ProviderUsage, UsageReaderError,
 };
 
 /// Default overall deadline for one Codex usage exchange (15 seconds).
@@ -42,6 +42,9 @@ pub struct CodexUsageConfig {
     pub executable: PathBuf,
     /// Extra arguments before `app-server --stdio`.
     pub executable_args: Vec<String>,
+    /// Interpreter prefix placed between the program and `executable_args`
+    /// (from [`CliLaunch`], empty for direct launches).
+    pub prefix_args: Vec<String>,
     /// Extra environment for the spawned child (fixture seam).
     pub spawn_env: Vec<(String, String)>,
     /// Caps the whole spawn-handshake-request sequence.
@@ -57,10 +60,19 @@ impl CodexUsageConfig {
         Self {
             executable,
             executable_args: Vec::new(),
+            prefix_args: Vec::new(),
             spawn_env: Vec::new(),
             overall_timeout: CODEX_USAGE_OVERALL_TIMEOUT,
             bounds: ExchangeBounds::defaults(),
         }
+    }
+
+    /// Creates a read configuration from one resolved CLI launch.
+    #[must_use]
+    pub fn launched(launch: &CliLaunch) -> Self {
+        let mut config = Self::new(launch.program.clone());
+        config.prefix_args = launch.prefix_args.clone();
+        config
     }
 }
 
@@ -73,7 +85,8 @@ impl CodexUsageConfig {
 /// unauthenticated [`ProviderUsage`], never a failure.
 pub fn read_codex_usage(config: &CodexUsageConfig) -> Result<ProviderUsage, UsageReaderError> {
     let deadline = Instant::now() + config.overall_timeout;
-    let mut args = config.executable_args.clone();
+    let mut args = config.prefix_args.clone();
+    args.extend(config.executable_args.iter().cloned());
     args.push("app-server".to_owned());
     args.push("--stdio".to_owned());
     let mut session =

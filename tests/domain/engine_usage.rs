@@ -122,3 +122,18 @@ fn collection_bounds_match_the_typescript_contract() {
     assert_eq!(ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE, 64);
     assert_eq!(ENGINE_USAGE_ENGINES_MAX, 16);
 }
+
+#[test]
+fn failure_marking_keeps_windows_and_validates() {
+    let marked = report("codex", "Codex")
+        .with_failure("refresh failed".to_owned())
+        .expect("marking should validate");
+    assert_eq!(marked.failure(), Some("refresh failed"));
+    assert_eq!(marked.windows().len(), 1);
+    assert_eq!(marked.engine_id(), "codex");
+    assert!(
+        report("codex", "Codex")
+            .with_failure(String::new())
+            .is_err()
+    );
+}
