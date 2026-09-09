@@ -26,7 +26,10 @@ rust_test(
     name = "dev_launch_test",
     srcs = ["dev_launch.rs"],
     crate_name = "dev_launch_test",
-    deps = ["//scripts/native_dev:native_dev"],
+    deps = [
+        "//scripts/native_dev:native_dev",
+        "@crates//:fs2",
+    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",

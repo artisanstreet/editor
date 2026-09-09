@@ -60,6 +60,12 @@ pub enum DevError {
         /// Live Forge process identity from the readiness receipt.
         pid: u32,
     },
+    /// Forge custody is held on this home; a live Forge may own it.
+    #[error("forge custody is held at {path}; a live Forge may own this home, receipt preserved")]
+    CustodyHeld {
+        /// Custody file another owner holds.
+        path: PathBuf,
+    },
     /// Startup confirmation failed after launch.
     #[error("editor startup not confirmed: {reason}")]
     StartupUnconfirmed {

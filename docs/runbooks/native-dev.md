@@ -134,18 +134,26 @@ Closing the Editor kills its owned Forge, which then cannot remove its
 readiness receipt — and the Forge's no-clobber publish refuses to
 overwrite it, so the next launch died at stage 7 with a readiness
 failure. The dev runner reconciles this under the staging lock before
-spawning: a receipt identifying a **live** staged Forge is refused
-(`previous dev Forge still running`); a receipt that parses as valid
-Forge readiness but names no live staged Forge is stale — its
-(pid, executable) identity provably describes no running owned process —
-so the regular file is removed with a `removed stale readiness of dead
-forge pid N` line; symlinks, reparse points, directories, oversized, or
-malformed bytes are preserved and refuse the launch. Orphan publish
-temporaries (`.artisan-forge-ready-<pid>-<seq>.tmp`) are swept; anything
-else in the home is untouched. The runtime and CLI no-clobber invariants
-are unchanged: the runner never writes a receipt, only removes a
-proven-stale one, and credentials, database, and instance identity are
-never re-minted by a restart.
+spawning, and only with two independent proofs:
+
+1. The receipt must parse as valid Forge readiness (schema, loopback
+   endpoint, certificate pin, nonzero pid) but name no live staged
+   Forge — a live one is refused outright. Symlinks, reparse points,
+   directories, oversized, or malformed bytes are preserved and refuse
+   the launch.
+2. Every ancestor of the receipt must be a regular directory (no
+   symlink, reparse point, or missing component), and the home's Forge
+   custody lock must be acquirable nonblocking and is retained while the
+   receipt is rechecked byte-identical and removed. A live Forge holds
+   that lock from startup until after shutdown, so same-home live Forge
+   removal is impossible even when pid queries are unavailable; a held
+   lock refuses and preserves the receipt.
+
+Publish temporaries are never swept: a stale temporary cannot block the
+next publish, and deleting files by pattern would violate preservation.
+The runtime and CLI no-clobber invariants are unchanged — the runner
+never writes a receipt — and credentials, database, and instance
+identity are never re-minted by a restart.
 
 ## Failure behavior
 
@@ -158,6 +166,7 @@ never re-minted by a restart.
 | `shipping manifest loader rejected the dev home: ...` | Manifest would not launch | Previous manifest restored; report |
 | `existing dev instance is invalid: ...` | `instance-v2.json` corrupted | Delete the file (a fresh identity is minted; dev data stays) |
 | `cannot clear stale startup receipt ...` | Unremovable file at the per-launch receipt path | Remove it by hand; the launch refuses rather than reading stale `ready` |
+| `forge custody is held at ...` | Another owner holds the home's Forge custody | A live Forge may be running; receipt preserved, close it and retry |
 | `stale readiness at ... is malformed / is not a regular file / exceeds its size bound` | Unparseable or unsafe Forge receipt | Preserved; remove it by hand after confirming no Forge runs on the home |
 | `editor startup not confirmed ...` / `stage 7/7 startup ... failed` | Receipt `failed`, timeout, or early exit | Stage detail names the phase; owned Editor already stopped |
 | `path must be absolute` | Relative `--dev-dir` | Pass an absolute path |

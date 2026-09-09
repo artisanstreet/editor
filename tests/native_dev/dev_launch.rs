@@ -243,8 +243,16 @@ fn dead_forge_receipt() -> Vec<u8> {
 fn readiness_home(case: &str) -> (PathBuf, DevPaths) {
     let dev_dir = scratch_dev_dir(case);
     let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
-    std::fs::create_dir_all(paths.readiness_path().parent().expect("readiness parent"))
-        .expect("readiness dir");
+    // Mirror provision: the readiness and custody directories exist before
+    // any Forge runs, so reconcile only ever sees unexpected shapes.
+    for runtime_path in [
+        paths.readiness_path(),
+        paths.custody_path(),
+        paths.database_path(),
+    ] {
+        std::fs::create_dir_all(runtime_path.parent().expect("runtime parent"))
+            .expect("runtime dir");
+    }
     (dev_dir, paths)
 }
 
@@ -262,6 +270,8 @@ fn missing_readiness_reconciles_to_absent() {
 fn stale_valid_readiness_permits_a_second_launch() {
     let (dev_dir, paths) = readiness_home("reconcile-stale");
     std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
+    // Publish temporaries are never swept: a stale temporary cannot block
+    // the next publish, and deleting by pattern would violate preservation.
     let stray = paths
         .readiness_path()
         .parent()
@@ -283,7 +293,7 @@ fn stale_valid_readiness_permits_a_second_launch() {
         !paths.readiness_path().exists(),
         "stale receipt must be gone before the next publish"
     );
-    assert!(!stray.exists(), "orphan publish temporary is swept");
+    assert!(stray.exists(), "publish temporaries are never swept");
     assert!(sibling.exists(), "unrelated siblings are preserved");
     cleanup(&dev_dir);
 }
@@ -337,37 +347,109 @@ fn non_file_readiness_is_preserved_and_refused() {
 }
 
 #[test]
-fn only_exact_publish_temporaries_are_swept() {
+fn publish_temporaries_are_never_swept() {
     let (dev_dir, paths) = readiness_home("reconcile-tmp");
     let parent = paths
         .readiness_path()
         .parent()
         .expect("parent")
         .to_path_buf();
+    // Even the exact runtime temporary shape is preserved: stale
+    // temporaries cannot block the next publish, so nothing but a
+    // proven-stale receipt is ever removed.
     let exact = parent.join(".artisan-forge-ready-7-3.tmp");
     std::fs::write(&exact, b"orphan").expect("exact tmp");
-    for preserved in [
-        "notes.txt",
-        ".artisan-forge-ready-7.tmp",
-        "artisan-forge-ready-7-3.tmp",
-        ".artisan-forge-ready-7-3.log",
-        ".artisan-forge-ready-x-3.tmp",
-    ] {
-        std::fs::write(parent.join(preserved), b"keep").expect("sibling");
-    }
+    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
     assert_eq!(
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("sweep runs"),
-        ReadinessReconcile::Absent
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("stale reconciles"),
+        ReadinessReconcile::CleanedStale { pid: u32::MAX }
     );
-    assert!(!exact.exists(), "exact publish temporary is swept");
-    for preserved in [
-        "notes.txt",
-        ".artisan-forge-ready-7.tmp",
-        "artisan-forge-ready-7-3.tmp",
-        ".artisan-forge-ready-7-3.log",
-        ".artisan-forge-ready-x-3.tmp",
-    ] {
-        assert!(parent.join(preserved).exists(), "preserved: {preserved}");
-    }
+    assert!(!paths.readiness_path().exists(), "stale receipt removed");
+    assert!(exact.exists(), "exact publish temporary is preserved");
     cleanup(&dev_dir);
+}
+
+#[test]
+fn held_custody_refuses_and_preserves_the_receipt() {
+    let (dev_dir, paths) = readiness_home("reconcile-custody");
+    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
+    std::fs::write(paths.custody_path(), b"custody carrier").expect("custody file");
+
+    // A live Forge holds the home's custody lock from startup until after
+    // shutdown. Holding it here simulates that live owner: even though the
+    // receipt's pid is dead, the home must not be touched.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(paths.custody_path())
+        .expect("custody opens");
+    fs2::FileExt::try_lock_exclusive(&held).expect("test holds custody");
+    let error =
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("custody refuses");
+    assert!(
+        matches!(error, native_dev::DevError::CustodyHeld { .. }),
+        "unexpected: {error}"
+    );
+    assert!(
+        paths.readiness_path().exists(),
+        "receipt preserved while custody is held"
+    );
+    drop(held);
+
+    // With custody released, the same stale receipt reconciles normally.
+    assert_eq!(
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("stale reconciles"),
+        ReadinessReconcile::CleanedStale { pid: u32::MAX }
+    );
+    assert!(!paths.readiness_path().exists());
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn missing_custody_shape_fails_closed() {
+    let (dev_dir, paths) = readiness_home("reconcile-no-custody");
+    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
+    // A receipt with no custody directory is an unexpected shape: a Forge
+    // can only have run here if custody existed, so fail closed instead of
+    // inventing custody to justify removal.
+    std::fs::remove_dir_all(paths.custody_path().parent().expect("custody parent"))
+        .expect("custody dir removed");
+    let error =
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("missing refused");
+    assert!(error.to_string().contains("custody"), "unexpected: {error}");
+    assert!(
+        paths.readiness_path().exists(),
+        "receipt preserved on unexpected custody shape"
+    );
+    cleanup(&dev_dir);
+}
+
+/// A symlinked ancestor must refuse removal: deleting through it could
+/// operate outside the dev home. Unix-only: Windows reparse points cannot
+/// be fabricated without privileges, and the same walker covers both.
+#[cfg(unix)]
+#[test]
+fn symlinked_parent_refuses_and_preserves() {
+    use std::os::unix::fs::symlink;
+
+    let outer = scratch_dev_dir("reconcile-symlink");
+    let real = outer.join("real").join("dev").join("home");
+    std::fs::create_dir_all(real.join("readiness")).expect("real readiness");
+    std::fs::create_dir_all(real.join("custody")).expect("real custody");
+    let linked = outer.join("linked");
+    symlink(outer.join("real"), &linked).expect("ancestor symlink");
+    // Every owned path now resolves through the symlinked ancestor.
+    let paths = DevPaths::new(&linked.join("dev")).expect("absolute dev dir");
+    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
+    let error =
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("symlink refused");
+    assert!(
+        error.to_string().contains("symbolic link"),
+        "unexpected: {error}"
+    );
+    assert!(
+        paths.readiness_path().exists(),
+        "receipt preserved behind a symlinked parent"
+    );
+    cleanup(&outer);
 }

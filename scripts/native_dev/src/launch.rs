@@ -18,6 +18,7 @@ use std::{
 };
 
 use artisan_editor_cli::process::{self, ForgeReadiness, ForgeReadinessStatus};
+use fs2::FileExt;
 
 use crate::{
     error::DevError,
@@ -145,14 +146,20 @@ pub enum ReadinessReconcile {
     },
 }
 
-/// Prefix of the runtime's publish temporary files.
-const READINESS_TMP_PREFIX: &str = ".artisan-forge-ready-";
-
-/// Suffix of the runtime's publish temporary files.
-const READINESS_TMP_SUFFIX: &str = ".tmp";
-
 /// Bound for one readiness receipt read, matching the CLI bound.
 const READINESS_MAX_BYTES: u64 = 4_096;
+
+/// Windows reparse-point attribute.
+///
+/// Mirrors the backend custody checks without depending on the backend
+/// crate; `symlink_metadata` preserves this attribute for links and
+/// junctions so either can be rejected before removal.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// Windows flag that opens a reparse point itself instead of following it.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 /// Returns whether directory metadata describes a plain regular file.
 ///
@@ -165,7 +172,6 @@ fn is_plain_file(metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return false;
         }
@@ -173,49 +179,256 @@ fn is_plain_file(metadata: &std::fs::Metadata) -> bool {
     true
 }
 
-/// Returns whether a file name is one of the runtime's publish temporaries.
+/// Validates every ancestor of a removal target without resolving links.
 ///
-/// The runtime names them `.artisan-forge-ready-<pid>-<sequence>.tmp`; only
-/// that exact shape qualifies, so sibling state is never touched.
-fn is_readiness_temporary(name: &std::ffi::OsStr) -> bool {
-    let Some(text) = name.to_str() else {
-        return false;
-    };
-    let Some(middle) = text
-        .strip_prefix(READINESS_TMP_PREFIX)
-        .and_then(|rest| rest.strip_suffix(READINESS_TMP_SUFFIX))
-    else {
-        return false;
-    };
-    let mut parts = middle.split('-');
-    matches!((parts.next(), parts.next(), parts.next()), (Some(pid), Some(sequence), None)
-        if !pid.is_empty()
-            && !sequence.is_empty()
-            && pid.bytes().all(|byte| byte.is_ascii_digit())
-            && sequence.bytes().all(|byte| byte.is_ascii_digit()))
+/// Any symlink, reparse point, non-directory, missing, or uninspectable
+/// ancestor fails closed: removal must never operate through a redirected
+/// parent (for example a junction swapped in after staging). Mirrors the
+/// backend custody parent checks without depending on the backend crate.
+fn validate_parent_chain(path: &Path) -> Result<(), DevError> {
+    let mut current = path;
+    loop {
+        let metadata = match std::fs::symlink_metadata(current) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(DevError::Stage {
+                    stage: "launch",
+                    reason: format!("readiness parent is missing: {}", current.display()),
+                });
+            }
+            Err(_) => {
+                return Err(DevError::Stage {
+                    stage: "launch",
+                    reason: format!("cannot inspect {}", current.display()),
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(DevError::Stage {
+                stage: "launch",
+                reason: format!(
+                    "readiness parent is a symbolic link; preserved, remove it by hand: {}",
+                    current.display()
+                ),
+            });
+        }
+        if is_reparse_point(&metadata) {
+            return Err(DevError::Stage {
+                stage: "launch",
+                reason: format!(
+                    "readiness parent is a reparse point; preserved, remove it by hand: {}",
+                    current.display()
+                ),
+            });
+        }
+        if !metadata.is_dir() {
+            return Err(DevError::Stage {
+                stage: "launch",
+                reason: format!(
+                    "readiness parent is not a directory; preserved: {}",
+                    current.display()
+                ),
+            });
+        }
+        let Some(next) = current.parent() else {
+            break;
+        };
+        if next == current || next.as_os_str().is_empty() {
+            break;
+        }
+        current = next;
+    }
+    Ok(())
 }
 
-/// Removes orphan publish temporaries beside the readiness receipt.
+/// Returns whether metadata describes a Windows reparse point.
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Reparse points do not exist outside Windows.
+#[cfg(not(windows))]
+fn is_reparse_point(_: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Forge custody probe: a nonblocking exclusive OS lock on the home's
+/// custody file, mirroring `ForgeProcessCustody::acquire` narrowly.
 ///
-/// Best-effort: a leftover temporary never blocks the next publish (each
-/// publish mints a fresh pid-scoped name), so an unremovable file is left
-/// for the operator instead of failing the launch.
-fn sweep_readiness_temporaries(readiness_path: &Path) {
-    let Some(parent) = readiness_path.parent() else {
-        return;
+/// A live Forge holds this lock from startup until after application
+/// shutdown, so acquiring it proves no live Forge owns this home — even
+/// when pid queries are unavailable. The guard retains the exact file
+/// through the readiness recheck and removal; dropping it releases
+/// custody. It is never held across spawn: the new Forge must acquire
+/// custody itself on startup. No backend dependency: only `fs2` and the
+/// same shape checks the backend applies.
+struct CustodyProbe {
+    _file: std::fs::File,
+}
+
+/// Acquires the custody probe for one home.
+///
+/// # Errors
+///
+/// Returns [`DevError::CustodyHeld`] when another owner holds the lock,
+/// and [`DevError::Stage`] for any unsafe or unexpected custody shape.
+fn acquire_custody_probe(custody_path: &Path) -> Result<CustodyProbe, DevError> {
+    let Some(parent) = custody_path.parent() else {
+        return Err(DevError::Stage {
+            stage: "launch",
+            reason: format!("custody path has no parent: {}", custody_path.display()),
+        });
     };
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if !is_readiness_temporary(name.as_os_str()) {
-            continue;
+    validate_parent_chain(parent)?;
+    let file = open_or_create_custody_file(custody_path)?;
+    validate_open_custody_file(custody_path, &file)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(CustodyProbe { _file: file }),
+        Err(source) if is_lock_contention(&source) => Err(DevError::CustodyHeld {
+            path: custody_path.to_path_buf(),
+        }),
+        Err(_) => Err(DevError::Stage {
+            stage: "launch",
+            reason: format!("cannot lock {}", custody_path.display()),
+        }),
+    }
+}
+
+/// Opens the pre-existing regular custody file, or creates it atomically.
+fn open_or_create_custody_file(custody_path: &Path) -> Result<std::fs::File, DevError> {
+    match std::fs::symlink_metadata(custody_path) {
+        Ok(metadata) => {
+            validate_custody_metadata(custody_path, &metadata)?;
+            open_custody_file(custody_path)
         }
-        let path = entry.path();
-        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| is_plain_file(&metadata)) {
-            let _ = std::fs::remove_file(&path);
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            create_custody_file(custody_path).or_else(|source| {
+                if source.kind() == std::io::ErrorKind::AlreadyExists {
+                    // A concurrent creator won the race: re-inspect before
+                    // opening, never retry blindly.
+                    match std::fs::symlink_metadata(custody_path) {
+                        Ok(metadata) => {
+                            validate_custody_metadata(custody_path, &metadata)?;
+                            open_custody_file(custody_path)
+                        }
+                        Err(_) => Err(DevError::Stage {
+                            stage: "launch",
+                            reason: format!("cannot inspect {}", custody_path.display()),
+                        }),
+                    }
+                } else {
+                    Err(DevError::Stage {
+                        stage: "launch",
+                        reason: format!("cannot create {}", custody_path.display()),
+                    })
+                }
+            })
         }
+        Err(_) => Err(DevError::Stage {
+            stage: "launch",
+            reason: format!("cannot inspect {}", custody_path.display()),
+        }),
+    }
+}
+
+/// Creates the custody carrier without truncating any existing file.
+fn create_custody_file(custody_path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.mode(0o600);
+    }
+    configure_no_reparse_open(&mut options);
+    options.open(custody_path)
+}
+
+/// Opens the custody carrier read/write without truncating it.
+fn open_custody_file(custody_path: &Path) -> Result<std::fs::File, DevError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    configure_no_reparse_open(&mut options);
+    options.open(custody_path).map_err(|_| DevError::Stage {
+        stage: "launch",
+        reason: format!("cannot open {}", custody_path.display()),
+    })
+}
+
+/// Verifies metadata from the retained descriptor as well as the path.
+fn validate_open_custody_file(custody_path: &Path, file: &std::fs::File) -> Result<(), DevError> {
+    let metadata = file.metadata().map_err(|_| DevError::Stage {
+        stage: "launch",
+        reason: format!("cannot inspect {}", custody_path.display()),
+    })?;
+    validate_custody_metadata(custody_path, &metadata)
+}
+
+/// Rejects symlinks, reparse points, and non-regular custody entries.
+fn validate_custody_metadata(
+    custody_path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), DevError> {
+    if metadata.file_type().is_symlink() {
+        return Err(DevError::Stage {
+            stage: "launch",
+            reason: format!(
+                "custody path is a symbolic link; preserved: {}",
+                custody_path.display()
+            ),
+        });
+    }
+    if is_reparse_point(metadata) {
+        return Err(DevError::Stage {
+            stage: "launch",
+            reason: format!(
+                "custody path is a reparse point; preserved: {}",
+                custody_path.display()
+            ),
+        });
+    }
+    if !metadata.is_file() {
+        return Err(DevError::Stage {
+            stage: "launch",
+            reason: format!(
+                "custody path is not a regular file; preserved: {}",
+                custody_path.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Opens a reparse point itself instead of following it on Windows.
+#[cfg(windows)]
+fn configure_no_reparse_open(options: &mut std::fs::OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+/// No special open flags outside Windows.
+#[cfg(not(windows))]
+fn configure_no_reparse_open(_: &mut std::fs::OpenOptions) {}
+
+/// Maps OS lock errors to contention, mirroring the backend mapping
+/// (`WouldBlock` everywhere, plus `ERROR_LOCK_VIOLATION` on Windows
+/// where `fs2` preserves it instead of mapping to `WouldBlock`).
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(33)
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
@@ -223,33 +436,35 @@ fn sweep_readiness_temporaries(readiness_path: &Path) {
 ///
 /// Background: the Forge publishes its receipt with a no-clobber install
 /// and removes it only on graceful shutdown; an owned Forge killed with
-/// its Editor leaves the receipt (and possibly a publish temporary)
-/// behind, and the next Forge then refuses to publish and dies. The dev
-/// runner owns this home's lifecycle and holds the staging lock, so it —
-/// and only it — may clear the way, under tight rules:
+/// its Editor leaves the receipt behind, and the next Forge then refuses
+/// to publish and dies. The dev runner owns this home's lifecycle and
+/// holds the staging lock, so it — and only it — may clear the way, under
+/// tight rules:
 ///
 /// - A receipt identifying a **live** Forge running the staged binary is
 ///   refused, never touched ([`DevError::PreviousForgeRunning`]).
-/// - A receipt that parses as valid Forge readiness but names no live
-///   staged Forge is stale: its (pid, executable) identity provably
-///   describes no running owned process (exactly what
-///   `readiness_status` verifies), so the regular file is removed.
-/// - Anything else at the path — missing parents, symlinks, reparse
-///   points, directories, oversized or malformed bytes — is preserved and
-///   refused with a bounded diagnostic. In particular the general
-///   readiness no-clobber invariant is untouched: this never writes a
-///   receipt, only removes a proven-stale one under lock.
+/// - Otherwise the safe regular parent chain is required, the receipt
+///   must parse as valid Forge readiness (anything malformed, oversized,
+///   or non-regular is preserved and refused), and the home's Forge
+///   custody lock must be acquirable nonblocking — proving no live Forge
+///   owns this home even when pid queries are unavailable. The probe is
+///   retained while the receipt is rechecked against the exact bytes
+///   validated before, and only those bytes are removed.
+/// - Publish temporaries are never swept: a stale temporary cannot block
+///   the next publish, and deleting files by pattern would violate the
+///   preservation contract. The general readiness no-clobber invariant is
+///   untouched: this never writes a receipt.
 ///
-/// Tradeoff: pid-executable identity is checked, not cryptographic
-/// ownership. A live unrelated process that reused a dead Forge's pid
-/// still yields "not the staged Forge", which is the correct stale
-/// verdict for the file — deleting it harms nothing, since the receipt
-/// is false either way. The one case that must never delete (a live
-/// staged Forge) is exactly what `Ready` refuses.
+/// Tradeoff: custody proves no live Forge holds this home, and
+/// pid-executable identity is rechecked on top; neither is cryptographic
+/// ownership. The dangerous case — a live staged Forge — is refused twice:
+/// once by the pid-identity check and once by custody contention, either
+/// of which preserves the receipt.
 ///
 /// # Errors
 ///
-/// Returns [`DevError::PreviousForgeRunning`] for a live Forge and
+/// Returns [`DevError::PreviousForgeRunning`] for a live Forge,
+/// [`DevError::CustodyHeld`] when custody is occupied, and
 /// [`DevError::Stage`] when an unsafe or unreadable receipt blocks the
 /// launch.
 pub fn reconcile_stale_readiness(
@@ -261,24 +476,32 @@ pub fn reconcile_stale_readiness(
         ForgeReadinessStatus::Ready(readiness) => Err(DevError::PreviousForgeRunning {
             pid: readiness.pid(),
         }),
-        ForgeReadinessStatus::Missing => {
-            sweep_readiness_temporaries(&readiness);
-            Ok(ReadinessReconcile::Absent)
-        }
-        ForgeReadinessStatus::Invalid => reconcile_invalid_readiness(&readiness),
+        ForgeReadinessStatus::Missing => Ok(ReadinessReconcile::Absent),
+        ForgeReadinessStatus::Invalid => reconcile_invalid_readiness(paths, &readiness, forge_exe),
     }
 }
 
 /// Handles a present-but-unusable readiness receipt.
 ///
-/// Only a regular file that parses as valid Forge readiness is stale and
-/// removable; everything else is preserved and refused.
-fn reconcile_invalid_readiness(readiness: &Path) -> Result<ReadinessReconcile, DevError> {
+/// Only a regular file that parses as valid Forge readiness, under a safe
+/// parent chain, with acquirable home custody, rechecked byte-identical,
+/// is stale and removable; everything else is preserved and refused.
+fn reconcile_invalid_readiness(
+    paths: &DevPaths,
+    readiness: &Path,
+    forge_exe: &Path,
+) -> Result<ReadinessReconcile, DevError> {
+    let Some(readiness_dir) = readiness.parent() else {
+        return Err(DevError::Stage {
+            stage: "launch",
+            reason: format!("readiness path has no parent: {}", readiness.display()),
+        });
+    };
+    validate_parent_chain(readiness_dir)?;
     let metadata = match std::fs::symlink_metadata(readiness) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // Raced away between the status check and now: nothing to clean.
-            sweep_readiness_temporaries(readiness);
             return Ok(ReadinessReconcile::Absent);
         }
         Err(_) => {
@@ -306,22 +529,42 @@ fn reconcile_invalid_readiness(readiness: &Path) -> Result<ReadinessReconcile, D
             ),
         });
     }
-    let bytes = std::fs::read(readiness).map_err(|_| DevError::Stage {
+    let validated = std::fs::read(readiness).map_err(|_| DevError::Stage {
         stage: "launch",
         reason: format!("cannot read {}", readiness.display()),
     })?;
-    let receipt = ForgeReadiness::from_json(&bytes).map_err(|_| DevError::Stage {
+    let receipt = ForgeReadiness::from_json(&validated).map_err(|_| DevError::Stage {
         stage: "launch",
         reason: format!(
             "stale readiness at {} is malformed; preserved, remove it by hand",
             readiness.display()
         ),
     })?;
+    // No live Forge may own this home while the receipt is removed: the
+    // custody probe proves it even when pid queries are unavailable, and
+    // is retained through the recheck below so no Forge can start between
+    // the checks and the removal.
+    let _custody = acquire_custody_probe(&paths.custody_path())?;
+    if let ForgeReadinessStatus::Ready(live) = process::readiness_status(readiness, forge_exe) {
+        return Err(DevError::PreviousForgeRunning { pid: live.pid() });
+    }
+    let current = std::fs::read(readiness).map_err(|_| DevError::Stage {
+        stage: "launch",
+        reason: format!("cannot re-read {}", readiness.display()),
+    })?;
+    if current != validated {
+        return Err(DevError::Stage {
+            stage: "launch",
+            reason: format!(
+                "readiness at {} changed during reconciliation; retry the launch",
+                readiness.display()
+            ),
+        });
+    }
     std::fs::remove_file(readiness).map_err(|_| DevError::Stage {
         stage: "launch",
         reason: format!("cannot remove stale readiness at {}", readiness.display()),
     })?;
-    sweep_readiness_temporaries(readiness);
     Ok(ReadinessReconcile::CleanedStale { pid: receipt.pid() })
 }
 
