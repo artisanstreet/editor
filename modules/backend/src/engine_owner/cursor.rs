@@ -1348,7 +1348,8 @@ mod tests {
 
     #[test]
     fn model_resolution_matrix() {
-        // No model stays absent; effort and speed never invent one.
+        // No model stays absent; effort and speed never invent one. The raw
+        // selection rides `launch_args` untouched.
         assert_eq!(
             settings(
                 None,
@@ -1362,88 +1363,83 @@ mod tests {
             None
         );
 
+        // Resolution lives in `cursor_build_args` (mirroring TS
+        // `ResolveCursorModel` inside `CursorAcpArgs`), so the matrix asserts
+        // through the resolved `--model` argv value, never the raw selection.
+        fn resolved_model(settings: &CursorSettings) -> Option<String> {
+            let args = settings.build_args();
+            let position = args
+                .iter()
+                .position(|arg| arg.to_str() == Some("--model"))?;
+            args.get(position + 1)
+                .and_then(|model| model.to_str())
+                .map(str::to_owned)
+        }
+
         // Effort appends unless the base already carries a suffix.
         assert_eq!(
-            settings(
+            resolved_model(&settings(
                 Some("composer-1"),
                 Some("high"),
                 None,
                 None,
                 FilesystemAccess::Workspace
-            )
-            .launch_args()
-            .model
-            .as_deref(),
-            Some("composer-1-high")
+            )),
+            Some("composer-1-high".to_owned())
         );
         assert_eq!(
-            settings(
+            resolved_model(&settings(
                 Some("composer-1-high"),
                 Some("low"),
                 None,
                 None,
                 FilesystemAccess::Workspace
-            )
-            .launch_args()
-            .model
-            .as_deref(),
-            Some("composer-1-high")
+            )),
+            Some("composer-1-high".to_owned())
         );
         assert_eq!(
-            settings(
+            resolved_model(&settings(
                 Some("composer-1-high-fast"),
                 Some("low"),
                 None,
                 None,
                 FilesystemAccess::Workspace
-            )
-            .launch_args()
-            .model
-            .as_deref(),
-            Some("composer-1-high-fast")
+            )),
+            Some("composer-1-high-fast".to_owned())
         );
 
         // Fast appends unless already present.
         assert_eq!(
-            settings(
+            resolved_model(&settings(
                 Some("composer-1"),
                 Some("high"),
                 Some(CursorSpeed::Fast),
                 None,
                 FilesystemAccess::Workspace
-            )
-            .launch_args()
-            .model
-            .as_deref(),
-            Some("composer-1-high-fast")
+            )),
+            Some("composer-1-high-fast".to_owned())
         );
         assert_eq!(
-            settings(
+            resolved_model(&settings(
                 Some("composer-1-fast"),
                 None,
                 Some(CursorSpeed::Fast),
                 None,
                 FilesystemAccess::Workspace
-            )
-            .launch_args()
-            .model
-            .as_deref(),
-            Some("composer-1-fast")
+            )),
+            Some("composer-1-fast".to_owned())
         );
 
         // Bracket models pass through untouched.
         assert_eq!(
-            settings(
+            resolved_model(&settings(
                 Some("cursor[fast]"),
                 Some("high"),
                 Some(CursorSpeed::Fast),
                 None,
                 FilesystemAccess::Workspace
-            )
-            .launch_args()
-            .model
-            .as_deref(),
-            Some("cursor[fast]")
+            )),
+            Some("cursor[fast]".to_owned())
         );
     }
 

@@ -112,7 +112,7 @@ fn cursor_continuation_gate_matrix() {
     // Older dated releases never authorize continuation.
     for old in [
         "2026.08.10-nightly",
-        "2026.9.5-stable.1",
+        "2026.08.05-stable.1",
         "2025.12.31-nightly",
         "not a version",
         "",
@@ -696,11 +696,13 @@ fn cursor_quota_windows_cover_individual_pooled_and_remaining_math() {
         json!({}),
         json!({ "planUsage": null }),
         json!({ "planUsage": { "totalSpend": "lots" } }),
-        // The macro cannot spell 1e999 (denied as an overflowing literal),
-        // so a runtime parse supplies the same JSON text: the parser
-        // saturates it to infinity, which must also map to no windows.
-        serde_json::from_str::<Value>(r#"{"planUsage":{"totalSpend":1e999}}"#)
-            .expect("non-finite spend fixture parses"),
+        // A non-numeric spend fails the whole mapping to no windows. A
+        // non-finite float is unrepresentable through JSON (serde_json
+        // rejects 1e999 with "number out of range"), so the honest
+        // JSON-expressible boundary is a wrong-typed number; the is_finite
+        // guard stays as below-the-JSON-layer defense for programmatic
+        // values.
+        json!({ "planUsage": { "totalSpend": true } }),
     ] {
         assert!(
             map_cursor_quota_windows(&malformed).is_empty(),
