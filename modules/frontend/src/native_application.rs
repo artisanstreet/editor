@@ -2225,9 +2225,6 @@ impl NativeApplication {
                             }
                         }),
                 );
-        if !self.profile_menu.is_open() {
-            self.clear_profile_hover();
-        }
         // The retained exit presentation stays mounted through Closing so
         // the shared 100ms fade/slide-out can complete, exactly like the
         // model picker popover.
