@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use artisan_domain::{ObservationId, RunId};
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -38,7 +39,9 @@ use super::http::{
 use super::interaction::{
     InteractionDeliveryError, InteractionTarget, TurnInteractionLedger, TurnInteractionOutcome,
 };
-use super::observation::{EngineObservation, TerminalState};
+use super::observation::{
+    EngineObservation, SubagentLifecycleRow, SubagentTranscriptRow, TerminalState,
+};
 use super::process::{
     ChildParts, CleanupObservation, LaunchRecipe, LifelineWriter, RetainedEngine, StderrCounter,
     cleanup_after_abort, eventual_wait_once, spawn_configured_engine, spawn_engine,
@@ -922,6 +925,14 @@ fn prepare_preflight_context(request: PreflightRequest) -> Result<PreflightConte
             fixture.scenario,
             secret.as_str(),
         ),
+        super::InternalLaunch::Codex(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Claude(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
     };
     let Ok(mut child) = child_result else {
         let _ = respond.send(Err(EngineOperationError::SpawnFailed));
@@ -1190,6 +1201,14 @@ fn prepare_catalog_context(request: CatalogRequest) -> Result<CatalogContext, Ex
             fixture.scenario,
             secret.as_str(),
         ),
+        super::InternalLaunch::Codex(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Claude(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
     };
     let Ok(mut child) = child_result else {
         let _ = respond.send(Err(EngineOperationError::SpawnFailed));
@@ -1498,12 +1517,24 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         Ok(runtime) => runtime,
         Err(error) => return request.fail(error),
     };
-    let artisan_domain::EngineSelection::OpenCode2(selection) =
-        request.input.settings.config().selection()
-    else {
-        return request.fail(EngineOperationError::Configuration);
+    let selected_profile = match request.input.settings.config().selection() {
+        artisan_domain::EngineSelection::OpenCode2(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Codex(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Claude(selection) => selection.profile_id().as_str(),
+        _ => return request.fail(EngineOperationError::Configuration),
     };
-    if request.input.launch.profile_id() != selection.profile_id().as_str() {
+    if request.input.launch.profile_id() != selected_profile {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    // Codex and Claude turns carry no provider continuation in this packet;
+    // a mid-turn resume here fails closed instead of executing as another
+    // engine.
+    if request.input.continuation.is_some()
+        && matches!(
+            request.input.launch,
+            super::InternalLaunch::Codex(_) | super::InternalLaunch::Claude(_)
+        )
+    {
         return request.fail(EngineOperationError::Configuration);
     }
     if shutdown.is_cancelled() {
@@ -1513,6 +1544,12 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         return request.fail(EngineOperationError::Cancelled);
     }
 
+    if matches!(request.input.launch, super::InternalLaunch::Codex(_)) {
+        return Box::pin(execute_codex_turn(request, runtime, shutdown)).await;
+    }
+    if matches!(request.input.launch, super::InternalLaunch::Claude(_)) {
+        return Box::pin(execute_claude_turn(request, runtime, shutdown)).await;
+    }
     Box::pin(execute_configured_turn(request, runtime, shutdown)).await
 }
 
@@ -1626,6 +1663,941 @@ async fn execute_configured_turn(
     Box::pin(execute_configured_session(process, shutdown)).await
 }
 
+/// Executes one finite Codex turn over `codex app-server --stdio`.
+///
+/// Single-owner match arm beside the OpenCode2 executor: no second task, no
+/// second queue. Performs initialize, thread/start, the bind authorization
+/// gate, then turn/start plus the streaming pump. Text deltas normalize onto
+/// the shared S1a vocabulary; approval/question frames populate the pending
+/// tracker with no control-flow side effect; child-thread frames never adopt
+/// the root turn. External-kill EOF maps to `Interrupted`, explicit cancel to
+/// `Cancelled`, and stall/failure to `Failed`.
+async fn execute_codex_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::codex as codex_runtime;
+    use super::process::spawn_codex_engine;
+
+    let artisan_domain::EngineSelection::Codex(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = match codex_runtime::CodexSettings::from_selection(selection) {
+        Ok(settings) => settings,
+        Err(_) => return request.fail(EngineOperationError::Configuration),
+    };
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Codex(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let mut child = match spawn_codex_engine(launch.as_ref(), &request.input.project_root) {
+        Ok(child) => child,
+        Err(_) => return request.fail(EngineOperationError::SpawnFailed),
+    };
+    let stdin_opt = child.stdin.take();
+    let stdout_opt = child.stdout.take();
+    let stderr_opt = child.stderr.take();
+    let lifeline = LifelineWriter::take(&mut child);
+    let stderr_counter = StderrCounter::new(stderr_opt, runtime.bounds.stderr_cap_bytes);
+    let (mut stdin, stdout) = match (stdin_opt, stdout_opt) {
+        (Some(stdin), Some(stdout)) => (stdin, stdout),
+        _ => {
+            let parts = ChildParts {
+                child,
+                lifeline,
+                stdout: None,
+                stderr_counter,
+            };
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::SpawnFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut next_id: u64 = 1;
+
+    // initialize ---------------------------------------------------------
+    let init_line = codex_runtime::request_line(
+        next_id,
+        "initialize",
+        &codex_runtime::initialize_params("artisan-editor", "0.3.0"),
+    );
+    next_id += 1;
+    if write_codex_line(&mut stdin, &init_line).await.is_err() {
+        return finish_configured_start(
+            request,
+            parts,
+            EngineOperationError::ProviderRequestFailed,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    let mut line = String::new();
+    if read_codex_line(
+        &mut reader,
+        &mut line,
+        phase_deadline(runtime.limits.prompt, request.deadline),
+        shutdown,
+        &request.control,
+    )
+    .await
+    .is_err()
+    {
+        let error = if shutdown.is_cancelled() {
+            EngineOperationError::Shutdown
+        } else if request.control.is_cancelled() {
+            EngineOperationError::Cancelled
+        } else {
+            EngineOperationError::ProviderRequestFailed
+        };
+        return finish_configured_start(request, parts, error, runtime.limits.close).await;
+    }
+    if !is_codex_result_for(&line, 1) {
+        return finish_configured_start(
+            request,
+            parts,
+            EngineOperationError::ProviderRequestFailed,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    // thread/start --------------------------------------------------------
+    let thread_line = codex_runtime::request_line(
+        next_id,
+        "thread/start",
+        &settings.thread_params(&request.input.project_root),
+    );
+    next_id += 1;
+    if write_codex_line(&mut stdin, &thread_line).await.is_err() {
+        return finish_configured_start(
+            request,
+            parts,
+            EngineOperationError::ProviderRequestFailed,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    line.clear();
+    if read_codex_line(
+        &mut reader,
+        &mut line,
+        phase_deadline(runtime.limits.prompt, request.deadline),
+        shutdown,
+        &request.control,
+    )
+    .await
+    .is_err()
+    {
+        let error = if shutdown.is_cancelled() {
+            EngineOperationError::Shutdown
+        } else if request.control.is_cancelled() {
+            EngineOperationError::Cancelled
+        } else {
+            EngineOperationError::ProviderRequestFailed
+        };
+        return finish_configured_start(request, parts, error, runtime.limits.close).await;
+    }
+    let Some(thread_id) = codex_thread_id(&line, 2) else {
+        return finish_configured_start(
+            request,
+            parts,
+            EngineOperationError::ProviderRequestFailed,
+            runtime.limits.close,
+        )
+        .await;
+    };
+
+    // Bind authorization gate: the dispatcher binds the native thread id
+    // before exactly one prompt is authorized. Destructure here so the
+    // prepared session carries the exact native identity.
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        mut authorize,
+        observations,
+        respond,
+    } = request;
+    if prepared
+        .send(Ok(PreparedSession::new(thread_id.clone())))
+        .is_err()
+    {
+        drop(stdin);
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::Cancelled),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    if let Err(error) =
+        wait_for_authorization(&mut parts, &mut authorize, deadline, shutdown, &control).await
+    {
+        drop(stdin);
+        return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+    }
+
+    // turn/start + streaming pump -----------------------------------------
+    let prompt_text = input
+        .prompt
+        .text()
+        .map(|text| text.as_str().to_owned())
+        .unwrap_or_default();
+    let turn_params = serde_json::json!({ "input": [{ "text": prompt_text, "text_elements": [], "type": "text" }] });
+    let turn_line = codex_runtime::request_line(next_id, "turn/start", &turn_params);
+    next_id += 1;
+    if write_codex_line(&mut stdin, &turn_line).await.is_err() {
+        drop(stdin);
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::ProviderRequestFailed),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    let inactivity = runtime.limits.sse;
+    let mut tracker = codex_runtime::CodexPendingTracker::new();
+    let mut active_turn: Option<String> = None;
+    let mut frame_sequence: u64 = 0;
+    let mut last_activity = Instant::now();
+    let terminal = codex_pump_loop(
+        &mut reader,
+        &mut stdin,
+        &mut parts,
+        &mut line,
+        &input.run_id,
+        &mut tracker,
+        &mut active_turn,
+        &mut frame_sequence,
+        &mut last_activity,
+        inactivity,
+        deadline,
+        shutdown,
+        &control,
+        &observations,
+        &thread_id,
+    )
+    .await;
+    drop(stdin);
+    let _ = next_id;
+    match terminal {
+        CodexPumpOutcome::Terminal(state) => {
+            drop(observations);
+            finish_turn_result(
+                parts,
+                Ok(EngineTurnResult { terminal: state }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        CodexPumpOutcome::Failed(error) => {
+            finish_turn_result(parts, Err(error), respond, runtime.limits.close).await
+        }
+    }
+}
+
+enum CodexPumpOutcome {
+    Terminal(super::observation::TerminalState),
+    Failed(EngineOperationError),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn codex_pump_loop(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    stdin: &mut tokio::process::ChildStdin,
+    parts: &mut ChildParts,
+    line: &mut String,
+    run_id: &artisan_domain::RunId,
+    tracker: &mut super::codex::CodexPendingTracker,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    inactivity: Duration,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+    thread_id: &str,
+) -> CodexPumpOutcome {
+    use super::codex as codex_runtime;
+    use tokio::io::AsyncBufReadExt as _;
+
+    loop {
+        if shutdown.is_cancelled() {
+            return CodexPumpOutcome::Failed(EngineOperationError::Shutdown);
+        }
+        if control.is_cancelled() {
+            // Best-effort provider interrupt before reporting cancellation.
+            if let Some(turn_id) = active_turn.clone() {
+                let mut request_id = u64::MAX;
+                let _ =
+                    codex_runtime::interrupt_live_turn(stdin, &mut request_id, thread_id, &turn_id)
+                        .await;
+            }
+            return CodexPumpOutcome::Terminal(TerminalState::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return CodexPumpOutcome::Failed(EngineOperationError::Deadline);
+        }
+        if codex_runtime::has_stalled(
+            active_turn.is_some(),
+            *last_activity,
+            inactivity,
+            Instant::now(),
+        ) {
+            return CodexPumpOutcome::Terminal(TerminalState::Failed);
+        }
+        let stall_at = last_activity
+            .checked_add(inactivity)
+            .unwrap_or(deadline)
+            .min(deadline);
+        line.clear();
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => return CodexPumpOutcome::Failed(EngineOperationError::Shutdown),
+            () = control.wait() => {
+                if let Some(turn_id) = active_turn.clone() {
+                    let mut request_id = u64::MAX;
+                    let _ = codex_runtime::interrupt_live_turn(stdin, &mut request_id, thread_id, &turn_id).await;
+                }
+                return CodexPumpOutcome::Terminal(TerminalState::Cancelled);
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return CodexPumpOutcome::Failed(EngineOperationError::Deadline);
+            }
+            () = tokio::time::sleep_until(stall_at) => {
+                if codex_runtime::has_stalled(
+                    active_turn.is_some(),
+                    *last_activity,
+                    inactivity,
+                    Instant::now(),
+                ) {
+                    return CodexPumpOutcome::Terminal(TerminalState::Failed);
+                }
+                let _ = parts.stderr_counter.pump().await;
+            }
+            read = reader.read_line(line) => {
+                match read {
+                    Ok(0) => {
+                        // External kill: interruption, never cancel/failure.
+                        return CodexPumpOutcome::Terminal(TerminalState::Interrupted);
+                    }
+                    Ok(_) => {
+                        *last_activity = Instant::now();
+                        *frame_sequence += 1;
+                        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                        match codex_runtime::parse_frame(&trimmed, *frame_sequence) {
+                            Ok(event) => {
+                                if let Some(terminal) = codex_runtime::apply_event(
+                                    event,
+                                    run_id,
+                                    tracker,
+                                    active_turn,
+                                    observations,
+                                    *frame_sequence,
+                                ).await {
+                                    return CodexPumpOutcome::Terminal(terminal);
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    Err(_) => return CodexPumpOutcome::Failed(EngineOperationError::StreamFailed),
+                }
+            }
+        }
+    }
+}
+
+async fn write_codex_line(
+    stdin: &mut tokio::process::ChildStdin,
+    line: &str,
+) -> Result<(), EngineOperationError> {
+    use tokio::io::AsyncWriteExt as _;
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|_| EngineOperationError::ProviderRequestFailed)?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|_| EngineOperationError::ProviderRequestFailed)?;
+    stdin
+        .flush()
+        .await
+        .map_err(|_| EngineOperationError::ProviderRequestFailed)?;
+    Ok(())
+}
+
+async fn read_codex_line(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    line: &mut String,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+) -> Result<(), EngineOperationError> {
+    use tokio::io::AsyncBufReadExt as _;
+    line.clear();
+    tokio::select! {
+        biased;
+        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+        () = control.wait() => Err(EngineOperationError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => Err(EngineOperationError::Deadline),
+        read = reader.read_line(line) => match read {
+            Ok(0) => Err(EngineOperationError::ProviderRequestFailed),
+            Ok(_) => Ok(()),
+            Err(_) => Err(EngineOperationError::ProviderRequestFailed),
+        },
+    }
+}
+
+/// Returns whether one handshake line is the result for the request id.
+///
+/// Bounds the line before parsing and requires a `result` member; anything
+/// else fails the handshake closed without spawning further phases.
+pub(crate) fn is_codex_result_for(line: &str, id: u64) -> bool {
+    if line.len() > super::codex::CODEX_MAX_FRAME_BYTES {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    let matches_id = value.get("id").is_some_and(|candidate| {
+        candidate.as_u64() == Some(id)
+            || candidate
+                .as_str()
+                .is_some_and(|text| text == id.to_string())
+    });
+    matches_id && value.get("result").is_some()
+}
+
+/// Extracts the exact native thread identity from a `thread/start` result.
+///
+/// Returns `None` on id mismatch, missing thread, or out-of-bound identity
+/// so the dispatcher never binds a corrupt session.
+pub(crate) fn codex_thread_id(line: &str, id: u64) -> Option<String> {
+    if line.len() > super::codex::CODEX_MAX_FRAME_BYTES {
+        return None;
+    }
+    let value: Value = serde_json::from_str(line).ok()?;
+    let matches_id = value.get("id").is_some_and(|candidate| {
+        candidate.as_u64() == Some(id)
+            || candidate
+                .as_str()
+                .is_some_and(|text| text == id.to_string())
+    });
+    if !matches_id {
+        return None;
+    }
+    let thread = value.get("result")?.get("thread")?;
+    let id = thread.get("id")?.as_str()?;
+    if id.is_empty() || id.len() > 256 {
+        return None;
+    }
+    Some(id.to_owned())
+}
+
+/// Executes one finite Claude turn over `claude -p --output-format stream-json`.
+///
+/// Single-owner match arm beside the Codex executor: no second task, no
+/// second queue. Writes the first user message over stdin, waits for the
+/// `system/init` session identity behind the bind authorization gate, then
+/// pumps the stream. Text deltas normalize onto the shared S1a vocabulary
+/// with verbatim phases; `AskUserQuestion` frames populate pending questions
+/// lifted out of the approval path; child transcript frames never adopt the
+/// root turn. EOF before `result` maps to `Interrupted`, explicit cancel to
+/// `Cancelled`, and stall/failure to `Failed`.
+async fn execute_claude_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::claude as claude_runtime;
+    use super::process::spawn_claude_engine;
+    use tokio::io::AsyncBufReadExt as _;
+
+    let artisan_domain::EngineSelection::Claude(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = match claude_runtime::ClaudeSettings::from_selection(selection) {
+        Ok(settings) => settings,
+        Err(_) => return request.fail(EngineOperationError::Configuration),
+    };
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Claude(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    if request.input.continuation.is_some() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let Some(session_id) = claude_runtime::new_session_id() else {
+        return request.fail(EngineOperationError::EntropyFailed);
+    };
+    let session = claude_runtime::ClaudeSession::Start(session_id.clone());
+    let args = settings.spawn_args(&session);
+    let mut child = match spawn_claude_engine(launch.as_ref(), &request.input.project_root, &args) {
+        Ok(child) => child,
+        Err(_) => return request.fail(EngineOperationError::SpawnFailed),
+    };
+    let stdin_opt = child.stdin.take();
+    let stdout_opt = child.stdout.take();
+    let stderr_opt = child.stderr.take();
+    let lifeline = LifelineWriter::take(&mut child);
+    let stderr_counter = StderrCounter::new(stderr_opt, runtime.bounds.stderr_cap_bytes);
+    let (mut stdin, stdout) = match (stdin_opt, stdout_opt) {
+        (Some(stdin), Some(stdout)) => (stdin, stdout),
+        _ => {
+            let parts = ChildParts {
+                child,
+                lifeline,
+                stdout: None,
+                stderr_counter,
+            };
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::SpawnFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let mut reader = tokio::io::BufReader::new(stdout);
+
+    // First user message ----------------------------------------------------
+    // The prompt travels as the first stdin line; there is no `turn/start`
+    // RPC on this transport.
+    if let Some(prompt_text) = request
+        .input
+        .prompt
+        .text()
+        .map(|text| text.as_str().to_owned())
+    {
+        let line = settings.user_message_line(&session, &prompt_text);
+        if claude_runtime::write_line(&mut stdin, &line).await.is_err() {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    }
+
+    // init-event gate ---------------------------------------------------------
+    // The CLI speaks first: the bind authorization gate opens only after the
+    // exact spawned session announces itself. Pre-init lines that are not
+    // init are not replayed; a wrong session fails closed.
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if read_claude_line(
+            &mut reader,
+            &mut line,
+            phase_deadline(runtime.limits.prompt, request.deadline),
+            shutdown,
+            &request.control,
+        )
+        .await
+        .is_err()
+        {
+            let error = if shutdown.is_cancelled() {
+                EngineOperationError::Shutdown
+            } else if request.control.is_cancelled() {
+                EngineOperationError::Cancelled
+            } else {
+                EngineOperationError::ProviderRequestFailed
+            };
+            return finish_configured_start(request, parts, error, runtime.limits.close).await;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+        match claude_runtime::parse_frame(&trimmed, 0) {
+            Ok(claude_runtime::ClaudeEvent::Init {
+                session_id: announced,
+            }) if announced == session_id => break,
+            Ok(claude_runtime::ClaudeEvent::Init { .. }) => {
+                return finish_configured_start(
+                    request,
+                    parts,
+                    EngineOperationError::ProviderRequestFailed,
+                    runtime.limits.close,
+                )
+                .await;
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+
+    // Bind authorization gate: the dispatcher binds the native session id
+    // before exactly one prompt is authorized. Destructure here so the
+    // prepared session carries the exact native identity.
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        mut authorize,
+        observations,
+        respond,
+    } = request;
+    if prepared
+        .send(Ok(PreparedSession::new(session_id.clone())))
+        .is_err()
+    {
+        drop(stdin);
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::Cancelled),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    if let Err(error) =
+        wait_for_authorization(&mut parts, &mut authorize, deadline, shutdown, &control).await
+    {
+        drop(stdin);
+        return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+    }
+
+    // streaming pump ----------------------------------------------------------
+    let mut stdin = Some(stdin);
+    let mut tracker = claude_runtime::ClaudePendingTracker::new();
+    let mut active_turn: Option<String> = None;
+    let mut frame_sequence: u64 = 0;
+    let mut last_activity = Instant::now();
+    let inactivity = runtime.limits.sse;
+    let terminal = claude_pump_loop(
+        &mut reader,
+        &mut stdin,
+        &mut parts,
+        &mut line,
+        &input.run_id,
+        &session_id,
+        &mut tracker,
+        &mut active_turn,
+        &mut frame_sequence,
+        &mut last_activity,
+        inactivity,
+        deadline,
+        shutdown,
+        &control,
+        &observations,
+    )
+    .await;
+    drop(stdin);
+    match terminal {
+        ClaudePumpOutcome::Terminal {
+            state,
+            subagent_rows,
+        } => {
+            // Rows traversed the pump loop beside the text channel; forward
+            // them through the owner channel in emission order ahead of
+            // terminal settlement, exactly like text deltas flow. A closed
+            // sink or a non-subagent row ends forwarding without disturbing
+            // the turn result: only lifecycle and transcript rows ever
+            // accumulate in the pump buffer.
+            forward_subagent_rows(&observations, subagent_rows).await;
+            drop(observations);
+            finish_turn_result(
+                parts,
+                Ok(EngineTurnResult { terminal: state }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        ClaudePumpOutcome::Failed {
+            error,
+            subagent_rows,
+        } => {
+            forward_subagent_rows(&observations, subagent_rows).await;
+            finish_turn_result(parts, Err(error), respond, runtime.limits.close).await
+        }
+    }
+}
+
+enum ClaudePumpOutcome {
+    Terminal {
+        state: super::observation::TerminalState,
+        subagent_rows: Vec<artisan_domain::Observation>,
+    },
+    Failed {
+        error: EngineOperationError,
+        subagent_rows: Vec<artisan_domain::Observation>,
+    },
+}
+
+/// Forwards buffered subagent rows through the owner observation channel.
+///
+/// Wraps each domain row into its channel event in buffer order and sends it
+/// ahead of terminal settlement. A closed sink or an unexpected row kind
+/// ends forwarding without disturbing the turn result; the caller settles
+/// the turn exactly as it would have without rows.
+async fn forward_subagent_rows(
+    observations: &mpsc::Sender<EngineObservation>,
+    subagent_rows: Vec<artisan_domain::Observation>,
+) {
+    for row in subagent_rows {
+        let event = match row {
+            artisan_domain::Observation::Subagent(observation) => {
+                EngineObservation::Subagent(SubagentLifecycleRow::new(observation))
+            }
+            artisan_domain::Observation::SubagentTranscript(observation) => {
+                EngineObservation::SubagentTranscript(SubagentTranscriptRow::new(observation))
+            }
+            _ => break,
+        };
+        if observations.send(event).await.is_err() {
+            break;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn claude_pump_loop(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    stdin: &mut Option<tokio::process::ChildStdin>,
+    parts: &mut ChildParts,
+    line: &mut String,
+    run_id: &artisan_domain::RunId,
+    expected_session: &str,
+    tracker: &mut super::claude::ClaudePendingTracker,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    inactivity: Duration,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+) -> ClaudePumpOutcome {
+    use super::claude as claude_runtime;
+    use tokio::io::AsyncBufReadExt as _;
+
+    let mut exited: Option<std::process::ExitStatus> = None;
+    // Emission buffer beside the text channel: drained per applied frame so
+    // rows traverse the loop in emission order instead of accumulating in
+    // the tracker. Delivery beyond the loop awaits the owner-channel
+    // follow-up; see the handoff marker where the pump settles.
+    let mut subagent_rows: Vec<artisan_domain::Observation> = Vec::new();
+    loop {
+        if shutdown.is_cancelled() {
+            return ClaudePumpOutcome::Failed {
+                error: EngineOperationError::Shutdown,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
+        }
+        if control.is_cancelled() {
+            // No provider interrupt verb exists on this transport (the
+            // adapter settles cancel without one); closing stdin is the only
+            // turn-side signal before reporting cancellation.
+            drop(stdin.take());
+            return ClaudePumpOutcome::Terminal {
+                state: TerminalState::Cancelled,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
+        }
+        if Instant::now() >= deadline {
+            return ClaudePumpOutcome::Failed {
+                error: EngineOperationError::Deadline,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
+        }
+        if claude_runtime::has_stalled(
+            active_turn.is_some(),
+            *last_activity,
+            inactivity,
+            Instant::now(),
+        ) {
+            return ClaudePumpOutcome::Terminal {
+                state: TerminalState::Failed,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
+        }
+        let stall_at = last_activity
+            .checked_add(inactivity)
+            .unwrap_or(deadline)
+            .min(deadline);
+        line.clear();
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => {
+                return ClaudePumpOutcome::Failed {
+                    error: EngineOperationError::Shutdown,
+                    subagent_rows: std::mem::take(&mut subagent_rows),
+                };
+            }
+            () = control.wait() => {
+                drop(stdin.take());
+                return ClaudePumpOutcome::Terminal {
+                    state: TerminalState::Cancelled,
+                    subagent_rows: std::mem::take(&mut subagent_rows),
+                };
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return ClaudePumpOutcome::Failed {
+                    error: EngineOperationError::Deadline,
+                    subagent_rows: std::mem::take(&mut subagent_rows),
+                };
+            }
+            () = tokio::time::sleep_until(stall_at) => {
+                if claude_runtime::has_stalled(
+                    active_turn.is_some(),
+                    *last_activity,
+                    inactivity,
+                    Instant::now(),
+                ) {
+                    return ClaudePumpOutcome::Terminal {
+                        state: TerminalState::Failed,
+                        subagent_rows: std::mem::take(&mut subagent_rows),
+                    };
+                }
+                let _ = parts.stderr_counter.pump().await;
+            }
+            status = parts.child.wait(), if exited.is_none() => {
+                match status {
+                    Ok(status) => exited = Some(status),
+                    Err(_) => {
+                        return ClaudePumpOutcome::Failed {
+                            error: EngineOperationError::StreamFailed,
+                            subagent_rows: std::mem::take(&mut subagent_rows),
+                        };
+                    }
+                }
+            }
+            read = reader.read_line(line) => {
+                match read {
+                    Ok(0) => {
+                        // EOF is the observed close: a `result` before it is
+                        // a clean turn (modulo exit failure and semantic
+                        // failure); EOF before `result` is an external kill,
+                        // never cancel and never failure-by-code.
+                        let clean_exit = match exited {
+                            None => true,
+                            Some(status) => status.success(),
+                        };
+                        let subagent_rows = std::mem::take(&mut subagent_rows);
+                        if tracker.result_seen() && !tracker.semantic_failure() && clean_exit {
+                            return ClaudePumpOutcome::Terminal {
+                                state: TerminalState::Completed,
+                                subagent_rows,
+                            };
+                        }
+                        if tracker.result_seen() {
+                            return ClaudePumpOutcome::Terminal {
+                                state: TerminalState::Failed,
+                                subagent_rows,
+                            };
+                        }
+                        return ClaudePumpOutcome::Terminal {
+                            state: TerminalState::Interrupted,
+                            subagent_rows,
+                        };
+                    }
+                    Ok(_) => {
+                        *last_activity = Instant::now();
+                        *frame_sequence += 1;
+                        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                        match claude_runtime::parse_frame(&trimmed, *frame_sequence) {
+                            Ok(event) => {
+                                let outcome = claude_runtime::apply_event(
+                                    event,
+                                    run_id,
+                                    expected_session,
+                                    tracker,
+                                    active_turn,
+                                    observations,
+                                    *frame_sequence,
+                                )
+                                .await;
+                                // Drain beside the text channel: rows traverse
+                                // the loop in emission order.
+                                subagent_rows.extend(tracker.take_subagent_rows());
+                                match outcome {
+                                    claude_runtime::ClaudeApplyOutcome::Continue { end_input } => {
+                                        if end_input {
+                                            // `result` seen: EndInput
+                                            // equivalent, then the CLI exits
+                                            // and EOF classifies the turn.
+                                            drop(stdin.take());
+                                        }
+                                    }
+                                    claude_runtime::ClaudeApplyOutcome::Terminal(state) => {
+                                        return ClaudePumpOutcome::Terminal {
+                                            state,
+                                            subagent_rows: std::mem::take(&mut subagent_rows),
+                                        };
+                                    }
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    Err(_) => {
+                        return ClaudePumpOutcome::Failed {
+                            error: EngineOperationError::StreamFailed,
+                            subagent_rows: std::mem::take(&mut subagent_rows),
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn read_claude_line(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    line: &mut String,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+) -> Result<(), EngineOperationError> {
+    use tokio::io::AsyncBufReadExt as _;
+    line.clear();
+    tokio::select! {
+        biased;
+        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+        () = control.wait() => Err(EngineOperationError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => Err(EngineOperationError::Deadline),
+        read = reader.read_line(line) => match read {
+            Ok(0) => Err(EngineOperationError::ProviderRequestFailed),
+            Ok(_) => Ok(()),
+            Err(_) => Err(EngineOperationError::ProviderRequestFailed),
+        },
+    }
+}
+
 async fn prepare_configured_process(
     request: ConfiguredTurnRequest,
     runtime: ConfiguredRuntime,
@@ -1647,6 +2619,12 @@ async fn prepare_configured_process(
                 fixture.scenario,
                 secret.as_str(),
             )
+        }
+        crate::engine_owner::InternalLaunch::Codex(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
+        }
+        crate::engine_owner::InternalLaunch::Claude(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
         }
     }) else {
         return Err(request.fail(EngineOperationError::SpawnFailed));
@@ -1919,6 +2897,8 @@ async fn authorize_configured_session(
         super::InternalLaunch::Verified(_) => {
             StreamState::for_run(input.run_id.clone(), session.clone(), stream_after)
         }
+        super::InternalLaunch::Codex(_) => Err(StreamError::InvalidSession),
+        super::InternalLaunch::Claude(_) => Err(StreamError::InvalidSession),
         #[cfg(test)]
         super::InternalLaunch::Fixture(_) => Ok(StreamState::new(stream_after)),
     };
@@ -2063,7 +3043,8 @@ async fn execute_authorized_configured_turn(
 fn stream_usage_context(input: &super::InternalTurnInput) -> Option<StreamUsageContext> {
     let thread_id = input.thread_id.as_ref()?.clone();
     // Usage attribution is OpenCode2-shaped; other selections carry no
-    // usage scope instead of attributing as OpenCode2.
+    // usage scope instead of attributing as OpenCode2. Claude usage capture
+    // beyond the tracker plumbing in `super::claude` is a later packet.
     let artisan_domain::EngineSelection::OpenCode2(selection) = input.settings.config().selection()
     else {
         return None;

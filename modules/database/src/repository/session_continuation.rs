@@ -214,6 +214,13 @@ struct ProviderBinding {
     engine: String,
     profile_id: String,
     session_id: String,
+    /// Binding document format. Absent on rows bound before the format key
+    /// existed; always `Some(1)` on rows bound after. It is informational
+    /// only: authority still comes from the column binding version checked
+    /// in [`decode_binding`], so any value decodes without changing the
+    /// disposition.
+    #[serde(default)]
+    format: Option<i64>,
 }
 
 impl Repository {

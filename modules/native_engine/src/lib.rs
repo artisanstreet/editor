@@ -1,7 +1,18 @@
 #![forbid(unsafe_code)]
 
+// `claude.rs` / `codex.rs` (the certified launch authorities, wired as
+// `*_authority` below) coexist with the `claude/` / `codex/` discovery
+// directories, so the directory modules need explicit paths: a plain
+// `pub mod claude;` / `pub mod codex;` would resolve to both `*.rs` and
+// `*/mod.rs` (E0583).
+#[path = "claude/mod.rs"]
 pub mod claude;
+#[path = "claude.rs"]
+mod claude_authority;
+#[path = "codex/mod.rs"]
 pub mod codex;
+#[path = "codex.rs"]
+mod codex_authority;
 pub mod cursor;
 #[path = "install.rs"]
 mod engine_core;
@@ -14,6 +25,16 @@ mod resolver;
 #[cfg(windows)]
 mod windows_private;
 
+pub use claude_authority::{
+    CLAUDE_EXECUTABLE_ENV_VAR, CLAUDE_MINIMUM_CLI_VERSION, CLAUDE_NATIVE_CONTINUATION_VERSION,
+    CLAUDE_PROTOCOL_VERSION, CLAUDE_TRANSPORT, NativeClaudeAuthority, NativeClaudeLaunchError,
+    VerifiedClaudeLaunch, compare_claude_versions,
+};
+pub use codex_authority::{
+    CODEX_APP_SERVER_ARGS, CODEX_MINIMUM_CLI_VERSION, CODEX_OPT_OUT_NOTIFICATION_METHODS,
+    CODEX_PROTOCOL_VERSION, CODEX_TRANSPORT, NativeCodexAuthority, NativeCodexLaunchError,
+    VerifiedCodexLaunch, compare_codex_versions,
+};
 pub use engine_core::{
     NativeOpenCode2Authority, NativeOpenCode2Error, NativeOpenCode2InstallLock,
     NativeOpenCode2InstallLockError, NativeOpenCode2InstallPathError, NativeOpenCode2InstallPaths,

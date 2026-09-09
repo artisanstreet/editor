@@ -97,7 +97,7 @@ pub(crate) enum OpenCodeTextReconciliation {
 /// monotonic local sequence starting at one solely for the observation's
 /// existing `sequence` field; it never reports that local value as a provider
 /// cursor.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct OpenCodeEventResult {
     pub(crate) observations: Vec<EngineObservation>,
     pub(crate) provider_cursor: Option<u64>,
@@ -935,7 +935,7 @@ mod tests {
     fn text_delta_from(observation: &EngineObservation) -> &TextDelta {
         match observation {
             EngineObservation::TextDelta(delta) => delta,
-            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) => panic!("unexpected production observation in fixture"),
+            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
             EngineObservation::Terminal(_) => panic!("expected text delta"),
         }
     }
