@@ -126,7 +126,7 @@ fn account_usage_query_arms_round_trip() {
         let frame = query_envelope(frame, Query::ReadAccountUsage(query.clone()));
         let decoded = decode_envelope(&encode_envelope(&frame).expect("query encodes"))
             .expect("query decodes");
-        assert_eq!(decoded, frame);
+        assert!(decoded == frame);
         match decoded.body {
             WireEnvelopeBody::Request(ClientRequest::Query(Query::ReadAccountUsage(decoded))) => {
                 assert_eq!(decoded, query);
@@ -146,7 +146,7 @@ fn account_usage_snapshot_round_trips_field_for_field() {
     );
     let decoded = decode_envelope(&encode_envelope(&frame).expect("snapshot encodes"))
         .expect("snapshot decodes");
-    assert_eq!(decoded, frame);
+    assert!(decoded == frame);
     match decoded.body {
         WireEnvelopeBody::Response(response) => {
             assert_eq!(response.request_id, request_id("usage-request"));
@@ -196,7 +196,7 @@ fn absent_optionals_survive_as_empty_wire_values() {
     );
     let decoded = decode_envelope(&encode_envelope(&frame).expect("snapshot encodes"))
         .expect("snapshot decodes");
-    assert_eq!(decoded, frame);
+    assert!(decoded == frame);
 }
 
 fn raw_account_usage_frame(frame_id: &str, fill: impl FnOnce(response::Builder<'_>)) -> Vec<u8> {
@@ -255,7 +255,7 @@ fn malformed_windows_are_rejected_without_guessing() {
     );
     assert!(matches!(
         decode_envelope(&empty_id),
-        Err(ProtocolDecodeError::EngineUsage(_))
+        Err(ProtocolDecodeError::EngineUsage { .. })
     ));
 
     let bad_resets = raw_snapshot_with_window(
@@ -268,7 +268,7 @@ fn malformed_windows_are_rejected_without_guessing() {
     );
     assert!(matches!(
         decode_envelope(&bad_resets),
-        Err(ProtocolDecodeError::EngineUsage(_))
+        Err(ProtocolDecodeError::EngineUsage { .. })
     ));
 
     let non_finite = raw_snapshot_with_window(
@@ -281,7 +281,7 @@ fn malformed_windows_are_rejected_without_guessing() {
     );
     assert!(matches!(
         decode_envelope(&non_finite),
-        Err(ProtocolDecodeError::EngineUsage(_))
+        Err(ProtocolDecodeError::EngineUsage { .. })
     ));
 
     let bad_fetch = raw_snapshot_with_window(
@@ -294,7 +294,7 @@ fn malformed_windows_are_rejected_without_guessing() {
     );
     assert!(matches!(
         decode_envelope(&bad_fetch),
-        Err(ProtocolDecodeError::EngineUsage(_))
+        Err(ProtocolDecodeError::EngineUsage { .. })
     ));
 }
 
@@ -321,7 +321,7 @@ fn oversized_collections_are_rejected_before_allocation() {
     });
     assert!(matches!(
         decode_envelope(&too_many_windows),
-        Err(ProtocolDecodeError::EngineUsage(_))
+        Err(ProtocolDecodeError::EngineUsage { .. })
     ));
 
     let too_many_engines = raw_account_usage_frame("usage-many-engines", |response| {
@@ -340,7 +340,7 @@ fn oversized_collections_are_rejected_before_allocation() {
     });
     assert!(matches!(
         decode_envelope(&too_many_engines),
-        Err(ProtocolDecodeError::EngineUsage(_))
+        Err(ProtocolDecodeError::EngineUsage { .. })
     ));
 }
 
