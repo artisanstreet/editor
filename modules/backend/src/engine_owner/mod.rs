@@ -47,6 +47,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod event;
 pub(crate) mod framing;
+pub(crate) mod hermes;
 pub mod http;
 pub(crate) mod interaction;
 pub(crate) mod observation;
@@ -88,6 +89,10 @@ mod engine_owner_codex;
 #[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_claude.rs"]
 mod engine_owner_claude;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_hermes.rs"]
+mod engine_owner_hermes;
 
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
@@ -210,13 +215,15 @@ impl std::fmt::Debug for FixtureTurnInput {
 ///
 /// The `Verified` variant carries the production OpenCode2 capability, the
 /// `Codex` variant carries the production Codex capability, the `Claude`
-/// variant carries the production Claude capability, and the `Fixture`
+/// variant carries the production Claude capability, the `Hermes` variant
+/// carries the production Hermes capability, and the `Fixture`
 /// variant is `#[cfg(test)]` only and never constructible in non-test builds.
 /// Never `Clone`.
 pub(crate) enum InternalLaunch {
     Verified(Box<VerifiedOpenCode2ProfileLaunch>),
     Codex(Box<VerifiedCodexLaunch>),
     Claude(Box<VerifiedClaudeLaunch>),
+    Hermes(Box<hermes::VerifiedHermesLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }
@@ -233,6 +240,7 @@ impl InternalLaunch {
             Self::Verified(verified) => verified.as_ref().profile_id().as_str(),
             Self::Codex(verified) => verified.as_ref().profile_id().as_str(),
             Self::Claude(verified) => verified.as_ref().profile_id().as_str(),
+            Self::Hermes(verified) => verified.profile_id(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.profile_id.as_str(),
         }
@@ -243,6 +251,7 @@ impl InternalLaunch {
             Self::Verified(verified) => verified.as_ref().version(),
             Self::Codex(verified) => verified.as_ref().version(),
             Self::Claude(verified) => verified.as_ref().version(),
+            Self::Hermes(verified) => verified.version(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.version,
         }
@@ -297,9 +306,37 @@ impl std::fmt::Debug for EngineClaudeTurnInput {
     }
 }
 
+/// Immutable input handed to the configured `Hermes` owner.
+///
+/// The dispatcher constructs this only after reading the durable settings
+/// and resolving the exact Hermes launch. Unlike the Codex and Claude turns,
+/// Hermes carries the optional provider continuation: resume reopens the
+/// durable gateway session with original-model enforcement. The owner never
+/// rereads the thread, registry, or environment while this value is live.
+pub(crate) struct EngineHermesTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt: QueueMessagePayload,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: hermes::VerifiedHermesLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for EngineHermesTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineHermesTurnInput { <redacted> }")
+    }
+}
+
 /// Single internal input for the one configured-turn pipeline.
 ///
-/// `EngineTurnInput`, `EngineCodexTurnInput`, and `EngineClaudeTurnInput`
+/// `EngineTurnInput`, `EngineCodexTurnInput`, `EngineClaudeTurnInput`, and
+/// `EngineHermesTurnInput`
 /// (production) plus `FixtureTurnInput` (`#[cfg(test)]`) convert into this at admission, so the
 /// queued `Job::Turn` always carries the same type and exactly one executor
 /// per engine proves the lifecycle.
@@ -900,6 +937,34 @@ impl EngineOwner {
             settings: input.settings,
             launch: InternalLaunch::Claude(Box::new(input.launch)),
             continuation: None,
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    /// Admits one configured `Hermes` turn into the single owner queue.
+    ///
+    /// Mirrors [`Self::admit_turn`] without forking the queue: the same
+    /// `Job::Turn` type carries an [`InternalLaunch::Hermes`] capability and
+    /// exactly one executor proves the lifecycle. Hermes turns carry the
+    /// optional provider continuation for gateway resume with original-model
+    /// enforcement.
+    pub(crate) fn admit_hermes_turn(
+        &self,
+        input: EngineHermesTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            thread_id: Some(input.thread_id),
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt: input.prompt,
+            settings: input.settings,
+            launch: InternalLaunch::Hermes(Box::new(input.launch)),
+            continuation: input.continuation,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,

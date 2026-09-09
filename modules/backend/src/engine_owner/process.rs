@@ -562,6 +562,44 @@ pub(crate) fn spawn_claude_engine(
     EngineChild::spawn(command, true)
 }
 
+/// Spawns the verified Hermes private-service child for one turn.
+///
+/// Extends (never forks) the owner custody contract: the executable is the
+/// verified capability path, argv is exactly
+/// `serve --host 127.0.0.1 --port 0`, the working directory is the exact
+/// project root, and the environment is inherited ambiently plus the
+/// dashboard session token and parent PID, mirroring
+/// `modules/engines/src/hermes/service.ts`
+/// (`{ ...process.env, HERMES_DASHBOARD_SESSION_TOKEN, HERMES_PARENT_PID }`).
+/// Hermes runs as the user's installed profile over its own subscription
+/// session, not from a managed home. Revalidation is the last authority
+/// operation before the child is created.
+pub(crate) fn spawn_hermes_engine(
+    launch: &super::hermes::VerifiedHermesLaunch,
+    project_root: &RootPath,
+    session_token: &str,
+) -> io::Result<EngineChild> {
+    let mut command = tokio::process::Command::new(launch.executable_path());
+    command.current_dir(Path::new(project_root.as_str())).args([
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+    ]);
+    command.env("HERMES_DASHBOARD_SESSION_TOKEN", session_token);
+    command.env("HERMES_PARENT_PID", std::process::id().to_string());
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    launch
+        .revalidate()
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "hermes launch rejected"))?;
+    EngineChild::spawn(command, true)
+}
+
 /// The taken sole stdin writer kept open for the whole operation.
 ///
 /// The writer is removed from the [`EngineChild`] immediately after spawn so the

@@ -933,6 +933,10 @@ fn prepare_preflight_context(request: PreflightRequest) -> Result<PreflightConte
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
         }
+        super::InternalLaunch::Hermes(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
     };
     let Ok(mut child) = child_result else {
         let _ = respond.send(Err(EngineOperationError::SpawnFailed));
@@ -1206,6 +1210,10 @@ fn prepare_catalog_context(request: CatalogRequest) -> Result<CatalogContext, Ex
             return Err(Execution::Completed);
         }
         super::InternalLaunch::Claude(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Hermes(_) => {
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
         }
@@ -1521,6 +1529,7 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         artisan_domain::EngineSelection::OpenCode2(selection) => selection.profile_id().as_str(),
         artisan_domain::EngineSelection::Codex(selection) => selection.profile_id().as_str(),
         artisan_domain::EngineSelection::Claude(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Hermes(selection) => selection.profile_id().as_str(),
         _ => return request.fail(EngineOperationError::Configuration),
     };
     if request.input.launch.profile_id() != selected_profile {
@@ -1549,6 +1558,9 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
     }
     if matches!(request.input.launch, super::InternalLaunch::Claude(_)) {
         return Box::pin(execute_claude_turn(request, runtime, shutdown)).await;
+    }
+    if matches!(request.input.launch, super::InternalLaunch::Hermes(_)) {
+        return Box::pin(execute_hermes_turn(request, runtime, shutdown)).await;
     }
     Box::pin(execute_configured_turn(request, runtime, shutdown)).await
 }
@@ -2598,6 +2610,519 @@ async fn read_claude_line(
     }
 }
 
+/// Executes one finite Hermes turn over the private-service gateway WebSocket.
+///
+/// Single-owner match arm beside the Codex/Claude executors: no second task,
+/// no second queue. Mints the dashboard session token, spawns the verified
+/// service, drives `HERMES_BACKEND_READY` readiness, connects the JSON-RPC
+/// gateway, validates the live `model.options` inventory against the durable
+/// selection, opens (or resumes with original-model enforcement) exactly one
+/// session, passes the bind authorization gate, submits one prompt, then
+/// pumps the stream. Text deltas normalize onto the shared S1a vocabulary;
+/// approval/question frames populate the pending tracker with no
+/// control-flow side effect; images fail closed before spawn. Stall, failure,
+/// and close-before-terminal map distinctly; teardown reuses the owner
+/// process contract and quarantines on unobserved reaps.
+async fn execute_hermes_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::hermes as hermes_runtime;
+    use super::process::spawn_hermes_engine;
+
+    let artisan_domain::EngineSelection::Hermes(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = hermes_runtime::HermesSettings::from_selection(selection);
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Hermes(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    if let Err(error) = hermes_runtime::reject_image_attachments(&request.input.prompt) {
+        return request.fail(map_hermes_turn_error(error));
+    }
+    let Some(session_token) = hermes_runtime::new_session_token() else {
+        return request.fail(EngineOperationError::EntropyFailed);
+    };
+    let mut child = match spawn_hermes_engine(launch, &request.input.project_root, &session_token) {
+        Ok(child) => child,
+        Err(_) => return request.fail(EngineOperationError::SpawnFailed),
+    };
+    let stdin_opt = child.stdin.take();
+    let stdout_opt = child.stdout.take();
+    let stderr_opt = child.stderr.take();
+    let lifeline = LifelineWriter::take(&mut child);
+    let stderr_counter = StderrCounter::new(stderr_opt, runtime.bounds.stderr_cap_bytes);
+    let (_held_stdin, stdout) = match (stdin_opt, stdout_opt) {
+        (Some(stdin), Some(stdout)) => (stdin, stdout),
+        _ => {
+            let parts = ChildParts {
+                child,
+                lifeline,
+                stdout: None,
+                stderr_counter,
+            };
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::SpawnFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let mut stdout = stdout;
+    let port = match hermes_runtime::drive_service_readiness(
+        &mut stdout,
+        &mut parts,
+        phase_deadline(runtime.limits.readiness, request.deadline),
+        shutdown,
+        &request.control,
+        runtime.bounds.max_readiness_line,
+    )
+    .await
+    {
+        Ok(port) => port,
+        Err(error) => {
+            drop(stdout);
+            return finish_configured_start(
+                request,
+                parts,
+                map_readiness_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    drop(stdout);
+    let address =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+    let connect_scope = hermes_runtime::RequestScope {
+        deadline: phase_deadline(runtime.limits.health, request.deadline),
+        cancel: &request.control,
+        shutdown,
+    };
+    let mut client =
+        match hermes_runtime::GatewayClient::connect(address, &session_token, &connect_scope).await
+        {
+            Ok(client) => client,
+            Err(error) => {
+                return finish_configured_start(
+                    request,
+                    parts,
+                    map_hermes_gateway_error(error),
+                    runtime.limits.close,
+                )
+                .await;
+            }
+        };
+    let provider_scope = hermes_runtime::RequestScope {
+        deadline: phase_deadline(runtime.limits.prompt, request.deadline),
+        cancel: &request.control,
+        shutdown,
+    };
+    let mut early_events = Vec::new();
+    let inventory_value = match client
+        .request(
+            "model.options",
+            serde_json::json!({
+                "explicit_only": true,
+                "include_unconfigured": false,
+                "refresh": false,
+            }),
+            &provider_scope,
+        )
+        .await
+    {
+        Ok((value, events)) => {
+            early_events.extend(events);
+            value
+        }
+        Err(error) => {
+            client.close().await;
+            return finish_configured_start(
+                request,
+                parts,
+                map_hermes_gateway_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let inventory = match hermes_runtime::validate_model_options_inventory(&inventory_value) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            client.close().await;
+            return finish_configured_start(
+                request,
+                parts,
+                map_hermes_inventory_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    if !hermes_runtime::inventory_supports(&inventory, settings.route_id(), settings.model_id()) {
+        client.close().await;
+        return finish_configured_start(
+            request,
+            parts,
+            EngineOperationError::Configuration,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    let open_input = hermes_runtime::OpenSessionInput {
+        settings: &settings,
+        project_root: request.input.project_root.as_str(),
+        guidance_sections: &[],
+        resume_stored_session_id: request
+            .input
+            .continuation
+            .as_ref()
+            .map(|continuation| continuation.provider_session_id()),
+    };
+    let opened = match hermes_runtime::open_session(&mut client, &open_input, &provider_scope).await
+    {
+        Ok(opened) => opened,
+        Err(error) => {
+            client.close().await;
+            return finish_configured_start(
+                request,
+                parts,
+                map_hermes_session_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    early_events.extend(opened.setup_events);
+
+    // Bind authorization gate: the dispatcher binds the durable stored
+    // session before exactly one prompt is authorized. Destructure here so
+    // the prepared session carries the exact durable identity.
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        mut authorize,
+        observations,
+        respond,
+    } = request;
+    if prepared
+        .send(Ok(PreparedSession::new(opened.durable_session_id.clone())))
+        .is_err()
+    {
+        client.close().await;
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::Cancelled),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    if let Err(error) =
+        wait_for_authorization(&mut parts, &mut authorize, deadline, shutdown, &control).await
+    {
+        client.close().await;
+        return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+    }
+
+    // Prompt submit ---------------------------------------------------------
+    // Images were rejected before spawn; only text travels here.
+    let prompt_text = input
+        .prompt
+        .text()
+        .map(|text| text.as_str().to_owned())
+        .unwrap_or_default();
+    let submit_scope = hermes_runtime::RequestScope {
+        deadline: phase_deadline(runtime.limits.prompt, deadline),
+        cancel: &control,
+        shutdown,
+    };
+    if client
+        .request(
+            "prompt.submit",
+            serde_json::json!({
+                "session_id": opened.runtime_session_id,
+                "text": prompt_text,
+            }),
+            &submit_scope,
+        )
+        .await
+        .is_err()
+    {
+        client.close().await;
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::ProviderRequestFailed),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+
+    // Streaming pump ----------------------------------------------------------
+    let mut normalizer = hermes_runtime::HermesNormalizer::new();
+    let mut tracker = hermes_runtime::HermesPendingTracker::new();
+    let mut active_turn: Option<String> = None;
+    let mut frame_sequence: u64 = 0;
+    let mut last_activity = Instant::now();
+    let terminal = hermes_pump_loop(
+        &mut client,
+        &mut normalizer,
+        &mut tracker,
+        &settings,
+        &input.run_id,
+        input.thread_id.as_ref(),
+        &opened.runtime_session_id,
+        early_events,
+        &mut active_turn,
+        &mut frame_sequence,
+        &mut last_activity,
+        runtime.limits.sse,
+        deadline,
+        shutdown,
+        &control,
+        &observations,
+        &mut parts,
+    )
+    .await;
+    let close_scope = hermes_runtime::RequestScope {
+        deadline: phase_deadline(runtime.limits.close, deadline),
+        cancel: &control,
+        shutdown,
+    };
+    let _ = client
+        .request(
+            "session.close",
+            serde_json::json!({ "session_id": opened.runtime_session_id }),
+            &close_scope,
+        )
+        .await;
+    client.close().await;
+    match terminal {
+        HermesPumpOutcome::Terminal(state) => {
+            drop(observations);
+            finish_turn_result(
+                parts,
+                Ok(EngineTurnResult { terminal: state }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        HermesPumpOutcome::Failed(error) => {
+            finish_turn_result(parts, Err(error), respond, runtime.limits.close).await
+        }
+    }
+}
+
+enum HermesPumpOutcome {
+    Terminal(super::observation::TerminalState),
+    Failed(EngineOperationError),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn hermes_pump_loop(
+    client: &mut super::hermes::GatewayClient,
+    normalizer: &mut super::hermes::HermesNormalizer,
+    tracker: &mut super::hermes::HermesPendingTracker,
+    settings: &super::hermes::HermesSettings,
+    run_id: &artisan_domain::RunId,
+    thread_id: Option<&artisan_domain::ThreadId>,
+    runtime_session: &str,
+    early_events: Vec<super::hermes::HermesEvent>,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    inactivity: Duration,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+    parts: &mut ChildParts,
+) -> HermesPumpOutcome {
+    use super::hermes as hermes_runtime;
+
+    for event in &early_events {
+        *frame_sequence = frame_sequence.wrapping_add(1);
+        *last_activity = Instant::now();
+        if let Some(terminal) = hermes_runtime::apply_observations(
+            normalizer,
+            event,
+            hermes_runtime::ApplyContext {
+                run_id,
+                thread_id,
+                settings,
+                runtime_session_id: runtime_session,
+                tracker,
+                active_turn,
+                observations,
+                frame_sequence: *frame_sequence,
+            },
+        )
+        .await
+        {
+            return HermesPumpOutcome::Terminal(terminal);
+        }
+    }
+    loop {
+        if shutdown.is_cancelled() {
+            return HermesPumpOutcome::Failed(EngineOperationError::Shutdown);
+        }
+        if control.is_cancelled() {
+            let scope = hermes_runtime::RequestScope {
+                deadline: Instant::now()
+                    .checked_add(Duration::from_secs(5))
+                    .unwrap_or(deadline)
+                    .min(deadline),
+                cancel: control,
+                shutdown,
+            };
+            let _ = hermes_runtime::interrupt_live_turn(client, runtime_session, &scope).await;
+            return HermesPumpOutcome::Terminal(TerminalState::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return HermesPumpOutcome::Failed(EngineOperationError::Deadline);
+        }
+        if hermes_runtime::has_stalled(
+            active_turn.is_some(),
+            *last_activity,
+            inactivity,
+            Instant::now(),
+        ) {
+            return HermesPumpOutcome::Terminal(TerminalState::Failed);
+        }
+        let stall_at = last_activity
+            .checked_add(inactivity)
+            .unwrap_or(deadline)
+            .min(deadline);
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => return HermesPumpOutcome::Failed(EngineOperationError::Shutdown),
+            () = control.wait() => {
+                let scope = hermes_runtime::RequestScope {
+                    deadline: Instant::now()
+                        .checked_add(Duration::from_secs(5))
+                        .unwrap_or(deadline)
+                        .min(deadline),
+                    cancel: control,
+                    shutdown,
+                };
+                let _ = hermes_runtime::interrupt_live_turn(client, runtime_session, &scope).await;
+                return HermesPumpOutcome::Terminal(TerminalState::Cancelled);
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return HermesPumpOutcome::Failed(EngineOperationError::Deadline);
+            }
+            () = tokio::time::sleep_until(stall_at) => {
+                if hermes_runtime::has_stalled(
+                    active_turn.is_some(),
+                    *last_activity,
+                    inactivity,
+                    Instant::now(),
+                ) {
+                    return HermesPumpOutcome::Terminal(TerminalState::Failed);
+                }
+                let _ = parts.stderr_counter.pump().await;
+            }
+            event = client.next_event(control, shutdown) => {
+                match event {
+                    Ok(event) => {
+                        *last_activity = Instant::now();
+                        *frame_sequence = frame_sequence.wrapping_add(1);
+                        if let Some(terminal) = hermes_runtime::apply_observations(
+                            normalizer,
+                            &event,
+                            hermes_runtime::ApplyContext {
+                                run_id,
+                                thread_id,
+                                settings,
+                                runtime_session_id: runtime_session,
+                                tracker,
+                                active_turn,
+                                observations,
+                                frame_sequence: *frame_sequence,
+                            },
+                        )
+                        .await
+                        {
+                            return HermesPumpOutcome::Terminal(terminal);
+                        }
+                    }
+                    Err(hermes_runtime::GatewayError::Closed) => {
+                        return HermesPumpOutcome::Terminal(TerminalState::Interrupted);
+                    }
+                    Err(hermes_runtime::GatewayError::Shutdown) => {
+                        return HermesPumpOutcome::Failed(EngineOperationError::Shutdown);
+                    }
+                    Err(hermes_runtime::GatewayError::Cancelled) => {
+                        return HermesPumpOutcome::Failed(EngineOperationError::Cancelled);
+                    }
+                    Err(hermes_runtime::GatewayError::Timeout) => {
+                        return HermesPumpOutcome::Failed(EngineOperationError::Deadline);
+                    }
+                    Err(_) => {
+                        return HermesPumpOutcome::Failed(EngineOperationError::StreamFailed);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn map_hermes_turn_error(error: super::hermes::HermesTurnError) -> EngineOperationError {
+    match error {
+        super::hermes::HermesTurnError::Configuration
+        | super::hermes::HermesTurnError::ImagesUnsupported => EngineOperationError::Configuration,
+        super::hermes::HermesTurnError::StreamFailed => EngineOperationError::StreamFailed,
+    }
+}
+
+fn map_hermes_gateway_error(error: super::hermes::GatewayError) -> EngineOperationError {
+    match error {
+        super::hermes::GatewayError::Shutdown => EngineOperationError::Shutdown,
+        super::hermes::GatewayError::Cancelled => EngineOperationError::Cancelled,
+        super::hermes::GatewayError::Timeout => EngineOperationError::Deadline,
+        _ => EngineOperationError::ProviderRequestFailed,
+    }
+}
+
+fn map_hermes_session_error(error: super::hermes::SessionError) -> EngineOperationError {
+    match error {
+        super::hermes::SessionError::Shutdown => EngineOperationError::Shutdown,
+        super::hermes::SessionError::Cancelled => EngineOperationError::Cancelled,
+        super::hermes::SessionError::Deadline => EngineOperationError::Deadline,
+        super::hermes::SessionError::IncompatibleVersion => {
+            EngineOperationError::IncompatibleVersion
+        }
+        super::hermes::SessionError::Configuration => EngineOperationError::Configuration,
+        super::hermes::SessionError::ProviderRequestFailed
+        | super::hermes::SessionError::StreamFailed => EngineOperationError::ProviderRequestFailed,
+    }
+}
+
+fn map_hermes_inventory_error(error: super::hermes::InventoryError) -> EngineOperationError {
+    match error {
+        super::hermes::InventoryError::InvalidShape
+        | super::hermes::InventoryError::DuplicateModel => EngineOperationError::Configuration,
+    }
+}
+
 async fn prepare_configured_process(
     request: ConfiguredTurnRequest,
     runtime: ConfiguredRuntime,
@@ -2624,6 +3149,9 @@ async fn prepare_configured_process(
             return Err(request.fail(EngineOperationError::Configuration));
         }
         crate::engine_owner::InternalLaunch::Claude(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
+        }
+        crate::engine_owner::InternalLaunch::Hermes(_) => {
             return Err(request.fail(EngineOperationError::Configuration));
         }
     }) else {
@@ -2899,6 +3427,7 @@ async fn authorize_configured_session(
         }
         super::InternalLaunch::Codex(_) => Err(StreamError::InvalidSession),
         super::InternalLaunch::Claude(_) => Err(StreamError::InvalidSession),
+        super::InternalLaunch::Hermes(_) => Err(StreamError::InvalidSession),
         #[cfg(test)]
         super::InternalLaunch::Fixture(_) => Ok(StreamState::new(stream_after)),
     };
