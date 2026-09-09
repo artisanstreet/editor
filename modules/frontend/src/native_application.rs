@@ -1217,7 +1217,7 @@ impl NativeApplication {
                     app.sidebar_hover
                         .borrow_mut()
                         .set_active(SIDEBAR_NEW_THREAD_HOVER_ID.to_owned());
-                } else {
+                } else if app.sidebar_hover.borrow().active_id() == Some(SIDEBAR_NEW_THREAD_HOVER_ID) {
                     // Hide, don't clear: the retained rect keeps the next
                     // row-to-row flight sliding instead of snapping.
                     app.sidebar_hover.borrow_mut().hide();
@@ -1262,7 +1262,7 @@ impl NativeApplication {
                     app.sidebar_hover
                         .borrow_mut()
                         .set_active(SIDEBAR_MARKETPLACE_HOVER_ID.to_owned());
-                } else {
+                } else if app.sidebar_hover.borrow().active_id() == Some(SIDEBAR_MARKETPLACE_HOVER_ID) {
                     app.sidebar_hover.borrow_mut().hide();
                 }
                 cx.notify();
@@ -2407,7 +2407,7 @@ impl NativeApplication {
                     app.sidebar_hover
                         .borrow_mut()
                         .set_active(SIDEBAR_PROFILE_HOVER_ID.to_owned());
-                } else {
+                } else if app.sidebar_hover.borrow().active_id() == Some(SIDEBAR_PROFILE_HOVER_ID) {
                     app.sidebar_hover.borrow_mut().hide();
                 }
                 cx.notify();
