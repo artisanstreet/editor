@@ -2791,6 +2791,7 @@ async fn authorize_configured_session(
             StreamState::for_run(input.run_id.clone(), session.clone(), stream_after)
         }
         super::InternalLaunch::Codex(_) => Err(StreamError::InvalidSession),
+        super::InternalLaunch::Claude(_) => Err(StreamError::InvalidSession),
         #[cfg(test)]
         super::InternalLaunch::Fixture(_) => Ok(StreamState::new(stream_after)),
     };
