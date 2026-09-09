@@ -753,7 +753,7 @@ async fn admitted_client<'authority, 'handler, 'cancel>(
 
     let (client, owner) = tokio::join!(client, tokio::time::timeout(TEST_DEADLINE, server),);
     let owner = owner.expect("authentication settles under the watchdog")?;
-    Ok((client?, owner))
+    Ok((client??, owner))
 }
 
 /// Drives a doomed admission: the client completes its handshake half, the
@@ -2782,12 +2782,9 @@ async fn idle_legacy_connection_serves_after_the_request_deadline() -> Result<()
     }
 
     let stamp = response_stamp("forge-idle-frame");
-    let reply = exchange(
-        &client,
-        &list_projects_request("idle-request-frame"),
-        &stamp,
-    )
-    .await?;
+    let request = list_projects_request("idle-request-frame");
+    let (reply, owner) = tokio::join!(exchange(&client, &request, &stamp), serving);
+    let reply = reply?;
     let WireEnvelopeBody::Response(response) = reply.body else {
         panic!("expected a correlated response after idle");
     };
@@ -2796,7 +2793,7 @@ async fn idle_legacy_connection_serves_after_the_request_deadline() -> Result<()
         matches!(response.payload, ResponsePayload::ProjectListing(_)),
         "idle connection must serve project listings"
     );
-    let _owner = serving.await.expect("dispatch completes after idle");
+    drop(owner.expect("dispatch completes after idle"));
 
     expect_application_close(&client.connection).await;
     drop(client);
@@ -2828,8 +2825,11 @@ async fn cancelled_idle_accept_stops_promptly() -> Result<(), Box<dyn Error>> {
     )
     .await?;
 
-    let serving = Box::pin(owner.respond_next(response_stamp("forge-cancel-idle-frame")));
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut serving = Box::pin(owner.respond_next(response_stamp("forge-cancel-idle-frame")));
+    tokio::select! {
+        _ended = &mut serving => panic!("idle accept must remain active before cancellation"),
+        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
     cancel.cancel();
     let outcome = tokio::time::timeout(Duration::from_secs(5), serving)
         .await
