@@ -1116,9 +1116,8 @@ impl NativeApplication {
         cx.notify();
     }
 
-    /// Native titlebar identity: the `Artisan Editor` wordmark plus an
-    /// adjacent `Beta` suffix. The wordmark keeps the home navigation; the
-    /// project/route breadcrumb it replaces never navigated anywhere.
+    /// Native titlebar identity: the `Artisan Editor` wordmark. The
+    /// wordmark keeps the home navigation.
     fn desktop_identity(&self, cx: &Context<Self>) -> Div {
         div()
             .flex()
@@ -1135,22 +1134,13 @@ impl NativeApplication {
                     }))
                     .debug_selector(|| "artisan-brand-home".to_owned())
                     .flex_shrink_0()
-                    .text_size(px(16.0))
+                    .text_size(px(20.0))
                     .font_family("Cal Sans")
                     .font_weight(FontWeight::BOLD)
-                    // -0.05em tracking at 16px: 16 * -0.05 = -0.8px.
-                    .letter_spacing(px(-0.8))
+                    // -0.05em tracking at 20px: 20 * -0.05 = -1.0px.
+                    .letter_spacing(px(-1.0))
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(14.0))
-                    .font_family("Spline Sans")
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(self.desktop_theme.secondary)
-                    .child("Beta"),
             )
     }
 

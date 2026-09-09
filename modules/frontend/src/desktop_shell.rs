@@ -216,7 +216,26 @@ pub fn desktop_shell(
         .border_b_1()
         .border_color(theme.line)
         .debug_selector(|| DESKTOP_TITLEBAR_SELECTOR.to_string())
-        .child(drag);
+        .child(drag)
+        .child(
+            // One-physical-pixel continuation of the sidebar's right rule
+            // above the junction. The sidebar border paints the rightmost
+            // logical pixel inside `sidebar_width` ([sw-1, sw], border-box
+            // inset), and the junction crosshair centers its vertical arm on
+            // x = sw, so a rule at [sw-1dp, sw] extends exactly that line
+            // through the full header height in the same `theme.line` paint.
+            // Absolute, so the drag/search/control flex layout is untouched;
+            // a plain element with no pointer listener, so like the
+            // crosshair it cannot intercept drags or clicks.
+            div()
+                .absolute()
+                .left(style.sidebar_width - style.one_device_pixel)
+                .top(px(0.0))
+                .w(style.one_device_pixel)
+                .h(style.titlebar_height)
+                .bg(theme.line)
+                .debug_selector(|| "artisan-desktop-titlebar-divider".to_owned()),
+        );
 
     let main = div()
         .relative()
