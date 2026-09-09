@@ -175,12 +175,17 @@ impl RefreshSwapTarget {
 
 /// Retained interruptible swap for one refresh control. Retargets always
 /// start from the currently displayed values, so rapid hover/focus/refresh
-/// changes reverse mid-flight exactly like the source transition.
+/// changes reverse mid-flight exactly like the source transition. Opacity,
+/// blur, and paint offset are each retained and interpolated, so a reversal
+/// can never flip an offset sign mid-flight.
 #[derive(Clone, Copy, Debug)]
 struct RefreshSwap {
     from: [f32; 3],
     displayed: [f32; 3],
     to: [f32; 3],
+    off_from: [f32; 3],
+    off_displayed: [f32; 3],
+    off_to: [f32; 3],
     started_ms: i64,
     hovered: bool,
 }
@@ -191,10 +196,25 @@ impl RefreshSwap {
             from: [1.0, 0.0, 0.0],
             displayed: [1.0, 0.0, 0.0],
             to: [1.0, 0.0, 0.0],
+            off_from: [0.0, 4.0, 4.0],
+            off_displayed: [0.0, 4.0, 4.0],
+            off_to: [0.0, 4.0, 4.0],
             started_ms: 0,
             hovered: false,
         }
     }
+}
+
+/// Paint offsets per target: shown readings sit at zero; the hidden
+/// reading exits downward while action and spinner rest above, matching the
+/// source hidden frames. A reversal keeps interpolating its retained
+/// offset, so the sign can never flip mid-flight.
+fn swap_offsets_for(to: [f32; 3]) -> [f32; 3] {
+    [
+        if to[0] >= 1.0 { 0.0 } else { -4.0 },
+        if to[1] >= 1.0 { 0.0 } else { 4.0 },
+        if to[2] >= 1.0 { 0.0 } else { 4.0 },
+    ]
 }
 /// Width of one meter tick: fourteen full 72/14 pitches with a 2px
 /// transparent tail inside every pitch including the last.
@@ -1541,15 +1561,23 @@ impl NativeApplication {
             .entry(engine_id.to_owned())
             .or_insert_with(RefreshSwap::resting);
         let to = target.values();
+        // A reduced-motion change settles immediately even when the target
+        // itself is unchanged.
+        if reduce_motion {
+            swap.displayed = to;
+            swap.off_displayed = swap_offsets_for(to);
+            swap.from = to;
+            swap.off_from = swap.off_displayed;
+            return;
+        }
         if swap.to == to {
             return;
         }
         swap.from = swap.displayed;
         swap.to = to;
+        swap.off_from = swap.off_displayed;
+        swap.off_to = swap_offsets_for(to);
         swap.started_ms = profile_usage_now_ms();
-        if reduce_motion {
-            swap.displayed = to;
-        }
     }
 
     /// Recomputes one control's target from its live hover/focus/refresh
@@ -1626,9 +1654,12 @@ impl NativeApplication {
             for index in 0..3 {
                 swap.displayed[index] =
                     swap.from[index] + (swap.to[index] - swap.from[index]) * eased;
+                swap.off_displayed[index] =
+                    swap.off_from[index] + (swap.off_to[index] - swap.off_from[index]) * eased;
             }
             if progress >= 1.0 {
                 swap.displayed = swap.to;
+                swap.off_displayed = swap.off_to;
             } else {
                 running = true;
             }
@@ -1913,21 +1944,20 @@ impl NativeApplication {
         // One grid cell shared by all three readings, so the control width
         // is always the max of reading and action like the source
         // `t-checked` grid — never collapsing, never shifting on swap. Each
-        // reading paints from the retained tween: source 150ms ease-in-out
-        // opacity/blur(2px)/±4px paint offset, interrupted from the current
-        // visual values. The ring only attaches without pointer hover,
-        // matching source `:focus-visible` (keyboard focus, not mouse).
-        let paint = |from: f32, displayed: f32, to: f32| {
-            let hidden = 1.0 - displayed;
-            let direction = if to >= from { 1.0 } else { -1.0 };
-            (displayed, hidden * 2.0, direction * 4.0 * hidden)
+        // reading paints its retained opacity/blur/offset triple, so a
+        // reversal keeps interpolating without sign flips. The ring only
+        // attaches for keyboard-driven focus, matching source
+        // `:focus-visible` (a mouse click followed by pointer leave is
+        // still mouse focus and shows no ring).
+        let paint = |displayed: f32, off_displayed: f32| {
+            (displayed, (1.0 - displayed) * 2.0, off_displayed)
         };
         let (reading_opacity, reading_blur, reading_top) =
-            paint(swap.from[0], swap.displayed[0], swap.to[0]);
+            paint(swap.displayed[0], swap.off_displayed[0]);
         let (action_opacity, action_blur, action_top) =
-            paint(swap.from[1], swap.displayed[1], swap.to[1]);
+            paint(swap.displayed[1], swap.off_displayed[1]);
         let (spinner_opacity, spinner_blur, spinner_top) =
-            paint(swap.from[2], swap.displayed[2], swap.to[2]);
+            paint(swap.displayed[2], swap.off_displayed[2]);
         let ring = vec![gpui::BoxShadow {
             color: self.theme.interaction.focus_ring_color.to_paint(),
             offset: gpui::point(px(0.0), px(0.0)),
@@ -1947,7 +1977,7 @@ impl NativeApplication {
             .flex_shrink_0()
             .text_size(px(12.0))
             .line_height(px(16.0));
-        if !swap.hovered {
+        if focus.is_focused(window) && window.last_input_was_keyboard() {
             control = control.focus(move |style| style.shadow(ring));
         }
         control = control
@@ -2598,8 +2628,6 @@ impl NativeApplication {
                                 .flex_col()
                                 .min_w(px(0.0))
                                 .flex_shrink_0()
-                                .px(px(4.0))
-                                .py(px(4.0))
                                 .on_scroll_wheel(
                                     cx.listener(Self::handle_profile_usage_scroll_wheel),
                                 )
@@ -8470,6 +8498,11 @@ mod tests {
             let swap = binding.get("swap-test").expect("swap state");
             assert!(swap.displayed[0] > 0.0 && swap.displayed[0] < 1.0);
             assert!(swap.displayed[1] > 0.0 && swap.displayed[1] < 1.0);
+            // Offsets travel with opacity: the leaving reading heads
+            // downward from zero while the entering action arrives from
+            // above, neither jumping to an endpoint.
+            assert!(swap.off_displayed[0] > -4.0 && swap.off_displayed[0] < 0.0);
+            assert!(swap.off_displayed[1] > 0.0 && swap.off_displayed[1] < 4.0);
         });
 
         // Leaving retargets from the mid-flight values, not from rest.
@@ -8484,6 +8517,11 @@ mod tests {
             assert_eq!(swap.to, [1.0, 0.0, 0.0]);
             assert!(swap.from[0] > 0.0 && swap.from[0] < 1.0);
             assert!(swap.from[1] > 0.0 && swap.from[1] < 1.0);
+            // The retained offsets continue without sign flips: the
+            // reading keeps leaving downward, the action returns upward.
+            assert!(swap.off_from[0] > -4.0 && swap.off_from[0] < 0.0);
+            assert!(swap.off_from[1] > 0.0 && swap.off_from[1] < 4.0);
+            assert_eq!(swap.off_to, [0.0, 4.0, 4.0]);
         });
 
         // A far-future step settles exactly on the reading values.
@@ -8493,6 +8531,28 @@ mod tests {
             let binding = application.profile_refresh_swap.borrow();
             let swap = binding.get("swap-test").expect("swap state");
             assert_eq!(swap.displayed, [1.0, 0.0, 0.0]);
+            assert_eq!(swap.off_displayed, [0.0, 4.0, 4.0]);
+        });
+
+        // A reduced-motion change settles mid-flight even though the target
+        // itself is unchanged.
+        cx.simulate_mouse_move(control.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let mid = super::profile_usage_now_ms();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            application
+                .profile_refresh_swap
+                .borrow_mut()
+                .get_mut("swap-test")
+                .expect("swap state")
+                .started_ms = mid - 75;
+            assert!(application.step_profile_swaps(mid));
+            application.retarget_profile_swap("swap-test", super::RefreshSwapTarget::Action, true);
+            let binding = application.profile_refresh_swap.borrow();
+            let swap = binding.get("swap-test").expect("swap state");
+            assert_eq!(swap.displayed, [0.0, 1.0, 0.0]);
+            assert_eq!(swap.off_displayed, [-4.0, 0.0, 4.0]);
         });
 
         // Reduced motion settles a retarget instantly.
@@ -8564,8 +8624,9 @@ mod tests {
         // Engine separators keep one 1px rule with 4px margins on each side.
         assert_eq!(f32::from(middle.top() - first.bottom()), 9.0);
         assert_eq!(f32::from(last.top() - middle.bottom()), 9.0);
-        // The scroll wrapper contributes the outer 4px inset on both ends.
+        // The section contributes the single outer 4px inset on both ends.
         assert_eq!(f32::from(first.top() - scroller.top()), 4.0);
+        assert_eq!(f32::from(scroller.bottom() - last.bottom()), 4.0);
     }
 
     #[gpui::test]
