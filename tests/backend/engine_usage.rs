@@ -624,8 +624,8 @@ fn cursor_token_file_reads_read_only_and_bounded() {
 
 fn split_plan_fixture() -> serde_json::Value {
     serde_json::json!({
-        "billingCycleStart": 1_756_867_200_000,
-        "billingCycleEnd": 1_759_459_200_000,
+        "billingCycleStart": 1_756_867_200_000_i64,
+        "billingCycleEnd": 1_759_459_200_000_i64,
         "planUsage": {
             "totalSpend": 30.0,
             "limit": 100.0,
@@ -651,8 +651,8 @@ fn cursor_split_and_single_plan_pools_map_to_monthly_windows() {
     assert_eq!(windows[1].percent_used(), 10.0);
 
     let single = serde_json::json!({
-        "billingCycleStart": 1_756_867_200_000,
-        "billingCycleEnd": 1_759_459_200_000,
+        "billingCycleStart": 1_756_867_200_000_i64,
+        "billingCycleEnd": 1_759_459_200_000_i64,
         "planUsage": {"totalSpend": 25.0, "limit": 50.0}
     });
     let windows = map_cursor_period_usage(&single).expect("single plan maps");
