@@ -28,18 +28,24 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::time::Instant;
 
 use super::hermes::{
-    ApplyContext, DecodedEnvelope, GatewayClient, GatewayError, HERMES_MAX_ANSWERS,
-    HERMES_MAX_FRAME_BYTES, HermesEvent, HermesNormalizer, HermesPendingTracker, HermesSettings,
-    HermesTurnError, InventoryError, OpenSessionInput, RequestScope, SessionError,
-    VerifiedHermesLaunch, answer_approval, answer_questions, apply_observations, decode_approval,
-    decode_envelope, decode_questions, guidance_seed_messages, has_stalled, interrupt_live_turn,
+    ApplyContext, DecodedEnvelope, GatewayClient, GatewayError,
+    HERMES_CONTINUATION_MINIMUM_SERVICE_VERSION, HERMES_MAX_ANSWERS, HERMES_MAX_FRAME_BYTES,
+    HermesContinuationDecision, HermesContinuationGateInput, HermesEvent, HermesNormalizer,
+    HermesPendingTracker, HermesSettings, HermesTurnError, InventoryError, OpenSessionInput,
+    RequestScope, SessionError, VerifiedHermesLaunch, answer_approval, answer_questions,
+    apply_observations, check_hermes_native_continuation, compare_hermes_service_versions,
+    decode_approval, decode_envelope, decode_questions, guidance_seed_messages, has_stalled,
+    hermes_requires_group_termination, hermes_service_meets_minimum, interrupt_live_turn,
     inventory_supports, new_session_token, open_session, parse_ready_port_line, read_ready_port,
     read_ws_frame, reject_image_attachments, resolve_service_executable, resume_selection_matches,
     steer_live_turn, usage_report, usage_sample, validate_model_options_inventory,
     websocket_accept_key, write_client_text, write_server_text,
 };
 use super::observation::{EngineObservation, TerminalState};
-use super::process::spawn_hermes_engine;
+use super::process::{
+    ChildParts, CleanupObservation, LifelineWriter, StderrCounter, cleanup_after_abort,
+    reset_witnesses, spawn_hermes_engine, witness_counts,
+};
 use crate::native_run_dispatch::{binding_bytes_vec, binding_matches_bytes};
 
 // ---------------------------------------------------------------------------
@@ -1543,4 +1549,600 @@ async fn hermes_fragmented_text_reassembles() {
     assert_eq!(event.event_type(), "message.delta");
     client.close().await;
     server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// H3: continuation gate matrix (same engine, explicit model, service >= 0.20.0)
+// ---------------------------------------------------------------------------
+
+fn hermes_gate_decision(
+    service_version: &str,
+    target_model: Option<&str>,
+    advertised_models: Option<&[&str]>,
+    same_engine: bool,
+) -> HermesContinuationDecision {
+    check_hermes_native_continuation(&HermesContinuationGateInput {
+        service_version,
+        target_model,
+        advertised_models,
+        same_engine,
+    })
+}
+
+#[test]
+fn hermes_continuation_gate_matrix() {
+    assert_eq!(
+        hermes_gate_decision("0.20.0", Some("nous/model-x"), None, true),
+        HermesContinuationDecision::Compatible
+    );
+    assert_eq!(
+        hermes_gate_decision("0.21.3", Some("nous/model-x"), None, true),
+        HermesContinuationDecision::Compatible
+    );
+    assert_eq!(
+        hermes_gate_decision("1.0.0", Some("nous/model-x"), None, true),
+        HermesContinuationDecision::Compatible
+    );
+    assert_eq!(
+        hermes_gate_decision("Hermes Agent v0.20.0", Some("nous/model-x"), None, true),
+        HermesContinuationDecision::Compatible
+    );
+    assert_eq!(
+        hermes_gate_decision(
+            "0.20.0",
+            Some("nous/model-x"),
+            Some(&["nous/model-x", "other/model"]),
+            true
+        ),
+        HermesContinuationDecision::Compatible
+    );
+    // The recorded constant is the floor the gate enforces.
+    assert_eq!(HERMES_CONTINUATION_MINIMUM_SERVICE_VERSION, "0.20.0");
+    // Explicit target model is required before resume.
+    assert!(matches!(
+        hermes_gate_decision("0.20.0", None, None, true),
+        HermesContinuationDecision::Incompatible { .. }
+    ));
+    assert!(matches!(
+        hermes_gate_decision("0.20.0", Some(""), None, true),
+        HermesContinuationDecision::Incompatible { .. }
+    ));
+    // Older services never authorize continuation.
+    for old in ["0.19.9", "0.9.0", "not a version", ""] {
+        assert!(
+            matches!(
+                hermes_gate_decision(old, Some("nous/model-x"), None, true),
+                HermesContinuationDecision::Incompatible { .. }
+            ),
+            "service {old} must not authorize continuation"
+        );
+    }
+    // Cross-engine resume never proceeds, even with a fresh service and model.
+    assert!(matches!(
+        hermes_gate_decision("0.20.0", Some("nous/model-x"), None, false),
+        HermesContinuationDecision::Incompatible { .. }
+    ));
+    // Advertisement is enforced only when an inventory is supplied.
+    assert!(matches!(
+        hermes_gate_decision("0.20.0", Some("nous/model-x"), Some(&["other/model"]), true),
+        HermesContinuationDecision::Incompatible { .. }
+    ));
+}
+
+#[test]
+fn hermes_service_version_floor_parses_recorded_spellings() {
+    assert!(hermes_service_meets_minimum("0.20.0", "0.20.0"));
+    assert!(hermes_service_meets_minimum(
+        "Hermes Agent v0.20.0",
+        "0.20.0"
+    ));
+    assert!(hermes_service_meets_minimum("0.20.0-beta", "0.20.0"));
+    assert!(hermes_service_meets_minimum("0.21.0", "0.20.0"));
+    assert!(hermes_service_meets_minimum("1.0.0", "0.20.0"));
+    assert!(!hermes_service_meets_minimum("0.19.9", "0.20.0"));
+    assert!(!hermes_service_meets_minimum(
+        "Hermes Agent v0.19.9",
+        "0.20.0"
+    ));
+    assert!(!hermes_service_meets_minimum("no version here", "0.20.0"));
+    assert!(!hermes_service_meets_minimum("", "0.20.0"));
+    assert_eq!(
+        compare_hermes_service_versions("0.20.0", "0.20.0"),
+        Some(std::cmp::Ordering::Equal)
+    );
+    assert_eq!(
+        compare_hermes_service_versions("0.19.9", "0.20.0"),
+        Some(std::cmp::Ordering::Less)
+    );
+    assert_eq!(compare_hermes_service_versions("0.20.0", ""), None);
+}
+
+// ---------------------------------------------------------------------------
+// H3: usage mapping (bounds, unknown kinds, basis rules) plus best-effort
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hermes_usage_mapping_bounds_unknown_kinds_and_basis_rules() {
+    let run_id = RunId::parse("run-1").expect("run id");
+    let thread_id = ThreadId::parse("thread-1").expect("thread id");
+    let settings = HermesSettings::from_selection(&hermes_selection());
+    let report_for = |payload: &serde_json::Value| {
+        let sample = usage_sample(payload)?;
+        usage_report(
+            &run_id,
+            Some(&thread_id),
+            "runtime-1",
+            Some("run-1:turn:0".to_owned()),
+            7,
+            &settings,
+            &sample,
+            UnixMillis::from_millis(1),
+        )
+    };
+
+    // Non-u64 numerics fail closed per field instead of poisoning the turn:
+    // the fractional input is absent while the intact output still reports.
+    let mixed_report = report_for(&serde_json::json!({"usage": {"input": 1.5, "output": 5}}))
+        .expect("intact fields still report");
+    assert_eq!(mixed_report.input_tokens(), None);
+    assert_eq!(mixed_report.output_tokens(), Some(5));
+    // A payload with no usable field at all is not a report.
+    for payload in [
+        serde_json::json!({"usage": {"input": -1}}),
+        serde_json::json!({"usage": {"output": "many"}}),
+        serde_json::json!({"usage": {"cost_usd": 1.5}}),
+        serde_json::json!({}),
+    ] {
+        assert!(
+            usage_sample(&payload).is_none(),
+            "unknown kinds never become reports: {payload}"
+        );
+    }
+    // Unknown member names are ignored; a non-object `usage` member falls
+    // back to the payload itself, exactly like the TypeScript normalizer.
+    let fallback_report = report_for(&serde_json::json!({"usage": "telemetry", "input": 4}))
+        .expect("payload fallback reports");
+    assert_eq!(fallback_report.input_tokens(), Some(4));
+    let extra_report = report_for(&serde_json::json!({"frobnicate": 1, "input_tokens": 2}))
+        .expect("unknown fields are ignored");
+    assert_eq!(extra_report.input_tokens(), Some(2));
+
+    // Domain bounds fail closed: a counter past the storage ceiling and a
+    // zero context window never become reports.
+    let huge_payload = serde_json::json!({"input_tokens": 9_223_372_036_854_775_808_u64});
+    assert!(usage_sample(&huge_payload).is_some());
+    assert!(report_for(&huge_payload).is_none());
+    let zero_window_payload = serde_json::json!({"context_used": 10, "context_max": 0});
+    assert!(usage_sample(&zero_window_payload).is_some());
+    assert!(
+        report_for(&zero_window_payload).is_none(),
+        "a zero context window must not validate"
+    );
+
+    // Basis rules: Hermes discloses cumulative totals only, with the provider
+    // turn and source sequence preserved and zero distinct from absent.
+    let report = report_for(&serde_json::json!({
+        "usage": {"input": 10, "output": 0, "context_used": 100, "context_max": 1000},
+    }))
+    .expect("token payload reports");
+    assert_eq!(report.basis(), RunUsageBasis::Cumulative);
+    assert_eq!(report.input_tokens(), Some(10));
+    assert_eq!(report.output_tokens(), Some(0));
+    assert_eq!(report.context_tokens(), Some(100));
+    assert_eq!(report.context_window_tokens(), Some(1000));
+    assert_eq!(report.provider_turn_id(), Some("run-1:turn:0"));
+    assert_eq!(report.source_sequence(), 7);
+}
+
+#[tokio::test]
+async fn hermes_usage_projects_best_effort_without_blocking_turn() {
+    let run_id = RunId::parse("run-1").expect("run id");
+    let thread_id = ThreadId::parse("thread-1").expect("thread id");
+    let settings = HermesSettings::from_selection(&hermes_selection());
+    let mut normalizer = HermesNormalizer::new();
+    let mut tracker = HermesPendingTracker::new();
+    let mut active_turn: Option<String> = None;
+    let usage_event = event_fixture(
+        r#"{"method":"event","params":{"type":"session.usage","session_id":"runtime-1","payload":{"usage":{"input":10,"output":5,"context_used":100,"context_max":1000}}}}"#,
+    );
+
+    // With a thread scope the usage sample projects onto the shared channel.
+    let (sender, mut receiver) = mpsc::channel(64);
+    let outcome = apply_observations(
+        &mut normalizer,
+        &usage_event,
+        ApplyContext {
+            run_id: &run_id,
+            thread_id: Some(&thread_id),
+            settings: &settings,
+            runtime_session_id: "runtime-1",
+            tracker: &mut tracker,
+            active_turn: &mut active_turn,
+            observations: &sender,
+            frame_sequence: 3,
+        },
+    )
+    .await;
+    assert!(outcome.is_none(), "usage never ends the turn");
+    let EngineObservation::Usage(observation) = receiver.try_recv().expect("usage observed") else {
+        panic!("expected a usage observation");
+    };
+    assert_eq!(observation.report().basis(), RunUsageBasis::Cumulative);
+    assert_eq!(observation.report().input_tokens(), Some(10));
+    assert_eq!(observation.report().context_tokens(), Some(100));
+    assert_eq!(observation.report().context_window_tokens(), Some(1000));
+    assert_eq!(observation.report().source_sequence(), 3);
+
+    // Without a thread scope the same event is a diagnostic: skipped, never
+    // terminal, and the turn continues.
+    let (sender, mut receiver) = mpsc::channel(64);
+    let outcome = apply_observations(
+        &mut normalizer,
+        &usage_event,
+        ApplyContext {
+            run_id: &run_id,
+            thread_id: None,
+            settings: &settings,
+            runtime_session_id: "runtime-1",
+            tracker: &mut tracker,
+            active_turn: &mut active_turn,
+            observations: &sender,
+            frame_sequence: 4,
+        },
+    )
+    .await;
+    assert!(
+        outcome.is_none(),
+        "unattributable usage never ends the turn"
+    );
+    assert!(receiver.try_recv().is_err(), "no usage without scope");
+}
+
+// ---------------------------------------------------------------------------
+// H3: kill-tree with pipe-holding grandchild plus sweep replay on one session
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hermes_teardown_requires_group_termination() {
+    assert!(
+        hermes_requires_group_termination(),
+        "Windows teardown must kill the whole Job Object so no hermes grandchild \
+         holding a pipe is orphaned; unobserved reaps quarantine through \
+         cleanup_after_abort and finish_turn_result"
+    );
+}
+
+#[tokio::test]
+async fn hermes_kill_reports_interruption_with_durable_prefix() {
+    let (address, _state, server) = spawn_fixture(FixtureMode::scripted(), fixture_script()).await;
+    let cancel = CancelHandle::new();
+    let shutdown = CancelHandle::new();
+    let mut client = connect_fixture(address, &cancel, &shutdown).await;
+    let scope = test_scope(&cancel, &shutdown, 10_000);
+    let settings = HermesSettings::from_selection(&hermes_selection());
+    let opened = open_session(
+        &mut client,
+        &OpenSessionInput {
+            settings: &settings,
+            project_root: "C:\\work",
+            guidance_sections: &[],
+            resume_stored_session_id: None,
+        },
+        &scope,
+    )
+    .await
+    .expect("session opens");
+    let submit_scope = test_scope(&cancel, &shutdown, 10_000);
+    let (_, _) = client
+        .request(
+            "prompt.submit",
+            serde_json::json!({"session_id": opened.runtime_session_id, "text": "hi"}),
+            &submit_scope,
+        )
+        .await
+        .expect("prompt submits");
+
+    let run_id = RunId::parse("run-1").expect("run id");
+    let thread_id = ThreadId::parse("thread-1").expect("thread id");
+    let (observations, mut receiver) = mpsc::channel(64);
+    let mut normalizer = HermesNormalizer::new();
+    let mut tracker = HermesPendingTracker::new();
+    let mut active_turn: Option<String> = None;
+    let mut frame_sequence: u64 = 0;
+    // Stream the durable prefix, then lose the transport mid-turn.
+    for _ in 0..2 {
+        let event = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.next_event(&cancel, &shutdown),
+        )
+        .await
+        .expect("event arrives")
+        .expect("event streams");
+        frame_sequence += 1;
+        let terminal = apply_observations(
+            &mut normalizer,
+            &event,
+            ApplyContext {
+                run_id: &run_id,
+                thread_id: Some(&thread_id),
+                settings: &settings,
+                runtime_session_id: &opened.runtime_session_id,
+                tracker: &mut tracker,
+                active_turn: &mut active_turn,
+                observations: &observations,
+                frame_sequence,
+            },
+        )
+        .await;
+        assert!(terminal.is_none());
+    }
+    client.close().await;
+    let terminal_error = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.next_event(&cancel, &shutdown).await {
+                Ok(_) => continue,
+                Err(error) => break error,
+            }
+        }
+    })
+    .await
+    .expect("close settles");
+    assert_eq!(terminal_error, GatewayError::Closed);
+    // Production maps `Closed` to an interrupted terminal (see the Hermes pump
+    // loop); the streamed prefix below is the durable content the sweep replay
+    // resumes from.
+    drop(observations);
+    let mut prefix = String::new();
+    while let Some(observation) = receiver.recv().await {
+        if let EngineObservation::TextDelta(delta) = observation {
+            prefix.push_str(delta.delta());
+        }
+    }
+    assert_eq!(prefix, "hello ");
+    server.abort();
+}
+
+#[tokio::test]
+async fn hermes_restart_after_kill_replays_prefix_on_the_same_session() {
+    let (address, state, server) = spawn_fixture(FixtureMode::scripted(), fixture_script()).await;
+    let cancel = CancelHandle::new();
+    let shutdown = CancelHandle::new();
+    let settings = HermesSettings::from_selection(&hermes_selection());
+    let scope = test_scope(&cancel, &shutdown, 10_000);
+
+    // First attempt streams the durable prefix, then the transport dies.
+    let mut first = connect_fixture(address, &cancel, &shutdown).await;
+    let opened = open_session(
+        &mut first,
+        &OpenSessionInput {
+            settings: &settings,
+            project_root: "C:\\work",
+            guidance_sections: &[],
+            resume_stored_session_id: None,
+        },
+        &scope,
+    )
+    .await
+    .expect("session creates");
+    let submit_scope = test_scope(&cancel, &shutdown, 10_000);
+    let (_, _) = first
+        .request(
+            "prompt.submit",
+            serde_json::json!({"session_id": opened.runtime_session_id, "text": "hi"}),
+            &submit_scope,
+        )
+        .await
+        .expect("prompt submits");
+    let run_id = RunId::parse("run-1").expect("run id");
+    let thread_id = ThreadId::parse("thread-1").expect("thread id");
+    let (observations, mut prefix_receiver) = mpsc::channel(64);
+    let mut normalizer = HermesNormalizer::new();
+    let mut tracker = HermesPendingTracker::new();
+    let mut active_turn: Option<String> = None;
+    let mut frame_sequence: u64 = 0;
+    for _ in 0..2 {
+        let event = tokio::time::timeout(
+            Duration::from_secs(10),
+            first.next_event(&cancel, &shutdown),
+        )
+        .await
+        .expect("event arrives")
+        .expect("event streams");
+        frame_sequence += 1;
+        let terminal = apply_observations(
+            &mut normalizer,
+            &event,
+            ApplyContext {
+                run_id: &run_id,
+                thread_id: Some(&thread_id),
+                settings: &settings,
+                runtime_session_id: &opened.runtime_session_id,
+                tracker: &mut tracker,
+                active_turn: &mut active_turn,
+                observations: &observations,
+                frame_sequence,
+            },
+        )
+        .await;
+        assert!(terminal.is_none());
+    }
+    first.close().await;
+    drop(observations);
+    let mut durable_prefix = String::new();
+    while let Some(observation) = prefix_receiver.recv().await {
+        if let EngineObservation::TextDelta(delta) = observation {
+            durable_prefix.push_str(delta.delta());
+        }
+    }
+    assert_eq!(durable_prefix, "hello ");
+
+    // Restart: the sweep replay resumes provider-owned state — the stored
+    // session reopens on the same thread id instead of duplicating provider
+    // effects with a second session, and the durable prefix replays verbatim
+    // before new content.
+    let mut second = connect_fixture(address, &cancel, &shutdown).await;
+    let resume_scope = test_scope(&cancel, &shutdown, 10_000);
+    let resumed = open_session(
+        &mut second,
+        &OpenSessionInput {
+            settings: &settings,
+            project_root: "C:\\work",
+            guidance_sections: &[],
+            resume_stored_session_id: Some(&opened.durable_session_id),
+        },
+        &resume_scope,
+    )
+    .await
+    .expect("durable session resumes after kill");
+    assert_eq!(resumed.durable_session_id, opened.durable_session_id);
+    assert_eq!(
+        resumed.runtime_session_id, opened.runtime_session_id,
+        "resume reopens the same thread id"
+    );
+    let followup_scope = test_scope(&cancel, &shutdown, 10_000);
+    let (_, _) = second
+        .request(
+            "prompt.submit",
+            serde_json::json!({"session_id": resumed.runtime_session_id, "text": "hi"}),
+            &followup_scope,
+        )
+        .await
+        .expect("follow-up submits");
+    let (observations, mut receiver) = mpsc::channel(64);
+    let mut terminal = None;
+    for _ in 0..16 {
+        let event = tokio::time::timeout(
+            Duration::from_secs(10),
+            second.next_event(&cancel, &shutdown),
+        )
+        .await
+        .expect("event arrives")
+        .expect("event streams");
+        frame_sequence += 1;
+        terminal = apply_observations(
+            &mut normalizer,
+            &event,
+            ApplyContext {
+                run_id: &run_id,
+                thread_id: Some(&thread_id),
+                settings: &settings,
+                runtime_session_id: &resumed.runtime_session_id,
+                tracker: &mut tracker,
+                active_turn: &mut active_turn,
+                observations: &observations,
+                frame_sequence,
+            },
+        )
+        .await;
+        if terminal.is_some() {
+            break;
+        }
+    }
+    assert_eq!(terminal, Some(TerminalState::Completed));
+    drop(observations);
+    let mut replayed = String::new();
+    while let Some(observation) = receiver.recv().await {
+        if let EngineObservation::TextDelta(delta) = observation {
+            replayed.push_str(delta.delta());
+        }
+    }
+    assert!(
+        replayed.starts_with(durable_prefix.as_str()),
+        "the durable prefix replays verbatim: {replayed:?}"
+    );
+    let rest = &replayed[durable_prefix.len()..];
+    assert_eq!(format!("{durable_prefix}{rest}"), "hello done");
+
+    // Exactly one session was ever created and exactly one resume reopened it:
+    // the restart never duplicated provider effects.
+    let received = &state.lock().await.received;
+    assert_eq!(
+        received
+            .iter()
+            .filter(|(method, _)| method.as_str() == "session.create")
+            .count(),
+        1,
+        "no second provider session may be created"
+    );
+    assert_eq!(
+        received
+            .iter()
+            .filter(|(method, _)| method.as_str() == "session.resume")
+            .count(),
+        1,
+        "the restart resumes exactly once"
+    );
+    let close_scope = test_scope(&cancel, &shutdown, 10_000);
+    let _ = second
+        .request(
+            "session.close",
+            serde_json::json!({ "session_id": resumed.runtime_session_id }),
+            &close_scope,
+        )
+        .await;
+    second.close().await;
+    server.abort();
+}
+
+// H3: the Hermes spawn path rides whole-group custody, so teardown observes
+// its reap bounded instead of quarantining. Pipe-holding-grandchild group
+// kill itself is proven once at the shared owner layer by
+// `configured_fixture_descendant_holds_sentinel_until_group_reap` (Windows),
+// which rides the identical `cleanup_after_abort` plus whole-group custody
+// the Hermes spawn requests; a Hermes-seamed grandchild variant is not
+// fixture-representable because the service spawn carries fixed argv and
+// inherits ambient state.
+#[tokio::test(flavor = "current_thread")]
+async fn hermes_spawned_child_reaps_bounded_without_quarantine() {
+    reset_witnesses();
+    let exe = std::env::current_exe().expect("current exe");
+    let launch = VerifiedHermesLaunch::new(exe, "hermes-h3".to_owned(), "0.20.0".to_owned())
+        .expect("launch validates");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "artisan-hermes-h3-reap-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir creates");
+    let root = RootPath::parse(dir.to_str().expect("temp path utf8")).expect("temp root parses");
+    // The re-executed test binary never reports Hermes readiness (see
+    // `spawn_installed_executable_reaches_readiness_eof`): it exits fast, so
+    // teardown must observe the reap bounded instead of quarantining.
+    let mut child =
+        spawn_hermes_engine(&launch, &root, "hermes-h3-token").expect("hermes child spawns");
+    let lifeline = LifelineWriter::take(&mut child);
+    let _stdout_held = child.stdout.take();
+    let stderr_counter = StderrCounter::new(child.stderr.take(), 4096);
+    let parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let observation = tokio::time::timeout(
+        Duration::from_secs(30),
+        cleanup_after_abort(parts, Duration::from_secs(10)),
+    )
+    .await
+    .expect("teardown returns bounded");
+    assert!(
+        matches!(
+            observation,
+            CleanupObservation::ReapedWithoutKill(_) | CleanupObservation::ReapedAfterKill(_)
+        ),
+        "the hermes spawn path must observe its reap instead of quarantining"
+    );
+    let counts = witness_counts();
+    assert_eq!(counts.spawned, 1);
+    assert_eq!(counts.reaps_observed, 1);
+    assert_eq!(counts.watchdog_failures_seen, 0);
+    #[cfg(windows)]
+    assert_eq!(
+        counts.kills_requested, 1,
+        "Windows requests whole-group termination before the abort wait"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
