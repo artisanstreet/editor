@@ -3725,17 +3725,17 @@ mod tests {
             assert!(requeue.is_empty());
             assert_eq!(submit.commands.len(), 2);
             let submitted = approval_answer(&submit.commands[0]);
-            assert_eq!(submitted.request_id, expected_approval);
-            assert_eq!(submitted.thread_id, thread_id());
-            assert_eq!(submitted.run_id, run_id());
-            assert_eq!(submitted.approval_id.as_str(), "approval-1");
+            assert_eq!(submitted.request_id(), &expected_approval);
+            assert_eq!(submitted.thread_id(), &thread_id());
+            assert_eq!(submitted.run_id(), &run_id());
+            assert_eq!(submitted.approval_id().as_str(), "approval-1");
             assert!(submitted.approved);
             let submitted = question_answer(&submit.commands[1]);
-            assert_eq!(submitted.request_id, expected_question);
-            assert_eq!(submitted.thread_id, thread_id());
-            assert_eq!(submitted.run_id, run_id());
-            assert_eq!(submitted.question_id.as_str(), "question-1");
-            assert_eq!(submitted.answers, vec![String::from("tokio")]);
+            assert_eq!(submitted.request_id(), &expected_question);
+            assert_eq!(submitted.thread_id(), &thread_id());
+            assert_eq!(submitted.run_id(), &run_id());
+            assert_eq!(submitted.question_id().as_str(), "question-1");
+            assert_eq!(submitted.answers(), &vec![String::from("tokio")]);
         }
 
         #[test]
@@ -3847,9 +3847,9 @@ mod tests {
             });
             assert_eq!(submit.commands.len(), 1);
             let submitted = approval_answer(&submit.commands[0]);
-            assert_eq!(submitted.thread_id, thread_id());
-            assert_eq!(submitted.run_id, run_id());
-            assert_eq!(submitted.approval_id.as_str(), "approval-1");
+            assert_eq!(submitted.thread_id(), &thread_id());
+            assert_eq!(submitted.run_id(), &run_id());
+            assert_eq!(submitted.approval_id().as_str(), "approval-1");
             assert!(submitted.approved);
         }
     }
