@@ -14,7 +14,10 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use artisan_domain::{Command, ItemId, ObservationId, RequestId, RunId, ThreadId, TurnId};
+use artisan_domain::{
+    Command, ItemId, OBSERVATION_ANSWER_MAX_BYTES, ObservationId, RequestId, RunId, ThreadId,
+    TurnId,
+};
 use artisan_protocol::{
     ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt, RespondQuestionReceipt,
 };
@@ -23,14 +26,15 @@ use artisan_ui::badge::{BadgeStyle, outline_badge};
 use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::collapsible::Collapsible;
+use artisan_ui::input_state::TextInputState;
 use artisan_ui::markdown_renderer::MarkdownRenderer;
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, SurfaceScale, SurfaceStep, ThemeMode};
 use gpui::{
-    AnyElement, Context, Div, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Render,
-    ScrollAnchor, ScrollHandle, SharedString, Stateful, Window, div,
+    AnyElement, Context, Div, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Modifiers,
+    Render, ScrollAnchor, ScrollHandle, SharedString, Stateful, Window, div,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -422,6 +426,14 @@ pub struct ConversationSurface {
     /// pruned on scene replacement; a focused control that disappears
     /// returns focus to the transcript.
     navigator_focus: HashMap<String, FocusHandle>,
+    /// Focus handles for free-form question input rows, keyed by block
+    /// identity text.
+    ///
+    /// Handles are rebuilt on scene replacement, retaining generations for
+    /// surviving rows (mirroring `navigator_focus`), so per-row keystrokes
+    /// route to the row that owns them while unrelated updates never steal
+    /// focus.
+    question_focus: HashMap<String, FocusHandle>,
     /// Explicit live answer context for engine approval/question rows.
     ///
     /// The owning thread and live run are supplied explicitly by the
@@ -629,6 +641,20 @@ fn item_id_for_scene_id(id: &SceneId) -> Option<ItemId> {
     ItemId::parse(id.as_str()).ok()
 }
 
+/// Returns the block identities of every question row in the scene, in
+/// render order, for per-row input focus retention.
+fn question_block_ids(scene: &ConversationScene) -> Vec<String> {
+    let mut ids = Vec::new();
+    for turn_scene in scene.turn_scenes() {
+        for block in turn_scene.blocks() {
+            if let TurnBlock::Question(question) = block {
+                ids.push(question.id.as_str().to_owned());
+            }
+        }
+    }
+    ids
+}
+
 /// Returns the scene identity that owns the transcript position of one work
 /// group card. This is the single source for the group-card anchor identity
 /// shared by rendering and scroll-target resolution.
@@ -706,7 +732,7 @@ impl ConversationSurface {
     /// handles. The surface starts with the supplied scene and no actions.
     #[must_use]
     pub fn new(scene: ConversationScene, theme_mode: ThemeMode, cx: &mut Context<Self>) -> Self {
-        Self {
+        let mut surface = Self {
             scene,
             message_images: None,
             message_images_observation: None,
@@ -733,13 +759,16 @@ impl ConversationSurface {
             scroll_anchors: Vec::new(),
             scroll_anchor_paint_token: None,
             navigator_focus: HashMap::new(),
+            question_focus: HashMap::new(),
             answer_thread: None,
             answer_run: None,
             approval_gates: HashMap::new(),
             question_gates: HashMap::new(),
             question_choices: HashMap::new(),
             pending_answer_dispatches: Vec::new(),
-        }
+        };
+        surface.sync_question_focus(cx);
+        surface
     }
 
     /// Returns the currently accepted scene without cloning it.
@@ -795,6 +824,30 @@ impl ConversationSurface {
             .cloned()
     }
 
+    /// Returns the focus handle retained for one free-form question row, if
+    /// the row is currently rendered.
+    #[must_use]
+    pub fn question_focus_handle(&self, block_id: &str) -> Option<FocusHandle> {
+        self.question_focus.get(block_id).cloned()
+    }
+
+    /// Rebuilds per-row question focus handles from the accepted scene.
+    ///
+    /// Generations survive for rows still present, so unrelated scene
+    /// updates never steal focus; handles for removed rows drop with the
+    /// rebuild, so drafts and focus never leak across questions.
+    fn sync_question_focus(&mut self, cx: &mut Context<Self>) {
+        let mut next = HashMap::with_capacity(self.question_focus.len());
+        for block_id in question_block_ids(&self.scene) {
+            let handle = self
+                .question_focus
+                .remove(&block_id)
+                .unwrap_or_else(|| cx.focus_handle().tab_index(4).tab_stop(true));
+            next.insert(block_id, handle);
+        }
+        self.question_focus = next;
+    }
+
     /// Mirrors the controller's detached-reader affordance into rendering.
     ///
     /// The viewport controller remains the sole authority for whether the
@@ -819,6 +872,7 @@ impl ConversationSurface {
     /// the next replacement scene remains authoritative.
     pub fn replace_scene(&mut self, scene: ConversationScene, cx: &mut Context<Self>) {
         self.scene = scene;
+        self.sync_question_focus(cx);
         cx.notify();
     }
 
@@ -1005,6 +1059,74 @@ impl ConversationSurface {
         } else {
             false
         }
+    }
+
+    /// Handles one keystroke for a focused free-form question row.
+    ///
+    /// Only pending free-form rows handle keys: choice rows keep their
+    /// buttons, and rows with an outstanding flight ignore everything, so a
+    /// second gesture can never mint a second identity. `enter` submits the
+    /// staged draft through the existing [`Self::submit_question_gesture`]
+    /// path (fresh request id, empty drafts rejected); `backspace` deletes
+    /// one character; `escape` returns focus to the transcript without
+    /// submitting; other unmodified single-character keys (plus `space`)
+    /// append. Modified keys are ignored so shortcuts and focus navigation
+    /// keep working.
+    #[must_use]
+    pub fn handle_question_key(
+        &mut self,
+        block_key: &str,
+        key: &str,
+        modifiers: &Modifiers,
+        cx: &mut Context<Self>,
+    ) -> QuestionKeyOutcome {
+        let freeform = !self
+            .question_choices
+            .get(block_key)
+            .is_some_and(QuestionChoiceCache::is_choice);
+        let pending = !self
+            .question_gates
+            .get(block_key)
+            .is_some_and(QuestionAnswerGate::is_in_flight);
+        if !(freeform && pending) {
+            return QuestionKeyOutcome::Ignored;
+        }
+        if key == "escape" {
+            return QuestionKeyOutcome::FocusTranscript;
+        }
+        if key == "enter" && !modifiers.modified() {
+            return if self.submit_question_gesture(block_key, cx) {
+                QuestionKeyOutcome::Submitted
+            } else {
+                QuestionKeyOutcome::Ignored
+            };
+        }
+        if key == "backspace" && !modifiers.modified() {
+            let gate = self.question_gates.entry(block_key.to_owned()).or_default();
+            if gate.delete_backward() {
+                cx.notify();
+                return QuestionKeyOutcome::Edited;
+            }
+            return QuestionKeyOutcome::Ignored;
+        }
+        // The spacebar reports its key name, not a blank character; every
+        // other named key (tab, arrows, function keys) is ignored so focus
+        // navigation keeps working.
+        let text = if key == "space" { " " } else { key };
+        let mut chars = text.chars();
+        let printable = match chars.next() {
+            Some(first) => chars.next().is_none() && !first.is_control(),
+            None => false,
+        };
+        let plain = !modifiers.control && !modifiers.alt && !modifiers.platform;
+        if plain && printable {
+            let gate = self.question_gates.entry(block_key.to_owned()).or_default();
+            if gate.insert_text(text) {
+                cx.notify();
+                return QuestionKeyOutcome::Edited;
+            }
+        }
+        QuestionKeyOutcome::Ignored
     }
 
     /// Attempts one single-select option choice the moment it is clicked.
@@ -2009,9 +2131,35 @@ impl ConversationSurface {
                 draft.to_owned()
             };
             let input_selector = format!("{selector}-input");
-            details = details.child(
-                body_text(&draft_text, theme).debug_selector(move || input_selector.clone()),
-            );
+            let row_focus = self
+                .question_focus
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| self.answer_focus.clone());
+            let surface = entity.downgrade();
+            let key_id = key.clone();
+            let transcript = self.transcript_focus.clone();
+            let input = div()
+                .track_focus(&row_focus)
+                .tab_index(0)
+                .debug_selector(move || input_selector.clone())
+                .child(body_text(&draft_text, theme))
+                .on_key_down(move |event, window, app| {
+                    let key = event.keystroke.key.as_str().to_owned();
+                    let transcript = transcript.clone();
+                    let _ = surface.update(app, |surface, cx| {
+                        if surface.handle_question_key(
+                            &key_id,
+                            &key,
+                            &event.keystroke.modifiers,
+                            cx,
+                        ) == QuestionKeyOutcome::FocusTranscript
+                        {
+                            window.focus(&transcript, cx);
+                        }
+                    });
+                });
+            details = details.child(input);
             let surface = entity.downgrade();
             let answer_key = key.clone();
             let answer_button = Button::new(
@@ -2482,6 +2630,37 @@ impl ApprovalAnswerGate {
     }
 }
 
+/// What one question-row keystroke did.
+///
+/// Returned by [`ConversationSurface::handle_question_key`] so renderers can
+/// route focus without re-deriving the decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuestionKeyOutcome {
+    /// The key changed nothing: wrong row kind, outstanding flight,
+    /// modified shortcut, unhandled key, or a refused intake/submit.
+    Ignored,
+    /// Typed or deleted text staged into the row draft.
+    Edited,
+    /// `enter` dispatched the staged draft through the existing question
+    /// submit gesture with a fresh request id.
+    Submitted,
+    /// `escape` asks the renderer to return focus to the transcript without
+    /// submitting.
+    FocusTranscript,
+}
+
+/// Shapes raw staged text into the single-line free-form draft form.
+///
+/// Canonicalizes through the shared input intake, then strips newlines for
+/// legacy single-line `Input` parity (the browser input drops them; Enter
+/// submits instead of inserting a break here).
+fn shape_freeform_draft(text: &str) -> String {
+    artisan_ui::input_state::normalize_input(text)
+        .chars()
+        .filter(|character| *character != '\n')
+        .collect()
+}
+
 /// One question answer attempt admitted by [`QuestionAnswerGate`].
 ///
 /// Carries the dispatched `respond_question` action value, the domain command
@@ -2506,11 +2685,21 @@ pub struct QuestionAnswerAttempt {
 /// nothing is minted or dispatched. A settled attempt keeps the gate closed
 /// until the row resolves; a failed attempt reopens it with the retry message
 /// from the existing pairing policy.
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// The free-form draft is backed by [`TextInputState`](artisan_ui::input_state::TextInputState):
+/// keystroke intake is canonicalized on entry (zero-width spaces removed,
+/// CR/CRLF folded) exactly like the shared input seam, while the
+/// single-line caller policy additionally strips newlines (legacy `Input`
+/// parity: the browser single-line input drops them) and clamps the buffer
+/// to [`OBSERVATION_ANSWER_MAX_BYTES`] UTF-8 bytes, the same bound the
+/// answer validation enforces at submit. `TextInputState` carries no
+/// `PartialEq`, so this gate deliberately omits it; no caller compares
+/// gates.
+#[derive(Clone, Debug, Default)]
 pub struct QuestionAnswerGate {
     flight: AnswerFlight,
     selected: Vec<String>,
-    draft: String,
+    draft: TextInputState,
     failure: Option<String>,
     last_request_id: Option<RequestId>,
 }
@@ -2534,10 +2723,10 @@ impl QuestionAnswerGate {
         &self.selected
     }
 
-    /// Returns the staged free-form draft exactly as set.
+    /// Returns the staged free-form draft in canonical input form.
     #[must_use]
     pub fn draft(&self) -> &str {
-        &self.draft
+        self.draft.value()
     }
 
     /// Returns the surfaced retry/diagnostic message, if any.
@@ -2568,8 +2757,48 @@ impl QuestionAnswerGate {
     }
 
     /// Replaces the staged free-form draft exactly as supplied.
+    ///
+    /// The text passes through the single-line shaping (canonical input
+    /// form, newlines stripped); the byte bound is enforced at keystroke
+    /// intake and at submit validation, not here, so controller-staged
+    /// drafts arrive intact for the existing submit path to judge.
     pub fn set_draft(&mut self, draft: String) {
-        self.draft = draft;
+        self.draft.set_value(&shape_freeform_draft(&draft));
+    }
+
+    /// Appends keystroke text to the staged free-form draft.
+    ///
+    /// Returns whether the draft changed: empty text and appends that would
+    /// exceed [`OBSERVATION_ANSWER_MAX_BYTES`] UTF-8 bytes are refused with
+    /// the buffer untouched, so the draft stays within the bound the answer
+    /// validation enforces.
+    #[must_use]
+    pub fn insert_text(&mut self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let mut next = self.draft.value().to_owned();
+        next.push_str(text);
+        let next = shape_freeform_draft(&next);
+        if next.len() > OBSERVATION_ANSWER_MAX_BYTES {
+            return false;
+        }
+        self.draft.set_value(&next)
+    }
+
+    /// Deletes the last character of the staged free-form draft.
+    ///
+    /// Returns whether the draft changed; an already-empty draft reports
+    /// `false`. There is no caret or selection model, matching the shared
+    /// input seam limits.
+    #[must_use]
+    pub fn delete_backward(&mut self) -> bool {
+        let mut next = self.draft.value().to_owned();
+        if next.pop().is_none() {
+            return false;
+        }
+        self.draft.set_value(&next);
+        true
     }
 
     /// Submits one single-select choice immediately.
@@ -2627,12 +2856,12 @@ impl QuestionAnswerGate {
         run_id: RunId,
         question_id: ObservationId,
     ) -> Option<QuestionAnswerAttempt> {
-        let trimmed = self.draft.trim().to_owned();
+        let trimmed = self.draft.value().trim().to_owned();
         if trimmed.is_empty() {
             return None;
         }
         let attempt = self.submit_answers(thread_id, run_id, question_id, vec![trimmed])?;
-        self.draft.clear();
+        self.draft.set_value("");
         self.selected.clear();
         Some(attempt)
     }
@@ -2694,6 +2923,8 @@ impl QuestionAnswerGate {
         let pairing = pair_question_answer(state, command, receipt);
         if pairing.is_settled() {
             self.failure = None;
+            self.draft.set_value("");
+            self.selected.clear();
         } else {
             self.flight.settle();
             self.failure = pairing.settlement.message().map(str::to_owned);
@@ -3324,9 +3555,10 @@ mod tests {
     /// with no display dependencies.
     mod approve_submit {
         use artisan_domain::{
-            ApprovalObservation, ApprovalRequest, Command, EngineObservationEvent, Observation,
-            ObservationId, ObservationSequence, QuestionInput, QuestionObservation, QuestionOption,
-            ReceiptDisposition, RunId, ThreadId,
+            ApprovalObservation, ApprovalRequest, Command, EngineObservationEvent,
+            OBSERVATION_ANSWER_MAX_BYTES, Observation, ObservationId, ObservationSequence,
+            QuestionInput, QuestionObservation, QuestionOption, ReceiptDisposition, RunId,
+            ThreadId,
         };
         use artisan_protocol::{
             ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt,
@@ -3337,12 +3569,13 @@ mod tests {
             AnswerDispatch, AnswerDispatchAction, ApprovalAnswerGate, ConversationSurface,
             QuestionAnswerGate, QuestionChoiceCache, drain_answer_queue,
         };
-        use super::scene;
+        use super::{item, scene};
+        use crate::conversation_scene::SceneItemKind;
         use crate::engine_approve_ui::AnswerSettlement;
         use crate::engine_observation_state::EngineObservationState;
         use crate::native_transport_service::{CommandSendError, NativeTransportCommand};
         use artisan_ui::theme::ThemeMode;
-        use gpui::TestAppContext;
+        use gpui::{Entity, KeyDownEvent, Keystroke, TestAppContext, VisualTestContext};
 
         fn observation_id(value: &str) -> ObservationId {
             ObservationId::parse(value).expect("fixture observation id is valid")
@@ -3851,6 +4084,267 @@ mod tests {
             assert_eq!(submitted.run_id(), &run_id());
             assert_eq!(submitted.approval_id().as_str(), "approval-1");
             assert!(submitted.approved);
+        }
+
+        #[test]
+        fn keystroke_text_accumulates_with_canonical_intake() {
+            let mut gate = QuestionAnswerGate::new();
+            assert!(gate.insert_text("h"));
+            assert!(gate.insert_text("i"));
+            assert_eq!(gate.draft(), "hi");
+            assert!(gate.insert_text("a\r\nb"));
+            assert_eq!(gate.draft(), "hiab");
+            assert!(gate.insert_text("x\u{200B}y"));
+            assert_eq!(gate.draft(), "hiabxy");
+            assert!(!gate.insert_text(""));
+        }
+
+        #[test]
+        fn keystroke_intake_clamped_to_answer_bound() {
+            let mut gate = QuestionAnswerGate::new();
+            assert!(gate.insert_text(&"y".repeat(OBSERVATION_ANSWER_MAX_BYTES)));
+            assert_eq!(gate.draft().len(), OBSERVATION_ANSWER_MAX_BYTES);
+            assert!(!gate.insert_text("z"));
+            assert_eq!(gate.draft().len(), OBSERVATION_ANSWER_MAX_BYTES);
+        }
+
+        #[test]
+        fn delete_backward_removes_last_char() {
+            let mut gate = QuestionAnswerGate::new();
+            assert!(!gate.delete_backward());
+            gate.set_draft(String::from("hi"));
+            assert!(gate.delete_backward());
+            assert_eq!(gate.draft(), "h");
+            assert!(gate.delete_backward());
+            assert_eq!(gate.draft(), "");
+            assert!(!gate.delete_backward());
+        }
+
+        #[test]
+        fn settled_row_drops_its_draft() {
+            let mut state = EngineObservationState::new(thread_id());
+            state.apply(1, &event(question_requested("question-1", false)));
+            let mut gate = QuestionAnswerGate::new();
+            gate.set_draft(String::from("typed"));
+            let attempt = gate
+                .submit_freeform(thread_id(), run_id(), observation_id("question-1"))
+                .expect("typed draft submits");
+            gate.set_draft(String::from("typed during flight"));
+            let receipt = RespondQuestionReceipt {
+                request_id: attempt.request_id.clone(),
+                thread_id: thread_id(),
+                run_id: run_id(),
+                question_id: observation_id("question-1"),
+                answers: vec![String::from("typed")],
+                outcome: RunInteractionOutcome::Applied,
+                disposition: ReceiptDisposition::Accepted,
+            };
+            let pairing =
+                gate.settle_receipt(&state, question_command_inner(&attempt.command), &receipt);
+            assert!(pairing.is_settled());
+            assert_eq!(gate.draft(), "");
+        }
+
+        #[test]
+        fn failed_row_keeps_its_draft_for_retry() {
+            let mut gate = QuestionAnswerGate::new();
+            gate.set_draft(String::from("typed"));
+            let attempt = gate
+                .submit_freeform(thread_id(), run_id(), observation_id("question-1"))
+                .expect("typed draft submits");
+            gate.set_draft(String::from("retry text"));
+            let failure = ProtocolFailure {
+                code: ErrorCode::Internal,
+                detail: ErrorDetail::parse("fixture unavailable").expect("fixture detail is valid"),
+                retryable: true,
+                request_id: Some(attempt.request_id.clone()),
+            };
+            let settlement = gate.settle_failure(&attempt.request_id, &failure);
+            assert!(matches!(
+                settlement,
+                AnswerSettlement::RetryableFailure { .. }
+            ));
+            assert_eq!(gate.draft(), "retry text");
+            assert!(!gate.is_in_flight());
+        }
+
+        fn freeform_scene() -> crate::conversation_scene::ConversationScene {
+            scene(vec![
+                item(
+                    "question-a",
+                    1,
+                    SceneItemKind::Question {
+                        prompt: String::from("Which runtime?"),
+                    },
+                    None,
+                ),
+                item(
+                    "question-b",
+                    2,
+                    SceneItemKind::Question {
+                        prompt: String::from("Which region?"),
+                    },
+                    None,
+                ),
+            ])
+        }
+
+        fn press_key(cx: &mut VisualTestContext, key: &str) {
+            cx.simulate_event(KeyDownEvent {
+                keystroke: Keystroke::parse(key).expect("known test key"),
+                is_held: false,
+                prefer_character_input: false,
+            });
+        }
+
+        fn focus_row(
+            cx: &mut VisualTestContext,
+            surface: &Entity<ConversationSurface>,
+            block: &str,
+        ) {
+            cx.update(|window, app| {
+                window.focus(
+                    &surface
+                        .read(app)
+                        .question_focus_handle(block)
+                        .expect("row focus handle"),
+                    app,
+                );
+            });
+            cx.run_until_parked();
+        }
+
+        fn row_draft(
+            cx: &mut VisualTestContext,
+            surface: &Entity<ConversationSurface>,
+            block: &str,
+        ) -> String {
+            cx.update(|_, app| {
+                surface
+                    .read(app)
+                    .question_gates
+                    .get(block)
+                    .map_or("", QuestionAnswerGate::draft)
+                    .to_owned()
+            })
+        }
+
+        #[gpui::test]
+        fn freeform_typing_accumulates_per_row(cx: &mut TestAppContext) {
+            let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+                ConversationSurface::new(freeform_scene(), ThemeMode::Dark, surface_cx)
+            });
+            cx.run_until_parked();
+            focus_row(cx, &surface, "question-a");
+            press_key(cx, "h");
+            press_key(cx, "i");
+            press_key(cx, "space");
+            press_key(cx, "h");
+            press_key(cx, "o");
+            cx.run_until_parked();
+            assert_eq!(row_draft(cx, &surface, "question-a"), "hi ho");
+            focus_row(cx, &surface, "question-b");
+            press_key(cx, "x");
+            cx.run_until_parked();
+            assert_eq!(row_draft(cx, &surface, "question-b"), "x");
+            assert_eq!(
+                row_draft(cx, &surface, "question-a"),
+                "hi ho",
+                "rows keep isolated drafts"
+            );
+        }
+
+        #[gpui::test]
+        fn freeform_backspace_deletes(cx: &mut TestAppContext) {
+            let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+                ConversationSurface::new(freeform_scene(), ThemeMode::Dark, surface_cx)
+            });
+            cx.run_until_parked();
+            focus_row(cx, &surface, "question-a");
+            press_key(cx, "h");
+            press_key(cx, "i");
+            press_key(cx, "backspace");
+            cx.run_until_parked();
+            assert_eq!(row_draft(cx, &surface, "question-a"), "h");
+        }
+
+        #[gpui::test]
+        fn freeform_enter_submits_staged_text(cx: &mut TestAppContext) {
+            let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+                ConversationSurface::new(freeform_scene(), ThemeMode::Dark, surface_cx)
+            });
+            cx.run_until_parked();
+            cx.update(|_, app| {
+                surface.update(app, |surface, cx| {
+                    surface.set_answer_context(thread_id(), run_id(), cx);
+                });
+            });
+            focus_row(cx, &surface, "question-a");
+            for key in ["t", "o", "k", "i", "o"] {
+                press_key(cx, key);
+            }
+            press_key(cx, "enter");
+            cx.run_until_parked();
+            let answers = cx.update(|_, app| {
+                let surface = surface.read(app);
+                assert_eq!(surface.pending_answer_dispatches().len(), 1);
+                match &surface.pending_answer_dispatches()[0].command {
+                    Command::RespondQuestion(command) => command.answers().clone(),
+                    _ => panic!("free-form enter must dispatch an answer"),
+                }
+            });
+            assert_eq!(answers, vec![String::from("tokio")]);
+            assert_eq!(row_draft(cx, &surface, "question-a"), "");
+        }
+
+        #[gpui::test]
+        fn freeform_empty_enter_rejected(cx: &mut TestAppContext) {
+            let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+                ConversationSurface::new(freeform_scene(), ThemeMode::Dark, surface_cx)
+            });
+            cx.run_until_parked();
+            cx.update(|_, app| {
+                surface.update(app, |surface, cx| {
+                    surface.set_answer_context(thread_id(), run_id(), cx);
+                });
+            });
+            focus_row(cx, &surface, "question-b");
+            press_key(cx, "enter");
+            cx.run_until_parked();
+            cx.update(|_, app| {
+                assert!(surface.read(app).pending_answer_dispatches().is_empty());
+            });
+            assert_eq!(row_draft(cx, &surface, "question-b"), "");
+        }
+
+        #[gpui::test]
+        fn freeform_escape_clears_focus(cx: &mut TestAppContext) {
+            let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+                ConversationSurface::new(freeform_scene(), ThemeMode::Dark, surface_cx)
+            });
+            cx.run_until_parked();
+            focus_row(cx, &surface, "question-a");
+            press_key(cx, "x");
+            press_key(cx, "escape");
+            cx.run_until_parked();
+            cx.update(|window, app| {
+                let view = surface.read(app);
+                assert!(
+                    !view
+                        .question_focus_handle("question-a")
+                        .expect("row focus handle")
+                        .is_focused(window),
+                    "escape must clear row focus without submitting"
+                );
+                assert!(
+                    view.transcript_focus_handle().is_focused(window),
+                    "escape returns focus to the transcript"
+                );
+            });
+            assert_eq!(row_draft(cx, &surface, "question-a"), "x");
+            cx.update(|_, app| {
+                assert!(surface.read(app).pending_answer_dispatches().is_empty());
+            });
         }
     }
 }
