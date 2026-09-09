@@ -915,8 +915,8 @@ async fn idle_driver_connection_serves_after_the_request_deadline() -> Result<()
 
     // The shared fixture deadline is two seconds; stay idle well past it
     // while the driver waits for the next request or wake.
-    let drive = owner.drive_until_end(8, || Ok(response_stamp("idle-driver-response")));
-    tokio::pin!(drive);
+    let mut drive =
+        Box::pin(owner.drive_until_end(8, || Ok(response_stamp("idle-driver-response"))));
     tokio::select! {
         biased;
         _ended = &mut drive => panic!("driver must stay waiting through idle"),
@@ -924,19 +924,22 @@ async fn idle_driver_connection_serves_after_the_request_deadline() -> Result<()
     }
 
     let request = lifecycle_request("idle-driver-status", LifecycleRequest::Status);
-    let reply = exchange(&client, request, &response_stamp("idle-driver-response"))
-        .await
-        .expect("request served after idle");
-    let status = match lifecycle_payload(reply) {
-        LifecycleResponse::Status(status) => status,
-        LifecycleResponse::Stop(_) => panic!("status request returned stop response"),
-    };
-    assert_eq!(status.state, LifecycleState::Ready);
+    let client_work = async {
+        let reply = exchange(&client, request, &response_stamp("idle-driver-response"))
+            .await
+            .expect("request served after idle");
+        let status = match lifecycle_payload(reply) {
+            LifecycleResponse::Status(status) => status,
+            LifecycleResponse::Stop(_) => panic!("status request returned stop response"),
+        };
+        assert_eq!(status.state, LifecycleState::Ready);
 
-    // Caller cancellation still stops the wait promptly through the
-    // graceful cleanup path, after exactly the one completed request.
-    cancel.cancel();
-    let failure = match drive.await {
+        // Caller cancellation still stops the wait promptly through the
+        // graceful cleanup path, after exactly the one completed request.
+        cancel.cancel();
+    };
+    let ((), result) = tokio::join!(client_work, drive);
+    let failure = match result {
         Err(failure) => failure,
         Ok(_) => panic!("cancel must end the drive"),
     };
