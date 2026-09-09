@@ -44,6 +44,7 @@ use crate::engine_owner::{FixtureConfiguredLaunch, FixtureTurnInput};
 use crate::{
     CommandOrigin, SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
+    engine_owner::cursor::CursorLaunch,
     engine_owner::grok::GrokLaunch,
     engine_owner::interaction::InteractionTarget,
     engine_owner::observation::{
@@ -52,8 +53,8 @@ use crate::{
     },
     engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
     engine_owner::{
-        EngineClaudeTurnInput, EngineCodexTurnInput, EngineContinuation, EngineGrokTurnInput,
-        EngineTurnInput,
+        EngineClaudeTurnInput, EngineCodexTurnInput, EngineContinuation, EngineCursorTurnInput,
+        EngineGrokTurnInput, EngineTurnInput,
     },
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
@@ -72,6 +73,7 @@ const PROVIDER_BINDING_VERSION: i64 = 1;
 const PROVIDER_BINDING_ENGINE: &str = "opencode2";
 const PROVIDER_BINDING_ENGINE_CODEX: &str = "codex";
 const PROVIDER_BINDING_ENGINE_CLAUDE: &str = "claude";
+const PROVIDER_BINDING_ENGINE_CURSOR: &str = "cursor";
 const PROVIDER_BINDING_ENGINE_GROK: &str = "grok";
 const PROVIDER_FAILURE_CODE: &str = "provider_failed";
 const PROVIDER_FAILURE_MESSAGE: &str = "OpenCode2 provider turn failed";
@@ -481,6 +483,7 @@ enum ResolvedLaunch {
     Configured(Box<VerifiedOpenCode2ProfileLaunch>),
     Codex(Box<VerifiedCodexLaunch>),
     Claude(Box<VerifiedClaudeLaunch>),
+    Cursor(Box<CursorLaunch>),
     Grok(Box<GrokLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
@@ -1213,9 +1216,9 @@ async fn load_claim(
     // CLI, Claude resolves through the Claude launch authority with a bounded
     // `--version` probe enforcing the minimum CLI, Grok resolves through the
     // existing Grok discovery with a bounded `--version` probe parsed by the
-    // shared ACP row (no minimum CLI in the TypeScript evidence), and every
-    // other newly representable engine requeues instead of running as another
-    // engine.
+    // shared ACP row (no minimum CLI in the TypeScript evidence), Cursor has
+    // no launch authority in C1 and requeues, and every other newly
+    // representable engine requeues instead of running as another engine.
     let launch = match settings.config().selection() {
         EngineSelection::OpenCode2(selection) => match launch_mode {
             ClaimLaunchMode::Configured => {
@@ -1286,6 +1289,25 @@ async fn load_claim(
                 return None;
             }
         },
+        EngineSelection::Cursor(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                // C1 owns the definition row but no launch authority yet: the
+                // probe/authority packet resolves this. Requeue without
+                // running as another engine.
+                let Some(launch) =
+                    resolve_cursor_launch(context.database_path, selection.profile_id()).await
+                else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Cursor(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
         _ => {
             context.requeue("engine unavailable").await;
             return None;
@@ -1308,12 +1330,15 @@ async fn resolve_continuation(
     if matches!(&claim.launch, ResolvedLaunch::Fixture(_)) {
         return Ok(None);
     }
-    // Codex, Claude, and Grok continuation is a later packet: those turns
+    // Codex, Claude, Grok, and Cursor continuation is a later packet: those turns
     // always start a fresh native thread in this packet instead of resuming
     // provider history.
     if matches!(
         &claim.launch,
-        ResolvedLaunch::Codex(_) | ResolvedLaunch::Claude(_) | ResolvedLaunch::Grok(_)
+        ResolvedLaunch::Codex(_)
+            | ResolvedLaunch::Claude(_)
+            | ResolvedLaunch::Grok(_)
+            | ResolvedLaunch::Cursor(_)
     ) {
         return Ok(None);
     }
@@ -1353,6 +1378,7 @@ fn mint_claim_ids(
         ResolvedLaunch::Configured(_)
         | ResolvedLaunch::Codex(_)
         | ResolvedLaunch::Claude(_)
+        | ResolvedLaunch::Cursor(_)
         | ResolvedLaunch::Grok(_) => (
             mint_run_id(origin).ok_or("run identity unavailable")?,
             mint_turn_id(origin).ok_or("run identity unavailable")?,
@@ -1528,6 +1554,21 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
             },
             attempt_budget,
         ),
+        ResolvedLaunch::Cursor(launch) => context.owner.admit_cursor_turn(
+            EngineCursorTurnInput {
+                run_id: receipt.run_id.clone(),
+                thread_id: payload.thread_id.clone(),
+                project_root,
+                prompt_id,
+                prompt,
+                settings: settings.clone(),
+                launch: *launch,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
         #[cfg(test)]
         ResolvedLaunch::Fixture(fixture) => context.owner.admit_fixture_turn(
             FixtureTurnInput {
@@ -1603,7 +1644,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         turn.cancel();
     }
     // Provider binding bytes carry the exact engine tag (`opencode2`,
-    // `codex`, `claude`, or `grok`) with format 1 and the native thread identity from
+    // `codex`, `claude`, `grok`, or `cursor`) with format 1 and the native thread identity from
     // the app-server contract. A selection for any other engine abandons the
     // turn here instead of binding as a runnable engine.
     let (binding_engine, binding_profile) = match settings.config().selection() {
@@ -1617,6 +1658,10 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         ),
         EngineSelection::Claude(selection) => (
             PROVIDER_BINDING_ENGINE_CLAUDE,
+            selection.profile_id().as_str().to_owned(),
+        ),
+        EngineSelection::Cursor(selection) => (
+            PROVIDER_BINDING_ENGINE_CURSOR,
             selection.profile_id().as_str().to_owned(),
         ),
         EngineSelection::Grok(selection) => (
@@ -1764,6 +1809,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
                 EngineSelection::OpenCode2(_) => EngineId::OpenCode2,
                 EngineSelection::Codex(_) => EngineId::Codex,
                 EngineSelection::Claude(_) => EngineId::Claude,
+                EngineSelection::Cursor(_) => EngineId::Cursor,
                 EngineSelection::Grok(_) => EngineId::Grok,
                 _ => EngineId::OpenCode2,
             },
@@ -1998,11 +2044,11 @@ async fn bind_with_retry(
 /// Builds the raw engine-tagged binding document with format 1 and the exact
 /// native thread identity from the app-server contract.
 ///
-/// The `engine` tag is `opencode2`, `codex`, `claude`, or `grok`; the session
-/// id is the native thread id returned by `thread/start` (Codex),
-/// `CreateSession` session (OpenCode2), `system/init` session (Claude), or
-/// `session/new` session (Grok). Empty identities reject so a corrupt bind
-/// never persists.
+/// The `engine` tag is `opencode2`, `codex`, `claude`, `grok`, or `cursor`;
+/// the session id is the native thread id returned by `thread/start` (Codex),
+/// `CreateSession` session (OpenCode2), `system/init` session (Claude),
+/// `session/new` session (Grok), or the ACP `session/new` result (Cursor).
+/// Empty identities reject so a corrupt bind never persists.
 ///
 /// Split from the [`ProviderBindingBytes`] wrap so the tag/format/profile
 /// round trip is provable over plain bytes: [`ProviderBindingBytes`]
@@ -2148,6 +2194,17 @@ async fn resolve_grok_launch(profile_id: &artisan_domain::EngineProfileId) -> Op
     let stdout = String::from_utf8(output.stdout).ok()?;
     let version = artisan_native_engine::grok::parse_grok_version(&stdout)?;
     Some(GrokLaunch::new(executable, profile_id.clone(), version))
+}
+/// Resolves one Cursor profile into a C1 launch.
+///
+/// C1 owns the definition row but no launch authority yet: the probe and
+/// verified-launch packet resolve this later. Always returns `None` so the
+/// caller requeues the claim instead of running as another engine.
+async fn resolve_cursor_launch(
+    _database_path: &Path,
+    _profile_id: &artisan_domain::EngineProfileId,
+) -> Option<CursorLaunch> {
+    None
 }
 
 async fn abandon_turn(

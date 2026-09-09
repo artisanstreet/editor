@@ -45,6 +45,7 @@ pub(crate) mod acp_bridges;
 pub(crate) mod catalog;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod cursor;
 pub(crate) mod event;
 pub(crate) mod framing;
 pub(crate) mod grok;
@@ -216,7 +217,9 @@ impl std::fmt::Debug for FixtureTurnInput {
 /// The `Verified` variant carries the production OpenCode2 capability, the
 /// `Codex` variant carries the production Codex capability, the `Claude`
 /// variant carries the production Claude capability, the `Grok` variant
-/// carries the probe-certified Grok launch, and the `Fixture`
+/// carries the probe-certified Grok launch, the `Cursor` variant carries
+/// the finite C1 cursor launch (typed settings, unprobed version sentinel;
+/// not runnable yet), and the `Fixture`
 /// variant is `#[cfg(test)]` only and never constructible in non-test builds.
 /// Never `Clone`.
 pub(crate) enum InternalLaunch {
@@ -224,6 +227,7 @@ pub(crate) enum InternalLaunch {
     Codex(Box<VerifiedCodexLaunch>),
     Claude(Box<VerifiedClaudeLaunch>),
     Grok(Box<grok::GrokLaunch>),
+    Cursor(Box<cursor::CursorLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }
@@ -241,6 +245,7 @@ impl InternalLaunch {
             Self::Codex(verified) => verified.as_ref().profile_id().as_str(),
             Self::Claude(verified) => verified.as_ref().profile_id().as_str(),
             Self::Grok(launch) => launch.as_ref().profile_id().as_str(),
+            Self::Cursor(launch) => launch.profile_id(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.profile_id.as_str(),
         }
@@ -252,6 +257,7 @@ impl InternalLaunch {
             Self::Codex(verified) => verified.as_ref().version(),
             Self::Claude(verified) => verified.as_ref().version(),
             Self::Grok(launch) => launch.as_ref().version(),
+            Self::Cursor(launch) => launch.version(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.version,
         }
@@ -330,12 +336,46 @@ impl std::fmt::Debug for EngineGrokTurnInput {
     }
 }
 
+/// Immutable input handed to the configured `Cursor` owner.
+///
+/// The dispatcher constructs this only after reading the durable settings
+/// and resolving the exact cursor launch. The owner never rereads the thread,
+/// registry, or environment while this value is live. Cursor turns carry no
+/// provider continuation in this packet (later packet).
+pub(crate) struct EngineCursorTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt: QueueMessagePayload,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: cursor::CursorLaunch,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for EngineGrokTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineGrokTurnInput { <redacted> }")
+    }
+}
+
+impl std::fmt::Debug for EngineCursorTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineCursorTurnInput { <redacted> }")
+    }
+}
+    }
+}
+
 /// Single internal input for the one configured-turn pipeline.
 ///
-/// `EngineTurnInput`, `EngineCodexTurnInput`, `EngineClaudeTurnInput`, and
-/// `EngineGrokTurnInput` (production) plus `FixtureTurnInput` (`#[cfg(test)]`)
-/// convert into this at admission, so the queued `Job::Turn` always carries
-/// the same type and exactly one executor per engine proves the lifecycle.
+/// `EngineTurnInput`, `EngineCodexTurnInput`, `EngineClaudeTurnInput`,
+/// `EngineGrokTurnInput`, and `EngineCursorTurnInput` (production) plus
+/// `FixtureTurnInput` (`#[cfg(test)]`) convert into this at admission, so the
+/// queued `Job::Turn` always carries the same type and exactly one executor
+/// per engine proves the lifecycle.
 pub(crate) struct InternalTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) thread_id: Option<ThreadId>,
@@ -959,6 +999,33 @@ impl EngineOwner {
             prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Grok(Box::new(input.launch)),
+            continuation: None,
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    /// Admits one configured `Cursor` turn into the single owner queue.
+    ///
+    /// Mirrors [`Self::admit_turn`] without forking the queue: the same
+    /// `Job::Turn` type carries an [`InternalLaunch::Cursor`] capability and
+    /// exactly one executor proves the lifecycle. Cursor turns carry no
+    /// provider continuation in this packet (later packet).
+    pub(crate) fn admit_cursor_turn(
+        &self,
+        input: EngineCursorTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            thread_id: Some(input.thread_id),
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt: input.prompt,
+            settings: input.settings,
+            launch: InternalLaunch::Cursor(Box::new(input.launch)),
             continuation: None,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
