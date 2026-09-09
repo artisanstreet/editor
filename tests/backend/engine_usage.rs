@@ -38,7 +38,8 @@ use artisan_native_engine::account_usage::{ProviderUsage, UsageReaderError};
 use artisan_native_engine::{
     ClaudeUsageConfig, CliResolveInput, CodexUsageConfig, resolve_cli_with,
 };
-use artisan_protocol::{ClientRequest, ErrorCode, Query, ResponsePayload};
+use artisan_domain::Query;
+use artisan_protocol::{ClientRequest, ErrorCode, ResponsePayload};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 
