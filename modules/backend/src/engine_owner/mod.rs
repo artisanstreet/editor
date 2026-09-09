@@ -334,6 +334,10 @@ impl std::fmt::Debug for EngineClaudeTurnInput {
 /// The dispatcher constructs this only after reading the durable settings
 /// and resolving the exact probe-certified Grok launch. The owner never
 /// rereads the thread, registry, or environment while this value is live.
+/// Unlike the Cursor turns, Grok carries the optional provider continuation:
+/// resume reopens the durable provider conversation through `session/load`
+/// behind the G3 gate (same engine, explicit target model, recorded CLI
+/// version).
 pub(crate) struct EngineGrokTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) thread_id: ThreadId,
@@ -342,6 +346,7 @@ pub(crate) struct EngineGrokTurnInput {
     pub(crate) prompt: QueueMessagePayload,
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: grok::GrokLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -1023,8 +1028,9 @@ impl EngineOwner {
     ///
     /// Mirrors [`Self::admit_turn`] without forking the queue: the same
     /// `Job::Turn` type carries an [`InternalLaunch::Grok`] capability and
-    /// exactly one executor proves the lifecycle. Grok turns carry no
-    /// provider continuation in this packet (later packet).
+    /// exactly one executor proves the lifecycle. Grok turns carry the
+    /// optional provider continuation for `session/load` behind the G3 gate
+    /// (same engine, explicit target model, recorded CLI version).
     pub(crate) fn admit_grok_turn(
         &self,
         input: EngineGrokTurnInput,
@@ -1038,7 +1044,7 @@ impl EngineOwner {
             prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Grok(Box::new(input.launch)),
-            continuation: None,
+            continuation: input.continuation,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
