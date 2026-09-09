@@ -429,6 +429,14 @@ impl ForgeConnection<'_, '_, '_, '_> {
     /// Dispatches exactly one deadline-bounded request and returns the
     /// ready owner.
     ///
+    /// Waiting for the next request stream has no idle deadline: ordinary
+    /// desktop idle is not a request failure. The wait resolves on an
+    /// accepted stream, caller cancellation, or a transport failure, with
+    /// cancellation winning over a simultaneously ready accept. Only the
+    /// started dispatch below runs under `limits.next_request`. A zero
+    /// request budget can never dispatch, so it fails fast with the
+    /// established typed timeout decision instead of waiting.
+    ///
     /// The owner is consumed for the duration of the dispatch and comes
     /// back only after the established single-request dispatcher completed:
     /// the incoming frame-derived request id stayed authoritative, the
@@ -465,14 +473,26 @@ impl ForgeConnection<'_, '_, '_, '_> {
         self,
         stamp: ServerFrameStamp,
     ) -> Result<Self, DeadlineError<RequestStageError>> {
+        if self.cancel.is_cancelled() {
+            return Err(DeadlineError::Cancelled {
+                operation: OperationKind::Receive,
+            });
+        }
+        if self.limits.next_request.is_zero() {
+            return Err(DeadlineError::Timeout {
+                operation: OperationKind::Receive,
+                limit: Duration::ZERO,
+            });
+        }
+        let (send, recv) = accept_next_request(&self.connection, self.cancel).await?;
         let mut streams = StageStreams::new();
+        streams.install(send, recv);
 
         let outcome = run_with_deadline(
             OperationKind::Receive,
             self.limits.next_request,
             self.cancel,
-            drive_request(
-                &self.connection,
+            drive_request_stream(
                 self.handler,
                 self.lifecycle,
                 self.lifecycle_witness,
@@ -618,13 +638,22 @@ impl ForgeConnection<'_, '_, '_, '_> {
             .conversation_delivery
             .as_mut()
             .expect("configured delivery driver remains owned");
-        run_with_deadline(
-            OperationKind::Receive,
-            self.limits.next_request,
-            self.cancel,
-            wait_for_driver_event(&self.connection, driver),
-        )
-        .await
+        // Ordinary desktop idle is not a request failure: this wait has no
+        // deadline and resolves on the next request stream, delivery wake,
+        // caller cancellation, or transport failure. Started dispatches keep
+        // their `next_request` bound at their own sites below.
+        tokio::select! {
+            biased;
+            () = self.cancel.wait() => Err(DeadlineError::Cancelled {
+                operation: OperationKind::Receive,
+            }),
+            event = wait_for_driver_event(&self.connection, driver) => event.map_err(|error| {
+                DeadlineError::Peer {
+                    operation: OperationKind::Receive,
+                    error,
+                }
+            }),
+        }
     }
 
     async fn dispatch_driver_request(
@@ -791,36 +820,28 @@ async fn drive_authentication(
     ))
 }
 
-/// Runs exactly one deadline-bounded request dispatch on the owned
-/// connection.
-#[allow(clippy::too_many_arguments)]
-async fn drive_request(
+/// Accepts the next inbound request stream without an idle deadline.
+///
+/// Ordinary desktop idle is not a request failure: the wait resolves on an
+/// accepted stream, caller cancellation, or a transport failure, with
+/// cancellation winning over a simultaneously ready accept. There is no
+/// polling loop; a live connection simply waits. Actual peer disconnects
+/// surface as typed accept failures through the established
+/// [`RequestStageError::Accept`] path, never as timeouts.
+async fn accept_next_request(
     connection: &Connection,
-    handler: &RequestHandler,
-    lifecycle: &LifecycleController,
-    lifecycle_witness: LifecycleWitness,
-    protocol_version: ProtocolVersion,
-    stamp: ServerFrameStamp,
-    context: Option<&ConversationConnectionContext>,
-    streams: &mut StageStreams,
     cancel: &CancelHandle,
-) -> Result<RequestDispatchOutcome, RequestStageError> {
-    let (send, recv) = connection
-        .accept_bi()
-        .await
-        .map_err(|source| RequestStageError::Accept { source })?;
-    streams.install(send, recv);
-    drive_request_stream(
-        handler,
-        lifecycle,
-        lifecycle_witness,
-        protocol_version,
-        stamp,
-        context,
-        streams,
-        cancel,
-    )
-    .await
+) -> Result<(SendStream, RecvStream), DeadlineError<RequestStageError>> {
+    tokio::select! {
+        biased;
+        () = cancel.wait() => Err(DeadlineError::Cancelled {
+            operation: OperationKind::Receive,
+        }),
+        accepted = connection.accept_bi() => accepted.map_err(|source| DeadlineError::Peer {
+            operation: OperationKind::Receive,
+            error: RequestStageError::Accept { source },
+        }),
+    }
 }
 
 /// Dispatches a request on a stream pair already accepted by the connection

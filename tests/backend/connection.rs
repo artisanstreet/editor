@@ -2697,3 +2697,217 @@ async fn request_stage_deadline_and_cancellation_preserve_the_committed_rotation
     loopback.drain().await;
     Ok(())
 }
+
+/// Admits on a fresh rig with a short non-zero next-request limit for the
+/// idle-accept regression below. Mirrors `admitted_client` with explicit
+/// connection limits; the handshake deadline stays generous while request
+/// waits use the short bound under test.
+async fn admitted_client_with_limits<'authority, 'handler, 'cancel>(
+    loopback: &mut Loopback,
+    authority: &'authority mut CredentialAuthority,
+    handler: &'handler RequestHandler,
+    cancel: &'cancel CancelHandle,
+    credential: HelloCredential,
+    next_request: Duration,
+) -> Result<
+    (
+        AuthenticatedClient,
+        ForgeConnection<'authority, 'handler, 'cancel, 'static>,
+    ),
+    Box<dyn Error>,
+> {
+    let client_connection = connect_client(loopback).await;
+    let server_connection = next_server_connection(loopback).await;
+
+    let client = async {
+        let (mut send, mut recv) = client_connection.open_bi().await?;
+        let welcome = tokio::time::timeout(
+            TEST_DEADLINE,
+            artisan_transport::client_handshake(&mut send, &mut recv, hello_envelope(credential)),
+        )
+        .await??;
+        Ok::<AuthenticatedClient, Box<dyn Error>>(AuthenticatedClient {
+            connection: client_connection,
+            control_send: send,
+            control_recv: recv,
+            welcome,
+        })
+    };
+
+    let server = ForgeConnection::authenticate(
+        server_connection,
+        authority,
+        handler,
+        default_lifecycle(),
+        welcome_metadata(),
+        ConnectionLimits {
+            handshake: Duration::from_secs(2),
+            next_request,
+        },
+        cancel,
+    );
+
+    let (client, owner) = tokio::join!(tokio::time::timeout(TEST_DEADLINE, client), server,);
+    let owner = owner.expect("authentication settles under its own deadline");
+    Ok((client?, owner))
+}
+
+/// Ordinary desktop idle must not fail a waiting connection: the server
+/// stays in its request accept well past a short configured request
+/// deadline, then serves the next request normally. Before the idle-accept
+/// fix this failed with a `Receive` timeout at the deadline while the
+/// desktop sat untouched.
+#[tokio::test]
+async fn idle_legacy_connection_serves_after_the_request_deadline() -> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("idle-legacy").await;
+    let handler = RequestHandler::new(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+    let (client, owner) = admitted_client_with_limits(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+        Duration::from_millis(300),
+    )
+    .await?;
+
+    let mut serving = Box::pin(owner.respond_next(response_stamp("forge-idle-frame")));
+    tokio::select! {
+        biased;
+        _ended = &mut serving => panic!("server must stay waiting through idle"),
+        () = tokio::time::sleep(Duration::from_millis(700)) => {}
+    }
+
+    let stamp = response_stamp("forge-idle-frame");
+    let reply = exchange(
+        &client,
+        &list_projects_request("idle-request-frame"),
+        &stamp,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated response after idle");
+    };
+    assert_eq!(response.request_id.as_str(), "idle-request-frame");
+    assert!(
+        matches!(response.payload, ResponsePayload::ProjectListing(_)),
+        "idle connection must serve project listings"
+    );
+    let _owner = serving.await.expect("dispatch completes after idle");
+
+    expect_application_close(&client.connection).await;
+    drop(client);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
+
+/// Caller cancellation still stops an idle accept promptly: the typed
+/// decision stays `Cancelled`, never a timeout, far inside a long request
+/// deadline.
+#[tokio::test]
+async fn cancelled_idle_accept_stops_promptly() -> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("idle-cancel").await;
+    let handler = RequestHandler::new(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+    let (client, owner) = admitted_client_with_limits(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+        Duration::from_secs(30),
+    )
+    .await?;
+
+    let serving = Box::pin(owner.respond_next(response_stamp("forge-cancel-idle-frame")));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("cancel settles promptly, far inside the request deadline");
+    let failure = expect_failure(outcome, "cancel must stop an idle accept");
+    assert!(
+        matches!(
+            &failure,
+            DeadlineError::Cancelled {
+                operation: OperationKind::Receive,
+            }
+        ),
+        "expected a typed request cancellation, got {failure:?}"
+    );
+    drop(failure);
+
+    expect_application_close(&client.connection).await;
+    drop(client);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
+
+/// A started request that stalls mid-stream stays deadline-bounded: the
+/// accept resolves immediately on the waiting stream, then the dispatch
+/// fails with the typed request timeout. This guards the bound the
+/// idle-accept split must preserve.
+#[tokio::test]
+async fn stalled_started_request_stays_deadline_bounded() -> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("idle-stalled").await;
+    let handler = RequestHandler::new(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+    let (client, owner) = admitted_client_with_limits(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+        Duration::from_millis(300),
+    )
+    .await?;
+
+    // The stream waits before the dispatch starts, so only the started
+    // receive runs under the deadline.
+    let (request_send, request_recv) =
+        write_unfinished_partial_frame(&client.connection, 8192, [9_u8; 4]).await?;
+    let outcome = tokio::time::timeout(
+        TEST_DEADLINE,
+        owner.respond_next(response_stamp("forge-stalled-frame")),
+    )
+    .await
+    .expect("stalled dispatch settles under the watchdog");
+    let failure = expect_failure(outcome, "stalled request must time out");
+    assert!(
+        matches!(
+            &failure,
+            DeadlineError::Timeout {
+                operation: OperationKind::Receive,
+                ..
+            }
+        ),
+        "expected a typed request timeout, got {failure:?}"
+    );
+    drop(failure);
+    drop(request_send);
+    drop(request_recv);
+
+    expect_application_close(&client.connection).await;
+    drop(client);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}

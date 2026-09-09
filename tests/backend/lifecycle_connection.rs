@@ -34,6 +34,7 @@ use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use super::{
     ConnectionLimits, ForgeConnection, RequestStageError, ServerFrameStamp, WelcomeMetadata,
 };
+use crate::conversation_commit_notifier::ConversationCommitNotifier;
 use crate::credential_authority::CredentialAuthority;
 use crate::lifecycle_control::{
     ActivityGate, ActivityGateError, ActivitySnapshot, ActivityStopReservation,
@@ -881,4 +882,80 @@ async fn reconnect_negotiates_fresh_witness_instead_of_reusing_old_offer() {
     app.shutdown().await.expect("test application shuts down");
     drop(temporary);
     loopback.drain().await;
+}
+
+/// Ordinary desktop idle must not fail a delivery-driven connection: the
+/// driver waits well past the configured request deadline with no traffic,
+/// then serves the next request normally, and caller cancellation still
+/// ends the drive through the graceful path. Before the idle-accept fix
+/// the wait failed with a `Receive` timeout at the deadline while the
+/// desktop sat untouched, which the listener treated as terminal and took
+/// the whole Forge down.
+#[tokio::test]
+async fn idle_driver_connection_serves_after_the_request_deadline() -> Result<(), Box<dyn Error>> {
+    let (temporary, app) = opened_app("idle-driver").await;
+    let mut loopback = spawn_loopback();
+    let gate = TestActivityGate::new(0);
+    let lifecycle = LifecycleController::with_activity_gate(gate.clone());
+    let mut authority = bootstrap_authority();
+    let handler = RequestHandler::with_subscriptions(app.repository().clone())
+        .with_conversation_commit_notifier(ConversationCommitNotifier::new());
+    let cancel = CancelHandle::new();
+    let (client, owner) = admit(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &lifecycle,
+        &cancel,
+        initial_credential(),
+        true,
+    )
+    .await
+    .expect("driver admission succeeds");
+
+    // The shared fixture deadline is two seconds; stay idle well past it
+    // while the driver waits for the next request or wake.
+    let drive = owner.drive_until_end(8, || Ok(response_stamp("idle-driver-response")));
+    tokio::pin!(drive);
+    tokio::select! {
+        biased;
+        _ended = &mut drive => panic!("driver must stay waiting through idle"),
+        () = tokio::time::sleep(Duration::from_millis(2600)) => {}
+    }
+
+    let request = lifecycle_request("idle-driver-status", LifecycleRequest::Status);
+    let reply = exchange(&client, request, &response_stamp("idle-driver-response"))
+        .await
+        .expect("request served after idle");
+    let status = match lifecycle_payload(reply) {
+        LifecycleResponse::Status(status) => status,
+        LifecycleResponse::Stop(_) => panic!("status request returned stop response"),
+    };
+    assert_eq!(status.state, LifecycleState::Ready);
+
+    // Caller cancellation still stops the wait promptly through the
+    // graceful cleanup path, after exactly the one completed request.
+    cancel.cancel();
+    let failure = match drive.await {
+        Err(failure) => failure,
+        Ok(_) => panic!("cancel must end the drive"),
+    };
+    let (completed, source) = failure.into_parts();
+    assert_eq!(completed, 1);
+    assert!(
+        matches!(
+            source,
+            DeadlineError::Cancelled {
+                operation: OperationKind::Receive,
+            }
+        ),
+        "cancel must stay graceful, got {source:?}"
+    );
+
+    drop(client);
+    drop(handler);
+    app.shutdown().await.expect("test application shuts down");
+    drop(temporary);
+    loopback.drain().await;
+    Ok(())
 }
