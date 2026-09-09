@@ -51,7 +51,9 @@ use crate::{
     },
     engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
     engine_owner::{
-        EngineClaudeTurnInput, EngineCodexTurnInput, EngineContinuation, EngineTurnInput,
+        EngineClaudeTurnInput, EngineCodexTurnInput, EngineContinuation, EngineHermesTurnInput,
+        EngineTurnInput,
+        hermes::{VerifiedHermesLaunch, resolve_service_executable},
     },
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
@@ -479,7 +481,7 @@ enum ResolvedLaunch {
     Configured(Box<VerifiedOpenCode2ProfileLaunch>),
     Codex(Box<VerifiedCodexLaunch>),
     Claude(Box<VerifiedClaudeLaunch>),
-    Hermes(Box<engine_owner::hermes::VerifiedHermesLaunch>),
+    Hermes(Box<VerifiedHermesLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }
@@ -1540,7 +1542,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
             attempt_budget,
         ),
         ResolvedLaunch::Hermes(launch) => context.owner.admit_hermes_turn(
-            engine_owner::EngineHermesTurnInput {
+            EngineHermesTurnInput {
                 run_id: receipt.run_id.clone(),
                 thread_id: payload.thread_id.clone(),
                 project_root,
@@ -2152,8 +2154,8 @@ async fn resolve_claude_launch(
 /// or the version predates the minimum; the caller requeues the claim.
 async fn resolve_hermes_launch(
     profile_id: &artisan_domain::EngineProfileId,
-) -> Option<engine_owner::hermes::VerifiedHermesLaunch> {
-    let resolved = engine_owner::hermes::resolve_service_executable()?;
+) -> Option<VerifiedHermesLaunch> {
+    let resolved = resolve_service_executable()?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::process::Command::new(&resolved)
@@ -2172,7 +2174,7 @@ async fn resolve_hermes_launch(
     let stdout = String::from_utf8(output.stdout).ok()?;
     let version = artisan_native_engine::hermes::parse_hermes_version(&stdout).ok()?;
     artisan_native_engine::hermes::check_minimum_version(&version).ok()?;
-    engine_owner::hermes::VerifiedHermesLaunch::new(
+    VerifiedHermesLaunch::new(
         resolved,
         profile_id.as_str().to_owned(),
         version.to_string(),
