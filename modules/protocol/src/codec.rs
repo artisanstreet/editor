@@ -2632,7 +2632,7 @@ fn decode_response(
         response::Which::MessageWithdrawn(value) => ResponsePayload::MessageWithdrawn(crate::composer_state_codec::decode_queued_message_withdrawal_result(value?, &request_id)?),
         response::Which::RecalledMessage(value) => ResponsePayload::RecalledMessage(crate::composer_state_codec::decode_recalled_message_result(value?)?),
         response::Which::RunUsage(value) => ResponsePayload::RunUsage(crate::composer_state_codec::decode_run_usage_result(value?)?),
-        response::Which::AccountUsage(value) => decode_engine_usage_snapshot(value?),
+        response::Which::AccountUsage(value) => decode_engine_usage_snapshot(value?)?,
         response::Which::ComposerCatalog(result) => decode_composer_catalog(result?)?,
         response::Which::ModelFavorites(snapshot) => {
             ResponsePayload::ModelFavorites(decode_model_favorites_snapshot(snapshot?, "response.modelFavorites.modelIds")?)

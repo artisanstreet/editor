@@ -404,6 +404,12 @@ impl EngineUsageWindow {
     }
 }
 
+// `Eq` is implemented manually rather than derived: `percent_used` is an
+// `f64`, and `Eq` needs reflexivity. The constructor rejects NaN and
+// infinite input and clamps finite values to `0..=100`, so every
+// constructible window is reflexive and this impl is sound.
+impl Eq for EngineUsageWindow {}
+
 /// Provider-account authentication state with an optional bounded reason.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EngineUsageAuth {
@@ -549,7 +555,29 @@ impl EngineUsageReport {
     pub fn windows(&self) -> &[EngineUsageWindow] {
         &self.windows
     }
+
+    /// Returns a copy of this report marked with a refresh failure.
+    ///
+    /// Used when a refresh fails but a last-good reading exists: the served
+    /// copy exposes the failure honestly while keeping the original windows
+    /// and authentication. The cached original is never mutated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineUsageError`] when the reason violates its bound.
+    pub fn with_failure(&self, failure: String) -> Result<Self, EngineUsageError> {
+        validate_usage_text(&failure, "failure", ENGINE_USAGE_REASON_MAX_BYTES)?;
+        Ok(Self {
+            failure: Some(failure),
+            ..self.clone()
+        })
+    }
 }
+
+// Sound by the same constructor invariant as [`EngineUsageWindow`]: every
+// contained window is reflexive, and all other fields already implement
+// `Eq`.
+impl Eq for EngineUsageReport {}
 
 /// Requests provider-account usage.
 ///
@@ -636,6 +664,10 @@ impl EngineUsageSnapshot {
         &self.fetched_at
     }
 }
+
+// Sound by the same constructor invariant as [`EngineUsageWindow`]: every
+// contained report is reflexive, and the fetch instant is a `String`.
+impl Eq for EngineUsageSnapshot {}
 
 /// Validates one ISO-8601 timestamp of the strict UTC form the usage
 /// protocol carries: `YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)`.
