@@ -506,6 +506,7 @@ dependencies = [
  "native-dialog",
  "quinn",
  "rcgen",
+ "reqwest",
  "runfiles",
  "rustls-pki-types",
  "sea-orm",
@@ -624,6 +625,7 @@ name = "artisan-native-engine"
 version = "0.0.0"
 dependencies = [
  "artisan-domain",
+ "command-group",
  "fs2",
  "serde",
  "serde_json",
