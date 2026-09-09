@@ -15,7 +15,9 @@
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_domain::{Command, ItemId, ObservationId, RequestId, RunId, ThreadId, TurnId};
-use artisan_protocol::{ProtocolFailure, RespondApprovalReceipt, RespondQuestionReceipt};
+use artisan_protocol::{
+    ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt, RespondQuestionReceipt,
+};
 use artisan_ui::alert::{Alert, AlertVariant};
 use artisan_ui::badge::{BadgeStyle, outline_badge};
 use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
@@ -56,6 +58,7 @@ use crate::engine_approve_ui::{
     pair_approval_answer, pair_question_answer, pending_approval_label, question_command,
 };
 use crate::engine_observation_state::EngineObservationState;
+use crate::native_transport_service::CommandSendError;
 
 /// Stable debug selector for the conversation surface root.
 pub const CONVERSATION_SURFACE_SELECTOR: &str = "artisan-conversation-surface";
@@ -894,6 +897,33 @@ impl ConversationSurface {
     /// Drains built answer dispatches in FIFO order.
     pub fn take_answer_dispatches(&mut self) -> Vec<AnswerDispatch> {
         std::mem::take(&mut self.pending_answer_dispatches)
+    }
+
+    /// Drains pending answer dispatches toward transport through the mirrored
+    /// send path.
+    ///
+    /// Takes the outbox via [`Self::take_answer_dispatches`] (`mem::take`
+    /// semantics already in the accessor: the queue is never re-taken or
+    /// cloned) and hands each domain command with its already-minted request
+    /// id to `send` at most once per call. `send` mirrors
+    /// [`NativeTransportService::submit`](crate::native_transport_service::NativeTransportService::submit):
+    /// it reports [`CommandSendError::Busy`] when its bounded queue is full
+    /// and [`CommandSendError::Stopped`] after the service has stopped.
+    ///
+    /// Failed dispatches are re-queued in order with the existing retry
+    /// message from [`pair_answer_failure`], so rows stay pending (their
+    /// gates remain in flight until a receipt pairs through the existing
+    /// settle-in-place pairing) with no silent drop and no same-call retry:
+    /// one drain attempt per controller tick scope. Resolutions continue to
+    /// pair through the existing receipt path, never through the outbox.
+    pub fn drain_pending_answer_dispatches(
+        &mut self,
+        send: &mut impl FnMut(&Command) -> Result<(), CommandSendError>,
+    ) -> AnswerDrainReport {
+        let queue = self.take_answer_dispatches();
+        let (requeue, report) = drain_answer_queue(queue, send);
+        self.pending_answer_dispatches.extend(requeue);
+        report
     }
 
     /// Attempts one approval gesture for a rendered row.
@@ -2681,6 +2711,107 @@ impl QuestionAnswerGate {
     }
 }
 
+/// One answer dispatch that a drain attempt could not hand to transport.
+///
+/// The dispatch is re-queued in the surface outbox so nothing is silently
+/// dropped. Its row stays pending (the gate remains in flight until a receipt
+/// pairs through the existing settle-in-place pairing) and `message` carries
+/// the existing retry/diagnostic text from [`pair_answer_failure`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct FailedAnswerDispatch {
+    /// The already-minted request identity of the unsent dispatch.
+    pub request_id: RequestId,
+    /// The existing retry/diagnostic message for the send failure.
+    pub message: String,
+}
+
+/// Finite report of one outbox drain call.
+///
+/// Each taken dispatch is accounted exactly once: either sent or re-queued
+/// with its retry message. A second drain over an emptied outbox reports
+/// zeros without touching the send path.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AnswerDrainReport {
+    /// Dispatches handed to the send path in this call.
+    pub sent: usize,
+    /// Dispatches the send path refused, re-queued with retry messages.
+    pub failed: Vec<FailedAnswerDispatch>,
+}
+
+impl AnswerDrainReport {
+    /// Returns whether the drain call moved every taken dispatch.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.failed.is_empty()
+    }
+}
+
+/// Maps one mirrored send-path failure onto the existing answer retry policy.
+///
+/// [`CommandSendError::Busy`] (bounded queue full, mirroring the composer
+/// backpressure path) becomes a retryable failure so the report carries the
+/// existing "retry the same answer" text; [`CommandSendError::Stopped`]
+/// (service gone) becomes a terminal failure so the report carries the
+/// existing diagnostic text. No new pairing logic is introduced: the message
+/// always comes from [`pair_answer_failure`].
+fn answer_send_failure(
+    kind: AnswerKind,
+    request_id: &RequestId,
+    error: CommandSendError,
+) -> ProtocolFailure {
+    let (detail, retryable) = match error {
+        CommandSendError::Busy => ("answer transport is busy", true),
+        CommandSendError::Stopped => ("answer transport has stopped", false),
+    };
+    ProtocolFailure {
+        code: ErrorCode::Internal,
+        detail: ErrorDetail::parse(detail).expect("static answer send detail is valid"),
+        retryable,
+        request_id: Some(request_id.clone()),
+    }
+}
+
+/// Drains one taken answer queue through the mirrored send path.
+///
+/// Every dispatch is handed to `send` at most once, in FIFO order, with its
+/// already-minted request id; the queue itself is consumed, never re-taken
+/// or cloned. Refused dispatches are returned for re-queue with the existing
+/// retry message from [`pair_answer_failure`]; an empty queue never touches
+/// `send`. Row gates are never settled here: single-flight is preserved until
+/// resolutions pair through the existing receipt path.
+pub fn drain_answer_queue(
+    queue: Vec<AnswerDispatch>,
+    send: &mut impl FnMut(&Command) -> Result<(), CommandSendError>,
+) -> (Vec<AnswerDispatch>, AnswerDrainReport) {
+    let mut requeue = Vec::with_capacity(queue.len());
+    let mut report = AnswerDrainReport::default();
+    for dispatch in queue {
+        match send(&dispatch.command) {
+            Ok(()) => {
+                report.sent = report.sent.saturating_add(1);
+            }
+            Err(error) => {
+                let kind = match dispatch.action {
+                    AnswerDispatchAction::Approval(_) => AnswerKind::Approval,
+                    AnswerDispatchAction::Question(_) => AnswerKind::Question,
+                };
+                let failure = answer_send_failure(kind, &dispatch.request_id, error);
+                let settlement = pair_answer_failure(kind, &dispatch.request_id, &failure);
+                let message = settlement
+                    .message()
+                    .expect("send failures never settle")
+                    .to_owned();
+                report.failed.push(FailedAnswerDispatch {
+                    request_id: dispatch.request_id.clone(),
+                    message,
+                });
+                requeue.push(dispatch);
+            }
+        }
+    }
+    (requeue, report)
+}
+
 impl Render for ConversationSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ArtisanTheme::for_mode(self.theme_mode);
@@ -3169,16 +3300,23 @@ mod tests {
         use artisan_domain::{
             ApprovalObservation, ApprovalRequest, Command, EngineObservationEvent, Observation,
             ObservationId, ObservationSequence, QuestionInput, QuestionObservation, QuestionOption,
-            ReceiptDisposition, RunId, ThreadId,
+            ReceiptDisposition, RequestId, RunId, ThreadId,
         };
         use artisan_protocol::{
             ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt,
             RespondQuestionReceipt, RunInteractionOutcome,
         };
 
-        use super::super::{ApprovalAnswerGate, QuestionAnswerGate, QuestionChoiceCache};
+        use super::super::{
+            AnswerDispatch, AnswerDispatchAction, ApprovalAnswerGate, ConversationSurface,
+            QuestionAnswerGate, QuestionChoiceCache, drain_answer_queue,
+        };
+        use super::scene;
         use crate::engine_approve_ui::AnswerSettlement;
         use crate::engine_observation_state::EngineObservationState;
+        use crate::native_transport_service::CommandSendError;
+        use artisan_ui::theme::ThemeMode;
+        use gpui::TestAppContext;
 
         fn observation_id(value: &str) -> ObservationId {
             ObservationId::parse(value).expect("fixture observation id is valid")
@@ -3476,6 +3614,186 @@ mod tests {
                 &question_receipt,
             );
             assert!(question_pairing.is_settled());
+        }
+
+        fn sent_request_id(command: &Command) -> RequestId {
+            if let Command::RespondApproval(inner) = command {
+                inner.request_id().clone()
+            } else if let Command::RespondQuestion(inner) = command {
+                inner.request_id().clone()
+            } else {
+                panic!("drain carries only answer commands")
+            }
+        }
+
+        fn approval_dispatch() -> AnswerDispatch {
+            let mut gate = ApprovalAnswerGate::new();
+            let attempt = gate
+                .begin(thread_id(), run_id(), observation_id("approval-1"), true)
+                .expect("approve gesture admits an attempt");
+            AnswerDispatch {
+                action: AnswerDispatchAction::Approval(attempt.action),
+                command: attempt.command,
+                request_id: attempt.request_id,
+            }
+        }
+
+        fn question_dispatch() -> AnswerDispatch {
+            let mut gate = QuestionAnswerGate::new();
+            let attempt = gate
+                .submit_single(
+                    thread_id(),
+                    run_id(),
+                    observation_id("question-1"),
+                    String::from("tokio"),
+                )
+                .expect("single-select choice submits immediately");
+            AnswerDispatch {
+                action: AnswerDispatchAction::Question(attempt.action),
+                command: attempt.command,
+                request_id: attempt.request_id,
+            }
+        }
+
+        #[test]
+        fn drain_sends_taken_queue_preserving_minted_ids() {
+            let approval = approval_dispatch();
+            let question = question_dispatch();
+            let approval_inner = approval_command_inner(&approval.command);
+            assert_eq!(approval_inner.thread_id(), &thread_id());
+            assert_eq!(approval_inner.run_id(), &run_id());
+            assert_eq!(approval_inner.approval_id().as_str(), "approval-1");
+            let question_inner = question_command_inner(&question.command);
+            assert_eq!(question_inner.thread_id(), &thread_id());
+            assert_eq!(question_inner.run_id(), &run_id());
+            assert_eq!(question_inner.question_id().as_str(), "question-1");
+            assert_eq!(question_inner.answers(), &vec![String::from("tokio")]);
+            let expected = vec![approval.request_id.clone(), question.request_id.clone()];
+            let mut seen: Vec<RequestId> = Vec::new();
+            let mut send = |command: &Command| {
+                seen.push(sent_request_id(command));
+                Ok::<(), CommandSendError>(())
+            };
+            let (requeue, report) = drain_answer_queue(vec![approval, question], &mut send);
+            assert_eq!(report.sent, 2);
+            assert!(report.is_clean());
+            assert!(requeue.is_empty());
+            assert_eq!(seen, expected);
+        }
+
+        #[test]
+        fn drain_failure_requeues_with_retry_message() {
+            let dispatch = approval_dispatch();
+            let expected = dispatch.request_id.clone();
+            let mut calls = 0_usize;
+            let mut busy = |_: &Command| {
+                calls += 1;
+                Err::<(), CommandSendError>(CommandSendError::Busy)
+            };
+            let (requeue, report) = drain_answer_queue(vec![dispatch], &mut busy);
+            assert_eq!(calls, 1, "one drain attempt per dispatch per call");
+            assert_eq!(report.sent, 0);
+            assert!(!report.is_clean());
+            assert_eq!(report.failed.len(), 1);
+            assert_eq!(report.failed[0].request_id, expected);
+            assert!(
+                report.failed[0].message.contains("retry the same answer"),
+                "the existing retry message is surfaced"
+            );
+            assert_eq!(requeue.len(), 1);
+            assert_eq!(requeue[0].request_id, expected);
+
+            let mut seen: Vec<RequestId> = Vec::new();
+            let mut open = |command: &Command| {
+                seen.push(sent_request_id(command));
+                Ok::<(), CommandSendError>(())
+            };
+            let (requeue, report) = drain_answer_queue(requeue, &mut open);
+            assert_eq!(report.sent, 1);
+            assert!(report.is_clean());
+            assert!(requeue.is_empty());
+            assert_eq!(seen, vec![expected]);
+        }
+
+        #[test]
+        fn drain_stopped_reports_a_diagnostic() {
+            let dispatch = question_dispatch();
+            let expected = dispatch.request_id.clone();
+            let mut stopped = |_: &Command| Err::<(), CommandSendError>(CommandSendError::Stopped);
+            let (requeue, report) = drain_answer_queue(vec![dispatch], &mut stopped);
+            assert_eq!(report.sent, 0);
+            assert_eq!(report.failed.len(), 1);
+            assert_eq!(report.failed[0].request_id, expected);
+            assert!(
+                report.failed[0].message.contains("nothing was recorded"),
+                "a stopped service degrades to the existing diagnostic text"
+            );
+            assert_eq!(requeue.len(), 1, "nothing is silently dropped");
+        }
+
+        #[test]
+        fn drain_empty_outbox_is_a_no_op() {
+            let mut send = |_: &Command| -> Result<(), CommandSendError> {
+                panic!("an empty queue never touches the send path")
+            };
+            let (requeue, report) = drain_answer_queue(Vec::new(), &mut send);
+            assert_eq!(report.sent, 0);
+            assert!(report.is_clean());
+            assert!(requeue.is_empty());
+        }
+
+        #[test]
+        fn double_drain_sends_once() {
+            let dispatch = approval_dispatch();
+            let mut sends = 0_usize;
+            let mut send = |_: &Command| {
+                sends += 1;
+                Ok::<(), CommandSendError>(())
+            };
+            let (requeue, first) = drain_answer_queue(vec![dispatch], &mut send);
+            let (requeue, second) = drain_answer_queue(requeue, &mut send);
+            assert_eq!((first.sent, second.sent), (1, 0));
+            assert_eq!(sends, 1);
+            assert!(second.is_clean());
+            assert!(requeue.is_empty());
+        }
+
+        #[gpui::test]
+        fn surface_drain_takes_sends_and_empties(cx: &mut TestAppContext) {
+            let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+                ConversationSurface::new(scene(Vec::new()), ThemeMode::Dark, surface_cx)
+            });
+            cx.update(|_, app| {
+                surface.update(app, |surface, cx| {
+                    surface.set_answer_context(thread_id(), run_id(), cx);
+                    assert!(surface.submit_approval_gesture(
+                        "approval-1",
+                        &observation_id("approval-1"),
+                        true,
+                        cx,
+                    ));
+                    assert_eq!(surface.pending_answer_dispatches().len(), 1);
+                });
+            });
+            let mut seen: Vec<RequestId> = Vec::new();
+            cx.update(|_, app| {
+                surface.update(app, |surface, _| {
+                    let report =
+                        surface.drain_pending_answer_dispatches(&mut |command: &Command| {
+                            seen.push(sent_request_id(command));
+                            Ok::<(), CommandSendError>(())
+                        });
+                    assert_eq!(report.sent, 1);
+                    assert!(report.is_clean());
+                    assert!(surface.pending_answer_dispatches().is_empty());
+                    let replay = surface.drain_pending_answer_dispatches(&mut |_: &Command| {
+                        Ok::<(), CommandSendError>(())
+                    });
+                    assert_eq!(replay.sent, 0);
+                    assert!(surface.pending_answer_dispatches().is_empty());
+                });
+            });
+            assert_eq!(seen.len(), 1);
         }
     }
 }
