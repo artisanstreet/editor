@@ -13,7 +13,7 @@ use std::{
 
 use artisan_editor_cli::{
     manifest::InstallationManifest,
-    payload::{self, PAYLOAD_MANIFEST_NAME},
+    payload::PAYLOAD_MANIFEST_NAME,
 };
 use native_dev::{
     BinarySet, DevError, DevPaths, installation_document, provision_manifest, stage_binaries,
@@ -33,7 +33,7 @@ fn scratch_dev_dir(case: &str) -> PathBuf {
 fn fixture_set(case: &str) -> (PathBuf, BinarySet) {
     let root = scratch_dev_dir(case).join("sources");
     std::fs::create_dir_all(&root).expect("fixture sources");
-    let mut get = |stem: &str| {
+    let get = |stem: &str| {
         let path = root.join(native_dev::exe_name(stem));
         std::fs::write(&path, format!("fixture-binary-{stem}")).expect("fixture binary");
         path

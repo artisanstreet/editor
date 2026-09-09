@@ -126,7 +126,7 @@ fn staging_and_lock_paths_stay_inside_the_dev_tree() {
     assert!(paths.receipt_path().starts_with(&dev_dir));
     assert_ne!(paths.staging_root(), paths.version_root);
     assert_ne!(paths.previous_root(), paths.version_root);
-    assert_ne!(paths.staging_root(), paths.previous_root);
+    assert_ne!(paths.staging_root(), paths.previous_root());
     assert!(
         !paths
             .staging_root()

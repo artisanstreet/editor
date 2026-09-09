@@ -45,7 +45,7 @@ fn launch_uses_staged_paths_not_sources() {
     let dev_dir = scratch_dev_dir("staged-paths");
     let sources = dev_dir.join("sources");
     std::fs::create_dir_all(&sources).expect("sources");
-    let mut source_path = |stem: &str| {
+    let source_path = |stem: &str| {
         let path = sources.join(native_dev::exe_name(stem));
         std::fs::write(&path, b"source").expect("source binary");
         path
