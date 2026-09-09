@@ -1568,11 +1568,18 @@ async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
         })
         .await
         .expect("message should queue");
+    let wall_millis = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_millis(),
+    )
+    .expect("wall millis fit");
     let claimed = repository
         .claim_next_message_dispatch(ClaimMessageDispatch {
             owner: DispatchLeaseOwner::new([0x22; 32]),
             claimed_at: UnixMillis::from_millis(100),
-            lease_expires_at: UnixMillis::from_millis(600),
+            lease_expires_at: UnixMillis::from_millis(wall_millis + 60_000),
         })
         .await
         .expect("claim should read")
