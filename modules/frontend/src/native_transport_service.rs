@@ -1185,13 +1185,13 @@ fn message_stable_mutation(command: QueueMessage) -> Result<StableMutation, Serv
 }
 
 fn approval_stable_mutation(command: RespondApproval) -> Result<StableMutation, ServiceFailure> {
-    let request_id = command.request_id.clone();
+    let request_id = command.request_id().clone();
     let frame_id = FrameId::parse(request_id.as_str().to_owned())
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
     let frame_request_id = frame_id
         .to_request_id()
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
-    if frame_request_id != request_id || command.request_id != request_id {
+    if frame_request_id != request_id || command.request_id() != &request_id {
         return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
     }
     let sent_at =
@@ -1204,13 +1204,13 @@ fn approval_stable_mutation(command: RespondApproval) -> Result<StableMutation, 
 }
 
 fn question_stable_mutation(command: RespondQuestion) -> Result<StableMutation, ServiceFailure> {
-    let request_id = command.request_id.clone();
+    let request_id = command.request_id().clone();
     let frame_id = FrameId::parse(request_id.as_str().to_owned())
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
     let frame_request_id = frame_id
         .to_request_id()
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
-    if frame_request_id != request_id || command.request_id != request_id {
+    if frame_request_id != request_id || command.request_id() != &request_id {
         return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
     }
     let sent_at =
@@ -4209,8 +4209,8 @@ async fn respond_approval(
     events: &SyncSender<NativeTransportEvent>,
     command: RespondApproval,
 ) -> Result<(), ServiceFailure> {
-    let thread_id = command.thread_id.clone();
-    let request_id = command.request_id.clone();
+    let thread_id = command.thread_id().clone();
+    let request_id = command.request_id().clone();
     if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
         return publish(
             events,
@@ -4281,8 +4281,8 @@ async fn respond_question(
     events: &SyncSender<NativeTransportEvent>,
     command: RespondQuestion,
 ) -> Result<(), ServiceFailure> {
-    let thread_id = command.thread_id.clone();
-    let request_id = command.request_id.clone();
+    let thread_id = command.thread_id().clone();
+    let request_id = command.request_id().clone();
     if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
         return publish(
             events,
