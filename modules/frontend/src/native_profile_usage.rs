@@ -608,6 +608,14 @@ pub fn usage_remaining_percent(percent_used: f64) -> i64 {
     (100.0 - percent_used.round()).clamp(0.0, 100.0) as i64
 }
 
+/// First-reading start for the shared remaining tween: just short of the
+/// target so the number is legible the whole way rather than spinning up
+/// from zero. Mirrors `RunUpFrom` in `usage-window-motion.ts`.
+#[must_use]
+pub fn tip_run_up_from(target: f64) -> f64 {
+    (target - 1.0f64.max((target * 0.08).round())).max(0.0)
+}
+
 /// Returns the provider-specific “last checked” label used by Electron.
 #[must_use]
 pub fn checked_label(fetched_at_ms: Option<i64>, now_ms: i64) -> Option<String> {
@@ -866,6 +874,13 @@ mod tests {
         assert_eq!(usage_remaining_percent(100.0), 0);
         assert_eq!(usage_remaining_percent(120.0), 0);
         assert_eq!(usage_remaining_percent(f64::NAN), 0);
+    }
+
+    #[test]
+    fn tip_run_up_starts_just_short_of_its_target() {
+        assert_eq!(tip_run_up_from(38.0), 35.0);
+        assert_eq!(tip_run_up_from(100.0), 92.0);
+        assert_eq!(tip_run_up_from(0.0), 0.0);
     }
 
     fn entry_with_time(engine_id: &str, fetched_at_ms: Option<i64>) -> NativeUsageEntry {

@@ -42,8 +42,9 @@ use crate::native_model_catalog::{
 
 #[path = "native_picker_motion.rs"]
 mod native_picker_motion;
-pub(crate) use self::native_picker_motion::{HoverRect, PickerScrollState, SlidingHoverState};
-use self::native_picker_motion::{PickerMenuMotion, PickerMenuPhase};
+pub(crate) use self::native_picker_motion::{
+    HoverRect, PickerMenuMotion, PickerMenuPhase, PickerScrollState, SlidingHoverState,
+};
 
 /// Stable selector painted on the compact composer trigger.
 pub const NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR: &str = "artisan-native-model-selector-trigger";
@@ -67,7 +68,7 @@ const MODEL_PREVIEW_WIDTH_PX: f32 = 224.0;
 const MODEL_ROW_HEIGHT_PX: f32 = 48.0;
 const COMPACT_CONTROL_HEIGHT_PX: f32 = 32.0;
 const POLICY_CONTROL_HEIGHT_PX: f32 = 24.0;
-const PICKER_MENU_MOTION_DURATION_MS: u64 = 100;
+pub(crate) const PICKER_MENU_MOTION_DURATION_MS: u64 = 100;
 const PICKER_HOVER_MOTION_DURATION_MS: u64 = 250;
 const PICKER_TOOLTIP_SHOW_DELAY_MS: u64 = 500;
 const OPTION_TOOLTIP_WIDTH_PX: f32 = 320.0;
@@ -2996,7 +2997,7 @@ pub(crate) fn render_picker_hover_pill(
     pill.into_any_element()
 }
 
-fn animate_picker_menu(
+pub(crate) fn animate_picker_menu(
     panel: Stateful<Div>,
     motion: Rc<RefCell<PickerMenuMotion>>,
     snapshot: PickerMenuMotion,

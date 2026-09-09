@@ -35,15 +35,15 @@ use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
 use artisan_ui::fade_arc::FadeArc;
 use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
-use artisan_ui::motion::MotionPolicy;
+use artisan_ui::motion::{MotionCurve, MotionDuration, MotionPolicy};
 use artisan_ui::separator::{SeparatorAxis, separator};
-use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
+use artisan_ui::theme::{ArtisanTheme, DesktopTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
-    FocusHandle, FontWeight, KeyBinding, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    Stateful, StatefulInteractiveElement, StyledImage as _, Subscription, Task, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, canvas, div,
+    FocusHandle, FontWeight, HighlightStyle, KeyBinding, Render, ScrollHandle, ScrollWheelEvent,
+    SharedString, Stateful, StatefulInteractiveElement, StyledImage as _, StyledText, Subscription,
+    Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, canvas, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
 };
@@ -68,13 +68,14 @@ use crate::native_composer_material::{
 use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent};
 use crate::native_model_catalog::NativeModelCatalog;
 use crate::native_model_selector::{
-    HoverRect, NativeModelSelector, NativeModelSelectorStatus, PickerScrollState,
-    SlidingHoverState, engine_accent, engine_asset, render_picker_hover_pill,
+    HoverRect, NativeModelSelector, NativeModelSelectorStatus, PICKER_MENU_MOTION_DURATION_MS,
+    PickerMenuMotion, PickerMenuPhase, PickerScrollState, SlidingHoverState, animate_picker_menu,
+    engine_accent, engine_asset, render_picker_hover_pill,
 };
 use crate::native_profile_usage::{
     NativeProfileUsageState, NativeUsageEntry, NativeUsageWindow, ProfileUsageGeneration,
     account_usage_response_current, checked_label, group_usage_windows, plan_profile_usage_loads,
-    profile_usage_display_name, reset_duration, usage_remaining_percent,
+    profile_usage_display_name, reset_duration, tip_run_up_from, usage_remaining_percent,
 };
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::SettingsScreen;
@@ -148,8 +149,39 @@ const PROFILE_USAGE_HOVER_ID: &str = "profile-usage";
 /// Breathing room kept between the profile panel top edge and the viewport.
 const PROFILE_MENU_VIEWPORT_MARGIN_PX: f32 = 8.0;
 /// Vertical gap between the panel bottom and the profile trigger top,
-/// matching the anchored offset applied when placing the panel.
-const PROFILE_MENU_ANCHOR_GAP_PX: f32 = 10.0;
+/// matching the source content `sideOffset` and the anchored offset applied
+/// when placing the panel.
+const PROFILE_MENU_ANCHOR_GAP_PX: f32 = 4.0;
+/// Width of one meter tick: fourteen full 72/14 pitches with a 2px
+/// transparent tail inside every pitch including the last.
+const PROFILE_METER_TICK_PX: f32 = 72.0 / 14.0 - 2.0;
+/// Shared remaining-value tween for meter tooltips: the first reading of
+/// a menu-open session runs up from just short of its value, later rows
+/// carry the displayed value across, all on the source 250ms smooth-out
+/// curve (`MotionDuration::Fast` + `MotionCurve::SmoothOut`, matching
+/// `--duration-fast` and `--ease-smooth-out`).
+#[derive(Clone, Copy, Debug)]
+struct ProfileTipTween {
+    displayed: f64,
+    from: f64,
+    to: f64,
+    started_ms: i64,
+    seen: bool,
+    scheduled: bool,
+}
+
+impl Default for ProfileTipTween {
+    fn default() -> Self {
+        Self {
+            displayed: 0.0,
+            from: 0.0,
+            to: 0.0,
+            started_ms: 0,
+            seen: false,
+            scheduled: false,
+        }
+    }
+}
 /// Fixed vertical chrome inside the profile panel: header (avatar 32 +
 /// vertical padding 32), two separators (1 + margins 8 each), and the action
 /// section (container padding 8 + two 36px rows). The usage area scrolls
@@ -301,6 +333,13 @@ pub struct NativeApplication {
     profile_meter_hover: Rc<RefCell<Option<(String, String)>>>,
     profile_tip_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     profile_tip_anchor: Rc<RefCell<Option<((String, String), HoverRect)>>>,
+    /// Stable keyboard focus per visible refresh control, pruned with the
+    /// visible provider list so Enter/Space can refresh without new menu
+    /// items.
+    profile_refresh_focus: Rc<RefCell<Vec<(String, FocusHandle)>>>,
+    profile_menu_motion: Rc<RefCell<PickerMenuMotion>>,
+    profile_menu_motion_task: Option<Task<()>>,
+    profile_tip_tween: Rc<RefCell<ProfileTipTween>>,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
@@ -513,6 +552,10 @@ impl NativeApplication {
             profile_meter_hover: Rc::new(RefCell::new(None)),
             profile_tip_surface_bounds: Rc::new(RefCell::new(None)),
             profile_tip_anchor: Rc::new(RefCell::new(None)),
+            profile_refresh_focus: Rc::new(RefCell::new(Vec::new())),
+            profile_menu_motion: Rc::new(RefCell::new(PickerMenuMotion::default())),
+            profile_menu_motion_task: None,
+            profile_tip_tween: Rc::new(RefCell::new(ProfileTipTween::default())),
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
@@ -1208,6 +1251,26 @@ impl NativeApplication {
         }
     }
 
+    /// Returns the stable keyboard focus for one refresh control,
+    /// creating it on first paint. Handles are pruned with the visible
+    /// provider list in [`Self::desktop_profile_usage`].
+    fn profile_refresh_focus_handle(&self, engine_id: &str, cx: &Context<Self>) -> FocusHandle {
+        if let Some(handle) = self
+            .profile_refresh_focus
+            .borrow()
+            .iter()
+            .find(|(id, _)| id == engine_id)
+            .map(|(_, handle)| handle.clone())
+        {
+            return handle;
+        }
+        let handle = cx.focus_handle();
+        self.profile_refresh_focus
+            .borrow_mut()
+            .push((engine_id.to_owned(), handle.clone()));
+        handle
+    }
+
     fn clear_profile_hover(&self) {
         if self.profile_hover.borrow().visible() {
             self.profile_hover.borrow_mut().clear();
@@ -1217,6 +1280,7 @@ impl NativeApplication {
         self.profile_meter_hover.borrow_mut().take();
         self.profile_tip_surface_bounds.borrow_mut().take();
         self.profile_tip_anchor.borrow_mut().take();
+        *self.profile_tip_tween.borrow_mut() = ProfileTipTween::default();
     }
 
     /// Maximum height for the scrollable usage area: the natural content
@@ -1242,7 +1306,7 @@ impl NativeApplication {
         // wheel here keeps GPUI from applying its default offset update a
         // second time.
         cx.stop_propagation();
-        if !self.profile_menu.is_open() {
+        if !self.profile_menu_is_interactive() {
             return;
         }
         // A scrolling list must not keep a meter tooltip pinned to a stale
@@ -1305,6 +1369,104 @@ impl NativeApplication {
         self.profile_usage_scroll_frame_scheduled = false;
     }
 
+    /// Whether the profile menu accepts pointer and wheel input: open and
+    /// past its retained exit presentation, mirroring the model picker.
+    fn profile_menu_is_interactive(&self) -> bool {
+        self.profile_menu.is_open()
+            && self.profile_menu_motion.borrow().phase() != PickerMenuPhase::Closing
+    }
+
+    fn begin_profile_menu_open(&mut self, cx: &mut Context<Self>) {
+        let generation = self.profile_menu_motion.borrow_mut().begin_open();
+        if cx.reduce_motion() {
+            self.profile_menu_motion
+                .borrow_mut()
+                .finish_open(generation);
+            self.profile_menu_motion_task = None;
+        } else {
+            self.schedule_profile_menu_motion_settle(generation, true, cx);
+        }
+    }
+
+    fn begin_profile_menu_close(&mut self, cx: &mut Context<Self>) {
+        let generation = self.profile_menu_motion.borrow_mut().begin_close();
+        if cx.reduce_motion() {
+            self.profile_menu_motion
+                .borrow_mut()
+                .finish_close(generation);
+            self.profile_menu_motion_task = None;
+        } else {
+            self.schedule_profile_menu_motion_settle(generation, false, cx);
+        }
+    }
+
+    fn schedule_profile_menu_motion_settle(
+        &mut self,
+        generation: u64,
+        opening: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile_menu_motion_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(PICKER_MENU_MOTION_DURATION_MS))
+                .await;
+            let _ = this.update(cx, |application, cx| {
+                let settled = if opening {
+                    application
+                        .profile_menu_motion
+                        .borrow_mut()
+                        .finish_open(generation)
+                } else {
+                    application
+                        .profile_menu_motion
+                        .borrow_mut()
+                        .finish_close(generation)
+                };
+                if settled {
+                    application.profile_menu_motion_task = None;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn schedule_profile_tip_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settled = {
+            let tween = self.profile_tip_tween.borrow();
+            tween.displayed == tween.to
+        };
+        if settled || self.profile_tip_tween.borrow().scheduled {
+            return;
+        }
+        self.profile_tip_tween.borrow_mut().scheduled = true;
+        cx.on_next_frame(window, |application, window, cx| {
+            application.advance_profile_tip(window, cx);
+        });
+    }
+
+    fn advance_profile_tip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile_tip_tween.borrow_mut().scheduled = false;
+        let total_ms = MotionDuration::Fast.as_duration().as_millis() as f64;
+        let now_ms = profile_usage_now_ms();
+        let done = {
+            let mut tween = self.profile_tip_tween.borrow_mut();
+            let elapsed = now_ms.saturating_sub(tween.started_ms).max(0) as f64;
+            let progress = (elapsed / total_ms).clamp(0.0, 1.0);
+            let eased = MotionCurve::SmoothOut.sample(progress);
+            tween.displayed = tween.from + (tween.to - tween.from) * eased;
+            if progress >= 1.0 {
+                tween.displayed = tween.to;
+                true
+            } else {
+                false
+            }
+        };
+        cx.notify();
+        if !done {
+            self.schedule_profile_tip_frame(window, cx);
+        }
+    }
+
     fn activate_profile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for action in self.profile_menu.take_actions() {
             match action.item_id().as_ref() {
@@ -1326,6 +1488,7 @@ impl NativeApplication {
                 "settings" => {
                     self.clear_profile_hover();
                     self.cancel_profile_usage_scroll();
+                    self.begin_profile_menu_close(cx);
                     self.navigate(
                         NativeRoute::Settings {
                             section: SettingsRoute::Models,
@@ -1360,19 +1523,30 @@ impl NativeApplication {
                 .child(
                     div()
                         .text_size(px(12.0))
+                        .line_height(px(16.0))
                         .text_color(theme.foreground)
                         .child("Usage"),
                 )
-                .child(desktop_muted(theme, "Connect to Forge to see usage.").text_size(px(11.0)));
+                .child(
+                    desktop_muted(theme, "Connect to Forge to see usage.")
+                        .line_height(px(14.0))
+                        .text_size(px(11.0)),
+                );
         }
 
         let visible = self.profile_usage.visible_usage_entries();
+        self.profile_refresh_focus.borrow_mut().retain(|(id, _)| {
+            visible
+                .iter()
+                .any(|entry| entry.engine_id.as_str() == id.as_str())
+        });
         if visible.is_empty() {
             return section.child(
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
                     .text_size(px(12.0))
+                    .line_height(px(16.0))
                     .text_color(theme.secondary)
                     .child("No engine accounts connected."),
             );
@@ -1382,7 +1556,7 @@ impl NativeApplication {
         let mut section = section.px(px(4.0)).py(px(4.0));
         for (index, entry) in visible.iter().enumerate() {
             if index > 0 {
-                section = section.child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
+                section = section.child(div().h(px(1.0)).bg(separator).my(px(4.0)));
             }
             section = section.child(self.desktop_profile_usage_engine(entry, theme, now_ms, cx));
         }
@@ -1411,9 +1585,10 @@ impl NativeApplication {
             .refreshing_engine_ids
             .iter()
             .any(|current| current == &engine_id);
+        let mark_asset = engine_asset(&engine_id);
         let accent = engine_accent(&engine_id)
             .map(|hex| gpui::rgb_to_hsla(gpui::rgb(hex)).to_paint())
-            .unwrap_or(theme.secondary);
+            .unwrap_or_else(|| self.theme.colors.primary.to_paint());
         let dim = self.theme.colors.foreground.with_alpha(0.11).to_paint();
         let mut block = div().flex().flex_col().gap(px(6.0)).px(px(8.0)).py(px(4.0));
         let mut title = div()
@@ -1427,12 +1602,20 @@ impl NativeApplication {
                     .min_w(px(0.0))
                     .items_center()
                     .gap(px(8.0))
+                    // Foreground ambient: monochrome provider marks resolve
+                    // through it like source `dark:invert`; full-color marks
+                    // keep their authored colors either way.
+                    .text_color(theme.foreground)
                     .child(
                         icon(IconStyle::resolve(
                             self.theme,
-                            engine_asset(&engine_id),
+                            mark_asset,
                             IconSize::Default,
-                            IconTint::Inherit,
+                            if mark_asset == AssetId::TABLER_QUESTION_MARK {
+                                IconTint::Muted
+                            } else {
+                                IconTint::Inherit
+                            },
                         ))
                         .size(px(16.0))
                         .flex_shrink_0(),
@@ -1441,6 +1624,7 @@ impl NativeApplication {
                         div()
                             .truncate()
                             .text_size(px(12.0))
+                            .line_height(px(16.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
                             .child(report.display_name.clone()),
@@ -1460,6 +1644,7 @@ impl NativeApplication {
             group_view = group_view.child(
                 div()
                     .text_size(px(12.0))
+                    .line_height(px(16.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
                     .child(group.cadence.title()),
@@ -1470,40 +1655,46 @@ impl NativeApplication {
                 );
             }
             if let Some(duration) = reset_duration(&group.windows, now_ms) {
+                // One inline run like source: the duration range carries the
+                // foreground highlight so spaces and wrapping are preserved.
+                let sentence = format!(
+                    "Your {} limit resets in {}.",
+                    group.cadence.title().to_lowercase(),
+                    duration
+                );
+                let body = match sentence.find(duration.as_str()) {
+                    Some(start) => {
+                        let end = start + duration.len();
+                        StyledText::new(SharedString::from(sentence)).with_highlights([(
+                            start..end,
+                            HighlightStyle {
+                                color: Some(theme.foreground),
+                                ..Default::default()
+                            },
+                        )])
+                    }
+                    None => StyledText::new(SharedString::from(sentence)),
+                };
                 group_view = group_view.child(
                     div()
                         .mt(px(8.0))
-                        .flex()
-                        .flex_row()
                         .text_size(px(12.0))
+                        .line_height(px(16.0))
                         .text_color(theme.secondary)
-                        .child(format!(
-                            "Your {} limit resets in ",
-                            group.cadence.title().to_lowercase()
-                        ))
-                        .child(div().text_color(theme.foreground).child(duration))
-                        .child("."),
+                        .child(body),
                 );
             }
             block = block.child(group_view);
-        }
-        if let Some(failure) = report.failure.as_deref() {
-            block = block.child(desktop_muted(theme, failure.to_owned()).text_size(px(11.0)));
-        }
-        if let Some(failure) = entry.failure.as_deref()
-            && Some(failure) != report.failure.as_deref()
-        {
-            block = block.child(
-                desktop_muted(theme, format!("Refresh failed: {failure}")).text_size(px(10.0)),
-            );
         }
         block
     }
 
     /// Inline checked/refresh control: the provider's own "last checked"
     /// reading at rest, swapping to a foreground Refresh action on hover and
-    /// to a spinner while its refresh is in flight. Withheld until the
-    /// engine has answered at least once.
+    /// to a spinner while its refresh is in flight. The reading stays mounted
+    /// under the spinner so the control never collapses width. Withheld until
+    /// the engine has answered at least once. Keyboard focus plus Enter/Space
+    /// refreshes once through the same path as a click.
     fn desktop_profile_usage_refresh(
         &self,
         engine_id: &str,
@@ -1514,33 +1705,35 @@ impl NativeApplication {
     ) -> Div {
         let group = format!("profile-usage-refresh-{engine_id}");
         let selector = format!("artisan-profile-usage-refresh-{engine_id}");
-        let control = div()
+        let focus = self.profile_refresh_focus_handle(engine_id, cx);
+        let ring = vec![gpui::BoxShadow {
+            color: self.theme.interaction.focus_ring_color.to_paint(),
+            offset: gpui::point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: self.theme.interaction.focus_ring_width,
+            inset: false,
+        }];
+        let mut control = div()
             .debug_selector({
                 let selector = selector.clone();
                 move || selector.clone()
             })
+            .track_focus(&focus)
             .group(group.clone())
             .relative()
             .flex()
             .items_center()
             .justify_end()
             .flex_shrink_0()
-            .text_size(px(12.0));
-        if refreshing {
-            return control.child(
-                FadeArc::new(SharedString::from(selector.clone()), self.theme)
-                    .size(px(14.0))
-                    .debug_selector(selector),
-            );
-        }
-        let engine_id = engine_id.to_owned();
-        control
-            .cursor_pointer()
+            .text_size(px(12.0))
+            .line_height(px(16.0))
+            .focus(move |style| style.shadow(ring))
             .child(
                 div()
                     .whitespace_nowrap()
                     .text_color(theme.secondary)
                     .child(checked.to_owned())
+                    .opacity(if refreshing { 0.0 } else { 1.0 })
                     .group_hover(group.clone(), |style| style.opacity(0.0)),
             )
             .child(
@@ -1553,7 +1746,9 @@ impl NativeApplication {
                     .items_center()
                     .justify_end()
                     .opacity(0.0)
-                    .group_hover(group, |style| style.opacity(1.0))
+                    .group_hover(group.clone(), |style| {
+                        style.opacity(if refreshing { 0.0 } else { 1.0 })
+                    })
                     .child(
                         div()
                             .whitespace_nowrap()
@@ -1561,9 +1756,38 @@ impl NativeApplication {
                             .child("Refresh"),
                     ),
             )
-            .on_click(cx.listener(move |app, _, _, cx| {
-                app.refresh_single_profile_engine(&engine_id, cx);
-            }))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .opacity(if refreshing { 1.0 } else { 0.0 })
+                    .child(
+                        FadeArc::new(SharedString::from(selector.clone()), self.theme)
+                            .size(px(14.0))
+                            .debug_selector(format!("{selector}-spinner")),
+                    ),
+            );
+        if !refreshing {
+            let engine_id = engine_id.to_owned();
+            control = control
+                .cursor_pointer()
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.refresh_single_profile_engine(&engine_id, cx);
+                }))
+                .on_key_down(cx.listener(move |app, event: &gpui::KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        app.refresh_single_profile_engine(&engine_id, cx);
+                        cx.notify();
+                    }
+                }));
+        }
+        control
     }
 
     /// One cadence meter row: scope label plus a fixed 72x8 provider-accent
@@ -1582,21 +1806,29 @@ impl NativeApplication {
         let segments = usize::from(crate::usage_meter::USAGE_METER_SEGMENTS);
         let lit_segments =
             (usage_segment_fraction(window.percent_used) * segments as f64).round() as usize;
+        // Fourteen full pitches across 72px with a 2px transparent tail cut
+        // from every pitch including the last, matching the source mask.
         let mut meter = div()
+            .debug_selector({
+                let bar_selector = bar_selector.clone();
+                move || bar_selector.clone()
+            })
             .w(px(72.0))
             .h(px(8.0))
             .flex_shrink_0()
-            .flex()
-            .gap(px(2.0));
+            .flex();
         for index in 0..segments {
             meter = meter.child(
                 div()
-                    .flex_1()
+                    .w(px(PROFILE_METER_TICK_PX))
+                    .mr(px(2.0))
+                    .h_full()
                     .bg(if index < lit_segments { accent } else { dim }),
             );
         }
         let tip_key = (engine_id.to_owned(), window.id.clone());
         let meter_selector = format!("artisan-profile-usage-meter-{engine_id}-{}", window.id);
+        let bar_selector = format!("{meter_selector}-bar");
         let meter_hover = Rc::clone(&self.profile_meter_hover);
         let tip_surface = Rc::clone(&self.profile_tip_surface_bounds);
         let tip_anchor = Rc::clone(&self.profile_tip_anchor);
@@ -1648,15 +1880,38 @@ impl NativeApplication {
                     .truncate()
                     .pl(px(8.0))
                     .text_size(px(12.0))
+                    .line_height(px(16.0))
                     .text_color(theme.secondary)
                     .child(window.scope_label().to_owned()),
             )
             .child(meter)
             .on_hover(cx.listener({
                 let tip_key = tip_key.clone();
-                move |app, hovered: &bool, _, cx| {
+                let percent_used = window.percent_used;
+                move |app, hovered: &bool, window, cx| {
                     if *hovered {
                         *app.profile_meter_hover.borrow_mut() = Some(tip_key.clone());
+                        // One shared tween per menu-open session: the first
+                        // reading runs up from just short of its value,
+                        // later rows carry the displayed value across.
+                        let remaining = usage_remaining_percent(percent_used) as f64;
+                        {
+                            let mut tween = app.profile_tip_tween.borrow_mut();
+                            if !tween.seen {
+                                tween.seen = true;
+                                tween.displayed = tip_run_up_from(remaining);
+                                tween.from = tween.displayed;
+                            } else {
+                                tween.from = tween.displayed;
+                            }
+                            tween.to = remaining;
+                            tween.started_ms = profile_usage_now_ms();
+                            if cx.reduce_motion() {
+                                tween.displayed = remaining;
+                                tween.scheduled = false;
+                            }
+                        }
+                        app.schedule_profile_tip_frame(window, cx);
                     } else if app.profile_meter_hover.borrow().as_ref() == Some(&tip_key) {
                         app.profile_meter_hover.borrow_mut().take();
                         app.profile_tip_anchor.borrow_mut().take();
@@ -1667,37 +1922,50 @@ impl NativeApplication {
     }
 
     /// Glass remaining tooltip for the hovered meter, anchored beside its
-    /// row. The number is the exact remaining percentage; the shared
-    /// cross-row tween from source is intentionally not replicated (see the
-    /// parity evidence notes), so this text is static per hover.
-    fn desktop_profile_usage_tooltip(&self, theme: DesktopTheme) -> Option<Div> {
+    /// row with the source 8px offset and clamped into the viewport. The
+    /// number is the shared tweened remaining percentage, so moving across
+    /// rows carries one value onto the next.
+    fn desktop_profile_usage_tooltip(&self, window: &Window, theme: DesktopTheme) -> Option<Div> {
         let (engine_id, window_id) = self.profile_meter_hover.borrow().clone()?;
         let ((anchor_engine, anchor_window), anchor) = self.profile_tip_anchor.borrow().clone()?;
         if (engine_id.clone(), window_id.clone()) != (anchor_engine, anchor_window) {
             return None;
         }
-        let remaining = self
+        let known = self
             .profile_usage
             .entry(&engine_id)
             .and_then(|entry| entry.report.as_ref())
             .and_then(|report| report.windows.iter().find(|window| window.id == window_id))
-            .map(|window| usage_remaining_percent(window.percent_used))?;
+            .is_some();
+        if !known {
+            return None;
+        }
+        let displayed = self.profile_tip_tween.borrow().displayed;
+        let viewport_width = f32::from(window.bounds().size.width);
+        let max_left = (viewport_width - PROFILE_MENU_VIEWPORT_MARGIN_PX - 224.0).max(8.0);
+        let left = (anchor.left + anchor.width + 8.0).min(max_left).max(8.0);
         Some(
             div()
                 .id("artisan-profile-usage-tooltip")
                 .debug_selector(|| "artisan-profile-usage-tooltip".to_owned())
                 .absolute()
-                .left(px(anchor.left + anchor.width + 8.0))
+                .left(px(left))
                 .top(px(anchor.top))
                 .max_w(px(224.0))
-                .rounded(px(16.0))
+                .rounded(RadiusTokens::value(RadiusStep::X2l))
                 .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
                 .bg(glass_foreground_base(self.theme))
                 .border_1()
                 .border_color(theme.line)
                 .shadow(glass_card_shadows())
-                .child(glass_material_layer(GlassStrength::Quiet, px(16.0)))
-                .child(glass_highlight_layer(GlassStrength::Quiet, px(16.0)))
+                .child(glass_material_layer(
+                    GlassStrength::Quiet,
+                    RadiusTokens::value(RadiusStep::X2l),
+                ))
+                .child(glass_highlight_layer(
+                    GlassStrength::Quiet,
+                    RadiusTokens::value(RadiusStep::X2l),
+                ))
                 .child(
                     div()
                         .px(px(12.0))
@@ -1706,12 +1974,13 @@ impl NativeApplication {
                         .flex_row()
                         .items_center()
                         .text_size(px(12.0))
+                        .line_height(px(16.0))
                         .text_color(theme.secondary)
                         .child("You have ")
                         .child(
                             div()
                                 .text_color(theme.foreground)
-                                .child(format!("{remaining}%")),
+                                .child(format!("{}%", displayed.round() as i64)),
                         )
                         .child(" left."),
                 ),
@@ -1832,30 +2101,46 @@ impl NativeApplication {
                 window.focus(&app.profile_focus, cx);
                 if !was_open && app.profile_menu.is_open() {
                     app.clear_profile_hover();
+                    app.begin_profile_menu_open(cx);
                     app.ensure_profile_usage(false, None, cx);
                 } else {
                     app.clear_profile_hover();
                     app.cancel_profile_usage_scroll();
+                    if was_open {
+                        app.begin_profile_menu_close(cx);
+                    }
                 }
                 cx.notify();
             }))
             .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "escape" => {
+                        let was_open = app.profile_menu.is_open();
                         let _ = app.profile_menu.dismiss();
                         app.clear_profile_hover();
                         app.cancel_profile_usage_scroll();
+                        if was_open {
+                            app.begin_profile_menu_close(cx);
+                        }
                     }
                     "down" => {
+                        let was_open = app.profile_menu.is_open();
                         app.profile_menu.set_open(true);
                         let _ = app.profile_menu.move_next();
                         app.sync_profile_hover_to_highlight();
+                        if !was_open {
+                            app.begin_profile_menu_open(cx);
+                        }
                         app.ensure_profile_usage(false, None, cx);
                     }
                     "up" => {
+                        let was_open = app.profile_menu.is_open();
                         app.profile_menu.set_open(true);
                         let _ = app.profile_menu.move_previous();
                         app.sync_profile_hover_to_highlight();
+                        if !was_open {
+                            app.begin_profile_menu_open(cx);
+                        }
                         app.ensure_profile_usage(false, None, cx);
                     }
                     "home" => {
@@ -1874,14 +2159,19 @@ impl NativeApplication {
                             let _ = app.profile_menu.press_trigger();
                             if app.profile_menu.is_open() {
                                 app.clear_profile_hover();
+                                app.begin_profile_menu_open(cx);
                                 app.ensure_profile_usage(false, None, cx);
                             }
                         }
                     }
                     "tab" => {
+                        let was_open = app.profile_menu.is_open();
                         let _ = app.profile_menu.dismiss();
                         app.clear_profile_hover();
                         app.cancel_profile_usage_scroll();
+                        if was_open {
+                            app.begin_profile_menu_close(cx);
+                        }
                         cx.notify();
                         return;
                     }
@@ -1906,7 +2196,13 @@ impl NativeApplication {
         if !self.profile_menu.is_open() {
             self.clear_profile_hover();
         }
-        if self.profile_menu.is_open() {
+        // The retained exit presentation stays mounted through Closing so
+        // the shared 100ms fade/slide-out can complete, exactly like the
+        // model picker popover.
+        let menu_phase = self.profile_menu_motion.borrow().phase();
+        if self.profile_menu.is_open() || menu_phase == PickerMenuPhase::Closing {
+            // Source `bg-border/50` resolved from the shared border token.
+            let separator = self.theme.colors.border.with_alpha(0.5).to_paint();
             // The machine line only paints when the hostname differs from
             // the profile name, matching `show_hostname` in source.
             let show_profile_hostname = self.profile_hostname.as_deref().is_some_and(|hostname| {
@@ -1941,7 +2237,7 @@ impl NativeApplication {
                 .debug_selector(|| "artisan-desktop-profile-menu".to_string())
                 .min_w(px(256.0))
                 .max_w(px(352.0))
-                .rounded(px(16.0))
+                .rounded(RadiusTokens::value(RadiusStep::X2l))
                 .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
                 .bg(glass_foreground_base(self.theme))
                 .border_1()
@@ -1950,16 +2246,26 @@ impl NativeApplication {
                 .flex()
                 .flex_col()
                 .relative()
-                .child(glass_material_layer(GlassStrength::Quiet, px(16.0)))
-                .child(glass_highlight_layer(GlassStrength::Quiet, px(16.0)))
+                .child(glass_material_layer(
+                    GlassStrength::Quiet,
+                    RadiusTokens::value(RadiusStep::X2l),
+                ))
+                .child(glass_highlight_layer(
+                    GlassStrength::Quiet,
+                    RadiusTokens::value(RadiusStep::X2l),
+                ))
                 .child(tip_surface_probe)
                 .block_mouse_except_scroll()
                 .on_mouse_down_out(cx.listener(|app, event: &gpui::MouseDownEvent, _, cx| {
                     let trigger = app.profile_origin.get();
                     if !trigger.contains(&event.position) {
+                        let was_open = app.profile_menu.is_open();
                         let _ = app.profile_menu.dismiss();
                         app.clear_profile_hover();
                         app.cancel_profile_usage_scroll();
+                        if was_open {
+                            app.begin_profile_menu_close(cx);
+                        }
                         cx.notify();
                     }
                 }))
@@ -1994,7 +2300,7 @@ impl NativeApplication {
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(theme.foreground)
                                         .child(self.profile_name.clone().map_or_else(
-                                            || "User".into(),
+                                            || "Not connected".into(),
                                             |name| capitalize_label(&name),
                                         )),
                                 )
@@ -2012,7 +2318,7 @@ impl NativeApplication {
                                 })),
                         ),
                 )
-                .child(div().h(px(1.0)).bg(theme.line).my(px(4.0)))
+                .child(div().h(px(1.0)).bg(separator).my(px(4.0)))
                 .child(
                     div()
                         .id("artisan-profile-usage-scroll")
@@ -2036,7 +2342,7 @@ impl NativeApplication {
                                 .child(self.desktop_profile_usage(theme, cx)),
                         ),
                 )
-                .child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
+                .child(div().h(px(1.0)).bg(separator).my(px(4.0)));
             self.profile_hover.borrow_mut().clear_if_missing(&[
                 PROFILE_SETTINGS_HOVER_ID.to_owned(),
                 PROFILE_USAGE_HOVER_ID.to_owned(),
@@ -2114,7 +2420,7 @@ impl NativeApplication {
                     self.theme,
                     Rc::clone(&profile_hover),
                     "profile",
-                    px(12.0),
+                    RadiusTokens::value(RadiusStep::Xl),
                     cx.reduce_motion(),
                 ));
             for (index, (label, icon, hover_id)) in [
@@ -2144,14 +2450,15 @@ impl NativeApplication {
                         .py(px(8.0))
                         .flex()
                         .items_center()
-                        .gap(px(10.0))
-                        .rounded(px(12.0))
+                        .gap(px(8.0))
+                        .rounded(RadiusTokens::value(RadiusStep::Xl))
                         .cursor_pointer()
                         .child(row_probe)
                         .child(desktop_nav_glyph(icon, theme))
                         .child(
                             div()
                                 .text_size(px(14.0))
+                                .line_height(px(20.0))
                                 .text_color(theme.foreground)
                                 .child(label),
                         )
@@ -2166,6 +2473,9 @@ impl NativeApplication {
                             }
                         }))
                         .on_click(cx.listener(move |app, _, window, cx| {
+                            if !app.profile_menu_is_interactive() {
+                                return;
+                            }
                             cx.stop_propagation();
                             let _ = app.profile_menu.activate_index(index);
                             app.activate_profile_selection(window, cx);
@@ -2173,15 +2483,21 @@ impl NativeApplication {
                 );
             }
             panel = panel.child(actions);
-            if let Some(tooltip) = self.desktop_profile_usage_tooltip(theme) {
+            if let Some(tooltip) = self.desktop_profile_usage_tooltip(window, theme) {
                 panel = panel.child(tooltip);
             }
+            let motion = *self.profile_menu_motion.borrow();
             root = root.child(gpui::deferred(
                 gpui::anchored()
                     .anchor(gpui::Anchor::BottomLeft)
                     .position(self.profile_origin.get().origin)
-                    .offset(gpui::point(px(0.0), px(-10.0)))
-                    .child(panel),
+                    .offset(gpui::point(px(0.0), px(-4.0)))
+                    .child(animate_picker_menu(
+                        panel,
+                        Rc::clone(&self.profile_menu_motion),
+                        motion,
+                        "profile",
+                    )),
             ));
         }
         root
@@ -7603,6 +7919,11 @@ mod tests {
         let zero_meter = cx
             .debug_bounds("artisan-profile-usage-meter-profile-test-alpha-session")
             .expect("zero-percent meter row");
+        // The meter bar keeps the exact source 72px width.
+        let zero_bar = cx
+            .debug_bounds("artisan-profile-usage-meter-profile-test-alpha-session-bar")
+            .expect("zero-percent meter bar");
+        assert_eq!(f32::from(zero_bar.size.width), 72.0);
         // No tooltip until a meter is hovered.
         assert!(cx.debug_bounds("artisan-profile-usage-tooltip").is_none());
         cx.simulate_mouse_move(zero_meter.center(), None, gpui::Modifiers::none());
@@ -7826,6 +8147,255 @@ mod tests {
             cx.debug_bounds("artisan-desktop-profile-actions-hover-surface")
                 .is_some()
         );
+    }
+
+    #[gpui::test]
+    fn profile_tip_tween_runs_up_once_then_carries_across_rows(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                install_connected_profile_usage(application, sink);
+            });
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+
+        // Alpha's session window is unused: 100% remains, so the first
+        // reading runs up from just short of it.
+        let alpha = cx
+            .debug_bounds("artisan-profile-usage-meter-profile-test-alpha-session")
+            .expect("alpha meter row");
+        cx.simulate_mouse_move(alpha.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let tween = *view.read(app).profile_tip_tween.borrow();
+            assert_eq!(tween.to, 100.0);
+            assert_eq!(tween.from, 92.0);
+            assert!(tween.seen);
+        });
+
+        // Beta's session window is 21% used: the displayed value carries
+        // across while only the target moves.
+        let beta = cx
+            .debug_bounds("artisan-profile-usage-meter-profile-test-beta-session")
+            .expect("beta meter row");
+        cx.simulate_mouse_move(beta.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let tween = *view.read(app).profile_tip_tween.borrow();
+            assert_eq!(tween.to, 79.0);
+            assert_eq!(tween.from, 92.0);
+            let displayed = tween.displayed;
+            assert!(
+                displayed >= 79.0 && displayed <= 92.0,
+                "the carried value must ease toward its target, never restart"
+            );
+        });
+
+        // Reduced motion settles the shared value directly.
+        cx.update(|app| app.set_reduce_motion(true));
+        cx.simulate_mouse_move(alpha.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let tween = *view.read(app).profile_tip_tween.borrow();
+            assert_eq!(tween.to, 100.0);
+            assert_eq!(tween.displayed, 100.0);
+        });
+    }
+
+    #[gpui::test]
+    fn profile_refresh_spinner_keeps_control_width(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                install_connected_profile_usage(application, sink);
+            });
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let idle = cx
+            .debug_bounds("artisan-profile-usage-refresh-profile-test-alpha")
+            .expect("refresh control");
+        let idle_width = f32::from(idle.size.width);
+        assert!(
+            cx.debug_bounds("artisan-profile-usage-refresh-profile-test-alpha-spinner")
+                .is_some()
+        );
+
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                application
+                    .profile_usage
+                    .refreshing_engine_ids
+                    .push("profile-test-alpha".to_owned());
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let loading = cx
+            .debug_bounds("artisan-profile-usage-refresh-profile-test-alpha")
+            .expect("refresh control");
+        assert_eq!(f32::from(loading.size.width), idle_width);
+        assert!(
+            cx.debug_bounds("artisan-profile-usage-refresh-profile-test-alpha-spinner")
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn profile_refresh_focus_enter_refreshes_once(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                application.test_command_sink = Some(sink);
+                application.profile_usage.entries.push(reported_usage_entry(
+                    "codex",
+                    "Codex",
+                    vec![reported_usage_window(
+                        "session",
+                        NativeUsageCadence::Session,
+                        None,
+                        50.0,
+                    )],
+                ));
+            });
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        // The fresh Codex reading needs no load on open; only the focused
+        // Enter may dispatch its refresh.
+        let focus = cx.update(|_, app| {
+            view.read(app)
+                .profile_refresh_focus
+                .borrow()
+                .iter()
+                .find(|(id, _)| id == "codex")
+                .map(|(_, handle)| handle.clone())
+                .expect("refresh focus handle")
+        });
+        let codex_reads = || {
+            commands
+                .borrow()
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command,
+                        NativeTransportCommand::ReadAccountUsage { engine_id, .. }
+                        if engine_id == "codex"
+                    )
+                })
+                .count()
+        };
+        assert_eq!(codex_reads(), 0);
+        cx.update(|window, app| window.focus(&focus, app));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(codex_reads(), 1);
+    }
+
+    #[gpui::test]
+    fn profile_menu_plays_shared_popup_motion(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.update(|app| app.set_reduce_motion(true));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(application.profile_menu.is_open());
+            assert_eq!(
+                application.profile_menu_motion.borrow().phase(),
+                crate::native_model_selector::PickerMenuPhase::Open
+            );
+        });
+        assert!(cx.debug_bounds("artisan-desktop-profile-menu").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(!application.profile_menu.is_open());
+            assert_eq!(
+                application.profile_menu_motion.borrow().phase(),
+                crate::native_model_selector::PickerMenuPhase::Hidden
+            );
+        });
+        assert!(cx.debug_bounds("artisan-desktop-profile-menu").is_none());
+
+        cx.update(|app| app.set_reduce_motion(false));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(application.profile_menu.is_open());
+            assert_eq!(
+                application.profile_menu_motion.borrow().phase(),
+                crate::native_model_selector::PickerMenuPhase::Opening
+            );
+        });
+        assert!(cx.debug_bounds("artisan-desktop-profile-menu").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(!application.profile_menu.is_open());
+            assert_eq!(
+                application.profile_menu_motion.borrow().phase(),
+                crate::native_model_selector::PickerMenuPhase::Closing
+            );
+        });
+        // The retained exit presentation stays mounted through Closing.
+        assert!(cx.debug_bounds("artisan-desktop-profile-menu").is_some());
+    }
+
+    #[gpui::test]
+    fn profile_tip_clamps_into_a_narrow_viewport(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                install_connected_profile_usage(application, sink);
+            });
+        });
+        cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(900.0)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        let alpha = cx
+            .debug_bounds("artisan-profile-usage-meter-profile-test-alpha-session")
+            .expect("alpha meter row");
+        cx.simulate_mouse_move(alpha.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let tooltip = cx
+            .debug_bounds("artisan-profile-usage-tooltip")
+            .expect("usage tooltip");
+        assert!(f32::from(tooltip.left()) <= 169.0);
+        assert!(f32::from(tooltip.right()) <= 393.0);
     }
 
     #[test]
