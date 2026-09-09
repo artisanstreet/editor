@@ -5081,10 +5081,10 @@ mod tests {
         assert!(matches!(
             envelope.body,
             WireEnvelopeBody::Request(ClientRequest::Command(Command::RespondApproval(answer)))
-                if answer.request_id == request_id
-                    && answer.thread_id == answer_thread()
-                    && answer.run_id == answer_run()
-                    && answer.approval_id.as_str() == "approval-1"
+                if answer.request_id() == &request_id
+                    && answer.thread_id() == &answer_thread()
+                    && answer.run_id() == &answer_run()
+                    && answer.approval_id().as_str() == "approval-1"
                     && answer.approved
         ));
     }
@@ -5099,11 +5099,11 @@ mod tests {
         assert!(matches!(
             envelope.body,
             WireEnvelopeBody::Request(ClientRequest::Command(Command::RespondQuestion(answer)))
-                if answer.request_id == request_id
-                    && answer.thread_id == answer_thread()
-                    && answer.run_id == answer_run()
-                    && answer.question_id.as_str() == "question-1"
-                    && answer.answers == vec![String::from("tokio")]
+                if answer.request_id() == &request_id
+                    && answer.thread_id() == &answer_thread()
+                    && answer.run_id() == &answer_run()
+                    && answer.question_id().as_str() == "question-1"
+                    && answer.answers() == &vec![String::from("tokio")]
         ));
     }
 
