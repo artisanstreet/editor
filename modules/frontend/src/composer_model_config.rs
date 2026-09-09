@@ -651,14 +651,25 @@ fn default_runtime() -> Result<EngineRuntimeControls, &'static str> {
 mod tests {
     use super::*;
     use artisan_catalog::{
-        NativeContextConfig, NativeContextSelection, NativeModelDefinition, NativeModelSelection,
-        NativeOptionValue,
+        NativeContextConfig, NativeContextSelection, NativeModelDefinition, NativeModelRoute,
+        NativeModelRouteGroup, NativeModelRouteStatus, NativeModelSelection, NativeOptionValue,
     };
 
     fn profiled_policy(catalog: &NativeModelCatalog, model_id: &str) -> NativeModelPolicy {
         let mut policy = catalog.selection_policy_for_model(model_id).unwrap();
         policy.profile_id = Some("default".to_owned());
         policy
+    }
+
+    /// Builds the offline snapshot with the five fixture-proven harness ids
+    /// marked runnable, mirroring the catalog test helpers: static
+    /// direct models need no route, so runnable harnesses admit them.
+    fn runnable_catalog() -> NativeModelCatalog {
+        let mut catalog = NativeModelCatalog::offline().unwrap();
+        for engine_id in ["codex", "claude", "grok", "cursor", "hermes"] {
+            catalog.runnable_harness_ids.push(engine_id.to_owned());
+        }
+        catalog
     }
 
     #[test]
@@ -677,8 +688,17 @@ mod tests {
     }
 
     #[test]
-    fn codex_choice_builds_a_runnable_codex_selection() {
+    fn offline_catalog_admits_nothing_runnable() {
         let catalog = NativeModelCatalog::offline().unwrap();
+        assert!(catalog.runnable_harness_ids.is_empty());
+        let policy = profiled_policy(&catalog, "codex-sol");
+        assert!(catalog.admit_policy(&policy).is_err());
+        assert!(validate_run_choice(&catalog, &policy, None).is_err());
+    }
+
+    #[test]
+    fn codex_choice_builds_a_runnable_codex_selection() {
+        let catalog = runnable_catalog();
         let policy = profiled_policy(&catalog, "codex-sol");
         let config = config_for_policy(&catalog, &policy, None).unwrap();
         let EngineSelection::Codex(selection) = config.selection() else {
@@ -722,7 +742,7 @@ mod tests {
 
     #[test]
     fn claude_choice_builds_a_floored_claude_selection() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+        let catalog = runnable_catalog();
         let policy = profiled_policy(&catalog, "claude-fable");
         let config = config_for_policy(&catalog, &policy, None).unwrap();
         let EngineSelection::Claude(selection) = config.selection() else {
@@ -780,7 +800,7 @@ mod tests {
 
     #[test]
     fn grok_choice_builds_a_grok_selection() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+        let catalog = runnable_catalog();
         let policy = profiled_policy(&catalog, "grok-4-6");
         let config = config_for_policy(&catalog, &policy, None).unwrap();
         let EngineSelection::Grok(selection) = config.selection() else {
@@ -797,7 +817,7 @@ mod tests {
 
     #[test]
     fn cursor_choice_builds_a_cursor_selection_without_speed() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+        let catalog = runnable_catalog();
         let policy = profiled_policy(&catalog, "cursor-composer-2-5");
         let config = config_for_policy(&catalog, &policy, None).unwrap();
         let EngineSelection::Cursor(selection) = config.selection() else {
@@ -826,10 +846,12 @@ mod tests {
         assert_eq!(selection.speed(), Some(CursorSpeed::Fast));
     }
 
-    /// Extends the offline snapshot with a routed Hermes model plus a direct
+    /// Extends the runnable snapshot with a routed Hermes model plus a direct
     /// one, mirroring the live dynamic rows the backend merges at runtime.
+    /// The routed row requires its provider route, so the helper seats that
+    /// route Available the way the catalog test helpers do.
     fn catalog_with_hermes_models() -> NativeModelCatalog {
-        let mut catalog = NativeModelCatalog::offline().unwrap();
+        let mut catalog = runnable_catalog();
         let template = catalog.manifest.model("codex-sol").cloned().unwrap();
         let routed = NativeModelDefinition {
             id: "hermes-test-route".to_owned(),
@@ -853,6 +875,19 @@ mod tests {
         };
         catalog.manifest.models.push(routed);
         catalog.manifest.models.push(direct);
+        catalog.routes.push(NativeModelRoute {
+            engine_id: "hermes".to_owned(),
+            group: NativeModelRouteGroup {
+                id: "openai-codex".to_owned(),
+                label: "OpenAI Codex".to_owned(),
+                order: 0,
+                show_route_labels: false,
+            },
+            id: "openai-codex".to_owned(),
+            label: "OpenAI Codex".to_owned(),
+            status: NativeModelRouteStatus::Available,
+            unavailable_reason: None,
+        });
         catalog
     }
 
