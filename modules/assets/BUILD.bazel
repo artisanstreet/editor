@@ -134,6 +134,7 @@ LICENSE_DOCS = [
 # //tests/assets bijection pins those two lists at exactly 104/9 entries, and
 # fonts are binary TrueType, not SVG catalog rows.
 FONT_FILES = [
+    "fonts/cal-sans-700.ttf",
     "fonts/spline-sans-variable.ttf",
     "fonts/spline-sans-mono-variable.ttf",
     "fonts/spline-sans-300.ttf",
@@ -149,6 +150,7 @@ FONT_FILES = [
 ]
 
 FONT_LICENSES = [
+    "licenses/cal-sans-OFL.txt",
     "licenses/spline-sans-OFL.txt",
     "licenses/spline-sans-mono-OFL.txt",
 ]

@@ -1,4 +1,4 @@
-//! Bundled Spline Sans and Spline Sans Mono variable TrueType fonts.
+//! Bundled Cal Sans, Spline Sans and Spline Sans Mono TrueType fonts.
 //!
 //! Files are embedded at compile time and registered once through
 //! `artisan_ui::fonts::register_bundled_fonts`. Family names and weight ranges
@@ -50,6 +50,15 @@ impl std::error::Error for UnknownFont {}
 
 /// Every bundled typeface, ordered by family name so lookups binary search.
 pub const ALL: &[BundledFont] = &[
+    BundledFont {
+        file_name: "cal-sans-700.ttf",
+        family: "Cal Sans",
+        weights: (700, 700),
+        license_path: "licenses/cal-sans-OFL.txt",
+        license_text: include_str!("../licenses/cal-sans-OFL.txt"),
+        bytes: include_bytes!("../fonts/cal-sans-700.ttf"),
+        static_faces: &[include_bytes!("../fonts/cal-sans-700.ttf")],
+    },
     BundledFont {
         file_name: "spline-sans-variable.ttf",
         family: "Spline Sans",
@@ -115,18 +124,19 @@ mod tests {
     /// Expected `(file name, byte length)` pins: any truncation or
     /// re-encode of a vendored binary fails here before it can reach a
     /// renderer and silently fall back to a system face.
-    const EXPECTED_LENGTHS: [(&str, usize); 2] = [
+    const EXPECTED_LENGTHS: [(&str, usize); 3] = [
+        ("cal-sans-700.ttf", 219_644),
         ("spline-sans-variable.ttf", 146_896),
         ("spline-sans-mono-variable.ttf", 118_744),
     ];
 
     #[test]
-    fn catalog_carries_exactly_the_two_declared_faces() {
-        assert_eq!(ALL.len(), 2, "two Spline families");
+    fn catalog_carries_exactly_the_three_declared_faces() {
+        assert_eq!(ALL.len(), 3, "Cal Sans plus the two Spline families");
         let families: Vec<&str> = ALL.iter().map(|font| font.family).collect();
         assert_eq!(
             families,
-            vec!["Spline Sans", "Spline Sans Mono"],
+            vec!["Cal Sans", "Spline Sans", "Spline Sans Mono"],
             "catalog order is by family name for binary search"
         );
         for (font, (file_name, length)) in ALL.iter().zip(EXPECTED_LENGTHS) {
@@ -164,7 +174,7 @@ mod tests {
     #[test]
     fn bundled_fonts_shapes_borrowed_slices_for_add_fonts() {
         let shaped = bundled_fonts();
-        assert_eq!(shaped.len(), 10);
+        assert_eq!(shaped.len(), 11);
         let expected = ALL.iter().flat_map(|font| font.static_faces.iter());
         for (shaped, bytes) in shaped.iter().zip(expected) {
             assert_eq!(shaped.as_ref(), *bytes);
@@ -187,6 +197,30 @@ mod tests {
                 id: String::from("Segoe UI"),
             }
         );
+    }
+
+    #[test]
+    fn cal_sans_registers_its_verified_bold_static_face() {
+        // Internal name-table identity `Cal Sans` / `Bold` with OS/2
+        // `usWeightClass` 700, verified from the vendored bytes (no fvar
+        // axis: a single static Bold face). The native wordmark requests
+        // exactly this family at weight 700 so the platform matcher cannot
+        // silently fall back to a system face.
+        let font = lookup_family("Cal Sans").expect("bundled Cal Sans face");
+        assert_eq!(font.file_name, "cal-sans-700.ttf");
+        assert_eq!(font.weights, (700, 700));
+        assert_eq!(font.bytes.len(), 219_644);
+        assert_eq!(
+            &font.bytes[0..4],
+            b"\x00\x01\x00\x00",
+            "cal-sans-700.ttf: missing TrueType sfnt magic"
+        );
+        assert_eq!(
+            font.static_faces.len(),
+            1,
+            "Cal Sans ships one static Bold face"
+        );
+        assert_eq!(font.static_faces[0], font.bytes);
     }
 
     #[test]

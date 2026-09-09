@@ -1116,8 +1116,11 @@ impl NativeApplication {
         cx.notify();
     }
 
+    /// Native titlebar identity: the `Artisan Editor` wordmark plus an
+    /// adjacent `Beta` suffix. The wordmark keeps the home navigation; the
+    /// project/route breadcrumb it replaces never navigated anywhere.
     fn desktop_identity(&self, cx: &Context<Self>) -> Div {
-        let mut identity = div()
+        div()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -1133,30 +1136,22 @@ impl NativeApplication {
                     .debug_selector(|| "artisan-brand-home".to_owned())
                     .flex_shrink_0()
                     .text_size(px(16.0))
-                    .font_weight(FontWeight::EXTRA_BOLD)
+                    .font_family("Cal Sans")
+                    .font_weight(FontWeight::BOLD)
+                    // -0.05em tracking at 16px: 16 * -0.05 = -0.8px.
+                    .letter_spacing(px(-0.8))
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
-            );
-        if let Some(project) = self.selected_project_name() {
-            identity = identity.child(
+            )
+            .child(
                 div()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .whitespace_nowrap()
-                    .text_size(px(13.0))
+                    .flex_shrink_0()
+                    .text_size(px(14.0))
+                    .font_family("Spline Sans")
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(self.desktop_theme.secondary)
-                    .child(format!("/ {project}")),
-            );
-        }
-        identity.child(
-            div()
-                .min_w(px(0.0))
-                .truncate()
-                .whitespace_nowrap()
-                .text_size(px(14.0))
-                .text_color(self.desktop_theme.secondary)
-                .child(format!("/ {}", self.desktop_route_title())),
-        )
+                    .child("Beta"),
+            )
     }
 
     fn desktop_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {

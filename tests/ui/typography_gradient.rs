@@ -59,7 +59,7 @@ impl Render for GradientSurfaceProbe {
 
 #[test]
 fn bundled_catalog_matches_the_theme_declarations_on_both_sides() {
-    assert_eq!(bundled_fonts::ALL.len(), 2);
+    assert_eq!(bundled_fonts::ALL.len(), 3);
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
         let typography = ArtisanTheme::for_mode(mode).typography;
         // Role aliases resolve to the declared faces.
@@ -84,7 +84,8 @@ fn bundled_catalog_matches_the_theme_declarations_on_both_sides() {
             );
         }
     }
-    // The catalog carries the two verified variable-weight ranges.
+    // The catalog carries the two verified Spline variable-weight ranges
+    // plus the single static Cal Sans Bold wordmark face.
     let ranges: Vec<((u16, u16), &str)> = bundled_fonts::ALL
         .iter()
         .map(|font| (font.weights, font.family))
@@ -92,6 +93,7 @@ fn bundled_catalog_matches_the_theme_declarations_on_both_sides() {
     assert_eq!(
         ranges,
         vec![
+            ((700, 700), "Cal Sans"),
             ((300, 700), "Spline Sans"),
             ((300, 700), "Spline Sans Mono")
         ]
