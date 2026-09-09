@@ -753,7 +753,7 @@ async fn admitted_client<'authority, 'handler, 'cancel>(
 
     let (client, owner) = tokio::join!(client, tokio::time::timeout(TEST_DEADLINE, server),);
     let owner = owner.expect("authentication settles under the watchdog")?;
-    Ok((client??, owner))
+    Ok((client?, owner))
 }
 
 /// Drives a doomed admission: the client completes its handshake half, the
@@ -2749,7 +2749,7 @@ async fn admitted_client_with_limits<'authority, 'handler, 'cancel>(
 
     let (client, owner) = tokio::join!(tokio::time::timeout(TEST_DEADLINE, client), server,);
     let owner = owner.expect("authentication settles under its own deadline");
-    Ok((client?, owner))
+    Ok((client??, owner))
 }
 
 /// Ordinary desktop idle must not fail a waiting connection: the server
