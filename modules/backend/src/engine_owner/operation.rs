@@ -1577,7 +1577,6 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
     if matches!(request.input.launch, super::InternalLaunch::Cursor(_)) {
         return Box::pin(execute_cursor_turn(request, runtime, shutdown)).await;
     }
-    }
     Box::pin(execute_configured_turn(request, runtime, shutdown)).await
 }
 
