@@ -722,7 +722,7 @@ mod tests {
         }
     }
 
-    fn visible_ids<'a>(entries: &'a [NativeUsageEntry], refreshing: &[&str]) -> Vec<&'a str> {
+    fn visible_ids(entries: &[NativeUsageEntry], refreshing: &[&str]) -> Vec<String> {
         NativeProfileUsageState {
             entries: entries.to_vec(),
             refreshing_engine_ids: refreshing.iter().map(|id| (*id).to_owned()).collect(),
@@ -730,7 +730,7 @@ mod tests {
         }
         .visible_usage_entries()
         .iter()
-        .map(|entry| entry.engine_id.as_str())
+        .map(|entry| entry.engine_id.clone())
         .collect()
     }
 

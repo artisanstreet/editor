@@ -1723,7 +1723,7 @@ impl NativeApplication {
         theme: DesktopTheme,
         window: &Window,
         cx: &Context<Self>,
-    ) -> Div {
+    ) -> gpui::Stateful<Div> {
         let group = format!("profile-usage-refresh-{engine_id}");
         let selector = format!("artisan-profile-usage-refresh-{engine_id}");
         let focus = self.profile_refresh_focus_handle(engine_id, cx);
@@ -1829,7 +1829,7 @@ impl NativeApplication {
         dim: gpui::Hsla,
         theme: DesktopTheme,
         cx: &Context<Self>,
-    ) -> Div {
+    ) -> gpui::Stateful<Div> {
         let segments = usize::from(crate::usage_meter::USAGE_METER_SEGMENTS);
         let lit_segments =
             (usage_segment_fraction(window.percent_used) * segments as f64).round() as usize;
