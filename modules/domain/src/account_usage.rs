@@ -558,7 +558,7 @@ impl EngineUsageReport {
 /// provider; absent, every registered engine reports. `force` marks a
 /// user-initiated refresh: the backend re-asks providers even when its cached
 /// reports are still inside the freshness window.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ReadAccountUsage {
     engine_id: Option<String>,
     force: bool,

@@ -56,7 +56,7 @@ pub use bounds::{
 pub use commands::{
     AttachProject, Command, CreateThread, ListAttachedProjects, ListDirectories,
     ListProjectThreads, ListRegisteredEngineProfiles, Query, QueueFirstMessage, QueueMessage,
-    ReadAccountUsage, ReadActiveRun, ReadMessageImage, ReadThreadEngineSettings,
+    ReadActiveRun, ReadMessageImage, ReadThreadEngineSettings,
     SetThreadEngineConfig, StopRun,
 };
 pub use conversation::{
