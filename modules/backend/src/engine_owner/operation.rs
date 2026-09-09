@@ -1553,14 +1553,14 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
     if request.input.launch.profile_id() != selected_profile {
         return request.fail(EngineOperationError::Configuration);
     }
-    // Codex, Claude, Grok, and Cursor turns carry no provider continuation in this
+    // Claude, Grok, and Cursor turns carry no provider continuation in this
     // packet; a mid-turn resume here fails closed instead of executing as
-    // another engine.
+    // another engine. Codex carries its X3 continuation and gates it at the
+    // executor; Hermes carries its gateway continuation below.
     if request.input.continuation.is_some()
         && matches!(
             request.input.launch,
-            super::InternalLaunch::Codex(_)
-                | super::InternalLaunch::Claude(_)
+            super::InternalLaunch::Claude(_)
                 | super::InternalLaunch::Grok(_)
                 | super::InternalLaunch::Cursor(_)
         )
@@ -1705,12 +1705,17 @@ async fn execute_configured_turn(
 /// Executes one finite Codex turn over `codex app-server --stdio`.
 ///
 /// Single-owner match arm beside the OpenCode2 executor: no second task, no
-/// second queue. Performs initialize, thread/start, the bind authorization
-/// gate, then turn/start plus the streaming pump. Text deltas normalize onto
-/// the shared S1a vocabulary; approval/question frames populate the pending
-/// tracker with no control-flow side effect; child-thread frames never adopt
-/// the root turn. External-kill EOF maps to `Interrupted`, explicit cancel to
-/// `Cancelled`, and stall/failure to `Failed`.
+/// second queue. Performs initialize, thread/start (or `thread/resume` for a
+/// gated continuation that reopens the same provider thread), the bind
+/// authorization gate, then turn/start plus the streaming pump. Text deltas
+/// normalize onto the shared S1a vocabulary; token-usage frames project
+/// best-effort to cumulative usage observations without blocking the turn;
+/// approval/question frames populate the pending tracker with no
+/// control-flow side effect; child-thread frames never adopt the root turn.
+/// External-kill EOF maps to `Interrupted`, explicit cancel to `Cancelled`,
+/// and stall/failure to `Failed`. Teardown terminates the whole process
+/// group (no orphaned codex grandchildren holding pipes) and quarantines on
+/// unobserved reaps.
 async fn execute_codex_turn(
     request: ConfiguredTurnRequest,
     runtime: ConfiguredRuntime,
@@ -1733,6 +1738,27 @@ async fn execute_codex_turn(
     }
     let super::InternalLaunch::Codex(launch) = &request.input.launch else {
         return request.fail(EngineOperationError::Configuration);
+    };
+    // X3 continuation gate: same-engine is fenced by the dispatcher (codex
+    // bindings only); the owner additionally requires an explicit target
+    // model and CLI >= 0.145.0. Anything else is typed incompatible — never
+    // a silent fresh start and never a cross-engine resume.
+    let resume_stored_thread_id: Option<String> = match &request.input.continuation {
+        None => None,
+        Some(continuation) => {
+            let gate = codex_runtime::check_codex_native_continuation(
+                &codex_runtime::CodexContinuationGateInput {
+                    cli_version: request.input.launch.version(),
+                    target_model: selection.model_id().map(|model| model.as_str()),
+                    advertised_models: None,
+                    same_engine: true,
+                },
+            );
+            if !matches!(gate, codex_runtime::CodexContinuationDecision::Compatible) {
+                return request.fail(EngineOperationError::Configuration);
+            }
+            Some(continuation.provider_session_id().to_owned())
+        }
     };
     let mut child = match spawn_codex_engine(launch.as_ref(), &request.input.project_root) {
         Ok(child) => child,
@@ -1815,50 +1841,112 @@ async fn execute_codex_turn(
         )
         .await;
     }
-    // thread/start --------------------------------------------------------
-    let thread_line = codex_runtime::request_line(
-        next_id,
-        "thread/start",
-        &settings.thread_params(&request.input.project_root),
-    );
-    next_id += 1;
-    if write_codex_line(&mut stdin, &thread_line).await.is_err() {
-        return finish_configured_start(
-            request,
-            parts,
-            EngineOperationError::ProviderRequestFailed,
-            runtime.limits.close,
-        )
-        .await;
-    }
-    line.clear();
-    if read_codex_line(
-        &mut reader,
-        &mut line,
-        phase_deadline(runtime.limits.prompt, request.deadline),
-        shutdown,
-        &request.control,
-    )
-    .await
-    .is_err()
-    {
-        let error = if shutdown.is_cancelled() {
-            EngineOperationError::Shutdown
-        } else if request.control.is_cancelled() {
-            EngineOperationError::Cancelled
-        } else {
-            EngineOperationError::ProviderRequestFailed
+    // thread/start or thread/resume ---------------------------------------
+    // A gated continuation reopens the stored provider thread
+    // (`thread/resume` over the same options a fresh start would use); the
+    // response must name the same thread id or the turn fails closed. Fresh
+    // turns start exactly one thread. Either way provider-owned state is
+    // resumed, never invented, and a restart never duplicates provider
+    // effects with a second thread.
+    let thread_id = if let Some(stored) = resume_stored_thread_id.as_deref() {
+        let Some(resume_params) =
+            codex_runtime::thread_resume_params(&settings, &request.input.project_root, stored)
+        else {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::Configuration,
+                runtime.limits.close,
+            )
+            .await;
         };
-        return finish_configured_start(request, parts, error, runtime.limits.close).await;
-    }
-    let Some(thread_id) = codex_thread_id(&line, 2) else {
-        return finish_configured_start(
-            request,
-            parts,
-            EngineOperationError::ProviderRequestFailed,
-            runtime.limits.close,
+        let resume_line = codex_runtime::request_line(next_id, "thread/resume", &resume_params);
+        next_id += 1;
+        if write_codex_line(&mut stdin, &resume_line).await.is_err() {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+        line.clear();
+        if read_codex_line(
+            &mut reader,
+            &mut line,
+            phase_deadline(runtime.limits.prompt, request.deadline),
+            shutdown,
+            &request.control,
         )
-        .await;
+        .await
+        .is_err()
+        {
+            let error = if shutdown.is_cancelled() {
+                EngineOperationError::Shutdown
+            } else if request.control.is_cancelled() {
+                EngineOperationError::Cancelled
+            } else {
+                EngineOperationError::ProviderRequestFailed
+            };
+            return finish_configured_start(request, parts, error, runtime.limits.close).await;
+        }
+        let Some(thread_id) = codex_resumed_thread_id(&line, 2, stored) else {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        };
+        thread_id
+    } else {
+        let thread_line = codex_runtime::request_line(
+            next_id,
+            "thread/start",
+            &settings.thread_params(&request.input.project_root),
+        );
+        next_id += 1;
+        if write_codex_line(&mut stdin, &thread_line).await.is_err() {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+        line.clear();
+        if read_codex_line(
+            &mut reader,
+            &mut line,
+            phase_deadline(runtime.limits.prompt, request.deadline),
+            shutdown,
+            &request.control,
+        )
+        .await
+        .is_err()
+        {
+            let error = if shutdown.is_cancelled() {
+                EngineOperationError::Shutdown
+            } else if request.control.is_cancelled() {
+                EngineOperationError::Cancelled
+            } else {
+                EngineOperationError::ProviderRequestFailed
+            };
+            return finish_configured_start(request, parts, error, runtime.limits.close).await;
+        }
+        let Some(thread_id) = codex_thread_id(&line, 2) else {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        };
+        thread_id
     };
 
     // Bind authorization gate: the dispatcher binds the native thread id
@@ -1917,6 +2005,25 @@ async fn execute_codex_turn(
     let mut active_turn: Option<String> = None;
     let mut frame_sequence: u64 = 0;
     let mut last_activity = Instant::now();
+    // Best-effort usage scope: explicit model plus thread scope, else usage
+    // frames stay diagnostics. Usage never blocks the turn.
+    let usage_attribution = match (&input.thread_id, input.settings.config().selection()) {
+        (Some(thread_id), artisan_domain::EngineSelection::Codex(selection)) => selection
+            .model_id()
+            .map(|model| codex_runtime::CodexUsageAttribution {
+                thread_id: thread_id.clone(),
+                model_id: model.clone(),
+            }),
+        _ => None,
+    };
+    let usage_scope =
+        usage_attribution
+            .as_ref()
+            .map(|attribution| codex_runtime::CodexUsageScope {
+                thread_id: &attribution.thread_id,
+                model_id: &attribution.model_id,
+                provider_session_id: thread_id.as_str(),
+            });
     let terminal = codex_pump_loop(
         &mut reader,
         &mut stdin,
@@ -1933,6 +2040,7 @@ async fn execute_codex_turn(
         &control,
         &observations,
         &thread_id,
+        usage_scope.as_ref(),
     )
     .await;
     drop(stdin);
@@ -1976,6 +2084,7 @@ async fn codex_pump_loop(
     control: &Arc<CancelHandle>,
     observations: &mpsc::Sender<EngineObservation>,
     thread_id: &str,
+    usage: Option<&super::codex::CodexUsageScope<'_>>,
 ) -> CodexPumpOutcome {
     use super::codex as codex_runtime;
     use tokio::io::AsyncBufReadExt as _;
@@ -2053,6 +2162,7 @@ async fn codex_pump_loop(
                                     active_turn,
                                     observations,
                                     *frame_sequence,
+                                    usage,
                                 ).await {
                                     return CodexPumpOutcome::Terminal(terminal);
                                 }
@@ -2153,6 +2263,21 @@ pub(crate) fn codex_thread_id(line: &str, id: u64) -> Option<String> {
         return None;
     }
     Some(id.to_owned())
+}
+
+/// Extracts the resumed native thread identity, requiring the same thread.
+///
+/// `thread/resume` reopens provider-owned state only: a result naming any
+/// other thread fails closed (`None`) instead of adopting a foreign session,
+/// so resume reopens the same thread id and a restart replays the durable
+/// prefix without duplicating provider effects.
+pub(crate) fn codex_resumed_thread_id(
+    line: &str,
+    id: u64,
+    stored_thread_id: &str,
+) -> Option<String> {
+    let resumed = codex_thread_id(line, id)?;
+    (resumed.as_str() == stored_thread_id).then_some(resumed)
 }
 
 /// Executes one finite Claude turn over `claude -p --output-format stream-json`.

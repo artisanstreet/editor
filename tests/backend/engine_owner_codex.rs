@@ -15,7 +15,7 @@ use artisan_domain::{
     ApprovalMode, CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier,
     EngineAgentId, EngineId, EngineModelId, EnginePermissionPolicy, EngineProfileId,
     FilesystemAccess, NetworkAccess, ObservationId, ObservationSequence, PermissionId, RootPath,
-    RunId, ThreadId, WebSearchAccess,
+    RunId, RunUsageBasis, ThreadId, UnixMillis, WebSearchAccess,
 };
 use artisan_transport::CancelHandle;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -23,13 +23,18 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::codex::{
-    CODEX_MAX_FRAME_BYTES, CodexEvent, CodexPendingTracker, CodexSettings, CodexTurnState,
-    answer_approval, answer_questions, apply_event, classify_exit, has_stalled, initialize_params,
-    interrupt_live_turn, parse_frame, request_line, steer_live_turn, terminal_observation,
-    write_line,
+    CODEX_MAX_FRAME_BYTES, CodexContinuationDecision, CodexContinuationGateInput, CodexEvent,
+    CodexPendingTracker, CodexQuotaWindowKind, CodexSettings, CodexTurnState,
+    CodexUsageAttribution, CodexUsageContext, CodexUsageScope, answer_approval, answer_questions,
+    apply_event, check_codex_native_continuation, clamp_codex_percent_used,
+    classify_codex_quota_window_kind, classify_exit, codex_account_read_line,
+    codex_cli_meets_minimum, codex_rate_limits_read_line, codex_requires_group_termination,
+    codex_reset_at_iso, codex_usage_report, has_stalled, initialize_params, interrupt_live_turn,
+    map_codex_rate_limit_windows, parse_frame, parse_thread_token_usage, request_line,
+    steer_live_turn, terminal_observation, thread_resume_params, write_line,
 };
 use super::observation::{EngineObservation, TerminalState};
-use super::operation::{codex_thread_id, is_codex_result_for};
+use super::operation::{codex_resumed_thread_id, codex_thread_id, is_codex_result_for};
 use crate::native_run_dispatch::{binding_bytes_vec, binding_matches_bytes};
 
 // ---------------------------------------------------------------------------
@@ -257,7 +262,7 @@ async fn approval_deny_then_allow_resolves_without_side_effect() {
         .expect("delta decodes");
         let (sender, mut receiver) = mpsc::channel(8);
         let mut active = None;
-        let terminal = apply_event(delta, &run, &mut tracker, &mut active, &sender, 2).await;
+        let terminal = apply_event(delta, &run, &mut tracker, &mut active, &sender, 2, None).await;
         assert_eq!(terminal, None);
         let EngineObservation::TextDelta(chunk) = receiver.try_recv().expect("delta observed")
         else {
@@ -333,7 +338,7 @@ async fn subagent_frames_never_adopt_the_root_turn() {
     .expect("subagent decodes");
     let (sender, mut receiver) = mpsc::channel(8);
     let mut active = None;
-    let terminal = apply_event(event, &run, &mut tracker, &mut active, &sender, 1).await;
+    let terminal = apply_event(event, &run, &mut tracker, &mut active, &sender, 1, None).await;
     assert_eq!(terminal, None);
     assert!(receiver.try_recv().is_err(), "no root observation");
     assert_eq!(tracker.subagent_count(), 1);
@@ -591,7 +596,7 @@ async fn run_fixture_turn(
                     match parse_frame(&trimmed, sequence) {
                         Ok(event) => {
                             if let Some(state) = apply_event(
-                                event, &run, &mut tracker, &mut active, &sender, sequence,
+                                event, &run, &mut tracker, &mut active, &sender, sequence, None,
                             )
                             .await
                             {
@@ -958,4 +963,487 @@ async fn continuation_decodes_old_and_new_binding_rows() {
         panic!("old 3-key binding row should stay usable");
     };
     assert_eq!(old.session_id.as_str(), "session-old");
+}
+
+// ---------------------------------------------------------------------------
+// X3: continuation gate matrix (same engine, explicit model, CLI >= 0.145.0)
+// ---------------------------------------------------------------------------
+
+fn gate_decision(
+    cli_version: &str,
+    target_model: Option<&str>,
+    advertised_models: Option<&[&str]>,
+    same_engine: bool,
+) -> CodexContinuationDecision {
+    check_codex_native_continuation(&CodexContinuationGateInput {
+        cli_version,
+        target_model,
+        advertised_models,
+        same_engine,
+    })
+}
+
+#[test]
+fn codex_continuation_gate_matrix() {
+    assert_eq!(
+        gate_decision("0.145.0", Some("codex-model"), None, true),
+        CodexContinuationDecision::Compatible
+    );
+    assert_eq!(
+        gate_decision("0.146.2", Some("codex-model"), None, true),
+        CodexContinuationDecision::Compatible
+    );
+    assert_eq!(
+        gate_decision(
+            "0.145.0",
+            Some("codex-model"),
+            Some(&["codex-model", "other-model"]),
+            true
+        ),
+        CodexContinuationDecision::Compatible
+    );
+    // Explicit target model is required before resume.
+    assert!(matches!(
+        gate_decision("0.145.0", None, None, true),
+        CodexContinuationDecision::Incompatible { .. }
+    ));
+    assert!(matches!(
+        gate_decision("0.145.0", Some(""), None, true),
+        CodexContinuationDecision::Incompatible { .. }
+    ));
+    // The continuation floor is newer than the transport floor.
+    for old in ["0.142.5", "0.144.9", "not a version", ""] {
+        assert!(
+            matches!(
+                gate_decision(old, Some("codex-model"), None, true),
+                CodexContinuationDecision::Incompatible { .. }
+            ),
+            "CLI {old} must not authorize continuation"
+        );
+    }
+    // Cross-engine resume never proceeds, even with a fresh CLI and model.
+    assert!(matches!(
+        gate_decision("0.145.0", Some("codex-model"), None, false),
+        CodexContinuationDecision::Incompatible { .. }
+    ));
+    // Advertisement is enforced only when an inventory is supplied.
+    assert!(matches!(
+        gate_decision("0.145.0", Some("codex-model"), Some(&["other-model"]), true),
+        CodexContinuationDecision::Incompatible { .. }
+    ));
+}
+
+#[test]
+fn codex_cli_version_floor_parses_embedded_triples() {
+    assert!(codex_cli_meets_minimum("codex-cli 0.145.0", "0.145.0"));
+    assert!(codex_cli_meets_minimum("0.145.0-alpha", "0.145.0"));
+    assert!(codex_cli_meets_minimum("0.146.0", "0.145.0"));
+    assert!(!codex_cli_meets_minimum("codex-cli 0.144.9", "0.145.0"));
+    assert!(!codex_cli_meets_minimum("no version here", "0.145.0"));
+    assert!(!codex_cli_meets_minimum("", "0.145.0"));
+}
+
+// ---------------------------------------------------------------------------
+// X3: resume reopens the same thread id over start options
+// ---------------------------------------------------------------------------
+
+#[test]
+fn codex_resume_reopens_the_same_thread_id() {
+    let line = r#"{"id":2,"result":{"thread":{"id":"thread-fixture-1"}}}"#;
+    assert_eq!(
+        codex_resumed_thread_id(line, 2, "thread-fixture-1").as_deref(),
+        Some("thread-fixture-1")
+    );
+    // A foreign thread is never adopted.
+    assert_eq!(codex_resumed_thread_id(line, 2, "thread-other"), None);
+    // Id mismatch fails closed.
+    assert_eq!(codex_resumed_thread_id(line, 3, "thread-fixture-1"), None);
+
+    let settings = CodexSettings::from_selection(&codex_selection()).expect("settings valid");
+    let root_path = std::env::temp_dir().join("codex-fixture-resume");
+    let root = RootPath::parse(root_path.to_str().expect("temp path utf8")).expect("root");
+    let params = thread_resume_params(&settings, &root, "thread-fixture-1").expect("resume params");
+    assert_eq!(params["threadId"], "thread-fixture-1");
+    assert_eq!(params["approvalPolicy"], "on-request");
+    assert_eq!(params["sandbox"], "workspace-write");
+    assert!(thread_resume_params(&settings, &root, "").is_none());
+    assert!(thread_resume_params(&settings, &root, &"t".repeat(257)).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// X3: token-usage basis rules (cumulative, gauge never additive)
+// ---------------------------------------------------------------------------
+
+fn token_usage_params(payload: &str) -> serde_json::Value {
+    serde_json::from_str(payload).expect("usage params json")
+}
+
+#[test]
+fn token_usage_frames_decode_to_a_cumulative_sample() {
+    let event = parse_frame(
+        r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"t-1","turnId":"turn-1","tokenUsage":{"total":{"inputTokens":40,"outputTokens":9,"cachedInputTokens":12},"last":{"totalTokens":41},"modelContextWindow":200000}}}"#,
+        1,
+    )
+    .expect("usage decodes");
+    let CodexEvent::TokenUsage { turn_id, sample } = event else {
+        panic!("expected token usage");
+    };
+    assert_eq!(turn_id, "turn-1");
+    assert_eq!(sample.input, Some(40));
+    assert_eq!(sample.output, Some(9));
+    assert_eq!(sample.cached_input, Some(12));
+    assert_eq!(sample.context, Some(41));
+    assert_eq!(sample.context_window, Some(200000));
+
+    // An empty measurement stays observable without a report.
+    let empty = parse_frame(
+        r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"t-1","turnId":"turn-1","tokenUsage":{}}}"#,
+        2,
+    )
+    .expect("empty usage decodes");
+    assert!(matches!(empty, CodexEvent::UnknownMethod));
+
+    // Non-u64 numerics fail closed to absent instead of poisoning the turn.
+    let negative = parse_frame(
+        r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"t-1","turnId":"turn-1","tokenUsage":{"total":{"inputTokens":-1}}}}"#,
+        3,
+    )
+    .expect("negative usage decodes");
+    assert!(matches!(negative, CodexEvent::UnknownMethod));
+
+    // Missing turn scope fails closed.
+    let unscoped = parse_frame(
+        r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"t-1","tokenUsage":{"total":{"inputTokens":1}}}}"#,
+        4,
+    )
+    .expect("unscoped usage decodes");
+    assert!(matches!(unscoped, CodexEvent::UnknownMethod));
+}
+
+#[test]
+fn codex_usage_report_is_cumulative_with_a_replacing_gauge() {
+    let run = run_id();
+    let thread = ThreadId::parse("thread-usage-1").expect("thread id");
+    let model = EngineModelId::parse("model-usage-1").expect("model id");
+    let context = CodexUsageContext {
+        run_id: &run,
+        thread_id: &thread,
+        provider_session_id: "thread-fixture-1",
+        model_id: &model,
+        observed_at: UnixMillis::from_millis(7),
+    };
+    let params = token_usage_params(
+        r#"{"threadId":"t-1","turnId":"turn-1","tokenUsage":{"total":{"inputTokens":40,"outputTokens":9,"cachedInputTokens":12},"last":{"totalTokens":41},"modelContextWindow":200000}}"#,
+    );
+    let sample = parse_thread_token_usage(&params).expect("sample");
+    let report =
+        codex_usage_report(&context, Some("turn-1".to_owned()), 3, &sample).expect("report builds");
+    assert_eq!(report.basis(), RunUsageBasis::Cumulative);
+    assert_eq!(report.provider_session_id(), "thread-fixture-1");
+    assert_eq!(report.provider_turn_id(), Some("turn-1"));
+    assert_eq!(report.source_sequence(), 3);
+    assert_eq!(report.input_tokens(), Some(40));
+    assert_eq!(report.output_tokens(), Some(9));
+    assert_eq!(report.cached_input_tokens(), Some(12));
+    // The window gauge is the last request only, never the running total.
+    assert_eq!(report.context_tokens(), Some(41));
+    assert_eq!(report.context_window_tokens(), Some(200000));
+
+    // Absent gauge stays absent rather than becoming a wrong zero.
+    let no_gauge = token_usage_params(
+        r#"{"threadId":"t-1","turnId":"turn-1","tokenUsage":{"total":{"inputTokens":40}}}"#,
+    );
+    let sample = parse_thread_token_usage(&no_gauge).expect("partial sample");
+    let report = codex_usage_report(&context, None, 4, &sample).expect("partial report");
+    assert_eq!(report.context_tokens(), None);
+    assert_eq!(report.provider_turn_id(), None);
+
+    // Zero is preserved and distinct from absent.
+    let zero = token_usage_params(
+        r#"{"threadId":"t-1","turnId":"turn-1","tokenUsage":{"total":{"inputTokens":0,"outputTokens":0}}}"#,
+    );
+    let sample = parse_thread_token_usage(&zero).expect("zero sample");
+    let report = codex_usage_report(&context, None, 5, &sample).expect("zero report");
+    assert_eq!(report.input_tokens(), Some(0));
+    assert_eq!(report.output_tokens(), Some(0));
+
+    // Empty measurements are never reports.
+    assert!(parse_thread_token_usage(&token_usage_params(r#"{"tokenUsage":{}}"#)).is_none());
+}
+
+#[tokio::test]
+async fn token_usage_projects_a_usage_observation_without_blocking_the_turn() {
+    let event = parse_frame(
+        r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture-1","turnId":"turn-9","tokenUsage":{"total":{"inputTokens":40,"outputTokens":9},"last":{"totalTokens":41}}}}"#,
+        9,
+    )
+    .expect("usage decodes");
+    let run = run_id();
+    let attribution = CodexUsageAttribution {
+        thread_id: ThreadId::parse("thread-usage-1").expect("thread id"),
+        model_id: EngineModelId::parse("model-usage-1").expect("model id"),
+    };
+    let scope = CodexUsageScope {
+        thread_id: &attribution.thread_id,
+        model_id: &attribution.model_id,
+        provider_session_id: "thread-fixture-1",
+    };
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut tracker = CodexPendingTracker::new();
+    let mut active = None;
+    let terminal = apply_event(
+        event,
+        &run,
+        &mut tracker,
+        &mut active,
+        &sender,
+        9,
+        Some(&scope),
+    )
+    .await;
+    assert_eq!(terminal, None, "usage never settles the turn");
+    let EngineObservation::Usage(observation) = receiver.try_recv().expect("usage observed") else {
+        panic!("expected a usage observation");
+    };
+    assert_eq!(observation.report().basis(), RunUsageBasis::Cumulative);
+    assert_eq!(observation.report().context_tokens(), Some(41));
+    assert_eq!(observation.report().source_sequence(), 9);
+
+    // Without attribution the same frame is a diagnostic: no observation,
+    // no terminal, and the turn continues.
+    let event = parse_frame(
+        r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture-1","turnId":"turn-9","tokenUsage":{"total":{"inputTokens":40}}}}"#,
+        10,
+    )
+    .expect("usage decodes");
+    let (sender, mut receiver) = mpsc::channel(8);
+    let terminal = apply_event(event, &run, &mut tracker, &mut active, &sender, 10, None).await;
+    assert_eq!(terminal, None);
+    assert!(receiver.try_recv().is_err(), "no usage without scope");
+}
+
+// ---------------------------------------------------------------------------
+// X3: rate-limit bucket mapping (clamp, kinds, resets) plus request lines
+// ---------------------------------------------------------------------------
+
+#[test]
+fn codex_rate_limit_buckets_map_with_clamp_and_kinds() {
+    let result: serde_json::Value = serde_json::from_str(
+        r#"{
+            "rateLimitsByLimitId": {
+                "codex": {"limitId":"codex","limitName":null,"primary":{"usedPercent":120,"resetsAt":0,"windowDurationMins":300},"secondary":null},
+                "gpt-5": {"limitId":"gpt-5","limitName":"GPT-5","primary":{"usedPercent":-5,"resetsAt":null,"windowDurationMins":10080},"secondary":{"usedPercent":50,"windowDurationMins":43200}}
+            }
+        }"#,
+    )
+    .expect("rate limits json");
+    let windows = map_codex_rate_limit_windows(&result);
+    assert_eq!(windows.len(), 3);
+
+    assert_eq!(windows[0].id, "codex:primary");
+    assert_eq!(windows[0].kind, CodexQuotaWindowKind::Session);
+    assert!(
+        (windows[0].percent_used - 100.0).abs() < 1e-9,
+        "over-full gauge clamps to 100"
+    );
+    assert_eq!(
+        windows[0].resets_at.as_deref(),
+        Some("1970-01-01T00:00:00Z")
+    );
+    assert_eq!(windows[0].window_minutes, Some(300));
+    assert_eq!(windows[0].scope, "unknown");
+
+    assert_eq!(windows[1].id, "gpt-5:primary");
+    assert_eq!(windows[1].kind, CodexQuotaWindowKind::Weekly);
+    assert!(
+        (windows[1].percent_used - 0.0).abs() < 1e-9,
+        "negative gauge clamps to 0"
+    );
+    assert_eq!(windows[1].resets_at, None);
+    assert_eq!(windows[1].scope, "model");
+
+    assert_eq!(windows[2].id, "gpt-5:secondary");
+    assert_eq!(windows[2].kind, CodexQuotaWindowKind::Monthly);
+    assert!(
+        (windows[2].percent_used - 50.0).abs() < 1e-9,
+        "in-range gauge passes through"
+    );
+    assert_eq!(windows[2].scope, "model");
+
+    // Unknown kinds are never guessed, and the single-snapshot fallback
+    // keeps the codex bucket identity.
+    assert_eq!(
+        classify_codex_quota_window_kind(None),
+        CodexQuotaWindowKind::Unknown
+    );
+    assert_eq!(
+        classify_codex_quota_window_kind(Some(999)),
+        CodexQuotaWindowKind::Unknown
+    );
+    assert_eq!(
+        classify_codex_quota_window_kind(Some(300)),
+        CodexQuotaWindowKind::Session
+    );
+    assert_eq!(
+        classify_codex_quota_window_kind(Some(10_080)),
+        CodexQuotaWindowKind::Weekly
+    );
+    assert_eq!(
+        classify_codex_quota_window_kind(Some(43_200)),
+        CodexQuotaWindowKind::Monthly
+    );
+    assert!(
+        clamp_codex_percent_used(None).abs() < 1e-9,
+        "absent gauge becomes 0"
+    );
+    assert!(
+        (clamp_codex_percent_used(Some(33.5)) - 33.5).abs() < 1e-9,
+        "in-range gauge passes through"
+    );
+
+    let single: serde_json::Value = serde_json::from_str(
+        r#"{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300}}}"#,
+    )
+    .expect("single snapshot json");
+    let windows = map_codex_rate_limit_windows(&single);
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].id, "codex:primary");
+
+    let malformed: serde_json::Value =
+        serde_json::from_str(r#"{"rateLimitsByLimitId":{"broken":42}}"#).expect("malformed json");
+    assert!(map_codex_rate_limit_windows(&malformed).is_empty());
+
+    assert_eq!(codex_reset_at_iso(0), "1970-01-01T00:00:00Z");
+    assert!(codex_account_read_line(7).contains("\"method\":\"account/read\""));
+    assert!(codex_rate_limits_read_line(8).contains("\"method\":\"account/rateLimits/read\""));
+}
+
+// ---------------------------------------------------------------------------
+// X3: teardown kills the whole group; quarantine stays on unobserved reaps
+// ---------------------------------------------------------------------------
+
+#[test]
+fn codex_teardown_requires_group_termination() {
+    assert!(
+        codex_requires_group_termination(),
+        "Windows teardown must kill the whole Job Object so no codex grandchild \
+         holding a pipe is orphaned; unobserved reaps quarantine through \
+         cleanup_after_abort and finish_turn_result"
+    );
+}
+
+#[tokio::test]
+async fn fixture_kill_reports_interruption_with_durable_prefix() {
+    let responses = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"prefix-","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+    );
+    // Pipe-holding grandchild: the leader is killed below while this holder
+    // still inherits stdout, so EOF (and the interruption) must arrive
+    // bounded without an orphan wedging the pump.
+    #[cfg(windows)]
+    let tail = "ping -n 4 127.0.0.1 >nul";
+    #[cfg(not(windows))]
+    let tail = "sleep 3";
+    let script = FixtureScript::new(&responses, tail);
+    let mut child = script.spawn();
+    let stdout = child.stdout.take().expect("fixture stdout");
+    drop(child.stdin.take());
+    let mut reader = BufReader::new(stdout);
+
+    let run = run_id();
+    let (sender, mut receiver) = mpsc::channel(64);
+    let mut tracker = CodexPendingTracker::new();
+    let mut active: Option<String> = None;
+    let mut sequence: u64 = 0;
+    let mut line = String::new();
+    let terminal = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break Some(TerminalState::Interrupted),
+                Ok(_) => {
+                    sequence += 1;
+                    // Kill the leader once the durable prefix has landed.
+                    if sequence == 3 {
+                        let _ = child.kill().await;
+                    }
+                    let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                    match parse_frame(&trimmed, sequence) {
+                        Ok(event) => {
+                            if let Some(state) = apply_event(
+                                event,
+                                &run,
+                                &mut tracker,
+                                &mut active,
+                                &sender,
+                                sequence,
+                                None,
+                            )
+                            .await
+                            {
+                                break Some(state);
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => break None,
+            }
+        }
+    })
+    .await
+    .expect("kill fixture finishes bounded");
+    let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    assert_eq!(terminal, Some(TerminalState::Interrupted));
+    let mut deltas = Vec::new();
+    while let Ok(observation) = receiver.try_recv() {
+        if let EngineObservation::TextDelta(delta) = observation {
+            deltas.push(delta.delta().to_owned());
+        }
+    }
+    assert_eq!(deltas.join(""), "prefix-");
+}
+
+#[tokio::test]
+async fn fixture_restart_after_kill_replays_prefix_on_the_same_thread() {
+    let first = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"durable-","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+    );
+    let interrupted = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&first, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("first attempt finishes");
+    assert_eq!(interrupted.terminal, Some(TerminalState::Interrupted));
+    let durable_prefix = joined(&interrupted);
+    assert_eq!(durable_prefix, "durable-");
+
+    // The restart resumes provider-owned state: the same thread id reopens
+    // through thread/resume instead of duplicating provider effects with a
+    // second thread.
+    let resume_line = r#"{"id":2,"result":{"thread":{"id":"thread-fixture-1"}}}"#;
+    assert_eq!(
+        codex_resumed_thread_id(resume_line, 2, "thread-fixture-1").as_deref(),
+        Some("thread-fixture-1")
+    );
+
+    let second = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"replayed","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+        r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+    );
+    let completed = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&second, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("restart finishes");
+    assert_eq!(completed.terminal, Some(TerminalState::Completed));
+    assert_eq!(
+        format!("{durable_prefix}{}", joined(&completed)),
+        "durable-replayed"
+    );
 }
