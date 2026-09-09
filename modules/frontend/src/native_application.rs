@@ -69,6 +69,10 @@ use crate::native_model_selector::{
     HoverRect, NativeModelSelector, NativeModelSelectorStatus, SlidingHoverState,
     render_picker_hover_pill,
 };
+use crate::native_profile_usage::{
+    NativeProfileUsageState, NativeUsageAuthentication, NativeUsageEntry, NativeUsageWindow,
+    checked_label, group_usage_windows, reset_duration,
+};
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::SettingsScreen;
 use crate::native_transport::{
@@ -258,6 +262,7 @@ pub struct NativeApplication {
     profile_picture: Option<std::path::PathBuf>,
     profile_name: Option<String>,
     profile_hostname: Option<String>,
+    profile_usage: NativeProfileUsageState,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
@@ -421,6 +426,13 @@ impl NativeApplication {
         let command_menu_observation = cx.observe(&command_menu, |application, menu, cx| {
             application.route_command_action(&menu, cx);
         });
+        let profile_hostname = std::env::var("COMPUTERNAME")
+            .ok()
+            .filter(|name| !name.is_empty());
+        let profile_name = std::env::var("USERNAME")
+            .ok()
+            .filter(|name| !name.is_empty())
+            .or_else(|| profile_hostname.clone());
         let mut application = Self {
             theme: ArtisanTheme::for_mode(ThemeMode::Dark),
             desktop_theme: DesktopTheme::neutral_dark(),
@@ -444,17 +456,14 @@ impl NativeApplication {
             _composer_observation: composer_observation,
             profile_menu: DropdownMenuState::new([
                 DropdownMenuEntry::item(DropdownMenuItem::new("settings", "Settings")),
-                DropdownMenuEntry::item(DropdownMenuItem::new("add-project", "Add project")),
+                DropdownMenuEntry::item(DropdownMenuItem::new("usage", "Usage")),
             ]),
             profile_focus: cx.focus_handle(),
             profile_origin: Rc::new(Cell::new(Bounds::default())),
             profile_picture: None,
-            profile_name: std::env::var("USERNAME")
-                .ok()
-                .filter(|name| !name.is_empty()),
-            profile_hostname: std::env::var("COMPUTERNAME")
-                .ok()
-                .filter(|name| !name.is_empty()),
+            profile_name,
+            profile_hostname,
+            profile_usage: NativeProfileUsageState::default(),
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
@@ -1128,6 +1137,13 @@ impl NativeApplication {
     fn activate_profile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for action in self.profile_menu.take_actions() {
             match action.item_id().as_ref() {
+                "usage" => {
+                    // The incoming native usage adapter owns refresh and
+                    // provider data. The action only keeps this already
+                    // mounted usage section visible; it never invents a
+                    // successful reading locally.
+                    self.profile_menu.set_open(true);
+                }
                 "settings" => self.navigate(
                     NativeRoute::Settings {
                         section: SettingsRoute::Models,
@@ -1135,7 +1151,6 @@ impl NativeApplication {
                     },
                     cx,
                 ),
-                "add-project" => self.activate_add_project(cx),
                 _ => {}
             }
         }
@@ -1143,33 +1158,74 @@ impl NativeApplication {
         cx.notify();
     }
 
+    fn desktop_profile_usage(&self, theme: DesktopTheme) -> Div {
+        let mut section = div()
+            .id(crate::native_profile_usage::PROFILE_USAGE_SELECTOR)
+            .debug_selector(|| crate::native_profile_usage::PROFILE_USAGE_SELECTOR.to_owned())
+            .flex()
+            .flex_col()
+            .px(px(8.0))
+            .py(px(6.0));
+
+        if self.profile_usage.entries.is_empty() {
+            return section
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.foreground)
+                        .child("Usage"),
+                )
+                .child(
+                    desktop_muted(theme, "Waiting for provider usage data.").text_size(px(11.0)),
+                );
+        }
+
+        let now_ms = profile_usage_now_ms();
+        for (index, entry) in self.profile_usage.entries.iter().enumerate() {
+            if index > 0 {
+                section = section.child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
+            }
+            section = section.child(desktop_profile_usage_entry(
+                entry,
+                &self.profile_usage,
+                theme,
+                now_ms,
+            ));
+        }
+        section
+    }
+
     fn desktop_profile(&self, cx: &Context<Self>) -> Div {
         let theme = self.desktop_theme;
         let profile_feedback = self.theme.colors.foreground.with_alpha(0.08).to_paint();
         let origin = self.profile_origin.clone();
-        let avatar_theme = self.theme;
-        let name = self.profile_name.clone();
-        let hostname = self.profile_hostname.clone();
-        let fallback = move || {
-            crate::shell::profile_avatar(
-                &avatar_theme,
-                crate::shell::RailIdentity::new(name.as_deref(), hostname.as_deref()),
-            )
-            .rounded(px(8.0))
-            .overflow_hidden()
-            .into_any_element()
-        };
-        let avatar = if let Some(path) = self.profile_picture.clone() {
-            gpui::img(path)
-                .size(px(32.0))
+        let render_avatar = || {
+            let avatar_theme = self.theme;
+            let name = self.profile_name.clone();
+            let hostname = self.profile_hostname.clone();
+            let fallback = move || {
+                crate::shell::profile_avatar(
+                    &avatar_theme,
+                    crate::shell::RailIdentity::new(name.as_deref(), hostname.as_deref()),
+                )
                 .rounded(px(8.0))
-                .object_fit(gpui::ObjectFit::Cover)
-                .with_fallback(fallback.clone())
-                .with_loading(fallback)
+                .overflow_hidden()
                 .into_any_element()
-        } else {
-            fallback()
+            };
+            if let Some(path) = self.profile_picture.clone() {
+                gpui::img(path)
+                    .size(px(32.0))
+                    .rounded(px(8.0))
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .with_fallback(fallback.clone())
+                    .with_loading(fallback)
+                    .into_any_element()
+            } else {
+                fallback()
+            }
         };
+        let avatar = render_avatar();
         let trigger = div()
             .id("artisan-desktop-profile-trigger")
             .debug_selector(|| "artisan-desktop-profile-trigger".to_string())
@@ -1218,12 +1274,10 @@ impl NativeApplication {
                             .line_height(px(16.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
-                            .child(
-                                self.profile_name.clone().map_or_else(
-                                    || "User".into(),
-                                    |name| capitalize_label(&name),
-                                ),
-                            ),
+                            .child(self.profile_name.clone().map_or_else(
+                                || "User".into(),
+                                |name| capitalize_label(&name),
+                            )),
                     )
                     .child(
                         div()
@@ -1332,31 +1386,62 @@ impl NativeApplication {
                 .child(
                     div()
                         .px(px(10.0))
-                        .py(px(10.0))
+                        .py(px(8.0))
                         .flex()
-                        .flex_col()
-                        .gap(px(4.0))
+                        .items_center()
+                        .gap(px(8.0))
                         .child(
                             div()
-                                .text_size(px(13.0))
-                                .text_color(theme.foreground)
-                                .child(
-                                    self.profile_name.clone().map_or_else(
-                                        || "This computer".into(),
-                                        |name| capitalize_label(&name),
-                                    ),
-                                ),
+                                .size(px(32.0))
+                                .flex_shrink_0()
+                                .rounded(px(8.0))
+                                .overflow_hidden()
+                                .child(render_avatar()),
                         )
-                        .children(
-                            self.profile_hostname
-                                .clone()
-                                .map(|hostname| desktop_muted(theme, hostname)),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(0.0))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(14.0))
+                                        .line_height(px(16.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.foreground)
+                                        .child(self.profile_name.clone().map_or_else(
+                                            || "User".into(),
+                                            |name| capitalize_label(&name),
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(10.0))
+                                        .line_height(px(12.0))
+                                        .text_color(theme.secondary)
+                                        .child(
+                                            self.profile_hostname
+                                                .clone()
+                                                .unwrap_or_else(|| "This computer".to_owned()),
+                                        ),
+                                ),
                         ),
+                )
+                .child(
+                    div()
+                        .min_h(px(0.0))
+                        .max_h(px(280.0))
+                        .overflow_y_scroll()
+                        .child(self.desktop_profile_usage(theme)),
                 )
                 .child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
             for (index, (label, icon)) in [
                 ("Settings", AssetId::TABLER_SETTINGS),
-                ("Add project", AssetId::TABLER_FOLDER_PLUS),
+                ("Usage", AssetId::TABLER_LIST_DETAILS),
             ]
             .into_iter()
             .enumerate()
@@ -5349,6 +5434,183 @@ fn certified_profiles_detail(registry_view: &RegistryView) -> String {
     }
 }
 
+fn profile_usage_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn desktop_profile_usage_entry(
+    entry: &NativeUsageEntry,
+    state: &NativeProfileUsageState,
+    theme: DesktopTheme,
+    now_ms: i64,
+) -> Div {
+    let refreshing = state
+        .refreshing_engine_ids
+        .iter()
+        .any(|engine_id| engine_id == &entry.engine_id);
+    let display_name = entry
+        .report
+        .as_ref()
+        .map_or(entry.display_name.as_str(), |report| {
+            report.display_name.as_str()
+        });
+    let checked = checked_label(entry.fetched_at_ms, now_ms);
+    let mut root = div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .px(px(2.0))
+        .py(px(3.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .min_w(px(0.0))
+                        .child(desktop_nav_glyph(AssetId::TABLER_WORLD, theme))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .child(display_name.to_owned()),
+                        ),
+                )
+                .child(
+                    desktop_muted(
+                        theme,
+                        if refreshing {
+                            "Refreshing…".to_owned()
+                        } else {
+                            checked.unwrap_or_else(|| "Not checked".to_owned())
+                        },
+                    )
+                    .text_size(px(10.0)),
+                ),
+        );
+
+    match entry.report.as_ref() {
+        Some(report) if report.authentication == NativeUsageAuthentication::Authenticated => {
+            let groups = group_usage_windows(&report.windows);
+            if groups.is_empty() {
+                root = root.child(
+                    desktop_muted(theme, "No usage windows were reported.").text_size(px(11.0)),
+                );
+            } else {
+                for group in groups {
+                    let mut group_view = div().flex().flex_col().gap(px(4.0)).child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child(group.cadence.title()),
+                    );
+                    for window in &group.windows {
+                        group_view = group_view.child(desktop_profile_usage_window(window, theme));
+                    }
+                    if let Some(duration) = reset_duration(&group.windows, now_ms) {
+                        group_view = group_view.child(
+                            desktop_muted(
+                                theme,
+                                format!(
+                                    "Your {} limit resets in {duration}.",
+                                    group.cadence.title().to_lowercase()
+                                ),
+                            )
+                            .text_size(px(10.0)),
+                        );
+                    }
+                    root = root.child(group_view);
+                }
+            }
+        }
+        Some(report) if report.authentication == NativeUsageAuthentication::Unauthenticated => {
+            root = root.child(
+                desktop_muted(
+                    theme,
+                    report
+                        .failure
+                        .as_deref()
+                        .unwrap_or("This provider is not authenticated."),
+                )
+                .text_size(px(11.0)),
+            );
+        }
+        Some(report) => {
+            root = root.child(
+                desktop_muted(
+                    theme,
+                    report
+                        .failure
+                        .as_deref()
+                        .unwrap_or("Usage is unavailable right now."),
+                )
+                .text_size(px(11.0)),
+            );
+        }
+        None => {
+            root = root.child(
+                desktop_muted(
+                    theme,
+                    entry
+                        .failure
+                        .as_deref()
+                        .unwrap_or("Waiting for provider usage data."),
+                )
+                .text_size(px(11.0)),
+            );
+        }
+    }
+    root
+}
+
+fn desktop_profile_usage_window(window: &NativeUsageWindow, theme: DesktopTheme) -> Div {
+    let segments = usize::from(crate::usage_meter::USAGE_METER_SEGMENTS);
+    let lit_segments = (crate::usage_meter::usage_segment_fraction(window.percent_used)
+        * segments as f64)
+        .round() as usize;
+    let mut meter = div().flex().flex_1().min_w(px(0.0)).h(px(6.0)).gap(px(1.0));
+    for index in 0..segments {
+        meter = meter.child(
+            div()
+                .flex_1()
+                .h_full()
+                .rounded(px(1.0))
+                .bg(if index < lit_segments {
+                    theme.foreground
+                } else {
+                    theme.line
+                }),
+        );
+    }
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(
+            desktop_muted(theme, window.scope_label().to_owned())
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(11.0)),
+        )
+        .child(meter)
+        .child(
+            desktop_muted(theme, format!("{:.0}% used", window.percent_used)).text_size(px(10.0)),
+        )
+}
+
 /// Display a raw OS account or machine string with only its first letter
 /// capitalized, so `sander` paints as `Sander`. The stored value is left
 /// untouched so avatar seeds and identity matching stay stable.
@@ -6347,6 +6609,41 @@ mod tests {
                 }
             ));
         });
+    }
+
+    #[gpui::test]
+    fn profile_menu_usage_action_keeps_menu_open_and_never_invents_readings(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(application.profile_menu.is_open());
+            assert!(application.profile_usage.entries.is_empty());
+            let item_ids = application
+                .profile_menu
+                .entries()
+                .iter()
+                .filter_map(|entry| entry.as_item())
+                .map(|item| item.id.as_ref())
+                .collect::<Vec<_>>();
+            assert_eq!(item_ids, vec!["settings", "usage"]);
+        });
+        assert!(
+            cx.debug_bounds(crate::native_profile_usage::PROFILE_USAGE_SELECTOR)
+                .is_some()
+        );
+        cx.simulate_keystrokes("end enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!cx.update(|_, app| view.read(app).profile_menu.is_open()));
     }
 
     #[gpui::test]

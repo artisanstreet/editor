@@ -104,6 +104,7 @@ rust_library(
         "src/native_model_selector.rs",
         "src/composer_model_config.rs",
         "src/native_message_images.rs",
+        "src/native_profile_usage.rs",
         "src/native_composer_visuals.rs",
         "src/native_hover_rail_card.rs",
         "src/native_new_thread_surface.rs",
