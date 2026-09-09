@@ -15,6 +15,7 @@ members = [
     "modules/transport",
     "modules/ui",
     "scripts/capnp_codegen",
+    "scripts/native_dev",
 ]
 resolver = "3"
 

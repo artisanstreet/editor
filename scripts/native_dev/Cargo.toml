@@ -1,0 +1,49 @@
+[package]
+name = "artisan-native-dev"
+description = "One-command native development installation: stage Bazel-built Editor and Forge under .dist/dev and launch the Editor on its owned Forge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "native_dev"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dev"
+path = "src/main.rs"
+
+[dependencies]
+artisan-editor-cli = { path = "../../modules/cli" }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+artisan-editor-cli = { path = "../../modules/cli" }
+serde_json = "1"
+
+[lints]
+workspace = true
+
+[[test]]
+name = "dev_args"
+path = "../../tests/native_dev/dev_args.rs"
+
+[[test]]
+name = "dev_layout"
+path = "../../tests/native_dev/dev_layout.rs"
+
+[[test]]
+name = "dev_manifest"
+path = "../../tests/native_dev/dev_manifest.rs"
+
+[[test]]
+name = "dev_instance"
+path = "../../tests/native_dev/dev_instance.rs"
+
+[[test]]
+name = "dev_runfiles"
+path = "../../tests/native_dev/dev_runfiles.rs"

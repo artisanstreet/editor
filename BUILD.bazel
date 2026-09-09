@@ -8,6 +8,14 @@ exports_files([
     "Cargo.toml",
 ])
 
+# Native development launcher: `bazel run //:dev` builds the Editor and
+# Forge through the authoritative graph, stages them under `.dist/dev`, and
+# launches the staged Editor on its newly owned Forge.
+alias(
+    name = "dev",
+    actual = "//scripts/native_dev:dev",
+)
+
 rust_lint_config(
     name = "workspace_lints",
     clippy = {
@@ -45,6 +53,8 @@ rust_clippy(
         "//modules/ui:tinted_svg_unit_test",
         "//modules/ui:ui",
         "//scripts/capnp_codegen:capnpc_rust",
+        "//scripts/native_dev:dev",
+        "//scripts/native_dev:native_dev",
         "//tests/assets:assets_validation_test",
         "//tests/backend:agent_name_allocation_policy_test",
         "//tests/backend:agent_name_catalog_policy_test",
@@ -274,6 +284,11 @@ rust_clippy(
         "//tests/frontend:vcs_labels_test",
         "//tests/frontend:workspace_header_presentation_test",
         "//tests/frontend:workspace_tab_state_test",
+        "//tests/native_dev:dev_args_test",
+        "//tests/native_dev:dev_instance_test",
+        "//tests/native_dev:dev_layout_test",
+        "//tests/native_dev:dev_manifest_test",
+        "//tests/native_dev:dev_runfiles_test",
         "//packaging/portable:payload_manifest_generator",
         "//packaging/release:release_tool",
         "//packaging/release:release_tool_test",
@@ -362,6 +377,8 @@ rustfmt_test(
         "//modules/ui:command_unit_test",
         "//modules/ui:tinted_svg_unit_test",
         "//scripts/capnp_codegen:capnpc_rust",
+        "//scripts/native_dev:dev",
+        "//scripts/native_dev:native_dev",
         "//tests/assets:assets_validation_test",
         "//tests/backend:agent_name_allocation_policy_test",
         "//tests/backend:agent_name_catalog_policy_test",
@@ -591,6 +608,11 @@ rustfmt_test(
         "//tests/frontend:vcs_labels_test",
         "//tests/frontend:workspace_header_presentation_test",
         "//tests/frontend:workspace_tab_state_test",
+        "//tests/native_dev:dev_args_test",
+        "//tests/native_dev:dev_instance_test",
+        "//tests/native_dev:dev_layout_test",
+        "//tests/native_dev:dev_manifest_test",
+        "//tests/native_dev:dev_runfiles_test",
         "//packaging/portable:payload_manifest_generator",
         "//packaging/release:release_tool",
         "//packaging/release:release_tool_test",
