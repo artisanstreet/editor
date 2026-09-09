@@ -2307,9 +2307,13 @@ mod tests {
         } else {
             "/nonexistent/artisan-acp-test-agent"
         };
-        let error =
-            spawn_acp_child(OsStr::new(missing), &[], None).expect_err("missing executable");
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            matches!(
+                spawn_acp_child(OsStr::new(missing), &[], None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound
+            ),
+            "missing executable"
+        );
     }
 
     #[test]
@@ -2803,7 +2807,7 @@ mod tests {
         );
 
         let bracket = LaunchArgs {
-            model: Some("cursor[fast]").to_owned(),
+            model: Some("cursor[fast]".to_owned()),
             reasoning_effort: Some("high".to_owned()),
             ..launch_args()
         };
