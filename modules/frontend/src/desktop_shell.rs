@@ -9,7 +9,8 @@
 
 use artisan_assets::AssetId;
 use artisan_ui::asset_seam::asset_glyph;
-use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
+use artisan_ui::gradient::vertical_gradient;
+use artisan_ui::theme::{ArtisanTheme, DesktopTheme, SurfaceStep, ThemeMode};
 use gpui::prelude::{
     InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
 };
@@ -123,6 +124,12 @@ pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
 
 /// Compose the complete native desktop frame around application-owned
 /// surfaces.
+///
+/// The window carries one continuous top-to-bottom large-card face
+/// (`sectioned-panel.svelte:313/341` dark `from-surface-900 to-surface-925`,
+/// `theme.css:85-86`) painted once at this root. Titlebar, sidebar, and main
+/// wrappers stay transparent so the progression never restarts per pane;
+/// controls, composer, and popovers keep their own glass/material fills.
 #[must_use]
 pub fn desktop_shell(
     theme: DesktopTheme,
@@ -136,6 +143,11 @@ pub fn desktop_shell(
 ) -> Div {
     let style = DesktopShellStyle::resolve(collapsed, scale_factor);
     let legacy_theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    // Electron large content card, dark face: surface-900 (top) to
+    // surface-925 (bottom). `vertical_gradient` is 180 degrees (`to bottom`)
+    // with stops at 0.0/1.0 and Oklab interpolation, matching the Tailwind
+    // `bg-linear-to-b` default progression from the shared ramp.
+    let window_background = vertical_gradient(SurfaceStep::S900.oklch(), SurfaceStep::S925.oklch());
 
     let controls = div()
         .flex()
@@ -201,7 +213,6 @@ pub fn desktop_shell(
         .flex_shrink_0()
         .flex()
         .items_center()
-        .bg(theme.chrome)
         .border_b_1()
         .border_color(theme.line)
         .debug_selector(|| DESKTOP_TITLEBAR_SELECTOR.to_string())
@@ -219,7 +230,6 @@ pub fn desktop_shell(
                 .w(style.sidebar_width)
                 .h_full()
                 .flex_shrink_0()
-                .bg(theme.workspace)
                 .border_r_1()
                 .border_color(theme.line)
                 .debug_selector(|| DESKTOP_SIDEBAR_SELECTOR.to_string())
@@ -233,7 +243,6 @@ pub fn desktop_shell(
                 .min_h(px(0.0))
                 .flex()
                 .flex_col()
-                .bg(theme.workspace)
                 .debug_selector(|| DESKTOP_MAIN_SELECTOR.to_string())
                 .child(
                     div()
@@ -252,7 +261,7 @@ pub fn desktop_shell(
         .size_full()
         .flex()
         .flex_col()
-        .bg(theme.workspace)
+        .bg(window_background)
         .text_color(theme.foreground)
         .font_family(
             ArtisanTheme::for_mode(ThemeMode::Dark)
