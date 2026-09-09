@@ -153,7 +153,6 @@ const SIDEBAR_PROFILE_HOVER_ID: &str = "profile";
 fn sidebar_hover_probe(
     hover: Rc<RefCell<SlidingHoverState>>,
     surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
-    row_bounds: Rc<RefCell<HashMap<String, HoverRect>>>,
     id: &'static str,
 ) -> gpui::Canvas<()> {
     let measured_id = id.to_owned();
@@ -169,9 +168,6 @@ fn sidebar_hover_probe(
                 width: f32::from(bounds.size.width),
                 height: f32::from(bounds.size.height),
             };
-            // Recorded for every row on every paint, even while another row
-            // owns the pill, so pointer containment sees all rows.
-            row_bounds.borrow_mut().insert(measured_id.clone(), rect);
             if hover.borrow_mut().measure(&measured_id, rect) {
                 window.defer(cx, |window, _| window.refresh());
             }
@@ -451,10 +447,6 @@ pub struct NativeApplication {
     sidebar_navigation_focus: FocusHandle,
     sidebar_hover: Rc<RefCell<SlidingHoverState>>,
     sidebar_hover_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
-    /// Measured bounds of every sidebar row by hover id, refreshed on each
-    /// paint, so container pointer movement can tell rows apart from blank
-    /// gutter and spacer regions.
-    sidebar_row_bounds: Rc<RefCell<HashMap<String, HoverRect>>>,
     message_flight: Option<NativeMessageFlight>,
     message_retry: Option<NativeMessageRetry>,
     message_receipt: Option<QueueMessageReceipt>,
@@ -673,7 +665,6 @@ impl NativeApplication {
             sidebar_navigation_focus: cx.focus_handle(),
             sidebar_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             sidebar_hover_surface_bounds: Rc::new(RefCell::new(None)),
-            sidebar_row_bounds: Rc::new(RefCell::new(HashMap::new())),
             message_flight: None,
             message_retry: None,
             message_receipt: None,
@@ -1182,7 +1173,6 @@ impl NativeApplication {
 
         let sidebar_hover = Rc::clone(&self.sidebar_hover);
         let sidebar_hover_surface_bounds = Rc::clone(&self.sidebar_hover_surface_bounds);
-        let sidebar_row_bounds = Rc::clone(&self.sidebar_row_bounds);
         let surface_bounds = Rc::clone(&sidebar_hover_surface_bounds);
         let surface_probe = canvas(
             |_, _, _| {},
@@ -1227,13 +1217,16 @@ impl NativeApplication {
                     app.sidebar_hover
                         .borrow_mut()
                         .set_active(SIDEBAR_NEW_THREAD_HOVER_ID.to_owned());
-                    cx.notify();
+                } else {
+                    // Hide, don't clear: the retained rect keeps the next
+                    // row-to-row flight sliding instead of snapping.
+                    app.sidebar_hover.borrow_mut().hide();
                 }
+                cx.notify();
             }))
             .child(sidebar_hover_probe(
                 Rc::clone(&sidebar_hover),
                 Rc::clone(&sidebar_hover_surface_bounds),
-                Rc::clone(&sidebar_row_bounds),
                 SIDEBAR_NEW_THREAD_HOVER_ID,
             ))
             .child(desktop_nav_glyph(AssetId::TABLER_EDIT, nav_theme))
@@ -1269,13 +1262,14 @@ impl NativeApplication {
                     app.sidebar_hover
                         .borrow_mut()
                         .set_active(SIDEBAR_MARKETPLACE_HOVER_ID.to_owned());
-                    cx.notify();
+                } else {
+                    app.sidebar_hover.borrow_mut().hide();
                 }
+                cx.notify();
             }))
             .child(sidebar_hover_probe(
                 Rc::clone(&sidebar_hover),
                 Rc::clone(&sidebar_hover_surface_bounds),
-                Rc::clone(&sidebar_row_bounds),
                 SIDEBAR_MARKETPLACE_HOVER_ID,
             ))
             .child(desktop_nav_glyph(AssetId::TABLER_SHOPPING_BAG, nav_theme))
@@ -1287,9 +1281,10 @@ impl NativeApplication {
             );
         // One shared hover surface for the whole sidebar column: the same
         // sliding pill travels among New thread, Marketplace, and the
-        // profile footer, measured against these bounds. Pointer movement
-        // outside the measured rows hides the pill without resetting its
-        // geometry; leaving the column clears it as well.
+        // profile footer, measured against these bounds. Rows hide the pill
+        // on departure and the spacer hides it on entry, all retaining
+        // geometry so row-to-row keeps sliding; leaving the column clears
+        // it as well.
         let navigation = div()
             .id("artisan-workspace-navigation-hover-surface")
             .relative()
@@ -1305,29 +1300,6 @@ impl NativeApplication {
                     cx.notify();
                 }
             }))
-            .on_mouse_move(cx.listener(
-                move |app: &mut Self, event: &gpui::MouseMoveEvent, _, cx| {
-                    // Blank gutters and the spacer share no row: hide the
-                    // pill there instead of stranding it. Geometry is
-                    // retained, so sliding straight into another row keeps
-                    // animating from the last rect.
-                    let Some(surface) = *app.sidebar_hover_surface_bounds.borrow() else {
-                        return;
-                    };
-                    let x = f32::from(event.position.x - surface.left());
-                    let y = f32::from(event.position.y - surface.top());
-                    let over_row = app.sidebar_row_bounds.borrow().values().any(|rect| {
-                        x >= rect.left
-                            && x <= rect.left + rect.width
-                            && y >= rect.top
-                            && y <= rect.top + rect.height
-                    });
-                    if !over_row && app.sidebar_hover.borrow().visible() {
-                        app.sidebar_hover.borrow_mut().hide();
-                        cx.notify();
-                    }
-                },
-            ))
             .child(surface_probe)
             .child(render_picker_hover_pill(
                 self.theme,
@@ -1350,14 +1322,26 @@ impl NativeApplication {
                     .id("artisan-sidebar-spacer")
                     .flex_1()
                     .min_h(px(0.0))
-                    .debug_selector(|| "artisan-sidebar-spacer".to_owned()),
+                    .debug_selector(|| "artisan-sidebar-spacer".to_owned())
+                    .on_hover(cx.listener(|app: &mut Self, hovered: &bool, _, cx| {
+                        if *hovered {
+                            app.sidebar_hover.borrow_mut().hide();
+                            cx.notify();
+                        }
+                    })),
             )
             .child(
                 div()
                     .w_full()
                     .flex()
                     .flex_col()
-                    .child(div().h(px(1.0)).w_full().mx(px(-10.0)).bg(theme.line))
+                    .child(
+                        div()
+                            .h(px(1.0))
+                            .mx(px(-10.0))
+                            .bg(theme.line)
+                            .debug_selector(|| "artisan-sidebar-footer-divider".to_owned()),
+                    )
                     .child(self.desktop_profile(window, cx)),
             );
         div()
@@ -2423,13 +2407,14 @@ impl NativeApplication {
                     app.sidebar_hover
                         .borrow_mut()
                         .set_active(SIDEBAR_PROFILE_HOVER_ID.to_owned());
-                    cx.notify();
+                } else {
+                    app.sidebar_hover.borrow_mut().hide();
                 }
+                cx.notify();
             }))
             .child(sidebar_hover_probe(
                 Rc::clone(&self.sidebar_hover),
                 Rc::clone(&self.sidebar_hover_surface_bounds),
-                Rc::clone(&self.sidebar_row_bounds),
                 SIDEBAR_PROFILE_HOVER_ID,
             ))
             .child(
@@ -8177,6 +8162,17 @@ mod tests {
                 "row-to-row must slide, not jump"
             );
         });
+
+        // The footer seal spans the sidebar edges: exactly 10px past the
+        // trigger on each side, matching the sidebar padding it bleeds.
+        let divider = cx
+            .debug_bounds("artisan-sidebar-footer-divider")
+            .expect("footer divider");
+        assert_eq!(f32::from(divider.left()), f32::from(trigger.left()) - 10.0);
+        assert_eq!(
+            f32::from(divider.right()),
+            f32::from(trigger.right()) + 10.0
+        );
     }
 
     #[gpui::test]
