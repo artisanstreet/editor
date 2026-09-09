@@ -621,6 +621,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "artisan-native-dev"
+version = "0.0.0"
+dependencies = [
+ "artisan-editor-cli",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "artisan-native-engine"
 version = "0.0.0"
 dependencies = [
