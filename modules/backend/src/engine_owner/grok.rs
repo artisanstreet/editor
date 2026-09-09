@@ -34,6 +34,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use artisan_domain::{EngineProfileId, FilesystemAccess, GrokSelection};

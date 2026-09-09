@@ -2801,7 +2801,7 @@ async fn execute_grok_turn(
             () = shutdown.wait() => break Err(EngineOperationError::Shutdown),
             () = control.wait() => break Err(EngineOperationError::Cancelled),
             () = tokio::time::sleep_until(deadline) => break Err(EngineOperationError::Deadline),
-            result = &mut *authorize => {
+            result = &mut authorize => {
                 break result.map_err(|_| EngineOperationError::ProviderRequestFailed);
             }
             event = stderr_counter.pump(), if stderr_counter.state() == super::process::StderrState::Open => {
