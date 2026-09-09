@@ -1,7 +1,12 @@
 #![forbid(unsafe_code)]
 
+pub mod claude;
+pub mod codex;
+pub mod cursor;
 #[path = "install.rs"]
 mod engine_core;
+pub mod grok;
+pub mod hermes;
 #[path = "files.rs"]
 mod io;
 #[path = "profile.rs"]

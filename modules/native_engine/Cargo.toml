@@ -18,3 +18,55 @@ winapi-util.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "codex_discovery"
+path = "../../tests/native_engine/codex_discovery.rs"
+
+[[test]]
+name = "codex_probe"
+path = "../../tests/native_engine/codex_probe.rs"
+
+[[test]]
+name = "codex_session"
+path = "../../tests/native_engine/codex_session.rs"
+
+[[test]]
+name = "codex_version"
+path = "../../tests/native_engine/codex_version.rs"
+
+[[test]]
+name = "claude_discovery"
+path = "../../tests/native_engine/claude_discovery.rs"
+
+[[test]]
+name = "claude_probe"
+path = "../../tests/native_engine/claude_probe.rs"
+
+[[test]]
+name = "grok_discovery"
+path = "../../tests/native_engine/grok_discovery.rs"
+
+[[test]]
+name = "grok_probe"
+path = "../../tests/native_engine/grok_probe.rs"
+
+[[test]]
+name = "cursor_discovery"
+path = "../../tests/native_engine/cursor_discovery.rs"
+
+[[test]]
+name = "cursor_probe"
+path = "../../tests/native_engine/cursor_probe.rs"
+
+[[test]]
+name = "hermes_resolve"
+path = "../../tests/native_engine/hermes_resolve.rs"
+
+[[test]]
+name = "hermes_version"
+path = "../../tests/native_engine/hermes_version.rs"
+
+[[test]]
+name = "hermes_probe"
+path = "../../tests/native_engine/hermes_probe.rs"
