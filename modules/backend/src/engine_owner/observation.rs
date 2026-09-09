@@ -264,9 +264,7 @@ pub(crate) struct SubagentLifecycleRow {
 
 impl SubagentLifecycleRow {
     /// Wraps a validated domain lifecycle row for channel delivery.
-    ///
-    /// Test-only until the pump marker flip sends rows through the channel.
-    #[cfg(test)]
+    #[must_use]
     pub(crate) fn new(observation: SubagentObservation) -> Self {
         Self { observation }
     }
@@ -289,9 +287,7 @@ pub(crate) struct SubagentTranscriptRow {
 
 impl SubagentTranscriptRow {
     /// Wraps a validated domain transcript row for channel delivery.
-    ///
-    /// Test-only until the pump marker flip sends rows through the channel.
-    #[cfg(test)]
+    #[must_use]
     pub(crate) fn new(observation: SubagentTranscriptObservation) -> Self {
         Self { observation }
     }

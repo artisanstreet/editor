@@ -39,7 +39,9 @@ use super::http::{
 use super::interaction::{
     InteractionDeliveryError, InteractionTarget, TurnInteractionLedger, TurnInteractionOutcome,
 };
-use super::observation::{EngineObservation, TerminalState};
+use super::observation::{
+    EngineObservation, SubagentLifecycleRow, SubagentTranscriptRow, TerminalState,
+};
 use super::process::{
     ChildParts, CleanupObservation, LaunchRecipe, LifelineWriter, RetainedEngine, StderrCounter,
     cleanup_after_abort, eventual_wait_once, spawn_configured_engine, spawn_engine,
@@ -2319,16 +2321,13 @@ async fn execute_claude_turn(
             state,
             subagent_rows,
         } => {
-            // Handoff marker: subagent rows traversed the pump loop beside
-            // the text channel (drained per applied frame, emission-ordered).
-            // They cannot yet travel the owner observation channel, which
-            // carries only the S1a text/usage/terminal vocabulary, and the
-            // dispatcher has no arm for domain subagent rows; extending both
-            // is the follow-up that owns observation.rs plus
-            // native_run_dispatch.rs. Dropping here preserves today's exact
-            // delivery set: no row is re-encoded, delayed, or projected into
-            // the root transcript. Fixture coverage proves loop traversal.
-            drop(subagent_rows);
+            // Rows traversed the pump loop beside the text channel; forward
+            // them through the owner channel in emission order ahead of
+            // terminal settlement, exactly like text deltas flow. A closed
+            // sink or a non-subagent row ends forwarding without disturbing
+            // the turn result: only lifecycle and transcript rows ever
+            // accumulate in the pump buffer.
+            forward_subagent_rows(&observations, subagent_rows).await;
             drop(observations);
             finish_turn_result(
                 parts,
@@ -2342,7 +2341,7 @@ async fn execute_claude_turn(
             error,
             subagent_rows,
         } => {
-            drop(subagent_rows);
+            forward_subagent_rows(&observations, subagent_rows).await;
             finish_turn_result(parts, Err(error), respond, runtime.limits.close).await
         }
     }
@@ -2357,6 +2356,32 @@ enum ClaudePumpOutcome {
         error: EngineOperationError,
         subagent_rows: Vec<artisan_domain::Observation>,
     },
+}
+
+/// Forwards buffered subagent rows through the owner observation channel.
+///
+/// Wraps each domain row into its channel event in buffer order and sends it
+/// ahead of terminal settlement. A closed sink or an unexpected row kind
+/// ends forwarding without disturbing the turn result; the caller settles
+/// the turn exactly as it would have without rows.
+async fn forward_subagent_rows(
+    observations: &mpsc::Sender<EngineObservation>,
+    subagent_rows: Vec<artisan_domain::Observation>,
+) {
+    for row in subagent_rows {
+        let event = match row {
+            artisan_domain::Observation::Subagent(observation) => {
+                EngineObservation::Subagent(SubagentLifecycleRow::new(observation))
+            }
+            artisan_domain::Observation::SubagentTranscript(observation) => {
+                EngineObservation::SubagentTranscript(SubagentTranscriptRow::new(observation))
+            }
+            _ => break,
+        };
+        if observations.send(event).await.is_err() {
+            break;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
