@@ -531,16 +531,17 @@ impl JsonRpcSession {
         let line =
             serde_json::json!({"id": id, "method": method, "params": params}).to_string() + "\n";
         self.write_line(line.as_bytes())?;
-        let lines = self
-            .lines
-            .as_ref()
-            .ok_or(CallError::Transport(UsageReaderError::Closed))?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(CallError::Transport(UsageReaderError::Timeout));
             }
-            match lines.recv_timeout(remaining) {
+            let received = self
+                .lines
+                .as_ref()
+                .ok_or(CallError::Transport(UsageReaderError::Closed))?
+                .recv_timeout(remaining);
+            match received {
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(CallError::Transport(UsageReaderError::Timeout));
                 }

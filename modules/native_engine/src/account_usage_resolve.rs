@@ -290,7 +290,7 @@ mod tests {
         write_file(&first.join("codex.cmd"));
         let apps = root.join("Microsoft").join("WindowsApps");
         write_file(&apps.join("codex.exe"));
-        let input = windows_input("codex", &root, vec![first.clone(), apps, second]);
+        let input = windows_input("codex", &root, vec![first.clone(), apps, second.clone()]);
         let launch = resolve_cli_with(&input);
         assert_eq!(launch.program, PathBuf::from("cmd"));
         assert!(

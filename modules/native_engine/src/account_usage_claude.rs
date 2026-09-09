@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use artisan_domain::{EngineUsageWindow, EngineUsageWindowKind, clamp_percent_used, utc_ymd};
+use crate::CliLaunch;
 
 use super::account_usage::{
     ChildCustody, ProviderUsage, USAGE_TEARDOWN_GRACE, UsageReaderError, join_thread_bounded,
