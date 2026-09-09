@@ -939,10 +939,7 @@ async fn idle_driver_connection_serves_after_the_request_deadline() -> Result<()
         cancel.cancel();
     };
     let ((), result) = tokio::join!(client_work, drive);
-    let failure = match result {
-        Err(failure) => failure,
-        Ok(_) => panic!("cancel must end the drive"),
-    };
+    let failure = result.err().expect("cancel must end the drive");
     let (completed, source) = failure.into_parts();
     assert_eq!(completed, 1);
     assert!(
