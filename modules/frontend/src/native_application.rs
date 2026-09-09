@@ -1271,6 +1271,14 @@ impl NativeApplication {
         handle
     }
 
+    /// Source `bg-border/50` for dropdown separators: the shared border
+    /// token with its original alpha multiplied by one half rather than
+    /// overridden, so an already-translucent border stays proportional.
+    fn profile_separator_paint(&self) -> gpui::Paint {
+        let border = self.theme.colors.border;
+        border.with_alpha(border.a * 0.5).to_paint()
+    }
+
     fn clear_profile_hover(&self) {
         if self.profile_hover.borrow().visible() {
             self.profile_hover.borrow_mut().clear();
@@ -1507,6 +1515,7 @@ impl NativeApplication {
     fn desktop_profile_usage(
         &self,
         theme: DesktopTheme,
+        window: &Window,
         cx: &Context<Self>,
     ) -> gpui::Stateful<Div> {
         let section = div()
@@ -1556,9 +1565,15 @@ impl NativeApplication {
         let mut section = section.px(px(4.0)).py(px(4.0));
         for (index, entry) in visible.iter().enumerate() {
             if index > 0 {
-                section = section.child(div().h(px(1.0)).bg(separator).my(px(4.0)));
+                section = section.child(
+                    div()
+                        .h(px(1.0))
+                        .bg(self.profile_separator_paint())
+                        .my(px(4.0)),
+                );
             }
-            section = section.child(self.desktop_profile_usage_engine(entry, theme, now_ms, cx));
+            section =
+                section.child(self.desktop_profile_usage_engine(entry, theme, window, now_ms, cx));
         }
         section
     }
@@ -1573,6 +1588,7 @@ impl NativeApplication {
         &self,
         entry: &NativeUsageEntry,
         theme: DesktopTheme,
+        window: &Window,
         now_ms: i64,
         cx: &Context<Self>,
     ) -> Div {
@@ -1631,9 +1647,9 @@ impl NativeApplication {
                     ),
             );
         if let Some(checked) = checked_label(entry.fetched_at_ms, now_ms) {
-            title = title.child(
-                self.desktop_profile_usage_refresh(&engine_id, &checked, refreshing, theme, cx),
-            );
+            title = title.child(self.desktop_profile_usage_refresh(
+                &engine_id, &checked, refreshing, theme, window, cx,
+            ));
         }
         block = block.child(title);
         for (group_index, group) in group_usage_windows(&report.windows).iter().enumerate() {
@@ -1690,22 +1706,25 @@ impl NativeApplication {
     }
 
     /// Inline checked/refresh control: the provider's own "last checked"
-    /// reading at rest, swapping to a foreground Refresh action on hover and
-    /// to a spinner while its refresh is in flight. The reading stays mounted
-    /// under the spinner so the control never collapses width. Withheld until
-    /// the engine has answered at least once. Keyboard focus plus Enter/Space
-    /// refreshes once through the same path as a click.
+    /// reading at rest, swapping to a foreground Refresh action on hover or
+    /// keyboard focus and to a spinner while its refresh is in flight. The
+    /// reading stays mounted under the spinner so the control never
+    /// collapses width. Withheld until the engine has answered at least
+    /// once. Keyboard focus plus Enter/Space refreshes once through the same
+    /// path as a click.
     fn desktop_profile_usage_refresh(
         &self,
         engine_id: &str,
         checked: &str,
         refreshing: bool,
         theme: DesktopTheme,
+        window: &Window,
         cx: &Context<Self>,
     ) -> Div {
         let group = format!("profile-usage-refresh-{engine_id}");
         let selector = format!("artisan-profile-usage-refresh-{engine_id}");
         let focus = self.profile_refresh_focus_handle(engine_id, cx);
+        let focused = focus.is_focused(window);
         let ring = vec![gpui::BoxShadow {
             color: self.theme.interaction.focus_ring_color.to_paint(),
             offset: gpui::point(px(0.0), px(0.0)),
@@ -1733,7 +1752,7 @@ impl NativeApplication {
                     .whitespace_nowrap()
                     .text_color(theme.secondary)
                     .child(checked.to_owned())
-                    .opacity(if refreshing { 0.0 } else { 1.0 })
+                    .opacity(if refreshing || focused { 0.0 } else { 1.0 })
                     .group_hover(group.clone(), |style| style.opacity(0.0)),
             )
             .child(
@@ -1745,7 +1764,7 @@ impl NativeApplication {
                     .flex()
                     .items_center()
                     .justify_end()
-                    .opacity(0.0)
+                    .opacity(if focused && !refreshing { 1.0 } else { 0.0 })
                     .group_hover(group.clone(), |style| {
                         style.opacity(if refreshing { 0.0 } else { 1.0 })
                     })
@@ -1773,16 +1792,17 @@ impl NativeApplication {
                     ),
             );
         if !refreshing {
-            let engine_id = engine_id.to_owned();
+            let click_engine_id = engine_id.to_owned();
+            let key_engine_id = engine_id.to_owned();
             control = control
                 .cursor_pointer()
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    app.refresh_single_profile_engine(&engine_id, cx);
+                    app.refresh_single_profile_engine(&click_engine_id, cx);
                 }))
                 .on_key_down(cx.listener(move |app, event: &gpui::KeyDownEvent, _, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         cx.stop_propagation();
-                        app.refresh_single_profile_engine(&engine_id, cx);
+                        app.refresh_single_profile_engine(&key_engine_id, cx);
                         cx.notify();
                     }
                 }));
@@ -1808,6 +1828,9 @@ impl NativeApplication {
             (usage_segment_fraction(window.percent_used) * segments as f64).round() as usize;
         // Fourteen full pitches across 72px with a 2px transparent tail cut
         // from every pitch including the last, matching the source mask.
+        let tip_key = (engine_id.to_owned(), window.id.clone());
+        let meter_selector = format!("artisan-profile-usage-meter-{engine_id}-{}", window.id);
+        let bar_selector = format!("{meter_selector}-bar");
         let mut meter = div()
             .debug_selector({
                 let bar_selector = bar_selector.clone();
@@ -1826,9 +1849,6 @@ impl NativeApplication {
                     .bg(if index < lit_segments { accent } else { dim }),
             );
         }
-        let tip_key = (engine_id.to_owned(), window.id.clone());
-        let meter_selector = format!("artisan-profile-usage-meter-{engine_id}-{}", window.id);
-        let bar_selector = format!("{meter_selector}-bar");
         let meter_hover = Rc::clone(&self.profile_meter_hover);
         let tip_surface = Rc::clone(&self.profile_tip_surface_bounds);
         let tip_anchor = Rc::clone(&self.profile_tip_anchor);
@@ -2201,8 +2221,16 @@ impl NativeApplication {
         // model picker popover.
         let menu_phase = self.profile_menu_motion.borrow().phase();
         if self.profile_menu.is_open() || menu_phase == PickerMenuPhase::Closing {
+            // The dropdown paints from the shared Artisan text tokens rather
+            // than the desktop shell's custom palette; the bottom trigger
+            // keeps the shell palette.
+            let theme = DesktopTheme {
+                foreground: self.theme.colors.foreground.to_paint(),
+                secondary: self.theme.colors.muted_foreground.to_paint(),
+                ..theme
+            };
             // Source `bg-border/50` resolved from the shared border token.
-            let separator = self.theme.colors.border.with_alpha(0.5).to_paint();
+            let separator = self.profile_separator_paint();
             // The machine line only paints when the hostname differs from
             // the profile name, matching `show_hostname` in source.
             let show_profile_hostname = self.profile_hostname.as_deref().is_some_and(|hostname| {
@@ -2339,7 +2367,7 @@ impl NativeApplication {
                                 .on_scroll_wheel(
                                     cx.listener(Self::handle_profile_usage_scroll_wheel),
                                 )
-                                .child(self.desktop_profile_usage(theme, cx)),
+                                .child(self.desktop_profile_usage(theme, window, cx)),
                         ),
                 )
                 .child(div().h(px(1.0)).bg(separator).my(px(4.0)));
@@ -8200,7 +8228,7 @@ mod tests {
         });
 
         // Reduced motion settles the shared value directly.
-        cx.update(|app| app.set_reduce_motion(true));
+        cx.update(|_, app| app.set_reduce_motion(true));
         cx.simulate_mouse_move(alpha.center(), None, gpui::Modifiers::none());
         cx.run_until_parked();
         cx.update(|_, app| {
@@ -8319,7 +8347,7 @@ mod tests {
         cx.update(|window, app| {
             view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
         });
-        cx.update(|app| app.set_reduce_motion(true));
+        cx.update(|_, app| app.set_reduce_motion(true));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         cx.update(|_, app| {
@@ -8343,7 +8371,7 @@ mod tests {
         });
         assert!(cx.debug_bounds("artisan-desktop-profile-menu").is_none());
 
-        cx.update(|app| app.set_reduce_motion(false));
+        cx.update(|_, app| app.set_reduce_motion(false));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         cx.update(|_, app| {
