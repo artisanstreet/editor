@@ -315,7 +315,11 @@ impl fmt::Display for ClaudeVersion {
 fn parse_claude_version(stdout: &str) -> Result<ClaudeVersion, NativeClaudeLaunchError> {
     let version = crate::claude::probe::parse_claude_version(stdout)
         .ok_or(NativeClaudeLaunchError::VersionUnparseable)?;
-    let mut components = version.split('.');
+    let core = version
+        .split(|c| c == '-' || c == '+')
+        .next()
+        .ok_or(NativeClaudeLaunchError::VersionUnparseable)?;
+    let mut components = core.split('.');
     match (
         components.next(),
         components.next(),
