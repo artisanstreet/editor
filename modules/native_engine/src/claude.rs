@@ -216,7 +216,7 @@ impl NativeClaudeAuthority {
         let candidate = crate::claude::discovery::search_path_for(
             path_entries,
             crate::claude::discovery::candidate_file_names(),
-            &|path| { verify_regular_executable(path).is_ok() },
+            |path| { verify_regular_executable(path).is_ok() },
         );
         match candidate {
             Some(path) => {
