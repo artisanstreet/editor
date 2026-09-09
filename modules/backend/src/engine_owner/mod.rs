@@ -39,6 +39,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub(crate) mod acp;
+pub(crate) mod acp_bridges;
 pub(crate) mod catalog;
 pub(crate) mod event;
 pub(crate) mod framing;
