@@ -1335,6 +1335,7 @@ impl NativeApplication {
                     .w_full()
                     .flex()
                     .flex_col()
+                    .gap(px(10.0))
                     .child(
                         div()
                             .h(px(1.0))
