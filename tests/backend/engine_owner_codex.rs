@@ -495,7 +495,7 @@ impl Drop for FixtureScript {
     }
 }
 
-const INIT_LINE: &str = r#"{"id":1,"result":{"codexHome":"C:\x","platformFamily":"windows","platformOs":"windows","userAgent":"test"}}"#;
+const INIT_LINE: &str = r#"{"id":1,"result":{"codexHome":"C:\\x","platformFamily":"windows","platformOs":"windows","userAgent":"test"}}"#;
 const THREAD_LINE: &str = r#"{"id":2,"result":{"thread":{"id":"thread-fixture-1"}}}"#;
 
 struct FixtureOutcome {
@@ -842,9 +842,44 @@ async fn seed_binding_run(
     created_at_ms: i64,
     binding_json: &str,
 ) {
-    use artisan_database::entities::{self, AssistantRunLifecycle};
+    use artisan_database::entities::{self, AssistantRunLifecycle, EntityLifecycle, OrdinalKind};
     use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 
+    // The bound run references its origin message and turn, which reference
+    // their ordinal row: seed the whole parent chain first.
+    let ordinal = created_at_ms;
+    entities::message::ActiveModel {
+        message_id: Set(format!("message-{run_id}")),
+        thread_id: Set("thread-codex-binding".to_owned()),
+        ordinal: Set(ordinal),
+        body: Set(format!("message for {run_id}")),
+        accepted_at_ms: Set(created_at_ms),
+    }
+    .insert(database)
+    .await
+    .expect("message should insert");
+    entities::conversation_ordinal::ActiveModel {
+        thread_id: Set("thread-codex-binding".to_owned()),
+        ordinal: Set(ordinal),
+        kind: Set(OrdinalKind::Turn),
+        entity_id: Set(format!("turn-{run_id}")),
+    }
+    .insert(database)
+    .await
+    .expect("turn ordinal should insert");
+    entities::conversation_turn::ActiveModel {
+        turn_id: Set(format!("turn-{run_id}")),
+        thread_id: Set("thread-codex-binding".to_owned()),
+        ordinal: Set(ordinal),
+        kind: Set(OrdinalKind::Turn),
+        revision: Set(0),
+        lifecycle: Set(EntityLifecycle::Completed),
+        created_at_ms: Set(created_at_ms),
+        updated_at_ms: Set(created_at_ms + 10),
+    }
+    .insert(database)
+    .await
+    .expect("turn should insert");
     entities::assistant_run::ActiveModel {
         run_id: Set(run_id.to_owned()),
         thread_id: Set("thread-codex-binding".to_owned()),
