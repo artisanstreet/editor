@@ -20,6 +20,27 @@ use native_dev::{
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn fresh_home_provisions_runtime_parent_directories() {
+    let dev_dir = scratch_dev_dir("runtime-parents");
+    let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
+    provision_forge_home(&paths).expect("fresh provision");
+    for path in [
+        paths.database_path(),
+        paths.custody_path(),
+        paths.readiness_path(),
+    ] {
+        assert!(path.parent().expect("runtime parent").is_dir());
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("runtime can create its file without creating parents");
+        drop(file);
+    }
+    cleanup(&dev_dir);
+}
+
 fn scratch_dev_dir(case: &str) -> PathBuf {
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(

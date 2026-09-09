@@ -109,6 +109,20 @@ pub fn provision_forge_home(paths: &DevPaths) -> Result<InstanceOutcome, DevErro
         stage: "provision",
         reason: format!("cannot create {}", paths.home.display()),
     })?;
+    for runtime_path in [
+        paths.database_path(),
+        paths.custody_path(),
+        paths.readiness_path(),
+    ] {
+        let parent = runtime_path.parent().ok_or_else(|| DevError::Stage {
+            stage: "provision",
+            reason: format!("runtime path has no parent: {}", runtime_path.display()),
+        })?;
+        fs::create_dir_all(parent).map_err(|_| DevError::Stage {
+            stage: "provision",
+            reason: format!("cannot create {}", parent.display()),
+        })?;
+    }
     credentials::provision_or_load(&paths.home).map_err(|error| DevError::Stage {
         stage: "provision",
         reason: format!("cannot provision dev credentials: {error}"),
