@@ -933,6 +933,10 @@ fn prepare_preflight_context(request: PreflightRequest) -> Result<PreflightConte
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
         }
+        super::InternalLaunch::Cursor(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
     };
     let Ok(mut child) = child_result else {
         let _ = respond.send(Err(EngineOperationError::SpawnFailed));
@@ -1206,6 +1210,10 @@ fn prepare_catalog_context(request: CatalogRequest) -> Result<CatalogContext, Ex
             return Err(Execution::Completed);
         }
         super::InternalLaunch::Claude(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Cursor(_) => {
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
         }
@@ -1521,18 +1529,21 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         artisan_domain::EngineSelection::OpenCode2(selection) => selection.profile_id().as_str(),
         artisan_domain::EngineSelection::Codex(selection) => selection.profile_id().as_str(),
         artisan_domain::EngineSelection::Claude(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Cursor(selection) => selection.profile_id().as_str(),
         _ => return request.fail(EngineOperationError::Configuration),
     };
     if request.input.launch.profile_id() != selected_profile {
         return request.fail(EngineOperationError::Configuration);
     }
-    // Codex and Claude turns carry no provider continuation in this packet;
-    // a mid-turn resume here fails closed instead of executing as another
-    // engine.
+    // Codex, Claude, and Cursor turns carry no provider continuation in this
+    // packet; a mid-turn resume here fails closed instead of executing as
+    // another engine.
     if request.input.continuation.is_some()
         && matches!(
             request.input.launch,
-            super::InternalLaunch::Codex(_) | super::InternalLaunch::Claude(_)
+            super::InternalLaunch::Codex(_)
+                | super::InternalLaunch::Claude(_)
+                | super::InternalLaunch::Cursor(_)
         )
     {
         return request.fail(EngineOperationError::Configuration);
@@ -1549,6 +1560,9 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
     }
     if matches!(request.input.launch, super::InternalLaunch::Claude(_)) {
         return Box::pin(execute_claude_turn(request, runtime, shutdown)).await;
+    }
+    if matches!(request.input.launch, super::InternalLaunch::Cursor(_)) {
+        return Box::pin(execute_cursor_turn(request, runtime, shutdown)).await;
     }
     Box::pin(execute_configured_turn(request, runtime, shutdown)).await
 }
@@ -2598,6 +2612,52 @@ async fn read_claude_line(
     }
 }
 
+/// Executes one finite Cursor turn over the shared ACP core.
+///
+/// Single-owner match arm beside the Codex and Claude executors: no second
+/// task, no second queue. C1 proves admission agreement (durable cursor
+/// selection, typed [`CursorSettings`](super::cursor::CursorSettings), and
+/// the cursor launch capability carry the same managed profile, and no
+/// provider continuation travels with the turn) and then fails closed: the
+/// probe authority, live spawn/pump, catalog merge, and frontend selection
+/// belong to later packets. The cursor-shaped ACP wire itself is proven by
+/// the fixture script tests in `super::cursor`, which drive the exact
+/// definition row (`--model` resolution, `--mode ask`, `--force`, `acp`;
+/// image-block mode; permission deny-then-allow; plan-approval extensions;
+/// resume; cancel/close; malformed frames; `AE-PROVIDER-206`) through the
+/// shared transport core without spawning the real CLI.
+async fn execute_cursor_turn(
+    request: ConfiguredTurnRequest,
+    _runtime: ConfiguredRuntime,
+    _shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::cursor as cursor_runtime;
+
+    let artisan_domain::EngineSelection::Cursor(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = match cursor_runtime::CursorSettings::from_selection(selection) {
+        Ok(settings) => settings,
+        Err(_) => return request.fail(EngineOperationError::Configuration),
+    };
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Cursor(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    if launch.profile_id() != settings.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    if request.input.continuation.is_some() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let _definition = cursor_runtime::CursorSettings::definition();
+    request.fail(EngineOperationError::Configuration)
+}
+
 async fn prepare_configured_process(
     request: ConfiguredTurnRequest,
     runtime: ConfiguredRuntime,
@@ -2624,6 +2684,9 @@ async fn prepare_configured_process(
             return Err(request.fail(EngineOperationError::Configuration));
         }
         crate::engine_owner::InternalLaunch::Claude(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
+        }
+        crate::engine_owner::InternalLaunch::Cursor(_) => {
             return Err(request.fail(EngineOperationError::Configuration));
         }
     }) else {
@@ -2899,6 +2962,7 @@ async fn authorize_configured_session(
         }
         super::InternalLaunch::Codex(_) => Err(StreamError::InvalidSession),
         super::InternalLaunch::Claude(_) => Err(StreamError::InvalidSession),
+        super::InternalLaunch::Cursor(_) => Err(StreamError::InvalidSession),
         #[cfg(test)]
         super::InternalLaunch::Fixture(_) => Ok(StreamState::new(stream_after)),
     };
