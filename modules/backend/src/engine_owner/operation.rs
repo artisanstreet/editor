@@ -934,6 +934,9 @@ fn prepare_preflight_context(request: PreflightRequest) -> Result<PreflightConte
             return Err(Execution::Completed);
         }
         super::InternalLaunch::Grok(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
         super::InternalLaunch::Cursor(_) => {
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
