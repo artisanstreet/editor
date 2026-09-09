@@ -1210,7 +1210,7 @@ impl NativeApplication {
     /// area scrolls. Short windows clamp at zero instead of overflowing.
     fn profile_usage_max_height(&self, window: &Window) -> gpui::Pixels {
         let viewport_height = f32::from(window.bounds().size.height);
-        let trigger_top = f32::from(self.profile_origin.get().top());
+        let trigger_top = f32::from(self.profile_origin.get().top()).min(viewport_height);
         let available = trigger_top - PROFILE_MENU_ANCHOR_GAP_PX - PROFILE_MENU_VIEWPORT_MARGIN_PX;
         px((available - PROFILE_MENU_FIXED_CHROME_PX).max(0.0))
     }
@@ -7422,7 +7422,7 @@ mod tests {
             .center();
 
         // A lines wheel queues a bounded target without jumping there.
-        cx.update(|app| app.set_reduce_motion(false));
+        cx.update(|_, app| app.set_reduce_motion(false));
         let line = cx.update(|window, _| f32::from(window.line_height()));
         cx.simulate_event(gpui::ScrollWheelEvent {
             position: scroll_center,
@@ -7465,7 +7465,7 @@ mod tests {
         });
 
         // Reduced motion settles a lines wheel directly.
-        cx.update(|app| app.set_reduce_motion(true));
+        cx.update(|_, app| app.set_reduce_motion(true));
         let expected_reduced = cx.update(|_, app| {
             let application = view.read(app);
             (f32::from(application.profile_usage_scroll.offset().y) - line).clamp(
@@ -7489,7 +7489,7 @@ mod tests {
         });
 
         // Dismissing with a queued target cancels the pending motion.
-        cx.update(|app| app.set_reduce_motion(false));
+        cx.update(|_, app| app.set_reduce_motion(false));
         cx.simulate_event(gpui::ScrollWheelEvent {
             position: scroll_center,
             delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)),
