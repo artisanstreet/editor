@@ -272,7 +272,8 @@ async fn ready_port_rejects_overlong_lines() {
 
 #[tokio::test]
 async fn ready_port_times_out_on_silence() {
-    let mut silent = tokio::io::pending();
+    // Never-ready in-memory pipe: reads pend so the expired deadline fires.
+    let (_silence_writer, mut silent) = tokio::io::duplex(8);
     let cancel = CancelHandle::new();
     let shutdown = CancelHandle::new();
     let error = read_ready_port(
@@ -1110,7 +1111,11 @@ async fn spawn_fixture(
     (address, state, handle)
 }
 
-fn test_scope(cancel: &CancelHandle, shutdown: &CancelHandle, millis: u64) -> RequestScope<'_> {
+fn test_scope<'a>(
+    cancel: &'a CancelHandle,
+    shutdown: &'a CancelHandle,
+    millis: u64,
+) -> RequestScope<'a> {
     RequestScope {
         deadline: Instant::now() + Duration::from_millis(millis),
         cancel,

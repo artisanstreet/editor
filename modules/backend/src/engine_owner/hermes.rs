@@ -830,6 +830,7 @@ enum RoutedFrame {
 }
 
 /// Stashed response for an id awaited outside the current read.
+#[derive(Debug)]
 struct PendingResponse {
     result: Value,
     error_code: Option<i64>,
@@ -841,6 +842,7 @@ struct PendingResponse {
 /// while buffering interleaved events, and the streaming pump reads events
 /// while stashing stray responses for the next request. Exactly one
 /// `gateway.ready` event gates [`GatewayClient::connect`].
+#[derive(Debug)]
 pub(crate) struct GatewayClient {
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: tokio::net::tcp::OwnedWriteHalf,
@@ -1392,6 +1394,7 @@ pub(crate) struct OpenSessionInput<'a> {
 /// session the dispatcher binds with tag `hermes` format 1. Setup-phase
 /// events interleaved with the open requests ride along for ordered
 /// projection after authorization.
+#[derive(Debug)]
 pub(crate) struct OpenedSession {
     pub(crate) runtime_session_id: String,
     pub(crate) durable_session_id: String,
