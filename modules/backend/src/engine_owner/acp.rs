@@ -2064,6 +2064,9 @@ mod tests {
             agent_write_line(&mut agent_write, &update_line("sess-stall", 1)).await;
             tokio::time::sleep(Duration::from_millis(200)).await;
             agent_write_line(&mut agent_write, &update_line("sess-stall", 2)).await;
+            // Hold the pipe open past the stall window: the third read must
+            // observe silence on a live pipe, not EOF from a dropped writer.
+            tokio::time::sleep(Duration::from_millis(1_000)).await;
         });
 
         let mut driver = AcpTransport::new(BufReader::new(driver_read), driver_write, bounds);
