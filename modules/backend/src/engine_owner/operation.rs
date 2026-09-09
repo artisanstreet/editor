@@ -1553,9 +1553,10 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
     if request.input.launch.profile_id() != selected_profile {
         return request.fail(EngineOperationError::Configuration);
     }
-    // Codex, Claude, Grok, and Cursor turns carry no provider continuation in this
-    // packet; a mid-turn resume here fails closed instead of executing as
-    // another engine.
+    // Grok and Cursor turns carry no provider continuation in this packet; a
+    // mid-turn resume here fails closed instead of executing as another
+    // engine. Claude carries its L3 continuation and gates it at the executor
+    // below; Hermes carries its gateway continuation below.
     if request.input.continuation.is_some()
         && matches!(
             request.input.launch,
@@ -2158,13 +2159,19 @@ pub(crate) fn codex_thread_id(line: &str, id: u64) -> Option<String> {
 /// Executes one finite Claude turn over `claude -p --output-format stream-json`.
 ///
 /// Single-owner match arm beside the Codex executor: no second task, no
-/// second queue. Writes the first user message over stdin, waits for the
-/// `system/init` session identity behind the bind authorization gate, then
-/// pumps the stream. Text deltas normalize onto the shared S1a vocabulary
-/// with verbatim phases; `AskUserQuestion` frames populate pending questions
-/// lifted out of the approval path; child transcript frames never adopt the
-/// root turn. EOF before `result` maps to `Interrupted`, explicit cancel to
-/// `Cancelled`, and stall/failure to `Failed`.
+/// second queue. Writes the first user message over stdin (or reopens the
+/// stored native session through `--resume` for a gated continuation),
+/// waits for the `system/init` session identity behind the bind authorization
+/// gate, then pumps the stream. Text deltas normalize onto the shared S1a
+/// vocabulary with verbatim phases; usage frames project best-effort to
+/// cumulative usage observations without blocking the turn; the generated
+/// title is captured best-effort at the terminal fence;
+/// `AskUserQuestion` frames populate pending questions lifted out of the
+/// approval path; child transcript frames never adopt the root turn. EOF
+/// before `result` maps to `Interrupted`, explicit cancel to `Cancelled`,
+/// and stall/failure to `Failed`. Teardown terminates the whole process
+/// group (no orphaned claude grandchildren holding pipes) and quarantines on
+/// unobserved reaps.
 async fn execute_claude_turn(
     request: ConfiguredTurnRequest,
     runtime: ConfiguredRuntime,
@@ -2189,13 +2196,43 @@ async fn execute_claude_turn(
     let super::InternalLaunch::Claude(launch) = &request.input.launch else {
         return request.fail(EngineOperationError::Configuration);
     };
-    if request.input.continuation.is_some() {
-        return request.fail(EngineOperationError::Configuration);
-    }
-    let Some(session_id) = claude_runtime::new_session_id() else {
-        return request.fail(EngineOperationError::EntropyFailed);
+    // L3 continuation gate: same-engine is fenced by the dispatcher (claude
+    // bindings only); the owner additionally requires an explicit target
+    // model and CLI >= 2.1.220. Anything else is typed incompatible — never
+    // a silent fresh start and never a cross-engine resume.
+    let resume_stored_session_id: Option<String> = match &request.input.continuation {
+        None => None,
+        Some(continuation) => {
+            let gate = claude_runtime::check_claude_native_continuation(
+                &claude_runtime::ClaudeContinuationGateInput {
+                    cli_version: launch.version(),
+                    target_model: selection.model_id().map(|model| model.as_str()),
+                    advertised_models: None,
+                    same_engine: true,
+                },
+            );
+            if !matches!(gate, claude_runtime::ClaudeContinuationDecision::Compatible) {
+                return request.fail(EngineOperationError::Configuration);
+            }
+            Some(continuation.provider_session_id().to_owned())
+        }
     };
-    let session = claude_runtime::ClaudeSession::Start(session_id.clone());
+    // A gated continuation reopens the stored native session (`--resume`
+    // over the same flags a fresh start would use); fresh turns mint exactly
+    // one session. Either way provider-owned state is resumed, never
+    // invented, and a restart never duplicates provider effects with a second
+    // session.
+    let session = match resume_stored_session_id.as_deref() {
+        Some(stored) => match claude_runtime::claude_resume_session(stored) {
+            Some(session) => session,
+            None => return request.fail(EngineOperationError::Configuration),
+        },
+        None => match claude_runtime::new_session_id() {
+            Some(fresh) => claude_runtime::ClaudeSession::Start(fresh),
+            None => return request.fail(EngineOperationError::EntropyFailed),
+        },
+    };
+    let session_id = session.session_id().to_owned();
     let args = settings.spawn_args(&session);
     let mut child = match spawn_claude_engine(launch.as_ref(), &request.input.project_root, &args) {
         Ok(child) => child,
@@ -2336,6 +2373,25 @@ async fn execute_claude_turn(
     let mut frame_sequence: u64 = 0;
     let mut last_activity = Instant::now();
     let inactivity = runtime.limits.sse;
+    // Best-effort usage scope: explicit model plus thread scope, else usage
+    // frames stay diagnostics. Usage never blocks the turn.
+    let usage_attribution = match (&input.thread_id, input.settings.config().selection()) {
+        (Some(thread_id), artisan_domain::EngineSelection::Claude(selection)) => selection
+            .model_id()
+            .map(|model| claude_runtime::ClaudeUsageAttribution {
+                thread_id: thread_id.clone(),
+                model_id: model.clone(),
+            }),
+        _ => None,
+    };
+    let usage_scope =
+        usage_attribution
+            .as_ref()
+            .map(|attribution| claude_runtime::ClaudeUsageScope {
+                thread_id: &attribution.thread_id,
+                model_id: &attribution.model_id,
+                provider_session_id: session_id.as_str(),
+            });
     let terminal = claude_pump_loop(
         &mut reader,
         &mut stdin,
@@ -2352,6 +2408,7 @@ async fn execute_claude_turn(
         shutdown,
         &control,
         &observations,
+        usage_scope.as_ref(),
     )
     .await;
     drop(stdin);
@@ -2367,6 +2424,22 @@ async fn execute_claude_turn(
             // the turn result: only lifecycle and transcript rows ever
             // accumulate in the pump buffer.
             forward_subagent_rows(&observations, subagent_rows).await;
+            // Terminal fence: capture the generated title best-effort and
+            // carry it on the terminal observation beside settlement, exactly
+            // like text deltas flow. A closed sink ends the send without
+            // disturbing the turn result.
+            settle_claude_terminal_title(&input, &session_id, &mut tracker);
+            let terminal_observation = super::observation::TerminalObservation::new(
+                input.run_id.clone(),
+                frame_sequence,
+                state,
+                None,
+                None,
+            )
+            .with_summary_title(tracker.summary_title().map(str::to_owned));
+            let _ = observations
+                .send(EngineObservation::Terminal(terminal_observation))
+                .await;
             drop(observations);
             finish_turn_result(
                 parts,
@@ -2381,8 +2454,40 @@ async fn execute_claude_turn(
             subagent_rows,
         } => {
             forward_subagent_rows(&observations, subagent_rows).await;
+            // The fence still captures the title on failure paths and carries
+            // it on a Failed terminal observation; dispatcher precedence
+            // (forced flags, then observation state, then the owner result)
+            // settles exactly as the owner result alone would have.
+            settle_claude_terminal_title(&input, &session_id, &mut tracker);
+            let terminal_observation = super::observation::TerminalObservation::new(
+                input.run_id.clone(),
+                frame_sequence,
+                TerminalState::Failed,
+                None,
+                None,
+            )
+            .with_summary_title(tracker.summary_title().map(str::to_owned));
+            let _ = observations
+                .send(EngineObservation::Terminal(terminal_observation))
+                .await;
             finish_turn_result(parts, Err(error), respond, runtime.limits.close).await
         }
+    }
+}
+
+/// Captures the CLI's generated session title at the terminal fence.
+///
+/// Best-effort beside settlement: any failure means "no title yet" and the
+/// turn settles exactly as it would have without the read.
+fn settle_claude_terminal_title(
+    input: &super::InternalTurnInput,
+    session_id: &str,
+    tracker: &mut super::claude::ClaudePendingTracker,
+) {
+    if let Some(title) =
+        super::claude::claude_transcript_title_for_session(&input.project_root, session_id)
+    {
+        tracker.note_summary_title(title);
     }
 }
 
@@ -2440,6 +2545,7 @@ async fn claude_pump_loop(
     shutdown: &Arc<CancelHandle>,
     control: &Arc<CancelHandle>,
     observations: &mpsc::Sender<EngineObservation>,
+    usage: Option<&super::claude::ClaudeUsageScope<'_>>,
 ) -> ClaudePumpOutcome {
     use super::claude as claude_runtime;
     use tokio::io::AsyncBufReadExt as _;
@@ -2578,6 +2684,7 @@ async fn claude_pump_loop(
                                     active_turn,
                                     observations,
                                     *frame_sequence,
+                                    usage,
                                 )
                                 .await;
                                 // Drain beside the text channel: rows traverse
@@ -4102,8 +4209,9 @@ async fn execute_authorized_configured_turn(
 fn stream_usage_context(input: &super::InternalTurnInput) -> Option<StreamUsageContext> {
     let thread_id = input.thread_id.as_ref()?.clone();
     // Usage attribution is OpenCode2-shaped; other selections carry no
-    // usage scope instead of attributing as OpenCode2. Claude usage capture
-    // beyond the tracker plumbing in `super::claude` is a later packet.
+    // usage scope instead of attributing as OpenCode2. Claude usage travels
+    // its own pump scope in `execute_claude_turn` (cumulative reports with a
+    // replacing context gauge); the `/usage` CLI buckets stay diagnostics.
     let artisan_domain::EngineSelection::OpenCode2(selection) = input.settings.config().selection()
     else {
         return None;

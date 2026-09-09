@@ -1,11 +1,13 @@
-//! Finite L1 Claude lifecycle proofs without the real CLI.
+//! Finite L3 Claude continuation plus usage plus title plus cleanup proofs
+//! without the real CLI.
 //!
 //! Pure coverage (settings, frames, tracker, domain bridging, stall
-//! predicate, binding round trip) plus fixture stdio script turns: a
-//! temporary `cmd`/`sh` script types canned stream-JSON over stdout while the
-//! test writes the first user message and drives the init gate plus the
-//! streaming pump through the shared [`super::claude`] helpers. No real
-//! `claude` binary, no catalog flag, no frontend selection, no continuation.
+//! predicate, binding round trip, continuation gate, usage mapping, title
+//! capture) plus fixture stdio script turns: a temporary `cmd`/`sh` script
+//! types canned stream-JSON over stdout while the test writes the first user
+//! message and drives the init gate plus the streaming pump through the
+//! shared [`super::claude`] helpers. No real `claude` binary, no catalog
+//! flag, no frontend selection, no model inventory.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,8 +19,8 @@ use artisan_domain::{
     EnginePermissionPolicy, EngineProfileId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, ItemId,
     MessageBody, MessageId, MessagePhase, NetworkAccess, Observation, ObservationSequence, PatchId,
-    PermissionId, ProjectId, RequestId, Revision, RunId, SubagentState, ThreadId, ThreadTitle,
-    TranscriptContent, TurnId, UnixMillis, WebSearchAccess,
+    PermissionId, ProjectId, RequestId, Revision, RunId, RunUsageBasis, SubagentState, ThreadId,
+    ThreadTitle, TranscriptContent, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_transport::CancelHandle;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -26,10 +28,17 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::claude::{
-    CLAUDE_MAX_ANSWERS, CLAUDE_MAX_FRAME_BYTES, ClaudeApplyOutcome, ClaudeEvent,
-    ClaudePendingTracker, ClaudeSession, ClaudeSettings, answer_approval, answer_questions,
-    apply_event, approval_response_line, classify_exit, has_stalled, new_session_id, parse_frame,
-    steer_live_turn, terminal_observation, user_message_line, write_line,
+    CLAUDE_MAX_ANSWERS, CLAUDE_MAX_FRAME_BYTES, ClaudeApplyOutcome, ClaudeContinuationDecision,
+    ClaudeContinuationGateInput, ClaudeEvent, ClaudePendingTracker, ClaudeQuotaWindowKind,
+    ClaudeSession, ClaudeSettings, ClaudeUsageAttribution, ClaudeUsageContext, ClaudeUsageScope,
+    answer_approval, answer_questions, apply_event, approval_response_line,
+    check_claude_native_continuation, clamp_claude_percent_used, classify_claude_quota_window_kind,
+    classify_exit, claude_cli_meets_minimum, claude_cli_usage_args, claude_project_directory_name,
+    claude_requires_group_termination, claude_resume_session, claude_session_title_from_lines,
+    claude_session_transcript_path, claude_usage_report, has_stalled, new_session_id,
+    parse_claude_assistant_usage, parse_claude_cli_reset_at, parse_claude_cli_usage_windows,
+    parse_claude_result_usage, parse_frame, read_claude_session_title, steer_live_turn,
+    terminal_observation, user_message_line, write_line,
 };
 use super::observation::{
     EngineObservation, SubagentLifecycleRow, SubagentTranscriptRow, TerminalState,
@@ -273,7 +282,7 @@ fn init_delta_phases_and_message_start_decode() {
     )
     .expect("delta decodes");
     match delta {
-        ClaudeEvent::TextDelta { delta, phase } => {
+        ClaudeEvent::TextDelta { delta, phase, .. } => {
             assert_eq!(delta, "hi");
             assert_eq!(phase, "unspecified");
         }
@@ -286,7 +295,7 @@ fn init_delta_phases_and_message_start_decode() {
     )
     .expect("assistant decodes");
     match commentary {
-        ClaudeEvent::TextDelta { delta, phase } => {
+        ClaudeEvent::TextDelta { delta, phase, .. } => {
             assert_eq!(delta, "working");
             assert_eq!(phase, "commentary");
         }
@@ -317,7 +326,7 @@ fn init_delta_phases_and_message_start_decode() {
         6,
     )
     .expect("reasoning block decodes");
-    assert!(matches!(settled, ClaudeEvent::ReasoningSettled));
+    assert!(matches!(settled, ClaudeEvent::ReasoningSettled { .. }));
 }
 
 #[test]
@@ -410,7 +419,6 @@ fn unknown_bookkeeping_and_malformed_frames_reject_safely() {
         r#"{"type":"system","subtype":"status"}"#,
         r#"{"type":"stream-event","event":{"type":"ping"}}"#,
         r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abc"}}}"#,
-        r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":10}}}"#,
         r#"{"type":"user","message":{"content":[]},"tool_use_result":{}}"#,
         r#"{"type":"future-event"}"#,
     ] {
@@ -420,6 +428,19 @@ fn unknown_bookkeeping_and_malformed_frames_reject_safely() {
             "unexpected projection for {line}"
         );
     }
+
+    // A usage-only assistant frame is canonical usage content, not
+    // bookkeeping: the per-response sample projects a context gauge even
+    // though no text streamed.
+    let usage_only = parse_frame(
+        r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":10}}}"#,
+        2,
+    )
+    .expect("usage-only frame decodes");
+    assert!(
+        matches!(usage_only, ClaudeEvent::Usage { .. }),
+        "usage without text must stay observable as usage"
+    );
 
     assert!(parse_frame("not json", 2).is_err());
     assert!(parse_frame(r#"{"nopetype":1}"#, 3).is_err());
@@ -485,6 +506,7 @@ async fn approval_deny_then_allow_resolves_without_side_effect() {
             &mut active,
             &sender,
             2,
+            None,
         )
         .await;
         assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
@@ -577,6 +599,7 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
         &mut active,
         &sender,
         1,
+        None,
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
@@ -596,6 +619,7 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
         &mut active,
         &sender,
         2,
+        None,
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
@@ -635,6 +659,7 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
         &mut active,
         &sender,
         6,
+        None,
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
@@ -675,6 +700,7 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
         &mut active,
         &sender,
         3,
+        None,
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
@@ -694,6 +720,7 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
         &mut active,
         &sender,
         4,
+        None,
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
@@ -715,6 +742,7 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
         &mut active,
         &sender,
         5,
+        None,
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
@@ -741,6 +769,7 @@ async fn session_mismatch_fails_the_turn_closed() {
         &mut active,
         &sender,
         1,
+        None,
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
@@ -759,6 +788,7 @@ async fn session_mismatch_fails_the_turn_closed() {
         &mut active,
         &sender,
         2,
+        None,
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Terminal(TerminalState::Failed));
@@ -777,6 +807,7 @@ async fn session_mismatch_fails_the_turn_closed() {
         &mut active,
         &sender,
         3,
+        None,
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: true });
@@ -1054,6 +1085,7 @@ async fn run_fixture_turn(
                             }
                             match apply_event(
                                 event, &run, SESSION, &mut tracker, &mut active, &sender, sequence,
+                                None,
                             )
                             .await
                             {
@@ -1403,24 +1435,8 @@ fn duplex_write_shapes_stream_json_framing() {
     });
 }
 
-#[test]
-fn duplex_write_shapes_stream_json_framing() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    runtime.block_on(async {
-        let (mut client, server) = tokio::io::duplex(65_536);
-        let mut server = BufReader::new(server);
-        write_line(&mut client, r#"{"type":"user"}"#)
-            .await
-            .expect("write");
-        drop(client);
-        let mut text = String::new();
-        server.read_to_string(&mut text).await.expect("read");
-        assert_eq!(text, "{\"type\":\"user\"}\n");
-    });
-}
+// NOTE: a byte-identical duplicate of the test above existed at HEAD and is
+// removed here so the target compiles; see the packet deviations.
 
 // ---------------------------------------------------------------------------
 // Owner channel plus dispatcher commit end to end (real repository)
@@ -1654,6 +1670,7 @@ async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
             &mut active,
             &apply_sender,
             sequence,
+            None,
         )
         .await;
         assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
@@ -1762,4 +1779,765 @@ async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
         .collect();
     assert_eq!(assistants.len(), 1);
     assert_eq!(assistants[0].body, "root ");
+}
+
+// ---------------------------------------------------------------------------
+// L3: continuation gate matrix (same engine, explicit model, CLI >= 2.1.220)
+// ---------------------------------------------------------------------------
+
+fn gate_decision(
+    cli_version: &str,
+    target_model: Option<&str>,
+    advertised_models: Option<&[&str]>,
+    same_engine: bool,
+) -> ClaudeContinuationDecision {
+    check_claude_native_continuation(&ClaudeContinuationGateInput {
+        cli_version,
+        target_model,
+        advertised_models,
+        same_engine,
+    })
+}
+
+#[test]
+fn claude_continuation_gate_matrix() {
+    assert_eq!(
+        gate_decision("2.1.220", Some("claude-model"), None, true),
+        ClaudeContinuationDecision::Compatible
+    );
+    assert_eq!(
+        gate_decision("2.2.0", Some("claude-model"), None, true),
+        ClaudeContinuationDecision::Compatible
+    );
+    assert_eq!(
+        gate_decision("2.1.220 (Claude Code)", Some("claude-model"), None, true),
+        ClaudeContinuationDecision::Compatible
+    );
+    assert_eq!(
+        gate_decision(
+            "2.1.220",
+            Some("claude-model"),
+            Some(&["claude-model", "other-model"]),
+            true
+        ),
+        ClaudeContinuationDecision::Compatible
+    );
+    // The recorded constant is the floor the gate enforces.
+    assert_eq!(CLAUDE_NATIVE_CONTINUATION_VERSION, "2.1.220");
+    // Explicit target model is required before resume.
+    assert!(matches!(
+        gate_decision("2.1.220", None, None, true),
+        ClaudeContinuationDecision::Incompatible { .. }
+    ));
+    assert!(matches!(
+        gate_decision("2.1.220", Some(""), None, true),
+        ClaudeContinuationDecision::Incompatible { .. }
+    ));
+    // Older releases never authorize continuation.
+    for old in ["2.1.219", "2.0.0", "not a version", ""] {
+        assert!(
+            matches!(
+                gate_decision(old, Some("claude-model"), None, true),
+                ClaudeContinuationDecision::Incompatible { .. }
+            ),
+            "CLI {old} must not authorize continuation"
+        );
+    }
+    // Cross-engine resume never proceeds, even with a fresh CLI and model.
+    assert!(matches!(
+        gate_decision("2.1.220", Some("claude-model"), None, false),
+        ClaudeContinuationDecision::Incompatible { .. }
+    ));
+    // Advertisement is enforced only when an inventory is supplied.
+    assert!(matches!(
+        gate_decision(
+            "2.1.220",
+            Some("claude-model"),
+            Some(&["other-model"]),
+            true
+        ),
+        ClaudeContinuationDecision::Incompatible { .. }
+    ));
+}
+
+#[test]
+fn claude_cli_version_floor_parses_embedded_triples() {
+    assert!(claude_cli_meets_minimum("claude 2.1.220", "2.1.220"));
+    assert!(claude_cli_meets_minimum("2.1.220-beta+001", "2.1.220"));
+    assert!(claude_cli_meets_minimum("2.2.0", "2.1.220"));
+    assert!(!claude_cli_meets_minimum("claude 2.1.219", "2.1.220"));
+    assert!(!claude_cli_meets_minimum("no version here", "2.1.220"));
+    assert!(!claude_cli_meets_minimum("", "2.1.220"));
+}
+
+// ---------------------------------------------------------------------------
+// L3: resume reopens the stored session over start flags
+// ---------------------------------------------------------------------------
+
+#[test]
+fn claude_resume_reopens_the_stored_session() {
+    let session = claude_resume_session("session-stored-1").expect("resume session");
+    assert_eq!(session.session_id(), "session-stored-1");
+    let settings = ClaudeSettings::from_selection(&claude_selection()).expect("settings valid");
+    let args = settings.spawn_args(&session);
+    assert!(args.contains(&"--resume".to_owned()));
+    assert!(args.contains(&"session-stored-1".to_owned()));
+    assert!(
+        !args.contains(&"--session-id".to_owned()),
+        "resume must not open a fresh session"
+    );
+    // Corrupt stored identities fail closed instead of resuming.
+    assert!(claude_resume_session("").is_none());
+    assert!(claude_resume_session(&"s".repeat(257)).is_none());
+}
+
+#[tokio::test]
+async fn claude_resume_init_gate_accepts_only_the_stored_session() {
+    let run = run_id();
+    let mut tracker = ClaudePendingTracker::new();
+    let (sender, _) = mpsc::channel(8);
+    let mut active = None;
+    // The reopened session announces itself: the gate opens.
+    let init = parse_frame(
+        r#"{"type":"system","subtype":"init","session_id":"session-stored-1"}"#,
+        1,
+    )
+    .expect("init decodes");
+    let outcome = apply_event(
+        init,
+        &run,
+        "session-stored-1",
+        &mut tracker,
+        &mut active,
+        &sender,
+        1,
+        None,
+    )
+    .await;
+    assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
+    assert!(tracker.init_seen());
+    // Any other session fails closed instead of adopting a foreign session.
+    let foreign = parse_frame(
+        r#"{"type":"system","subtype":"init","session_id":"session-other"}"#,
+        2,
+    )
+    .expect("init decodes");
+    let outcome = apply_event(
+        foreign,
+        &run,
+        "session-stored-1",
+        &mut tracker,
+        &mut active,
+        &sender,
+        2,
+        None,
+    )
+    .await;
+    assert_eq!(outcome, ClaudeApplyOutcome::Terminal(TerminalState::Failed));
+}
+
+// ---------------------------------------------------------------------------
+// L3: usage basis rules (cumulative totals, replacing context gauge)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn assistant_and_result_usage_decode_with_honest_shapes() {
+    // Text plus per-response usage: delta carries the gauge beside the text.
+    let event = parse_frame(
+        r#"{"type":"assistant","message":{"id":"msg-1","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":100,"cache_creation_input_tokens":10,"cache_read_input_tokens":20,"output_tokens":5}}}"#,
+        1,
+    )
+    .expect("assistant with usage decodes");
+    match event {
+        ClaudeEvent::TextDelta { delta, usage, .. } => {
+            assert_eq!(delta, "hi");
+            let sample = usage.expect("gauge travels with the delta");
+            assert_eq!(sample.input, Some(100));
+            assert_eq!(sample.cached_input, Some(20));
+            assert_eq!(sample.output, Some(5));
+            // The gauge is the response window only, never the running total.
+            assert_eq!(sample.context, Some(130));
+        }
+        _ => panic!("expected text delta with usage"),
+    }
+
+    // Usage without text still projects: the gauge is canonical content.
+    let usage_only = parse_frame(
+        r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":40}}}}"#,
+        2,
+    )
+    .expect("usage-only frame decodes");
+    match usage_only {
+        ClaudeEvent::Usage { sample } => {
+            assert_eq!(sample.input, Some(40));
+            assert_eq!(sample.context, Some(40));
+        }
+        _ => panic!("expected usage event"),
+    }
+
+    // Terminal totals never become a gauge.
+    let result = parse_frame(
+        r#"{"type":"result","subtype":"success","session_id":"session-1","is_error":false,"usage":{"input_tokens":1000,"cache_read_input_tokens":200,"output_tokens":50}}"#,
+        3,
+    )
+    .expect("result with usage decodes");
+    match result {
+        ClaudeEvent::TurnResult { usage, .. } => {
+            let sample = usage.expect("totals travel with the result");
+            assert_eq!(sample.input, Some(1000));
+            assert_eq!(sample.cached_input, Some(200));
+            assert_eq!(sample.output, Some(50));
+            assert_eq!(sample.context, None);
+        }
+        _ => panic!("expected turn result with usage"),
+    }
+
+    // The typeless terminal summary carries totals the same way.
+    let typeless = parse_frame(
+        r#"{"is_error":false,"session_id":"session-1","usage":{"output_tokens":7}}"#,
+        4,
+    )
+    .expect("typeless terminal with usage decodes");
+    assert!(
+        matches!(typeless, ClaudeEvent::TurnResult { usage: Some(_), .. }),
+        "typeless usage must stay observable"
+    );
+
+    // Empty measurements stay observable without a report.
+    let empty = parse_frame(
+        r#"{"type":"assistant","message":{"content":[],"usage":{}}}"#,
+        5,
+    )
+    .expect("empty usage decodes");
+    assert!(matches!(empty, ClaudeEvent::Unknown));
+
+    // Non-u64 numerics fail closed to absent instead of poisoning the turn.
+    for line in [
+        r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":-1}}}"#,
+        r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":1.5}}}"#,
+        r#"{"type":"result","subtype":"success","session_id":"s","usage":{"output_tokens":"many"}}"#,
+    ] {
+        let event = parse_frame(line, 6).expect("corrupt usage decodes");
+        assert!(
+            matches!(event, ClaudeEvent::Unknown),
+            "corrupt usage must not project for {line}"
+        );
+    }
+}
+
+#[test]
+fn claude_usage_report_is_cumulative_with_a_replacing_gauge() {
+    let run = run_id();
+    let thread = ThreadId::parse("thread-usage-1").expect("thread id");
+    let model = EngineModelId::parse("model-usage-1").expect("model id");
+    let context = ClaudeUsageContext {
+        run_id: &run,
+        thread_id: &thread,
+        provider_session_id: "session-stored-1",
+        model_id: &model,
+        observed_at: UnixMillis::from_millis(7),
+    };
+    let usage: serde_json::Value = serde_json::from_str(
+        r#"{"input_tokens":100,"cache_creation_input_tokens":10,"cache_read_input_tokens":20,"output_tokens":5}"#,
+    )
+    .expect("usage json");
+    let sample = parse_claude_assistant_usage(&usage).expect("sample");
+    let report = claude_usage_report(&context, 3, &sample).expect("report builds");
+    assert_eq!(report.basis(), RunUsageBasis::Cumulative);
+    assert_eq!(report.provider_session_id(), "session-stored-1");
+    assert_eq!(report.provider_turn_id(), None);
+    assert_eq!(report.source_sequence(), 3);
+    assert_eq!(report.input_tokens(), Some(100));
+    assert_eq!(report.output_tokens(), Some(5));
+    assert_eq!(report.cached_input_tokens(), Some(20));
+    // The window gauge is the one response only, never the running total.
+    assert_eq!(report.context_tokens(), Some(130));
+    assert_eq!(report.context_window_tokens(), None);
+
+    // Terminal totals carry no gauge: absent stays absent, never a wrong zero.
+    let totals: serde_json::Value = serde_json::from_str(
+        r#"{"input_tokens":1000,"cache_read_input_tokens":200,"output_tokens":50}"#,
+    )
+    .expect("totals json");
+    let sample = parse_claude_result_usage(&totals).expect("totals sample");
+    let report = claude_usage_report(&context, 4, &sample).expect("totals report");
+    assert_eq!(report.context_tokens(), None);
+
+    // Zero is preserved and distinct from absent.
+    let zero: serde_json::Value =
+        serde_json::from_str(r#"{"input_tokens":0,"output_tokens":0}"#).expect("zero json");
+    let sample = parse_claude_result_usage(&zero).expect("zero sample");
+    let report = claude_usage_report(&context, 5, &sample).expect("zero report");
+    assert_eq!(report.input_tokens(), Some(0));
+    assert_eq!(report.output_tokens(), Some(0));
+
+    // Empty measurements are never reports.
+    let empty: serde_json::Value = serde_json::from_str(r#"{}"#).expect("empty json");
+    assert!(parse_claude_result_usage(&empty).is_none());
+    assert!(parse_claude_assistant_usage(&empty).is_none());
+}
+
+#[tokio::test]
+async fn usage_projects_a_usage_observation_without_blocking_the_turn() {
+    let event = parse_frame(
+        r#"{"type":"assistant","message":{"id":"msg-9","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":100,"cache_read_input_tokens":20}}}"#,
+        9,
+    )
+    .expect("usage decodes");
+    let run = run_id();
+    let attribution = ClaudeUsageAttribution {
+        thread_id: ThreadId::parse("thread-usage-1").expect("thread id"),
+        model_id: EngineModelId::parse("model-usage-1").expect("model id"),
+    };
+    let scope = ClaudeUsageScope {
+        thread_id: &attribution.thread_id,
+        model_id: &attribution.model_id,
+        provider_session_id: "session-stored-1",
+    };
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut tracker = ClaudePendingTracker::new();
+    let mut active = None;
+    let outcome = apply_event(
+        event,
+        &run,
+        "session-stored-1",
+        &mut tracker,
+        &mut active,
+        &sender,
+        9,
+        Some(&scope),
+    )
+    .await;
+    assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
+    // Text first, gauge second, both on the shared channel.
+    let EngineObservation::TextDelta(chunk) = receiver.try_recv().expect("delta observed") else {
+        panic!("expected a text delta");
+    };
+    assert_eq!(chunk.delta(), "hi");
+    let EngineObservation::Usage(observation) = receiver.try_recv().expect("usage observed") else {
+        panic!("expected a usage observation");
+    };
+    assert_eq!(observation.report().basis(), RunUsageBasis::Cumulative);
+    assert_eq!(observation.report().context_tokens(), Some(120));
+    assert_eq!(observation.report().source_sequence(), 9);
+    assert_eq!(
+        observation.report().provider_session_id(),
+        "session-stored-1"
+    );
+
+    // Without attribution the same frame is a diagnostic: text flows, no
+    // usage observation, no terminal, and the turn continues.
+    let event = parse_frame(
+        r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":40}}}"#,
+        10,
+    )
+    .expect("usage decodes");
+    let (sender, mut receiver) = mpsc::channel(8);
+    let outcome = apply_event(
+        event,
+        &run,
+        "session-stored-1",
+        &mut tracker,
+        &mut active,
+        &sender,
+        10,
+        None,
+    )
+    .await;
+    assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
+    assert!(receiver.try_recv().is_err(), "no usage without scope");
+}
+
+// ---------------------------------------------------------------------------
+// L3: /usage bucket mapping (clamp, kinds, resets) plus invocation shape
+// ---------------------------------------------------------------------------
+
+/// Fixed now for reset-clause tests: 2026-01-01T00:00:00Z.
+const USAGE_AT_MS: i64 = 1_767_225_600_000;
+
+#[test]
+fn claude_cli_usage_buckets_map_with_clamp_and_kinds() {
+    let text = [
+        "Current session: 120% used, resets Jan 2, 3:04 pm (UTC)",
+        "Current week (all models): 33% used",
+        "Current week (GPT-5): 7% used, resets Feb 3, 1:02 am (UTC)",
+        "Current week (GPT-5): 9% used",
+    ]
+    .join("\n");
+    let windows = parse_claude_cli_usage_windows(&text, USAGE_AT_MS);
+    assert_eq!(windows.len(), 3);
+
+    assert_eq!(windows[0].id, "five_hour");
+    assert_eq!(windows[0].kind, ClaudeQuotaWindowKind::Session);
+    assert!(
+        (windows[0].percent_used - 100.0).abs() < f64::EPSILON,
+        "over-full gauge clamps to 100"
+    );
+    assert_eq!(
+        windows[0].resets_at.as_deref(),
+        Some("2026-01-02T15:04:00Z")
+    );
+    assert_eq!(windows[0].window_minutes, Some(300));
+    assert_eq!(windows[0].scope, "shared");
+
+    assert_eq!(windows[1].id, "seven_day");
+    assert_eq!(windows[1].kind, ClaudeQuotaWindowKind::Weekly);
+    assert!(
+        (windows[1].percent_used - 33.0).abs() < f64::EPSILON,
+        "in-range gauge passes through"
+    );
+    assert_eq!(windows[1].resets_at, None);
+    assert_eq!(windows[1].scope, "shared");
+
+    // The duplicate labeled bucket keeps the first row.
+    assert_eq!(windows[2].id, "seven_day:gpt-5");
+    assert_eq!(windows[2].kind, ClaudeQuotaWindowKind::Weekly);
+    assert_eq!(windows[2].label.as_deref(), Some("GPT-5"));
+    assert!(
+        (windows[2].percent_used - 7.0).abs() < f64::EPSILON,
+        "first duplicate wins"
+    );
+    assert_eq!(
+        windows[2].resets_at.as_deref(),
+        Some("2026-02-03T01:02:00Z")
+    );
+    assert_eq!(windows[2].scope, "model");
+
+    // Unknown kinds are never guessed.
+    assert_eq!(
+        classify_claude_quota_window_kind(None),
+        ClaudeQuotaWindowKind::Unknown
+    );
+    assert_eq!(
+        classify_claude_quota_window_kind(Some(999)),
+        ClaudeQuotaWindowKind::Unknown
+    );
+    assert_eq!(
+        classify_claude_quota_window_kind(Some(300)),
+        ClaudeQuotaWindowKind::Session
+    );
+    assert_eq!(
+        classify_claude_quota_window_kind(Some(10_080)),
+        ClaudeQuotaWindowKind::Weekly
+    );
+    assert!(
+        clamp_claude_percent_used(None).abs() < f64::EPSILON,
+        "absent gauge becomes 0"
+    );
+    assert!(
+        (clamp_claude_percent_used(Some(33.5)) - 33.5).abs() < f64::EPSILON,
+        "in-range gauge passes through"
+    );
+}
+
+#[test]
+fn claude_cli_usage_malformed_lines_yield_nothing() {
+    // A named IANA zone never becomes an invented instant, but the window
+    // still reports its gauge.
+    let zoned = parse_claude_cli_usage_windows(
+        "Current session: 42% used, resets Jan 2, 3:04 pm (CET)",
+        USAGE_AT_MS,
+    );
+    assert_eq!(zoned.len(), 1);
+    assert_eq!(zoned[0].resets_at, None);
+    assert!((zoned[0].percent_used - 42.0).abs() < f64::EPSILON);
+
+    // Malformed lines yield no windows.
+    for line in [
+        "Current session: used",
+        "Current session: many% used",
+        "Current session Vienna: 10% used",
+        "Current week: 10% used",
+        "Current week (): 10% used",
+        "Current week (GPT-5) 10% used",
+        "Last session: 10% used",
+        "",
+    ] {
+        assert!(
+            parse_claude_cli_usage_windows(line, USAGE_AT_MS).is_empty(),
+            "malformed line must yield nothing: {line}"
+        );
+    }
+
+    // The non-billable invocation keeps the documented argv shape.
+    assert_eq!(
+        claude_cli_usage_args(),
+        ["-p", "/usage", "--output-format", "json"]
+    );
+}
+
+#[test]
+fn claude_cli_reset_clause_parses_utc_and_rejects_the_rest() {
+    assert_eq!(
+        parse_claude_cli_reset_at(
+            "Current session: 1% used, resets Dec 31, 11:59 pm (UTC)",
+            USAGE_AT_MS
+        )
+        .as_deref(),
+        Some("2026-12-31T23:59:00Z")
+    );
+    // Minutes are optional; midnight rolls to hour zero.
+    assert_eq!(
+        parse_claude_cli_reset_at(
+            "Current session: 1% used, resets Jan 2, 12 am (GMT)",
+            USAGE_AT_MS
+        )
+        .as_deref(),
+        Some("2026-01-02T00:00:00Z")
+    );
+    // A December now rolls a January reset into next year.
+    let december_now = USAGE_AT_MS + 334_i64 * 86_400_000;
+    assert_eq!(
+        parse_claude_cli_reset_at(
+            "Current session: 1% used, resets Jan 2, 1 pm (UT)",
+            december_now
+        )
+        .as_deref(),
+        Some("2027-01-02T13:00:00Z")
+    );
+    // Impossible dates, bad hours, and trailing junk never become instants.
+    for line in [
+        "Current session: 1% used, resets Feb 31, 1 pm (UTC)",
+        "Current session: 1% used, resets Jan 2, 0 pm (UTC)",
+        "Current session: 1% used, resets Jan 2, 1 xm (UTC)",
+        "Current session: 1% used, resets Jan 2, 1 pm (UTC) tomorrow",
+        "Current session: 1% used",
+        "no reset clause here",
+    ] {
+        assert_eq!(
+            parse_claude_cli_reset_at(line, USAGE_AT_MS),
+            None,
+            "must not invent an instant for {line}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// L3: generated title capture (newest ai-title wins, total function)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn claude_session_title_takes_the_newest_valid_record() {
+    let lines = [
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+        r#"{"type":"ai-title","aiTitle":"First name"}"#,
+        "not json",
+        r#"{"type":"ai-title","aiTitle":""}"#,
+        r#"{"type":"ai-title","aiTitle":"Current name"}"#,
+        // A corrupt newer record is skipped instead of ending the scan.
+        r#"{"type":"ai-title","aiTitle":"truncated"#,
+    ];
+    assert_eq!(
+        claude_session_title_from_lines(&lines).as_deref(),
+        Some("Current name")
+    );
+    // No record means no title yet.
+    assert_eq!(claude_session_title_from_lines(&lines[..1]), None,);
+    // Oversize titles never become observations.
+    let big = format!(r#"{{"type":"ai-title","aiTitle":"{}"}}"#, "t".repeat(257));
+    assert_eq!(claude_session_title_from_lines(&[big.as_str()]), None);
+}
+
+#[test]
+fn claude_transcript_path_shapes_config_home_segments() {
+    assert_eq!(
+        claude_project_directory_name("E:\\work\\artisan"),
+        "E--work--artisan"
+    );
+    assert_eq!(
+        claude_project_directory_name("/home/sander/work"),
+        "-home-sander-work"
+    );
+    let path = claude_session_transcript_path("/home/test/.claude", "/work/app", "session-9");
+    assert_eq!(
+        path,
+        std::path::Path::new("/home/test/.claude")
+            .join("projects")
+            .join("-work-app")
+            .join("session-9.jsonl"),
+        "unexpected transcript path {path:?}"
+    );
+}
+
+#[test]
+fn claude_session_title_reads_one_transcript_total() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("artisan-claude-title-{nonce}"));
+    std::fs::create_dir_all(&directory).expect("title dir");
+    let transcript = directory.join("session-9.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"session-9\"}\n",
+            "{\"type\":\"ai-title\",\"aiTitle\":\"First name\"}\n",
+            "broken line\n",
+            "{\"type\":\"ai-title\",\"aiTitle\":\"Kept name\"}\n",
+        ),
+    )
+    .expect("transcript writes");
+    assert_eq!(
+        read_claude_session_title(&transcript).as_deref(),
+        Some("Kept name")
+    );
+    // A missing transcript means no title yet, never a failure.
+    assert_eq!(
+        read_claude_session_title(&directory.join("missing.jsonl")),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn claude_terminal_carries_the_captured_title() {
+    let mut tracker = ClaudePendingTracker::new();
+    assert_eq!(tracker.summary_title(), None);
+    tracker.note_summary_title("Kept name".to_owned());
+    assert_eq!(tracker.summary_title(), Some("Kept name"));
+    // Later captures replace earlier ones, mirroring the newest-record rule.
+    tracker.note_summary_title("Newer name".to_owned());
+    let terminal = terminal_observation(&run_id(), 3, TerminalState::Completed)
+        .with_summary_title(tracker.summary_title().map(str::to_owned));
+    assert_eq!(terminal.state(), TerminalState::Completed);
+    assert_eq!(terminal.summary_title(), Some("Newer name"));
+    // Engines that capture no title leave the observation unchanged.
+    let bare = terminal_observation(&run_id(), 4, TerminalState::Failed);
+    assert_eq!(bare.summary_title(), None);
+}
+
+// ---------------------------------------------------------------------------
+// L3: teardown kills the whole group; quarantine stays on unobserved reaps
+// ---------------------------------------------------------------------------
+
+#[test]
+fn claude_teardown_requires_group_termination() {
+    assert!(
+        claude_requires_group_termination(),
+        "Windows teardown must kill the whole Job Object so no claude grandchild \
+         holding a pipe is orphaned; unobserved reaps quarantine through \
+         cleanup_after_abort and finish_turn_result"
+    );
+}
+
+#[tokio::test]
+async fn fixture_kill_reports_interruption_with_durable_prefix() {
+    let responses = format!(
+        "{}\n{}\n",
+        init_line(),
+        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"prefix-"}}}"#,
+    );
+    // Pipe-holding grandchild: the leader is killed below while this holder
+    // still inherits stdout, so EOF (and the interruption) must arrive
+    // bounded without an orphan wedging the pump.
+    #[cfg(windows)]
+    let tail = "ping -n 4 127.0.0.1 >nul";
+    #[cfg(not(windows))]
+    let tail = "sleep 3";
+    let script = FixtureScript::new(&responses, tail);
+    let mut child = script.spawn();
+    let stdout = child.stdout.take().expect("fixture stdout");
+    drop(child.stdin.take());
+    let mut reader = BufReader::new(stdout);
+
+    let run = run_id();
+    let (sender, mut receiver) = mpsc::channel(64);
+    let mut tracker = ClaudePendingTracker::new();
+    let mut active: Option<String> = None;
+    let mut sequence: u64 = 0;
+    let mut line = String::new();
+    let terminal = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break Some(TerminalState::Interrupted),
+                Ok(_) => {
+                    sequence += 1;
+                    // Kill the leader once the durable prefix has landed.
+                    if sequence == 2 {
+                        let _ = child.kill().await;
+                    }
+                    let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                    match parse_frame(&trimmed, sequence) {
+                        Ok(event) => {
+                            if let ClaudeApplyOutcome::Terminal(state) = apply_event(
+                                event,
+                                &run,
+                                SESSION,
+                                &mut tracker,
+                                &mut active,
+                                &sender,
+                                sequence,
+                                None,
+                            )
+                            .await
+                            {
+                                break Some(state);
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => break None,
+            }
+        }
+    })
+    .await
+    .expect("kill fixture finishes bounded");
+    let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    assert_eq!(terminal, Some(TerminalState::Interrupted));
+    let mut deltas = Vec::new();
+    while let Ok(observation) = receiver.try_recv() {
+        if let EngineObservation::TextDelta(delta) = observation {
+            deltas.push(delta.delta().to_owned());
+        }
+    }
+    assert_eq!(deltas.join(""), "prefix-");
+}
+
+#[tokio::test]
+async fn fixture_restart_after_kill_replays_prefix_on_the_same_session() {
+    let first = format!(
+        "{}\n{}\n",
+        init_line(),
+        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"durable-"}}}"#,
+    );
+    let interrupted = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&first, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("first attempt finishes");
+    assert_eq!(interrupted.terminal, Some(TerminalState::Interrupted));
+    let durable_prefix = joined(&interrupted);
+    assert_eq!(durable_prefix, "durable-");
+
+    // The restart resumes provider-owned state: the stored session reopens
+    // through `--resume` instead of duplicating provider effects with a
+    // second session, and the init gate accepts exactly that session.
+    let stored = claude_resume_session(SESSION).expect("stored session resumes");
+    assert_eq!(stored.session_id(), SESSION);
+    let args = ClaudeSettings::from_selection(&claude_selection())
+        .expect("settings valid")
+        .spawn_args(&stored);
+    assert!(args.contains(&"--resume".to_owned()));
+
+    let second = format!(
+        "{}\n{}\n{}\n",
+        init_line(),
+        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"replayed"}}}"#,
+        result_line(),
+    );
+    let completed = tokio::time::timeout(
+        Duration::from_secs(30),
+        run_fixture_turn(&second, "", Duration::from_secs(5), None),
+    )
+    .await
+    .expect("restart finishes");
+    assert_eq!(completed.terminal, Some(TerminalState::Completed));
+    assert_eq!(
+        format!("{durable_prefix}{}", joined(&completed)),
+        "durable-replayed"
+    );
 }
