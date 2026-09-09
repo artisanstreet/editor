@@ -11,9 +11,10 @@ use std::time::Duration;
 
 use native_dev::{
     Action, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, InstanceOutcome,
-    StartupWait, clear_stale_receipt, fresh_receipt_path, locate_binaries, provision_forge_home,
-    provision_manifest, refuse_live_forge, resolve_dev_dir, spawn_editor, stage_binaries,
-    stage_line, staged_editor, staged_forge, stop_editor, usage, wait_for_startup,
+    ReadinessReconcile, StartupWait, clear_stale_receipt, fresh_receipt_path, locate_binaries,
+    provision_forge_home, provision_manifest, reconcile_stale_readiness, refuse_live_forge,
+    resolve_dev_dir, spawn_editor, stage_binaries, stage_line, staged_editor, staged_forge,
+    stop_editor, usage, wait_for_startup,
 };
 
 /// Number of stages in a full stage-and-launch run.
@@ -124,6 +125,13 @@ fn run() -> Result<u8, Outcome> {
     let receipt_path = fresh_receipt_path(&paths);
     clear_stale_receipt(&receipt_path).map_err(fail)?;
     let editor = staged_editor(&paths);
+    let forge = staged_forge(&paths);
+    match reconcile_stale_readiness(&paths, &forge).map_err(fail)? {
+        ReadinessReconcile::Absent => {}
+        ReadinessReconcile::CleanedStale { pid } => {
+            println!("dev: removed stale readiness of dead forge pid {pid}");
+        }
+    }
     println!(
         "dev: launching staged editor {} on its owned forge (close the window to stop)",
         editor.display()

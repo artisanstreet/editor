@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use artisan_editor_cli::process::{self, ForgeReadinessStatus};
+use artisan_editor_cli::process::{self, ForgeReadiness, ForgeReadinessStatus};
 
 use crate::{
     error::DevError,
@@ -131,6 +131,198 @@ pub fn refuse_live_forge(paths: &DevPaths, forge_exe: &Path) -> Result<(), DevEr
         }),
         ForgeReadinessStatus::Missing | ForgeReadinessStatus::Invalid => Ok(()),
     }
+}
+
+/// Outcome of pre-launch readiness reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadinessReconcile {
+    /// No receipt file exists; only orphan publish temporaries were swept.
+    Absent,
+    /// A stale receipt naming a dead Forge was removed.
+    CleanedStale {
+        /// Dead Forge identity the stale receipt named.
+        pid: u32,
+    },
+}
+
+/// Prefix of the runtime's publish temporary files.
+const READINESS_TMP_PREFIX: &str = ".artisan-forge-ready-";
+
+/// Suffix of the runtime's publish temporary files.
+const READINESS_TMP_SUFFIX: &str = ".tmp";
+
+/// Bound for one readiness receipt read, matching the CLI bound.
+const READINESS_MAX_BYTES: u64 = 4_096;
+
+/// Returns whether directory metadata describes a plain regular file.
+///
+/// Symlinks, reparse points, directories, and anything else fail closed:
+/// only a directly owned regular file may ever be removed.
+fn is_plain_file(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Returns whether a file name is one of the runtime's publish temporaries.
+///
+/// The runtime names them `.artisan-forge-ready-<pid>-<sequence>.tmp`; only
+/// that exact shape qualifies, so sibling state is never touched.
+fn is_readiness_temporary(name: &std::ffi::OsStr) -> bool {
+    let Some(text) = name.to_str() else {
+        return false;
+    };
+    let Some(middle) = text
+        .strip_prefix(READINESS_TMP_PREFIX)
+        .and_then(|rest| rest.strip_suffix(READINESS_TMP_SUFFIX))
+    else {
+        return false;
+    };
+    let mut parts = middle.split('-');
+    matches!((parts.next(), parts.next(), parts.next()), (Some(pid), Some(sequence), None)
+        if !pid.is_empty()
+            && !sequence.is_empty()
+            && pid.bytes().all(|byte| byte.is_ascii_digit())
+            && sequence.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Removes orphan publish temporaries beside the readiness receipt.
+///
+/// Best-effort: a leftover temporary never blocks the next publish (each
+/// publish mints a fresh pid-scoped name), so an unremovable file is left
+/// for the operator instead of failing the launch.
+fn sweep_readiness_temporaries(readiness_path: &Path) {
+    let Some(parent) = readiness_path.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !is_readiness_temporary(name.as_os_str()) {
+            continue;
+        }
+        let path = entry.path();
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| is_plain_file(&metadata)) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Reconciles a stale Forge readiness receipt before spawning the Editor.
+///
+/// Background: the Forge publishes its receipt with a no-clobber install
+/// and removes it only on graceful shutdown; an owned Forge killed with
+/// its Editor leaves the receipt (and possibly a publish temporary)
+/// behind, and the next Forge then refuses to publish and dies. The dev
+/// runner owns this home's lifecycle and holds the staging lock, so it —
+/// and only it — may clear the way, under tight rules:
+///
+/// - A receipt identifying a **live** Forge running the staged binary is
+///   refused, never touched ([`DevError::PreviousForgeRunning`]).
+/// - A receipt that parses as valid Forge readiness but names no live
+///   staged Forge is stale: its (pid, executable) identity provably
+///   describes no running owned process (exactly what
+///   `readiness_status` verifies), so the regular file is removed.
+/// - Anything else at the path — missing parents, symlinks, reparse
+///   points, directories, oversized or malformed bytes — is preserved and
+///   refused with a bounded diagnostic. In particular the general
+///   readiness no-clobber invariant is untouched: this never writes a
+///   receipt, only removes a proven-stale one under lock.
+///
+/// Tradeoff: pid-executable identity is checked, not cryptographic
+/// ownership. A live unrelated process that reused a dead Forge's pid
+/// still yields "not the staged Forge", which is the correct stale
+/// verdict for the file — deleting it harms nothing, since the receipt
+/// is false either way. The one case that must never delete (a live
+/// staged Forge) is exactly what `Ready` refuses.
+///
+/// # Errors
+///
+/// Returns [`DevError::PreviousForgeRunning`] for a live Forge and
+/// [`DevError::Stage`] when an unsafe or unreadable receipt blocks the
+/// launch.
+pub fn reconcile_stale_readiness(
+    paths: &DevPaths,
+    forge_exe: &Path,
+) -> Result<ReadinessReconcile, DevError> {
+    let readiness = paths.readiness_path();
+    match process::readiness_status(&readiness, forge_exe) {
+        ForgeReadinessStatus::Ready(readiness) => Err(DevError::PreviousForgeRunning {
+            pid: readiness.pid(),
+        }),
+        ForgeReadinessStatus::Missing => {
+            sweep_readiness_temporaries(&readiness);
+            Ok(ReadinessReconcile::Absent)
+        }
+        ForgeReadinessStatus::Invalid => reconcile_invalid_readiness(&readiness),
+    }
+}
+
+/// Handles a present-but-unusable readiness receipt.
+///
+/// Only a regular file that parses as valid Forge readiness is stale and
+/// removable; everything else is preserved and refused.
+fn reconcile_invalid_readiness(readiness: &Path) -> Result<ReadinessReconcile, DevError> {
+    let metadata = match std::fs::symlink_metadata(readiness) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Raced away between the status check and now: nothing to clean.
+            sweep_readiness_temporaries(readiness);
+            return Ok(ReadinessReconcile::Absent);
+        }
+        Err(_) => {
+            return Err(DevError::Stage {
+                stage: "launch",
+                reason: format!("cannot inspect {}", readiness.display()),
+            });
+        }
+    };
+    if !is_plain_file(&metadata) {
+        return Err(DevError::Stage {
+            stage: "launch",
+            reason: format!(
+                "stale readiness at {} is not a regular file; preserved, remove it by hand",
+                readiness.display()
+            ),
+        });
+    }
+    if metadata.len() > READINESS_MAX_BYTES {
+        return Err(DevError::Stage {
+            stage: "launch",
+            reason: format!(
+                "stale readiness at {} exceeds its size bound; preserved, remove it by hand",
+                readiness.display()
+            ),
+        });
+    }
+    let bytes = std::fs::read(readiness).map_err(|_| DevError::Stage {
+        stage: "launch",
+        reason: format!("cannot read {}", readiness.display()),
+    })?;
+    let receipt = ForgeReadiness::from_json(&bytes).map_err(|_| DevError::Stage {
+        stage: "launch",
+        reason: format!(
+            "stale readiness at {} is malformed; preserved, remove it by hand",
+            readiness.display()
+        ),
+    })?;
+    std::fs::remove_file(readiness).map_err(|_| DevError::Stage {
+        stage: "launch",
+        reason: format!("cannot remove stale readiness at {}", readiness.display()),
+    })?;
+    sweep_readiness_temporaries(readiness);
+    Ok(ReadinessReconcile::CleanedStale { pid: receipt.pid() })
 }
 
 /// Spawns the staged Editor on the dev home.

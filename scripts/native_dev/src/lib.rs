@@ -33,9 +33,10 @@ pub mod stage;
 pub use args::{Action, DevArgs, usage};
 pub use error::DevError;
 pub use launch::{
-    DEV_STARTUP_POLL_MS, DEV_STARTUP_TIMEOUT_MS, MAX_RECEIPT_TEXT, STARTUP_RECEIPT_ENV,
-    STARTUP_RECEIPT_SCHEMA, StartupWait, clear_stale_receipt, fresh_receipt_path, read_receipt,
-    refuse_live_forge, spawn_editor, staged_editor, staged_forge, stop_editor, wait_for_startup,
+    DEV_STARTUP_POLL_MS, DEV_STARTUP_TIMEOUT_MS, MAX_RECEIPT_TEXT, ReadinessReconcile,
+    STARTUP_RECEIPT_ENV, STARTUP_RECEIPT_SCHEMA, StartupWait, clear_stale_receipt,
+    fresh_receipt_path, read_receipt, reconcile_stale_readiness, refuse_live_forge, spawn_editor,
+    staged_editor, staged_forge, stop_editor, wait_for_startup,
 };
 pub use manifest::{
     installation_document, provision_manifest, verify_payload_dir, write_payload_manifest,

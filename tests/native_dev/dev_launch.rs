@@ -14,7 +14,8 @@ use std::{
 };
 
 use native_dev::{
-    BinarySet, DevPaths, StartupWait, read_receipt, staged_editor, staged_forge, wait_for_startup,
+    BinarySet, DevPaths, ReadinessReconcile, StartupWait, read_receipt, reconcile_stale_readiness,
+    staged_editor, staged_forge, wait_for_startup,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -227,4 +228,146 @@ fn wait_resolves_a_receipt_written_mid_wait() {
     let _ = child.kill();
     let _ = child.wait();
     cleanup(&dir);
+}
+
+/// A syntactically valid readiness receipt naming a pid that cannot exist.
+///
+/// `u32::MAX` passes the CLI receipt validation (nonzero pid, loopback
+/// endpoint, 64-hex pin) while no live process can match it, so the
+/// launcher must treat it as stale — exactly the owned-Forge-killed state
+/// the restart fix targets.
+fn dead_forge_receipt() -> Vec<u8> {
+    br#"{"schema":"artisan-forge-ready-v1","endpoint":"127.0.0.1:9","certificate_sha256":"abababababababababababababababababababababababababababababababab","pid":4294967295}"#.to_vec()
+}
+
+fn readiness_home(case: &str) -> (PathBuf, DevPaths) {
+    let dev_dir = scratch_dev_dir(case);
+    let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
+    std::fs::create_dir_all(paths.readiness_path().parent().expect("readiness parent"))
+        .expect("readiness dir");
+    (dev_dir, paths)
+}
+
+#[test]
+fn missing_readiness_reconciles_to_absent() {
+    let (dev_dir, paths) = readiness_home("reconcile-missing");
+    assert_eq!(
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("missing reconciles"),
+        ReadinessReconcile::Absent
+    );
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn stale_valid_readiness_permits_a_second_launch() {
+    let (dev_dir, paths) = readiness_home("reconcile-stale");
+    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
+    let stray = paths
+        .readiness_path()
+        .parent()
+        .expect("parent")
+        .join(".artisan-forge-ready-19808-0.tmp");
+    std::fs::write(&stray, b"orphan publish temporary").expect("stray tmp");
+    let sibling = paths
+        .readiness_path()
+        .parent()
+        .expect("parent")
+        .join("notes.txt");
+    std::fs::write(&sibling, b"operator notes").expect("sibling");
+
+    assert_eq!(
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("stale reconciles"),
+        ReadinessReconcile::CleanedStale { pid: u32::MAX }
+    );
+    assert!(
+        !paths.readiness_path().exists(),
+        "stale receipt must be gone before the next publish"
+    );
+    assert!(!stray.exists(), "orphan publish temporary is swept");
+    assert!(sibling.exists(), "unrelated siblings are preserved");
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn malformed_readiness_is_preserved_and_refused() {
+    let (dev_dir, paths) = readiness_home("reconcile-malformed");
+    std::fs::write(paths.readiness_path(), b"not a receipt").expect("malformed receipt");
+    let error =
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("malformed refused");
+    assert!(
+        error.to_string().contains("malformed"),
+        "unexpected: {error}"
+    );
+    assert!(
+        paths.readiness_path().exists(),
+        "malformed bytes are preserved, never deleted"
+    );
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn oversized_readiness_is_preserved_and_refused() {
+    let (dev_dir, paths) = readiness_home("reconcile-oversized");
+    std::fs::write(paths.readiness_path(), vec![b'x'; 5000]).expect("oversized receipt");
+    let error =
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("oversized refused");
+    assert!(
+        error.to_string().contains("size bound"),
+        "unexpected: {error}"
+    );
+    assert!(
+        paths.readiness_path().exists(),
+        "oversized bytes are preserved"
+    );
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn non_file_readiness_is_preserved_and_refused() {
+    let (dev_dir, paths) = readiness_home("reconcile-dir");
+    std::fs::create_dir_all(paths.readiness_path()).expect("directory at receipt path");
+    let error =
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("directory refused");
+    assert!(
+        error.to_string().contains("not a regular file"),
+        "unexpected: {error}"
+    );
+    assert!(paths.readiness_path().is_dir(), "directory is preserved");
+    cleanup(&dev_dir);
+}
+
+#[test]
+fn only_exact_publish_temporaries_are_swept() {
+    let (dev_dir, paths) = readiness_home("reconcile-tmp");
+    let parent = paths
+        .readiness_path()
+        .parent()
+        .expect("parent")
+        .to_path_buf();
+    let exact = parent.join(".artisan-forge-ready-7-3.tmp");
+    std::fs::write(&exact, b"orphan").expect("exact tmp");
+    for preserved in [
+        "notes.txt",
+        ".artisan-forge-ready-7.tmp",
+        "artisan-forge-ready-7-3.tmp",
+        ".artisan-forge-ready-7-3.log",
+        ".artisan-forge-ready-x-3.tmp",
+    ] {
+        std::fs::write(parent.join(preserved), b"keep").expect("sibling");
+    }
+    assert_eq!(
+        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("sweep runs"),
+        ReadinessReconcile::Absent
+    );
+    assert!(!exact.exists(), "exact publish temporary is swept");
+    for preserved in [
+        "notes.txt",
+        ".artisan-forge-ready-7.tmp",
+        "artisan-forge-ready-7-3.tmp",
+        ".artisan-forge-ready-7-3.log",
+        ".artisan-forge-ready-x-3.tmp",
+    ] {
+        assert!(parent.join(preserved).exists(), "preserved: {preserved}");
+    }
+    cleanup(&dev_dir);
 }
