@@ -140,6 +140,8 @@ const SURFACE_HEIGHT: f32 = 720.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const SIDEBAR_NEW_THREAD_HOVER_ID: &str = "new-thread";
 const SIDEBAR_MARKETPLACE_HOVER_ID: &str = "marketplace";
+const PROFILE_SETTINGS_HOVER_ID: &str = "profile-settings";
+const PROFILE_USAGE_HOVER_ID: &str = "profile-usage";
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -269,6 +271,8 @@ pub struct NativeApplication {
     profile_usage: NativeProfileUsageState,
     profile_usage_generation: ProfileUsageGeneration,
     profile_usage_next_seq: u64,
+    profile_hover: Rc<RefCell<SlidingHoverState>>,
+    profile_hover_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
@@ -472,6 +476,8 @@ impl NativeApplication {
             profile_usage: NativeProfileUsageState::default(),
             profile_usage_generation: ProfileUsageGeneration::first(),
             profile_usage_next_seq: 0,
+            profile_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
+            profile_hover_surface_bounds: Rc::new(RefCell::new(None)),
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
@@ -1142,6 +1148,37 @@ impl NativeApplication {
             .child(self.desktop_profile(cx))
     }
 
+    fn profile_hover_id_for_index(index: usize) -> Option<String> {
+        match index {
+            0 => Some(PROFILE_SETTINGS_HOVER_ID.to_owned()),
+            1 => Some(PROFILE_USAGE_HOVER_ID.to_owned()),
+            _ => None,
+        }
+    }
+
+    fn set_profile_highlight(&mut self, index: usize) {
+        if index == 0 {
+            let _ = self.profile_menu.move_first();
+        } else {
+            let _ = self.profile_menu.move_last();
+        }
+    }
+
+    fn sync_profile_hover_to_highlight(&self) {
+        if let Some(index) = self.profile_menu.highlighted_index()
+            && let Some(id) = Self::profile_hover_id_for_index(index)
+        {
+            self.profile_hover.borrow_mut().set_active(id);
+        }
+    }
+
+    fn clear_profile_hover(&self) {
+        if self.profile_hover.borrow().visible() {
+            self.profile_hover.borrow_mut().clear();
+        }
+        self.profile_hover_surface_bounds.borrow_mut().take();
+    }
+
     fn activate_profile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for action in self.profile_menu.take_actions() {
             match action.item_id().as_ref() {
@@ -1149,16 +1186,26 @@ impl NativeApplication {
                     // The Usage action forces a refresh and keeps the menu
                     // open. Provider rows are never invented locally; the
                     // native adapter owns refresh and provider data.
+                    // Restore the Usage highlight so the sliding pill stays
+                    // on the row under the pointer instead of jumping to
+                    // Settings after the transient state clears.
                     self.profile_menu.set_open(true);
+                    self.set_profile_highlight(1);
+                    self.profile_hover
+                        .borrow_mut()
+                        .set_active(PROFILE_USAGE_HOVER_ID.to_owned());
                     self.ensure_profile_usage(true, None, cx);
                 }
-                "settings" => self.navigate(
-                    NativeRoute::Settings {
-                        section: SettingsRoute::Models,
-                        engine: None,
-                    },
-                    cx,
-                ),
+                "settings" => {
+                    self.clear_profile_hover();
+                    self.navigate(
+                        NativeRoute::Settings {
+                            section: SettingsRoute::Models,
+                            engine: None,
+                        },
+                        cx,
+                    );
+                }
                 _ => {}
             }
         }
@@ -1356,7 +1403,10 @@ impl NativeApplication {
                 let _ = app.profile_menu.press_trigger();
                 window.focus(&app.profile_focus, cx);
                 if !was_open && app.profile_menu.is_open() {
+                    app.clear_profile_hover();
                     app.ensure_profile_usage(false, None, cx);
+                } else {
+                    app.clear_profile_hover();
                 }
                 cx.notify();
             }))
@@ -1364,22 +1414,27 @@ impl NativeApplication {
                 match event.keystroke.key.as_str() {
                     "escape" => {
                         let _ = app.profile_menu.dismiss();
+                        app.clear_profile_hover();
                     }
                     "down" => {
                         app.profile_menu.set_open(true);
                         let _ = app.profile_menu.move_next();
+                        app.sync_profile_hover_to_highlight();
                         app.ensure_profile_usage(false, None, cx);
                     }
                     "up" => {
                         app.profile_menu.set_open(true);
                         let _ = app.profile_menu.move_previous();
+                        app.sync_profile_hover_to_highlight();
                         app.ensure_profile_usage(false, None, cx);
                     }
                     "home" => {
                         let _ = app.profile_menu.move_first();
+                        app.sync_profile_hover_to_highlight();
                     }
                     "end" => {
                         let _ = app.profile_menu.move_last();
+                        app.sync_profile_hover_to_highlight();
                     }
                     "enter" | "space" => {
                         if app.profile_menu.is_open() {
@@ -1388,12 +1443,14 @@ impl NativeApplication {
                         } else {
                             let _ = app.profile_menu.press_trigger();
                             if app.profile_menu.is_open() {
+                                app.clear_profile_hover();
                                 app.ensure_profile_usage(false, None, cx);
                             }
                         }
                     }
                     "tab" => {
                         let _ = app.profile_menu.dismiss();
+                        app.clear_profile_hover();
                         cx.notify();
                         return;
                     }
@@ -1415,6 +1472,9 @@ impl NativeApplication {
                             }
                         }),
                 );
+        if !self.profile_menu.is_open() {
+            self.clear_profile_hover();
+        }
         if self.profile_menu.is_open() {
             let mut panel = div()
                 .id("artisan-desktop-profile-menu")
@@ -1437,6 +1497,7 @@ impl NativeApplication {
                     let trigger = app.profile_origin.get();
                     if !trigger.contains(&event.position) {
                         let _ = app.profile_menu.dismiss();
+                        app.clear_profile_hover();
                         cx.notify();
                     }
                 }))
@@ -1477,8 +1538,8 @@ impl NativeApplication {
                                 .child(
                                     div()
                                         .truncate()
-                                        .text_size(px(10.0))
-                                        .line_height(px(12.0))
+                                        .text_size(px(14.0))
+                                        .line_height(px(16.0))
                                         .text_color(theme.secondary)
                                         .child(
                                             self.profile_hostname
@@ -1497,16 +1558,108 @@ impl NativeApplication {
                         .child(self.desktop_profile_usage(theme, cx)),
                 )
                 .child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
-            for (index, (label, icon)) in [
-                ("Settings", AssetId::TABLER_SETTINGS),
-                ("Usage", AssetId::TABLER_LIST_DETAILS),
+            self.profile_hover.borrow_mut().clear_if_missing(&[
+                PROFILE_SETTINGS_HOVER_ID.to_owned(),
+                PROFILE_USAGE_HOVER_ID.to_owned(),
+            ]);
+            let profile_hover = Rc::clone(&self.profile_hover);
+            let profile_hover_surface = Rc::clone(&self.profile_hover_surface_bounds);
+            let profile_surface_probe = {
+                let surface = Rc::clone(&profile_hover_surface);
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, cx| {
+                        let changed = {
+                            let mut surface = surface.borrow_mut();
+                            if *surface == Some(bounds) {
+                                false
+                            } else {
+                                *surface = Some(bounds);
+                                true
+                            }
+                        };
+                        if changed {
+                            window.defer(cx, |window, _| window.refresh());
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+            };
+            let profile_row_hover = Rc::clone(&profile_hover);
+            let profile_row_surface = Rc::clone(&profile_hover_surface);
+            let profile_hover_probe = move |id: &'static str| {
+                let measured_id = id.to_owned();
+                let hover = Rc::clone(&profile_row_hover);
+                let surface_bounds = Rc::clone(&profile_row_surface);
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, cx| {
+                        let Some(surface) = *surface_bounds.borrow() else {
+                            return;
+                        };
+                        let rect = HoverRect {
+                            left: f32::from(bounds.left() - surface.left()),
+                            top: f32::from(bounds.top() - surface.top()),
+                            width: f32::from(bounds.size.width),
+                            height: f32::from(bounds.size.height),
+                        };
+                        if hover.borrow_mut().measure(&measured_id, rect) {
+                            window.defer(cx, |window, _| window.refresh());
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+            };
+            let mut actions = div()
+                .id("artisan-desktop-profile-actions-hover-surface")
+                .debug_selector(|| "artisan-desktop-profile-actions-hover-surface".to_owned())
+                .relative()
+                .w_full()
+                .flex()
+                .flex_col()
+                .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
+                    if !*hovered {
+                        app.profile_hover.borrow_mut().clear();
+                        cx.notify();
+                    }
+                }))
+                .child(profile_surface_probe)
+                .child(render_picker_hover_pill(
+                    self.theme,
+                    Rc::clone(&profile_hover),
+                    "profile",
+                    px(6.0),
+                    cx.reduce_motion(),
+                ));
+            for (index, (label, icon, hover_id)) in [
+                (
+                    "Settings",
+                    AssetId::TABLER_SETTINGS,
+                    PROFILE_SETTINGS_HOVER_ID,
+                ),
+                (
+                    "Usage",
+                    AssetId::TABLER_LIST_DETAILS,
+                    PROFILE_USAGE_HOVER_ID,
+                ),
             ]
             .into_iter()
             .enumerate()
             {
-                panel = panel.child(
+                let row_selector = format!("artisan-desktop-profile-action-{index}");
+                let row_probe = profile_hover_probe(hover_id);
+                let row_hover_id = hover_id.to_owned();
+                actions = actions.child(
                     div()
                         .id(("artisan-profile-action", index))
+                        .debug_selector(move || row_selector.clone())
+                        .relative()
                         .h(px(34.0))
                         .px(px(10.0))
                         .flex()
@@ -1514,13 +1667,18 @@ impl NativeApplication {
                         .gap(px(8.0))
                         .rounded(px(6.0))
                         .cursor_pointer()
-                        .when(
-                            self.profile_menu.highlighted_index() == Some(index),
-                            move |style| style.bg(profile_feedback),
-                        )
-                        .hover(move |style| style.bg(profile_feedback))
+                        .child(row_probe)
                         .child(desktop_nav_glyph(icon, theme))
                         .child(desktop_muted(theme, label))
+                        .on_hover(cx.listener(move |app, hovered: &bool, _, cx| {
+                            if *hovered {
+                                app.set_profile_highlight(index);
+                                app.profile_hover
+                                    .borrow_mut()
+                                    .set_active(row_hover_id.clone());
+                                cx.notify();
+                            }
+                        }))
                         .on_click(cx.listener(move |app, _, window, cx| {
                             cx.stop_propagation();
                             let _ = app.profile_menu.activate_index(index);
@@ -1528,6 +1686,7 @@ impl NativeApplication {
                         })),
                 );
             }
+            panel = panel.child(actions);
             root = root.child(gpui::deferred(
                 gpui::anchored()
                     .anchor(gpui::Anchor::BottomLeft)
@@ -6873,6 +7032,67 @@ mod tests {
             let application = view.read(app);
             let hover = application.sidebar_hover.borrow();
             assert_eq!(hover.active_id(), Some("marketplace"));
+        });
+    }
+
+    #[gpui::test]
+    fn profile_actions_share_sliding_hover_and_keyboard_syncs_pill(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+
+        let settings = cx
+            .debug_bounds("artisan-desktop-profile-action-0")
+            .expect("profile Settings action");
+        let usage = cx
+            .debug_bounds("artisan-desktop-profile-action-1")
+            .expect("profile Usage action");
+
+        cx.simulate_mouse_move(settings.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert_eq!(application.profile_menu.highlighted_index(), Some(0));
+            assert_eq!(
+                application.profile_hover.borrow().active_id(),
+                Some("profile-settings")
+            );
+            assert!(application.profile_hover.borrow().visible());
+        });
+
+        cx.simulate_mouse_move(usage.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert_eq!(application.profile_menu.highlighted_index(), Some(1));
+            assert_eq!(
+                application.profile_hover.borrow().active_id(),
+                Some("profile-usage")
+            );
+        });
+
+        cx.simulate_keystrokes("home");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert_eq!(application.profile_menu.highlighted_index(), Some(0));
+            assert_eq!(
+                application.profile_hover.borrow().active_id(),
+                Some("profile-settings")
+            );
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(!application.profile_menu.is_open());
+            assert_eq!(application.profile_hover.borrow().active_id(), None);
+            assert!(!application.profile_hover.borrow().visible());
         });
     }
 
