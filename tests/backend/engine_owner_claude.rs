@@ -1043,6 +1043,8 @@ async fn run_fixture_turn(
                                 }
                                 ClaudeApplyOutcome::Terminal(state) => break Some(state),
                             }
+                            // Drain beside the text channel, mirroring the live
+                            // pump: rows traverse the loop in emission order.
                             subagent_rows.extend(tracker.take_subagent_rows());
                         }
                         Err(_) => continue,
@@ -1197,7 +1199,7 @@ async fn fixture_subagent_discovery_and_transcript_row_sequence() {
         r#"{"type":"assistant","parent_tool_use_id":"tool-9","message":{"content":[{"type":"text","text":"child speaks"}]}}"#,
         result_line(),
     );
-    let outcome = tokio::time::timeout(
+    let mut outcome = tokio::time::timeout(
         Duration::from_secs(30),
         run_fixture_turn(&responses, "", Duration::from_secs(5), None),
     )
@@ -1237,6 +1239,8 @@ async fn fixture_subagent_discovery_and_transcript_row_sequence() {
         }
         other => panic!("expected transcript row, got {}", other.tag()),
     }
+    // The loop drained every row: nothing lingers in the tracker.
+    assert!(outcome.tracker.take_subagent_rows().is_empty());
 }
 
 #[tokio::test]

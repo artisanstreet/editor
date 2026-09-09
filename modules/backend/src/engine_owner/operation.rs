@@ -2315,7 +2315,20 @@ async fn execute_claude_turn(
     .await;
     drop(stdin);
     match terminal {
-        ClaudePumpOutcome::Terminal(state) => {
+        ClaudePumpOutcome::Terminal {
+            state,
+            subagent_rows,
+        } => {
+            // Handoff marker: subagent rows traversed the pump loop beside
+            // the text channel (drained per applied frame, emission-ordered).
+            // They cannot yet travel the owner observation channel, which
+            // carries only the S1a text/usage/terminal vocabulary, and the
+            // dispatcher has no arm for domain subagent rows; extending both
+            // is the follow-up that owns observation.rs plus
+            // native_run_dispatch.rs. Dropping here preserves today's exact
+            // delivery set: no row is re-encoded, delayed, or projected into
+            // the root transcript. Fixture coverage proves loop traversal.
+            drop(subagent_rows);
             drop(observations);
             finish_turn_result(
                 parts,
@@ -2325,15 +2338,25 @@ async fn execute_claude_turn(
             )
             .await
         }
-        ClaudePumpOutcome::Failed(error) => {
+        ClaudePumpOutcome::Failed {
+            error,
+            subagent_rows,
+        } => {
+            drop(subagent_rows);
             finish_turn_result(parts, Err(error), respond, runtime.limits.close).await
         }
     }
 }
 
 enum ClaudePumpOutcome {
-    Terminal(super::observation::TerminalState),
-    Failed(EngineOperationError),
+    Terminal {
+        state: super::observation::TerminalState,
+        subagent_rows: Vec<artisan_domain::Observation>,
+    },
+    Failed {
+        error: EngineOperationError,
+        subagent_rows: Vec<artisan_domain::Observation>,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2358,19 +2381,33 @@ async fn claude_pump_loop(
     use tokio::io::AsyncBufReadExt as _;
 
     let mut exited: Option<std::process::ExitStatus> = None;
+    // Emission buffer beside the text channel: drained per applied frame so
+    // rows traverse the loop in emission order instead of accumulating in
+    // the tracker. Delivery beyond the loop awaits the owner-channel
+    // follow-up; see the handoff marker where the pump settles.
+    let mut subagent_rows: Vec<artisan_domain::Observation> = Vec::new();
     loop {
         if shutdown.is_cancelled() {
-            return ClaudePumpOutcome::Failed(EngineOperationError::Shutdown);
+            return ClaudePumpOutcome::Failed {
+                error: EngineOperationError::Shutdown,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
         }
         if control.is_cancelled() {
             // No provider interrupt verb exists on this transport (the
             // adapter settles cancel without one); closing stdin is the only
             // turn-side signal before reporting cancellation.
             drop(stdin.take());
-            return ClaudePumpOutcome::Terminal(TerminalState::Cancelled);
+            return ClaudePumpOutcome::Terminal {
+                state: TerminalState::Cancelled,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
         }
         if Instant::now() >= deadline {
-            return ClaudePumpOutcome::Failed(EngineOperationError::Deadline);
+            return ClaudePumpOutcome::Failed {
+                error: EngineOperationError::Deadline,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
         }
         if claude_runtime::has_stalled(
             active_turn.is_some(),
@@ -2378,7 +2415,10 @@ async fn claude_pump_loop(
             inactivity,
             Instant::now(),
         ) {
-            return ClaudePumpOutcome::Terminal(TerminalState::Failed);
+            return ClaudePumpOutcome::Terminal {
+                state: TerminalState::Failed,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
         }
         let stall_at = last_activity
             .checked_add(inactivity)
@@ -2387,13 +2427,24 @@ async fn claude_pump_loop(
         line.clear();
         tokio::select! {
             biased;
-            () = shutdown.wait() => return ClaudePumpOutcome::Failed(EngineOperationError::Shutdown),
+            () = shutdown.wait() => {
+                return ClaudePumpOutcome::Failed {
+                    error: EngineOperationError::Shutdown,
+                    subagent_rows: std::mem::take(&mut subagent_rows),
+                };
+            }
             () = control.wait() => {
                 drop(stdin.take());
-                return ClaudePumpOutcome::Terminal(TerminalState::Cancelled);
+                return ClaudePumpOutcome::Terminal {
+                    state: TerminalState::Cancelled,
+                    subagent_rows: std::mem::take(&mut subagent_rows),
+                };
             }
             () = tokio::time::sleep_until(deadline) => {
-                return ClaudePumpOutcome::Failed(EngineOperationError::Deadline);
+                return ClaudePumpOutcome::Failed {
+                    error: EngineOperationError::Deadline,
+                    subagent_rows: std::mem::take(&mut subagent_rows),
+                };
             }
             () = tokio::time::sleep_until(stall_at) => {
                 if claude_runtime::has_stalled(
@@ -2402,14 +2453,22 @@ async fn claude_pump_loop(
                     inactivity,
                     Instant::now(),
                 ) {
-                    return ClaudePumpOutcome::Terminal(TerminalState::Failed);
+                    return ClaudePumpOutcome::Terminal {
+                        state: TerminalState::Failed,
+                        subagent_rows: std::mem::take(&mut subagent_rows),
+                    };
                 }
                 let _ = parts.stderr_counter.pump().await;
             }
             status = parts.child.wait(), if exited.is_none() => {
                 match status {
                     Ok(status) => exited = Some(status),
-                    Err(_) => return ClaudePumpOutcome::Failed(EngineOperationError::StreamFailed),
+                    Err(_) => {
+                        return ClaudePumpOutcome::Failed {
+                            error: EngineOperationError::StreamFailed,
+                            subagent_rows: std::mem::take(&mut subagent_rows),
+                        };
+                    }
                 }
             }
             read = reader.read_line(line) => {
@@ -2423,13 +2482,23 @@ async fn claude_pump_loop(
                             None => true,
                             Some(status) => status.success(),
                         };
+                        let subagent_rows = std::mem::take(&mut subagent_rows);
                         if tracker.result_seen() && !tracker.semantic_failure() && clean_exit {
-                            return ClaudePumpOutcome::Terminal(TerminalState::Completed);
+                            return ClaudePumpOutcome::Terminal {
+                                state: TerminalState::Completed,
+                                subagent_rows,
+                            };
                         }
                         if tracker.result_seen() {
-                            return ClaudePumpOutcome::Terminal(TerminalState::Failed);
+                            return ClaudePumpOutcome::Terminal {
+                                state: TerminalState::Failed,
+                                subagent_rows,
+                            };
                         }
-                        return ClaudePumpOutcome::Terminal(TerminalState::Interrupted);
+                        return ClaudePumpOutcome::Terminal {
+                            state: TerminalState::Interrupted,
+                            subagent_rows,
+                        };
                     }
                     Ok(_) => {
                         *last_activity = Instant::now();
@@ -2437,7 +2506,7 @@ async fn claude_pump_loop(
                         let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
                         match claude_runtime::parse_frame(&trimmed, *frame_sequence) {
                             Ok(event) => {
-                                match claude_runtime::apply_event(
+                                let outcome = claude_runtime::apply_event(
                                     event,
                                     run_id,
                                     expected_session,
@@ -2445,7 +2514,12 @@ async fn claude_pump_loop(
                                     active_turn,
                                     observations,
                                     *frame_sequence,
-                                ).await {
+                                )
+                                .await;
+                                // Drain beside the text channel: rows traverse
+                                // the loop in emission order.
+                                subagent_rows.extend(tracker.take_subagent_rows());
+                                match outcome {
                                     claude_runtime::ClaudeApplyOutcome::Continue { end_input } => {
                                         if end_input {
                                             // `result` seen: EndInput
@@ -2455,14 +2529,22 @@ async fn claude_pump_loop(
                                         }
                                     }
                                     claude_runtime::ClaudeApplyOutcome::Terminal(state) => {
-                                        return ClaudePumpOutcome::Terminal(state);
+                                        return ClaudePumpOutcome::Terminal {
+                                            state,
+                                            subagent_rows: std::mem::take(&mut subagent_rows),
+                                        };
                                     }
                                 }
                             }
                             Err(_) => continue,
                         }
                     }
-                    Err(_) => return ClaudePumpOutcome::Failed(EngineOperationError::StreamFailed),
+                    Err(_) => {
+                        return ClaudePumpOutcome::Failed {
+                            error: EngineOperationError::StreamFailed,
+                            subagent_rows: std::mem::take(&mut subagent_rows),
+                        };
+                    }
                 }
             }
         }
