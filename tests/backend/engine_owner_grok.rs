@@ -680,7 +680,7 @@ async fn fixture_grok_start_deltas_approval_question_cancel_close() {
             .expect("session update")
         {
             UpdateEvent::SessionUpdate(update) => {
-                assert_eq!(update.value()["index"], serde_json::json!(expected));
+                assert_eq!(update.update.value()["index"], serde_json::json!(expected));
             }
             other => panic!("expected session update, got {other:?}"),
         }
@@ -1256,7 +1256,7 @@ async fn fixture_restart_after_kill_replays_prefix_on_the_same_conversation() {
         .expect("session update")
     {
         UpdateEvent::SessionUpdate(update) => {
-            assert_eq!(update.value()["index"], serde_json::json!(1));
+            assert_eq!(update.update.value()["index"], serde_json::json!(1));
             durable_prefix.push_str("durable-");
         }
         other => panic!("expected session update, got {other:?}"),
