@@ -71,7 +71,8 @@ use crate::native_model_selector::{
 };
 use crate::native_profile_usage::{
     NativeProfileUsageState, NativeUsageAuthentication, NativeUsageEntry, NativeUsageWindow,
-    checked_label, group_usage_windows, reset_duration,
+    ProfileUsageGeneration, account_usage_response_current, checked_label, group_usage_windows,
+    plan_profile_usage_loads, profile_usage_display_name, reset_duration,
 };
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::SettingsScreen;
@@ -247,7 +248,10 @@ pub struct NativeApplication {
     composer_queue: composer_queue_application::QueueApplicationState,
     composer_controls: Entity<NativeComposerControls>,
     model_selector: Entity<NativeModelSelector>,
-    composer_model_choice: Option<(Option<ThreadId>, crate::native_model_catalog::NativeModelPolicy)>,
+    composer_model_choice: Option<(
+        Option<ThreadId>,
+        crate::native_model_catalog::NativeModelPolicy,
+    )>,
     composer_model_run_error: Option<&'static str>,
     catalog_controller: NativeCatalogController,
     _composer_controls_subscription: Subscription,
@@ -263,6 +267,8 @@ pub struct NativeApplication {
     profile_name: Option<String>,
     profile_hostname: Option<String>,
     profile_usage: NativeProfileUsageState,
+    profile_usage_generation: ProfileUsageGeneration,
+    profile_usage_next_seq: u64,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
@@ -464,6 +470,8 @@ impl NativeApplication {
             profile_name,
             profile_hostname,
             profile_usage: NativeProfileUsageState::default(),
+            profile_usage_generation: ProfileUsageGeneration::first(),
+            profile_usage_next_seq: 0,
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
@@ -1138,11 +1146,11 @@ impl NativeApplication {
         for action in self.profile_menu.take_actions() {
             match action.item_id().as_ref() {
                 "usage" => {
-                    // The incoming native usage adapter owns refresh and
-                    // provider data. The action only keeps this already
-                    // mounted usage section visible; it never invents a
-                    // successful reading locally.
+                    // The Usage action forces a refresh and keeps the menu
+                    // open. Provider rows are never invented locally; the
+                    // native adapter owns refresh and provider data.
                     self.profile_menu.set_open(true);
+                    self.ensure_profile_usage(true, None, cx);
                 }
                 "settings" => self.navigate(
                     NativeRoute::Settings {
@@ -1158,7 +1166,11 @@ impl NativeApplication {
         cx.notify();
     }
 
-    fn desktop_profile_usage(&self, theme: DesktopTheme) -> gpui::Stateful<Div> {
+    fn desktop_profile_usage(
+        &self,
+        theme: DesktopTheme,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<Div> {
         let mut section = div()
             .id(crate::native_profile_usage::PROFILE_USAGE_SELECTOR)
             .debug_selector(|| crate::native_profile_usage::PROFILE_USAGE_SELECTOR.to_owned())
@@ -1166,6 +1178,18 @@ impl NativeApplication {
             .flex_col()
             .px(px(8.0))
             .py(px(6.0));
+
+        if !self.profile_usage_connected() {
+            return section
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.foreground)
+                        .child("Usage"),
+                )
+                .child(desktop_muted(theme, "Connect to Forge to see usage.").text_size(px(11.0)));
+        }
 
         if self.profile_usage.entries.is_empty() {
             return section
@@ -1192,6 +1216,29 @@ impl NativeApplication {
                 theme,
                 now_ms,
             ));
+            let engine_id = entry.engine_id.clone();
+            let refresh_label = if self
+                .profile_usage
+                .refreshing_engine_ids
+                .iter()
+                .any(|current| current == &engine_id)
+            {
+                "Refreshing…"
+            } else {
+                "Refresh"
+            };
+            section = section.child(
+                div()
+                    .id(("artisan-profile-usage-refresh", index))
+                    .debug_selector(|| format!("artisan-profile-usage-refresh-{}", entry.engine_id))
+                    .cursor_pointer()
+                    .text_size(px(10.0))
+                    .text_color(theme.secondary)
+                    .child(refresh_label.to_owned())
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.refresh_single_profile_engine(&engine_id, cx);
+                    })),
+            );
         }
         section
     }
@@ -1274,10 +1321,11 @@ impl NativeApplication {
                             .line_height(px(16.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
-                            .child(self.profile_name.clone().map_or_else(
-                                || "User".into(),
-                                |name| capitalize_label(&name),
-                            )),
+                            .child(
+                                self.profile_name
+                                    .clone()
+                                    .map_or_else(|| "User".into(), |name| capitalize_label(&name)),
+                            ),
                     )
                     .child(
                         div()
@@ -1304,8 +1352,12 @@ impl NativeApplication {
             }))
             .on_click(cx.listener(|app, _, window, cx| {
                 cx.stop_propagation();
+                let was_open = app.profile_menu.is_open();
                 let _ = app.profile_menu.press_trigger();
                 window.focus(&app.profile_focus, cx);
+                if !was_open && app.profile_menu.is_open() {
+                    app.ensure_profile_usage(false, None, cx);
+                }
                 cx.notify();
             }))
             .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
@@ -1316,10 +1368,12 @@ impl NativeApplication {
                     "down" => {
                         app.profile_menu.set_open(true);
                         let _ = app.profile_menu.move_next();
+                        app.ensure_profile_usage(false, None, cx);
                     }
                     "up" => {
                         app.profile_menu.set_open(true);
                         let _ = app.profile_menu.move_previous();
+                        app.ensure_profile_usage(false, None, cx);
                     }
                     "home" => {
                         let _ = app.profile_menu.move_first();
@@ -1333,6 +1387,9 @@ impl NativeApplication {
                             app.activate_profile_selection(window, cx);
                         } else {
                             let _ = app.profile_menu.press_trigger();
+                            if app.profile_menu.is_open() {
+                                app.ensure_profile_usage(false, None, cx);
+                            }
                         }
                     }
                     "tab" => {
@@ -1437,7 +1494,7 @@ impl NativeApplication {
                         .min_h(px(0.0))
                         .max_h(px(280.0))
                         .overflow_y_scroll()
-                        .child(self.desktop_profile_usage(theme)),
+                        .child(self.desktop_profile_usage(theme, cx)),
                 )
                 .child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
             for (index, (label, icon)) in [
@@ -1594,12 +1651,33 @@ impl NativeApplication {
             self.message_submission_is_admissible(cx) && self.composer.read(cx).send_ready();
         snapshot.disabled = self.service_stopped;
         self.project_run_controls(&mut snapshot);
-        crate::native_composer_queue::project_controls_snapshot(&self.composer_queue.state, &mut snapshot);
+        crate::native_composer_queue::project_controls_snapshot(
+            &self.composer_queue.state,
+            &mut snapshot,
+        );
         let queue = &self.composer_queue.state;
         let count = crate::native_composer_queue::queue_count_label(queue);
         let status = queue.status().label();
-        snapshot.queue_status = if status.is_empty() { count } else { Some(match count { Some(count) => format!("{count} · {status}"), None => status.to_owned() }) };
-        snapshot.queue_retry = if queue.can_retry_restore() { Some("Restore".into()) } else if queue.can_retry_recalled_read() || matches!(queue.status(), crate::composer_queue_state::QueueStatus::TransportFailed) { Some("Retry".into()) } else { None };
+        snapshot.queue_status = if status.is_empty() {
+            count
+        } else {
+            Some(match count {
+                Some(count) => format!("{count} · {status}"),
+                None => status.to_owned(),
+            })
+        };
+        snapshot.queue_retry = if queue.can_retry_restore() {
+            Some("Restore".into())
+        } else if queue.can_retry_recalled_read()
+            || matches!(
+                queue.status(),
+                crate::composer_queue_state::QueueStatus::TransportFailed
+            )
+        {
+            Some("Retry".into())
+        } else {
+            None
+        };
 
         snapshot.new_thread_ready =
             snapshot.run_active && snapshot.send_ready && self.add_project_action_is_admissible();
@@ -1616,7 +1694,10 @@ impl NativeApplication {
         });
         if let Some(message) = self.composer_model_run_error {
             snapshot.failure = Some(crate::native_composer_controls::NativeComposerFailure::new(
-                0, "Could not start with this model", message, false,
+                0,
+                "Could not start with this model",
+                message,
+                false,
             ));
         }
         self.composer_controls
@@ -1664,7 +1745,8 @@ impl NativeApplication {
                 self.model_selector.read(cx).state().snapshot(),
                 policy,
                 self.engine_settings.authoritative_config(),
-            ).err();
+            )
+            .err();
             if self.composer_model_run_error.is_some() {
                 self.sync_composer_controls(cx);
                 cx.notify();
@@ -1995,7 +2077,9 @@ impl NativeApplication {
             return;
         }
         match event {
-            NativeTransportEvent::ComposerState(event) => self.handle_composer_state_event(event, cx),
+            NativeTransportEvent::ComposerState(event) => {
+                self.handle_composer_state_event(event, cx)
+            }
             NativeTransportEvent::ActiveRun {
                 thread_id,
                 generation,
@@ -2026,6 +2110,7 @@ impl NativeApplication {
             }
             NativeTransportEvent::Starting => {
                 self.state = NativeViewState::Loading;
+                self.reset_profile_usage_for_connection();
                 self.sync_composer_availability(cx);
                 cx.notify();
             }
@@ -2061,6 +2146,7 @@ impl NativeApplication {
                 self.pending_thread = None;
                 self.set_picker_disabled(true, cx);
                 self.set_thread_picker_disabled(true, cx);
+                self.reset_profile_usage_for_connection();
                 self.set_failure(failure, cx);
             }
             NativeTransportEvent::ThreadEngineSettings { generation, result } => {
@@ -2072,6 +2158,18 @@ impl NativeApplication {
             NativeTransportEvent::RegisteredProfilesFailed(failure) => {
                 self.handle_registered_profiles_failed(failure, cx);
             }
+            NativeTransportEvent::AccountUsage {
+                engine_id,
+                generation,
+                request_seq,
+                entry,
+            } => self.handle_account_usage(engine_id, generation, request_seq, entry, cx),
+            NativeTransportEvent::AccountUsageFailed {
+                engine_id,
+                generation,
+                request_seq,
+                failure,
+            } => self.handle_account_usage_failed(engine_id, generation, request_seq, failure, cx),
             NativeTransportEvent::ComposerCatalog {
                 thread_id,
                 profile_id,
@@ -2214,6 +2312,7 @@ impl NativeApplication {
         self.retain_message_flight(cx);
         self.service_stopped = true;
         self.reset_composer_catalog(cx);
+        self.reset_profile_usage_for_connection();
         self.thread_switch_flight = None;
         self.ordinary_unsubscribe_thread = None;
         self.pending_thread = None;
@@ -4296,10 +4395,14 @@ impl NativeApplication {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
-        let profile = self.engine_settings.authoritative_config()
+        let profile = self
+            .engine_settings
+            .authoritative_config()
             .map(|config| config.selection().as_opencode2().profile_id().clone())
             .or_else(|| match self.engine_settings.registry_view() {
-                crate::engine_settings::RegistryView::Present(profiles) if profiles.len() == 1 => profiles.into_iter().next(),
+                crate::engine_settings::RegistryView::Present(profiles) if profiles.len() == 1 => {
+                    profiles.into_iter().next()
+                }
                 _ => None,
             });
         let Some(profile_id) = profile else {
@@ -4522,6 +4625,160 @@ impl NativeApplication {
             self.sync_composer_catalog_status(cx);
             cx.notify();
         }
+    }
+
+    /// Returns whether the Forge connection can admit an account-usage read.
+    fn profile_usage_connected(&self) -> bool {
+        #[cfg(test)]
+        if self.test_command_sink.is_some() {
+            return !self.service_stopped && !self.shutdown_prepared;
+        }
+        self.service
+            .as_ref()
+            .is_some_and(|service| !service.is_finished())
+            && !self.service_stopped
+            && !self.shutdown_prepared
+    }
+
+    /// Advances the connection scope and drops incompatible cache/pending.
+    fn reset_profile_usage_for_connection(&mut self) {
+        let next = self
+            .profile_usage_generation
+            .checked_next()
+            .unwrap_or(ProfileUsageGeneration::first());
+        self.profile_usage_generation = next;
+        self.profile_usage.clear_for_connection();
+    }
+
+    /// Ensures per-engine usage for an opened menu.
+    ///
+    /// Missing and stale (180s) rows are dispatched independently with named
+    /// pending rows; fresh rows are retained. `force` bypasses freshness and
+    /// keeps the menu open. Each dispatch carries the current connection
+    /// generation plus a per-engine request sequence so an older same-engine
+    /// reply arriving after a forced refresh cannot settle or replace the
+    /// newer request.
+    fn ensure_profile_usage(
+        &mut self,
+        force: bool,
+        only_engine_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.profile_usage_connected() {
+            return;
+        }
+        let now_ms = profile_usage_now_ms();
+        let wanted = plan_profile_usage_loads(&self.profile_usage, now_ms, force, only_engine_id);
+        if wanted.is_empty() {
+            return;
+        }
+        let generation = self.profile_usage_generation;
+        for engine_id in wanted {
+            let Some(request_seq) = self.profile_usage_next_seq.checked_add(1) else {
+                let display_name = profile_usage_display_name(&engine_id).to_owned();
+                self.profile_usage.accept_failure(
+                    &engine_id,
+                    &display_name,
+                    invalid_service_failure().to_string(),
+                    None,
+                );
+                continue;
+            };
+            self.profile_usage_next_seq = request_seq;
+            let display_name = profile_usage_display_name(&engine_id).to_owned();
+            if self.profile_usage.entry(&engine_id).is_none() {
+                self.profile_usage.entries.push(NativeUsageEntry::pending(
+                    engine_id.clone(),
+                    display_name.clone(),
+                ));
+            }
+            self.profile_usage
+                .begin_refresh_seq(&engine_id, request_seq);
+            let command = NativeTransportCommand::ReadAccountUsage {
+                engine_id: engine_id.clone(),
+                generation,
+                request_seq,
+                force,
+            };
+            if let Err(error) = self.submit_command(command) {
+                let failure = command_failure(error);
+                self.profile_usage
+                    .finish_refresh_seq(&engine_id, request_seq);
+                self.profile_usage.accept_failure(
+                    &engine_id,
+                    &display_name,
+                    failure.to_string(),
+                    None,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// Refreshes one provider row from its explicit refresh control.
+    fn refresh_single_profile_engine(&mut self, engine_id: &str, cx: &mut Context<Self>) {
+        self.ensure_profile_usage(true, Some(engine_id), cx);
+    }
+
+    fn handle_account_usage(
+        &mut self,
+        engine_id: String,
+        generation: ProfileUsageGeneration,
+        request_seq: u64,
+        entry: NativeUsageEntry,
+        cx: &mut Context<Self>,
+    ) {
+        if !account_usage_response_current(
+            &self.profile_usage,
+            generation,
+            self.profile_usage_generation,
+            &engine_id,
+            request_seq,
+        ) || entry.engine_id != engine_id
+        {
+            return;
+        }
+        self.profile_usage.try_accept(entry, request_seq);
+        cx.notify();
+    }
+
+    fn handle_account_usage_failed(
+        &mut self,
+        engine_id: String,
+        generation: ProfileUsageGeneration,
+        request_seq: u64,
+        failure: ServiceFailure,
+        cx: &mut Context<Self>,
+    ) {
+        if !account_usage_response_current(
+            &self.profile_usage,
+            generation,
+            self.profile_usage_generation,
+            &engine_id,
+            request_seq,
+        ) {
+            return;
+        }
+        let display_name = self
+            .profile_usage
+            .entry(&engine_id)
+            .map(|entry| {
+                entry
+                    .report
+                    .as_ref()
+                    .map_or(entry.display_name.clone(), |report| {
+                        report.display_name.clone()
+                    })
+            })
+            .unwrap_or_else(|| profile_usage_display_name(&engine_id).to_owned());
+        self.profile_usage.try_accept_failure(
+            &engine_id,
+            &display_name,
+            failure.to_string(),
+            None,
+            request_seq,
+        );
+        cx.notify();
     }
 
     fn request_engine_settings_for_selected(&mut self, cx: &mut Context<Self>) {
@@ -5535,6 +5792,16 @@ fn desktop_profile_usage_entry(
                     root = root.child(group_view);
                 }
             }
+            // A provider failure travels alongside retained windows; both stay
+            // visible instead of the failure hiding the meters.
+            if let Some(failure) = report.failure.as_deref() {
+                root = root.child(desktop_muted(theme, failure.to_owned()).text_size(px(11.0)));
+            }
+            if let Some(failure) = entry.failure.as_deref() {
+                root = root.child(
+                    desktop_muted(theme, format!("Refresh failed: {failure}")).text_size(px(10.0)),
+                );
+            }
         }
         Some(report) if report.authentication == NativeUsageAuthentication::Unauthenticated => {
             root = root.child(
@@ -5547,6 +5814,13 @@ fn desktop_profile_usage_entry(
                 )
                 .text_size(px(11.0)),
             );
+            if let Some(failure) = entry.failure.as_deref()
+                && Some(failure) != report.failure.as_deref()
+            {
+                root = root.child(
+                    desktop_muted(theme, format!("Refresh failed: {failure}")).text_size(px(10.0)),
+                );
+            }
         }
         Some(report) => {
             root = root.child(
@@ -5559,6 +5833,13 @@ fn desktop_profile_usage_entry(
                 )
                 .text_size(px(11.0)),
             );
+            if let Some(failure) = entry.failure.as_deref()
+                && Some(failure) != report.failure.as_deref()
+            {
+                root = root.child(
+                    desktop_muted(theme, format!("Refresh failed: {failure}")).text_size(px(10.0)),
+                );
+            }
         }
         None => {
             root = root.child(
@@ -6153,19 +6434,47 @@ mod tests {
     }
 
     #[gpui::test]
-    fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(cx: &mut TestAppContext) {
+    fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
+        cx: &mut TestAppContext,
+    ) {
         let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
         let (sink, commands) = command_sink([]);
         cx.update(|_, app| {
             view.update(app, |application, cx| {
-                install_ready_message_surface(application, cx, ThreadId::parse("picker-task").unwrap(), "keep my draft", sink);
-                let policy = application.model_selector.read(cx).state().snapshot()
-                    .selection_policy_for_model("codex-sol").unwrap();
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    ThreadId::parse("picker-task").unwrap(),
+                    "keep my draft",
+                    sink,
+                );
+                let policy = application
+                    .model_selector
+                    .read(cx)
+                    .state()
+                    .snapshot()
+                    .selection_policy_for_model("codex-sol")
+                    .unwrap();
                 application.handle_composer_model_event(
-                    &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(policy.clone()), cx);
+                    &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(
+                        policy.clone(),
+                    ),
+                    cx,
+                );
                 application.sync_composer_model_policy(cx);
-                assert_eq!(application.model_selector.read(cx).state().policy(), Some(&policy));
-                assert!(application.model_selector.read(cx).state().status().error.is_none());
+                assert_eq!(
+                    application.model_selector.read(cx).state().policy(),
+                    Some(&policy)
+                );
+                assert!(
+                    application
+                        .model_selector
+                        .read(cx)
+                        .state()
+                        .status()
+                        .error
+                        .is_none()
+                );
                 assert!(application.composer_model_run_error.is_none());
                 application.begin_message_submission(cx);
                 assert!(commands.borrow().is_empty());
@@ -6570,7 +6879,10 @@ mod tests {
     #[test]
     fn profile_name_capitalizes_first_letter_only() {
         assert_eq!(super::capitalize_label("sander"), "Sander");
-        assert_eq!(super::capitalize_label("DESKTOP-96USC6J"), "Desktop-96usc6j");
+        assert_eq!(
+            super::capitalize_label("DESKTOP-96USC6J"),
+            "Desktop-96usc6j"
+        );
         assert_eq!(super::capitalize_label(""), "");
     }
 

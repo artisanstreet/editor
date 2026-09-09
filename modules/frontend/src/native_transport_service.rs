@@ -24,6 +24,7 @@ use std::{
 };
 
 use crate::forge_dev_endpoint as dev_endpoint;
+use crate::native_profile_usage::{NativeUsageEntry, ProfileUsageGeneration};
 use crate::native_transport::CatalogLoadGeneration;
 use artisan_domain::{
     AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor, ConversationQuery,
@@ -148,6 +149,31 @@ pub enum NativeTransportCommand {
     },
     /// Load the certified engine profile catalogue.
     ListRegisteredProfiles,
+    /// Read one engine's provider-account usage, fenced by the profile-menu
+    /// connection generation and a per-engine request sequence. The service
+    /// fans out per engine so each snapshot `fetched_at` represents that
+    /// provider; the application owns freshness, pending rows, and
+    /// stale-response pairing.
+    ///
+    /// Each read executes on the one serial service loop through the existing
+    /// bounded `runtime.request` path (existing request deadline, admission
+    /// budget, and cancellation behavior; no separate transport owner). Six
+    /// sequential reads can therefore delay composer/control commands by up
+    /// to six bounded request timeouts in the worst case; per-engine
+    /// deduplication in `plan_profile_usage_loads` keeps the common case to
+    /// only missing or stale rows.
+    ReadAccountUsage {
+        /// Stable engine identity narrowed for this read.
+        engine_id: String,
+        /// Connection scope minted by the profile menu.
+        generation: ProfileUsageGeneration,
+        /// Per-engine request sequence; an older same-engine reply arriving
+        /// after a forced refresh carries a superseded sequence and is
+        /// dropped without settling the newer request.
+        request_seq: u64,
+        /// User-initiated refresh bypasses the backend freshness window.
+        force: bool,
+    },
     /// Durably save one complete thread engine configuration.
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
     /// Durably save one desired model-favorite state with stable retry
@@ -196,6 +222,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::ReadComposerCatalog { .. } => "ReadComposerCatalog",
             Self::ReadModelFavorites { .. } => "ReadModelFavorites",
             Self::ListRegisteredProfiles => "ListRegisteredProfiles",
+            Self::ReadAccountUsage { .. } => "ReadAccountUsage",
             Self::SetThreadEngineConfig(_) => "SetThreadEngineConfig",
             Self::SetModelFavorite(_) => "SetModelFavorite",
             Self::QueueFirstMessage(_) => "QueueFirstMessage",
@@ -385,7 +412,7 @@ pub enum ServiceStopStatus {
 }
 
 /// Events crossing from the service thread to the GPUI application.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum NativeTransportEvent {
     ComposerState(ComposerStateEvent),
     ActiveRun {
@@ -470,6 +497,31 @@ pub enum NativeTransportEvent {
     RegisteredProfiles(RegisteredEngineProfilesResult),
     /// Registered engine profile catalogue read failure.
     RegisteredProfilesFailed(ServiceFailure),
+    /// One engine's provider-account usage with its connection fence.
+    AccountUsage {
+        /// Engine narrowed by the triggering read.
+        engine_id: String,
+        /// Connection scope minted by the profile menu.
+        generation: ProfileUsageGeneration,
+        /// Per-engine request sequence echoed from the triggering read.
+        request_seq: u64,
+        /// Provider-owned row; its `fetched_at_ms` is the snapshot's own
+        /// observation time, never the client receipt clock.
+        entry: NativeUsageEntry,
+    },
+    /// One engine's provider-account usage read failure with its fence.
+    /// The application preserves last-good meters and records this failure
+    /// only on the failing engine row.
+    AccountUsageFailed {
+        /// Engine narrowed by the triggering read.
+        engine_id: String,
+        /// Connection scope minted by the profile menu.
+        generation: ProfileUsageGeneration,
+        /// Per-engine request sequence echoed from the triggering read.
+        request_seq: u64,
+        /// Redacted failure.
+        failure: ServiceFailure,
+    },
     /// Runtime model catalog for one exact thread/profile/generation scope.
     ComposerCatalog {
         /// Thread that owns the discovery request.
@@ -1061,6 +1113,12 @@ fn model_favorites_request() -> ClientRequest {
     query_request(Query::ReadModelFavorites(ReadModelFavorites))
 }
 
+fn account_usage_request(engine_id: &str, force: bool) -> Result<ClientRequest, ServiceFailure> {
+    let query = artisan_domain::ReadAccountUsage::new(Some(engine_id.to_owned()), force)
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    Ok(query_request(Query::ReadAccountUsage(query)))
+}
+
 fn engine_config_stable_mutation(
     command: Box<SetThreadEngineConfig>,
 ) -> Result<StableMutation, ServiceFailure> {
@@ -1229,10 +1287,24 @@ fn create_mutation(
 
 #[derive(Clone)]
 enum ExpectedResponse {
-    QueuedMessages { thread_id: ThreadId },
-    MessageWithdrawn { thread_id: ThreadId, message_id: artisan_domain::MessageId, original_request_id: RequestId, request_id: RequestId },
-    RecalledMessage { thread_id: ThreadId, message_id: artisan_domain::MessageId, original_request_id: RequestId },
-    RunUsage { thread_id: ThreadId, run_id: artisan_domain::RunId },
+    QueuedMessages {
+        thread_id: ThreadId,
+    },
+    MessageWithdrawn {
+        thread_id: ThreadId,
+        message_id: artisan_domain::MessageId,
+        original_request_id: RequestId,
+        request_id: RequestId,
+    },
+    RecalledMessage {
+        thread_id: ThreadId,
+        message_id: artisan_domain::MessageId,
+        original_request_id: RequestId,
+    },
+    RunUsage {
+        thread_id: ThreadId,
+        run_id: artisan_domain::RunId,
+    },
 
     ActiveRun(ThreadId),
     RunStopped(artisan_domain::StopRun),
@@ -1245,6 +1317,9 @@ enum ExpectedResponse {
     MessageImage(artisan_domain::ImageAttachmentRef),
     ThreadEngineSettings(ThreadId),
     RegisteredProfiles,
+    AccountUsage {
+        engine_id: String,
+    },
     ComposerCatalog {
         thread_id: ThreadId,
         profile_id: artisan_domain::EngineProfileId,
@@ -1554,10 +1629,43 @@ fn validate_response_family(
     payload: ResponsePayload,
 ) -> Result<ResponsePayload, ServiceFailure> {
     match (expected, payload) {
-        (ExpectedResponse::QueuedMessages { thread_id }, ResponsePayload::QueuedMessages(value)) if value.thread_id() == &thread_id => Ok(ResponsePayload::QueuedMessages(value)),
-        (ExpectedResponse::MessageWithdrawn { thread_id, message_id, original_request_id, request_id }, ResponsePayload::MessageWithdrawn(value)) if value.thread_id == thread_id && value.message_id == message_id && value.original_request_id == original_request_id && value.withdrawal_request_id() == &request_id => Ok(ResponsePayload::MessageWithdrawn(value)),
-        (ExpectedResponse::RecalledMessage { thread_id, message_id, original_request_id }, ResponsePayload::RecalledMessage(value)) if value.thread_id == thread_id && value.message_id == message_id && value.original_request_id == original_request_id => Ok(ResponsePayload::RecalledMessage(value)),
-        (ExpectedResponse::RunUsage { thread_id, run_id }, ResponsePayload::RunUsage(value)) if value.thread_id == thread_id && value.run_id == run_id => Ok(ResponsePayload::RunUsage(value)),
+        (
+            ExpectedResponse::QueuedMessages { thread_id },
+            ResponsePayload::QueuedMessages(value),
+        ) if value.thread_id() == &thread_id => Ok(ResponsePayload::QueuedMessages(value)),
+        (
+            ExpectedResponse::MessageWithdrawn {
+                thread_id,
+                message_id,
+                original_request_id,
+                request_id,
+            },
+            ResponsePayload::MessageWithdrawn(value),
+        ) if value.thread_id == thread_id
+            && value.message_id == message_id
+            && value.original_request_id == original_request_id
+            && value.withdrawal_request_id() == &request_id =>
+        {
+            Ok(ResponsePayload::MessageWithdrawn(value))
+        }
+        (
+            ExpectedResponse::RecalledMessage {
+                thread_id,
+                message_id,
+                original_request_id,
+            },
+            ResponsePayload::RecalledMessage(value),
+        ) if value.thread_id == thread_id
+            && value.message_id == message_id
+            && value.original_request_id == original_request_id =>
+        {
+            Ok(ResponsePayload::RecalledMessage(value))
+        }
+        (ExpectedResponse::RunUsage { thread_id, run_id }, ResponsePayload::RunUsage(value))
+            if value.thread_id == thread_id && value.run_id == run_id =>
+        {
+            Ok(ResponsePayload::RunUsage(value))
+        }
 
         (ExpectedResponse::Directory, ResponsePayload::DirectoryPicked(outcome)) => {
             Ok(ResponsePayload::DirectoryPicked(outcome))
@@ -1636,6 +1744,15 @@ fn validate_response_family(
             ExpectedResponse::RegisteredProfiles,
             ResponsePayload::RegisteredEngineProfiles(result),
         ) => Ok(ResponsePayload::RegisteredEngineProfiles(result)),
+        (ExpectedResponse::AccountUsage { engine_id }, ResponsePayload::AccountUsage(snapshot))
+            if snapshot.engines().len() == 1
+                && snapshot
+                    .engines()
+                    .first()
+                    .is_some_and(|report| report.engine_id() == engine_id) =>
+        {
+            Ok(ResponsePayload::AccountUsage(snapshot))
+        }
         (
             ExpectedResponse::ComposerCatalog {
                 thread_id,
@@ -3029,6 +3146,23 @@ async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::ListRegisteredProfiles) => {
                         list_registered_profiles(runtime, frames, events).await?;
                     }
+                    Some(NativeTransportCommand::ReadAccountUsage {
+                        engine_id,
+                        generation,
+                        request_seq,
+                        force,
+                    }) => {
+                        profile_usage_operations::read_account_usage(
+                            runtime,
+                            frames,
+                            events,
+                            engine_id,
+                            generation,
+                            request_seq,
+                            force,
+                        )
+                        .await?;
+                    }
                     Some(NativeTransportCommand::SetThreadEngineConfig(command)) => {
                         set_thread_engine_config(runtime, frames, events, command).await?;
                     }
@@ -4208,7 +4342,6 @@ fn custody_trace() -> Vec<CustodyStep> {
 
 #[cfg(test)]
 mod tests {
-    use artisan_domain::UnixMillis;
     use super::{
         COMMAND_CAPACITY, ExpectedResponse, FrameFactory, IntakeRetry, NativeTransportCommand,
         PeerFailure, ReadinessValidationError, RequestAttemptError, RequestFailure, ServiceFailure,
@@ -4221,6 +4354,7 @@ mod tests {
         thread_selection_decision, threads_request, try_send_command, validate_readiness,
         validate_response_family,
     };
+    use artisan_domain::UnixMillis;
     use artisan_domain::{
         AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
         ConversationQueryBounds, ConversationSnapshot, CreateThread, DirectoryId, DisplayName,
@@ -5553,3 +5687,6 @@ mod composer_operations;
 #[path = "native_composer_state_transport.rs"]
 mod composer_state_operations;
 pub(crate) use composer_state_operations::{ComposerStateCommand, ComposerStateEvent};
+
+#[path = "native_profile_usage_transport.rs"]
+mod profile_usage_operations;

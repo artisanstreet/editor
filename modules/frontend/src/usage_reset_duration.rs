@@ -97,7 +97,10 @@ pub fn usage_reset_duration(windows: &[UsageResetWindow<'_>], at_ms: i64) -> Opt
 /// seconds beyond milliseconds are ignored, matching `Date.parse`'s
 /// millisecond time clip. Values outside JavaScript's finite date range are
 /// rejected rather than leaking an invalid duration.
-fn parse_iso_timestamp_ms(value: &str) -> Option<i64> {
+///
+/// The profile-usage adapter reuses this parser for provider `fetched_at`
+/// instants so frontend timestamp policy stays single-sourced.
+pub(crate) fn parse_iso_timestamp_ms(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     let mut cursor = 0;
     let (negative_year, year_digits) = match bytes.get(cursor) {
