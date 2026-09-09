@@ -277,7 +277,7 @@ fn init_delta_phases_and_message_start_decode() {
     assert!(matches!(init, ClaudeEvent::Init { .. }));
 
     let delta = parse_frame(
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}"#,
         2,
     )
     .expect("delta decodes");
@@ -303,7 +303,7 @@ fn init_delta_phases_and_message_start_decode() {
     }
 
     let start = parse_frame(
-        r#"{"type":"stream-event","event":{"type":"message_start","message":{"id":"msg-7"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-7"}}}"#,
         4,
     )
     .expect("message start decodes");
@@ -417,8 +417,8 @@ fn unknown_bookkeeping_and_malformed_frames_reject_safely() {
         r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"postTokens":10}}"#,
         r#"{"type":"system","subtype":"api_retry"}"#,
         r#"{"type":"system","subtype":"status"}"#,
-        r#"{"type":"stream-event","event":{"type":"ping"}}"#,
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abc"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"ping"}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abc"}}}"#,
         r#"{"type":"user","message":{"content":[]},"tool_use_result":{}}"#,
         r#"{"type":"future-event"}"#,
     ] {
@@ -492,7 +492,7 @@ async fn approval_deny_then_allow_resolves_without_side_effect() {
         assert_eq!(value["response"]["response"]["behavior"], behavior);
         // The run continues: deltas still normalize after a deny.
         let delta = parse_frame(
-            r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"onward"}}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"onward"}}}"#,
             2,
         )
         .expect("delta decodes");
@@ -729,7 +729,7 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
 
     // A non-empty thinking delta counts without root text either.
     let thinking = parse_frame(
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"plan"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"plan"}}}"#,
         5,
     )
     .expect("thinking delta decodes");
@@ -841,7 +841,7 @@ fn domain_bridging_validates_approval_and_question_rows() {
     assert_eq!(domain_request.kind(), ApprovalKind::FileChange);
 
     let action_approval = parse_frame(
-        r#"{"type":"control_request","request_id":"perm-10","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"a.txt"}}}}"#,
+        r#"{"type":"control_request","request_id":"perm-10","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"a.txt"}}}"#,
         2,
     )
     .expect("action approval decodes");
@@ -1142,8 +1142,8 @@ async fn fixture_start_deltas_phases_close() {
     let responses = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
         init_line(),
-        r#"{"type":"stream-event","event":{"type":"message_start","message":{"id":"msg-7"}}}"#,
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello "}}}"#,
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-7"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello "}}}"#,
         r#"{"type":"assistant","message":{"id":"msg-7","content":[{"type":"text","text":"world"},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"echo hi"}}]}}"#,
         r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":9}"#,
         r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":""}]}}"#,
@@ -1177,7 +1177,7 @@ async fn fixture_malformed_frame_rejected_without_killing_turn() {
         "{}\n{}\n{}\n{}\n",
         init_line(),
         "this is not json",
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"kept"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"kept"}}}"#,
         result_line(),
     );
     let outcome = tokio::time::timeout(
@@ -1247,7 +1247,7 @@ async fn fixture_subagent_discovery_and_transcript_row_sequence() {
     let responses = format!(
         "{}\n{}\n{}\n{}\n{}\n",
         init_line(),
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"root "}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"root "}}}"#,
         r#"{"type":"system","subtype":"task_started","task_id":"task-1","description":"Explore"}"#,
         r#"{"type":"assistant","parent_tool_use_id":"tool-9","message":{"content":[{"type":"text","text":"child speaks"}]}}"#,
         result_line(),
@@ -1301,7 +1301,7 @@ async fn fixture_external_kill_reports_interruption() {
     let responses = format!(
         "{}\n{}\n",
         init_line(),
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"prefix "}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"prefix "}}}"#,
     );
     let outcome = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1320,7 +1320,7 @@ async fn fixture_inactivity_stall_fails_turn() {
     let responses = format!(
         "{}\n{}\n",
         init_line(),
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"warming"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"warming"}}}"#,
     );
     #[cfg(windows)]
     let tail = "ping -n 6 127.0.0.1 >nul";
@@ -1362,7 +1362,7 @@ async fn fixture_restart_replays_durable_prefix() {
     let first = format!(
         "{}\n{}\n",
         init_line(),
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"durable-"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"durable-"}}}"#,
     );
     let interrupted = tokio::time::timeout(
         Duration::from_secs(30),
@@ -1377,7 +1377,7 @@ async fn fixture_restart_replays_durable_prefix() {
     let second = format!(
         "{}\n{}\n{}\n",
         init_line(),
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"replayed"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"replayed"}}}"#,
         result_line(),
     );
     let completed = tokio::time::timeout(
@@ -1963,7 +1963,7 @@ fn assistant_and_result_usage_decode_with_honest_shapes() {
 
     // Usage without text still projects: the gauge is canonical content.
     let usage_only = parse_frame(
-        r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":40}}}}"#,
+        r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":40}}}"#,
         2,
     )
     .expect("usage-only frame decodes");
@@ -2426,7 +2426,7 @@ async fn fixture_kill_reports_interruption_with_durable_prefix() {
     let responses = format!(
         "{}\n{}\n",
         init_line(),
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"prefix-"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"prefix-"}}}"#,
     );
     // Pipe-holding grandchild: the leader is killed below while this holder
     // still inherits stdout, so EOF (and the interruption) must arrive
@@ -2501,7 +2501,7 @@ async fn fixture_restart_after_kill_replays_prefix_on_the_same_session() {
     let first = format!(
         "{}\n{}\n",
         init_line(),
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"durable-"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"durable-"}}}"#,
     );
     let interrupted = tokio::time::timeout(
         Duration::from_secs(30),
@@ -2526,7 +2526,7 @@ async fn fixture_restart_after_kill_replays_prefix_on_the_same_session() {
     let second = format!(
         "{}\n{}\n{}\n",
         init_line(),
-        r#"{"type":"stream-event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"replayed"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"replayed"}}}"#,
         result_line(),
     );
     let completed = tokio::time::timeout(
