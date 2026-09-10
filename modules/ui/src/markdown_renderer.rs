@@ -4,6 +4,13 @@
 //! owned vocabulary in [`crate::markdown`]. It parses during the render pass
 //! and immediately turns the resulting blocks into ordinary GPUI elements;
 //! it does not retain message or document state.
+//!
+//! Lists render as native stacked rows with muted markers (`•` or `1.`)
+//! instead of HTML list elements; emphasis and strong survive as inline
+//! structure, and link labels render underlined in the accent token only
+//! when the destination matches the Svelte anchor guard (absolute
+//! `http(s)`/`mailto` or scheme-relative/relative paths). Anything else
+//! falls back to its plain label, and raw HTML stays inert text.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -11,10 +18,10 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Div, FontWeight, HighlightStyle, IntoElement, ParentElement, SharedString, Styled,
-    StyledText, div, prelude::InteractiveElement as _,
+    StyledText, UnderlineStyle, div, prelude::InteractiveElement as _, px,
 };
 
-use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, MarkdownEngine, Span};
+use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownEngine, Span};
 use crate::theme::ArtisanTheme;
 
 /// Synchronous renderer for accepted Markdown message bodies.
@@ -118,6 +125,16 @@ fn render_block(
     theme: ArtisanTheme,
     parent_selector: &str,
 ) -> AnyElement {
+    render_block_at_depth(index, block, theme, parent_selector, 0)
+}
+
+fn render_block_at_depth(
+    index: usize,
+    block: &Block,
+    theme: ArtisanTheme,
+    parent_selector: &str,
+    depth: u32,
+) -> AnyElement {
     let selector = format!("{parent_selector}-block-{index}");
     let mut element = body_container(theme).flex().flex_col();
 
@@ -138,9 +155,96 @@ fn render_block(
         Block::Html { source } => {
             element = element.child(source.clone());
         }
+        Block::List {
+            ordered,
+            start,
+            items,
+            ..
+        } => {
+            element = element.child(render_list(
+                &selector,
+                *ordered,
+                *start,
+                items,
+                theme,
+                depth,
+            ));
+        }
     }
     element = element.debug_selector(move || selector);
     element.into_any_element()
+}
+
+/// Renders an ordered or unordered list as native rows: one marker plus the
+/// item's own blocks. Nested lists recurse with one indent step per depth.
+fn render_list(
+    parent_selector: &str,
+    ordered: bool,
+    start: Option<u64>,
+    items: &[ListItem],
+    theme: ArtisanTheme,
+    depth: u32,
+) -> AnyElement {
+    let mut list = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(theme.spacing.steps(2.0));
+    if depth > 0 {
+        list = list.pl(theme.spacing.steps(4.0));
+    }
+    let base = start.unwrap_or(1);
+    for (position, item) in items.iter().enumerate() {
+        let marker = item_marker(ordered, base, position, item.task);
+        let item_selector = format!("{parent_selector}-item-{position}");
+        let mut content = div().flex().flex_1().min_w_0().flex_col();
+        if item.blocks.is_empty() {
+            let empty: &[Span] = &[];
+            content = content.child(render_inline(empty, theme));
+        }
+        for (sub_index, block) in item.blocks.iter().enumerate() {
+            content = content.child(render_block_at_depth(
+                sub_index,
+                block,
+                theme,
+                &item_selector,
+                depth.saturating_add(1),
+            ));
+        }
+        let mut row = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .gap(theme.spacing.steps(2.0));
+        row = row.child(
+            div()
+                .flex_shrink_0()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(marker),
+        );
+        row = row.child(content);
+        let selector = item_selector.clone();
+        row = row.debug_selector(move || selector);
+        list = list.child(row);
+    }
+    let selector = format!("{parent_selector}-list");
+    list.debug_selector(move || selector).into_any_element()
+}
+
+fn item_marker(ordered: bool, base: u64, position: usize, task: Option<bool>) -> String {
+    if let Some(checked) = task {
+        if checked {
+            return String::from("☑");
+        }
+        return String::from("☐");
+    }
+    if ordered {
+        format!("{}.", base.saturating_add(position as u64))
+    } else {
+        String::from("•")
+    }
 }
 
 fn heading_size(level: u8, theme: ArtisanTheme) -> gpui::Pixels {
@@ -157,10 +261,16 @@ fn render_inline(spans: &[Span], theme: ArtisanTheme) -> StyledText {
     let InlineText {
         source,
         code_ranges,
+        strong_ranges,
+        link_ranges,
     } = inline_text(spans);
     let code_style = inline_code_style(theme);
+    let strong_style = strong_style();
+    let link_style = link_style(theme);
     StyledText::new(source)
         .with_highlights(code_ranges.into_iter().map(|range| (range, code_style)))
+        .with_highlights(strong_ranges.into_iter().map(|range| (range, strong_style)))
+        .with_highlights(link_ranges.into_iter().map(|range| (range, link_style)))
 }
 
 fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) -> AnyElement {
@@ -195,35 +305,100 @@ fn valid_code_range(token: &CodeToken, source: &str) -> Option<(Range<usize>, Co
 struct InlineText {
     source: String,
     code_ranges: Vec<Range<usize>>,
+    strong_ranges: Vec<Range<usize>>,
+    link_ranges: Vec<Range<usize>>,
 }
 
 fn inline_text(spans: &[Span]) -> InlineText {
-    let mut source = String::new();
-    let mut code_ranges = Vec::new();
+    let mut text = InlineText {
+        source: String::new(),
+        code_ranges: Vec::new(),
+        strong_ranges: Vec::new(),
+        link_ranges: Vec::new(),
+    };
+    flatten_spans(spans, &mut text);
+    text
+}
 
+fn flatten_spans(spans: &[Span], text: &mut InlineText) {
     for span in spans {
-        let start = source.len();
         match span {
-            Span::Text(text) | Span::Html(text) => source.push_str(text),
+            Span::Text(inline) | Span::Html(inline) => text.source.push_str(inline),
             Span::Code(code) => {
-                source.push_str(code);
-                if start < source.len() {
-                    code_ranges.push(start..source.len());
+                let start = text.source.len();
+                text.source.push_str(code);
+                if start < text.source.len() {
+                    text.code_ranges.push(start..text.source.len());
+                }
+            }
+            Span::Emphasis(inner) => {
+                // No native italic highlight in the pinned GPUI build; the
+                // structure survives in the model and the label paints plain.
+                flatten_spans(inner, text);
+            }
+            Span::Strong(inner) => {
+                let start = text.source.len();
+                flatten_spans(inner, text);
+                if start < text.source.len() {
+                    text.strong_ranges.push(start..text.source.len());
+                }
+            }
+            Span::Link { label, destination } => {
+                let start = text.source.len();
+                flatten_spans(label, text);
+                if start < text.source.len() && is_safe_link_destination(destination) {
+                    text.link_ranges.push(start..text.source.len());
                 }
             }
         }
     }
+}
 
-    InlineText {
-        source,
-        code_ranges,
+/// Mirrors the Svelte anchor guard (`anchor.svelte`): absolute `http(s)`
+/// and `mailto` destinations are live; scheme-relative and relative paths
+/// stay live; any other scheme (including `javascript:` and `data:`) falls
+/// back to its plain label. The engine keeps every destination verbatim.
+fn is_safe_link_destination(destination: &str) -> bool {
+    let trimmed = destination.trim();
+    if trimmed.is_empty() {
+        return false;
     }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+    {
+        return true;
+    }
+    // Relative destinations carry no scheme before the first path, query,
+    // or fragment delimiter; anything with a scheme colon is unsafe here.
+    let scheme_end = trimmed
+        .find(|character| matches!(character, '/' | '?' | '#'))
+        .unwrap_or(trimmed.len());
+    !trimmed[..scheme_end].contains(':')
 }
 
 fn inline_code_style(theme: ArtisanTheme) -> HighlightStyle {
     HighlightStyle {
         color: Some(theme.colors.accent_foreground.to_paint()),
         background_color: Some(theme.colors.muted.to_paint()),
+        ..Default::default()
+    }
+}
+
+fn strong_style() -> HighlightStyle {
+    HighlightStyle {
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    }
+}
+
+fn link_style(theme: ArtisanTheme) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(theme.colors.accent_foreground.to_paint()),
+        underline: Some(UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(theme.colors.accent_foreground),
+            wavy: false,
+        }),
         ..Default::default()
     }
 }

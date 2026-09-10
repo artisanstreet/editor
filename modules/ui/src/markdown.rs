@@ -7,17 +7,21 @@
 //! native renderer can lay out without re-parsing or touching either crate
 //! directly.
 //!
-//! Deliberate Phase 1 limits:
+//! Deliberate Phase 1 limits, as promoted for list parity:
 //!
 //! - Raw HTML is recognized only so it can be carried as inert source text.
 //!   It is never interpreted, rewritten, sanitized into markup, or rendered.
 //! - Only `CommonMark` core constructs are modeled. GFM extensions such as
 //!   tables and strikethrough remain disabled until the renderer phase
 //!   selects them deliberately.
-//! - Container constructs are represented only when `pulldown-cmark` exposes
-//!   inner paragraph or heading events. Tight-list text and other unmodeled
-//!   container-only events are deliberately omitted instead of guessed.
-//!   Links, images, and emphasis flatten into their inner text.
+//! - Ordered, unordered, nested, tight, loose, and task lists are preserved
+//!   through the shared `pulldown-cmark` event stream; no parallel parser is
+//!   introduced. Tight item text becomes paragraph blocks so loose and tight
+//!   lists share one renderer path with no dropped or duplicated text.
+//! - Inline emphasis, strong, and link labels plus verbatim destinations are
+//!   preserved. Images continue to flatten into their alt text; the renderer
+//!   decides link safety (mirroring the Svelte anchor guard) and never
+//!   executes a destination.
 //! - Highlight output is scope-classified [`CodeToken`] data over byte
 //!   ranges, never HTML and never theme-resolved colors. Mapping kinds onto
 //!   Artisan theme tokens remains first-party renderer work.
@@ -109,12 +113,46 @@ pub struct CodeFence {
 /// One flattened inline run.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Span {
-    /// Ordinary text, including flattened link, image, and emphasis runs.
+    /// Ordinary text, including flattened image alt runs.
     Text(String),
     /// Inline code payload taken verbatim between backticks.
     Code(String),
     /// Raw inline HTML, carried verbatim as inert data.
     Html(String),
+    /// Emphasized runs (`*x*`, `_x_`); structure is preserved, rendering
+    /// stays plain until the native text primitive exposes italics.
+    Emphasis(Vec<Span>),
+    /// Strong runs (`**x**`); rendered bold through the native highlight.
+    Strong(Vec<Span>),
+    /// Link label plus the verbatim authored destination. The engine keeps
+    /// every destination; the renderer decides safety and never executes one.
+    Link {
+        /// Visible label runs.
+        label: Vec<Span>,
+        /// Verbatim destination URL as authored.
+        destination: String,
+    },
+}
+
+impl Span {
+    /// Flattens every visible label to plain text for no-drop assertions.
+    /// Destinations stay out: they are metadata, not visible copy.
+    #[must_use]
+    pub fn text_content(&self) -> String {
+        match self {
+            Self::Text(text) | Self::Code(text) | Self::Html(text) => text.clone(),
+            Self::Emphasis(inner) | Self::Strong(inner) => {
+                inner.iter().map(Self::text_content).collect()
+            }
+            Self::Link { label, .. } => label.iter().map(Self::text_content).collect(),
+        }
+    }
+}
+
+/// Flattens a span slice to its visible text.
+#[must_use]
+pub fn spans_text(spans: &[Span]) -> String {
+    spans.iter().map(Span::text_content).collect()
 }
 
 /// One recognized top-level block.
@@ -143,6 +181,63 @@ pub enum Block {
         /// Verbatim HTML source text.
         source: String,
     },
+    /// An ordered or unordered list with owned items. Nested lists live as
+    /// blocks inside their parent item, so tight, loose, and nested shapes
+    /// share one renderer path.
+    List {
+        /// True for numbered lists, false for bulleted lists.
+        ordered: bool,
+        /// Authored start number for ordered lists, if any.
+        start: Option<u64>,
+        /// Items in source order.
+        items: Vec<ListItem>,
+        /// Half-open byte range covering the list in the parsed input.
+        range: Range<usize>,
+    },
+}
+
+impl Block {
+    /// Flattens every visible label under this block for no-drop assertions.
+    #[must_use]
+    pub fn text_content(&self) -> String {
+        match self {
+            Self::Heading { spans, .. } | Self::Paragraph { spans, .. } => spans_text(spans),
+            Self::Code(fence) => fence.source.clone(),
+            Self::Html { source } => source.clone(),
+            Self::List { items, .. } => items
+                .iter()
+                .flat_map(|item| {
+                    item.blocks
+                        .iter()
+                        .map(Block::text_content)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+/// One list item: its own blocks plus an optional task marker.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ListItem {
+    /// Item content in source order: tight text arrives as one paragraph,
+    /// loose text as paragraph blocks, nested lists and fences as siblings.
+    pub blocks: Vec<Block>,
+    /// Task-list state from `pulldown-cmark`'s `TaskListMarker`, if any.
+    pub task: Option<bool>,
+}
+
+impl ListItem {
+    /// Flattens the item's visible text.
+    #[must_use]
+    pub fn text_content(&self) -> String {
+        self.blocks
+            .iter()
+            .map(Block::text_content)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Owned parse result: an ordered list of blocks.
@@ -473,19 +568,34 @@ fn fence_is_closed(region: &str) -> bool {
 }
 
 /// Accumulates parser events into the owned block model.
+///
+/// Lists nest through explicit stacks so tight text, loose paragraphs,
+/// nested lists, and fences inside items keep source order with no dropped
+/// or duplicated text. Inline emphasis, strong, and links nest through a
+/// small format stack over the same single `pulldown-cmark` event stream.
 #[derive(Default)]
 struct DocumentBuilder {
     blocks: Vec<Block>,
-    /// Spans of the paragraph or heading being assembled.
+    /// Spans of the paragraph, heading, or tight item text being assembled
+    /// at document level (used only when no list item is open).
     inline: Vec<Span>,
-    /// Byte offset where the current paragraph or heading began.
+    /// Byte offset where the current document-level inline run began.
     inline_start: usize,
     /// Depth of the heading being assembled, if any.
     heading_depth: Option<u8>,
+    /// True while a paragraph is open at document level or inside an item.
+    paragraph_open: bool,
     /// Accumulation state for the code block being assembled, if any.
     code: Option<FenceBuilder>,
     /// Raw text of the HTML block being assembled, if any.
     html: Option<String>,
+    /// Open lists, outermost first.
+    lists: Vec<ActiveList>,
+    /// Open items, outermost first; an item always belongs to the list at
+    /// the same depth.
+    items: Vec<ActiveItem>,
+    /// Open inline emphasis, strong, link, and image-alt frames.
+    formats: Vec<FormatFrame>,
 }
 
 #[derive(Default)]
@@ -493,6 +603,57 @@ struct FenceBuilder {
     language: Option<String>,
     source: String,
     start: usize,
+}
+
+struct ActiveList {
+    ordered: bool,
+    start: Option<u64>,
+    items: Vec<ListItem>,
+    range_start: usize,
+}
+
+struct ActiveItem {
+    blocks: Vec<Block>,
+    inline: Vec<Span>,
+    inline_start: usize,
+    heading_depth: Option<u8>,
+    paragraph_open: bool,
+    task: Option<bool>,
+}
+
+enum FormatFrame {
+    Emphasis(Vec<Span>),
+    Strong(Vec<Span>),
+    Link { label: Vec<Span>, destination: String },
+    ImageAlt(Vec<Span>),
+}
+
+impl FormatFrame {
+    fn spans_mut(&mut self) -> &mut Vec<Span> {
+        match self {
+            Self::Emphasis(spans) | Self::Strong(spans) | Self::ImageAlt(spans) => spans,
+            Self::Link { label, .. } => label,
+        }
+    }
+
+    fn into_span(self) -> Span {
+        match self {
+            Self::Emphasis(spans) => Span::Emphasis(spans),
+            Self::Strong(spans) => Span::Strong(spans),
+            Self::Link { label, destination } => Span::Link { label, destination },
+            Self::ImageAlt(spans) => Span::Text(spans_text(&spans)),
+        }
+    }
+
+    /// Unwinds an unclosed frame at end of input without dropping its label.
+    /// Links keep their label as plain text; the destination was never
+    /// confirmed by a closing tag, so it stays out of the visible copy.
+    fn into_recovery_spans(self) -> Vec<Span> {
+        match self {
+            Self::Emphasis(spans) | Self::Strong(spans) => spans,
+            Self::Link { label, .. } | Self::ImageAlt(label) => label,
+        }
+    }
 }
 
 impl DocumentBuilder {
@@ -522,7 +683,7 @@ impl DocumentBuilder {
                     match self.html.as_mut() {
                         Some(open) => open.push_str(html.as_ref()),
                         None if self.code.is_none() => {
-                            self.blocks.push(Block::Html {
+                            self.push_block(Block::Html {
                                 source: source[range].to_owned(),
                             });
                         }
@@ -532,13 +693,18 @@ impl DocumentBuilder {
                 Event::SoftBreak | Event::HardBreak => {
                     self.push_inline(Span::Text("\n".to_owned()));
                 }
+                Event::TaskListMarker(checked) => {
+                    if let Some(item) = self.items.last_mut() {
+                        item.task = Some(checked);
+                    }
+                }
                 Event::Rule
                 | Event::InlineMath(_)
                 | Event::DisplayMath(_)
-                | Event::FootnoteReference(_)
-                | Event::TaskListMarker(_) => {}
+                | Event::FootnoteReference(_) => {}
             }
         }
+        self.finish(source);
         MarkdownDocument {
             blocks: std::mem::take(&mut self.blocks),
         }
@@ -549,26 +715,54 @@ impl DocumentBuilder {
             Tag::Paragraph => {
                 // Stray text from flattened constructs must never leak into
                 // the next real block.
-                self.inline.clear();
-                self.inline_start = start;
-                self.heading_depth = None;
+                self.clear_inline(start);
+                self.set_paragraph_open(true);
+                self.set_heading_depth(None);
             }
             Tag::Heading { level, .. } => {
-                self.inline.clear();
-                self.inline_start = start;
-                self.heading_depth = Some(heading_depth(level));
+                self.clear_inline(start);
+                self.set_paragraph_open(false);
+                self.set_heading_depth(Some(heading_depth(level)));
             }
             Tag::CodeBlock(kind) => {
+                self.flush_tight_before_block();
                 self.code = Some(FenceBuilder {
                     language: fence_language(&kind),
                     source: String::new(),
                     start,
                 });
             }
-            Tag::HtmlBlock => self.html = Some(String::new()),
-            Tag::Item
-            | Tag::List(_)
-            | Tag::BlockQuote(_)
+            Tag::HtmlBlock => {
+                self.flush_tight_before_block();
+                self.html = Some(String::new());
+            }
+            Tag::List(start_number) => {
+                self.flush_tight_before_block();
+                self.lists.push(ActiveList {
+                    ordered: start_number.is_some(),
+                    start: start_number,
+                    items: Vec::new(),
+                    range_start: start,
+                });
+            }
+            Tag::Item => {
+                self.items.push(ActiveItem {
+                    blocks: Vec::new(),
+                    inline: Vec::new(),
+                    inline_start: start,
+                    heading_depth: None,
+                    paragraph_open: false,
+                    task: None,
+                });
+            }
+            Tag::Emphasis => self.formats.push(FormatFrame::Emphasis(Vec::new())),
+            Tag::Strong => self.formats.push(FormatFrame::Strong(Vec::new())),
+            Tag::Link { dest_url, .. } => self.formats.push(FormatFrame::Link {
+                label: Vec::new(),
+                destination: dest_url.to_string(),
+            }),
+            Tag::Image { .. } => self.formats.push(FormatFrame::ImageAlt(Vec::new())),
+            Tag::BlockQuote(_)
             | Tag::FootnoteDefinition(_)
             | Tag::DefinitionList
             | Tag::DefinitionListTitle
@@ -578,39 +772,43 @@ impl DocumentBuilder {
             | Tag::TableRow
             | Tag::TableCell
             | Tag::MetadataBlock(_)
-            | Tag::Emphasis
-            | Tag::Strong
             | Tag::Strikethrough
             | Tag::Superscript
-            | Tag::Subscript
-            | Tag::Link { .. }
-            | Tag::Image { .. } => {}
+            | Tag::Subscript => {}
         }
     }
 
     fn end_tag(&mut self, tag_end: TagEnd, range: Range<usize>, source: &str) {
         match tag_end {
-            TagEnd::Paragraph | TagEnd::Heading(_) => {
-                let spans = std::mem::take(&mut self.inline);
-                if let Some(level) = self.heading_depth.take() {
-                    self.blocks.push(Block::Heading {
-                        level,
-                        spans,
-                        range: self.inline_start..range.end,
-                    });
-                } else {
-                    self.blocks.push(Block::Paragraph {
-                        spans,
-                        range: self.inline_start..range.end,
-                    });
-                }
+            TagEnd::Paragraph => {
+                let spans = self.take_inline();
+                let start = self.take_inline_start(range.start);
+                self.set_paragraph_open(false);
+                // A heading level lingering here would belong to a different
+                // open construct; paragraphs keep their own shape.
+                self.take_heading_depth();
+                self.push_block(Block::Paragraph {
+                    spans,
+                    range: start..range.end,
+                });
+            }
+            TagEnd::Heading(_) => {
+                let spans = self.take_inline();
+                let start = self.take_inline_start(range.start);
+                self.set_paragraph_open(false);
+                let level = self.take_heading_depth().unwrap_or(1);
+                self.push_block(Block::Heading {
+                    level,
+                    spans,
+                    range: start..range.end,
+                });
             }
             TagEnd::CodeBlock => {
                 if let Some(fence) = self.code.take() {
                     let closed = source
                         .get(fence.start..range.end)
                         .is_some_and(fence_is_closed);
-                    self.blocks.push(Block::Code(CodeFence {
+                    self.push_block(Block::Code(CodeFence {
                         language: fence.language,
                         closed,
                         source: fence.source,
@@ -620,19 +818,266 @@ impl DocumentBuilder {
             }
             TagEnd::HtmlBlock => {
                 if let Some(source_text) = self.html.take() {
-                    self.blocks.push(Block::Html {
+                    self.push_block(Block::Html {
                         source: source_text,
                     });
+                }
+            }
+            TagEnd::List => {
+                self.close_open_item(range.end);
+                if let Some(list) = self.lists.pop() {
+                    self.push_block(Block::List {
+                        ordered: list.ordered,
+                        start: list.start,
+                        items: list.items,
+                        range: list.range_start..range.end,
+                    });
+                }
+            }
+            TagEnd::Item => {
+                self.close_open_item(range.end);
+            }
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Link | TagEnd::Image => {
+                if let Some(frame) = self.formats.pop() {
+                    let span = frame.into_span();
+                    self.push_inline(span);
                 }
             }
             _ => {}
         }
     }
 
-    fn push_inline(&mut self, span: Span) {
-        match (&mut self.inline.last_mut(), &span) {
-            (Some(Span::Text(existing)), Span::Text(text)) => existing.push_str(text),
-            _ => self.inline.push(span),
+    /// Flushes truncated input without dropping confirmed text: unclosed
+    /// inline frames recover their labels, tight item text becomes
+    /// paragraphs, open items join their lists, and open lists close at
+    /// end of input. An open fence or HTML block settles as open/inert.
+    fn finish(&mut self, source: &str) {
+        while let Some(frame) = self.formats.pop() {
+            for span in frame.into_recovery_spans() {
+                self.push_inline(span);
+            }
         }
+        // A fence whose closing tag never arrived stays explicitly open so
+        // streaming consumers keep the plain fallback instead of losing the
+        // tail.
+        self.finish_open_fence(source);
+        if let Some(source_text) = self.html.take() {
+            self.push_block(Block::Html {
+                source: source_text,
+            });
+        }
+        // An unclosed paragraph or heading at EOF still owns its text.
+        let pending_heading = self.take_heading_depth();
+        let paragraph_was_open = self.take_paragraph_flag();
+        let pending_spans = self.take_inline();
+        if !pending_spans.is_empty() || paragraph_was_open || pending_heading.is_some() {
+            let start = self.take_inline_start(source.len());
+            if let Some(level) = pending_heading {
+                self.push_block(Block::Heading {
+                    level,
+                    spans: pending_spans,
+                    range: start..source.len(),
+                });
+            } else {
+                self.push_block(Block::Paragraph {
+                    spans: pending_spans,
+                    range: start..source.len(),
+                });
+            }
+        }
+        // Drain items inside out; each tight remainder becomes a paragraph
+        // so streaming prefixes never lose their tail.
+        while !self.items.is_empty() {
+            self.close_open_item(source.len());
+        }
+        while let Some(list) = self.lists.pop() {
+            let block = Block::List {
+                ordered: list.ordered,
+                start: list.start,
+                items: list.items,
+                range: list.range_start..source.len(),
+            };
+            // A list left open while its parent item is still on the stack
+            // (deeply truncated nesting) belongs to that item.
+            if let Some(item) = self.items.last_mut() {
+                item.blocks.push(block);
+            } else {
+                self.blocks.push(block);
+            }
+        }
+    }
+
+    fn finish_open_fence(&mut self, source: &str) {
+        // Recovery for a fence whose closing tag never arrived in the event
+        // stream. `build` keeps accumulating its body in `self.code`; settle
+        // it here as explicitly open so streaming consumers keep the plain
+        // fallback instead of losing the tail.
+        if self.code.is_none() {
+            return;
+        }
+        if let Some(fence) = self.code.take() {
+            // Only settle when something was actually captured; an empty
+            // opener with no body still deserves its open block so the
+            // source prefix round-trips instead of vanishing.
+            let closed = source
+                .get(fence.start..source.len())
+                .is_some_and(fence_is_closed);
+            self.push_block(Block::Code(CodeFence {
+                language: fence.language,
+                closed,
+                source: fence.source,
+                tokens: None,
+            }));
+        }
+    }
+
+    /// Moves tight item text into a paragraph block before a nested
+    /// block-level construct (nested list, fence, HTML) starts, so the
+    /// outer text and the nested block become siblings in source order.
+    fn flush_tight_before_block(&mut self) {
+        if self.items.is_empty() || !self.formats.is_empty() {
+            return;
+        }
+        let needs_flush = self
+            .items
+            .last()
+            .is_some_and(|item| !item.paragraph_open && !item.inline.is_empty());
+        if !needs_flush {
+            return;
+        }
+        if let Some(item) = self.items.last_mut() {
+            let spans = std::mem::take(&mut item.inline);
+            let start = item.inline_start;
+            // End is unknown until the item closes; reuse the start so the
+            // range stays honest rather than invented.
+            item.blocks.push(Block::Paragraph {
+                spans,
+                range: start..start,
+            });
+        }
+    }
+
+    /// Closes the innermost open item: tight remainder becomes a paragraph,
+    /// then the item joins its list. A missing list (malformed nesting)
+    /// keeps the item's blocks at the current container instead of dropping.
+    fn close_open_item(&mut self, end: usize) {
+        let Some(mut item) = self.items.pop() else {
+            return;
+        };
+        if !item.inline.is_empty() || item.paragraph_open || item.heading_depth.is_some() {
+            let spans = std::mem::take(&mut item.inline);
+            if let Some(level) = item.heading_depth.take() {
+                item.blocks.push(Block::Heading {
+                    level,
+                    spans,
+                    range: item.inline_start..end,
+                });
+            } else {
+                item.blocks.push(Block::Paragraph {
+                    spans,
+                    range: item.inline_start..end,
+                });
+            }
+            item.paragraph_open = false;
+        }
+        let list_item = ListItem {
+            blocks: item.blocks,
+            task: item.task,
+        };
+        if let Some(list) = self.lists.last_mut() {
+            list.items.push(list_item);
+        } else {
+            // No open list owns this item: keep every confirmed block at
+            // the current container rather than dropping the tail.
+            for block in list_item.blocks {
+                self.push_block(block);
+            }
+        }
+    }
+
+    fn push_block(&mut self, block: Block) {
+        if let Some(item) = self.items.last_mut() {
+            item.blocks.push(block);
+        } else {
+            self.blocks.push(block);
+        }
+    }
+
+    fn push_inline(&mut self, span: Span) {
+        if let Some(frame) = self.formats.last_mut() {
+            push_span_merge(frame.spans_mut(), span);
+            return;
+        }
+        if let Some(item) = self.items.last_mut() {
+            // A heading inside an item assembles in the item's buffer.
+            push_span_merge(&mut item.inline, span);
+        } else {
+            push_span_merge(&mut self.inline, span);
+        }
+    }
+
+    fn clear_inline(&mut self, start: usize) {
+        if let Some(item) = self.items.last_mut() {
+            item.inline.clear();
+            item.inline_start = start;
+        } else {
+            self.inline.clear();
+            self.inline_start = start;
+        }
+    }
+
+    fn take_inline(&mut self) -> Vec<Span> {
+        if let Some(item) = self.items.last_mut() {
+            std::mem::take(&mut item.inline)
+        } else {
+            std::mem::take(&mut self.inline)
+        }
+    }
+
+    fn take_inline_start(&mut self, fallback: usize) -> usize {
+        if let Some(item) = self.items.last_mut() {
+            std::mem::replace(&mut item.inline_start, fallback)
+        } else {
+            std::mem::replace(&mut self.inline_start, fallback)
+        }
+    }
+
+    fn set_paragraph_open(&mut self, open: bool) {
+        if let Some(item) = self.items.last_mut() {
+            item.paragraph_open = open;
+        } else {
+            self.paragraph_open = open;
+        }
+    }
+
+    fn take_paragraph_flag(&mut self) -> bool {
+        if let Some(item) = self.items.last_mut() {
+            std::mem::take(&mut item.paragraph_open)
+        } else {
+            std::mem::take(&mut self.paragraph_open)
+        }
+    }
+
+    fn set_heading_depth(&mut self, depth: Option<u8>) {
+        if let Some(item) = self.items.last_mut() {
+            item.heading_depth = depth;
+        } else {
+            self.heading_depth = depth;
+        }
+    }
+
+    fn take_heading_depth(&mut self) -> Option<u8> {
+        if let Some(item) = self.items.last_mut() {
+            item.heading_depth.take()
+        } else {
+            self.heading_depth.take()
+        }
+    }
+}
+
+fn push_span_merge(target: &mut Vec<Span>, span: Span) {
+    match (target.last_mut(), &span) {
+        (Some(Span::Text(existing)), Span::Text(text)) => existing.push_str(text),
+        _ => target.push(span),
     }
 }
