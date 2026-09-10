@@ -2612,6 +2612,7 @@ impl ConversationSurface {
                 .child(Self::work_group_chevron(open, theme))
                 .into_any_element(),
             (true, None) => div()
+                .id(format!("{selector}-work-trigger"))
                 .flex()
                 .flex_row()
                 .items_center()
