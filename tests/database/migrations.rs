@@ -833,7 +833,14 @@ async fn engine_config_v2_migration_widens_shape_guards_and_down_restores_them()
     let downgraded = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
     migrate_to_current(&downgraded).await?;
     seed_v2_guard_scope(&downgraded).await?;
-    Migrator::down(&downgraded, Some(2)).await?;
+    // Downgrade restores the version-1-only guards on a v1-shaped database:
+    // roll back to exactly the pre-v2 boundary (the first 8 migrations),
+    // however many newer migrations exist above it. A fixed step count
+    // would silently land on the wrong boundary as migrations are added.
+    let applied = scalar_i64(&downgraded, "SELECT count(*) FROM seaql_migrations").await?;
+    let steps = u32::try_from(applied - 8)
+        .map_err(|_| std::io::Error::other("applied migrations must reach the v2 boundary"))?;
+    Migrator::down(&downgraded, Some(steps)).await?;
     let v2_after_down = downgraded
         .execute_unprepared(
             "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v2-down', 'p1', 'V2 thread', 4, 4, 2, 1, X'00')",

@@ -1422,7 +1422,7 @@ async fn same_request_different_target_conflicts_while_identical_replays() {
 #[tokio::test]
 async fn concurrent_duplicate_accept_has_one_winner_and_one_replay() {
     let temporary = TemporaryDatabase::new("queued-message-concurrent-accept");
-    let (_database, repository) = file_repository(temporary.path()).await;
+    let (database, repository) = file_repository(temporary.path()).await;
     setup_thread(&repository).await;
     let first = repository.clone();
     let second = repository.clone();
@@ -1452,6 +1452,13 @@ async fn concurrent_duplicate_accept_has_one_winner_and_one_replay() {
         (1, 1),
         "exactly one accept plus one replay"
     );
+    drop(first);
+    drop(second);
+    drop(repository);
+    database
+        .close()
+        .await
+        .expect("concurrent test database should close before temp dir removal");
 }
 
 #[tokio::test]
