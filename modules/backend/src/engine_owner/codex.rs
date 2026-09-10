@@ -150,6 +150,36 @@ impl CodexSettings {
         &self.profile_id
     }
 
+    /// Builds the `turn/start` params object for this turn.
+    ///
+    /// Mirrors `session.Request("turn/start", ...)` in
+    /// `modules/engines/src/codex/engine.ts`: the request always binds the
+    /// native `threadId` returned by `thread/start` (or `thread/resume`),
+    /// carries the prompt as the single text input part, and repeats
+    /// `serviceTier: "fast"` exactly when the durable selection requests the
+    /// fast tier. A missing `threadId` is rejected by the real server with
+    /// `-32600 Invalid request: missing field threadId`, so omitting it
+    /// stalls the turn until the lease expires instead of failing fast.
+    pub(crate) fn turn_start_params(&self, thread_id: &str, prompt_text: &str) -> Value {
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "input".to_owned(),
+            Value::Array(vec![serde_json::json!({
+                "text": prompt_text,
+                "text_elements": [],
+                "type": "text",
+            })]),
+        );
+        params.insert(
+            "threadId".to_owned(),
+            Value::String(thread_id.to_owned()),
+        );
+        if self.service_tier.as_deref() == Some("fast") {
+            params.insert("serviceTier".to_owned(), Value::String("fast".to_owned()));
+        }
+        Value::Object(params)
+    }
+
     /// Builds the `thread/start` params object for this turn.
     pub(crate) fn thread_params(&self, project_root: &RootPath) -> Value {
         let mut config = serde_json::Map::new();
@@ -658,6 +688,40 @@ pub(crate) fn initialize_params(client_name: &str, client_version: &str) -> Valu
 /// Builds one JSON-RPC request line for the stdio transport.
 pub(crate) fn request_line(id: u64, method: &str, params: &Value) -> String {
     serde_json::json!({ "id": id, "method": method, "params": params }).to_string()
+}
+
+/// Builds one JSON-RPC notification line (no id) for the stdio transport.
+///
+/// Mirrors `Notify` in `modules/engines/src/codex/app-server-session.ts`:
+/// `{ method, ...(params === undefined ? {} : { params }) }`. The official
+/// handshake sends `initialized` with no params after the `initialize`
+/// result; a notification never consumes a request id.
+pub(crate) fn notification_line(method: &str) -> String {
+    serde_json::json!({ "method": method }).to_string()
+}
+
+/// Returns whether one inbound line is a JSON-RPC error response.
+///
+/// Error responses carry `id` plus `error` and no `method` (see
+/// `DecodeCodexInboundEnvelope` in `modules/engines/src/codex/protocol.ts`).
+/// The streaming pump must fail fast on these instead of ignoring them until
+/// the lease expires: a rejected `turn/start` (for example `-32600` for a
+/// missing `threadId`) never produces turn events.
+pub(crate) fn is_codex_error_response(line: &str) -> bool {
+    if line.len() > CODEX_MAX_FRAME_BYTES {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    let object = match value.as_object() {
+        Some(object) => object,
+        None => return false,
+    };
+    if object.contains_key("method") {
+        return false;
+    }
+    object.contains_key("id") && object.get("error").is_some_and(|error| error.is_object())
 }
 
 /// Writes one JSONL line plus its terminator over the stdio transport.

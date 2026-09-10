@@ -30,11 +30,15 @@ use super::codex::{
     classify_codex_quota_window_kind, classify_exit, codex_account_read_line,
     codex_cli_meets_minimum, codex_rate_limits_read_line, codex_requires_group_termination,
     codex_reset_at_iso, codex_usage_report, has_stalled, initialize_params, interrupt_live_turn,
-    map_codex_rate_limit_windows, parse_frame, parse_thread_token_usage, request_line,
-    steer_live_turn, terminal_observation, thread_resume_params, write_line,
+    is_codex_error_response, map_codex_rate_limit_windows, notification_line, parse_frame,
+    parse_thread_token_usage, request_line, steer_live_turn, terminal_observation,
+    thread_resume_params, write_line,
 };
 use super::observation::{EngineObservation, TerminalState};
-use super::operation::{codex_resumed_thread_id, codex_thread_id, is_codex_result_for};
+use super::operation::{
+    codex_response_id_matches, codex_resumed_thread_id, codex_thread_id, codex_turn_id,
+    is_codex_result_for,
+};
 use crate::native_run_dispatch::{binding_bytes_vec, binding_matches_bytes};
 
 // ---------------------------------------------------------------------------
@@ -124,6 +128,116 @@ fn initialize_params_carry_opt_out_notifications() {
     );
     let line = request_line(1, "initialize", &params);
     assert!(line.contains("\"method\":\"initialize\""));
+}
+
+#[test]
+fn initialized_notification_carries_no_id_or_params() {
+    // Official handshake order (`Handshake` in
+    // `modules/engines/src/codex/app-server-session.ts`): `Notify("initialized")`
+    // writes `{ method }` with no id and no params, and never consumes a
+    // request id.
+    let line = notification_line("initialized");
+    assert_eq!(line, r#"{"method":"initialized"}"#);
+    let value: serde_json::Value = serde_json::from_str(&line).expect("valid json");
+    assert!(value.get("id").is_none());
+    assert!(value.get("params").is_none());
+    assert!(!is_codex_error_response(&line));
+}
+
+#[test]
+fn turn_start_params_bind_thread_id_and_fast_tier() {
+    let settings = CodexSettings::from_selection(&codex_selection()).expect("settings valid");
+    let params = settings.turn_start_params("thread-fixture-1", "hello");
+    assert_eq!(params["threadId"], "thread-fixture-1");
+    assert_eq!(params["input"][0]["text"], "hello");
+    assert_eq!(params["input"][0]["type"], "text");
+    assert_eq!(params["serviceTier"], "fast");
+
+    // A standard-tier selection carries no service tier on the turn either.
+    let standard = CodexSelection::new(
+        EngineProfileId::parse("codex-fixture").expect("profile id"),
+        Some(EngineModelId::parse("codex-model").expect("model id")),
+        permission(
+            ApprovalMode::OnRequest,
+            FilesystemAccess::Workspace,
+            NetworkAccess::Enabled,
+        ),
+        None,
+        None,
+        None,
+    )
+    .expect("standard selection valid");
+    let standard_settings = CodexSettings::from_selection(&standard).expect("settings valid");
+    let standard_params = standard_settings.turn_start_params("thread-fixture-1", "hello");
+    assert_eq!(standard_params["threadId"], "thread-fixture-1");
+    assert!(standard_params.get("serviceTier").is_none());
+}
+
+/// Emulates the real server's strict `turn/start` validation: the request
+/// is accepted only with a non-empty `threadId`, otherwise the server
+/// answers `-32600 Invalid request: missing field threadId` and starts no
+/// inference.
+fn strict_turn_start_result(id: u64, params: &serde_json::Value) -> String {
+    let thread_bound = params
+        .get("threadId")
+        .and_then(|value| value.as_str())
+        .is_some_and(|thread| !thread.is_empty());
+    if thread_bound {
+        serde_json::json!({"id": id, "result": {"turn": {"id": "turn-1"}}}).to_string()
+    } else {
+        serde_json::json!({"id": id, "error": {"code": -32600, "message": "Invalid request: missing field threadId"}})
+            .to_string()
+    }
+}
+
+#[test]
+fn strict_server_rejects_turn_start_without_thread_id() {
+    // The production builder always binds the native thread id, so the
+    // strict server accepts it and names the turn.
+    let settings = CodexSettings::from_selection(&codex_selection()).expect("settings valid");
+    let bound = settings.turn_start_params("thread-fixture-1", "hello");
+    let accepted = strict_turn_start_result(3, &bound);
+    assert!(!is_codex_error_response(&accepted));
+    assert!(is_codex_result_for(&accepted, 3));
+    assert_eq!(codex_turn_id(&accepted, 3).as_deref(), Some("turn-1"));
+
+    // The pre-fix shape (`input` without `threadId`) is rejected with the
+    // exact real-CLI error and yields no turn identity to pump.
+    let unbound = serde_json::json!({"input": [{"text": "hello", "text_elements": [], "type": "text"}]});
+    let rejected = strict_turn_start_result(3, &unbound);
+    let rejected_value: serde_json::Value =
+        serde_json::from_str(&rejected).expect("error envelope is valid json");
+    assert_eq!(rejected_value["error"]["code"], -32600);
+    assert_eq!(
+        rejected_value["error"]["message"],
+        "Invalid request: missing field threadId"
+    );
+    assert!(is_codex_error_response(&rejected));
+    assert!(!is_codex_result_for(&rejected, 3));
+    assert_eq!(codex_turn_id(&rejected, 3), None);
+}
+
+#[test]
+fn turn_start_error_response_fails_fast() {
+    // A matching error envelope fails the wait fast: it is an error
+    // response, never a result, and never a turn identity.
+    assert!(is_codex_error_response(TURN_MISSING_THREAD_ID_ERROR_LINE));
+    assert!(!is_codex_result_for(TURN_MISSING_THREAD_ID_ERROR_LINE, 3));
+    assert!(!codex_response_id_matches(TURN_MISSING_THREAD_ID_ERROR_LINE, 2));
+    assert!(codex_response_id_matches(TURN_MISSING_THREAD_ID_ERROR_LINE, 3));
+    assert_eq!(codex_turn_id(TURN_MISSING_THREAD_ID_ERROR_LINE, 3), None);
+
+    // The success envelope is the opposite on every discriminant.
+    assert!(!is_codex_error_response(TURN_LINE));
+    assert!(is_codex_result_for(TURN_LINE, 3));
+    assert!(!is_codex_result_for(TURN_LINE, 2));
+    assert_eq!(codex_turn_id(TURN_LINE, 3).as_deref(), Some("turn-1"));
+    assert_eq!(codex_turn_id(TURN_LINE, 2), None);
+
+    // Method envelopes (notifications and server requests) are never error
+    // responses, so the pump still routes them to the event pipeline.
+    let notification = r#"{"method":"thread/started","params":{"threadId":"thread-fixture-1"}}"#;
+    assert!(!is_codex_error_response(notification));
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +611,8 @@ impl Drop for FixtureScript {
 
 const INIT_LINE: &str = r#"{"id":1,"result":{"codexHome":"C:\\x","platformFamily":"windows","platformOs":"windows","userAgent":"test"}}"#;
 const THREAD_LINE: &str = r#"{"id":2,"result":{"thread":{"id":"thread-fixture-1"}}}"#;
+const TURN_LINE: &str = r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#;
+const TURN_MISSING_THREAD_ID_ERROR_LINE: &str = r#"{"id":3,"error":{"code":-32600,"message":"Invalid request: missing field threadId"}}"#;
 
 struct FixtureOutcome {
     terminal: Option<TerminalState>,
@@ -505,8 +621,10 @@ struct FixtureOutcome {
     thread_id: Option<String>,
 }
 
-/// Drives one fixture script turn through initialize, thread/start, one
-/// authorized prompt, and the streaming pump with stall/cancel/EOF mapping.
+/// Drives one fixture script turn through the official sequence —
+/// initialize, the `initialized` notification, thread/start, the id-bound
+/// `turn/start` (with its synchronously awaited result), and the streaming
+/// pump with stall/cancel/EOF mapping.
 async fn run_fixture_turn(
     responses: &str,
     tail: &str,
@@ -531,6 +649,12 @@ async fn run_fixture_turn(
     let mut line = String::new();
     reader.read_line(&mut line).await.expect("init reads");
     assert!(is_codex_result_for(&line, 1));
+    // Official order: `initialized` notification (no id, no params) before
+    // any `thread/*` request. The canned script ignores stdin, so no reply
+    // is read for it — the write itself is the sequence under test.
+    write_line(&mut stdin, &notification_line("initialized"))
+        .await
+        .expect("initialized writes");
     let root_path = std::env::temp_dir().join("codex-fixture-turn");
     let root = RootPath::parse(root_path.to_str().expect("temp path utf8")).expect("root");
     let settings = CodexSettings::from_selection(&codex_selection()).expect("settings");
@@ -543,12 +667,23 @@ async fn run_fixture_turn(
     line.clear();
     reader.read_line(&mut line).await.expect("thread reads");
     let thread_id = codex_thread_id(&line, 2).expect("thread id");
+    // Production binds the native thread id on `turn/start`; the strict
+    // server rejects a missing `threadId` with `-32600`, so the harness
+    // awaits the turn result exactly like the owner and fails the turn
+    // fast on an error envelope instead of pumping silence.
     write_line(
         &mut stdin,
-        &request_line(3, "turn/start", &serde_json::json!({"input": []})),
+        &request_line(3, "turn/start", &settings.turn_start_params(&thread_id, "")),
     )
     .await
     .expect("turn writes");
+    line.clear();
+    reader.read_line(&mut line).await.expect("turn reads");
+    assert!(
+        !is_codex_error_response(&line),
+        "turn/start must not answer with a JSON-RPC error"
+    );
+    let provider_turn_id = codex_turn_id(&line, 3).expect("turn id");
 
     if let Some(after) = cancel_after {
         let task_control = Arc::clone(&control);
@@ -562,7 +697,9 @@ async fn run_fixture_turn(
     let run = run_id();
     let (sender, mut receiver) = mpsc::channel(64);
     let mut tracker = CodexPendingTracker::new();
-    let mut active: Option<String> = None;
+    // The turn is in flight from the server's `turn/start` result, mirroring
+    // the owner: silence from here on owes output to the inactivity deadline.
+    let mut active: Option<String> = Some(provider_turn_id);
     let mut sequence: u64 = 0;
     let mut last_activity = Instant::now();
     let terminal = loop {
@@ -633,7 +770,7 @@ fn joined(outcome: &FixtureOutcome) -> String {
 #[tokio::test]
 async fn fixture_start_deltas_close() {
     let responses = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n{}\n",
         r#"{"method":"item/agentMessage/delta","params":{"delta":"hello ","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
         r#"{"method":"item/agentMessage/delta","params":{"delta":"world","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
         r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
@@ -658,7 +795,7 @@ async fn fixture_start_deltas_close() {
 #[tokio::test]
 async fn fixture_malformed_frame_rejected_without_killing_turn() {
     let responses = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n{}\n",
         "this is not json",
         r#"{"method":"item/agentMessage/delta","params":{"delta":"kept","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
         r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
@@ -676,7 +813,7 @@ async fn fixture_malformed_frame_rejected_without_killing_turn() {
 #[tokio::test]
 async fn fixture_approval_question_steer_shapes_before_close() {
     let responses = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n{}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n{}\n{}\n",
         r#"{"id":20,"method":"item/commandExecution/requestApproval","params":{"itemId":"approval-21","command":"echo hi","reason":"say hi"}}"#,
         r#"{"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"thread-fixture-1","turnId":"turn-1","questions":[{"id":"q1","question":"Which?"}]}}"#,
         r#"{"method":"item/subAgent/discovered","params":{"agentThreadId":"child-9","parentThreadId":"thread-fixture-1"}}"#,
@@ -698,7 +835,7 @@ async fn fixture_approval_question_steer_shapes_before_close() {
 #[tokio::test]
 async fn fixture_external_kill_reports_interruption() {
     let responses = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n",
         r#"{"method":"item/agentMessage/delta","params":{"delta":"prefix ","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
     );
     let outcome = tokio::time::timeout(
@@ -716,7 +853,7 @@ async fn fixture_inactivity_stall_fails_turn() {
     // One delta puts the turn in flight then the script goes silent: the
     // inactivity deadline settles the turn as stalled (failed).
     let responses = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n",
         r#"{"method":"item/agentMessage/delta","params":{"delta":"warming","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
     );
     #[cfg(windows)]
@@ -735,7 +872,7 @@ async fn fixture_inactivity_stall_fails_turn() {
 
 #[tokio::test]
 async fn fixture_cancel_reports_cancellation() {
-    let responses = format!("{INIT_LINE}\n{THREAD_LINE}\n");
+    let responses = format!("{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n");
     #[cfg(windows)]
     let tail = "ping -n 6 127.0.0.1 >nul";
     #[cfg(not(windows))]
@@ -757,7 +894,7 @@ async fn fixture_cancel_reports_cancellation() {
 #[tokio::test]
 async fn fixture_restart_replays_durable_prefix() {
     let first = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n",
         r#"{"method":"item/agentMessage/delta","params":{"delta":"durable-","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
     );
     let interrupted = tokio::time::timeout(
@@ -771,7 +908,7 @@ async fn fixture_restart_replays_durable_prefix() {
     assert_eq!(durable_prefix, "durable-");
 
     let second = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n",
         r#"{"method":"item/agentMessage/delta","params":{"delta":"replayed","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
         r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
     );
@@ -1379,7 +1516,7 @@ fn codex_teardown_requires_group_termination() {
 #[tokio::test]
 async fn fixture_kill_reports_interruption_with_durable_prefix() {
     let responses = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n",
         r#"{"method":"item/agentMessage/delta","params":{"delta":"prefix-","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
     );
     // Pipe-holding grandchild: the leader is killed below while this holder
@@ -1408,8 +1545,10 @@ async fn fixture_kill_reports_interruption_with_durable_prefix() {
                 Ok(0) => break Some(TerminalState::Interrupted),
                 Ok(_) => {
                     sequence += 1;
-                    // Kill the leader once the durable prefix has landed.
-                    if sequence == 3 {
+                    // Kill the leader once the durable prefix has landed:
+                    // INIT, THREAD, and TURN results precede the first
+                    // notification, so the prefix delta is sequence 4.
+                    if sequence == 4 {
                         let _ = child.kill().await;
                     }
                     let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
@@ -1452,7 +1591,7 @@ async fn fixture_kill_reports_interruption_with_durable_prefix() {
 #[tokio::test]
 async fn fixture_restart_after_kill_replays_prefix_on_the_same_thread() {
     let first = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n",
         r#"{"method":"item/agentMessage/delta","params":{"delta":"durable-","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
     );
     let interrupted = tokio::time::timeout(
@@ -1475,7 +1614,7 @@ async fn fixture_restart_after_kill_replays_prefix_on_the_same_thread() {
     );
 
     let second = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{}\n{}\n",
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n",
         r#"{"method":"item/agentMessage/delta","params":{"delta":"replayed","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
         r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
     );

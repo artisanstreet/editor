@@ -1861,6 +1861,21 @@ async fn execute_codex_turn(
         )
         .await;
     }
+    // Official handshake order (`Handshake` in
+    // `modules/engines/src/codex/app-server-session.ts`): the client notifies
+    // `initialized` (no id, no params) once the `initialize` result arrives,
+    // before any `thread/*` request. A notification never consumes a request
+    // id, so `next_id` still names the `thread/*` request below.
+    let initialized_line = codex_runtime::notification_line("initialized");
+    if write_codex_line(&mut stdin, &initialized_line).await.is_err() {
+        return finish_configured_start(
+            request,
+            parts,
+            EngineOperationError::ProviderRequestFailed,
+            runtime.limits.close,
+        )
+        .await;
+    }
     // thread/start or thread/resume ---------------------------------------
     // A gated continuation reopens the stored provider thread
     // (`thread/resume` over the same options a fresh start would use); the
@@ -2002,12 +2017,23 @@ async fn execute_codex_turn(
     }
 
     // turn/start + streaming pump -----------------------------------------
+    // The request binds the exact native thread id from `thread/start` (or
+    // `thread/resume`); the real server rejects a missing `threadId` with
+    // `-32600`. The reply is awaited with a bounded notification-aware wait:
+    // the real server emits interleaved notifications (for example
+    // `thread/started`) between the `thread/*` result and the `turn/start`
+    // result, so lines are correlated by request id instead of assuming the
+    // next line is the reply. Interleaved notifications are processed through
+    // the same event pipeline (never discarded), a matching error envelope
+    // fails the turn fast, and anything else keeps waiting inside the same
+    // absolute phase deadline.
     let prompt_text = input
         .prompt
         .text()
         .map(|text| text.as_str().to_owned())
         .unwrap_or_default();
-    let turn_params = serde_json::json!({ "input": [{ "text": prompt_text, "text_elements": [], "type": "text" }] });
+    let turn_params = settings.turn_start_params(thread_id.as_str(), &prompt_text);
+    let turn_request_id = next_id;
     let turn_line = codex_runtime::request_line(next_id, "turn/start", &turn_params);
     next_id += 1;
     if write_codex_line(&mut stdin, &turn_line).await.is_err() {
@@ -2044,6 +2070,45 @@ async fn execute_codex_turn(
                 model_id: &attribution.model_id,
                 provider_session_id: thread_id.as_str(),
             });
+    let turn_wait = codex_await_turn_start(
+        &mut reader,
+        &mut line,
+        &input.run_id,
+        &mut tracker,
+        &mut active_turn,
+        &mut frame_sequence,
+        &mut last_activity,
+        phase_deadline(runtime.limits.prompt, deadline),
+        shutdown,
+        &control,
+        &observations,
+        usage_scope.as_ref(),
+        turn_request_id,
+    )
+    .await;
+    let provider_turn_id = match turn_wait {
+        CodexTurnWait::Accepted(turn_id) => turn_id,
+        CodexTurnWait::Terminal(state) => {
+            drop(stdin);
+            drop(observations);
+            return finish_turn_result(
+                parts,
+                Ok(EngineTurnResult { terminal: state }),
+                respond,
+                runtime.limits.close,
+            )
+            .await;
+        }
+        CodexTurnWait::Failed(error) => {
+            drop(stdin);
+            return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+        }
+    };
+    // The turn is in flight from the server's `turn/start` result: seeding
+    // the active turn lets the inactivity deadline settle a silent turn as
+    // stalled instead of waiting idle until the attempt budget expires.
+    active_turn = Some(provider_turn_id);
+    last_activity = Instant::now();
     let terminal = codex_pump_loop(
         &mut reader,
         &mut stdin,
@@ -2085,6 +2150,94 @@ async fn execute_codex_turn(
 enum CodexPumpOutcome {
     Terminal(super::observation::TerminalState),
     Failed(EngineOperationError),
+}
+
+/// Outcome of the bounded `turn/start` reply wait.
+enum CodexTurnWait {
+    /// The server accepted the turn; carries the native turn identity.
+    Accepted(String),
+    /// An interleaved notification already settled the turn.
+    Terminal(super::observation::TerminalState),
+    /// Shutdown, cancellation, deadline, EOF, or a matching error envelope.
+    Failed(EngineOperationError),
+}
+
+/// Waits for the `turn/start` reply while preserving interleaved traffic.
+///
+/// The real server emits notifications (for example `thread/started`)
+/// between the `thread/*` result and the `turn/start` result, so every line
+/// is correlated by request id instead of assuming the next line is the
+/// reply. Interleaved notifications flow through the shared event pipeline —
+/// deltas reach the observation sink and a terminal event settles the turn —
+/// while a matching error envelope (for example `-32600` for a missing
+/// `threadId`) fails fast. Uncorrelated error envelopes and unparseable
+/// lines keep the wait alive inside the same absolute phase deadline; the
+/// turn is not yet in flight, so no inactivity deadline applies here.
+#[allow(clippy::too_many_arguments)]
+async fn codex_await_turn_start(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    line: &mut String,
+    run_id: &artisan_domain::RunId,
+    tracker: &mut super::codex::CodexPendingTracker,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+    usage: Option<&super::codex::CodexUsageScope<'_>>,
+    turn_request_id: u64,
+) -> CodexTurnWait {
+    use super::codex as codex_runtime;
+
+    loop {
+        line.clear();
+        if read_codex_line(reader, line, deadline, shutdown, control)
+            .await
+            .is_err()
+        {
+            if shutdown.is_cancelled() {
+                return CodexTurnWait::Failed(EngineOperationError::Shutdown);
+            }
+            if control.is_cancelled() {
+                return CodexTurnWait::Failed(EngineOperationError::Cancelled);
+            }
+            if Instant::now() >= deadline {
+                return CodexTurnWait::Failed(EngineOperationError::Deadline);
+            }
+            return CodexTurnWait::Failed(EngineOperationError::ProviderRequestFailed);
+        }
+        *last_activity = Instant::now();
+        *frame_sequence += 1;
+        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+        if codex_runtime::is_codex_error_response(&trimmed)
+            && codex_response_id_matches(&trimmed, turn_request_id)
+        {
+            return CodexTurnWait::Failed(EngineOperationError::ProviderRequestFailed);
+        }
+        if let Some(turn_id) = codex_turn_id(&trimmed, turn_request_id) {
+            return CodexTurnWait::Accepted(turn_id);
+        }
+        match codex_runtime::parse_frame(&trimmed, *frame_sequence) {
+            Ok(event) => {
+                if let Some(terminal) = codex_runtime::apply_event(
+                    event,
+                    run_id,
+                    tracker,
+                    active_turn,
+                    observations,
+                    *frame_sequence,
+                    usage,
+                )
+                .await
+                {
+                    return CodexTurnWait::Terminal(terminal);
+                }
+            }
+            Err(_) => continue,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2173,6 +2326,16 @@ async fn codex_pump_loop(
                         *last_activity = Instant::now();
                         *frame_sequence += 1;
                         let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                        // Late JSON-RPC error replies (for example a rejected
+                        // steer/interrupt) never become turn events: fail the
+                        // turn fast instead of ignoring them until the lease
+                        // expires. Method envelopes are never error replies,
+                        // so server requests and notifications are unaffected.
+                        if codex_runtime::is_codex_error_response(&trimmed) {
+                            return CodexPumpOutcome::Failed(
+                                EngineOperationError::ProviderRequestFailed,
+                            );
+                        }
                         match codex_runtime::parse_frame(&trimmed, *frame_sequence) {
                             Ok(event) => {
                                 if let Some(terminal) = codex_runtime::apply_event(
@@ -2283,6 +2446,58 @@ pub(crate) fn codex_thread_id(line: &str, id: u64) -> Option<String> {
         return None;
     }
     Some(id.to_owned())
+}
+
+/// Extracts the exact native turn identity from a `turn/start` result.
+///
+/// Returns `None` on id mismatch, on a JSON-RPC error envelope (for example
+/// `-32600` for a missing `threadId`), or on a missing/out-of-bound turn
+/// identity, so the dispatcher fails the turn fast instead of pumping a turn
+/// that the server never started.
+pub(crate) fn codex_turn_id(line: &str, id: u64) -> Option<String> {
+    if line.len() > super::codex::CODEX_MAX_FRAME_BYTES {
+        return None;
+    }
+    let value: Value = serde_json::from_str(line).ok()?;
+    let matches_id = value.get("id").is_some_and(|candidate| {
+        candidate.as_u64() == Some(id)
+            || candidate
+                .as_str()
+                .is_some_and(|text| text == id.to_string())
+    });
+    if !matches_id {
+        return None;
+    }
+    if value.get("error").is_some() {
+        return None;
+    }
+    let turn = value.get("result")?.get("turn")?;
+    let id = turn.get("id")?.as_str()?;
+    if id.is_empty() || id.len() > 256 {
+        return None;
+    }
+    Some(id.to_owned())
+}
+
+/// Returns whether one inbound line carries a JSON-RPC response id equal to
+/// the supplied request id (numeric or string form).
+///
+/// Used to correlate error envelopes with their pending request: only the
+/// matching reply fails its phase fast, while uncorrelated lines keep the
+/// bounded wait alive.
+pub(crate) fn codex_response_id_matches(line: &str, id: u64) -> bool {
+    if line.len() > super::codex::CODEX_MAX_FRAME_BYTES {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    value.get("id").is_some_and(|candidate| {
+        candidate.as_u64() == Some(id)
+            || candidate
+                .as_str()
+                .is_some_and(|text| text == id.to_string())
+    })
 }
 
 /// Extracts the resumed native thread identity, requiring the same thread.
