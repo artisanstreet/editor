@@ -7604,7 +7604,9 @@ mod tests {
         DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, DESKTOP_OFFLINE_SELECTOR,
         DESKTOP_SIDEBAR_SELECTOR, DESKTOP_TITLEBAR_SELECTOR,
     };
-    use crate::native_command_menu::COMMAND_MENU_DROPDOWN_SELECTOR;
+    use crate::native_command_menu::{
+        COMMAND_MENU_DROPDOWN_SELECTOR, COMMAND_MENU_INPUT_SELECTOR, COMMAND_MENU_LIST_SELECTOR,
+    };
     use crate::native_profile_usage::{
         NativeUsageAuthentication, NativeUsageCadence, NativeUsageEntry, NativeUsageQuotaSurface,
         NativeUsageReport, NativeUsageWindow,
@@ -9552,21 +9554,22 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_shortcut_opens_shared_titlebar_search_and_escape_restores_root(
+    fn command_shortcut_opens_palette_without_persistent_titlebar_search(
         cx: &mut TestAppContext,
     ) {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         cx.update(|_, app| super::bind_native_actions(app));
         cx.run_until_parked();
-        let input = cx
-            .debug_bounds(crate::native_command_menu::COMMAND_MENU_INPUT_SELECTOR)
-            .expect("search input");
-        cx.simulate_click(input.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        cx.update(|_, app| assert!(view.read(app).command_menu.read(app).state().is_open()));
-        cx.simulate_keystrokes("escape");
+        // The titlebar no longer paints a persistent search input; the
+        // palette lives behind the keyboard shortcut.
+        cx.update(|_, app| {
+            assert!(!view.read(app).command_menu.read(app).state().is_open());
+        });
+        assert!(cx.debug_bounds(COMMAND_MENU_INPUT_SELECTOR).is_none());
 
+        // Ctrl+K opens the working palette: focused input, result list, and
+        // dialog scrim — with no titlebar dropdown.
         cx.simulate_keystrokes("ctrl-k");
         cx.run_until_parked();
         cx.update(|window, app| {
@@ -9575,12 +9578,15 @@ mod tests {
             assert!(menu.state().is_open());
             assert!(menu.input_focus().is_focused(window));
         });
-        assert!(cx.debug_bounds(COMMAND_MENU_DROPDOWN_SELECTOR).is_some());
-        assert!(
-            cx.debug_bounds("artisan-native-command-menu-scrim")
-                .is_none()
-        );
+        assert!(cx.debug_bounds(COMMAND_MENU_INPUT_SELECTOR).is_some());
+        assert!(cx.debug_bounds(COMMAND_MENU_LIST_SELECTOR).is_some());
+        assert!(cx.debug_bounds(COMMAND_MENU_DROPDOWN_SELECTOR).is_none());
+        assert!(cx
+            .debug_bounds("artisan-native-command-menu-scrim")
+            .is_some());
 
+        // Escape closes the palette and restores root focus, removing the
+        // transient input with it.
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         cx.update(|window, app| {
@@ -9588,6 +9594,7 @@ mod tests {
             assert!(!application.command_menu.read(app).state().is_open());
             assert!(application.focus_handle.is_focused(window));
         });
+        assert!(cx.debug_bounds(COMMAND_MENU_INPUT_SELECTOR).is_none());
     }
 
     #[gpui::test]
