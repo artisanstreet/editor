@@ -119,13 +119,15 @@ fn carries_raw_html_as_inert_data() {
     assert_eq!(paragraph.as_slice(), expected_paragraph);
 
     // Nothing outside the inert payloads may have interpreted the markup:
-    // ordinary text runs must read exactly as authored, with no derived
-    // emphasis, entities, or element structure.
+    // visible copy reads exactly as authored, with no derived emphasis,
+    // entities, or element structure. Raw HTML stays excluded; all other
+    // spans (including emphasis, strong, and link labels) flatten to their
+    // visible text.
     let rendered_text = paragraph
         .iter()
         .filter_map(|span| match span {
-            Span::Text(text) | Span::Code(text) => Some(text.as_str()),
             Span::Html(_) => None,
+            visible => Some(visible.text_content()),
         })
         .collect::<Vec<_>>()
         .join("");

@@ -53,11 +53,14 @@ blocks. The renderer then painted heading + prose + fence with no list.
   indent. No HTML list elements.
 - `present_inline` flattens spans into one `StyledText` through a single
   `with_highlights` call (`StyledText::with_highlights` replaces stored
-  highlights, so chained calls would discard code and bold). Nested
-  combinations sweep into atomic segments combined with the existing
-  `HighlightStyle::highlight` helper, then coalesce: code keeps its wash,
-  strong adds `FontWeight::BOLD`, emphasis adds `FontStyle::Italic`,
-  openable links add accent color + 1px `UnderlineStyle`.
+  highlights, so chained calls would discard code and bold). Styles
+  propagate recursively in one linear pass — each nested run inherits its
+  parent style combined with the existing `HighlightStyle::highlight`
+  helper, leaf text emits only non-default runs, and adjacent equal runs
+  coalesce — so formatted-run count never goes quadratic on large replies
+  the renderer re-parses per render: code keeps its wash, strong adds
+  `FontWeight::BOLD`, emphasis adds `FontStyle::Italic`, openable links
+  add accent color + 1px `UnderlineStyle`.
 - Paragraphs with openable links render as `InteractiveText` whose
   `on_click` opens the clicked destination through `cx.open_url` (platform
   browser); the index is bounds-checked against the exposed link metadata.

@@ -343,10 +343,15 @@ pub struct InlinePresentation {
 ///
 /// `StyledText::with_highlights` replaces its stored highlights on every
 /// call, so code, strong, emphasis, and link ranges must merge into one
-/// iterator here. Nested combinations (bold code, bold link labels) sweep
-/// into atomic segments whose styles combine through the existing
-/// [`HighlightStyle::highlight`] helper in source order, then adjacent
-/// equal-styled segments coalesce.
+/// iterator here. Styles propagate recursively: each nested run inherits
+/// its parent style combined through the existing
+/// [`HighlightStyle::highlight`] helper, and leaf text emits one run only
+/// when the inherited style is non-default. Emission is strictly
+/// source-ordered, so runs arrive ordered and non-overlapping in a single
+/// linear pass with no boundary sort and no per-segment tag scan — the old
+/// sweep shape (sorted boundaries crossed with every tag range) was
+/// quadratic in formatted-run count and stalled large replies that the
+/// renderer re-parses on every render.
 ///
 /// # Must use
 ///
@@ -355,127 +360,86 @@ pub struct InlinePresentation {
 #[must_use]
 pub fn present_inline(spans: &[Span], theme: ArtisanTheme) -> InlinePresentation {
     let mut accumulator = InlineAccumulator::default();
-    flatten_spans(spans, &mut accumulator);
+    flatten_spans(spans, HighlightStyle::default(), &mut accumulator, theme);
     InlinePresentation {
         source: accumulator.source,
-        highlights: merge_tagged_ranges(&accumulator.tags, theme),
+        highlights: accumulator.runs,
         links: accumulator.links,
     }
-}
-
-/// Inline style tag at a flattened byte range; ranges may overlap and nest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InlineTag {
-    Emphasis,
-    Strong,
-    Link,
-    Code,
 }
 
 #[derive(Default)]
 struct InlineAccumulator {
     source: String,
-    tags: Vec<(Range<usize>, InlineTag)>,
+    runs: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<InlineLink>,
 }
 
-fn flatten_spans(spans: &[Span], accumulator: &mut InlineAccumulator) {
+/// Emits one leaf run, coalescing into the previous run when the style
+/// matches and the text is contiguous.
+fn emit_run(accumulator: &mut InlineAccumulator, start: usize, end: usize, style: HighlightStyle) {
+    if start >= end || style == HighlightStyle::default() {
+        return;
+    }
+    if let Some((last_range, last_style)) = accumulator.runs.last_mut() {
+        if *last_style == style && last_range.end == start {
+            last_range.end = end;
+            return;
+        }
+    }
+    accumulator.runs.push((start..end, style));
+}
+
+fn flatten_spans(
+    spans: &[Span],
+    inherited: HighlightStyle,
+    accumulator: &mut InlineAccumulator,
+    theme: ArtisanTheme,
+) {
     for span in spans {
         match span {
-            Span::Text(inline) | Span::Html(inline) => accumulator.source.push_str(inline),
+            Span::Text(inline) | Span::Html(inline) => {
+                let start = accumulator.source.len();
+                accumulator.source.push_str(inline);
+                emit_run(accumulator, start, accumulator.source.len(), inherited);
+            }
             Span::Code(code) => {
-                push_tagged(accumulator, InlineTag::Code, code);
+                let start = accumulator.source.len();
+                accumulator.source.push_str(code);
+                emit_run(
+                    accumulator,
+                    start,
+                    accumulator.source.len(),
+                    inherited.highlight(inline_code_style(theme)),
+                );
             }
             Span::Emphasis(inner) => {
-                push_wrapped(accumulator, InlineTag::Emphasis, inner);
+                flatten_spans(inner, inherited.highlight(emphasis_style()), accumulator, theme);
             }
             Span::Strong(inner) => {
-                push_wrapped(accumulator, InlineTag::Strong, inner);
+                flatten_spans(inner, inherited.highlight(strong_style()), accumulator, theme);
             }
             Span::Link { label, destination } => {
-                let start = accumulator.source.len();
-                flatten_spans(label, accumulator);
-                let end = accumulator.source.len();
-                if start < end && is_openable_link_destination(destination) {
-                    let range = start..end;
-                    accumulator.tags.push((range.clone(), InlineTag::Link));
-                    accumulator.links.push(InlineLink {
-                        range,
-                        destination: destination.clone(),
-                    });
+                if is_openable_link_destination(destination) {
+                    let start = accumulator.source.len();
+                    flatten_spans(
+                        label,
+                        inherited.highlight(link_style(theme)),
+                        accumulator,
+                        theme,
+                    );
+                    let end = accumulator.source.len();
+                    if start < end {
+                        accumulator.links.push(InlineLink {
+                            range: start..end,
+                            destination: destination.clone(),
+                        });
+                    }
+                } else {
+                    flatten_spans(label, inherited, accumulator, theme);
                 }
             }
         }
-    }
-}
-
-/// Appends leaf text and tags its full extent when non-empty.
-fn push_tagged(accumulator: &mut InlineAccumulator, tag: InlineTag, text: &str) {
-    let start = accumulator.source.len();
-    accumulator.source.push_str(text);
-    if start < accumulator.source.len() {
-        accumulator.tags.push((start..accumulator.source.len(), tag));
-    }
-}
-
-/// Flattens nested runs, then tags their combined extent when non-empty.
-fn push_wrapped(accumulator: &mut InlineAccumulator, tag: InlineTag, inner: &[Span]) {
-    let start = accumulator.source.len();
-    flatten_spans(inner, accumulator);
-    if start < accumulator.source.len() {
-        accumulator.tags.push((start..accumulator.source.len(), tag));
-    }
-}
-
-/// Merges possibly overlapping tag ranges into ordered, non-overlapping
-/// highlight runs. Each atomic segment combines its active tags through
-/// [`HighlightStyle::highlight`] in tag order (inner tags were pushed
-/// first, so outer tags blend over them deterministically), then adjacent
-/// segments with equal styles coalesce.
-fn merge_tagged_ranges(
-    tags: &[(Range<usize>, InlineTag)],
-    theme: ArtisanTheme,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut bounds = Vec::with_capacity(tags.len().saturating_mul(2));
-    for (range, _) in tags {
-        bounds.push(range.start);
-        bounds.push(range.end);
-    }
-    bounds.sort_unstable();
-    bounds.dedup();
-
-    let mut merged: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-    for pair in bounds.windows(2) {
-        let (start, end) = (pair[0], pair[1]);
-        if start >= end {
-            continue;
-        }
-        let mut style = HighlightStyle::default();
-        for (range, tag) in tags {
-            if range.start <= start && end <= range.end {
-                style = style.highlight(tag_style(*tag, theme));
-            }
-        }
-        if style == HighlightStyle::default() {
-            continue;
-        }
-        if let Some((last_range, last_style)) = merged.last_mut() {
-            if *last_style == style && last_range.end == start {
-                last_range.end = end;
-                continue;
-            }
-        }
-        merged.push((start..end, style));
-    }
-    merged
-}
-
-fn tag_style(tag: InlineTag, theme: ArtisanTheme) -> HighlightStyle {
-    match tag {
-        InlineTag::Emphasis => emphasis_style(),
-        InlineTag::Strong => strong_style(),
-        InlineTag::Link => link_style(theme),
-        InlineTag::Code => inline_code_style(theme),
     }
 }
 
