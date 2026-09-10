@@ -4673,11 +4673,12 @@ mod tests {
         });
         cx.simulate_resize(size(px(720.0), px(240.0)));
         settle(cx);
-        let body_selector = format!(
-            "{CONVERSATION_SURFACE_SELECTOR}-turn-turn_a-block-user-user-a-body"
-        );
+        // Static literal: debug_bounds takes &'static str. Verified against
+        // the selector contract: turn_selector appends "-turn-turn_a" to the
+        // surface root, the user arm appends "-block-user-user-a", and the
+        // body container appends "-body".
         let bounds = cx
-            .debug_bounds(body_selector.as_str())
+            .debug_bounds("artisan-conversation-surface-turn-turn_a-block-user-user-a-body")
             .expect("user body must paint");
         let left = point(bounds.origin.x + px(1.0), bounds.origin.y + px(10.0));
         let right = point(
