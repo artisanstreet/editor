@@ -38,10 +38,10 @@ use std::collections::{HashMap, HashSet};
 
 use artisan_domain::{
     ApprovalKind as DomainApprovalKind, ApprovalObservation, ApprovalState as DomainApprovalState,
-    EngineObservationEvent, MessagePhase, Observation, QuestionObservation,
-    QuestionState as DomainQuestionState, RunState, RunTerminalState, TerminalActivityObservation,
-    TerminalActivityState, ThreadId, ToolAction, ToolObservation, TurnState, UsageBasis,
-    UsageObservation,
+    EngineObservationAttribution, EngineObservationEvent, MessagePhase, Observation,
+    QuestionObservation, QuestionState as DomainQuestionState, RunId, RunState, RunTerminalState,
+    TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction, ToolObservation,
+    TurnId, TurnState, UnixMillis, UsageBasis, UsageObservation,
 };
 
 use crate::approval_presentation::{
@@ -77,6 +77,48 @@ pub struct ReplaySummary {
     pub stale: usize,
 }
 
+/// Scopes one provider row key by its Forge run.
+///
+/// Attributed rows key as `run_id#provider_id` so two runs sharing provider
+/// item names cannot coalesce. Legacy rows without attribution keep the bare
+/// provider id so existing pairing behavior is preserved.
+#[must_use]
+pub fn scoped_row_key(
+    attribution: Option<&EngineObservationAttribution>,
+    provider_id: &str,
+) -> String {
+    match attribution {
+        Some(attr) => format!("{}#{provider_id}", attr.run_id.as_str()),
+        None => provider_id.to_owned(),
+    }
+}
+
+/// Orders one replay entry: attributed lanes by durable delivery sequence,
+/// legacy lanes by wire cursor.
+///
+/// Attributed entries sort before legacy entries; within each lane the
+/// durable order applies. Cross-lane order is irrelevant to pairing
+/// correctness because each lane carries its own dedup.
+fn replay_order_key(event: &EngineObservationEvent, cursor: u64) -> (u8, u64, u64) {
+    match &event.attribution {
+        Some(attr) => (0, attr.delivery_sequence, cursor),
+        None => (1, cursor, cursor),
+    }
+}
+
+/// Orders one explicit-attribution replay entry, falling back to the event's
+/// own attribution when the override is [`None`].
+fn attributed_replay_order_key(
+    event: &EngineObservationEvent,
+    cursor: u64,
+    attribution: Option<&EngineObservationAttribution>,
+) -> (u8, u64, u64) {
+    match attribution.or(event.attribution.as_ref()) {
+        Some(attr) => (0, attr.delivery_sequence, cursor),
+        None => (1, cursor, cursor),
+    }
+}
+
 /// One accumulating agent message keyed by its native item id.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MessageRow {
@@ -87,6 +129,7 @@ pub struct MessageRow {
     turn_id: String,
     cursor: u64,
     sequence: u64,
+    attribution: Option<EngineObservationAttribution>,
 }
 
 impl MessageRow {
@@ -119,6 +162,39 @@ impl MessageRow {
     pub fn turn_id(&self) -> &str {
         &self.turn_id
     }
+
+    /// Returns the full delivery attribution, when the delivery carried one.
+    ///
+    /// Attribution is all-or-none: a real DB delivery carries the exact
+    /// Forge run/turn/time/sequence, while legacy transport carries none.
+    #[must_use]
+    pub const fn attribution(&self) -> Option<&EngineObservationAttribution> {
+        self.attribution.as_ref()
+    }
+
+    /// Returns the attributed Forge run, when the delivery carried one.
+    #[must_use]
+    pub fn attributed_run(&self) -> Option<&RunId> {
+        self.attribution.as_ref().map(|attr| &attr.run_id)
+    }
+
+    /// Returns the attributed canonical Forge turn, when delivered.
+    #[must_use]
+    pub fn attributed_turn(&self) -> Option<&TurnId> {
+        self.attribution.as_ref().map(|attr| &attr.turn_id)
+    }
+
+    /// Returns the durable commit time, when delivered.
+    #[must_use]
+    pub fn committed_at(&self) -> Option<UnixMillis> {
+        self.attribution.as_ref().map(|attr| attr.committed_at)
+    }
+
+    /// Returns the thread-scoped delivery sequence, when delivered.
+    #[must_use]
+    pub fn delivery_sequence(&self) -> Option<u64> {
+        self.attribution.as_ref().map(|attr| attr.delivery_sequence)
+    }
 }
 
 /// One accumulating reasoning summary keyed by its reasoning item id.
@@ -130,6 +206,7 @@ pub struct ReasoningRow {
     turn_id: String,
     cursor: u64,
     sequence: u64,
+    attribution: Option<EngineObservationAttribution>,
 }
 
 impl ReasoningRow {
@@ -156,6 +233,39 @@ impl ReasoningRow {
     pub fn turn_id(&self) -> &str {
         &self.turn_id
     }
+
+    /// Returns the full delivery attribution, when the delivery carried one.
+    ///
+    /// Attribution is all-or-none: a real DB delivery carries the exact
+    /// Forge run/turn/time/sequence, while legacy transport carries none.
+    #[must_use]
+    pub const fn attribution(&self) -> Option<&EngineObservationAttribution> {
+        self.attribution.as_ref()
+    }
+
+    /// Returns the attributed Forge run, when the delivery carried one.
+    #[must_use]
+    pub fn attributed_run(&self) -> Option<&RunId> {
+        self.attribution.as_ref().map(|attr| &attr.run_id)
+    }
+
+    /// Returns the attributed canonical Forge turn, when delivered.
+    #[must_use]
+    pub fn attributed_turn(&self) -> Option<&TurnId> {
+        self.attribution.as_ref().map(|attr| &attr.turn_id)
+    }
+
+    /// Returns the durable commit time, when delivered.
+    #[must_use]
+    pub fn committed_at(&self) -> Option<UnixMillis> {
+        self.attribution.as_ref().map(|attr| attr.committed_at)
+    }
+
+    /// Returns the thread-scoped delivery sequence, when delivered.
+    #[must_use]
+    pub fn delivery_sequence(&self) -> Option<u64> {
+        self.attribution.as_ref().map(|attr| attr.delivery_sequence)
+    }
 }
 
 /// Latest lifecycle report for one tool invocation, keyed by tool id.
@@ -167,6 +277,7 @@ pub struct ToolRow {
     detail: Option<String>,
     cursor: u64,
     sequence: u64,
+    attribution: Option<EngineObservationAttribution>,
 }
 
 impl ToolRow {
@@ -193,6 +304,39 @@ impl ToolRow {
     pub fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
     }
+
+    /// Returns the full delivery attribution, when the delivery carried one.
+    ///
+    /// Attribution is all-or-none: a real DB delivery carries the exact
+    /// Forge run/turn/time/sequence, while legacy transport carries none.
+    #[must_use]
+    pub const fn attribution(&self) -> Option<&EngineObservationAttribution> {
+        self.attribution.as_ref()
+    }
+
+    /// Returns the attributed Forge run, when the delivery carried one.
+    #[must_use]
+    pub fn attributed_run(&self) -> Option<&RunId> {
+        self.attribution.as_ref().map(|attr| &attr.run_id)
+    }
+
+    /// Returns the attributed canonical Forge turn, when delivered.
+    #[must_use]
+    pub fn attributed_turn(&self) -> Option<&TurnId> {
+        self.attribution.as_ref().map(|attr| &attr.turn_id)
+    }
+
+    /// Returns the durable commit time, when delivered.
+    #[must_use]
+    pub fn committed_at(&self) -> Option<UnixMillis> {
+        self.attribution.as_ref().map(|attr| attr.committed_at)
+    }
+
+    /// Returns the thread-scoped delivery sequence, when delivered.
+    #[must_use]
+    pub fn delivery_sequence(&self) -> Option<u64> {
+        self.attribution.as_ref().map(|attr| attr.delivery_sequence)
+    }
 }
 
 /// Latest activity for one terminal session, keyed by activity id.
@@ -206,6 +350,7 @@ pub struct TerminalRow {
     state: TerminalActivityState,
     cursor: u64,
     sequence: u64,
+    attribution: Option<EngineObservationAttribution>,
 }
 
 impl TerminalRow {
@@ -244,6 +389,39 @@ impl TerminalRow {
     pub const fn state(&self) -> TerminalActivityState {
         self.state
     }
+
+    /// Returns the full delivery attribution, when the delivery carried one.
+    ///
+    /// Attribution is all-or-none: a real DB delivery carries the exact
+    /// Forge run/turn/time/sequence, while legacy transport carries none.
+    #[must_use]
+    pub const fn attribution(&self) -> Option<&EngineObservationAttribution> {
+        self.attribution.as_ref()
+    }
+
+    /// Returns the attributed Forge run, when the delivery carried one.
+    #[must_use]
+    pub fn attributed_run(&self) -> Option<&RunId> {
+        self.attribution.as_ref().map(|attr| &attr.run_id)
+    }
+
+    /// Returns the attributed canonical Forge turn, when delivered.
+    #[must_use]
+    pub fn attributed_turn(&self) -> Option<&TurnId> {
+        self.attribution.as_ref().map(|attr| &attr.turn_id)
+    }
+
+    /// Returns the durable commit time, when delivered.
+    #[must_use]
+    pub fn committed_at(&self) -> Option<UnixMillis> {
+        self.attribution.as_ref().map(|attr| attr.committed_at)
+    }
+
+    /// Returns the thread-scoped delivery sequence, when delivered.
+    #[must_use]
+    pub fn delivery_sequence(&self) -> Option<u64> {
+        self.attribution.as_ref().map(|attr| attr.delivery_sequence)
+    }
 }
 
 /// One approval request with its eventual decision, keyed by approval id.
@@ -258,6 +436,7 @@ pub struct ApprovalRow {
     approved: Option<bool>,
     cursor: u64,
     sequence: u64,
+    attribution: Option<EngineObservationAttribution>,
 }
 
 impl ApprovalRow {
@@ -289,6 +468,39 @@ impl ApprovalRow {
     #[must_use]
     pub const fn is_requested(&self) -> bool {
         self.approved.is_none()
+    }
+
+    /// Returns the full delivery attribution, when the delivery carried one.
+    ///
+    /// Attribution is all-or-none: a real DB delivery carries the exact
+    /// Forge run/turn/time/sequence, while legacy transport carries none.
+    #[must_use]
+    pub const fn attribution(&self) -> Option<&EngineObservationAttribution> {
+        self.attribution.as_ref()
+    }
+
+    /// Returns the attributed Forge run, when the delivery carried one.
+    #[must_use]
+    pub fn attributed_run(&self) -> Option<&RunId> {
+        self.attribution.as_ref().map(|attr| &attr.run_id)
+    }
+
+    /// Returns the attributed canonical Forge turn, when delivered.
+    #[must_use]
+    pub fn attributed_turn(&self) -> Option<&TurnId> {
+        self.attribution.as_ref().map(|attr| &attr.turn_id)
+    }
+
+    /// Returns the durable commit time, when delivered.
+    #[must_use]
+    pub fn committed_at(&self) -> Option<UnixMillis> {
+        self.attribution.as_ref().map(|attr| attr.committed_at)
+    }
+
+    /// Returns the thread-scoped delivery sequence, when delivered.
+    #[must_use]
+    pub fn delivery_sequence(&self) -> Option<u64> {
+        self.attribution.as_ref().map(|attr| attr.delivery_sequence)
     }
 
     /// Projects this row into the pure approval presentation policy.
@@ -364,6 +576,7 @@ pub struct QuestionRow {
     answers: Option<Vec<String>>,
     cursor: u64,
     sequence: u64,
+    attribution: Option<EngineObservationAttribution>,
 }
 
 impl QuestionRow {
@@ -407,6 +620,39 @@ impl QuestionRow {
     #[must_use]
     pub const fn is_requested(&self) -> bool {
         self.answers.is_none()
+    }
+
+    /// Returns the full delivery attribution, when the delivery carried one.
+    ///
+    /// Attribution is all-or-none: a real DB delivery carries the exact
+    /// Forge run/turn/time/sequence, while legacy transport carries none.
+    #[must_use]
+    pub const fn attribution(&self) -> Option<&EngineObservationAttribution> {
+        self.attribution.as_ref()
+    }
+
+    /// Returns the attributed Forge run, when the delivery carried one.
+    #[must_use]
+    pub fn attributed_run(&self) -> Option<&RunId> {
+        self.attribution.as_ref().map(|attr| &attr.run_id)
+    }
+
+    /// Returns the attributed canonical Forge turn, when delivered.
+    #[must_use]
+    pub fn attributed_turn(&self) -> Option<&TurnId> {
+        self.attribution.as_ref().map(|attr| &attr.turn_id)
+    }
+
+    /// Returns the durable commit time, when delivered.
+    #[must_use]
+    pub fn committed_at(&self) -> Option<UnixMillis> {
+        self.attribution.as_ref().map(|attr| attr.committed_at)
+    }
+
+    /// Returns the thread-scoped delivery sequence, when delivered.
+    #[must_use]
+    pub fn delivery_sequence(&self) -> Option<u64> {
+        self.attribution.as_ref().map(|attr| attr.delivery_sequence)
     }
 }
 
@@ -489,6 +735,7 @@ pub struct TimelineRow {
     sequence: Option<u64>,
     tag: &'static str,
     summary: String,
+    attribution: Option<EngineObservationAttribution>,
 }
 
 impl TimelineRow {
@@ -515,6 +762,39 @@ impl TimelineRow {
     pub fn summary(&self) -> &str {
         &self.summary
     }
+
+    /// Returns the full delivery attribution, when the delivery carried one.
+    ///
+    /// Attribution is all-or-none: a real DB delivery carries the exact
+    /// Forge run/turn/time/sequence, while legacy transport carries none.
+    #[must_use]
+    pub const fn attribution(&self) -> Option<&EngineObservationAttribution> {
+        self.attribution.as_ref()
+    }
+
+    /// Returns the attributed Forge run, when the delivery carried one.
+    #[must_use]
+    pub fn attributed_run(&self) -> Option<&RunId> {
+        self.attribution.as_ref().map(|attr| &attr.run_id)
+    }
+
+    /// Returns the attributed canonical Forge turn, when delivered.
+    #[must_use]
+    pub fn attributed_turn(&self) -> Option<&TurnId> {
+        self.attribution.as_ref().map(|attr| &attr.turn_id)
+    }
+
+    /// Returns the durable commit time, when delivered.
+    #[must_use]
+    pub fn committed_at(&self) -> Option<UnixMillis> {
+        self.attribution.as_ref().map(|attr| attr.committed_at)
+    }
+
+    /// Returns the thread-scoped delivery sequence, when delivered.
+    #[must_use]
+    pub fn delivery_sequence(&self) -> Option<u64> {
+        self.attribution.as_ref().map(|attr| attr.delivery_sequence)
+    }
 }
 
 /// Latest terminal outcome for the run, when one has arrived.
@@ -534,6 +814,13 @@ pub struct EngineObservationState {
     thread_id: ThreadId,
     last_cursor: u64,
     seen_ids: HashSet<String>,
+    /// Durable delivery sequences already paired for attributed rows.
+    ///
+    /// The backend writer resets the wire cursor to 1 on every new
+    /// connection, so attributed reconnect dedup keys on this thread-scoped
+    /// strictly increasing sequence plus the stable observation identity,
+    /// never on the wire cursor.
+    seen_delivery_sequences: HashSet<u64>,
     messages: HashMap<String, MessageRow>,
     message_order: Vec<String>,
     reasoning: HashMap<String, ReasoningRow>,
@@ -561,6 +848,7 @@ impl EngineObservationState {
             thread_id,
             last_cursor: 0,
             seen_ids: HashSet::new(),
+            seen_delivery_sequences: HashSet::new(),
             messages: HashMap::new(),
             message_order: Vec::new(),
             reasoning: HashMap::new(),
@@ -633,21 +921,68 @@ impl EngineObservationState {
     }
 
     /// Returns the reasoning row for `item_id`, if one has arrived.
+    ///
+    /// Legacy lookups use the bare provider id. Attributed rows are scoped by
+    /// Forge run; use [`Self::reasoning_scoped`] for an exact run-scoped read.
     #[must_use]
     pub fn reasoning(&self, item_id: &str) -> Option<&ReasoningRow> {
         self.reasoning.get(item_id)
     }
 
+    /// Returns the run-scoped reasoning row for one Forge run.
+    #[must_use]
+    pub fn reasoning_scoped(&self, run_id: &RunId, item_id: &str) -> Option<&ReasoningRow> {
+        self.reasoning
+            .get(&format!("{}#{item_id}", run_id.as_str()))
+    }
+
+    /// Returns reasoning rows in first-seen order.
+    #[must_use]
+    pub fn reasoning_in_order(&self) -> Vec<&ReasoningRow> {
+        self.ordered(&self.reasoning_order, &self.reasoning)
+    }
+
     /// Returns the tool row for `tool_id`, if one has arrived.
+    ///
+    /// Legacy lookups use the bare provider id. Attributed rows are scoped by
+    /// Forge run; use [`Self::tool_scoped`] for an exact run-scoped read.
     #[must_use]
     pub fn tool(&self, tool_id: &str) -> Option<&ToolRow> {
         self.tools.get(tool_id)
     }
 
+    /// Returns the run-scoped tool row for one Forge run.
+    #[must_use]
+    pub fn tool_scoped(&self, run_id: &RunId, tool_id: &str) -> Option<&ToolRow> {
+        self.tools.get(&format!("{}#{tool_id}", run_id.as_str()))
+    }
+
+    /// Returns tool rows in first-seen order.
+    #[must_use]
+    pub fn tools_in_order(&self) -> Vec<&ToolRow> {
+        self.ordered(&self.tool_order, &self.tools)
+    }
+
     /// Returns the terminal row for `activity_id`, if one has arrived.
+    ///
+    /// Legacy lookups use the bare provider id. Attributed rows are scoped by
+    /// Forge run; use [`Self::terminal_scoped`] for an exact run-scoped read.
     #[must_use]
     pub fn terminal(&self, activity_id: &str) -> Option<&TerminalRow> {
         self.terminals.get(activity_id)
+    }
+
+    /// Returns the run-scoped terminal row for one Forge run.
+    #[must_use]
+    pub fn terminal_scoped(&self, run_id: &RunId, activity_id: &str) -> Option<&TerminalRow> {
+        self.terminals
+            .get(&format!("{}#{activity_id}", run_id.as_str()))
+    }
+
+    /// Returns terminal rows in first-seen order.
+    #[must_use]
+    pub fn terminals_in_order(&self) -> Vec<&TerminalRow> {
+        self.ordered(&self.terminal_order, &self.terminals)
     }
 
     /// Returns the approval row for `approval_id`, if one has arrived.
@@ -723,14 +1058,51 @@ impl EngineObservationState {
 
     /// Applies one subscription event at its delivery cursor.
     ///
-    /// Events naming another thread, carrying a zero cursor, repeating an
-    /// applied cursor, or repeating an applied observation identity change
-    /// nothing and report why. Otherwise the observation pairs into its row
-    /// and the cursor advances.
+    /// The attribution is read from the event itself: real DB deliveries
+    /// carry `Some` with the exact Forge run/turn/time/sequence, while legacy
+    /// transport carries `None` and pairs typed rows without activity
+    /// identity (never fabricating activity facts). Dedup follows the event
+    /// kind: attributed rows use the durable thread-scoped delivery sequence
+    /// plus stable observation identity, because the backend writer resets
+    /// the wire cursor to 1 on every new connection; legacy rows use wire
+    /// cursor order only.
     #[must_use]
     pub fn apply(&mut self, cursor: u64, event: &EngineObservationEvent) -> ApplyOutcome {
+        self.apply_attributed(cursor, event, event.attribution.as_ref())
+    }
+
+    /// Applies one subscription event with explicit Forge attribution.
+    ///
+    /// An explicit `Some` attribution overrides the event's own attribution;
+    /// [`None`] falls back to the event's attribution, so legacy events pair
+    /// without activity identity. Attributed rows scope by Forge run, so two
+    /// runs sharing provider item names cannot coalesce.
+    #[must_use]
+    pub fn apply_attributed(
+        &mut self,
+        cursor: u64,
+        event: &EngineObservationEvent,
+        attribution: Option<&EngineObservationAttribution>,
+    ) -> ApplyOutcome {
         if event.thread_id != self.thread_id {
             return ApplyOutcome::StaleThread;
+        }
+        let effective = attribution.or(event.attribution.as_ref());
+        if let Some(attr) = effective {
+            let observation_id = event.observation.observation_id().as_str().to_owned();
+            if self.seen_delivery_sequences.contains(&attr.delivery_sequence)
+                || !self.seen_ids.insert(observation_id)
+            {
+                return ApplyOutcome::Duplicate;
+            }
+            self.seen_delivery_sequences.insert(attr.delivery_sequence);
+            let sequence = event.observation.sequence().get();
+            let (tag, settled_in_place) =
+                self.pair(cursor, sequence, &event.observation, Some(attr));
+            return ApplyOutcome::Applied {
+                tag,
+                settled_in_place,
+            };
         }
         if cursor == 0 || cursor <= self.last_cursor {
             return ApplyOutcome::Duplicate;
@@ -743,24 +1115,60 @@ impl EngineObservationState {
         }
         self.last_cursor = cursor;
         let sequence = event.observation.sequence().get();
-        let (tag, settled_in_place) = self.pair(cursor, sequence, &event.observation);
+        let (tag, settled_in_place) = self.pair(cursor, sequence, &event.observation, None);
         ApplyOutcome::Applied {
             tag,
             settled_in_place,
         }
     }
 
-    /// Applies one reconnect replay batch in cursor order with dedup.
+    /// Applies one reconnect replay batch in durable order with dedup.
     ///
-    /// The batch is sorted by delivery cursor before application, so a replay
-    /// that arrives out of order still settles rows in durable order.
-    /// Duplicate and stale entries are counted, never applied twice.
+    /// Attributed entries apply first in delivery-sequence order, then legacy
+    /// entries in wire-cursor order; each lane keeps its own internal order
+    /// and dedup, so a replay that arrives out of order still settles rows in
+    /// durable order. Duplicate and stale entries are counted, never applied
+    /// twice.
     #[must_use]
     pub fn apply_replay(&mut self, mut batch: Vec<(u64, EngineObservationEvent)>) -> ReplaySummary {
-        batch.sort_by_key(|(cursor, _)| *cursor);
+        batch.sort_by(|left, right| {
+            replay_order_key(&left.1, left.0).cmp(&replay_order_key(&right.1, right.0))
+        });
         let mut summary = ReplaySummary::default();
         for (cursor, event) in &batch {
             match self.apply(*cursor, event) {
+                ApplyOutcome::Applied { .. } => {
+                    summary.applied = summary.applied.saturating_add(1);
+                }
+                ApplyOutcome::Duplicate => {
+                    summary.duplicates = summary.duplicates.saturating_add(1);
+                }
+                ApplyOutcome::StaleThread => {
+                    summary.stale = summary.stale.saturating_add(1);
+                }
+            }
+        }
+        summary
+    }
+
+    /// Applies one attributed reconnect replay batch in durable order.
+    ///
+    /// Each entry carries an explicit Forge attribution override; [`None`]
+    /// entries fall back to the event's own attribution. Ordering and
+    /// counting match [`Self::apply_replay`].
+    #[must_use]
+    pub fn apply_attributed_replay(
+        &mut self,
+        mut batch: Vec<(u64, EngineObservationEvent, Option<EngineObservationAttribution>)>,
+    ) -> ReplaySummary {
+        batch.sort_by(|left, right| {
+            let left_key = attributed_replay_order_key(&left.1, left.0, left.2.as_ref());
+            let right_key = attributed_replay_order_key(&right.1, right.0, right.2.as_ref());
+            left_key.cmp(&right_key)
+        });
+        let mut summary = ReplaySummary::default();
+        for (cursor, event, attribution) in &batch {
+            match self.apply_attributed(*cursor, event, attribution.as_ref()) {
                 ApplyOutcome::Applied { .. } => {
                     summary.applied = summary.applied.saturating_add(1);
                 }
@@ -800,6 +1208,7 @@ impl EngineObservationState {
             sequence: None,
             tag,
             summary: detail,
+            attribution: None,
         });
         ApplyOutcome::Applied {
             tag: "unknown",
@@ -812,80 +1221,87 @@ impl EngineObservationState {
         cursor: u64,
         sequence: u64,
         observation: &Observation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         match observation {
             Observation::AgentMessageDelta(value) => {
-                self.pair_message_delta(cursor, sequence, value);
+                self.pair_message_delta(cursor, sequence, value, attribution);
                 (observation.tag(), false)
             }
             Observation::AgentMessageCompleted(value) => {
-                self.pair_message_completed(cursor, sequence, value);
+                self.pair_message_completed(cursor, sequence, value, attribution);
                 (observation.tag(), true)
             }
             Observation::Approval(value) => {
-                let settled = self.pair_approval(cursor, sequence, value);
+                let settled = self.pair_approval(cursor, sequence, value, attribution);
                 (observation.tag(), settled)
             }
             Observation::Compaction(value) => {
-                self.push_compaction(cursor, sequence, observation.tag(), value)
+                self.push_compaction(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::File(value) => {
-                self.pair_file(cursor, sequence, value);
+                self.pair_file(cursor, sequence, value, attribution);
                 (observation.tag(), false)
             }
             Observation::NativeAction(value) => {
-                self.push_native_action(cursor, sequence, observation.tag(), value)
+                self.push_native_action(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::Plan(value) => {
-                self.push_plan(cursor, sequence, observation.tag(), value)
+                self.push_plan(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::ProcessDiagnostic(value) => {
-                self.push_process_diagnostic(cursor, sequence, observation.tag(), value)
+                self.push_process_diagnostic(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::ProtocolDiagnostic(value) => {
-                self.push_protocol_diagnostic(cursor, sequence, observation.tag(), value)
+                self.push_protocol_diagnostic(
+                    cursor,
+                    sequence,
+                    observation.tag(),
+                    value,
+                    attribution,
+                )
             }
             Observation::Question(value) => {
-                let settled = self.pair_question(cursor, sequence, value);
+                let settled = self.pair_question(cursor, sequence, value, attribution);
                 (observation.tag(), settled)
             }
             Observation::ReasoningSummaryCompleted(value) => {
-                self.pair_reasoning_completed(cursor, sequence, value);
+                self.pair_reasoning_completed(cursor, sequence, value, attribution);
                 (observation.tag(), true)
             }
             Observation::ReasoningSummaryDelta(value) => {
-                self.pair_reasoning_delta(cursor, sequence, value);
+                self.pair_reasoning_delta(cursor, sequence, value, attribution);
                 (observation.tag(), false)
             }
             Observation::Retry(value) => {
-                self.push_retry(cursor, sequence, observation.tag(), value)
+                self.push_retry(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::RunState(value) => {
-                self.push_run_state(cursor, sequence, observation.tag(), value)
+                self.push_run_state(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::RunTerminal(value) => {
-                self.push_run_terminal(cursor, sequence, observation.tag(), value)
+                self.push_run_terminal(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::Search(value) => {
-                self.pair_search(cursor, sequence, value);
+                self.pair_search(cursor, sequence, value, attribution);
                 (observation.tag(), false)
             }
             Observation::Subagent(value) => {
-                self.push_subagent(cursor, sequence, observation.tag(), value)
+                self.push_subagent(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::SubagentTranscript(value) => {
-                self.push_subagent_transcript(cursor, sequence, observation.tag(), value)
+                self.push_subagent_transcript(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::TerminalActivity(value) => {
-                self.pair_terminal(cursor, sequence, value);
+                self.pair_terminal(cursor, sequence, value, attribution);
                 (observation.tag(), false)
             }
             Observation::Tool(value) => {
-                self.pair_tool(cursor, sequence, value);
+                self.pair_tool(cursor, sequence, value, attribution);
                 (observation.tag(), false)
             }
             Observation::TurnState(value) => {
-                self.push_turn_state(cursor, sequence, observation.tag(), value)
+                self.push_turn_state(cursor, sequence, observation.tag(), value, attribution)
             }
             Observation::Usage(value) => {
                 self.pair_usage(value);
@@ -900,9 +1316,10 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::CompactionObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         let summary = format!("compaction {}", value.state().as_str());
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -912,13 +1329,14 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::NativeActionObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         let mut summary = format!("native action {}", value.action());
         if let Some(detail) = value.detail() {
             summary.push_str(": ");
             summary.push_str(detail);
         }
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -928,9 +1346,10 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::PlanObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         let summary = format!("plan with {} entries", value.entries().len());
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -940,9 +1359,10 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::ProcessDiagnosticObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         let summary = format!("[{}] {}", value.level().as_str(), value.message());
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -952,9 +1372,10 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::ProtocolDiagnosticObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         let summary = format!("[{}] {}", value.level().as_str(), value.message());
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -964,9 +1385,10 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::RetryObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         let summary = format!("{}: {}", value.attempt_state().as_str(), value.message());
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -976,10 +1398,11 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::RunStateObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         self.run_state = Some(value.state());
         let summary = format!("run {}", value.state().as_str());
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -989,6 +1412,7 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::RunTerminalObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         self.run_terminal = Some(RunTerminalView {
             state: value.state(),
@@ -999,7 +1423,7 @@ impl EngineObservationState {
             summary.push_str(": ");
             summary.push_str(title);
         }
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -1009,6 +1433,7 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::SubagentObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         let mut summary = format!(
             "subagent {} {}",
@@ -1019,7 +1444,7 @@ impl EngineObservationState {
             summary.push_str(": ");
             summary.push_str(activity);
         }
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -1029,12 +1454,13 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::SubagentTranscriptObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         let summary = format!(
             "subagent {} transcript",
             value.agent_native_thread_id().as_str()
         );
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -1044,6 +1470,7 @@ impl EngineObservationState {
         sequence: u64,
         tag: &'static str,
         value: &artisan_domain::TurnStateObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         self.turn_states
             .insert(value.turn_id().as_str().to_owned(), value.state());
@@ -1052,7 +1479,7 @@ impl EngineObservationState {
             value.turn_id().as_str(),
             value.state().as_str()
         );
-        self.push_timeline(cursor, sequence, tag, summary);
+        self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
     }
 
@@ -1061,8 +1488,9 @@ impl EngineObservationState {
         cursor: u64,
         sequence: u64,
         value: &artisan_domain::AgentMessageDeltaObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) {
-        let key = value.item_id().as_str().to_owned();
+        let key = scoped_row_key(attribution, value.item_id().as_str());
         if !self.message_order.iter().any(|known| known == &key) {
             self.message_order.push(key.clone());
         }
@@ -1073,6 +1501,7 @@ impl EngineObservationState {
                 row.text.push_str(value.delta());
                 row.cursor = cursor;
                 row.sequence = sequence;
+                row.attribution = attribution.cloned();
             })
             .or_insert_with(|| MessageRow {
                 item_id: value.item_id().as_str().to_owned(),
@@ -1082,6 +1511,7 @@ impl EngineObservationState {
                 turn_id: value.turn_id().as_str().to_owned(),
                 cursor,
                 sequence,
+                attribution: attribution.cloned(),
             });
     }
 
@@ -1090,8 +1520,9 @@ impl EngineObservationState {
         cursor: u64,
         sequence: u64,
         value: &artisan_domain::AgentMessageCompletedObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) {
-        let key = value.item_id().as_str().to_owned();
+        let key = scoped_row_key(attribution, value.item_id().as_str());
         if !self.message_order.iter().any(|known| known == &key) {
             self.message_order.push(key.clone());
         }
@@ -1103,6 +1534,7 @@ impl EngineObservationState {
                 row.completed = true;
                 row.cursor = cursor;
                 row.sequence = sequence;
+                row.attribution = attribution.cloned();
             })
             .or_insert_with(|| MessageRow {
                 item_id: value.item_id().as_str().to_owned(),
@@ -1112,6 +1544,7 @@ impl EngineObservationState {
                 turn_id: value.turn_id().as_str().to_owned(),
                 cursor,
                 sequence,
+                attribution: attribution.cloned(),
             });
     }
 
@@ -1120,8 +1553,9 @@ impl EngineObservationState {
         cursor: u64,
         sequence: u64,
         value: &artisan_domain::ReasoningSummaryDeltaObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) {
-        let key = value.item_id().as_str().to_owned();
+        let key = scoped_row_key(attribution, value.item_id().as_str());
         if !self.reasoning_order.iter().any(|known| known == &key) {
             self.reasoning_order.push(key.clone());
         }
@@ -1131,6 +1565,7 @@ impl EngineObservationState {
                 row.text.push_str(value.delta());
                 row.cursor = cursor;
                 row.sequence = sequence;
+                row.attribution = attribution.cloned();
             })
             .or_insert_with(|| ReasoningRow {
                 item_id: value.item_id().as_str().to_owned(),
@@ -1139,6 +1574,7 @@ impl EngineObservationState {
                 turn_id: value.turn_id().as_str().to_owned(),
                 cursor,
                 sequence,
+                attribution: attribution.cloned(),
             });
     }
 
@@ -1147,8 +1583,9 @@ impl EngineObservationState {
         cursor: u64,
         sequence: u64,
         value: &artisan_domain::ReasoningSummaryCompletedObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) {
-        let key = value.item_id().as_str().to_owned();
+        let key = scoped_row_key(attribution, value.item_id().as_str());
         if !self.reasoning_order.iter().any(|known| known == &key) {
             self.reasoning_order.push(key.clone());
         }
@@ -1161,6 +1598,7 @@ impl EngineObservationState {
                 row.settled = true;
                 row.cursor = cursor;
                 row.sequence = sequence;
+                row.attribution = attribution.cloned();
             })
             .or_insert_with(|| ReasoningRow {
                 item_id: value.item_id().as_str().to_owned(),
@@ -1169,11 +1607,18 @@ impl EngineObservationState {
                 turn_id: value.turn_id().as_str().to_owned(),
                 cursor,
                 sequence,
+                attribution: attribution.cloned(),
             });
     }
 
-    fn pair_tool(&mut self, cursor: u64, sequence: u64, value: &ToolObservation) {
-        let key = value.tool_id().as_str().to_owned();
+    fn pair_tool(
+        &mut self,
+        cursor: u64,
+        sequence: u64,
+        value: &ToolObservation,
+        attribution: Option<&EngineObservationAttribution>,
+    ) {
+        let key = scoped_row_key(attribution, value.tool_id().as_str());
         if !self.tool_order.iter().any(|known| known == &key) {
             self.tool_order.push(key.clone());
         }
@@ -1184,6 +1629,7 @@ impl EngineObservationState {
                 row.detail = value.detail().map(str::to_owned);
                 row.cursor = cursor;
                 row.sequence = sequence;
+                row.attribution = attribution.cloned();
             })
             .or_insert_with(|| ToolRow {
                 tool_id: value.tool_id().as_str().to_owned(),
@@ -1192,11 +1638,18 @@ impl EngineObservationState {
                 detail: value.detail().map(str::to_owned),
                 cursor,
                 sequence,
+                attribution: attribution.cloned(),
             });
     }
 
-    fn pair_terminal(&mut self, cursor: u64, sequence: u64, value: &TerminalActivityObservation) {
-        let key = value.activity_id().as_str().to_owned();
+    fn pair_terminal(
+        &mut self,
+        cursor: u64,
+        sequence: u64,
+        value: &TerminalActivityObservation,
+        attribution: Option<&EngineObservationAttribution>,
+    ) {
+        let key = scoped_row_key(attribution, value.activity_id().as_str());
         if !self.terminal_order.iter().any(|known| known == &key) {
             self.terminal_order.push(key.clone());
         }
@@ -1218,6 +1671,7 @@ impl EngineObservationState {
                 row.state = value.state();
                 row.cursor = cursor;
                 row.sequence = sequence;
+                row.attribution = attribution.cloned();
             })
             .or_insert_with(|| TerminalRow {
                 activity_id: value.activity_id().as_str().to_owned(),
@@ -1228,11 +1682,18 @@ impl EngineObservationState {
                 state: value.state(),
                 cursor,
                 sequence,
+                attribution: attribution.cloned(),
             });
     }
 
-    fn pair_approval(&mut self, cursor: u64, sequence: u64, value: &ApprovalObservation) -> bool {
-        let key = value.approval_id().as_str().to_owned();
+    fn pair_approval(
+        &mut self,
+        cursor: u64,
+        sequence: u64,
+        value: &ApprovalObservation,
+        attribution: Option<&EngineObservationAttribution>,
+    ) -> bool {
+        let key = scoped_row_key(attribution, value.approval_id().as_str());
         let first_seen = !self.approval_order.iter().any(|known| known == &key);
         if first_seen {
             self.approval_order.push(key.clone());
@@ -1250,6 +1711,7 @@ impl EngineObservationState {
                 row.approved = approved;
                 row.cursor = cursor;
                 row.sequence = sequence;
+                row.attribution = attribution.cloned();
             })
             .or_insert_with(|| ApprovalRow {
                 approval_id: value.approval_id().as_str().to_owned(),
@@ -1258,12 +1720,19 @@ impl EngineObservationState {
                 approved,
                 cursor,
                 sequence,
+                attribution: attribution.cloned(),
             });
         settled_in_place
     }
 
-    fn pair_question(&mut self, cursor: u64, sequence: u64, value: &QuestionObservation) -> bool {
-        let key = value.question_id().as_str().to_owned();
+    fn pair_question(
+        &mut self,
+        cursor: u64,
+        sequence: u64,
+        value: &QuestionObservation,
+        attribution: Option<&EngineObservationAttribution>,
+    ) -> bool {
+        let key = scoped_row_key(attribution, value.question_id().as_str());
         let first_seen = !self.question_order.iter().any(|known| known == &key);
         if first_seen {
             self.question_order.push(key.clone());
@@ -1291,6 +1760,7 @@ impl EngineObservationState {
                 row.answers = answers.clone();
                 row.cursor = cursor;
                 row.sequence = sequence;
+                row.attribution = attribution.cloned();
             })
             .or_insert_with(|| QuestionRow {
                 question_id: value.question_id().as_str().to_owned(),
@@ -1309,6 +1779,7 @@ impl EngineObservationState {
                 answers,
                 cursor,
                 sequence,
+                attribution: attribution.cloned(),
             });
         settled_in_place
     }
@@ -1353,7 +1824,13 @@ impl EngineObservationState {
         }
     }
 
-    fn pair_file(&mut self, cursor: u64, sequence: u64, value: &artisan_domain::FileObservation) {
+    fn pair_file(
+        &mut self,
+        cursor: u64,
+        sequence: u64,
+        value: &artisan_domain::FileObservation,
+        attribution: Option<&EngineObservationAttribution>,
+    ) {
         let mut summary = format!("{} {}", value.action().as_str(), value.path());
         match (value.lines_added(), value.lines_deleted()) {
             (Some(added), Some(deleted)) => {
@@ -1367,7 +1844,7 @@ impl EngineObservationState {
             }
             (None, None) => {}
         }
-        self.push_timeline(cursor, sequence, "file", summary);
+        self.push_timeline(cursor, sequence, "file", summary, attribution);
     }
 
     fn pair_search(
@@ -1375,6 +1852,7 @@ impl EngineObservationState {
         cursor: u64,
         sequence: u64,
         value: &artisan_domain::SearchObservation,
+        attribution: Option<&EngineObservationAttribution>,
     ) {
         let mut summary = format!("search {} \"{}\"", value.state().as_str(), value.query());
         if let Some(scope) = value.scope() {
@@ -1383,15 +1861,23 @@ impl EngineObservationState {
         if let Some(count) = value.result_count() {
             summary.push_str(&format!(" ({count} results)"));
         }
-        self.push_timeline(cursor, sequence, "search", summary);
+        self.push_timeline(cursor, sequence, "search", summary, attribution);
     }
 
-    fn push_timeline(&mut self, cursor: u64, sequence: u64, tag: &'static str, summary: String) {
+    fn push_timeline(
+        &mut self,
+        cursor: u64,
+        sequence: u64,
+        tag: &'static str,
+        summary: String,
+        attribution: Option<&EngineObservationAttribution>,
+    ) {
         self.timeline.push(TimelineRow {
             cursor,
             sequence: Some(sequence),
             tag,
             summary,
+            attribution: attribution.cloned(),
         });
     }
 }

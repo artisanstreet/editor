@@ -13,7 +13,7 @@
 
 #![forbid(unsafe_code)]
 
-use artisan_domain::{IdentifierError, ThreadId, TurnId, account_usage::iso_millis};
+use artisan_domain::{ConversationSnapshot, IdentifierError, ThreadId, TurnId, account_usage::iso_millis};
 use artisan_ui::theme::ThemeMode;
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, Render, Subscription,
@@ -284,6 +284,16 @@ impl ConversationHost {
         self.controller
             .scene()
             .map_err(ConversationHostError::SceneProjection)
+    }
+
+    /// Returns a clone of the controller's last-good canonical snapshot.
+    ///
+    /// Activity projection reads this snapshot to resolve attributed turns
+    /// once the mount and its snapshot exist; events retained before that
+    /// point replay here without fabricating turns.
+    #[must_use]
+    pub fn canonical_snapshot(&self) -> Option<ConversationSnapshot> {
+        self.controller.snapshot().cloned()
     }
 
     /// Returns the one child surface entity.

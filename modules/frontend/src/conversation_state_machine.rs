@@ -82,6 +82,13 @@ pub struct SceneFact {
     pub ordinal: u64,
     /// Closed non-durable fact kind.
     pub kind: SceneFactKind,
+    /// Narrow typed event timing in signed Unix millis, when known.
+    ///
+    /// This is the persisted engine commit time for activity projected from
+    /// retained observations, never a sampled clock or a global watermark.
+    /// It orders activity without fabricating time; elapsed evidence still
+    /// derives from the canonical turn's own creation/update times.
+    pub observed_at_ms: Option<i64>,
 }
 
 impl fmt::Debug for SceneFact {
@@ -92,6 +99,7 @@ impl fmt::Debug for SceneFact {
             .field("turn_id", &self.turn_id)
             .field("ordinal", &self.ordinal)
             .field("kind", &self.kind)
+            .field("observed_at_ms", &self.observed_at_ms)
             .finish()
     }
 }
@@ -115,9 +123,28 @@ impl SceneFact {
             turn_id,
             ordinal,
             kind,
+            observed_at_ms: None,
         };
         fact.as_scene_item(None)?;
         Ok(fact)
+    }
+
+    /// Attaches narrow typed event timing to this fact.
+    ///
+    /// The timestamp is a persisted commit time, never a sampled clock. It
+    /// does not change the fact identity, owning turn, ordinal, or kind.
+    #[must_use]
+    pub fn with_observed_at_ms(self, observed_at_ms: i64) -> Self {
+        Self {
+            observed_at_ms: Some(observed_at_ms),
+            ..self
+        }
+    }
+
+    /// Returns the narrow typed event timing, when present.
+    #[must_use]
+    pub const fn observed_at_ms(&self) -> Option<i64> {
+        self.observed_at_ms
     }
 
     fn as_scene_item(
@@ -273,6 +300,14 @@ impl SceneFactKind {
 pub enum SceneFactCommand {
     /// Add one new fact under its stable identity.
     Register(SceneFact),
+    /// Atomically insert or update one fact under its stable identity.
+    ///
+    /// A repeated projection of the same retained row upserts the same id:
+    /// an identical fact is a no-op, a changed fact for the same turn
+    /// updates in place without a transient removal, and reassignment to a
+    /// different turn is refused. The registry keeps the first accepted
+    /// ordinal so repeated projections never shift scene order.
+    Upsert(SceneFact),
     /// Remove one fact under its stable identity.
     Remove { id: SceneId },
 }
@@ -584,6 +619,9 @@ pub enum ConversationStateError {
     /// A fact removal targeted no registered fact.
     #[error("scene fact {id} is not registered")]
     UnknownFact { id: SceneId },
+    /// A fact upsert targeted a different turn than the registered fact.
+    #[error("scene fact {id} belongs to turn {turn_id} and cannot move to another turn")]
+    FactTurnMismatch { id: SceneId, turn_id: TurnId },
     /// A fact would collide with durable identity or global ordinal.
     #[error("scene fact {id} conflicts with durable scene state")]
     SceneConflict { id: SceneId },
@@ -1137,6 +1175,22 @@ impl ConversationStateController {
         }))
     }
 
+    /// Atomically inserts or updates one bounded non-durable fact.
+    ///
+    /// An identical fact is a no-op without effects; a changed fact for the
+    /// same turn updates in place while keeping its first accepted ordinal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError`] for a closed owner, cross-turn
+    /// reassignment, conflicting fact identity, invalid scene data, or
+    /// exhausted capacity.
+    pub fn upsert_fact(&mut self, fact: SceneFact) -> Result<(), ConversationStateError> {
+        self.dispatch(ConversationStateEvent::Fact(SceneFactCommand::Upsert(
+            fact,
+        )))
+    }
+
     /// Closes delivery and the sole viewport owner. The close operation is
     /// idempotent at the child boundary but a second aggregate close is a
     /// typed closed-owner refusal.
@@ -1172,6 +1226,15 @@ impl ConversationStateController {
     #[must_use]
     pub fn delivery_view(&self) -> ConversationDeliveryView {
         self.delivery.view()
+    }
+
+    /// Returns the last-good canonical snapshot, when one has arrived.
+    ///
+    /// Activity projection reads this snapshot to resolve attributed turns
+    /// without duplicating delivery internals.
+    #[must_use]
+    pub fn snapshot(&self) -> Option<&ConversationSnapshot> {
+        self.delivery.snapshot()
     }
 
     /// Returns the sole viewport state.
@@ -1519,6 +1582,11 @@ impl ConversationStateController {
     fn dispatch_fact(&mut self, command: SceneFactCommand) -> Result<(), ConversationStateError> {
         match command {
             SceneFactCommand::Register(fact) => self.register_fact_inner(fact)?,
+            SceneFactCommand::Upsert(fact) => {
+                if !self.upsert_fact_inner(fact)? {
+                    return Ok(());
+                }
+            }
             SceneFactCommand::Remove { id } => {
                 if !self.facts.contains_key(&id) {
                     return Err(ConversationStateError::UnknownFact { id });
@@ -1604,6 +1672,69 @@ impl ConversationStateController {
         self.facts.insert(fact.id.clone(), fact);
         self.push_effect(ConversationStateEffect::SceneInvalidated);
         Ok(())
+    }
+
+    /// Atomically inserts or updates one fact, reporting whether state changed.
+    ///
+    /// Returns `Ok(false)` without touching effects when the registered fact
+    /// already carries the same turn, kind, and timing: repeated projections
+    /// of unchanged rows are effect-quiet. Otherwise validates like
+    /// [`Self::register_fact_inner`] (closed owner, scene bounds, known
+    /// turn, durable collisions, item ceiling, effect room), keeps the first
+    /// accepted ordinal so repeated projections never shift scene order, and
+    /// updates kind and timing in place. Reassignment to a different turn is
+    /// refused with [`ConversationStateError::FactTurnMismatch`].
+    fn upsert_fact_inner(&mut self, fact: SceneFact) -> Result<bool, ConversationStateError> {
+        if let Some(existing) = self.facts.get(&fact.id) {
+            if existing.turn_id != fact.turn_id {
+                return Err(ConversationStateError::FactTurnMismatch {
+                    id: fact.id,
+                    turn_id: existing.turn_id.clone(),
+                });
+            }
+            if existing.kind == fact.kind && existing.observed_at_ms == fact.observed_at_ms {
+                return Ok(false);
+            }
+            let kept = SceneFact {
+                id: fact.id.clone(),
+                turn_id: fact.turn_id.clone(),
+                ordinal: existing.ordinal,
+                kind: fact.kind.clone(),
+                observed_at_ms: fact.observed_at_ms,
+            };
+            kept.as_scene_item(None)
+                .map_err(ConversationStateError::Scene)?;
+            let Some(snapshot) = self.delivery.snapshot() else {
+                return Err(ConversationStateError::UnknownTurn {
+                    turn_id: kept.turn_id.clone(),
+                });
+            };
+            if !snapshot
+                .turns()
+                .iter()
+                .any(|turn| turn.turn_id == kept.turn_id)
+            {
+                return Err(ConversationStateError::UnknownTurn {
+                    turn_id: kept.turn_id.clone(),
+                });
+            }
+            if snapshot_uses_ordinal(snapshot, kept.ordinal) {
+                return Err(ConversationStateError::SceneConflict { id: kept.id.clone() });
+            }
+            if snapshot
+                .items()
+                .iter()
+                .any(|durable| durable.item_id().as_str() == kept.id.as_str())
+            {
+                return Err(ConversationStateError::SceneConflict { id: kept.id.clone() });
+            }
+            self.ensure_effect_capacity(1)?;
+            self.facts.insert(kept.id.clone(), kept);
+            self.push_effect(ConversationStateEffect::SceneInvalidated);
+            return Ok(true);
+        }
+        self.register_fact_inner(fact)?;
+        Ok(true)
     }
 
     fn validate_steering_anchor(&self, item_id: &ItemId) -> Result<(), ConversationStateError> {

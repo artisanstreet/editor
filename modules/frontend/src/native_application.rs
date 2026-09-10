@@ -4754,12 +4754,13 @@ impl NativeApplication {
     /// Pairs one uni-stream engine observation into presentation state.
     ///
     /// Only the selected thread's rows are retained; events for any other
-    /// thread are ignored. Cursor ordering and reconnect dedup are owned by
-    /// [`EngineObservationState`], which is independent of host mounting, so
-    /// unlike patch batches this path does not wait for a thread-switch
-    /// flight to settle. This path never issues commands: approvals and
-    /// questions render with their request ids for the later answer packet,
-    /// but no answer is dispatched here.
+    /// thread are ignored. Dedup is owned by [`EngineObservationState`],
+    /// which is independent of host mounting, so unlike patch batches this
+    /// path does not wait for a thread-switch flight to settle. The event
+    /// carries its own Forge attribution for real DB deliveries; legacy
+    /// deliveries pair without activity identity. This path never issues
+    /// commands: approvals and questions render with their request ids for
+    /// the later answer packet, but no answer is dispatched here.
     fn handle_engine_observation(&mut self, observation: &ServerEvent, cx: &mut Context<Self>) {
         let artisan_domain::Event::EngineObservation(paired) = &observation.event else {
             return;
@@ -4779,6 +4780,69 @@ impl NativeApplication {
             if matches!(outcome, ApplyOutcome::Applied { .. }) {
                 cx.notify();
             }
+        }
+        self.replay_observation_activity(cx);
+    }
+
+    /// Replays retained attributed observations into the mounted host scene.
+    ///
+    /// Projection runs only with a mounted host that belongs to the selected
+    /// thread and already holds its canonical snapshot. Events arriving
+    /// before mount or before the canonical turn exists stay retained in
+    /// [`EngineObservationState`] and project on a later replay (after
+    /// snapshot dispatch or thread mount). Each projected fact dispatches
+    /// atomically through `SceneFactCommand::Upsert`: identical facts are a
+    /// no-op, changed facts update in place, and no remove-then-register
+    /// sequence ever runs. Unknown turns and scene conflicts skip without
+    /// failure so retained rows project once the canonical turn exists;
+    /// backpressure stops the replay so retained rows project later.
+    fn replay_observation_activity(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = self.selected_thread.clone() else {
+            return;
+        };
+        let Some(state) = self.engine_observations.as_ref() else {
+            return;
+        };
+        if state.thread_id() != &selected {
+            return;
+        }
+        let Some(host) = self.conversation_host.clone() else {
+            return;
+        };
+        if host.read(cx).controller_view().delivery.thread_id != selected {
+            return;
+        }
+        let Some(snapshot) = host.read(cx).canonical_snapshot() else {
+            return;
+        };
+        let projection =
+            crate::conversation_observation_projection::project_activities(state, &snapshot);
+        if projection.facts.is_empty() {
+            return;
+        }
+        let mut invalidated = false;
+        for fact in projection.facts {
+            let upsert = crate::conversation_state_machine::SceneFactCommand::Upsert(fact);
+            match host.update(cx, |host, host_cx| {
+                host.dispatch(ConversationStateEvent::Fact(upsert), host_cx)
+            }) {
+                Ok(()) => invalidated = true,
+                Err(
+                    crate::conversation_host::ConversationHostError::Controller(
+                        crate::conversation_state_machine::ConversationStateError::UnknownTurn { .. }
+                        | crate::conversation_state_machine::ConversationStateError::SceneConflict { .. }
+                        | crate::conversation_state_machine::ConversationStateError::FactTurnMismatch { .. }
+                        | crate::conversation_state_machine::ConversationStateError::Scene { .. },
+                    ),
+                ) => {
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+        if invalidated {
+            self.pump_host_boundary(&host, cx);
+            cx.notify();
         }
     }
 
@@ -5831,6 +5895,9 @@ impl NativeApplication {
             self.acknowledge_host_cursor(host, cx);
             self.pump_host_boundary(host, cx);
             self.sync_composer_availability(cx);
+            // The canonical turn may have arrived after retained observations;
+            // replay them now that the snapshot exists.
+            self.replay_observation_activity(cx);
             cx.notify();
         }
     }
