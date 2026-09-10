@@ -187,6 +187,17 @@ fn steer_codex_config() -> EngineRunConfig {
     )
 }
 
+/// Real-clock base for seed chronology: observation commits fence the
+/// dispatch lease against the real origin clock, so fixed millisecond
+/// seeds would expire before the test runs.
+fn seed_base_ms() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_millis();
+    i64::try_from(now).expect("millis fit") - 60_000
+}
+
 /// Real durable launch/bind receipts backing one live Codex run.
 struct SteerLaunch {
     run_id: RunId,
@@ -197,6 +208,8 @@ struct SteerLaunch {
     run_start_key: RunStartKey,
     credentials: RunLaunchCredentials,
     settings: ThreadEngineSettings,
+    launch_op_ms: i64,
+    bound_op_ms: i64,
 }
 
 async fn seed_steer_run(
@@ -207,6 +220,13 @@ async fn seed_steer_run(
     turn_id: &str,
 ) -> SteerLaunch {
     let project_id = ProjectId::parse(format!("project-{label}")).expect("project id");
+    // All seed times anchor to the real clock: observation commits fence
+    // the dispatch lease against the real origin clock, and the launch and
+    // bind fences order creation, launch, and binding.
+    let base = seed_base_ms();
+    let at = |offset: i64| UnixMillis::from_millis(base + offset);
+    let launch_op_ms = base + 490;
+    let bound_op_ms = base + 590;
     repository
         .attach_project(AttachProjectInput {
             request_id: RequestId::parse(format!("request-project-{label}")).expect("request id"),
@@ -214,7 +234,7 @@ async fn seed_steer_run(
             project_id: project_id.clone(),
             root_path: RootPath::parse(format!("C:/repos/project-{label}")).expect("root path"),
             display_name: DisplayName::parse("Project").expect("display name"),
-            attached_at: UnixMillis::from_millis(10),
+            attached_at: at(0),
         })
         .await
         .expect("project should attach");
@@ -224,8 +244,8 @@ async fn seed_steer_run(
             thread_id: thread_id.clone(),
             project_id,
             title: ThreadTitle::parse("Steer thread").expect("title"),
-            created_at: UnixMillis::from_millis(10),
-            updated_at: UnixMillis::from_millis(10),
+            created_at: at(0),
+            updated_at: at(0),
         })
         .await
         .expect("thread should create");
@@ -235,7 +255,7 @@ async fn seed_steer_run(
             thread_id: thread_id.clone(),
             precondition: EngineConfigUpdatePrecondition::Unconfigured,
             config: steer_codex_config(),
-            accepted_at: UnixMillis::from_millis(10),
+            accepted_at: at(0),
         })
         .await
         .expect("engine configuration should persist");
@@ -245,15 +265,16 @@ async fn seed_steer_run(
             message_id: MessageId::parse(format!("message-{label}")).expect("message id"),
             thread_id: thread_id.clone(),
             body: MessageBody::parse("hello steer").expect("message body"),
-            accepted_at: UnixMillis::from_millis(50),
+            accepted_at: at(40),
         })
         .await
         .expect("first message should queue");
     let claimed = repository
         .claim_next_message_dispatch(ClaimMessageDispatch {
             owner: DispatchLeaseOwner::new([0x11; 32]),
-            claimed_at: UnixMillis::from_millis(400),
-            lease_expires_at: UnixMillis::from_millis(900),
+            claimed_at: at(390),
+            // The lease must outlive every real-clock commit below.
+            lease_expires_at: UnixMillis::from_millis(base + 3_600_000),
         })
         .await
         .expect("claim should persist")
@@ -275,7 +296,7 @@ async fn seed_steer_run(
             item_id: &ItemId::parse(format!("item-{label}")).expect("item id"),
             first_patch_id: &PatchId::parse(format!("patch-{label}-first")).expect("patch id"),
             second_patch_id: &PatchId::parse(format!("patch-{label}-second")).expect("patch id"),
-            operated_at: UnixMillis::from_millis(500),
+            operated_at: UnixMillis::from_millis(launch_op_ms),
             run_start_key: &run_start_key,
             credentials: &credentials,
             engine_settings: &settings,
@@ -293,8 +314,8 @@ async fn seed_steer_run(
             receipt: &launched,
             run_start_key: &run_start_key,
             credentials: &credentials,
-            expected_launch_at: UnixMillis::from_millis(500),
-            bound_at: UnixMillis::from_millis(600),
+            expected_launch_at: UnixMillis::from_millis(launch_op_ms),
+            bound_at: UnixMillis::from_millis(bound_op_ms),
             binding_version: 1,
             binding_bytes: &binding,
         })
@@ -314,6 +335,8 @@ async fn seed_steer_run(
         run_start_key,
         credentials,
         settings,
+        launch_op_ms,
+        bound_op_ms,
     }
 }
 
@@ -446,8 +469,8 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
                 bound: &seed.bound,
                 run_start_key: &seed.run_start_key,
                 credentials: &seed.credentials,
-                expected_launch_at: UnixMillis::from_millis(500),
-                expected_updated_at: UnixMillis::from_millis(600),
+                expected_launch_at: UnixMillis::from_millis(seed.launch_op_ms),
+                expected_updated_at: UnixMillis::from_millis(seed.bound_op_ms),
             },
             EngineId::Codex,
         );
@@ -460,6 +483,10 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
             .expect("initial observation exists");
         assert!(matches!(initial, EngineObservation::TextDelta(_)));
         handle_observation(&context, &mut state, &mut turn, initial).await;
+        assert!(
+            !state.forced_interrupted,
+            "initial observation must commit cleanly against the live lease"
+        );
         let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
         handle_steer(
             &context,
@@ -681,8 +708,8 @@ async fn codex_steer_reject_fails_typed_with_payload_preserved() {
                 bound: &seed.bound,
                 run_start_key: &seed.run_start_key,
                 credentials: &seed.credentials,
-                expected_launch_at: UnixMillis::from_millis(500),
-                expected_updated_at: UnixMillis::from_millis(600),
+                expected_launch_at: UnixMillis::from_millis(seed.launch_op_ms),
+                expected_updated_at: UnixMillis::from_millis(seed.bound_op_ms),
             },
             EngineId::Codex,
         );
@@ -695,6 +722,10 @@ async fn codex_steer_reject_fails_typed_with_payload_preserved() {
             .expect("initial observation exists");
         assert!(matches!(initial, EngineObservation::TextDelta(_)));
         handle_observation(&context, &mut state, &mut turn, initial).await;
+        assert!(
+            !state.forced_interrupted,
+            "initial observation must commit cleanly against the live lease"
+        );
         let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
         handle_steer(
             &context,
@@ -857,8 +888,8 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
                 bound: &seed.bound,
                 run_start_key: &seed.run_start_key,
                 credentials: &seed.credentials,
-                expected_launch_at: UnixMillis::from_millis(500),
-                expected_updated_at: UnixMillis::from_millis(600),
+                expected_launch_at: UnixMillis::from_millis(seed.launch_op_ms),
+                expected_updated_at: UnixMillis::from_millis(seed.bound_op_ms),
             },
             EngineId::Codex,
         );
@@ -871,6 +902,10 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
             .expect("initial observation exists");
         assert!(matches!(initial, EngineObservation::TextDelta(_)));
         handle_observation(&context, &mut state, &mut turn, initial).await;
+        assert!(
+            !state.forced_interrupted,
+            "initial observation must commit cleanly against the live lease"
+        );
         let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
         handle_steer(
             &context,
@@ -1066,8 +1101,8 @@ async fn codex_steer_known_acked_retry_replays_projection_without_provider() {
                 bound: &seed.bound,
                 run_start_key: &seed.run_start_key,
                 credentials: &seed.credentials,
-                expected_launch_at: UnixMillis::from_millis(500),
-                expected_updated_at: UnixMillis::from_millis(600),
+                expected_launch_at: UnixMillis::from_millis(seed.launch_op_ms),
+                expected_updated_at: UnixMillis::from_millis(seed.bound_op_ms),
             },
             EngineId::Codex,
         );
@@ -1080,6 +1115,10 @@ async fn codex_steer_known_acked_retry_replays_projection_without_provider() {
             .expect("initial observation exists");
         assert!(matches!(initial, EngineObservation::TextDelta(_)));
         handle_observation(&context, &mut state, &mut turn, initial).await;
+        assert!(
+            !state.forced_interrupted,
+            "initial observation must commit cleanly against the live lease"
+        );
         let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
         handle_steer(
             &context,
