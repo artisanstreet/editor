@@ -1488,7 +1488,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|_, cx| NativeComposerControls::new(failed_snapshot(true), cx));
         let (events, _subscription) = observe_events(cx, &view);
-        let selector = format!("{NATIVE_COMPOSER_FAILED_NEW_THREAD_SELECTOR}-command-9");
+        let selector = "artisan-native-composer-failed-new-thread-command-9";
         let bounds = cx
             .debug_bounds(selector)
             .expect("the failed new-chat control paints");
@@ -1501,7 +1501,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|_, cx| NativeComposerControls::new(failed_snapshot(false), cx));
         let (events, _subscription) = observe_events(cx, &view);
-        let selector = format!("{NATIVE_COMPOSER_FAILED_NEW_THREAD_SELECTOR}-command-9");
+        let selector = "artisan-native-composer-failed-new-thread-command-9";
         let bounds = cx
             .debug_bounds(selector)
             .expect("the failed new-chat control paints");
