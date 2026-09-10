@@ -3119,14 +3119,67 @@ fn codex_session_in_binding(binding: Option<&entities::OpaqueBytes>) -> String {
         .to_owned()
 }
 
+/// Bounded point-in-time snapshot for live-dispatch timeout/failure
+/// diagnostics: dispatch state, run lifecycles, item count, and owner
+/// custody witnesses. The live gate showed a fully persisted assistant body
+/// with the run still `Running` and empty usage, which points at the
+/// `handle_usage` error path cancelling the turn; this snapshot exposes
+/// that state on the next rerun instead of a bare timeout.
+async fn live_dispatch_snapshot(database: &DatabaseConnection, message_id: &str) -> String {
+    let dispatch = entities::message_dispatch::Entity::find_by_id(message_id)
+        .one(database)
+        .await
+        .expect("dispatch snapshot query");
+    let dispatch_text = match dispatch {
+        Some(dispatch) => format!(
+            "state={:?} attempt={} last_error={:?}",
+            dispatch.state, dispatch.attempt_count, dispatch.last_error
+        ),
+        None => "missing".to_owned(),
+    };
+    let runs = entities::assistant_run::Entity::find()
+        .all(database)
+        .await
+        .expect("run snapshot query");
+    let mut run_text = Vec::new();
+    for run in &runs {
+        run_text.push(format!(
+            "run={} lifecycle={:?} error={:?}/{:?} terminal={:?}",
+            run.run_id, run.lifecycle, run.error_code, run.error_message, run.terminal_at_ms
+        ));
+    }
+    let items = entities::conversation_item::Entity::find()
+        .all(database)
+        .await
+        .expect("item snapshot query");
+    let counts = crate::engine_owner::witness_counts();
+    format!(
+        "dispatch[{message_id}] {dispatch_text}; runs[{}] {{{}}}; items={}; owner{{spawned={} reaped={} kills={} drivers={} watchdogs={}}}",
+        runs.len(),
+        run_text.join(", "),
+        items.len(),
+        counts.spawned,
+        counts.reaps_observed,
+        counts.kills_requested,
+        counts.control_driver_joined,
+        counts.watchdog_failures_seen
+    )
+}
+
 /// Configured Codex continuation rejection.
 ///
 /// A real persisted prior bound run is left `Interrupted` (ambiguous
 /// external outcome), then a subsequent accepted message is dispatched
 /// through the production [`NativeRunDispatcher::start`] path (never the
 /// fixture bypass, which skips `resolve_continuation`). The dispatcher must
-/// fail the new dispatch with `provider continuation unavailable` and must
-/// not persist a new assistant run or spawn a provider child.
+/// fail the new dispatch with `provider continuation unavailable` (or its
+/// precise extension) and must not persist a new assistant run or spawn a
+/// provider child.
+///
+/// Uses the realistic 180 s-claim dispatcher config: the real installed-CLI
+/// `--version` discovery exceeds a 10 ms lease, which left the retry leased
+/// instead of reaching continuation. The exact temp database path is used
+/// (no `C:/forge` stub) so launch verification sees the real file.
 ///
 /// Requires the installed Codex CLI for the configured launch probe
 /// (`resolve_codex_launch` has no narrow executable injection; it reads the
@@ -3139,7 +3192,7 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
     // Real persisted history uses the production default-session shape from
     // the field report (bound, then interrupted with unknown outcome).
     let prior_session = "session01a08ae6-4ad1-7173-97ad-8f68f4217f48";
-    let (database, repository, _temp) = temp_repository("dispatch-codex-continuation").await;
+    let (database, repository, temp) = temp_repository("dispatch-codex-continuation").await;
     seed_codex_thread(
         &database,
         &repository,
@@ -3184,18 +3237,19 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
 
     crate::engine_owner::reset_witnesses();
     let notifier = ConversationCommitNotifier::new();
-    let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
+    // Realistic lease: real CLI discovery outlasts a 10 ms claim lease.
+    let config = config_for_live_send_proof(notifier).expect("config");
     let process_cancel = Arc::new(CancelHandle::new());
     let mut dispatcher = NativeRunDispatcher::start(
         repository.clone(),
-        StdPathBuf::from("C:/forge/database.sqlite3"),
+        temp.path().to_owned(),
         config,
         Arc::clone(&process_cancel),
         ActivityGateImpl::new(),
         &tokio::runtime::Handle::current(),
     );
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut settled = false;
     while tokio::time::Instant::now() < deadline {
         let after = fetch_all(&database).await;
@@ -3396,16 +3450,18 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
             if dispatch.state == DispatchState::Completed {
                 return;
             }
-            assert_ne!(
-                dispatch.state,
-                DispatchState::Failed,
-                "live dispatch {message_id} must not fail: {:?}",
-                dispatch.last_error
-            );
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "live dispatch {message_id} must complete inside its budget"
-            );
+            if dispatch.state == DispatchState::Failed {
+                panic!(
+                    "live dispatch {message_id} failed: {}",
+                    live_dispatch_snapshot(database, message_id).await
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "live dispatch {message_id} timed out: {}",
+                    live_dispatch_snapshot(database, message_id).await
+                );
+            }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }

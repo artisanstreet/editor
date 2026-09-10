@@ -13,10 +13,10 @@ use artisan_domain::{
     ApprovalMode, AuthoredText, ByteLimit, CodexSelection, CountLimit, EngineAgentId,
     EngineConfigRevision, EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy,
     EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
-    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, MessageBody,
-    MessageId, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId, QueueMessagePayload,
-    RequestId, RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId, ThreadTitle,
-    UnixMillis, WebSearchAccess,
+    EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
+    MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId,
+    QueueMessagePayload, RequestId, RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput,
+    ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -579,12 +579,176 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
         observed_at: UnixMillis::from_millis(10),
     })
     .expect("codex usage report should validate");
+    // The Codex snapshot now establishes a truthful Codex authority
+    // (model-usage on the `codex` route with no variant), so this
+    // OpenCode2-shaped report is rejected as a scope mismatch rather than
+    // an invalid snapshot. Coercion to the wrong engine stays denied.
     assert!(matches!(
         repository
             .record_run_usage(record_command(&codex_report))
             .await,
-        Err(RunUsageRepositoryError::InvalidRunSnapshot { .. })
+        Err(RunUsageRepositoryError::ModelOriginMismatch { .. })
     ));
     drop(database);
     drop(run_id);
+}
+
+#[tokio::test]
+async fn codex_snapshot_authorizes_exact_usage_and_rejects_scope_mismatch() {
+    let (database, repository, _run_id, thread_id) = seeded(None).await;
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("request-config-codex-2").expect("request id"),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Exact(
+                EngineConfigRevision::new(1).expect("revision is valid"),
+            ),
+            config: codex_config(),
+            accepted_at: UnixMillis::from_millis(4),
+        })
+        .await
+        .expect("codex configuration should persist");
+    repository
+        .queue_message(QueueMessageInput {
+            request_id: RequestId::parse("request-message-codex-2").expect("request id"),
+            message_id: MessageId::parse("message-codex-2").expect("message id"),
+            thread_id: thread_id.clone(),
+            payload: QueueMessagePayload::new(
+                Some(AuthoredText::parse("codex").expect("text")),
+                Vec::new(),
+            )
+            .expect("payload"),
+            accepted_at: UnixMillis::from_millis(5),
+        })
+        .await
+        .expect("codex message should queue");
+    let thread = entities::thread::Entity::find_by_id(THREAD_ID)
+        .one(&database)
+        .await
+        .expect("thread should read")
+        .expect("thread should exist");
+    let config_blob = thread
+        .engine_run_config
+        .expect("configured thread has a snapshot")
+        .into_vec();
+    entities::conversation_ordinal::ActiveModel {
+        thread_id: Set(THREAD_ID.to_owned()),
+        ordinal: Set(1),
+        kind: Set(OrdinalKind::Turn),
+        entity_id: Set("turn-codex-2".to_owned()),
+    }
+    .insert(&database)
+    .await
+    .expect("codex turn ordinal should insert");
+    entities::conversation_turn::ActiveModel {
+        turn_id: Set("turn-codex-2".to_owned()),
+        thread_id: Set(THREAD_ID.to_owned()),
+        ordinal: Set(1),
+        kind: Set(OrdinalKind::Turn),
+        revision: Set(0),
+        lifecycle: Set(EntityLifecycle::Pending),
+        created_at_ms: Set(2),
+        updated_at_ms: Set(2),
+    }
+    .insert(&database)
+    .await
+    .expect("codex turn should insert");
+    entities::assistant_run::ActiveModel {
+        run_id: Set("run-codex-2".to_owned()),
+        thread_id: Set(THREAD_ID.to_owned()),
+        run_start_key: Set(entities::OpaqueBytes::new(vec![2; 32])),
+        origin_message_id: Set("message-codex-2".to_owned()),
+        origin_turn_id: Set("turn-codex-2".to_owned()),
+        lifecycle: Set(AssistantRunLifecycle::Completed),
+        generation: Set(1),
+        owner: Set(None),
+        lease: Set(None),
+        claim_token: Set(None),
+        provider_binding_version: Set(None),
+        provider_binding: Set(None),
+        provider_bound_at_ms: Set(None),
+        error_code: Set(None),
+        error_message: Set(None),
+        created_at_ms: Set(4),
+        updated_at_ms: Set(4),
+        terminal_at_ms: Set(Some(4)),
+        engine_run_config_version: Set(Some(2)),
+        engine_run_config_revision: Set(Some(thread.engine_run_config_revision)),
+        engine_run_config: Set(Some(entities::OpaqueBytes::new(config_blob))),
+    }
+    .insert(&database)
+    .await
+    .expect("codex run should insert");
+
+    fn codex_report_with(
+        model: &str,
+        route: &str,
+        variant: Option<EngineVariantId>,
+    ) -> RunUsageReport {
+        RunUsageReport::new(RunUsageReportInput {
+            run_id: RunId::parse("run-codex-2").expect("run id"),
+            thread_id: ThreadId::parse(THREAD_ID).expect("thread id"),
+            provider_session_id: "provider-session-codex-2".to_owned(),
+            source_sequence: 4,
+            model_id: EngineModelId::parse(model).expect("model id"),
+            provider_route_id: EngineRouteId::parse(route).expect("route id"),
+            variant_id: variant,
+            basis: RunUsageBasis::Delta,
+            provider_turn_id: Some("assistant-codex-2".to_owned()),
+            input_tokens: Some(10),
+            cached_input_tokens: Some(2),
+            output_tokens: Some(3),
+            context_tokens: None,
+            context_window_tokens: None,
+            observed_at: UnixMillis::from_millis(10),
+        })
+        .expect("codex usage report should validate")
+    }
+
+    // Legitimate Codex usage: exact immutable model on the exact `codex`
+    // route with no variant. Usage persists and reads back.
+    let legitimate = codex_report_with("model-usage", "codex", None);
+    assert!(matches!(
+        repository
+            .record_run_usage(record_command(&legitimate))
+            .await,
+        Ok(RecordRunUsageOutcome::Recorded(_))
+    ));
+    let latest = repository
+        .read_latest_run_usage(
+            &RunId::parse("run-codex-2").expect("run id"),
+            &thread_id,
+        )
+        .await
+        .expect("codex usage should read")
+        .expect("codex usage should exist");
+    assert_eq!(latest.source_sequence(), 4);
+    assert_eq!(latest.input_tokens(), Some(10));
+
+    // Mismatched model, route, and variant each deny without dropping the
+    // persisted legitimate usage.
+    for scoped in [
+        codex_report_with("model-other", "codex", None),
+        codex_report_with("model-usage", "route-usage", None),
+        codex_report_with(
+            "model-usage",
+            "codex",
+            Some(EngineVariantId::parse("variant-x").expect("variant id")),
+        ),
+    ] {
+        assert!(matches!(
+            repository.record_run_usage(record_command(&scoped)).await,
+            Err(RunUsageRepositoryError::ModelOriginMismatch { .. })
+        ));
+    }
+    let latest = repository
+        .read_latest_run_usage(
+            &RunId::parse("run-codex-2").expect("run id"),
+            &thread_id,
+        )
+        .await
+        .expect("codex usage should still read")
+        .expect("codex usage should remain");
+    assert_eq!(latest.source_sequence(), 4);
+    drop(database);
 }

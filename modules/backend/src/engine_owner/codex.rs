@@ -1323,7 +1323,11 @@ pub(crate) async fn interrupt_live_turn<W: AsyncWrite + Unpin>(
 ) -> Result<(), CodexTurnError> {
     let params = serde_json::json!({ "threadId": thread_id, "turnId": turn_id });
     let line = request_line(*request_id, "turn/interrupt", &params);
-    *request_id += 1;
+    // The pump's cancellation path issues this interrupt with a u64::MAX
+    // sentinel id (operation.rs). Saturate so a debug build cannot panic on
+    // overflow and a release build cannot wrap to 0 and collide with
+    // handshake ids; reusing MAX across repeated cancels is harmless.
+    *request_id = request_id.saturating_add(1);
     write_line(stdin, &line).await
 }
 

@@ -250,6 +250,41 @@ fn turn_start_error_response_fails_fast() {
     assert!(!is_codex_error_response(notification));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn interrupt_live_turn_saturates_max_sentinel_id() {
+    // The pump's cancellation path issues the interrupt with a u64::MAX
+    // sentinel id (operation.rs). A plain `+= 1` panics debug builds and
+    // wraps release builds to 0, colliding with handshake ids and wedging
+    // the cancelled run. The interrupt must still send with id MAX and the
+    // counter must saturate so repeated cancels stay harmless.
+    let mut sink: Vec<u8> = Vec::new();
+    let mut request_id = u64::MAX;
+    interrupt_live_turn(&mut sink, &mut request_id, "thread-1", "turn-1")
+        .await
+        .expect("sentinel interrupt must send without overflow");
+    assert_eq!(
+        request_id, u64::MAX,
+        "sentinel id saturates instead of wrapping"
+    );
+    let line = String::from_utf8(sink).expect("interrupt line is utf8");
+    let value: serde_json::Value =
+        serde_json::from_str(line.trim()).expect("interrupt line is json");
+    assert_eq!(value["id"], u64::MAX);
+    assert_eq!(value["method"], "turn/interrupt");
+
+    // Normal ids still advance by exactly one with the consumed id on wire.
+    let mut sink: Vec<u8> = Vec::new();
+    let mut request_id = 7u64;
+    interrupt_live_turn(&mut sink, &mut request_id, "thread-1", "turn-1")
+        .await
+        .expect("normal interrupt sends");
+    assert_eq!(request_id, 8);
+    let line = String::from_utf8(sink).expect("interrupt line is utf8");
+    let value: serde_json::Value =
+        serde_json::from_str(line.trim()).expect("interrupt line is json");
+    assert_eq!(value["id"], 7);
+}
+
 // ---------------------------------------------------------------------------
 // Frame normalization
 // ---------------------------------------------------------------------------

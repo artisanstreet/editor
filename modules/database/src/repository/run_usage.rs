@@ -6,8 +6,8 @@
 //! provider envelope is accepted or stored here.
 
 use artisan_domain::{
-    EngineConfigRevision, EngineModelId, EngineRouteId, EngineVariantId, RunId, RunUsageBasis,
-    RunUsageReport, RunUsageReportInput, ThreadId, UnixMillis,
+    EngineConfigRevision, EngineModelId, EngineRouteId, EngineSelection, EngineVariantId, RunId,
+    RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId, UnixMillis,
 };
 use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement, TransactionTrait, Value};
 use thiserror::Error;
@@ -264,19 +264,43 @@ async fn load_run_authority(
             run_id: run_id.clone(),
         });
     }
-    // Usage authority is OpenCode2-shaped. A configuration that selects any
-    // other engine cannot authorize usage as OpenCode2; it fails closed as
-    // an invalid snapshot instead of coercing to the wrong engine.
-    let selection = config.selection().as_opencode2().map_err(|_| {
-        RunUsageRepositoryError::InvalidRunSnapshot {
-            run_id: run_id.clone(),
+    // Usage authority mirrors the immutable selection. OpenCode2 authorizes
+    // its exact model/route/variant triple; Codex authorizes its exact model
+    // on the `codex` route with no variant, matching `codex_usage_report`.
+    // Any other engine, or a Codex selection with no model to fence against,
+    // fails closed as an invalid snapshot instead of coercing to the wrong
+    // engine. Scope mismatches against an established authority stay
+    // `ModelOriginMismatch` in `report_matches_authority`.
+    let (model_id, provider_route_id, variant_id) = match config.selection() {
+        EngineSelection::OpenCode2(selection) => (
+            selection.model_id().clone(),
+            selection.route_id().clone(),
+            selection.variant_id().cloned(),
+        ),
+        EngineSelection::Codex(selection) => {
+            let Some(model_id) = selection.model_id().cloned() else {
+                return Err(RunUsageRepositoryError::InvalidRunSnapshot {
+                    run_id: run_id.clone(),
+                });
+            };
+            let route_id = EngineRouteId::parse("codex").map_err(|_| {
+                RunUsageRepositoryError::InvalidRunSnapshot {
+                    run_id: run_id.clone(),
+                }
+            })?;
+            (model_id, route_id, None)
         }
-    })?;
+        _ => {
+            return Err(RunUsageRepositoryError::InvalidRunSnapshot {
+                run_id: run_id.clone(),
+            });
+        }
+    };
     Ok(RunUsageAuthority {
         generation: run.generation,
-        model_id: selection.model_id().clone(),
-        provider_route_id: selection.route_id().clone(),
-        variant_id: selection.variant_id().cloned(),
+        model_id,
+        provider_route_id,
+        variant_id,
     })
 }
 
