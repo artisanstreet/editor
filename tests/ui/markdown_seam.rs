@@ -403,16 +403,15 @@ fn longform_user_list_preserves_code_and_link() {
 
 #[test]
 fn ordered_loose_nested_and_task_lists_preserve_every_row() {
-    let parsed = engine()
-        .parse_document(
-            "1. one\n2. two\n\n- loose alpha\n\n- loose beta\n\n- outer\n  - inner\n\n- [ ] open\n- [x] done\n",
-        )
+    // Blank lines do not break a hyphen list under CommonMark, so each
+    // form below parses separately: one input per intended list keeps real
+    // grammar boundaries instead of forcing breaks the grammar forbids.
+    let ordered_blocks = engine()
+        .parse_document("1. one\n2. two\n")
         .expect("parse succeeds");
-    let blocks = parsed.blocks();
-    let collected = lists(blocks);
-    assert_eq!(collected.len(), 4, "four lists, got {blocks:?}");
-
-    let (ordered, start, items) = collected[0];
+    let ordered_lists = lists(ordered_blocks.blocks());
+    assert_eq!(ordered_lists.len(), 1);
+    let (ordered, start, items) = ordered_lists[0];
     assert!(ordered);
     assert_eq!(*start, Some(1));
     assert_eq!(
@@ -423,7 +422,12 @@ fn ordered_loose_nested_and_task_lists_preserve_every_row() {
         vec!["one".to_owned(), "two".to_owned()]
     );
 
-    let loose = &collected[1].2;
+    let loose_blocks = engine()
+        .parse_document("- loose alpha\n\n- loose beta\n")
+        .expect("parse succeeds");
+    let loose_lists = lists(loose_blocks.blocks());
+    assert_eq!(loose_lists.len(), 1);
+    let loose = &loose_lists[0].2;
     assert_eq!(loose.len(), 2);
     for item in loose.iter() {
         assert!(
@@ -436,7 +440,12 @@ fn ordered_loose_nested_and_task_lists_preserve_every_row() {
     }
     assert_eq!(loose[0].text_content(), "loose alpha");
 
-    let outer = &collected[2].2;
+    let nested_blocks = engine()
+        .parse_document("- outer\n  - inner\n")
+        .expect("parse succeeds");
+    let nested_lists = lists(nested_blocks.blocks());
+    assert_eq!(nested_lists.len(), 1);
+    let outer = &nested_lists[0].2;
     assert_eq!(outer.len(), 1);
     let nested = outer[0]
         .blocks
@@ -453,7 +462,12 @@ fn ordered_loose_nested_and_task_lists_preserve_every_row() {
         "outer text is not lost beside its nested list"
     );
 
-    let tasks = &collected[3].2;
+    let task_blocks = engine()
+        .parse_document("- [ ] open\n- [x] done\n")
+        .expect("parse succeeds");
+    let task_lists = lists(task_blocks.blocks());
+    assert_eq!(task_lists.len(), 1);
+    let tasks = &task_lists[0].2;
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].task, Some(false));
     assert_eq!(tasks[1].task, Some(true));
