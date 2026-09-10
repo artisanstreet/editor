@@ -99,6 +99,9 @@ async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
     let run = activity_run_id();
     let (sender, mut receiver) = mpsc::channel(128);
     let mut tracker = CodexPendingTracker::new();
+    // Root thread authority, mirroring the production pump binding from
+    // thread/start before the turn/start wait.
+    tracker.bind_native_thread("t-fixture");
     let mut active: Option<String> = None;
     let mut terminal = None;
     let mut sequence = 0u64;

@@ -2034,6 +2034,11 @@ async fn execute_codex_turn(
     }
     let inactivity = runtime.limits.sse;
     let mut tracker = codex_runtime::CodexPendingTracker::new();
+    // Root thread authority for rich activity: the native thread from
+    // thread/start (or the resumed thread) is the only thread whose frames
+    // may emit onto the root activity channel. Bound before the turn/start
+    // wait so legitimate interleaved root frames already normalize.
+    tracker.bind_native_thread(&thread_id);
     let mut active_turn: Option<String> = None;
     let mut frame_sequence: u64 = 0;
     let mut last_activity = Instant::now();

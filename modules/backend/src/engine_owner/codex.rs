@@ -1098,12 +1098,35 @@ pub(crate) struct CodexPendingTracker {
     approvals: HashMap<String, CodexApprovalRequest>,
     questions: HashMap<String, CodexQuestion>,
     subagents: Vec<(String, String)>,
+    /// The root native thread bound by the pump from `thread/start` (or the
+    /// resumed thread). Rich activity frames must claim exactly this thread;
+    /// an unbound tracker emits no activity at all.
+    native_thread_id: Option<String>,
 }
 
 impl CodexPendingTracker {
     /// Creates an empty tracker for one turn.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Binds the root native thread authority for rich activity.
+    ///
+    /// The pump calls this once with the native thread from `thread/start`
+    /// (or the resumed thread) before the `turn/start` wait, so legitimate
+    /// interleaved root frames already normalize. Empty identities never
+    /// pin: the tracker stays unbound and activity stays dropped. Activity
+    /// authority never depends on the optional usage model scope.
+    pub(crate) fn bind_native_thread(&mut self, native_thread_id: &str) {
+        if native_thread_id.is_empty() {
+            return;
+        }
+        self.native_thread_id = Some(native_thread_id.to_owned());
+    }
+
+    /// Returns the bound root native thread, when the pump pinned one.
+    pub(crate) fn native_thread_id(&self) -> Option<&str> {
+        self.native_thread_id.as_deref()
     }
 
     /// Notes one approval request; re-noting the same id is a no-op.
@@ -1721,23 +1744,31 @@ pub(crate) fn codex_rate_limits_read_line(id: u64) -> String {
 // identities verbatim inside its typed payload; the generated observation id
 // is deterministic in `(run, frame sequence, emission slug)` so replays
 // produce identical ids without collisions, and the sequence is the
-// source-local frame order (the dispatcher remints the durable
-// thread-scoped sequence and identity in a separate packet). No wall clocks
+// run-local durable sequence of the source frame (fragments may share it;
+// the dispatcher remints per-row durable identity and the thread-scoped
+// delivery sequence in a separate packet). No wall clocks
 // are minted: none of the target observation types carry timestamps.
 // ---------------------------------------------------------------------------
 
 /// Returns whether one activity frame may emit onto the root channel.
 ///
-/// Turn-scoped frames must claim exactly the current turn: a foreign turn is
-/// dropped without touching root state, while an unestablished turn is
-/// adopted exactly like the plain delta path. Frames claiming a discovered
-/// child thread are never coerced into the root channel.
+/// The frame must claim exactly the pump-bound root native thread: unknown
+/// foreign threads never emit even when they share the current turn, and an
+/// unbound tracker emits nothing at all, so authority is never guessed from
+/// the first rich frame. Turn-scoped frames must then claim exactly the
+/// current turn, while an unestablished turn is adopted exactly like the
+/// plain delta path so legitimate interleaved root frames before the
+/// `turn/start` result still flow. Frames claiming a discovered child thread
+/// are never coerced into the root channel.
 fn activity_frame_authorized(
     thread_id: &str,
     turn_id: &str,
     tracker: &CodexPendingTracker,
     active_turn: &mut Option<String>,
 ) -> bool {
+    if tracker.native_thread_id() != Some(thread_id) {
+        return false;
+    }
     if tracker.is_known_child_thread(thread_id) {
         return false;
     }
@@ -1770,11 +1801,13 @@ fn activity_observation_id(
     .ok()
 }
 
-/// Reads the source-local frame sequence as a domain sequence.
+/// Reads the run-local durable sequence of one source frame as a domain
+/// sequence.
 ///
-/// The owner channel carries source order only; the dispatcher remints the
-/// durable thread-scoped sequence before persistence. Returns [`None`] past
-/// the finite range so the emission drops instead of wrapping.
+/// Fragment rows from one frame may share it; the dispatcher remints
+/// per-row durable identity and the thread-scoped delivery sequence before
+/// persistence. Returns [`None`] past the finite range so the emission drops
+/// instead of wrapping.
 fn activity_sequence(frame_sequence: u64) -> Option<ObservationSequence> {
     ObservationSequence::new(frame_sequence).ok()
 }

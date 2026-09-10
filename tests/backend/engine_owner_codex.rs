@@ -2343,6 +2343,13 @@ async fn apply_activity(
     (terminal, rows)
 }
 
+/// One tracker bound to the fixture root thread used across activity tests.
+fn bound_activity_tracker() -> CodexPendingTracker {
+    let mut tracker = CodexPendingTracker::new();
+    tracker.bind_native_thread("t-1");
+    tracker
+}
+
 #[test]
 fn reasoning_summary_delta_and_boundary_decode_with_scope() {
     let event = parse_frame(
@@ -2407,7 +2414,7 @@ fn reasoning_summary_delta_and_boundary_decode_with_scope() {
 #[tokio::test]
 async fn reasoning_summary_emits_published_text_only() {
     let run = run_id();
-    let mut tracker = CodexPendingTracker::new();
+    let mut tracker = bound_activity_tracker();
     let mut active = None;
 
     let event = parse_frame(
@@ -2466,7 +2473,7 @@ async fn reasoning_summary_emits_published_text_only() {
 #[tokio::test]
 async fn reasoning_settled_joins_authoritative_summary() {
     let run = run_id();
-    let mut tracker = CodexPendingTracker::new();
+    let mut tracker = bound_activity_tracker();
     let mut active = Some("turn-1".to_owned());
 
     let event = parse_frame(
@@ -2515,7 +2522,7 @@ async fn reasoning_settled_joins_authoritative_summary() {
 #[tokio::test]
 async fn tool_begin_progress_complete_normalize() {
     let run = run_id();
-    let mut tracker = CodexPendingTracker::new();
+    let mut tracker = bound_activity_tracker();
     let mut active = Some("turn-1".to_owned());
 
     let started = parse_frame(
@@ -2606,7 +2613,7 @@ async fn tool_begin_progress_complete_normalize() {
 #[tokio::test]
 async fn foreign_child_and_malformed_frames_never_reach_root() {
     let run = run_id();
-    let mut tracker = CodexPendingTracker::new();
+    let mut tracker = bound_activity_tracker();
     let mut active = Some("turn-1".to_owned());
 
     // A foreign turn claims no authority over the current turn.
@@ -2654,7 +2661,7 @@ async fn foreign_child_and_malformed_frames_never_reach_root() {
 #[tokio::test]
 async fn activity_ids_are_stable_and_fragments_are_bounded() {
     let run = run_id();
-    let mut tracker = CodexPendingTracker::new();
+    let mut tracker = bound_activity_tracker();
     let mut active = Some("turn-1".to_owned());
 
     // A 5,000-byte delta fragments losslessly at the domain delta ceiling.
@@ -2734,7 +2741,7 @@ async fn activity_ids_are_stable_and_fragments_are_bounded() {
 #[tokio::test]
 async fn command_search_plan_and_file_frames_normalize() {
     let run = run_id();
-    let mut tracker = CodexPendingTracker::new();
+    let mut tracker = bound_activity_tracker();
     let mut active = Some("turn-1".to_owned());
 
     // Command start, output, and completion preserve provider evidence.
@@ -2954,5 +2961,82 @@ async fn plain_message_and_terminal_paths_stay_unchanged() {
     let (sender, _) = mpsc::channel(8);
     let terminal = apply_event(completed, &run, &mut tracker, &mut active, &sender, 72, None).await;
     assert_eq!(terminal, Some(TerminalState::Completed));
+}
+
+#[tokio::test]
+async fn activity_requires_exact_bound_root_thread() {
+    let run = run_id();
+    let summary = |thread: &str, turn: &str| {
+        format!(
+            r#"{{"method":"item/reasoning/summaryTextDelta","params":{{"delta":"x","itemId":"item-r1","summaryIndex":0,"threadId":"{thread}","turnId":"{turn}"}}}}"#
+        )
+    };
+
+    // An unbound tracker fails closed for rich activity even when the turn
+    // matches ...
+    let mut unbound = CodexPendingTracker::new();
+    assert_eq!(unbound.native_thread_id(), None);
+    let mut active = Some("turn-1".to_owned());
+    let event = parse_frame(&summary("t-1", "turn-1"), 80).expect("activity parses");
+    let (terminal, rows) = apply_activity(event, &run, &mut unbound, &mut active, 80).await;
+    assert_eq!(terminal, None);
+    assert!(rows.is_empty(), "unbound trackers emit no activity");
+    // ... while the plain delta path on the same tracker is untouched.
+    let delta = parse_frame(
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"hi","itemId":"item-1","threadId":"t-1","turnId":"turn-1"}}"#,
+        81,
+    )
+    .expect("delta parses");
+    let (sender, mut receiver) = mpsc::channel(8);
+    let terminal = apply_event(delta, &run, &mut unbound, &mut active, &sender, 81, None).await;
+    assert_eq!(terminal, None);
+    let EngineObservation::TextDelta(chunk) = receiver.try_recv().expect("delta observed") else {
+        panic!("plain deltas keep the text channel without binding");
+    };
+    assert_eq!(chunk.delta(), "hi");
+
+    // An unknown foreign thread sharing the turn never emits.
+    let mut tracker = bound_activity_tracker();
+    let mut active = Some("turn-1".to_owned());
+    let event = parse_frame(&summary("t-foreign", "turn-1"), 82).expect("foreign parses");
+    let (terminal, rows) = apply_activity(event, &run, &mut tracker, &mut active, 82).await;
+    assert_eq!(terminal, None);
+    assert!(
+        rows.is_empty(),
+        "foreign threads never emit on the root channel"
+    );
+    assert_eq!(active.as_deref(), Some("turn-1"));
+
+    // A foreign first frame adopts no turn authority.
+    let mut tracker = bound_activity_tracker();
+    let mut first: Option<String> = None;
+    let event = parse_frame(&summary("t-foreign", "turn-1"), 83).expect("foreign parses");
+    let (terminal, rows) = apply_activity(event, &run, &mut tracker, &mut first, 83).await;
+    assert_eq!(terminal, None);
+    assert!(rows.is_empty());
+    assert_eq!(first, None, "foreign frames never establish the turn");
+
+    // The exact bound root emits both before the turn/start result ...
+    let mut tracker = bound_activity_tracker();
+    let mut first: Option<String> = None;
+    let event = parse_frame(&summary("t-1", "turn-1"), 84).expect("root parses");
+    let (terminal, rows) = apply_activity(event, &run, &mut tracker, &mut first, 84).await;
+    assert_eq!(terminal, None);
+    assert_eq!(rows.len(), 1, "interleaved root frames normalize pre-result");
+    assert_eq!(first.as_deref(), Some("turn-1"));
+    // ... and after it.
+    let event = parse_frame(&summary("t-1", "turn-1"), 85).expect("root parses");
+    let (terminal, rows) = apply_activity(event, &run, &mut tracker, &mut first, 85).await;
+    assert_eq!(terminal, None);
+    assert_eq!(rows.len(), 1);
+
+    // An empty bind never pins authority.
+    let mut tracker = CodexPendingTracker::new();
+    tracker.bind_native_thread("");
+    assert_eq!(tracker.native_thread_id(), None);
+    let mut active = Some("turn-1".to_owned());
+    let event = parse_frame(&summary("t-1", "turn-1"), 86).expect("activity parses");
+    let (_, rows) = apply_activity(event, &run, &mut tracker, &mut active, 86).await;
+    assert!(rows.is_empty(), "empty binds stay unbound");
 }
 
