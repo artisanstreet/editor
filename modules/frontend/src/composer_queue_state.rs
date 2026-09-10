@@ -19,7 +19,8 @@ use std::{
 };
 
 use artisan_domain::{
-    AuthoredText, EngineModelId, EngineRouteId, EngineVariantId, ImageAttachmentRef, MessageId,
+    AuthoredText, DispatchError, EngineModelId, EngineRouteId, EngineVariantId, FailedMessageListing,
+    FailedMessageSummary, ImageAttachmentRef, MessageId,
     QueuedMessageListOrder, QueuedMessageListing, QueuedMessageWithdrawalOutcome,
     QueuedMessageWithdrawalResult, ReadRecalledMessage, RecalledMessageResult, RequestId, RunId,
     RunUsageReport, RunUsageResult, ThreadId, UnixMillis, WithdrawQueuedMessageCommand,
@@ -184,6 +185,152 @@ impl ComposerQueueEntry {
     pub(crate) fn lip_text(&self) -> &str {
         self.text.as_ref().map_or("", AuthoredText::as_str)
     }
+}
+
+/// Byte-free data needed to render one failed-dispatch card and to issue an
+/// exact new-chat recovery later.
+///
+/// The identity binds the action to the exact failed message and the
+/// generation that projected it: never to current composer text or a run id.
+/// The reason is the verbatim dispatcher diagnostic, so the card states
+/// exactly why the send cannot proceed on this thread.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FailedQueueEntry {
+    identity: ComposerQueueIdentity,
+    thread_id: ThreadId,
+    message_id: MessageId,
+    original_request_id: RequestId,
+    text: Option<AuthoredText>,
+    attachments: Vec<ImageAttachmentRef>,
+    accepted_at: UnixMillis,
+    failed_at: UnixMillis,
+    reason: DispatchError,
+}
+
+impl FailedQueueEntry {
+    fn from_summary(summary: &FailedMessageSummary, generation: u64) -> Option<Self> {
+        if summary.attachments.len() > artisan_domain::MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT {
+            return None;
+        }
+        let total_bytes = summary
+            .attachments
+            .iter()
+            .try_fold(0usize, |total, image| {
+                total.checked_add(usize::try_from(image.size_bytes).ok()?)
+            })?;
+        if total_bytes > artisan_domain::MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES {
+            return None;
+        }
+        if summary
+            .attachments
+            .iter()
+            .enumerate()
+            .any(|(index, image)| {
+                image.message_id != summary.message_id
+                    || image.thread_id != summary.thread_id
+                    || usize::try_from(image.index).ok() != Some(index)
+            })
+        {
+            return None;
+        }
+        Some(Self {
+            identity: ComposerQueueIdentity::new(summary.original_request_id.as_str(), generation),
+            thread_id: summary.thread_id.clone(),
+            message_id: summary.message_id.clone(),
+            original_request_id: summary.original_request_id.clone(),
+            text: summary.text.clone(),
+            attachments: summary.attachments.clone(),
+            accepted_at: summary.accepted_at,
+            failed_at: summary.failed_at,
+            reason: summary.reason.clone(),
+        })
+    }
+
+    /// Returns the exact controls identity.
+    #[must_use]
+    pub(crate) fn identity(&self) -> &ComposerQueueIdentity {
+        &self.identity
+    }
+
+    /// Returns the original owning thread.
+    #[must_use]
+    pub(crate) fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+
+    /// Returns the Forge-minted failed message identity.
+    #[must_use]
+    pub(crate) fn message_id(&self) -> &MessageId {
+        &self.message_id
+    }
+
+    /// Returns the request id that originally accepted the failed message.
+    #[must_use]
+    pub(crate) fn original_request_id(&self) -> &RequestId {
+        &self.original_request_id
+    }
+
+    /// Returns authored text with its `None` versus `Some("")` presence.
+    #[must_use]
+    pub(crate) fn text(&self) -> Option<&AuthoredText> {
+        self.text.as_ref()
+    }
+
+    /// Returns ordered, byte-free attachment references.
+    #[must_use]
+    pub(crate) fn attachments(&self) -> &[ImageAttachmentRef] {
+        &self.attachments
+    }
+
+    /// Returns whether the failed prompt carries image attachments.
+    #[must_use]
+    pub(crate) fn has_attachments(&self) -> bool {
+        !self.attachments.is_empty()
+    }
+
+    /// Returns the authoritative queue acceptance instant.
+    #[must_use]
+    pub(crate) const fn accepted_at(&self) -> UnixMillis {
+        self.accepted_at
+    }
+
+    /// Returns the terminal failure instant.
+    #[must_use]
+    pub(crate) const fn failed_at(&self) -> UnixMillis {
+        self.failed_at
+    }
+
+    /// Returns the verbatim dispatcher diagnostic for this failure.
+    #[must_use]
+    pub(crate) fn reason(&self) -> &str {
+        self.reason.as_str()
+    }
+
+    /// Returns the exact text sent to the failed-card renderer.
+    ///
+    /// An absent or empty text remains empty here. The card never invents a
+    /// placeholder: image-only failures render their attachment label from
+    /// [`Self::has_attachments`] instead.
+    #[must_use]
+    pub(crate) fn card_text(&self) -> &str {
+        self.text.as_ref().map_or("", AuthoredText::as_str)
+    }
+}
+
+/// Why a failed-dispatch listing could not be installed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FailedListingRejection {
+    /// A newer scope or refresh owns the state.
+    StaleRefresh,
+    /// The response names another thread.
+    WrongThread,
+    /// The response exceeds the native page bound.
+    TooManyRows,
+    /// Two visible rows reuse one original queue command id, making a
+    /// controls event ambiguous.
+    DuplicateCommandId,
+    /// One row contains out-of-scope or oversized image metadata.
+    InvalidAttachments,
 }
 
 /// One row projection consumed by `NativeComposerControls`.
@@ -610,6 +757,10 @@ pub(crate) struct ComposerQueueState {
     has_more: bool,
     order: QueuedMessageListOrder,
     refresh: QueueRefreshState,
+    failed_entries: Vec<FailedQueueEntry>,
+    failed_total_count: u64,
+    failed_has_more: bool,
+    failed_refresh: QueueRefreshState,
     pending_withdrawal: Option<PendingWithdrawal>,
     pending_recall_read: Option<PendingRecallRead>,
     restore_candidate: Option<RecallRestoreCandidate>,
@@ -648,6 +799,9 @@ impl fmt::Debug for ComposerQueueState {
             .field("total_count", &self.total_count)
             .field("has_more", &self.has_more)
             .field("refresh_in_flight", &self.refresh.in_flight.is_some())
+            .field("failed_entry_count", &self.failed_entries.len())
+            .field("failed_total_count", &self.failed_total_count)
+            .field("failed_refresh_in_flight", &self.failed_refresh.in_flight.is_some())
             .field("withdrawal_pending", &self.pending_withdrawal.is_some())
             .field("recall_read_pending", &self.pending_recall_read.is_some())
             .field("restore_candidate", &self.restore_candidate)
@@ -670,6 +824,10 @@ impl ComposerQueueState {
             has_more: false,
             order: QueuedMessageListOrder::OldestFirst,
             refresh: QueueRefreshState::default(),
+            failed_entries: Vec::new(),
+            failed_total_count: 0,
+            failed_has_more: false,
+            failed_refresh: QueueRefreshState::default(),
             pending_withdrawal: None,
             pending_recall_read: None,
             restore_candidate: None,
@@ -700,6 +858,10 @@ impl ComposerQueueState {
         self.total_count = 0;
         self.has_more = false;
         self.refresh.in_flight = None;
+        self.failed_entries.clear();
+        self.failed_total_count = 0;
+        self.failed_has_more = false;
+        self.failed_refresh.in_flight = None;
         self.terminal_identity = None;
         if thread_changed {
             self.usage_scope = None;
@@ -867,6 +1029,112 @@ impl ComposerQueueState {
             self.status = QueueStatus::Idle;
         }
         true
+    }
+
+    /// Starts one bounded failed-dispatch refresh if the parent-visible
+    /// conditions permit it.
+    ///
+    /// `force` is for relevant authoritative events such as a newly observed
+    /// dispatch failure. Slow polling passes `false` and runs only while a
+    /// failed row exists. The failed read never disturbs the queued refresh
+    /// fence: both pages are independent projections of one thread.
+    pub(crate) fn begin_failed_refresh(
+        &mut self,
+        visible: bool,
+        service_ready: bool,
+        stopped: bool,
+        force: bool,
+    ) -> Option<QueueRefreshToken> {
+        let thread_id = self.current_thread.clone()?;
+        if !visible || !service_ready || stopped || self.failed_refresh.in_flight.is_some() {
+            return None;
+        }
+        if !force && self.failed_total_count == 0 {
+            return None;
+        }
+        let serial = self.failed_refresh.next_serial.checked_add(1)?;
+        self.failed_refresh.next_serial = serial;
+        let token = QueueRefreshToken {
+            thread_id,
+            generation: self.current_generation,
+            serial,
+        };
+        self.failed_refresh.in_flight = Some(token.clone());
+        Some(token)
+    }
+
+    /// Returns whether one failed-dispatch listing is currently outstanding.
+    #[must_use]
+    pub(crate) fn failed_refresh_in_flight(&self) -> bool {
+        self.failed_refresh.in_flight.is_some()
+    }
+
+    /// Installs one exact bounded failed-dispatch page and clears its
+    /// matching refresh.
+    pub(crate) fn apply_failed_listing(
+        &mut self,
+        token: &QueueRefreshToken,
+        listing: FailedMessageListing,
+    ) -> Result<(), FailedListingRejection> {
+        if self.failed_refresh.in_flight.as_ref() != Some(token)
+            || self.current_generation != token.generation
+            || self.current_thread.as_ref() != Some(&token.thread_id)
+        {
+            return Err(FailedListingRejection::StaleRefresh);
+        }
+        self.failed_refresh.in_flight = None;
+        if listing.thread_id() != &token.thread_id {
+            return Err(FailedListingRejection::WrongThread);
+        }
+        if listing.messages().len() > COMPOSER_QUEUE_PAGE_LIMIT {
+            return Err(FailedListingRejection::TooManyRows);
+        }
+        self.failed_total_count = listing.total_count();
+        self.failed_has_more = listing.has_more();
+        let mut seen_commands = HashSet::with_capacity(listing.messages().len());
+        let mut entries = Vec::with_capacity(listing.messages().len());
+        for summary in listing.messages() {
+            let Some(entry) = FailedQueueEntry::from_summary(summary, token.generation) else {
+                return Err(FailedListingRejection::InvalidAttachments);
+            };
+            if !seen_commands.insert(entry.identity.command_id.clone()) {
+                return Err(FailedListingRejection::DuplicateCommandId);
+            }
+            entries.push(entry);
+        }
+        self.failed_entries = entries;
+        Ok(())
+    }
+
+    /// Clears a failed refresh only when the completion belongs to its exact
+    /// token.
+    pub(crate) fn finish_failed_refresh(&mut self, token: &QueueRefreshToken) -> bool {
+        if self.failed_refresh.in_flight.as_ref() != Some(token) {
+            return false;
+        }
+        self.failed_refresh.in_flight = None;
+        true
+    }
+
+    /// Returns the installed failed-dispatch rows, newest failures first.
+    #[must_use]
+    pub(crate) fn failed_entries(&self) -> &[FailedQueueEntry] {
+        &self.failed_entries
+    }
+
+    /// Returns one exact failed row by its Forge-minted message identity,
+    /// fenced to the current generation by the caller.
+    #[must_use]
+    pub(crate) fn failed_entry(&self, message_id: &MessageId) -> Option<&FailedQueueEntry> {
+        self.failed_entries
+            .iter()
+            .find(|entry| entry.message_id() == message_id)
+    }
+
+    /// Returns the exact failed-row count at read time.
+    #[must_use]
+    pub(crate) const fn failed_total_count(&self) -> u64 {
+        self.failed_total_count
     }
 
     /// Invalidates the current refresh without touching payload ownership.
@@ -1811,5 +2079,138 @@ mod tests {
             ))
             .expect("the unchanged payload remains available");
         assert!(state.can_retry_restore());
+    }
+
+    fn failed_summary(thread_id: &ThreadId, id: &str) -> artisan_domain::FailedMessageSummary {
+        artisan_domain::FailedMessageSummary {
+            message_id: message(id),
+            thread_id: thread_id.clone(),
+            original_request_id: request(&format!("request-{id}")),
+            text: Some(AuthoredText::parse("hello").expect("text")),
+            attachments: Vec::new(),
+            accepted_at: UnixMillis::from_millis(300),
+            failed_at: UnixMillis::from_millis(500),
+            reason: artisan_domain::DispatchError::parse(
+                "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue".to_owned(),
+            )
+            .expect("diagnostic"),
+        }
+    }
+
+    fn failed_listing(
+        thread_id: &ThreadId,
+        rows: Vec<artisan_domain::FailedMessageSummary>,
+    ) -> artisan_domain::FailedMessageListing {
+        artisan_domain::FailedMessageListing::new(
+            thread_id.clone(),
+            COMPOSER_QUEUE_PAGE_LIMIT,
+            rows.len() as u64,
+            rows,
+        )
+        .expect("valid failed listing")
+    }
+
+    #[test]
+    fn failed_refresh_installs_exact_rows_without_touching_queue_fence() {
+        let thread_id = thread("thread-a");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 6);
+        assert!(
+            state
+                .begin_failed_refresh(true, true, false, false)
+                .is_none(),
+            "slow poll discovers nothing while no failure exists"
+        );
+        let token = state
+            .begin_failed_refresh(true, true, false, true)
+            .expect("forced failed refresh");
+        assert!(state.failed_refresh_in_flight());
+        assert!(
+            state
+                .begin_queue_refresh(true, true, false, false, true)
+                .is_some(),
+            "the queued fence stays independent"
+        );
+        state
+            .apply_failed_listing(&token, failed_listing(&thread_id, vec![failed_summary(&thread_id, "one")]))
+            .expect("failed page");
+        assert!(!state.failed_refresh_in_flight());
+        assert_eq!(state.failed_total_count(), 1);
+        let [entry] = state.failed_entries() else {
+            panic!("exactly one failed row should be installed");
+        };
+        assert_eq!(entry.message_id(), &message("one"));
+        assert_eq!(entry.thread_id(), &thread_id);
+        assert_eq!(entry.card_text(), "hello");
+        assert!(!entry.has_attachments());
+        assert_eq!(
+            entry.reason(),
+            "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue"
+        );
+        assert_eq!(entry.identity().generation(), 6);
+        let token = state
+            .begin_failed_refresh(true, true, false, false)
+            .expect("slow poll continues while failures persist");
+        assert!(state.finish_failed_refresh(&token));
+    }
+
+    #[test]
+    fn failed_listing_rejects_stale_wrong_thread_and_duplicate_rows() {
+        let thread_id = thread("thread-a");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 6);
+        let token = state
+            .begin_failed_refresh(true, true, false, true)
+            .expect("failed refresh");
+        state.set_scope(Some(thread_id.clone()), 7);
+        assert_eq!(
+            state.apply_failed_listing(&token, failed_listing(&thread_id, Vec::new())),
+            Err(FailedListingRejection::StaleRefresh)
+        );
+
+        let other = thread("thread-b");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(other.clone()), 6);
+        let token = state
+            .begin_failed_refresh(true, true, false, true)
+            .expect("failed refresh");
+        assert_eq!(
+            state.apply_failed_listing(&token, failed_listing(&thread_id, Vec::new())),
+            Err(FailedListingRejection::WrongThread)
+        );
+
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 6);
+        let token = state
+            .begin_failed_refresh(true, true, false, true)
+            .expect("failed refresh");
+        assert_eq!(
+            state.apply_failed_listing(
+                &token,
+                failed_listing(&thread_id, vec![
+                    failed_summary(&thread_id, "one"),
+                    failed_summary(&thread_id, "one"),
+                ])
+            ),
+            Err(FailedListingRejection::DuplicateCommandId)
+        );
+    }
+
+    #[test]
+    fn failed_scope_change_clears_failed_rows_and_fence() {
+        let thread_id = thread("thread-a");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 6);
+        let token = state
+            .begin_failed_refresh(true, true, false, true)
+            .expect("failed refresh");
+        state
+            .apply_failed_listing(&token, failed_listing(&thread_id, vec![failed_summary(&thread_id, "one")]))
+            .expect("failed page");
+        assert_eq!(state.failed_entries().len(), 1);
+        state.set_scope(Some(thread("thread-b")), 7);
+        assert!(state.failed_entries().is_empty());
+        assert_eq!(state.failed_total_count(), 0);
+        assert!(!state.failed_refresh_in_flight());
     }
 }

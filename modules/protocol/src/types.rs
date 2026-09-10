@@ -1154,6 +1154,8 @@ pub enum ResponsePayload {
     /// Correlated favorite mutation receipt with complete post-state.
     ModelFavoriteSet(SetModelFavoriteReceipt),
     QueuedMessages(artisan_domain::QueuedMessageListing),
+    /// Terminally failed dispatches for one thread, newest failures first.
+    FailedMessages(artisan_domain::FailedMessageListing),
     MessageWithdrawn(artisan_domain::composer_state::QueuedMessageWithdrawalResult),
     RecalledMessage(artisan_domain::RecalledMessageResult),
     RunUsage(artisan_domain::RunUsageResult),

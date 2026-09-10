@@ -8,16 +8,19 @@ use artisan_domain::composer_state::{
 };
 use artisan_domain::{
     AuthoredText, CommandReceipt, DispatchError, EngineModelId, EngineRouteId, EngineVariantId,
-    ImageAttachment, ImageAttachmentRef, ListQueuedMessages, MessageId, QueueMessagePayload,
+    FAILED_MESSAGE_LIST_MAX, FailedMessageListing, FailedMessageSummary, ImageAttachment,
+    ImageAttachmentRef, ListFailedMessages, ListQueuedMessages, MessageId, QueueMessagePayload,
     QueuedMessageListOrder, QueuedMessageListing, QueuedMessageSummary,
     QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId, RunId, RunUsageBasis,
     RunUsageReport, RunUsageReportInput, ThreadId, UnixMillis,
 };
 use artisan_protocol::composer_state::{
-    ComposerStateCodecError, decode_list_queued_messages_request, decode_queued_message_listing,
+    ComposerStateCodecError, decode_failed_message_listing, decode_list_failed_messages_request,
+    decode_list_queued_messages_request, decode_queued_message_listing,
     decode_queued_message_withdrawal_result, decode_read_recalled_message_request,
     decode_read_run_usage_request, decode_recalled_message_result, decode_run_usage_result,
-    decode_withdraw_queued_message_request, encode_list_queued_messages_request,
+    decode_withdraw_queued_message_request, encode_failed_message_listing,
+    encode_list_failed_messages_request, encode_list_queued_messages_request,
     encode_queued_message_listing, encode_queued_message_withdrawal_result,
     encode_read_recalled_message_request, encode_read_run_usage_request,
     encode_recalled_message_result, encode_run_usage_result,
@@ -545,4 +548,170 @@ fn parent_envelope_dispatch_round_trips_composer_state() {
         let envelope = WireEnvelope { protocol_version: ProtocolVersion::V1, frame_id: FrameId::parse(request.as_str()).unwrap(), sent_at: UnixMillis::from_millis(20), body };
         assert!(decode_envelope(&encode_envelope(&envelope).unwrap()).unwrap() == envelope);
     }
+}
+
+#[test]
+fn parent_envelope_dispatch_round_trips_failed_dispatch_arms() {
+    use artisan_protocol::{ClientRequest, FrameId, ProtocolVersion, ResponsePayload, ServerResponse, WireEnvelope, WireEnvelopeBody, encode_envelope, decode_envelope};
+    use artisan_domain::Query;
+    let request = artisan_domain::RequestId::parse("failed-envelope").unwrap();
+    let query = ListFailedMessages::new(thread(), 5).expect("failed query");
+    let listing =
+        FailedMessageListing::new(thread(), 5, 1, vec![failed_summary()]).expect("listing");
+    let bodies = vec![
+        WireEnvelopeBody::Request(ClientRequest::Query(Query::ListFailedMessages(query))),
+        WireEnvelopeBody::Response(ServerResponse { request_id: request.clone(), payload: ResponsePayload::FailedMessages(listing) }),
+    ];
+    for body in bodies {
+        let envelope = WireEnvelope { protocol_version: ProtocolVersion::V1, frame_id: FrameId::parse(request.as_str()).unwrap(), sent_at: UnixMillis::from_millis(20), body };
+        assert!(decode_envelope(&encode_envelope(&envelope).unwrap()).unwrap() == envelope);
+    }
+}
+
+fn failed_summary() -> FailedMessageSummary {
+    let message_id = message_id();
+    let thread_id = thread();
+    FailedMessageSummary {
+        message_id: message_id.clone(),
+        thread_id: thread_id.clone(),
+        original_request_id: request_id("original-request"),
+        text: Some(AuthoredText::parse("hello").expect("text")),
+        attachments: vec![
+            ImageAttachmentRef::new(
+                message_id,
+                thread_id,
+                0,
+                "image/png",
+                "capture.png",
+                3,
+                [7; 32],
+            )
+            .expect("reference"),
+        ],
+        accepted_at: UnixMillis::from_millis(300),
+        failed_at: UnixMillis::from_millis(500),
+        reason: DispatchError::parse(
+            "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue".to_owned(),
+        )
+        .expect("diagnostic"),
+    }
+}
+
+fn round_trip_failed_listing(value: &FailedMessageListing) -> FailedMessageListing {
+    let mut message = Builder::new(HeapAllocator::new());
+    encode_failed_message_listing(
+        message.init_root::<composer_state_capnp::failed_message_listing::Builder>(),
+        value,
+    )
+    .expect("encode failed listing");
+    let words = serialize::write_message_to_words(&message);
+    let mut encoded = words.as_slice();
+    let decoded = serialize::read_message_from_flat_slice(&mut encoded, ReaderOptions::new())
+        .expect("read failed listing");
+    decode_failed_message_listing(
+        decoded
+            .get_root::<composer_state_capnp::failed_message_listing::Reader>()
+            .expect("failed listing root"),
+    )
+    .expect("decode failed listing")
+}
+
+#[test]
+fn failed_request_round_trips_exact_scope_and_limit() {
+    let query = ListFailedMessages::new(thread(), 10).expect("failed query");
+    let mut message = Builder::new(HeapAllocator::new());
+    encode_list_failed_messages_request(
+        message.init_root::<composer_state_capnp::list_failed_messages_request::Builder>(),
+        &query,
+    )
+    .expect("encode failed query");
+    let words = serialize::write_message_to_words(&message);
+    let mut encoded = words.as_slice();
+    let decoded = serialize::read_message_from_flat_slice(&mut encoded, ReaderOptions::new())
+        .expect("read failed query");
+    assert_eq!(
+        decode_list_failed_messages_request(
+            decoded
+                .get_root::<composer_state_capnp::list_failed_messages_request::Reader>()
+                .expect("failed query root")
+        )
+        .expect("decode failed query"),
+        query
+    );
+    assert!(ListFailedMessages::new(thread(), 0).is_err());
+    assert!(ListFailedMessages::new(thread(), FAILED_MESSAGE_LIST_MAX + 1).is_err());
+}
+
+#[test]
+fn failed_listing_round_trips_reason_text_attachments_and_counts() {
+    let original =
+        FailedMessageListing::new(thread(), 2, 3, vec![failed_summary()]).expect("listing");
+    let received = round_trip_failed_listing(&original);
+    assert_eq!(received, original);
+    assert!(received.has_more());
+    assert_eq!(received.total_count(), 3);
+    let row = &received.messages()[0];
+    assert_eq!(
+        row.reason.as_str(),
+        "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue"
+    );
+    assert_eq!(
+        row.text.as_ref().map(AuthoredText::as_str),
+        Some("hello")
+    );
+    assert_eq!(row.attachments.len(), 1);
+    assert_eq!(row.failed_at, UnixMillis::from_millis(500));
+}
+
+#[test]
+fn failed_listing_rejects_missing_reason_and_inconsistent_counts() {
+    let mut message = Builder::new(HeapAllocator::new());
+    {
+        let mut listing =
+            message.init_root::<composer_state_capnp::failed_message_listing::Builder>();
+        listing.set_thread_id(thread().as_str());
+        listing.set_limit(32);
+        listing.set_total_count(1);
+        listing.set_has_more(false);
+        let mut messages = listing.reborrow().init_messages(1);
+        let mut row = messages.reborrow().get(0);
+        row.set_message_id(message_id().as_str());
+        row.set_thread_id(thread().as_str());
+        row.set_original_request_id("original-request");
+        row.set_text("hello");
+        row.set_accepted_at_millis(300);
+        row.set_failed_at_millis(500);
+    }
+    let words = serialize::write_message_to_words(&message);
+    let mut encoded = words.as_slice();
+    let decoded = serialize::read_message_from_flat_slice(&mut encoded, ReaderOptions::new())
+        .expect("read malformed failed listing");
+    assert!(matches!(
+        decode_failed_message_listing(
+            decoded
+                .get_root::<composer_state_capnp::failed_message_listing::Reader>()
+                .expect("failed listing root")
+        ),
+        Err(ComposerStateCodecError::Listing { .. })
+    ));
+
+    let original =
+        FailedMessageListing::new(thread(), 1, 2, vec![]).expect("listing");
+    let mut message = Builder::new(HeapAllocator::new());
+    let mut listing = message.init_root::<composer_state_capnp::failed_message_listing::Builder>();
+    encode_failed_message_listing(listing.reborrow(), &original).expect("encode listing");
+    listing.set_has_more(true);
+    drop(listing);
+    let words = serialize::write_message_to_words(&message);
+    let mut encoded = words.as_slice();
+    let decoded = serialize::read_message_from_flat_slice(&mut encoded, ReaderOptions::new())
+        .expect("read malformed failed listing");
+    assert!(matches!(
+        decode_failed_message_listing(
+            decoded
+                .get_root::<composer_state_capnp::failed_message_listing::Reader>()
+                .expect("failed listing root")
+        ),
+        Err(ComposerStateCodecError::Listing { .. })
+    ));
 }

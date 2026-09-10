@@ -19,10 +19,12 @@ use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
 use gpui::{App, Div, ElementId, FocusHandle, Stateful, Window, div, px};
 
 use crate::composer_queue_state::{
-    ComposerQueueIdentity, ComposerQueueState, QueueLipRow, QueueStatus, ReportingUsage,
+    ComposerQueueIdentity, ComposerQueueState, FailedQueueEntry, QueueLipRow, QueueStatus,
+    ReportingUsage,
 };
 use crate::native_composer_controls::{
-    NativeComposerControlsEvent, NativeComposerControlsSnapshot, PendingSteeringRow,
+    FailedDispatchRow, NativeComposerControlsEvent, NativeComposerControlsSnapshot,
+    PendingSteeringRow,
 };
 use crate::native_context_usage::NativeContextUsage;
 
@@ -39,6 +41,9 @@ pub(crate) enum QueueControlIntent {
     Edit(ComposerQueueIdentity),
     /// The caller can begin withdrawal without reading image bytes.
     Discard(ComposerQueueIdentity),
+    /// The caller must recall the exact failed payload and carry it into a
+    /// new thread as an unsent draft. No retry on the failed thread exists.
+    NewThread(ComposerQueueIdentity),
 }
 
 /// Copies the queue/usage projection into the existing controls snapshot.
@@ -50,12 +55,19 @@ pub(crate) enum QueueControlIntent {
 pub(crate) fn project_controls_snapshot(
     state: &ComposerQueueState,
     snapshot: &mut NativeComposerControlsSnapshot,
+    failed_new_chat_ready: bool,
 ) {
     snapshot.pending_steering = state
         .pending_lip_rows()
         .into_iter()
         .map(pending_steering_row)
         .collect();
+    snapshot.failed_dispatches = state
+        .failed_entries()
+        .iter()
+        .map(failed_dispatch_row)
+        .collect();
+    snapshot.failed_new_chat_ready = failed_new_chat_ready;
     snapshot.context_usage = native_context_usage_for(state, snapshot.run_id.as_deref());
     if snapshot.run_id.is_none() {
         snapshot.run_id = snapshot
@@ -96,6 +108,16 @@ fn pending_steering_row(row: QueueLipRow) -> PendingSteeringRow {
     PendingSteeringRow::new(row.command_id, row.generation, row.text, row.editable)
 }
 
+fn failed_dispatch_row(entry: &FailedQueueEntry) -> FailedDispatchRow {
+    FailedDispatchRow::new(
+        entry.identity().command_id(),
+        entry.identity().generation(),
+        entry.card_text(),
+        entry.has_attachments(),
+        entry.reason(),
+    )
+}
+
 /// Resolves an existing controls event without performing its side effect.
 ///
 /// The generation and original queue command id must still be present in the
@@ -116,9 +138,20 @@ pub(crate) fn resolve_controls_event(
             command_id,
             generation,
         } => (command_id.as_str(), *generation, QueueIntentKind::Discard),
+        NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
+            command_id,
+            generation,
+        } => (command_id.as_str(), *generation, QueueIntentKind::NewThread),
         _ => return None,
     };
     let identity = ComposerQueueIdentity::new(command_id, generation);
+    if matches!(intent, QueueIntentKind::NewThread) {
+        return state
+            .failed_entries()
+            .iter()
+            .any(|entry| entry.identity() == &identity)
+            .then(|| QueueControlIntent::NewThread(identity));
+    }
     let editable = state
         .pending_lip_rows()
         .into_iter()
@@ -126,6 +159,7 @@ pub(crate) fn resolve_controls_event(
     editable.then(|| match intent {
         QueueIntentKind::Edit => QueueControlIntent::Edit(identity),
         QueueIntentKind::Discard => QueueControlIntent::Discard(identity),
+        QueueIntentKind::NewThread => QueueControlIntent::NewThread(identity),
     })
 }
 
@@ -133,6 +167,7 @@ pub(crate) fn resolve_controls_event(
 enum QueueIntentKind {
     Edit,
     Discard,
+    NewThread,
 }
 
 /// Returns the exact queue count copy, or no copy when no rows/count are
@@ -254,8 +289,9 @@ fn render_queue_summary_inner(
 mod tests {
     use super::*;
     use artisan_domain::{
-        AuthoredText, MessageId, QueuedMessageListOrder, QueuedMessageListing,
-        QueuedMessageSummary, RequestId, ThreadId, UnixMillis,
+        AuthoredText, DispatchError, FailedMessageListing, FailedMessageSummary, MessageId,
+        QueuedMessageListOrder, QueuedMessageListing, QueuedMessageSummary, RequestId, ThreadId,
+        UnixMillis,
     };
 
     fn thread(value: &str) -> ThreadId {
@@ -322,7 +358,7 @@ mod tests {
 
         let mut snapshot = NativeComposerControlsSnapshot::default();
         snapshot.run_id = None;
-        project_controls_snapshot(&state, &mut snapshot);
+        project_controls_snapshot(&state, &mut snapshot, false);
         assert_eq!(snapshot.pending_steering.len(), 2);
         assert_eq!(snapshot.pending_steering[1].text, "second");
         assert_eq!(
@@ -356,5 +392,73 @@ mod tests {
             resolve_controls_event(&state, &current),
             Some(QueueControlIntent::Discard(_))
         ));
+    }
+
+    fn failed_page(thread_id: &ThreadId) -> FailedMessageListing {
+        FailedMessageListing::new(
+            thread_id.clone(),
+            32,
+            1,
+            vec![FailedMessageSummary {
+                message_id: MessageId::parse("message-failed").expect("message"),
+                thread_id: thread_id.clone(),
+                original_request_id: request("command-failed"),
+                text: Some(AuthoredText::parse("hello").expect("text")),
+                attachments: Vec::new(),
+                accepted_at: UnixMillis::EPOCH,
+                failed_at: UnixMillis::from_millis(500),
+                reason: DispatchError::parse(
+                    "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue".to_owned(),
+                )
+                .expect("diagnostic"),
+            }],
+        )
+        .expect("failed page")
+    }
+
+    #[test]
+    fn failed_projection_carries_reason_and_readiness_into_snapshot() {
+        let thread_id = thread("thread-a");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 9);
+        let token = state
+            .begin_failed_refresh(true, true, false, true)
+            .expect("failed refresh");
+        state
+            .apply_failed_listing(&token, failed_page(&thread_id))
+            .expect("failed page");
+
+        let mut snapshot = NativeComposerControlsSnapshot::default();
+        project_controls_snapshot(&state, &mut snapshot, true);
+        assert_eq!(snapshot.failed_dispatches.len(), 1);
+        let row = &snapshot.failed_dispatches[0];
+        assert_eq!(row.command_id(), "command-failed");
+        assert_eq!(row.generation(), 9);
+        assert_eq!(row.text, "hello");
+        assert!(!row.has_attachments);
+        assert_eq!(
+            row.reason,
+            "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue"
+        );
+        assert!(snapshot.failed_new_chat_ready);
+
+        let mut blocked = NativeComposerControlsSnapshot::default();
+        project_controls_snapshot(&state, &mut blocked, false);
+        assert_eq!(blocked.failed_dispatches.len(), 1);
+        assert!(!blocked.failed_new_chat_ready);
+
+        let event = NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
+            command_id: "command-failed".to_owned(),
+            generation: 9,
+        };
+        assert!(matches!(
+            resolve_controls_event(&state, &event),
+            Some(QueueControlIntent::NewThread(_))
+        ));
+        let stale = NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
+            command_id: "command-failed".to_owned(),
+            generation: 8,
+        };
+        assert!(resolve_controls_event(&state, &stale).is_none());
     }
 }

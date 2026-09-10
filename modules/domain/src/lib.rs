@@ -147,7 +147,9 @@ pub use run_usage::{
 
 mod queued_message;
 pub use queued_message::{
-    DispatchError, DispatchErrorParseError, ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX,
+    DispatchError, DispatchErrorParseError, FailedMessageListError, FailedMessageListing,
+    FailedMessageListingError, FailedMessageSummary, ListFailedMessages, FAILED_MESSAGE_LIST_MAX,
+    ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX,
     QueuedMessageListError, QueuedMessageListOrder, QueuedMessageListing, QueuedMessageListingError,
     QueuedMessageSummary, QueuedMessageWithdrawalOutcome, WithdrawQueuedMessage,
     WithdrawQueuedMessageResult,

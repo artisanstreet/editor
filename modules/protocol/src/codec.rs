@@ -890,6 +890,13 @@ fn encode_request(
                 query,
             )
         }
+        ClientRequest::Query(Query::ListFailedMessages(query)) => {
+            crate::composer_state_codec::encode_list_failed_messages_request(
+                builder.reborrow().init_list_failed_messages(),
+                query,
+            )
+            .map_err(|_| ProtocolEncodeError::ComposerState)?
+        }
     }
     Ok(())
 }
@@ -966,6 +973,13 @@ fn encode_response_payload(
             value,
         )
         .map_err(|_| ProtocolEncodeError::ComposerState)?,
+        ResponsePayload::FailedMessages(value) => {
+            crate::composer_state_codec::encode_failed_message_listing(
+                builder.reborrow().init_failed_messages(),
+                value,
+            )
+            .map_err(|_| ProtocolEncodeError::ComposerState)?
+        }
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
         }
@@ -2215,6 +2229,11 @@ fn decode_request(
         request::Which::ReadRunUsage(value) => Ok(ClientRequest::Query(Query::ReadRunUsage(
             crate::composer_state_codec::decode_read_run_usage_request(value?)?,
         ))),
+        request::Which::ListFailedMessages(value) => {
+            Ok(ClientRequest::Query(Query::ListFailedMessages(
+                crate::composer_state_codec::decode_list_failed_messages_request(value?)?,
+            )))
+        }
         request::Which::ReadAccountUsage(value) => decode_read_account_usage(value?),
         request::Which::ReadModelFavorites(()) => Ok(ClientRequest::Query(
             Query::ReadModelFavorites(ReadModelFavorites),
@@ -3503,6 +3522,9 @@ fn decode_response(
         ),
         response::Which::RunUsage(value) => ResponsePayload::RunUsage(
             crate::composer_state_codec::decode_run_usage_result(value?)?,
+        ),
+        response::Which::FailedMessages(value) => ResponsePayload::FailedMessages(
+            crate::composer_state_codec::decode_failed_message_listing(value?)?,
         ),
         response::Which::AccountUsage(value) => decode_engine_usage_snapshot(value?)?,
         response::Which::ComposerCatalog(result) => decode_composer_catalog(result?)?,

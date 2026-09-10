@@ -2,7 +2,7 @@
 use super::*;
 use artisan_database::{QueuedMessageRepositoryError, RunUsageRepositoryError};
 use artisan_domain::{
-    ListQueuedMessages, ReadRecalledMessage, ReadRunUsage, RecalledMessageResult, RunUsageResult,
+    ListFailedMessages, ListQueuedMessages, ReadRecalledMessage, ReadRunUsage, RecalledMessageResult, RunUsageResult,
     WithdrawQueuedMessage, WithdrawQueuedMessageCommand,
 };
 
@@ -23,12 +23,33 @@ impl RequestHandler {
         ))
     }
 
+    pub(super) async fn read_failed_dispatches(
+        &self,
+        request_id: &RequestId,
+        query: &ListFailedMessages,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        let listing = self
+            .repository
+            .read_failed_messages(query.clone())
+            .await
+            .map_err(|error| queue_failure(error, request_id))?;
+        Ok(outcome(
+            request_id,
+            ResponsePayload::FailedMessages(listing),
+        ))
+    }
+
     pub(super) async fn read_recalled_composer_message(
         &self,
         request_id: &RequestId,
         query: &ReadRecalledMessage,
     ) -> Result<ServerResponse, ProtocolFailure> {
-        let payload = self
+        // Recall serves the exact immutable payload for withdrawn rows (the
+        // edit flow) and for terminally failed rows (the explicit new-chat
+        // recovery action). Live, queued, leased, and completed rows never
+        // resolve here: the caller keeps its recovery available instead of
+        // acting on another row's payload.
+        let withdrawn = self
             .repository
             .read_withdrawn_message_payload(
                 &query.thread_id,
@@ -37,6 +58,19 @@ impl RequestHandler {
             )
             .await
             .map_err(|error| queue_failure(error, request_id))?;
+        let payload = match withdrawn {
+            Some(payload) => Some(payload),
+            None => {
+                self.repository
+                    .read_failed_message_payload(
+                        &query.thread_id,
+                        &query.message_id,
+                        &query.original_request_id,
+                    )
+                    .await
+                    .map_err(|error| queue_failure(error, request_id))?
+            }
+        };
         let result = RecalledMessageResult::new(
             query.thread_id.clone(),
             query.message_id.clone(),
@@ -142,6 +176,7 @@ fn queue_failure(error: QueuedMessageRepositoryError, request_id: &RequestId) ->
         ),
         QueuedMessageRepositoryError::CrossThread { .. }
         | QueuedMessageRepositoryError::OriginalRequestMismatch { .. }
+        | QueuedMessageRepositoryError::InvalidFailedListLimit(_)
         | QueuedMessageRepositoryError::InvalidListLimit(_) => (
             ErrorCode::InvalidInput,
             "queued-message request is invalid",
@@ -149,6 +184,7 @@ fn queue_failure(error: QueuedMessageRepositoryError, request_id: &RequestId) ->
         ),
         QueuedMessageRepositoryError::InvalidChronology { .. }
         | QueuedMessageRepositoryError::InvalidListing(_)
+        | QueuedMessageRepositoryError::InvalidFailedListing(_)
         | QueuedMessageRepositoryError::CorruptData { .. }
         | QueuedMessageRepositoryError::Invariant { .. } => (
             ErrorCode::Internal,

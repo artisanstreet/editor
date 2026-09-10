@@ -12,7 +12,7 @@ use crate::engine_config::{EngineConfigUpdatePrecondition, EngineRunConfig};
 use crate::identifiers::{DirectoryId, MessageId, ProjectId, RequestId, RunId, ThreadId};
 use crate::message::QueueMessagePayload;
 use crate::run_interaction::{RespondApproval, RespondQuestion};
-use crate::{ListQueuedMessages, ReadAccountUsage, ReadRecalledMessage, ReadRunUsage, WithdrawQueuedMessageCommand};
+use crate::{ListFailedMessages, ListQueuedMessages, ReadAccountUsage, ReadRecalledMessage, ReadRunUsage, WithdrawQueuedMessageCommand};
 use crate::text::{MessageBody, ThreadTitle};
 
 pub use crate::composer_catalog::{ReadComposerCatalog, ReadModelFavorites, SetModelFavorite};
@@ -388,6 +388,8 @@ pub enum Query {
     /// See [`ReadModelFavorites`].
     ReadModelFavorites(ReadModelFavorites),
     ListQueuedMessages(ListQueuedMessages),
+    /// Terminally failed dispatches for one thread, newest first.
+    ListFailedMessages(ListFailedMessages),
     ReadRecalledMessage(ReadRecalledMessage),
     ReadRunUsage(ReadRunUsage),
     /// See [`ReadAccountUsage`].

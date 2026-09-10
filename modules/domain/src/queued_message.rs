@@ -428,3 +428,245 @@ fn validate_limit(limit: usize) -> Result<(), QueuedMessageListError> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Terminally failed dispatches
+// ---------------------------------------------------------------------------
+
+/// Maximum number of failed-dispatch summaries returned by one read.
+///
+/// Failed rows are terminal: the dispatcher will never claim them again, so
+/// this bound only limits how many a surface renders, never live retry work.
+pub const FAILED_MESSAGE_LIST_MAX: usize = 32;
+
+/// Read query for exactly one existing thread's terminally failed dispatches.
+///
+/// Unlike the queued listing, no direction is offered: newest failures first
+/// is the only stable order a surface needs. Withdrawn rows are excluded: a
+/// withdrawal is an explicit user dismissal recorded in
+/// `queued_message_withdrawals`, not a failure to surface.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ListFailedMessages {
+    /// Authenticated thread to read.
+    pub thread_id: ThreadId,
+    /// Requested page size, in the inclusive range `1..=32`.
+    pub limit: usize,
+}
+
+impl ListFailedMessages {
+    /// Creates a bounded failed-dispatch query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FailedMessageListError`] when the requested limit is zero or
+    /// exceeds [`FAILED_MESSAGE_LIST_MAX`].
+    pub fn new(thread_id: ThreadId, limit: usize) -> Result<Self, FailedMessageListError> {
+        if limit == 0 {
+            return Err(FailedMessageListError::Empty);
+        }
+        if limit > FAILED_MESSAGE_LIST_MAX {
+            return Err(FailedMessageListError::TooLarge {
+                limit,
+                maximum: FAILED_MESSAGE_LIST_MAX,
+            });
+        }
+        Ok(Self { thread_id, limit })
+    }
+}
+
+/// A failed-dispatch page was requested outside its finite bound.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum FailedMessageListError {
+    /// A page must contain at least one row.
+    #[error("failed-message list limit must be at least one")]
+    Empty,
+    /// A page cannot exceed the native failed-message bound.
+    #[error("failed-message list limit is {limit}; the maximum is {maximum}")]
+    TooLarge {
+        /// Requested row count.
+        limit: usize,
+        /// Native maximum row count.
+        maximum: usize,
+    },
+}
+
+/// One byte-free projection of a terminally failed dispatch.
+///
+/// `reason` is always present: a terminal dispatcher failure persists its
+/// diagnostic verbatim. Text and attachment references mirror the queued
+/// summary so the existing new-chat recovery action can restore the prompt
+/// as an unsent draft without a second read.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct FailedMessageSummary {
+    /// Forge-minted immutable message identity.
+    pub message_id: MessageId,
+    /// Authenticated thread owning the message.
+    pub thread_id: ThreadId,
+    /// Client request identity that originally queued the message.
+    pub original_request_id: RequestId,
+    /// Optional authored text with exact presence preserved.
+    pub text: Option<AuthoredText>,
+    /// Ordered byte-free image metadata.
+    pub attachments: Vec<ImageAttachmentRef>,
+    /// Original queue acceptance instant.
+    pub accepted_at: UnixMillis,
+    /// Terminal failure instant.
+    pub failed_at: UnixMillis,
+    /// Dispatcher diagnostic persisted with the terminal failure.
+    pub reason: DispatchError,
+}
+
+/// A bounded, truthfully countable failed-dispatch page.
+///
+/// Rows arrive newest failures first. `total_count` is the exact number of
+/// eligible failed rows and `has_more` says whether the finite page omitted
+/// any of them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailedMessageListing {
+    thread_id: ThreadId,
+    limit: usize,
+    messages: Vec<FailedMessageSummary>,
+    total_count: u64,
+    has_more: bool,
+}
+
+impl FailedMessageListing {
+    /// Builds a page after checking its finite and ownership invariants.
+    ///
+    /// The repository supplies `total_count` from the same eligibility
+    /// predicate as the page query. `has_more` is derived here instead of
+    /// trusting a separately supplied flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns a listing error when the page exceeds its limit, its count is
+    /// too small, or one row violates thread or identity uniqueness.
+    pub fn new(
+        thread_id: ThreadId,
+        limit: usize,
+        total_count: u64,
+        messages: Vec<FailedMessageSummary>,
+    ) -> Result<Self, FailedMessageListingError> {
+        if limit == 0 || limit > FAILED_MESSAGE_LIST_MAX {
+            return Err(FailedMessageListingError::InvalidLimit {
+                limit,
+                maximum: FAILED_MESSAGE_LIST_MAX,
+            });
+        }
+        if messages.len() > limit {
+            return Err(FailedMessageListingError::TooManyMessages {
+                count: messages.len(),
+                maximum: limit,
+            });
+        }
+        let message_count =
+            u64::try_from(messages.len()).map_err(|_| FailedMessageListingError::Invariant {
+                reason: "failed-message page length does not fit its count type",
+            })?;
+        if total_count < message_count {
+            return Err(FailedMessageListingError::CountBelowPage {
+                total_count,
+                page_count: message_count,
+            });
+        }
+
+        let mut seen = HashSet::with_capacity(messages.len());
+        for message in &messages {
+            if message.thread_id != thread_id {
+                return Err(FailedMessageListingError::WrongThread {
+                    message_id: message.message_id.clone(),
+                });
+            }
+            if !seen.insert(&message.message_id) {
+                return Err(FailedMessageListingError::DuplicateMessageId {
+                    message_id: message.message_id.clone(),
+                });
+            }
+        }
+
+        Ok(Self {
+            thread_id,
+            limit,
+            messages,
+            total_count,
+            has_more: total_count > message_count,
+        })
+    }
+
+    /// Returns the exact thread named by the query.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+
+    /// Returns the requested page size.
+    #[must_use]
+    pub const fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Returns the byte-free rows, newest failures first.
+    #[must_use]
+    pub fn messages(&self) -> &[FailedMessageSummary] {
+        &self.messages
+    }
+
+    /// Returns the exact eligible-row count at read time.
+    #[must_use]
+    pub const fn total_count(&self) -> u64 {
+        self.total_count
+    }
+
+    /// Whether another bounded page is needed to see every eligible row.
+    #[must_use]
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// Failure while validating or constructing a failed-dispatch page.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum FailedMessageListingError {
+    /// The query limit was outside its finite bound.
+    #[error("invalid failed-message list limit {limit}; the maximum is {maximum}")]
+    InvalidLimit {
+        /// Requested row count.
+        limit: usize,
+        /// Native maximum row count.
+        maximum: usize,
+    },
+    /// The repository returned more rows than the requested page size.
+    #[error("failed-message page contains {count} rows; the maximum is {maximum}")]
+    TooManyMessages {
+        /// Returned row count.
+        count: usize,
+        /// Requested page size.
+        maximum: usize,
+    },
+    /// The count query and page query disagree.
+    #[error("failed-message total count {total_count} is below page count {page_count}")]
+    CountBelowPage {
+        /// Count reported by SQLite.
+        total_count: u64,
+        /// Number of rows returned in the page.
+        page_count: u64,
+    },
+    /// A page row belongs to another thread.
+    #[error("failed-message `{message_id}` belongs to another thread")]
+    WrongThread {
+        /// Unexpected message identity.
+        message_id: MessageId,
+    },
+    /// A page repeated one message identity.
+    #[error("failed-message page repeats message `{message_id}`")]
+    DuplicateMessageId {
+        /// Repeated message identity.
+        message_id: MessageId,
+    },
+    /// A local page invariant failed.
+    #[error("failed-message page invariant failed: {reason}")]
+    Invariant {
+        /// Stable invariant description.
+        reason: &'static str,
+    },
+}

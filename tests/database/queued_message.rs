@@ -7,11 +7,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use artisan_database::entities::{self, DispatchState};
 use artisan_database::{
     AttachProjectInput, ClaimMessageDispatch, CreateThreadInput, DispatchFailureReason,
-    DispatchLeaseOwner, QueueMessageInput, QueuedMessageRepositoryError, Repository,
-    RequeueMessageDispatch, SqliteConfig, connect,
+    DispatchLeaseOwner, FailMessageDispatch, QueueMessageInput,
+    QueuedMessageRepositoryError, Repository, RequeueMessageDispatch, SqliteConfig, connect,
 };
 use artisan_domain::{
-    AuthoredText, DirectoryId, DisplayName, ImageAttachment, ListQueuedMessages, MessageId,
+    AuthoredText, DirectoryId, DisplayName, ImageAttachment, ListFailedMessages, ListQueuedMessages, MessageId,
     ProjectId, QUEUED_MESSAGE_LIST_MAX, QueueMessagePayload, QueuedMessageListError,
     QueuedMessageListOrder, QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId,
     RootPath, ThreadId, ThreadTitle, UnixMillis, WithdrawQueuedMessage,
@@ -865,4 +865,284 @@ impl Drop for TemporaryDatabase {
             }
         }
     }
+}
+
+fn fail(
+    message_value: &str,
+    owner_byte: u8,
+    operated_at_ms: i64,
+    reason: &str,
+) -> FailMessageDispatch {
+    FailMessageDispatch {
+        message_id: message_id(message_value),
+        owner: DispatchLeaseOwner::new([owner_byte; 32]),
+        operated_at: UnixMillis::from_millis(operated_at_ms),
+        reason: DispatchFailureReason::parse(reason).expect("failure reason should parse"),
+    }
+}
+
+async fn claim_succeeds(repository: &Repository, owner_byte: u8) {
+    repository
+        .claim_next_message_dispatch(claim(owner_byte, 400, 900))
+        .await
+        .expect("claim should succeed")
+        .expect("queued dispatch should be claimed");
+}
+
+const INTERRUPTED_REASON: &str = "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue";
+
+#[tokio::test]
+async fn failed_dispatch_listing_surfaces_terminal_failure_with_exact_reason() {
+    let (_database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue(
+        &repository,
+        "queue-1",
+        "message-1",
+        "thread-1",
+        text_payload("keep this exact text"),
+        300,
+    )
+    .await;
+    claim_succeeds(&repository, 0x11).await;
+    repository
+        .fail_message_dispatch(fail("message-1", 0x11, 500, INTERRUPTED_REASON))
+        .await
+        .expect("terminal failure should commit");
+
+    let listing = repository
+        .read_failed_messages(
+            ListFailedMessages::new(thread_id("thread-1"), 32).expect("failed query"),
+        )
+        .await
+        .expect("failed listing should read");
+    assert_eq!(listing.total_count(), 1);
+    assert!(!listing.has_more());
+    let [summary] = listing.messages() else {
+        panic!("exactly one failed row should be listed");
+    };
+    assert_eq!(summary.message_id, message_id("message-1"));
+    assert_eq!(summary.thread_id, thread_id("thread-1"));
+    assert_eq!(summary.original_request_id, request("queue-1"));
+    assert_eq!(
+        summary.text.as_ref().map(artisan_domain::AuthoredText::as_str),
+        Some("keep this exact text")
+    );
+    assert!(summary.attachments.is_empty());
+    assert_eq!(summary.accepted_at, UnixMillis::from_millis(300));
+    assert_eq!(summary.failed_at, UnixMillis::from_millis(500));
+    assert_eq!(summary.reason.as_str(), INTERRUPTED_REASON);
+
+    let queued = repository
+        .read_queued_messages(
+            ListQueuedMessages::new(thread_id("thread-1"), QueuedMessageListOrder::OldestFirst, 32)
+                .expect("queued query"),
+        )
+        .await
+        .expect("queued listing should read");
+    assert_eq!(queued.total_count(), 0);
+    assert!(queued.messages().is_empty());
+}
+
+#[tokio::test]
+async fn failed_dispatch_listing_excludes_withdrawn_queued_and_live_rows() {
+    let (_database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue(
+        &repository,
+        "queue-withdrawn",
+        "message-withdrawn",
+        "thread-1",
+        text_payload("withdraw me"),
+        300,
+    )
+    .await;
+    queue(
+        &repository,
+        "queue-live",
+        "message-live",
+        "thread-1",
+        text_payload("still queued"),
+        301,
+    )
+    .await;
+    queue(
+        &repository,
+        "queue-failed",
+        "message-failed",
+        "thread-1",
+        text_payload("terminally failed"),
+        302,
+    )
+    .await;
+    repository
+        .withdraw_queued_message(withdrawal(
+            "thread-1",
+            "message-withdrawn",
+            "queue-withdrawn",
+            "withdraw-1",
+            303,
+        ))
+        .await
+        .expect("withdrawal should commit");
+    // The claim takes the oldest eligible row: the withdrawn row is fenced
+    // out, so the live row claims first and must be returned to `queued`
+    // before the failed row can be claimed and failed terminally.
+    let _live = repository
+        .claim_next_message_dispatch(claim(0x11, 400, 900))
+        .await
+        .expect("live claim should succeed")
+        .expect("live dispatch should be claimed");
+    repository
+        .requeue_message_dispatch(RequeueMessageDispatch {
+            message_id: message_id("message-live"),
+            owner: DispatchLeaseOwner::new([0x11; 32]),
+            operated_at: UnixMillis::from_millis(410),
+            available_at: UnixMillis::from_millis(10_000),
+            reason: DispatchFailureReason::parse("engine unconfigured")
+                .expect("requeue reason should parse"),
+        })
+        .await
+        .expect("live row should requeue");
+    let _failed = repository
+        .claim_next_message_dispatch(claim(0x11, 420, 900))
+        .await
+        .expect("failed claim should succeed")
+        .expect("failed dispatch should be claimed");
+    repository
+        .fail_message_dispatch(fail("message-failed", 0x11, 500, INTERRUPTED_REASON))
+        .await
+        .expect("terminal failure should commit");
+
+    let listing = repository
+        .read_failed_messages(
+            ListFailedMessages::new(thread_id("thread-1"), 32).expect("failed query"),
+        )
+        .await
+        .expect("failed listing should read");
+    assert_eq!(listing.total_count(), 1);
+    let [summary] = listing.messages() else {
+        panic!("only the terminally failed row should be listed");
+    };
+    assert_eq!(summary.message_id, message_id("message-failed"));
+}
+
+#[tokio::test]
+async fn failed_message_payload_read_returns_exact_bytes_for_recovery() {
+    let (_database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue(
+        &repository,
+        "queue-1",
+        "message-1",
+        "thread-1",
+        mixed_payload(Some("failed with images")),
+        300,
+    )
+    .await;
+    claim_succeeds(&repository, 0x11).await;
+    repository
+        .fail_message_dispatch(fail("message-1", 0x11, 500, INTERRUPTED_REASON))
+        .await
+        .expect("terminal failure should commit");
+
+    let payload = repository
+        .read_failed_message_payload(
+            &thread_id("thread-1"),
+            &message_id("message-1"),
+            &request("queue-1"),
+        )
+        .await
+        .expect("failed payload read should succeed")
+        .expect("terminally failed row should be readable");
+    assert_eq!(
+        payload.text().map(artisan_domain::AuthoredText::as_str),
+        Some("failed with images")
+    );
+    assert_eq!(payload.attachments().len(), 2);
+    assert_eq!(payload.attachments()[0].bytes(), &[1, 2, 3]);
+    assert_eq!(payload.attachments()[1].bytes(), &[4, 5, 6, 7]);
+}
+
+#[tokio::test]
+async fn failed_message_payload_read_rejects_live_withdrawn_and_missing_rows() {
+    let (_database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue(
+        &repository,
+        "queue-live",
+        "message-live",
+        "thread-1",
+        text_payload("still live"),
+        300,
+    )
+    .await;
+    queue(
+        &repository,
+        "queue-gone",
+        "message-gone",
+        "thread-1",
+        text_payload("withdrawn"),
+        301,
+    )
+    .await;
+    repository
+        .withdraw_queued_message(withdrawal(
+            "thread-1",
+            "message-gone",
+            "queue-gone",
+            "withdraw-1",
+            302,
+        ))
+        .await
+        .expect("withdrawal should commit");
+
+    assert!(
+        repository
+            .read_failed_message_payload(
+                &thread_id("thread-1"),
+                &message_id("message-live"),
+                &request("queue-live"),
+            )
+            .await
+            .expect("live payload read should succeed")
+            .is_none(),
+        "a live row must not resolve through the failed seam"
+    );
+    assert!(
+        repository
+            .read_failed_message_payload(
+                &thread_id("thread-1"),
+                &message_id("message-gone"),
+                &request("queue-gone"),
+            )
+            .await
+            .expect("withdrawn payload read should succeed")
+            .is_none(),
+        "a withdrawn row must not resolve through the failed seam"
+    );
+    assert!(
+        repository
+            .read_failed_message_payload(
+                &thread_id("thread-1"),
+                &message_id("message-missing"),
+                &request("queue-live"),
+            )
+            .await
+            .expect("missing payload read should succeed")
+            .is_none(),
+        "a missing row must not resolve through the failed seam"
+    );
+    assert!(
+        repository
+            .read_failed_message_payload(
+                &thread_id("thread-1"),
+                &message_id("message-live"),
+                &request("queue-gone"),
+            )
+            .await
+            .expect("mismatched payload read should succeed")
+            .is_none(),
+        "a mismatched original request must not resolve through the failed seam"
+    );
 }

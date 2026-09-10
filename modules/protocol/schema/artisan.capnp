@@ -718,6 +718,10 @@ struct Request {
     readRecalledMessage @23 :ComposerState.ReadRecalledMessageRequest;
     readRunUsage @24 :ComposerState.ReadRunUsageRequest;
 
+    # Terminally failed-dispatch read. Appended after readAccountUsage;
+    # fresh ordinal, existing ordinals frozen.
+    listFailedMessages @28 :ComposerState.ListFailedMessagesRequest;
+
     # Provider-account usage read. The engine scope narrows the read to one
     # engine so clients can fan out per engine; force re-asks providers even
     # when cached reports are fresh. Appended after readRunUsage; fresh
@@ -788,6 +792,10 @@ struct Response {
     accountUsage @26 :EngineUsageSnapshot;
     approvalResponse @27 :RespondApprovalReceipt;
     questionResponse @28 :RespondQuestionReceipt;
+
+    # Terminally failed-dispatch listing. Appended after the question
+    # response; fresh ordinal, existing ordinals frozen.
+    failedMessages @29 :ComposerState.FailedMessageListing;
   }
 }
 

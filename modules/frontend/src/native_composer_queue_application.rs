@@ -13,6 +13,7 @@ pub(super) struct QueueApplicationState {
     pub(super) state: ComposerQueueState,
     generation: u64,
     refresh: Option<QueueRefreshToken>,
+    failed_refresh: Option<QueueRefreshToken>,
     usage: Option<UsageReadToken>,
     poll: Option<Task<()>>,
 }
@@ -22,6 +23,7 @@ impl QueueApplicationState {
             state: ComposerQueueState::new(),
             generation: 0,
             refresh: None,
+            failed_refresh: None,
             usage: None,
             poll: None,
         }
@@ -39,6 +41,7 @@ impl NativeApplication {
                 .state
                 .set_scope(self.selected_thread.clone(), next);
             self.composer_queue.refresh = None;
+            self.composer_queue.failed_refresh = None;
             self.composer_queue.usage = None;
             self.composer_queue.poll = None;
         }
@@ -104,6 +107,39 @@ impl NativeApplication {
         } else {
             self.composer_queue.state.finish_queue_refresh(&token);
             self.composer_queue.state.mark_transport_failure();
+        }
+        self.refresh_failed_dispatches(cx);
+    }
+
+    /// Fetches one bounded failed-dispatch page beside the queued listing.
+    ///
+    /// The failed read is independent: it has its own fence token and never
+    /// disturbs the queued refresh, withdrawal, recall, or usage flows. A
+    /// failed submit only clears its own fence; the queued page stays
+    /// authoritative.
+    fn refresh_failed_dispatches(&mut self, cx: &mut Context<Self>) {
+        let visible = self.message_composer_visible(cx);
+        let ready = self.command_submission_is_available();
+        let stopped = self.service_stopped || self.shutdown_prepared;
+        let Some(token) = self
+            .composer_queue
+            .state
+            .begin_failed_refresh(visible, ready, stopped, true)
+        else {
+            return;
+        };
+        let command = Command::ListFailedMessages {
+            thread_id: token.thread_id().clone(),
+            generation: token.generation(),
+            limit: crate::composer_queue_state::COMPOSER_QUEUE_PAGE_LIMIT,
+        };
+        if self
+            .submit_command(NativeTransportCommand::ComposerState(command))
+            .is_ok()
+        {
+            self.composer_queue.failed_refresh = Some(token);
+        } else {
+            self.composer_queue.state.finish_failed_refresh(&token);
         }
     }
 
@@ -178,6 +214,12 @@ impl NativeApplication {
         else {
             return false;
         };
+        // The new-chat recovery owns thread creation and draft restore in
+        // the application subscription; resolving it here must not mint a
+        // withdrawal request id or consume the event.
+        if matches!(intent, QueueControlIntent::NewThread(_)) {
+            return false;
+        }
         let Ok(request_id) = create_save_request_id() else {
             return true;
         };
@@ -194,6 +236,7 @@ impl NativeApplication {
                 .composer_queue
                 .state
                 .begin_discard(&identity, request_id),
+            QueueControlIntent::NewThread(_) => return false,
         };
         if let Ok(command) = command {
             self.send_queue_withdrawal(command);
@@ -231,12 +274,39 @@ impl NativeApplication {
         }
     }
 
+    /// Drops a pending new-chat recovery whose recall read failed.
+    ///
+    /// Returns whether `query` belonged to the pending recovery's old scope.
+    /// Old history and the failed row stay untouched; the notice names the
+    /// transport failure while the failed card keeps the exact dispatcher
+    /// reason.
+    fn abandon_failed_recovery_for_query(
+        &mut self,
+        query: &artisan_domain::ReadRecalledMessage,
+        failure: crate::native_transport_service::ServiceFailure,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(recovery) = self.pending_failed_recovery.as_ref() else {
+            return false;
+        };
+        if query.thread_id != recovery.old_thread
+            || query.message_id != recovery.message_id
+            || query.original_request_id != recovery.original_request_id
+        {
+            return false;
+        }
+        self.pending_failed_recovery = None;
+        self.message_failure = Some(NativeMessageFailure::new(failure));
+        self.sync_composer_availability(cx);
+        cx.notify();
+        true
+    }
+
     fn restore_queue_candidate(
         &mut self,
         candidate: RecallRestoreCandidate,
         cx: &mut Context<Self>,
-    ) {
-        if self.selected_thread.as_ref() != Some(&candidate.thread_id) {
+    ) {        if self.selected_thread.as_ref() != Some(&candidate.thread_id) {
             let _ = self
                 .composer_queue
                 .state
@@ -325,6 +395,44 @@ impl NativeApplication {
                     self.composer_queue.state.mark_transport_failure();
                 }
             }
+            Event::FailedMessages {
+                thread_id,
+                generation,
+                listing,
+            } => {
+                if self
+                    .composer_queue
+                    .failed_refresh
+                    .as_ref()
+                    .is_some_and(|token| {
+                        token.thread_id() == &thread_id && token.generation() == generation
+                    })
+                {
+                    let token = self.composer_queue.failed_refresh.take().unwrap();
+                    let _ = self
+                        .composer_queue
+                        .state
+                        .apply_failed_listing(&token, listing);
+                    self.sync_composer_controls(cx);
+                }
+            }
+            Event::FailedMessagesFailed {
+                thread_id,
+                generation,
+                ..
+            } => {
+                if self
+                    .composer_queue
+                    .failed_refresh
+                    .as_ref()
+                    .is_some_and(|token| {
+                        token.thread_id() == &thread_id && token.generation() == generation
+                    })
+                {
+                    let token = self.composer_queue.failed_refresh.take().unwrap();
+                    self.composer_queue.state.finish_failed_refresh(&token);
+                }
+            }
             Event::MessageWithdrawn { result, .. } => {
                 if self
                     .composer_queue
@@ -342,19 +450,22 @@ impl NativeApplication {
                 }
             }
             Event::RecalledMessage { result, .. } => {
-                if self
-                    .composer_queue
-                    .state
-                    .accept_recalled_message(*result)
-                    .is_ok()
+                if !self.accept_failed_recovery_result(&result, cx)
+                    && self
+                        .composer_queue
+                        .state
+                        .accept_recalled_message(*result)
+                        .is_ok()
                 {
                     if let Some(candidate) = self.composer_queue.state.take_restore_candidate() {
                         self.restore_queue_candidate(candidate, cx);
                     }
                 }
             }
-            Event::RecalledMessageFailed { query, .. } => {
-                self.composer_queue.state.mark_recalled_read_failed(&query);
+            Event::RecalledMessageFailed { query, failure, .. } => {
+                if !self.abandon_failed_recovery_for_query(&query, failure, cx) {
+                    self.composer_queue.state.mark_recalled_read_failed(&query);
+                }
             }
             Event::RunUsage {
                 generation,

@@ -2350,7 +2350,7 @@ impl Render for NativeComposer {
             NativeComposerInputElement::new(editor.into_any_element(), entity.clone(), focus);
         let mounted_controls = self.controls.clone();
         let mounted_model_selector = self.model_selector.clone();
-        let (controls_lip, controls_failure, controls_row, jump_to_latest) = if let Some((
+        let (controls_lip, controls_failure, controls_failed, controls_row, jump_to_latest) = if let Some((
             controls,
             model_selector,
         )) =
@@ -2362,6 +2362,9 @@ impl Render for NativeComposer {
             let controls_failure = controls.update(cx, |controls, controls_cx| {
                 controls.render_failure(theme, controls_cx)
             });
+            let controls_failed = controls.update(cx, |controls, controls_cx| {
+                controls.render_failed_dispatches(theme, controls_cx)
+            });
             let controls_row = controls.update(cx, |controls, controls_cx| {
                 controls.render_control_row(theme, model_selector.clone(), controls_cx)
             });
@@ -2371,11 +2374,12 @@ impl Render for NativeComposer {
             (
                 controls_lip,
                 controls_failure,
+                controls_failed,
                 Some(controls_row),
                 jump_to_latest,
             )
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
         let legacy_toolbar = if controls_row.is_none() {
@@ -2485,6 +2489,9 @@ impl Render for NativeComposer {
         }
         if let Some(failure) = controls_failure {
             root = root.child(failure);
+        }
+        if let Some(failed) = controls_failed {
+            root = root.child(failed);
         }
         root = root.child(editor);
         if let Some(controls_row) = controls_row {

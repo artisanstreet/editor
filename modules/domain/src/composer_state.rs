@@ -82,7 +82,7 @@ impl WithdrawQueuedMessageCommand {
     }
 }
 
-/// Reads the durable payload of one exact withdrawn message.
+/// Reads the durable payload of one exact withdrawn or terminally failed message.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ReadRecalledMessage {
     /// Authenticated owning thread.
@@ -165,7 +165,7 @@ pub struct RecalledMessageResult {
     pub message_id: MessageId,
     /// Request identity that originally queued the message.
     pub original_request_id: RequestId,
-    /// Durable payload, absent when no exact withdrawn row is readable.
+    /// Durable payload, absent when no exact withdrawn or failed row is readable.
     pub payload: Option<QueueMessagePayload>,
 }
 

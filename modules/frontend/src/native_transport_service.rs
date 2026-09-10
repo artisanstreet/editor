@@ -1369,6 +1369,9 @@ enum ExpectedResponse {
     QueuedMessages {
         thread_id: ThreadId,
     },
+    FailedMessages {
+        thread_id: ThreadId,
+    },
     MessageWithdrawn {
         thread_id: ThreadId,
         message_id: artisan_domain::MessageId,
@@ -1720,6 +1723,10 @@ fn validate_response_family(
             ExpectedResponse::QueuedMessages { thread_id },
             ResponsePayload::QueuedMessages(value),
         ) if value.thread_id() == &thread_id => Ok(ResponsePayload::QueuedMessages(value)),
+        (
+            ExpectedResponse::FailedMessages { thread_id },
+            ResponsePayload::FailedMessages(value),
+        ) if value.thread_id() == &thread_id => Ok(ResponsePayload::FailedMessages(value)),
         (
             ExpectedResponse::MessageWithdrawn {
                 thread_id,

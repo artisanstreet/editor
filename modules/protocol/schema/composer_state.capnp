@@ -6,8 +6,9 @@
 # are converted through the owned domain constructors in the Rust codec.
 #
 # Schema evolution is append-only. The parent Request union reserves ordinals
-# 21..24 for these four requests, and the parent Response union reserves
-# ordinals 22..25 for the four corresponding responses.
+# 21..24 for the first four requests and ordinal 28 for the failed-dispatch
+# read; the parent Response union reserves ordinals 22..25 for the first four
+# corresponding responses and ordinal 29 for the failed-dispatch listing.
 
 @0xb7d9f2e4a16c8b03;
 
@@ -37,6 +38,11 @@ struct ListQueuedMessagesRequest {
   threadId @0 :Text;
   order @1 :QueuedMessageListOrder;
   limit @2 :UInt16;
+}
+
+struct ListFailedMessagesRequest {
+  threadId @0 :Text;
+  limit @1 :UInt16;
 }
 
 struct WithdrawQueuedMessageRequest {
@@ -99,6 +105,28 @@ struct QueuedMessageListing {
   messages @3 :List(QueuedMessageSummary);
   totalCount @4 :UInt64;
   hasMore @5 :Bool;
+}
+
+struct FailedMessageSummary {
+  messageId @0 :Text;
+  threadId @1 :Text;
+  originalRequestId @2 :Text;
+  # The same null-versus-present-empty rule as QueueMessagePayload.text.
+  text @3 :Text;
+  attachments @4 :List(ImageAttachmentRef);
+  acceptedAtMillis @5 :Int64;
+  failedAtMillis @6 :Int64;
+  # Terminal dispatcher diagnostic persisted with the failure. Always present
+  # on the wire: a terminally failed row carries its reason verbatim.
+  reason @7 :Text;
+}
+
+struct FailedMessageListing {
+  threadId @0 :Text;
+  limit @1 :UInt16;
+  messages @2 :List(FailedMessageSummary);
+  totalCount @3 :UInt64;
+  hasMore @4 :Bool;
 }
 
 struct QueuedMessageWithdrawalResult {

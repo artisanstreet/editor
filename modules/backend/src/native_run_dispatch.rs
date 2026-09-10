@@ -23,8 +23,9 @@ use artisan_database::{
     DispatchFailureReason, DispatchLeaseOwner, FailMessageDispatch, InterruptRun, LaunchClaimedRun,
     LaunchClaimedRunOutcome, LaunchedRunReceipt, ProviderBindingBytes, RecordRunUsage, Repository,
     RequeueMessageDispatch, ResolveInteractionOutcome, RunBatchScope, RunErrorCode,
-    RunErrorMessage, RunLaunchCredentials, RunLaunchError, RunStartKey, SessionContinuationLookup,
-    SessionContinuationQuery,
+    RunErrorMessage, RunLaunchCredentials, RunLaunchError, RunStartKey,
+    SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup,
+    SessionContinuationQuery, SessionContinuationUnavailable, SessionContinuationUnavailableReason,
 };
 use artisan_domain::{
     AssistantBody, AssistantMessagePhase, EngineId, EngineSelection, IncrementalText, ItemId,
@@ -1339,6 +1340,58 @@ async fn load_claim(
     })
 }
 
+/// Precise, bounded dispatcher diagnostic for a blocked provider continuation.
+///
+/// Interrupted runs stay blocked: `thread/resume` against a missing rollout
+/// fails `-32600`, so no silent fresh start or old-prompt replay is attempted
+/// here. The returned text is persisted as the dispatch `last_error` the
+/// composer lip already renders, so the reader sees exactly why the send
+/// cannot proceed on this thread.
+pub(crate) fn continuation_unavailable_reason(
+    unavailable: &SessionContinuationUnavailable,
+) -> &'static str {
+    match unavailable.reason {
+        SessionContinuationUnavailableReason::ActiveRun => {
+            "provider continuation unavailable: another run is still active"
+        }
+        SessionContinuationUnavailableReason::UnboundSettledRun => {
+            "provider continuation unavailable: the prior run has no provider session"
+        }
+        SessionContinuationUnavailableReason::AmbiguousRun => {
+            "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue"
+        }
+        SessionContinuationUnavailableReason::CandidateLimit => {
+            "provider continuation unavailable: history limit reached"
+        }
+    }
+}
+
+/// Precise, bounded dispatcher diagnostic for a scope-mismatched continuation.
+///
+/// A mismatch fails closed: the dispatcher never resumes across engines or
+/// profiles and never starts silently on a fresh session here.
+pub(crate) fn continuation_incompatible_reason(
+    incompatible: &SessionContinuationIncompatible,
+) -> &'static str {
+    match incompatible.reason {
+        SessionContinuationIncompatibility::Engine => {
+            "provider continuation incompatible: the prior run used a different engine"
+        }
+        SessionContinuationIncompatibility::Profile => {
+            "provider continuation incompatible: the prior run used a different profile"
+        }
+        SessionContinuationIncompatibility::ProviderBindingVersion => {
+            "provider continuation incompatible: the prior binding version is unsupported"
+        }
+        SessionContinuationIncompatibility::ProviderBindingEngine => {
+            "provider continuation incompatible: the prior binding names a different engine"
+        }
+        SessionContinuationIncompatibility::ProviderBindingProfile => {
+            "provider continuation incompatible: the prior binding names a different profile"
+        }
+    }
+}
+
 async fn resolve_continuation(
     claim: &LoadedClaim<'_>,
     ids: &ClaimIds,
@@ -1375,8 +1428,12 @@ async fn resolve_continuation(
                     .map(Some)
                     .ok_or("provider continuation corrupt")
             }
-            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
-            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+            SessionContinuationLookup::Unavailable(unavailable) => {
+                Err(continuation_unavailable_reason(&unavailable))
+            }
+            SessionContinuationLookup::Incompatible(incompatible) => {
+                Err(continuation_incompatible_reason(&incompatible))
+            }
         };
     }
     // Grok resumes its durable provider conversation: the lookup is scoped
@@ -1408,8 +1465,12 @@ async fn resolve_continuation(
                     .map(Some)
                     .ok_or("provider continuation corrupt")
             }
-            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
-            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+            SessionContinuationLookup::Unavailable(unavailable) => {
+                Err(continuation_unavailable_reason(&unavailable))
+            }
+            SessionContinuationLookup::Incompatible(incompatible) => {
+                Err(continuation_incompatible_reason(&incompatible))
+            }
         };
     }
     // Claude resumes its durable native session: the lookup is scoped to the
@@ -1440,8 +1501,12 @@ async fn resolve_continuation(
                     .map(Some)
                     .ok_or("provider continuation corrupt")
             }
-            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
-            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+            SessionContinuationLookup::Unavailable(unavailable) => {
+                Err(continuation_unavailable_reason(&unavailable))
+            }
+            SessionContinuationLookup::Incompatible(incompatible) => {
+                Err(continuation_incompatible_reason(&incompatible))
+            }
         };
     }
     // Cursor resumes its durable ACP session: the lookup is scoped to the
@@ -1472,8 +1537,12 @@ async fn resolve_continuation(
                     .map(Some)
                     .ok_or("provider continuation corrupt")
             }
-            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
-            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+            SessionContinuationLookup::Unavailable(unavailable) => {
+                Err(continuation_unavailable_reason(&unavailable))
+            }
+            SessionContinuationLookup::Incompatible(incompatible) => {
+                Err(continuation_incompatible_reason(&incompatible))
+            }
         };
     }
     // Hermes resumes its durable gateway session: the lookup is scoped to the
@@ -1503,8 +1572,12 @@ async fn resolve_continuation(
                     .map(Some)
                     .ok_or("provider continuation corrupt")
             }
-            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
-            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+            SessionContinuationLookup::Unavailable(unavailable) => {
+                Err(continuation_unavailable_reason(&unavailable))
+            }
+            SessionContinuationLookup::Incompatible(incompatible) => {
+                Err(continuation_incompatible_reason(&incompatible))
+            }
         };
     }
     let EngineSelection::OpenCode2(selection) = claim.settings.config().selection() else {
@@ -1529,8 +1602,12 @@ async fn resolve_continuation(
                 .map(Some)
                 .ok_or("provider continuation corrupt")
         }
-        SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
-        SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+        SessionContinuationLookup::Unavailable(unavailable) => {
+                Err(continuation_unavailable_reason(&unavailable))
+            }
+        SessionContinuationLookup::Incompatible(incompatible) => {
+                Err(continuation_incompatible_reason(&incompatible))
+            }
     }
 }
 
@@ -4049,6 +4126,93 @@ mod settings_decision_tests {
         assert_eq!(
             classify_settings_load(Ok(None)),
             SettingsLoadDecision::Requeue("engine unconfigured")
+        );
+    }
+}
+
+#[cfg(test)]
+mod continuation_reason_tests {
+    use super::{continuation_incompatible_reason, continuation_unavailable_reason};
+    use artisan_database::{
+        SessionContinuationIncompatibility, SessionContinuationIncompatible,
+        SessionContinuationUnavailable, SessionContinuationUnavailableReason,
+    };
+
+    fn unavailable(reason: SessionContinuationUnavailableReason) -> SessionContinuationUnavailable {
+        SessionContinuationUnavailable {
+            run_id: artisan_domain::RunId::parse("run-a").expect("run id"),
+            reason,
+        }
+    }
+
+    fn incompatible(reason: SessionContinuationIncompatibility) -> SessionContinuationIncompatible {
+        SessionContinuationIncompatible {
+            run_id: artisan_domain::RunId::parse("run-a").expect("run id"),
+            reason,
+        }
+    }
+
+    #[test]
+    fn interrupted_run_names_unknown_outcome_and_new_chat() {
+        assert_eq!(
+            continuation_unavailable_reason(&unavailable(
+                SessionContinuationUnavailableReason::AmbiguousRun
+            )),
+            "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue"
+        );
+    }
+
+    #[test]
+    fn active_and_unbound_blocks_keep_their_exact_causes() {
+        assert_eq!(
+            continuation_unavailable_reason(&unavailable(
+                SessionContinuationUnavailableReason::ActiveRun
+            )),
+            "provider continuation unavailable: another run is still active"
+        );
+        assert_eq!(
+            continuation_unavailable_reason(&unavailable(
+                SessionContinuationUnavailableReason::UnboundSettledRun
+            )),
+            "provider continuation unavailable: the prior run has no provider session"
+        );
+        assert_eq!(
+            continuation_unavailable_reason(&unavailable(
+                SessionContinuationUnavailableReason::CandidateLimit
+            )),
+            "provider continuation unavailable: history limit reached"
+        );
+    }
+
+    #[test]
+    fn scope_mismatches_name_the_exact_fence() {
+        assert_eq!(
+            continuation_incompatible_reason(&incompatible(SessionContinuationIncompatibility::Engine)),
+            "provider continuation incompatible: the prior run used a different engine"
+        );
+        assert_eq!(
+            continuation_incompatible_reason(&incompatible(
+                SessionContinuationIncompatibility::Profile
+            )),
+            "provider continuation incompatible: the prior run used a different profile"
+        );
+        assert_eq!(
+            continuation_incompatible_reason(&incompatible(
+                SessionContinuationIncompatibility::ProviderBindingVersion
+            )),
+            "provider continuation incompatible: the prior binding version is unsupported"
+        );
+        assert_eq!(
+            continuation_incompatible_reason(&incompatible(
+                SessionContinuationIncompatibility::ProviderBindingEngine
+            )),
+            "provider continuation incompatible: the prior binding names a different engine"
+        );
+        assert_eq!(
+            continuation_incompatible_reason(&incompatible(
+                SessionContinuationIncompatibility::ProviderBindingProfile
+            )),
+            "provider continuation incompatible: the prior binding names a different profile"
         );
     }
 }

@@ -1084,6 +1084,9 @@ impl RequestHandler {
                 Ok(outcome(request_id, ResponsePayload::ActiveRun(result)))
             }
             Query::ListQueuedMessages(query) => self.read_composer_queue(request_id, query).await,
+            Query::ListFailedMessages(query) => {
+                self.read_failed_dispatches(request_id, query).await
+            }
             Query::ReadRecalledMessage(query) => {
                 self.read_recalled_composer_message(request_id, query).await
             }

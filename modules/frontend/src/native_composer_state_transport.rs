@@ -6,16 +6,17 @@
 //! `ServiceRuntime`, `StableMutation`, `ExpectedResponse`, `publish`, and
 //! `durable_save_request` seams without widening those internals.
 //!
-//! No byte-bearing queue payload is requested by the listing path. Only an
-//! authoritative edit withdrawal followed by a matching `Withdrawn` receipt
-//! may issue the recalled-message read.
+//! No byte-bearing queue payload is requested by either listing path. Only an
+//! authoritative edit withdrawal followed by a matching `Withdrawn` receipt,
+//! or an explicit new-chat recovery over a terminally failed row, may issue
+//! the recalled-message read.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::large_enum_variant)]
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_domain::{
-    Command, ListQueuedMessages, QueuedMessageListOrder, QueuedMessageListing,
+    Command, FailedMessageListing, ListFailedMessages, ListQueuedMessages, QueuedMessageListOrder, QueuedMessageListing,
     QueuedMessageWithdrawalResult, ReadRecalledMessage, RecalledMessageResult, RequestId,
     RunUsageResult, ThreadId, WithdrawQueuedMessageCommand,
 };
@@ -38,6 +39,15 @@ pub(crate) enum ComposerStateCommand {
         /// Stable order for the returned rows.
         order: QueuedMessageListOrder,
         /// Page size, bounded by the domain constant.
+        limit: usize,
+    },
+    /// Read one bounded, byte-free failed-dispatch page for the mounted scope.
+    ListFailedMessages {
+        /// Thread whose terminally failed rows are requested.
+        thread_id: ThreadId,
+        /// Application generation used to fence the response.
+        generation: u64,
+        /// Page size, bounded by the failed-listing domain constant.
         limit: usize,
     },
     /// Withdraw one exact queued message. The command id is stable across a
@@ -80,6 +90,24 @@ pub(crate) enum ComposerStateEvent {
     },
     /// Queue listing request failed; no local placeholder rows are implied.
     QueuedMessagesFailed {
+        /// Thread requested by the application.
+        thread_id: ThreadId,
+        /// Generation carried by the request.
+        generation: u64,
+        /// Redacted request failure.
+        failure: ServiceFailure,
+    },
+    /// Authoritative byte-free failed-dispatch listing, newest failures first.
+    FailedMessages {
+        /// Thread requested by the application.
+        thread_id: ThreadId,
+        /// Generation carried by the request.
+        generation: u64,
+        /// Exact listing and count from Forge.
+        listing: FailedMessageListing,
+    },
+    /// Failed-dispatch listing request failed; no local placeholder rows are implied.
+    FailedMessagesFailed {
         /// Thread requested by the application.
         thread_id: ThreadId,
         /// Generation carried by the request.
@@ -168,6 +196,13 @@ pub(super) async fn handle_composer_state_command(
             limit,
         } => {
             list_queued_messages(runtime, frames, events, thread_id, generation, order, limit).await
+        }
+        ComposerStateCommand::ListFailedMessages {
+            thread_id,
+            generation,
+            limit,
+        } => {
+            list_failed_messages(runtime, frames, events, thread_id, generation, limit).await
         }
         ComposerStateCommand::WithdrawQueuedMessage {
             generation,
@@ -274,6 +309,102 @@ async fn list_queued_messages(
     publish_composer_event(
         events,
         ComposerStateEvent::QueuedMessages {
+            thread_id,
+            generation,
+            listing,
+        },
+    )
+}
+
+async fn list_failed_messages(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    generation: u64,
+    limit: usize,
+) -> Result<(), ServiceFailure> {
+    if limit > COMPOSER_STATE_READ_LIMIT {
+        return publish_composer_event(
+            events,
+            ComposerStateEvent::FailedMessagesFailed {
+                thread_id,
+                generation,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    }
+    if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
+        return publish_composer_event(
+            events,
+            ComposerStateEvent::FailedMessagesFailed {
+                thread_id,
+                generation,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    }
+    let query = match ListFailedMessages::new(thread_id.clone(), limit) {
+        Ok(query) => query,
+        Err(_) => {
+            return publish_composer_event(
+                events,
+                ComposerStateEvent::FailedMessagesFailed {
+                    thread_id,
+                    generation,
+                    failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+                },
+            );
+        }
+    };
+    let payload = match runtime
+        .request(
+            frames,
+            query_request(Query::ListFailedMessages(query)),
+            ExpectedResponse::FailedMessages {
+                thread_id: thread_id.clone(),
+            },
+        )
+        .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return publish_composer_event(
+                events,
+                ComposerStateEvent::FailedMessagesFailed {
+                    thread_id,
+                    generation,
+                    failure: error.into(),
+                },
+            );
+        }
+    };
+    let ResponsePayload::FailedMessages(listing) = payload else {
+        return publish_composer_event(
+            events,
+            ComposerStateEvent::FailedMessagesFailed {
+                thread_id,
+                generation,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    };
+    if listing.thread_id() != &thread_id {
+        return publish_composer_event(
+            events,
+            ComposerStateEvent::FailedMessagesFailed {
+                thread_id,
+                generation,
+                failure: ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                ),
+            },
+        );
+    }
+    publish_composer_event(
+        events,
+        ComposerStateEvent::FailedMessages {
             thread_id,
             generation,
             listing,
