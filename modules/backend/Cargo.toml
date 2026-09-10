@@ -152,7 +152,6 @@ name = "request_handler"
 path = "../../tests/backend/request_handler.rs"
 
 [[test]]
-[[test]]
 name = "engine_usage"
 path = "../../tests/backend/engine_usage.rs"
 
