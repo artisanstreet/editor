@@ -3529,9 +3529,10 @@ impl NativeApplication {
             .run_controls
             .starting_guard_active(self.selected_thread.as_ref())
         {
-            self.message_failure = Some(NativeMessageFailure::new(
-                ServiceFailure::invalid(ServiceFailureStage::Request),
-            ));
+            self.message_failure = Some(NativeMessageFailure::new(ServiceFailure {
+                stage: ServiceFailureStage::Request,
+                category: ServiceFailureCategory::InvalidConfiguration,
+            }));
             self.message_failure_note = Some(
                 "The current run is still starting. Wait before sending another message."
                     .to_owned(),
@@ -13480,6 +13481,7 @@ mod tests {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-newer").expect("request"),
                     payload: body,
+                    steer_target: None,
                     token,
                 });
                 application.handle_service_event(
@@ -13522,6 +13524,7 @@ mod tests {
                     request_id: artisan_domain::RequestId::parse("request-failure")
                         .expect("request"),
                     payload: body,
+                    steer_target: None,
                     token,
                 });
                 application.handle_service_event(
@@ -13555,6 +13558,7 @@ mod tests {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-stop").expect("request"),
                     payload: body,
+                    steer_target: None,
                     token,
                 });
                 application.handle_service_event(
@@ -13594,6 +13598,7 @@ mod tests {
                     request_id: artisan_domain::RequestId::parse("request-transition")
                         .expect("request"),
                     payload: body,
+                    steer_target: None,
                     token,
                 });
                 application.message_receipt = Some(first_receipt(
@@ -13631,6 +13636,7 @@ mod tests {
                     request_id: artisan_domain::RequestId::parse("request-shutdown")
                         .expect("request"),
                     payload: body,
+                    steer_target: None,
                     token,
                 });
                 application.prepare_shutdown(application_cx);
@@ -13751,6 +13757,7 @@ mod tests {
             thread_id: source.clone(),
             request_id: request("message-switch"),
             payload: body,
+            steer_target: None,
             token,
         });
 
@@ -14077,6 +14084,7 @@ mod tests {
                     thread_id: source.clone(),
                     request_id: request("message-stopped"),
                     payload: body,
+                    steer_target: None,
                     token,
                 });
                 let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);
