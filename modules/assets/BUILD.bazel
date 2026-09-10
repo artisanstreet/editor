@@ -155,6 +155,7 @@ FONT_FILES = [
 
 FONT_LICENSES = [
     "fonts/TWEMOJI.md",
+    "licenses/twemoji-LICENSE.md",
     "licenses/artisan-neo-OFL.txt",
     "licenses/cal-sans-OFL.txt",
     "licenses/spline-sans-OFL.txt",
