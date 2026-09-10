@@ -19,7 +19,7 @@ use std::fmt;
 
 use artisan_domain::{
     AssistantMessagePhase, ConversationItem, ConversationLifecycle, ConversationPatch,
-    ConversationSnapshot, ItemId, RequestId, ThreadId, TurnId,
+    ConversationSnapshot, ConversationTurn, ItemId, RequestId, ThreadId, TurnId,
 };
 use thiserror::Error;
 
@@ -771,6 +771,14 @@ struct SteeringRecord {
 pub struct ConversationStateController {
     delivery: ConversationDeliveryController,
     turns: BTreeMap<TurnId, ConversationTurnController>,
+    /// Turns under explicit caller ownership.
+    ///
+    /// Delivery synchronizes only turns absent from this set: an explicit
+    /// [`Self::register_turn`] replaces any delivery-derived controller with
+    /// a fresh one and takes over that turn permanently, so manual drive
+    /// semantics never change under a live subscription. Bounded by
+    /// [`MAX_TURN_CONTROLLERS`] together with [`Self::turns`].
+    explicit_turns: BTreeSet<TurnId>,
     steerings: BTreeMap<SteeringKey, SteeringRecord>,
     disclosures: BTreeMap<SceneId, DisclosureController>,
     facts: BTreeMap<SceneId, SceneFact>,
@@ -785,6 +793,7 @@ impl fmt::Debug for ConversationStateController {
             .field("thread_id", self.delivery.thread_id())
             .field("delivery_phase", &self.delivery.phase())
             .field("turn_count", &self.turns.len())
+            .field("explicit_turn_count", &self.explicit_turns.len())
             .field("steering_count", &self.steerings.len())
             .field("disclosure_count", &self.disclosures.len())
             .field("scene_fact_count", &self.facts.len())
@@ -810,6 +819,7 @@ impl ConversationStateController {
         Self {
             delivery,
             turns: BTreeMap::new(),
+            explicit_turns: BTreeSet::new(),
             steerings: BTreeMap::new(),
             disclosures: BTreeMap::new(),
             facts: BTreeMap::new(),
@@ -905,26 +915,34 @@ impl ConversationStateController {
 
     /// Registers one turn controller.
     ///
+    /// Explicit registration takes permanent ownership of the turn: it
+    /// replaces any delivery-derived controller with a fresh one, and later
+    /// delivery synchronization skips explicitly owned turns. Registering an
+    /// already explicit turn is still a typed duplicate.
+    ///
     /// # Errors
     ///
     /// Returns [`ConversationStateError::OwnerClosed`] for a closed owner,
-    /// [`ConversationStateError::DuplicateTurn`] for a duplicate identity, or
-    /// [`ConversationStateError::CapacityExhausted`] when a bound is full.
+    /// [`ConversationStateError::DuplicateTurn`] for an already explicit
+    /// identity, or [`ConversationStateError::CapacityExhausted`] when a bound
+    /// is full.
     pub fn register_turn(&mut self, turn_id: TurnId) -> Result<(), ConversationStateError> {
         if self.delivery.is_closed() {
             return Err(ConversationStateError::OwnerClosed);
         }
-        if self.turns.contains_key(&turn_id) {
+        if self.explicit_turns.contains(&turn_id) {
             return Err(ConversationStateError::DuplicateTurn { turn_id });
         }
+        let fresh = !self.turns.contains_key(&turn_id);
         Self::ensure_capacity(
             CapacityResource::Turns,
-            self.turns.len().saturating_add(1),
+            self.turns.len().saturating_add(usize::from(fresh)),
             MAX_TURN_CONTROLLERS,
         )?;
         self.ensure_effect_capacity(1)?;
         self.turns
-            .insert(turn_id, ConversationTurnController::new());
+            .insert(turn_id.clone(), ConversationTurnController::new());
+        self.explicit_turns.insert(turn_id);
         self.push_effect(ConversationStateEffect::SceneInvalidated);
         Ok(())
     }
@@ -1355,9 +1373,47 @@ impl ConversationStateController {
             | ConversationDeliveryEvent::Closed => {}
         }
         self.ensure_effect_capacity(MAX_DELIVERY_EFFECTS_PER_EVENT)?;
-        let result = self.delivery.dispatch(event);
-        self.push_delivery_effects();
-        result.map_err(ConversationStateError::Delivery)
+        match self.delivery.dispatch(event) {
+            Ok(()) => {
+                self.push_delivery_effects();
+                self.synchronize_turn_controllers();
+                Ok(())
+            }
+            Err(error) => {
+                self.push_delivery_effects();
+                Err(ConversationStateError::Delivery(error))
+            }
+        }
+    }
+
+    /// Synchronizes delivery-owned turn controllers with the last-good snapshot.
+    ///
+    /// After every accepted delivery event, each durable turn without an
+    /// explicitly registered controller gains one (registry room permitting)
+    /// and receives the events derived from canonical lifecycle and item
+    /// evidence, so the live snapshot/patch path produces meaningful status
+    /// without test-seeded manual drive. Derived refusals are swallowed: a
+    /// sealed, stale, or regressed derivation only means the controller
+    /// already covers that durable state. At most one invalidation is pushed,
+    /// only when a controller changed leaf state; without effect room the
+    /// accepted delivery still stands and status catches up on a later event.
+    fn synchronize_turn_controllers(&mut self) {
+        if self.delivery.is_closed() {
+            return;
+        }
+        let Some(snapshot) = self.delivery.snapshot() else {
+            return;
+        };
+        if self.effects.len().saturating_add(1) > MAX_PENDING_EFFECTS {
+            return;
+        }
+        synchronize_turns(
+            &mut self.turns,
+            &self.explicit_turns,
+            &self.facts,
+            snapshot,
+            &mut self.effects,
+        );
     }
 
     fn dispatch_turn(
@@ -1868,6 +1924,204 @@ impl ConversationStateController {
             });
         }
         Ok(())
+    }
+}
+
+/// Drives delivery-owned turn controllers from one accepted snapshot.
+///
+/// For every durable turn without an explicitly registered controller, ensures
+/// a controller exists (skipped when the turn registry is full) and dispatches
+/// the events derived from canonical lifecycle and item evidence. Derived
+/// refusals leave state unchanged: they only mean the controller already
+/// covers that durable state. Pushes at most one
+/// [`ConversationStateEffect::SceneInvalidated`], only when a controller
+/// actually changed leaf state, so replays and refreshes stay effect-quiet.
+fn synchronize_turns(
+    turns: &mut BTreeMap<TurnId, ConversationTurnController>,
+    explicit_turns: &BTreeSet<TurnId>,
+    facts: &BTreeMap<SceneId, SceneFact>,
+    snapshot: &ConversationSnapshot,
+    effects: &mut Vec<ConversationStateEffect>,
+) {
+    let mut items_by_turn: BTreeMap<&TurnId, Vec<&ConversationItem>> = BTreeMap::new();
+    for item in snapshot.items() {
+        items_by_turn.entry(item.turn_id()).or_default().push(item);
+    }
+    let mut work_by_turn: BTreeSet<&TurnId> = BTreeSet::new();
+    let mut thought_by_turn: BTreeSet<&TurnId> = BTreeSet::new();
+    for fact in facts.values() {
+        match &fact.kind {
+            SceneFactKind::Activity | SceneFactKind::ChangedFiles { .. } => {
+                work_by_turn.insert(&fact.turn_id);
+            }
+            SceneFactKind::Reasoning { .. } => {
+                thought_by_turn.insert(&fact.turn_id);
+            }
+            SceneFactKind::Compaction { .. }
+            | SceneFactKind::WorkSession { .. }
+            | SceneFactKind::Plan { .. }
+            | SceneFactKind::Approval { .. }
+            | SceneFactKind::Question { .. }
+            | SceneFactKind::Error { .. }
+            | SceneFactKind::UsageInterruption { .. }
+            | SceneFactKind::ModelTransition { .. }
+            | SceneFactKind::NativeFact { .. } => {}
+        }
+    }
+
+    let watermark_ms = snapshot.updated_at().as_millis();
+    let mut changed = false;
+    for turn in snapshot.turns() {
+        if explicit_turns.contains(&turn.turn_id) {
+            continue;
+        }
+        if !turns.contains_key(&turn.turn_id) {
+            if turns.len() >= MAX_TURN_CONTROLLERS {
+                continue;
+            }
+            turns.insert(turn.turn_id.clone(), ConversationTurnController::new());
+        }
+        let controller = turns
+            .get_mut(&turn.turn_id)
+            .expect("turn controller was ensured above");
+        let before = controller.state();
+        let items: &[&ConversationItem] = items_by_turn
+            .get(&turn.turn_id)
+            .map_or(&[], Vec::as_slice);
+        for event in derive_turn_events(
+            turn,
+            items,
+            work_by_turn.contains(&turn.turn_id),
+            thought_by_turn.contains(&turn.turn_id),
+            watermark_ms,
+            controller,
+        ) {
+            // Best-effort: a sealed, stale, or regressed derivation only means
+            // this durable state is already covered.
+            let _ = controller.dispatch(event);
+        }
+        changed |= controller.state() != before;
+    }
+    if changed {
+        effects.push(ConversationStateEffect::SceneInvalidated);
+    }
+}
+
+/// Derives the turn-chart events for one durable turn from canonical evidence.
+///
+/// Only canonical lifecycle, item, and fact evidence feeds the chart — never
+/// text content or speculation:
+///
+/// - terminal lifecycles settle (`Completed`, `Failed`, `Cancelled`,
+///   `Interrupted`), replaying through a work/thought pre-step first so the
+///   settled kind stays truthful;
+/// - active lifecycles report a streaming reply while non-commentary reply
+///   text streams, else work/thought evidence, else provider wait;
+/// - `Pending` derives nothing: a queued turn renders quiet.
+///
+/// Timestamps are authoritative Forge times: first activation counts from the
+/// turn's own creation (send time), so the live elapsed basis matches the
+/// reference and never resets; later drives ride the monotonic window
+/// watermark and terminal events take the later of the turn update and the
+/// watermark, so redelivery can neither regress the chart clock nor move a
+/// frozen settlement. Revisions ride the controller's own monotonic lane
+/// (`revision + 1/2`): durable per-entity revisions are incomparable across a
+/// turn and never enter the chart.
+fn derive_turn_events(
+    turn: &ConversationTurn,
+    items: &[&ConversationItem],
+    work_evidence: bool,
+    thought_evidence: bool,
+    watermark_ms: i64,
+    controller: &ConversationTurnController,
+) -> Vec<TurnEvent> {
+    let activate_at = if controller.started_at().is_none() {
+        turn.created_at.as_millis()
+    } else {
+        watermark_ms
+    };
+    let settle_at = turn.updated_at.as_millis().max(watermark_ms);
+    let first_revision = controller.revision().saturating_add(1);
+    let second_revision = controller.revision().saturating_add(2);
+
+    match turn.lifecycle {
+        ConversationLifecycle::Pending => Vec::new(),
+        ConversationLifecycle::Completed
+        | ConversationLifecycle::Failed
+        | ConversationLifecycle::Cancelled => {
+            // A turn first seen already settled (history load) still earns a
+            // pre-step: it plants the truthful creation basis and the settled
+            // kind instead of collapsing the whole span to zero.
+            let needs_basis = controller.started_at().is_none();
+            let mut events = Vec::with_capacity(2);
+            if work_evidence {
+                events.push(TurnEvent::Working {
+                    at: activate_at,
+                    revision: first_revision,
+                });
+            } else if thought_evidence || needs_basis {
+                events.push(TurnEvent::Thinking {
+                    at: activate_at,
+                    revision: first_revision,
+                });
+            }
+            let revision = if events.is_empty() {
+                first_revision
+            } else {
+                second_revision
+            };
+            events.push(match turn.lifecycle {
+                ConversationLifecycle::Completed => TurnEvent::Completed {
+                    at: settle_at,
+                    revision,
+                },
+                ConversationLifecycle::Failed => TurnEvent::Failed {
+                    at: settle_at,
+                    revision,
+                    kind: None,
+                },
+                _ => TurnEvent::Cancelled {
+                    at: settle_at,
+                    revision,
+                },
+            });
+            events
+        }
+        ConversationLifecycle::Interrupted => vec![TurnEvent::Interrupted {
+            at: settle_at,
+            revision: first_revision,
+        }],
+        ConversationLifecycle::Active
+        | ConversationLifecycle::Streaming
+        | ConversationLifecycle::Waiting => {
+            let streaming_reply = items.iter().any(|item| {
+                matches!(item, ConversationItem::AssistantMessage(message)
+                    if message.lifecycle == ConversationLifecycle::Streaming
+                        && message.phase != AssistantMessagePhase::Commentary
+                        && !message.body.as_str().is_empty())
+            });
+            vec![if streaming_reply {
+                TurnEvent::StreamingReply {
+                    at: activate_at,
+                    revision: first_revision,
+                }
+            } else if work_evidence {
+                TurnEvent::Working {
+                    at: activate_at,
+                    revision: first_revision,
+                }
+            } else if thought_evidence {
+                TurnEvent::Thinking {
+                    at: activate_at,
+                    revision: first_revision,
+                }
+            } else {
+                TurnEvent::WaitingForProvider {
+                    at: activate_at,
+                    revision: first_revision,
+                }
+            }]
+        }
     }
 }
 
