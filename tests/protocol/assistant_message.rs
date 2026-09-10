@@ -734,8 +734,8 @@ fn raw_invalid_steer_run_id_returns_a_typed_identifier_error() {
     {
         let mut queue = request.init_queue_message();
         queue.set_thread_id(THREAD_ID);
-        queue.init_text().set_present("steer me");
-        queue.init_attachments(0);
+        queue.reborrow().init_text().set_present("steer me");
+        queue.reborrow().init_attachments(0);
         queue.set_steer_run_id("run leaked id");
     }
     let error = decode_error(&words(&message));
