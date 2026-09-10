@@ -30,8 +30,10 @@ blocks. The renderer then painted heading + prose + fence with no list.
   plain children. `link-url.ts` further gates rich-link metadata to absolute
   HTTP(S).
 - `lib/styles/prose.css`: bullets/counters muted, body muted-foreground,
-  headings/bold/links foreground, conversation links blue with underline
-  offset; inline code keeps backticks out (`content-none`).
+  headings/bold foreground, plain links foreground underlined;
+  conversation links (`a.conversation-link`, the only class the renderer
+  emits) blue with no underline; inline code keeps backticks out
+  (`content-none`).
 
 ## Native mapping
 
@@ -59,9 +61,12 @@ blocks. The renderer then painted heading + prose + fence with no list.
   helper, leaf text emits only non-default runs, and adjacent equal runs
   coalesce — so formatted-run count never goes quadratic on large replies
   the renderer re-parses per render: inline code reads muted with no wash,
-  strong adds `FontWeight::SEMIBOLD` (plugin 600), emphasis adds
-  `FontStyle::Italic`, openable links add accent color, `FontWeight::MEDIUM`
-  (plugin `a` 500), and 1px `UnderlineStyle`.
+  strong adds `FontWeight::SEMIBOLD` (plugin 600) in the foreground token,
+  emphasis adds `FontStyle::Italic`, openable links read reference blue
+  (`banner_info`: blue-500 light / blue-400 dark) at `FontWeight::MEDIUM`
+  (plugin `a` 500) with no underline (`conversation-link` class
+  semantics). Nested `a strong` / `a code` inherit the link color per the
+  plugin rules.
 - Paragraphs with openable links render as retained `SelectableText`
   whose `.links()` activation opens the clicked destination through
   `cx.open_url` (platform browser); the index is bounds-checked against
@@ -109,8 +114,9 @@ blocks. The renderer then painted heading + prose + fence with no list.
   - headings: `HEADING_WEIGHT` `FontWeight(630)`, `heading(level)` returns
     size/line/tracking/margins — h1 30/37.5/−1.35/0/26.667, h2
     24/30/−1.08/48/24, h3 20/27.5/−0.9/32/12, h4–h6 18/24.75/−0.81/27/9
-    (plugin em margins at the overridden sizes; `h2/h3/h4 + *` followers
-    and first/last children zero as in CSS);
+    (plugin em margins at the overridden sizes; first children take no top
+    margin, `h2/h3/h4 + *` zeroes only the follower top so the heading
+    bottom still collapses through);
   - inline: `STRONG_WEIGHT` SEMIBOLD, `LINK_WEIGHT` MEDIUM,
     `CODE_SIZE_PX` 14 / `CODE_LINE_PX` 24;
   - blocks: paragraphs 20, fences 24, lists 20, indent 26, item pitch 8,
@@ -121,7 +127,8 @@ blocks. The renderer then painted heading + prose + fence with no list.
   - gaps collapse top-only via `block_gaps(blocks, scope) -> Vec<f32>`
     (`BlockScope::Root/Item`): each gap renders once as top margin because
     flex columns never collapse, so two paragraphs read max(20, 20) = 20,
-    never 40; `h2/h3/h4 + *` clears the follower only.
+    never 40; `h2/h3/h4 + *` clears the follower top only, so h2+paragraph
+    still reads the heading's 24 px bottom.
 - Families are unchanged pending the open question: Spline Sans body and
   headings, Spline Sans Mono code, Artisan Neo wordmark at 600.
   `editor_text_desktop` is untouched; prose behavior applies at the
@@ -130,15 +137,27 @@ blocks. The renderer then painted heading + prose + fence with no list.
   (true `instantiateVariableFont` instances, OS/2 410/630, outlines
   distinct from 400/600 neighbors) are registered through the existing
   `static_faces` list; Bazel runfiles entries stay root-owned.
-- Honest gaps, no fakes: inline code keeps body size/face (highlight runs
-  cannot resize/refont, and `SelectableText` has no family-override
-  passthrough); code spans inherit body tracking (reference `code`
-  letter-spacing normal is per-element); blockquote/hr structure has no
-  engine model in this packet (`markdown.rs` frozen) so quotes read as
-  paragraphs and rules are dropped — both reported for a follow-up engine
-  packet; fence copy/filename chrome has no renderer action counterpart;
-  link color stays accent (reference conversation blue has no mapped
-  native token).
+- Honest gaps, no fakes: inline code reads 400 muted today with body face,
+  size, and tracking. That is an open dependency, not a GPUI limit and not
+  accepted parity: shared `StyledText` already supports
+  `with_font_family_overrides` (sorted non-overlapping char-boundary
+  ranges) and per-run `TextRun.letter_spacing`; only the shared
+  `SelectableText` element exposes neither yet. The frozen
+  `InlinePresentation` range API carries exactly what that extension
+  needs — `highlights` for `with_highlights`, `code_ranges` for the mono
+  family override plus run-level tracking reset, `links` for activation —
+  additive changes only. Until the extension lands (separate worker or
+  follow-up, root delegates), code spans inherit body tracking
+  (reference `code` letter-spacing normal is per-element); blockquote/hr
+  structure has no engine model in this packet (`markdown.rs` frozen) so
+  quotes read as paragraphs and rules are dropped — both reported for a
+  follow-up engine packet; fence copy/filename chrome has no renderer
+  action counterpart.
+- Body, headings, and strong carry their reference colors (muted body,
+  foreground headings/strong) instead of inheriting the bright parent;
+  fences read the foreground pre-code token under the reference vertical
+  gradient face, with the `card-lg` shadow stack deliberately unpainted
+  (no native helper exists).
 
 ## Streaming / balanced-events contract
 

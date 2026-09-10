@@ -25,8 +25,10 @@
 //! Spacing and type follow [`ProseTypography`](crate::theme::ProseTypography):
 //! 16 px / 28 px body at weight 410, per-heading sizes with collapsing
 //! block margins, and fence chrome from the reference code snippet. Inline
-//! code reads 400 muted with no wash; size, face, and tracking cannot ride
-//! a highlight run (see `inline_code_style`), so those stay reported gaps.
+//! code reads 400 muted with no wash; mono face, 14 px size, and normal
+//! tracking ride the shared `StyledText` range APIs through
+//! `InlinePresentation.code_ranges` once the selection extension exposes
+//! them (see `inline_code_style`).
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -34,12 +36,12 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Div, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement,
-    SharedString, Styled, UnderlineStyle, div, prelude::InteractiveElement as _, px,
+    SharedString, Styled, div, prelude::InteractiveElement as _, px,
 };
 
 use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownEngine, Span};
 use crate::selectable_text::SelectableText;
-use crate::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens};
+use crate::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
 
 /// Synchronous renderer for accepted Markdown message bodies.
 ///
@@ -146,6 +148,7 @@ fn body_container(theme: ArtisanTheme) -> Div {
         .line_height(px(ProseTypography::BODY_LINE_PX))
         .font_weight(ProseTypography::BODY_WEIGHT)
         .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
+        .text_color(theme.colors.muted_foreground.to_paint())
         .whitespace_normal()
 }
 
@@ -212,25 +215,27 @@ fn with_block_margins(child: AnyElement, top_px: f32) -> AnyElement {
 /// collapse at all, so emitting both a bottom margin and a collapsed top
 /// would double every gap (two paragraphs would read 20 + 20 = 40 instead
 /// of 20). Each gap here is therefore rendered exactly once, as top margin
-/// with zero bottom: the first block takes 0, followers of h2–h4 take 0
-/// (`h2/h3/h4 + *` clears the follower only, never the heading's own
-/// bottom, which simply has no consumer under top-only rendering), and
-/// every other gap is the max of the facing margins.
+/// with zero bottom: the first block takes 0, and every other gap is the
+/// max of the facing margins. Followers of h2–h4 keep the heading's own
+/// bottom (`h2/h3/h4 + *` zeroes only the follower's top margin, so the
+/// collapse still reads the full 24 px after an h2).
 #[must_use]
 pub fn block_gaps(blocks: &[Block], scope: BlockScope) -> Vec<f32> {
     let mut gaps = Vec::with_capacity(blocks.len());
     let mut previous_bottom = 0.0;
-    let mut previous_zeroes_next = false;
+    let mut previous_zeroes_follower = false;
     for (index, block) in blocks.iter().enumerate() {
         let (margin_top, margin_bottom) = block_margins(block, scope);
-        let gap = if index == 0 || previous_zeroes_next {
+        let gap = if index == 0 {
             0.0
+        } else if previous_zeroes_follower {
+            previous_bottom
         } else {
             previous_bottom.max(margin_top)
         };
         gaps.push(gap);
         previous_bottom = margin_bottom;
-        previous_zeroes_next = matches!(block, Block::Heading { level: 2 | 3 | 4, .. });
+        previous_zeroes_follower = matches!(block, Block::Heading { level: 2 | 3 | 4, .. });
     }
     gaps
 }
@@ -263,6 +268,7 @@ fn render_block_at_depth(
                 .text_size(px(heading.size_px))
                 .line_height(px(heading.line_px))
                 .letter_spacing(px(heading.tracking_px))
+                .text_color(theme.colors.foreground.to_paint())
                 .child(render_inline(&selector, spans, theme));
         }
         Block::Paragraph { spans, .. } => {
@@ -428,18 +434,29 @@ fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) ->
     let selector = format!("{parent_selector}-code");
     let id = SharedString::from(format!("{selector}-text"));
     // Fence chrome follows `docs-code-snippet-body`: 14 px mono at 24 px
-    // leading with 16 px padding and the shared 22 px 3xl radius. Fences
-    // read at 400 with normal tracking (plugin `pre`, `code`
-    // letter-spacing reset), not the body 410/−0.64. The surface gradient
-    // stays a flat muted fill natively; copy and filename chrome have no
-    // renderer action counterpart.
+    // leading with 16 px padding and the shared 22 px 3xl radius, reading
+    // in the foreground pre-code token at 400 with normal tracking
+    // (plugin `pre`, `code` letter-spacing reset), not the muted body
+    // 410/−0.64. The face is the reference vertical gradient
+    // (`bg-linear-to-t from-surface-50 to-surface-125`, dark 950→900)
+    // through the existing gradient helper; copy and filename chrome have
+    // no renderer action counterpart. The `card-lg` shadow stack has no
+    // native helper and stays unpainted rather than reinvented.
+    let (gradient_top, gradient_bottom) = match theme.mode {
+        ThemeMode::Light => (SurfaceStep::S125.oklch(), SurfaceStep::S50.oklch()),
+        ThemeMode::Dark => (SurfaceStep::S900.oklch(), SurfaceStep::S950.oklch()),
+    };
     let mut code = body_container(theme)
         .font_family(theme.typography.mono.family)
         .text_size(px(ProseTypography::CODE_SIZE_PX))
         .line_height(px(ProseTypography::CODE_LINE_PX))
         .font_weight(FontWeight::NORMAL)
         .letter_spacing(px(0.0))
-        .bg(theme.colors.muted.to_paint())
+        .text_color(theme.colors.foreground.to_paint())
+        .bg(crate::gradient::vertical_gradient(
+            gradient_top,
+            gradient_bottom,
+        ))
         .rounded(RadiusTokens::value(RadiusStep::X3l))
         .p(px(ProseTypography::CODE_PAD_PX))
         .child(SelectableText::retained(id, source, theme, highlights));
@@ -469,7 +486,17 @@ pub struct InlineLink {
 }
 
 /// Owned inline presentation for one span slice: flattened text, one
-/// ordered non-overlapping highlight list, and openable-link metadata.
+/// ordered non-overlapping highlight list, openable-link metadata, and
+/// inline-code ranges.
+///
+/// FROZEN range contract for the selection extension: `source` owns the
+/// text every range addresses; `highlights` are sorted, non-overlapping,
+/// and on character boundaries (exactly what one `with_highlights` call
+/// consumes); `links` are openable ranges in source order;
+/// `code_ranges` are the inline-code sub-ranges in source order,
+/// non-overlapping and on character boundaries (exactly what
+/// `with_font_family_overrides` consumes for the mono face, with run-level
+/// tracking reset beside it). Additive changes only — never reshape.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlinePresentation {
     /// Flattened visible text.
@@ -479,6 +506,8 @@ pub struct InlinePresentation {
     pub highlights: Vec<(Range<usize>, HighlightStyle)>,
     /// Openable links in source order.
     pub links: Vec<InlineLink>,
+    /// Inline-code ranges in source order for family/tracking treatment.
+    pub code_ranges: Vec<Range<usize>>,
 }
 
 /// Flattens spans into presentation data with a single merged highlight
@@ -508,6 +537,7 @@ pub fn present_inline(spans: &[Span], theme: ArtisanTheme) -> InlinePresentation
         source: accumulator.source,
         highlights: accumulator.runs,
         links: accumulator.links,
+        code_ranges: accumulator.code_ranges,
     }
 }
 
@@ -516,6 +546,7 @@ struct InlineAccumulator {
     source: String,
     runs: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<InlineLink>,
+    code_ranges: Vec<Range<usize>>,
 }
 
 /// Emits one leaf run, coalescing into the previous run when the style
@@ -539,6 +570,19 @@ fn flatten_spans(
     accumulator: &mut InlineAccumulator,
     theme: ArtisanTheme,
 ) {
+    flatten_spans_in_link(spans, inherited, accumulator, theme, false);
+}
+
+/// Flattens with link-ancestor context: the reference resolves `a strong`
+/// and `a code` to `color: inherit`, so strong and code inside a link keep
+/// the link color instead of imposing foreground/muted.
+fn flatten_spans_in_link(
+    spans: &[Span],
+    inherited: HighlightStyle,
+    accumulator: &mut InlineAccumulator,
+    theme: ArtisanTheme,
+    in_link: bool,
+) {
     for span in spans {
         match span {
             Span::Text(inline) | Span::Html(inline) => {
@@ -549,27 +593,44 @@ fn flatten_spans(
             Span::Code(code) => {
                 let start = accumulator.source.len();
                 accumulator.source.push_str(code);
+                let end = accumulator.source.len();
+                if start < end {
+                    accumulator.code_ranges.push(start..end);
+                }
                 emit_run(
                     accumulator,
                     start,
-                    accumulator.source.len(),
-                    inherited.highlight(inline_code_style(theme)),
+                    end,
+                    inherited.highlight(code_style(theme, in_link)),
                 );
             }
             Span::Emphasis(inner) => {
-                flatten_spans(inner, inherited.highlight(emphasis_style()), accumulator, theme);
+                flatten_spans_in_link(
+                    inner,
+                    inherited.highlight(emphasis_style()),
+                    accumulator,
+                    theme,
+                    in_link,
+                );
             }
             Span::Strong(inner) => {
-                flatten_spans(inner, inherited.highlight(strong_style()), accumulator, theme);
+                flatten_spans_in_link(
+                    inner,
+                    inherited.highlight(strong_style(theme, in_link)),
+                    accumulator,
+                    theme,
+                    in_link,
+                );
             }
             Span::Link { label, destination } => {
                 if is_openable_link_destination(destination) {
                     let start = accumulator.source.len();
-                    flatten_spans(
+                    flatten_spans_in_link(
                         label,
                         inherited.highlight(link_style(theme)),
                         accumulator,
                         theme,
+                        true,
                     );
                     let end = accumulator.source.len();
                     if start < end {
@@ -579,7 +640,7 @@ fn flatten_spans(
                         });
                     }
                 } else {
-                    flatten_spans(label, inherited, accumulator, theme);
+                    flatten_spans_in_link(label, inherited, accumulator, theme, in_link);
                 }
             }
         }
@@ -600,23 +661,38 @@ fn is_openable_link_destination(destination: &str) -> bool {
     lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
 }
 
-fn inline_code_style(theme: ArtisanTheme) -> HighlightStyle {
-    // Reference inline code reads 400 with no wash: mono at normal weight
-    // in the muted token (`prose.css` inline-code over plugin `code`).
-    // Face, size, and tracking cannot ride a highlight run — `HighlightStyle`
-    // carries color, weight, style, background, underline, strikethrough,
-    // and fade only (`gpui` `style.rs`), and the selection element has no
-    // family-override passthrough — so inline code keeps body face, size,
-    // and tracking. That residual gap is reported, not faked.
+fn code_style(theme: ArtisanTheme, in_link: bool) -> HighlightStyle {
+    // Reference inline code reads 400 muted with no wash (`prose.css`
+    // inline-code over plugin `code`), except inside a link where `a code`
+    // inherits the link color. The 400 weight rides here; face (mono,
+    // 14 px) and normal tracking do NOT ride `HighlightStyle` — they ride
+    // the shared `StyledText` range APIs (`with_highlights` only carries
+    // color/weight/style/background/underline/strike/fade). Those ranges
+    // are exposed as `InlinePresentation.code_ranges` for the selection
+    // extension (family override plus run-level tracking reset); until that
+    // extension lands, inline code keeps body face, size, and tracking.
+    // That is an open dependency, not accepted parity.
     HighlightStyle {
-        color: Some(theme.colors.muted_foreground.to_paint()),
+        color: if in_link {
+            None
+        } else {
+            Some(theme.colors.muted_foreground.to_paint())
+        },
         font_weight: Some(FontWeight::NORMAL),
         ..Default::default()
     }
 }
 
-fn strong_style() -> HighlightStyle {
+fn strong_style(theme: ArtisanTheme, in_link: bool) -> HighlightStyle {
+    // Plugin `strong` 600 in the headings/bold foreground token
+    // (`prose.css` bold rule); body inheritance would dim it to muted.
+    // Inside a link, `a strong` inherits the link color instead.
     HighlightStyle {
+        color: if in_link {
+            None
+        } else {
+            Some(theme.colors.foreground.to_paint())
+        },
         font_weight: Some(ProseTypography::STRONG_WEIGHT),
         ..Default::default()
     }
@@ -630,14 +706,14 @@ fn emphasis_style() -> HighlightStyle {
 }
 
 fn link_style(theme: ArtisanTheme) -> HighlightStyle {
+    // Conversation links always render through the anchor component
+    // (`ProseA`), i.e. the `conversation-link` class: blue with no
+    // underline (`prose.css` links/conversation-link rules), never the
+    // plain-`a` foreground+underline. `banner_info` is exactly that blue
+    // per mode (Tailwind blue-500 light / blue-400 dark).
     HighlightStyle {
-        color: Some(theme.colors.accent_foreground.to_paint()),
+        color: Some(theme.colors.banner_info.to_paint()),
         font_weight: Some(ProseTypography::LINK_WEIGHT),
-        underline: Some(UnderlineStyle {
-            thickness: px(1.0),
-            color: Some(theme.colors.accent_foreground.to_paint()),
-            wavy: false,
-        }),
         ..Default::default()
     }
 }

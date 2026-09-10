@@ -9,9 +9,12 @@
 //! highlight runs, and dropless truncated prefixes.
 
 use artisan_ui::markdown::{Block, CodeFence, CodeTokenKind, MarkdownEngine, Span};
-use artisan_ui::markdown_renderer::{BlockScope, block_gaps, present_inline};
+use artisan_ui::markdown_renderer::{BlockScope, MarkdownRenderer, block_gaps, present_inline};
 use artisan_ui::theme::{ArtisanTheme, ProseTypography, ThemeMode};
-use gpui::{FontStyle, FontWeight};
+use gpui::{
+    Context, FontStyle, FontWeight, IntoElement, ParentElement, Render, TestAppContext, Window,
+    div, px,
+};
 
 const CLOSED_RUST_FENCE: &str =
     "// leading\nfn main() {\n    let message = \"artisan\";\n    let count = 42;\n}\n";
@@ -710,11 +713,21 @@ fn merged_highlights_keep_code_bold_and_link_together() {
     let bold = &presentation.highlights[1];
     assert_eq!(&presentation.source[bold.0.clone()], "bold");
     assert_eq!(bold.1.font_weight, Some(FontWeight::SEMIBOLD));
+    assert_eq!(
+        bold.1.color,
+        Some(theme().colors.foreground.to_paint()),
+        "strong reads foreground, got {bold:?}"
+    );
     let link = &presentation.highlights[2];
     assert_eq!(&presentation.source[link.0.clone()], "label");
+    assert_eq!(
+        link.1.color,
+        Some(theme().colors.banner_info.to_paint()),
+        "conversation links read reference blue, got {link:?}"
+    );
     assert!(
-        link.1.underline.is_some(),
-        "link keeps its underline, got {link:?}"
+        link.1.underline.is_none(),
+        "conversation-link class carries no underline, got {link:?}"
     );
     assert_eq!(link.1.font_weight, Some(FontWeight::MEDIUM));
 
@@ -760,7 +773,7 @@ fn nested_bold_code_merges_into_combined_segments() {
 }
 
 #[test]
-fn nested_bold_link_label_combines_underline_and_weight() {
+fn nested_bold_link_label_keeps_link_color_and_weight() {
     let presentation =
         presented("Open [**runbook**](https://example.invalid/runbook) now.\n");
     assert_merged(&presentation);
@@ -776,9 +789,38 @@ fn nested_bold_link_label_combines_underline_and_weight() {
         .find(|(range, _)| &presentation.source[range.clone()] == "runbook")
         .expect("bold link label survives as one segment");
     assert_eq!(label.1.font_weight, Some(FontWeight::SEMIBOLD));
+    assert_eq!(
+        label.1.color,
+        Some(theme().colors.banner_info.to_paint()),
+        "`a strong` inherits the link blue, got {label:?}"
+    );
     assert!(
-        label.1.underline.is_some(),
-        "link underline combines with bold, got {label:?}"
+        label.1.underline.is_none(),
+        "conversation links carry no underline, got {label:?}"
+    );
+    assert_eq!(label.0, presentation.links[0].range);
+}
+
+#[test]
+fn code_inside_link_keeps_link_color() {
+    let presentation =
+        presented("Open [`runbook`](https://example.invalid/runbook) now.\n");
+    assert_merged(&presentation);
+    assert_eq!(presentation.links.len(), 1);
+    let label = presentation
+        .highlights
+        .iter()
+        .find(|(range, _)| &presentation.source[range.clone()] == "runbook")
+        .expect("code link label survives");
+    assert_eq!(
+        label.1.color,
+        Some(theme().colors.banner_info.to_paint()),
+        "`a code` inherits the link blue, got {label:?}"
+    );
+    assert_eq!(
+        label.1.font_weight,
+        Some(FontWeight::NORMAL),
+        "code reads 400 even inside a link, got {label:?}"
     );
     assert_eq!(label.0, presentation.links[0].range);
 }
@@ -824,8 +866,9 @@ fn relative_and_unsafe_links_expose_no_click_metadata() {
 
 #[test]
 fn two_paragraphs_collapse_to_a_single_gap() {
-    // The mounted gap between two paragraphs is max(20, 20) = 20 — never
-    // the 40 a flex column would stack from both margins.
+    // The computed gap between two paragraphs is max(20, 20) = 20 — never
+    // the 40 a flex column would stack from both margins. Mounted bounds
+    // prove the same gap below.
     let parsed = engine()
         .parse_document("alpha\n\nbeta\n")
         .expect("parse succeeds");
@@ -833,14 +876,13 @@ fn two_paragraphs_collapse_to_a_single_gap() {
 }
 
 #[test]
-fn heading_follower_clears_only_its_own_top_gap() {
-    // `h2 + *` zeroes the follower's top; the heading bottom (24) has no
-    // consumer under top-only rendering, so nothing is dropped and the
-    // pair reads 0. A non-heading follower keeps the full collapse.
+fn heading_follower_keeps_the_heading_bottom_gap() {
+    // `h2 + *` zeroes only the follower's top margin; the collapse still
+    // reads the heading's own 1 em bottom (24 px), so the pair gaps 24.
     let parsed = engine()
         .parse_document("## Head\n\nBody\n")
         .expect("parse succeeds");
-    assert_eq!(block_gaps(parsed.blocks(), BlockScope::Root), vec![0.0, 0.0]);
+    assert_eq!(block_gaps(parsed.blocks(), BlockScope::Root), vec![0.0, 24.0]);
 
     let parsed = engine()
         .parse_document("# Head\n\nBody\n")
@@ -944,5 +986,81 @@ fn mailto_links_open_like_http() {
     assert_eq!(presentation.links[0].destination, "mailto:crew@example.invalid");
     let label = &presentation.highlights[0];
     assert_eq!(&presentation.source[label.0.clone()], "us");
-    assert!(label.1.underline.is_some());
+    assert_eq!(
+        label.1.color,
+        Some(theme().colors.banner_info.to_paint()),
+        "mailto links read reference blue, got {label:?}"
+    );
+    assert!(label.1.underline.is_none());
+}
+
+/// Mounts one rendered message in a wide probe host so short bodies stay
+/// on single lines and vertical bounds read exact line boxes plus gaps.
+struct MountedMarkdownProbe {
+    renderer: MarkdownRenderer,
+    source: &'static str,
+}
+
+impl Render for MountedMarkdownProbe {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(600.0)).child(
+            self.renderer.render_source(
+                self.source,
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                "probe",
+            ),
+        )
+    }
+}
+
+/// Reads the painted vertical gap between two mounted block wrappers:
+/// the second block's top minus the first block's bottom.
+fn mounted_block_gap(
+    cx: &mut TestAppContext,
+    source: &'static str,
+    first: &str,
+    second: &str,
+) -> gpui::Pixels {
+    let (_, cx) = cx.add_window_view(|_, _| MountedMarkdownProbe {
+        renderer: MarkdownRenderer::new(),
+        source,
+    });
+    let first = cx
+        .debug_bounds(first)
+        .expect("first block must paint inspectable bounds");
+    let second = cx
+        .debug_bounds(second)
+        .expect("second block must paint inspectable bounds");
+    second.origin.y - (first.origin.y + first.size.height)
+}
+
+#[gpui::test]
+fn mounted_two_paragraphs_gap_is_twenty(cx: &mut TestAppContext) {
+    // Pure `block_gaps` pins the algorithm; this pins the actual painted
+    // flex spacing: one 20 px collapse, not 40 px of stacked margins.
+    assert_eq!(
+        mounted_block_gap(
+            cx,
+            "alpha\n\nbeta\n",
+            "probe-markdown-block-0",
+            "probe-markdown-block-1",
+        ),
+        px(20.0)
+    );
+}
+
+#[gpui::test]
+fn mounted_heading_follower_gap_keeps_heading_bottom(cx: &mut TestAppContext) {
+    // The mounted h2+paragraph pair reads the heading's full 24 px bottom:
+    // `h2 + *` clears only the follower top, and nothing in the 24 px may
+    // be lost to the top-only rendering.
+    assert_eq!(
+        mounted_block_gap(
+            cx,
+            "## Head\n\nBody\n",
+            "probe-markdown-block-0",
+            "probe-markdown-block-1",
+        ),
+        px(24.0)
+    );
 }
