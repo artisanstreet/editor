@@ -4695,8 +4695,11 @@ mod tests {
             .debug_bounds("artisan-conversation-surface-turn-turn_a-block-user-user-a-body")
             .expect("user body must paint");
         let left = point(bounds.origin.x + px(1.0), bounds.origin.y + px(10.0));
+        // The head lands past the text end inside the bubble padding, so the
+        // layout clamps it to the exact whole body: an endpoint on the last
+        // glyph resolves to that char start and drops the final character.
         let right = point(
-            bounds.origin.x + bounds.size.width - px(1.0),
+            bounds.origin.x + bounds.size.width + px(8.0),
             bounds.origin.y + px(10.0),
         );
         cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
