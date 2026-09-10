@@ -12,8 +12,9 @@ use artisan_ui::selectable_text::{
 };
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    Context, FocusHandle, FontStyle, FontWeight, HighlightStyle, IntoElement, Modifiers, Pixels,
-    Point, Render, Styled, TestAppContext, VisualTestContext, Window, div, point, px,
+    Context, FocusHandle, FontStyle, FontWeight, HighlightStyle, InteractiveElement, IntoElement,
+    Modifiers, ParentElement, Pixels, Point, Render, Styled, TestAppContext, VisualTestContext,
+    Window, div, point, px,
 };
 use std::cell::Cell;
 use std::rc::Rc;

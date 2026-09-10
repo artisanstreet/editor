@@ -477,9 +477,9 @@ struct PaintFrame {
     text: SharedString,
     links: Vec<Range<usize>>,
     on_link: Option<SelectableLinkHandler>,
-    /// Whether to attach the focus handle to the dispatch tree. True only
-    /// for retained mode, which owns its handle; controlled callers own
-    /// their handle's registration.
+    /// Whether to attach the focus handle to the dispatch tree in
+    /// `prepaint`. True for retained mode, which owns its handle, and for
+    /// controlled mode when the caller supplied one through `.focus()`.
     register_focus: bool,
 }
 
@@ -726,7 +726,7 @@ impl Element for SelectableText {
                     text: self.text.clone(),
                     links: self.link_ranges.clone(),
                     on_link: self.on_link.clone(),
-                    register_focus: false,
+                    register_focus: focus.is_some(),
                 };
                 (merged, state.selection_range(), frame)
             }
