@@ -123,12 +123,15 @@ frozen list below):
 
 Suppression is computed INSIDE the build (no new row either way):
 
-- genuine live reply suppresses — non-empty assistant, live lifecycle, and
-  phase `Final` or `Unspecified` ONLY. Commentary NEVER suppresses: it is
-  intermediate work, not a reply, so the live reasoning/status line stays
-  while commentary streams;
-- waiting-for-activity suppresses — live Activity/ChangedFiles fact newer
-  than the newest durable model text means the tool chain carries progress;
+- genuine live reply suppresses — non-empty assistant, live lifecycle,
+  phase `Final` or `Unspecified` ONLY, AND progress phase `Reply` (the
+  reply must be the newest phase; a stale stream behind newer work does
+  not). Commentary NEVER suppresses: it is intermediate work, not a reply,
+  so the live reasoning/status line stays while commentary streams;
+- waiting-for-activity suppresses — a live Activity fact (typed lifecycle
+  in the live set; unknown or settled tools never wait) newer than the
+  newest model prose (non-empty assistants of any phase plus non-empty
+  reasoning summaries) means the tool chain carries progress;
 - `StreamingSuppression` narration behaves as before.
 
 Thinking-word epochs stay renderer-side (`seed` = session anchor id).
@@ -213,27 +216,36 @@ single promoted reply (same rule, single source); contract unchanged.
 - Phase mapping is 1:1 (`Unspecified→Unspecified`, `Commentary→Commentary`,
   `Final→Final`); provenance attached to every assistant item and every
   fact-derived item carrying a `run_id`.
-- `SceneFact { …, pub run_id: Option<RunId> }` +
-  `pub fn with_run_id(self, run_id: RunId) -> Self`.
+- `SceneFact { …, pub run_id: Option<RunId>, pub activity_lifecycle: Option<ConversationLifecycle> }` +
+  `pub fn with_run_id(self, run_id: RunId) -> Self` +
+  `pub fn with_activity_lifecycle(self, lifecycle: ConversationLifecycle) -> Self`.
+  Upsert preserves `run_id` and prefers incoming lifecycles (incoming `None`
+  keeps existing); only an explicit live lifecycle ever counts as waiting.
 - Footer annotation consumes `promoted_reply_id` (single source with the
   scene) instead of its own latest-Final scan.
 
 `conversation_observation_projection.rs`:
 
 - `project_activities` fills `.with_run_id(run)` from row attribution on
-  every projected fact (reasoning/tool/terminal/approval/question/timeline).
-  No new arms, no synthetic session rows.
+  every projected fact (reasoning/tool/terminal/approval/question/timeline),
+  plus `.with_activity_lifecycle` from the row's own report on tool rows
+  (`Started|Progress→Active`, `Completed→Completed`, `Failed→Failed`) and
+  terminal rows (`Started|Output→Active`, else settled). Timeline rows carry
+  no lifecycle report, so they never count as live. No new arms, no
+  synthetic session rows.
 
 ## Renderer consumption recipes
 
 - Session group: header = elapsed basis (`TurnStatusBlock.active_started_at_ms`
   while active) + terminal `label` when settled; chevron/disclosure from
-  `disclosure` + `items.is_empty()`; details = `items` (activities only,
-  never reasoning); thinking line = `reasoning_summary` else verb;
-  superseded ⇒ no live line; `transition` ⇒ header far-end handoff.
+  `disclosure` + `session_details.is_empty()`; details = `session_details`
+  in ordinal order (assistant/commentary/activity/compaction/native, never
+  reasoning; `items` stays empty in session mode); thinking line =
+  `reasoning_summary` else verb; superseded ⇒ no live line; `transition`
+  ⇒ header far-end handoff.
 - Top-level reply: single `AssistantMessage` with `phase == Final` (or
-  promoted `Unspecified`); `lifecycle` + `run_id` now ride the block for
-  streaming treatment and attribution without text inference.
+  promoted `Unspecified`); `provenance` (run + lifecycle) rides the block
+  for streaming treatment and attribution without text inference.
 - Status row: `TurnStatusBlock` as before, plus summary/engine label above;
   absent exactly when suppressed.
 - Ordinal collision + replay rules unchanged: duplicate ids/ordinals are

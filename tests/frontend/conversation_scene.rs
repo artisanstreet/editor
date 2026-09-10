@@ -1947,3 +1947,96 @@ fn failed_turn_keeps_explicit_final_reply() {
         .collect();
     assert_eq!(bodies, vec!["final"]);
 }
+
+#[test]
+fn completed_tool_after_prose_does_not_wait() {
+    use conversation_scene::ConversationScene;
+
+    // A settled tool is history, not progress: only a typed live lifecycle
+    // waits, so the status row stays even though the tool ordinal is newer.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("m1", "turn_a", 2, "done", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            provenanced(
+                activity_item("tool", "turn_a", 4, "ran"),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
+}
+
+#[test]
+fn stale_streaming_before_newer_tool_is_not_live_reply() {
+    use conversation_scene::ConversationScene;
+
+    // The streaming reply is not the newest phase once a tool lands after
+    // it: progress is Work and nothing promotes, so has_live_reply
+    // (progress Reply AND live text) is false. The tool is already
+    // Completed, so no waiting suppression confounds the predicate either:
+    // old code hid this row via stale live_reply, corrected code keeps it.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("m1", "turn_a", 2, "draft", AssistantPhase::Unspecified),
+                "run_a",
+                ConversationLifecycle::Streaming,
+            ),
+            provenanced(
+                activity_item("tool", "turn_a", 4, "ran"),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
+    let group = session_group(blocks);
+    assert_eq!(group.progress, ProgressPhase::Work);
+    assert_eq!(scene.promoted_reply_id(&turn_id("turn_a")), None);
+}
+
+#[test]
+fn later_reasoning_retires_tool_wait() {
+    use conversation_scene::ConversationScene;
+
+    // Model prose is assistant text or reasoning summaries: reasoning newer
+    // than the live tool means the wait is over and the row returns.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                activity_item("tool", "turn_a", 2, "running"),
+                "run_a",
+                ConversationLifecycle::Active,
+            ),
+            provenanced(
+                reasoning_item("r1", "turn_a", 4, "thinking out loud"),
+                "run_a",
+                ConversationLifecycle::Active,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
+}

@@ -1207,3 +1207,53 @@ fn late_reasoning_joins_the_session_without_a_visible_row() {
         }
     }
 }
+
+#[test]
+fn tool_lifecycle_reports_live_or_settled_from_typed_action() {
+    use artisan_domain::ConversationLifecycle;
+
+    // Started tools wait; completed tools are history. Timeline rows carry
+    // no lifecycle report and never count as live.
+    let mut state = EngineObservationState::new(thread_id());
+    state.apply(
+        7,
+        &attributed_event(
+            tool_observation("obs-open", 1, "tool-open", ToolAction::Started),
+            RUN_A,
+            TURN_A,
+            2_000,
+            10,
+        ),
+    );
+    state.apply(
+        8,
+        &attributed_event(
+            tool_observation("obs-done", 2, "tool-done", ToolAction::Completed),
+            RUN_A,
+            TURN_A,
+            2_100,
+            11,
+        ),
+    );
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
+    let projection = project_activities(&state, &snapshot);
+    assert_eq!(projection.facts.len(), 2);
+    let lifecycle_of = |id: &str| {
+        projection
+            .facts
+            .iter()
+            .find(|fact| fact.id.as_str() == id)
+            .map(|fact| fact.activity_lifecycle)
+    };
+    assert_eq!(
+        lifecycle_of("tool-run_a-tool-open"),
+        Some(Some(ConversationLifecycle::Active))
+    );
+    assert_eq!(
+        lifecycle_of("tool-run_a-tool-done"),
+        Some(Some(ConversationLifecycle::Completed))
+    );
+}

@@ -39,7 +39,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use artisan_domain::{ConversationSnapshot, RunId, TurnId};
+use artisan_domain::{
+    ConversationLifecycle, ConversationSnapshot, RunId, TerminalActivityState, ToolAction, TurnId,
+};
 
 use crate::conversation_scene::{SCENE_ID_MAX_BYTES, SCENE_MAX_TEXT_BYTES, SceneId};
 use crate::conversation_state_machine::{SceneFact, SceneFactKind};
@@ -199,6 +201,7 @@ pub fn project_activities(
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
+            activity_lifecycle: None,
             kind: CandidateKind::Reasoning {
                 body: truncate_bounded(row.text(), MAX_CUMULATIVE_REASONING_BYTES),
             },
@@ -236,6 +239,7 @@ pub fn project_activities(
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
+            activity_lifecycle: Some(tool_activity_lifecycle(row.action())),
             kind: CandidateKind::Activity { body },
         });
     }
@@ -261,13 +265,20 @@ pub fn project_activities(
             rejected += 1;
             continue;
         };
-        let kind = match row.state() {
-            artisan_domain::TerminalActivityState::Failed => CandidateKind::Error {
-                message: terminal_body(row),
-            },
-            _ => CandidateKind::Activity {
-                body: terminal_body(row),
-            },
+        let state = row.state();
+        let (kind, activity_lifecycle) = match state {
+            artisan_domain::TerminalActivityState::Failed => (
+                CandidateKind::Error {
+                    message: terminal_body(row),
+                },
+                None,
+            ),
+            _ => (
+                CandidateKind::Activity {
+                    body: terminal_body(row),
+                },
+                Some(terminal_activity_lifecycle(state)),
+            ),
         };
         candidates.push(Candidate {
             id,
@@ -275,6 +286,7 @@ pub fn project_activities(
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
+            activity_lifecycle,
             kind,
         });
     }
@@ -306,6 +318,7 @@ pub fn project_activities(
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
+            activity_lifecycle: None,
             kind: CandidateKind::Approval {
                 prompt: truncate_bounded(row.description(), MAX_ACTIVITY_BODY_BYTES),
             },
@@ -339,6 +352,7 @@ pub fn project_activities(
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
+            activity_lifecycle: None,
             kind: CandidateKind::Question {
                 prompt: truncate_bounded(row.text(), MAX_ACTIVITY_BODY_BYTES),
             },
@@ -375,6 +389,9 @@ pub fn project_activities(
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
+            // Timeline rows carry no lifecycle report: unknown never means
+            // live, so these facts never count as tool progress.
+            activity_lifecycle: None,
             kind,
         });
     }
@@ -402,11 +419,14 @@ pub fn project_activities(
             rejected += 1;
             continue;
         };
-        facts.push(
-            fact.with_run_id(candidate.run.clone())
-                .with_observed_at_ms(candidate.committed_at_ms)
-                .with_derived(),
-        );
+        let mut fact = fact
+            .with_run_id(candidate.run.clone())
+            .with_observed_at_ms(candidate.committed_at_ms)
+            .with_derived();
+        if let Some(lifecycle) = candidate.activity_lifecycle {
+            fact = fact.with_activity_lifecycle(lifecycle);
+        }
+        facts.push(fact);
     }
 
     ActivityProjection {
@@ -433,6 +453,31 @@ fn terminal_summary(command: Option<&str>, exit_code: Option<i32>) -> String {
         (Some(command), None) => command.to_owned(),
         (None, Some(code)) => format!("activity (exit {code})"),
         (None, None) => String::from("activity"),
+    }
+}
+
+/// Maps a tool row's own lifecycle report onto renderer-visible liveness.
+///
+/// Open actions stay `Active`; terminal actions settle. There is no second
+/// axis to consult natively and none is invented: a single terminal report
+/// settles the row.
+fn tool_activity_lifecycle(action: ToolAction) -> ConversationLifecycle {
+    match action {
+        ToolAction::Started | ToolAction::Progress => ConversationLifecycle::Active,
+        ToolAction::Completed => ConversationLifecycle::Completed,
+        ToolAction::Failed => ConversationLifecycle::Failed,
+    }
+}
+
+/// Maps a terminal row's own lifecycle report the same way: output is still
+/// open work, completion and failure settle it.
+fn terminal_activity_lifecycle(state: TerminalActivityState) -> ConversationLifecycle {
+    match state {
+        TerminalActivityState::Started | TerminalActivityState::Output => {
+            ConversationLifecycle::Active
+        }
+        TerminalActivityState::Completed => ConversationLifecycle::Completed,
+        TerminalActivityState::Failed => ConversationLifecycle::Failed,
     }
 }
 
@@ -484,5 +529,6 @@ struct Candidate {
     run: RunId,
     committed_at_ms: i64,
     delivery_sequence: u64,
+    activity_lifecycle: Option<ConversationLifecycle>,
     kind: CandidateKind,
 }

@@ -1349,7 +1349,9 @@ fn delivery_drives_pending_waiting_work_stream_and_completed_without_manual_driv
 
     // A live reply suppresses the status row; its text is the status.
     // (Streaming lifecycle: a Pending item has not arrived yet, so only a
-    // genuinely streaming item counts as a live reply.)
+    // genuinely streaming item counts as a live reply. Ordinal 101 puts the
+    // reply after the ordinal-100 tool fact, so newest-phase progress stays
+    // Reply and the reply remains the promoted top-level row.)
     let streaming = PatchBatch::new(
         thread_id(),
         ConversationCursor::new(3),
@@ -1360,7 +1362,7 @@ fn delivery_drives_pending_waiting_work_stream_and_completed_without_manual_driv
             item: make_assistant_settled(
                 ASSISTANT_A,
                 TURN_A,
-                2,
+                101,
                 "draft",
                 AssistantMessagePhase::Unspecified,
                 ConversationLifecycle::Streaming,
@@ -1403,7 +1405,7 @@ fn delivery_drives_pending_waiting_work_stream_and_completed_without_manual_driv
                 item: make_assistant_settled(
                     ASSISTANT_A,
                     TURN_A,
-                    2,
+                    101,
                     "done",
                     AssistantMessagePhase::Final,
                     ConversationLifecycle::Completed,
@@ -1824,9 +1826,11 @@ fn commentary_phase_preserved_without_collapsing_into_streaming() {
         provenance.run_id.as_ref().map(|run| run.as_str()),
         Some("run_controller")
     );
+    // The fixture assistant carries a Pending lifecycle: phase preservation
+    // holds regardless of lifecycle, and the mapping never coerces it.
     assert_eq!(
         provenance.lifecycle,
-        Some(ConversationLifecycle::Streaming)
+        Some(ConversationLifecycle::Pending)
     );
 }
 
@@ -1979,16 +1983,22 @@ fn steering_boundary_keeps_post_steer_work_top_level() {
         })
         .expect("steer anchors");
     controller
-        .register_fact(activity_fact_with_run("tool_pre", TURN_A, 3, "ran", "run_controller"))
+        .register_fact(
+            activity_fact_with_run("tool_pre", TURN_A, 3, "ran", "run_controller")
+                .with_activity_lifecycle(ConversationLifecycle::Completed),
+        )
         .expect("pre-steer tool registers");
     controller
-        .register_fact(activity_fact_with_run("tool_post", TURN_A, 8, "stopping", "run_controller"))
+        .register_fact(
+            activity_fact_with_run("tool_post", TURN_A, 8, "stopping", "run_controller")
+                .with_activity_lifecycle(ConversationLifecycle::Active),
+        )
         .expect("post-steer tool registers");
     let _ = controller.drain_effects();
 
     // Pre-steer work joins the session; post-steer work stays top-level
-    // below the steering label and supersedes the session. The tool chain
-    // carries progress, so no status row renders.
+    // below the steering label and supersedes the session. The live tool
+    // chain carries progress, so no status row renders.
     assert_eq!(
         turn_blocks(&controller, TURN_A),
         vec!["user", "session", "user", "steer-label", "work", "footer"]

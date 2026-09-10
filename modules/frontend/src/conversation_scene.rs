@@ -1478,10 +1478,14 @@ impl ConversationScene {
             }
 
             // Live-reply and tool-progress inputs (session mode only): a
-            // genuine reply (Final/Unspecified, live lifecycle, non-empty)
-            // suppresses the row as its own status, while commentary never
-            // does; a live tool chain newer than model prose suppresses it
-            // the same way. Legacy inputs never suppress.
+            // genuine reply (Final/Unspecified, live lifecycle, non-empty,
+            // and the newest phase) suppresses the row as its own status,
+            // while commentary never does; a live tool chain newer than
+            // model prose suppresses it the same way. Tool liveness comes
+            // from typed lifecycles only — unknown or settled tools never
+            // wait. Model prose is non-empty assistant text of any phase
+            // plus non-empty reasoning summaries. Legacy inputs never
+            // suppress.
             let mut live_reply = false;
             let mut newest_model_ord: Option<u64> = None;
             let mut newest_tool_ord: Option<u64> = None;
@@ -1497,6 +1501,7 @@ impl ConversationScene {
                             if live
                                 && *phase != AssistantPhase::Commentary
                                 && !body.is_empty()
+                                && progress == ProgressPhase::Reply
                             {
                                 live_reply = true;
                             }
@@ -1508,12 +1513,26 @@ impl ConversationScene {
                                 );
                             }
                         }
-                        SceneItemKind::Activity { .. } => {
-                            newest_tool_ord = Some(
-                                newest_tool_ord.map_or(item.ordinal, |ord| {
+                        SceneItemKind::ReasoningSummary { body } if !body.is_empty() => {
+                            newest_model_ord = Some(
+                                newest_model_ord.map_or(item.ordinal, |ord| {
                                     ord.max(item.ordinal)
                                 }),
                             );
+                        }
+                        SceneItemKind::Activity { .. } => {
+                            let live = item
+                                .provenance
+                                .as_ref()
+                                .and_then(|provenance| provenance.lifecycle)
+                                .is_some_and(is_live_lifecycle);
+                            if live {
+                                newest_tool_ord = Some(
+                                    newest_tool_ord.map_or(item.ordinal, |ord| {
+                                        ord.max(item.ordinal)
+                                    }),
+                                );
+                            }
                         }
                         _ => {}
                     }

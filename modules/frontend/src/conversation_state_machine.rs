@@ -88,6 +88,13 @@ pub struct SceneFact {
     /// Filled by the observation projection from row attribution; manually
     /// registered facts leave it empty and never fabricate one.
     pub run_id: Option<RunId>,
+    /// Typed liveness for activity facts, from the row's own lifecycle
+    /// report.
+    ///
+    /// Only `Activity` facts ever carry this; every other kind leaves it
+    /// empty. Unknown (empty) never means live: the scene treats only an
+    /// explicitly live lifecycle as tool progress.
+    pub activity_lifecycle: Option<ConversationLifecycle>,
     /// Narrow typed event timing in signed Unix millis, when known.
     ///
     /// This is the persisted engine commit time for activity projected from
@@ -112,6 +119,7 @@ impl fmt::Debug for SceneFact {
             .field("ordinal", &self.ordinal)
             .field("kind", &self.kind)
             .field("run_id", &self.run_id)
+            .field("activity_lifecycle", &self.activity_lifecycle)
             .field("observed_at_ms", &self.observed_at_ms)
             .field("derived", &self.derived)
             .finish()
@@ -138,6 +146,7 @@ impl SceneFact {
             ordinal,
             kind,
             run_id: None,
+            activity_lifecycle: None,
             observed_at_ms: None,
             derived: false,
         };
@@ -166,6 +175,20 @@ impl SceneFact {
     pub fn with_run_id(self, run_id: RunId) -> Self {
         Self {
             run_id: Some(run_id),
+            ..self
+        }
+    }
+
+    /// Attaches the typed activity liveness for tool-progress detection.
+    ///
+    /// The lifecycle comes from the row's own lifecycle report (tool action
+    /// or terminal state mapped at the projection boundary), never inferred
+    /// from body text. Only meaningful on `Activity` facts; the scene
+    /// ignores it on every other kind. Absent never means live.
+    #[must_use]
+    pub fn with_activity_lifecycle(self, lifecycle: ConversationLifecycle) -> Self {
+        Self {
+            activity_lifecycle: Some(lifecycle),
             ..self
         }
     }
@@ -206,13 +229,24 @@ impl SceneFact {
             self.kind.as_scene_item_kind(),
             disclosure,
         )?;
-        if let Some(run_id) = &self.run_id {
-            return Ok(item.with_provenance(ItemProvenance {
+        // Liveness rides provenance so the scene never infers it from text;
+        // only Activity facts ever carry it, and only an explicit live
+        // lifecycle counts downstream.
+        let provenance = match (&self.run_id, &self.kind) {
+            (Some(run_id), SceneFactKind::Activity { .. }) => Some(ItemProvenance {
+                run_id: Some(run_id.clone()),
+                lifecycle: self.activity_lifecycle,
+            }),
+            (Some(run_id), _) => Some(ItemProvenance {
                 run_id: Some(run_id.clone()),
                 lifecycle: None,
-            }));
-        }
-        Ok(item)
+            }),
+            (None, _) => None,
+        };
+        Ok(match provenance {
+            Some(provenance) => item.with_provenance(provenance),
+            None => item,
+        })
     }
 }
 
@@ -2009,7 +2043,11 @@ impl ConversationStateController {
                     turn_id: existing.turn_id.clone(),
                 });
             }
-            if existing.kind == fact.kind && existing.observed_at_ms == fact.observed_at_ms {
+            if existing.kind == fact.kind
+                && existing.observed_at_ms == fact.observed_at_ms
+                && (fact.activity_lifecycle.is_none()
+                    || existing.activity_lifecycle == fact.activity_lifecycle)
+            {
                 return Ok(false);
             }
             let kept = SceneFact {
@@ -2018,6 +2056,9 @@ impl ConversationStateController {
                 ordinal: existing.ordinal,
                 kind: fact.kind.clone(),
                 run_id: existing.run_id.clone(),
+                activity_lifecycle: fact
+                    .activity_lifecycle
+                    .or(existing.activity_lifecycle),
                 observed_at_ms: fact.observed_at_ms,
                 derived: fact.derived,
             };
