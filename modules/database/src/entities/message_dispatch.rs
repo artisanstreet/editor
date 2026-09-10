@@ -15,6 +15,10 @@ pub struct Model {
     pub lease_owner: Option<String>,
     pub lease_expires_at_ms: Option<i64>,
     pub last_error: Option<String>,
+    /// Observed live run this dispatch must steer into, if named at accept.
+    /// `None` is a fresh send in every state. Intent only: dispatch
+    /// revalidates liveness and the same-engine rule before delivery.
+    pub steer_run_id: Option<String>,
     pub updated_at_ms: i64,
 }
 

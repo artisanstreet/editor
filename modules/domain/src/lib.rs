@@ -58,7 +58,7 @@ pub use commands::{
     AttachProject, Command, CreateThread, ListAttachedProjects, ListDirectories,
     ListProjectThreads, ListRegisteredEngineProfiles, Query, QueueFirstMessage, QueueMessage,
     ReadActiveRun, ReadMessageImage, ReadThreadEngineSettings,
-    SetThreadEngineConfig, StopRun,
+    SetThreadEngineConfig, SteerTarget, StopRun,
 };
 pub use conversation::{
     AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,

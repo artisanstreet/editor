@@ -11,11 +11,12 @@ use sha2::{Digest, Sha256};
 
 use artisan_domain::{
     AuthoredText, CommandReceipt, ImageAttachment, ImageAttachmentRef, MessageId,
-    QueueMessagePayload, ReceiptDisposition, RequestId, ThreadId, UnixMillis,
+    QueueMessagePayload, ReceiptDisposition, RequestId, RunId, ThreadId, UnixMillis,
 };
 
 use crate::entities::{self, CommandKind, DispatchState};
 
+use super::thread_engine_config::settings_from_thread;
 use super::{Repository, RepositoryError, corrupt_data, database_error, millis};
 
 /// Storage input after Forge mints the accepted message identity.
@@ -29,6 +30,10 @@ pub struct QueueMessageInput {
     pub thread_id: ThreadId,
     /// Validated authored text and ordered image bytes.
     pub payload: QueueMessagePayload,
+    /// Observed live run the message must steer into, if named at accept.
+    /// Intent only: dispatch revalidates liveness and the same-engine
+    /// rule; explicit-target failures fail typed, never fresh-run.
+    pub steer_run_id: Option<RunId>,
     /// Authoritative acceptance time.
     pub accepted_at: UnixMillis,
 }
@@ -44,6 +49,10 @@ pub struct QueueMessageResult {
     pub thread_id: ThreadId,
     /// Original text/image payload, including attachment order.
     pub payload: QueueMessagePayload,
+    /// Stored steer target, if the accept named one. Replay consults
+    /// this (never the incoming command alone) so a retry cannot
+    /// silently drop or change the original delivery intent.
+    pub steer_run_id: Option<RunId>,
     /// Durable acceptance instant.
     pub queued_at: UnixMillis,
 }
@@ -69,17 +78,26 @@ impl fmt::Debug for MessageImageRead {
 
 impl Repository {
     /// Checks a general queue receipt before Forge mints another message id.
+    ///
+    /// The full original wire intent participates: request, thread,
+    /// payload, AND steer target. A reused request id with a different
+    /// target or payload is an idempotency conflict, never a replay.
+    /// Settings never participate: the stored snapshot is replayed
+    /// without comparing current thread settings, so a selection change
+    /// between send and retry cannot break safe retry.
     pub async fn lookup_queue_message(
         &self,
         request_id: &RequestId,
         thread_id: &ThreadId,
         payload: &QueueMessagePayload,
+        steer_run_id: Option<&RunId>,
     ) -> Result<Option<QueueMessageResult>, RepositoryError> {
         lookup_queue_receipt(
             &self.database,
             request_id,
             thread_id,
             payload,
+            steer_run_id,
             ReceiptDisposition::Duplicate,
         )
         .await
@@ -87,18 +105,36 @@ impl Repository {
 
     /// Atomically stores a general message, ordered image rows, outbox row,
     /// and request receipt.
+    ///
+    /// Receipt-first retry runs before any config is read: an idempotent
+    /// replay returns the stored receipt (and its stored settings
+    /// snapshot) without consulting current thread settings. Everything
+    /// else — the authoritative thread read, the settings capture, and
+    /// all inserts — happens inside one transaction, so a concurrent
+    /// config save between read and begin cannot snapshot stale config
+    /// at accept.
     pub async fn queue_message(
         &self,
         input: QueueMessageInput,
     ) -> Result<QueueMessageResult, RepositoryError> {
         if let Some(duplicate) = self
-            .lookup_queue_message(&input.request_id, &input.thread_id, &input.payload)
+            .lookup_queue_message(
+                &input.request_id,
+                &input.thread_id,
+                &input.payload,
+                input.steer_run_id.as_ref(),
+            )
             .await?
         {
             return Ok(duplicate);
         }
 
-        let thread = thread_row_by_id(&self.database, &input.thread_id)
+        let transaction = self
+            .database
+            .begin()
+            .await
+            .map_err(|source| database_error("begin queue-message transaction", source))?;
+        let thread = thread_row_by_id(&transaction, &input.thread_id)
             .await?
             .ok_or_else(|| RepositoryError::ThreadNotFound {
                 thread_id: input.thread_id.clone(),
@@ -109,12 +145,16 @@ impl Repository {
                 later_field: "message.accepted_at",
             });
         }
+        // Authoritative settings are captured with the accepted command so
+        // a queued send can never run on a later-selected engine. Absence
+        // refuses the command here (fail-closed at admission) instead of
+        // queueing into the dispatcher's eternal requeue.
+        let settings = settings_from_thread(thread.clone())?.ok_or_else(|| {
+            RepositoryError::ThreadEngineNotConfigured {
+                thread_id: input.thread_id.clone(),
+            }
+        })?;
 
-        let transaction = self
-            .database
-            .begin()
-            .await
-            .map_err(|source| database_error("begin queue-message transaction", source))?;
         let ordinal = next_message_ordinal(&transaction, &input.thread_id).await?;
         let inserted_message = insert_message(&transaction, &input, ordinal).await?;
         if inserted_message == 0 {
@@ -133,13 +173,14 @@ impl Repository {
             .await;
         }
 
-        let inserted_receipt = insert_queue_receipt(&transaction, &input).await?;
+        let inserted_receipt = insert_queue_receipt(&transaction, &input, &settings).await?;
         if inserted_receipt == 0 {
             let result = lookup_queue_receipt(
                 &transaction,
                 &input.request_id,
                 &input.thread_id,
                 &input.payload,
+                input.steer_run_id.as_ref(),
                 ReceiptDisposition::Duplicate,
             )
             .await;
@@ -300,6 +341,7 @@ async fn insert_queued_dispatch(
         lease_owner: Set(None),
         lease_expires_at_ms: Set(None),
         last_error: Set(None),
+        steer_run_id: Set(input.steer_run_id.as_ref().map(|run_id| run_id.as_str().to_owned())),
         updated_at_ms: Set(millis(input.accepted_at)),
     })
     .on_conflict(do_nothing_on_conflict())
@@ -311,7 +353,9 @@ async fn insert_queued_dispatch(
 async fn insert_queue_receipt(
     database: &impl ConnectionTrait,
     input: &QueueMessageInput,
+    settings: &super::thread_engine_config::ThreadEngineSettings,
 ) -> Result<u64, RepositoryError> {
+    let encoded = super::thread_engine_config::encode_config(settings.config())?;
     entities::command_receipt::Entity::insert(entities::command_receipt::ActiveModel {
         request_id: Set(input.request_id.as_str().to_owned()),
         command_kind: Set(CommandKind::QueueMessage),
@@ -325,10 +369,12 @@ async fn insert_queue_receipt(
             .text()
             .map(|text| text.as_str().to_owned())),
         accepted_at_ms: Set(millis(input.accepted_at)),
-        engine_run_config_version: Set(None),
-        engine_run_config: Set(None),
+        engine_run_config_version: Set(Some(i64::from(
+            settings.config().storage_codec_version(),
+        ))),
+        engine_run_config: Set(Some(entities::OpaqueBytes::new(encoded))),
         engine_run_config_expected_revision: Set(None),
-        engine_run_config_result_revision: Set(None),
+        engine_run_config_result_revision: Set(Some(settings.revision().as_i64())),
     })
     .on_conflict(do_nothing_on_conflict())
     .exec_without_returning(database)
@@ -345,6 +391,7 @@ async fn classify_message_conflict(
         &input.request_id,
         &input.thread_id,
         &input.payload,
+        input.steer_run_id.as_ref(),
         ReceiptDisposition::Duplicate,
     )
     .await;
@@ -387,6 +434,7 @@ async fn lookup_queue_receipt(
     request_id: &RequestId,
     thread_id: &ThreadId,
     payload: &QueueMessagePayload,
+    steer_run_id: Option<&RunId>,
     disposition: ReceiptDisposition,
 ) -> Result<Option<QueueMessageResult>, RepositoryError> {
     let Some(row) = receipt_row_by_id(database, request_id).await? else {
@@ -439,11 +487,28 @@ async fn lookup_queue_receipt(
             reason: "queue receipt and durable dispatch request identities disagree",
         });
     }
+    // The steer target is part of the wire intent: a reused request id
+    // naming a different live run (or dropping a named target) conflicts
+    // instead of replaying. Stored settings are replayed, never compared.
+    if dispatch.steer_run_id.as_deref()
+        != steer_run_id.map(|run_id| run_id.as_str())
+    {
+        return Err(RepositoryError::IdempotencyConflict {
+            request_id: request_id.clone(),
+        });
+    }
     if dispatch.queued_at_ms != row.accepted_at_ms {
         return Err(RepositoryError::Invariant {
             reason: "queue receipt and durable dispatch queue times disagree",
         });
     }
+
+    let steer_run_id = match dispatch.steer_run_id.as_deref() {
+        None | Some("") => None,
+        Some(steer_run_id) => Some(RunId::parse(steer_run_id.to_owned()).map_err(|error| {
+            corrupt_data("message_dispatches", "steer_run_id", &error)
+        })?),
+    };
 
     Ok(Some(QueueMessageResult {
         receipt: CommandReceipt {
@@ -453,6 +518,7 @@ async fn lookup_queue_receipt(
         message_id,
         thread_id: thread_id.clone(),
         payload: payload.clone(),
+        steer_run_id,
         queued_at: UnixMillis::from_millis(row.accepted_at_ms),
     }))
 }
@@ -678,6 +744,7 @@ fn queue_result(input: &QueueMessageInput, disposition: ReceiptDisposition) -> Q
         message_id: input.message_id.clone(),
         thread_id: input.thread_id.clone(),
         payload: input.payload.clone(),
+        steer_run_id: input.steer_run_id.clone(),
         queued_at: input.accepted_at,
     }
 }

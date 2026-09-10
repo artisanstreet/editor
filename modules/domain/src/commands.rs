@@ -63,6 +63,11 @@ pub struct QueueFirstMessage {
 /// Unlike [`QueueFirstMessage`], this command is not restricted to ordinal
 /// zero. Its payload is validated before admission and retains image bytes in
 /// authored order through persistence and engine dispatch.
+///
+/// An optional [`SteerTarget`] names the live run the sender observed when
+/// the message was typed on the same engine. A named message must reach
+/// that live run or fail typed with its payload preserved; it must never
+/// silently start a fresh run. `None` is a fresh send in every state.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct QueueMessage {
     /// Client-minted stable request identity for this mutation.
@@ -71,6 +76,33 @@ pub struct QueueMessage {
     pub thread_id: ThreadId,
     /// Authored text and ordered owned image attachments.
     pub payload: QueueMessagePayload,
+    /// Observed live run to steer into, or `None` for a fresh send.
+    pub steer_target: Option<SteerTarget>,
+}
+
+/// Names the observed live run a message must steer into.
+///
+/// The thread is implied by the owning [`QueueMessage`]; the engine match
+/// is revalidated at dispatch from durable state, never trusted from the
+/// wire alone.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SteerTarget {
+    /// Observed live run identity at send time.
+    run_id: RunId,
+}
+
+impl SteerTarget {
+    /// Names an observed live run as the steer target.
+    #[must_use]
+    pub const fn new(run_id: RunId) -> Self {
+        Self { run_id }
+    }
+
+    /// Returns the observed live run identity.
+    #[must_use]
+    pub const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
 }
 
 impl QueueMessage {
@@ -85,7 +117,25 @@ impl QueueMessage {
             request_id,
             thread_id,
             payload,
+            steer_target: None,
         }
+    }
+
+    /// Names the observed live run this message must steer into.
+    ///
+    /// Naming is frontend-observed intent only; dispatch revalidates
+    /// liveness and the same-engine rule before delivery, and fails typed
+    /// otherwise. Retries must preserve the original target, never re-name.
+    #[must_use]
+    pub fn with_steer_target(mut self, target: SteerTarget) -> Self {
+        self.steer_target = Some(target);
+        self
+    }
+
+    /// Returns the observed live run to steer into, if named.
+    #[must_use]
+    pub const fn steer_target(&self) -> Option<&SteerTarget> {
+        self.steer_target.as_ref()
     }
 
     /// Returns the client request identity.

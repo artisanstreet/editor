@@ -8,13 +8,18 @@ use artisan_database::entities::{self, DispatchState};
 use artisan_database::{
     AttachProjectInput, ClaimMessageDispatch, CreateThreadInput, DispatchFailureReason,
     DispatchLeaseOwner, FailMessageDispatch, QueueMessageInput,
-    QueuedMessageRepositoryError, Repository, RequeueMessageDispatch, SqliteConfig, connect,
+    QueuedMessageRepositoryError, Repository, RepositoryError, RequeueMessageDispatch,
+    SetThreadEngineConfigInput, SqliteConfig, connect,
 };
 use artisan_domain::{
-    AuthoredText, DirectoryId, DisplayName, ImageAttachment, ListFailedMessages, ListQueuedMessages, MessageId,
-    ProjectId, QUEUED_MESSAGE_LIST_MAX, QueueMessagePayload, QueuedMessageListError,
-    QueuedMessageListOrder, QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId,
-    RootPath, ThreadId, ThreadTitle, UnixMillis, WithdrawQueuedMessage,
+    ApprovalMode, AuthoredText, ByteLimit, CountLimit, DirectoryId, DisplayName, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, ImageAttachment, ListFailedMessages,
+    ListQueuedMessages, MessageId, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId,
+    QUEUED_MESSAGE_LIST_MAX, QueueMessagePayload, QueuedMessageListError, QueuedMessageListOrder,
+    QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId, RootPath, RunId, ThreadId,
+    ThreadTitle, UnixMillis, WebSearchAccess, WithdrawQueuedMessage,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
@@ -118,6 +123,97 @@ async fn create_thread(repository: &Repository, value: &str, request_value: &str
         })
         .await
         .expect("thread fixture should create");
+    // Queue admission captures authoritative settings in-transaction and
+    // refuses unconfigured threads, so every fixture thread that receives
+    // a queued message is configured exactly once here.
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: request(&format!("{request_value}-engine")),
+            thread_id: thread_id(value),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: fixture_engine_config(),
+            accepted_at: UnixMillis::from_millis(250),
+        })
+        .await
+        .expect("thread engine configuration should persist");
+}
+
+fn fixture_engine_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-queue").expect("permission id is valid"),
+        EngineAgentId::parse("agent-queue").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-queue").expect("profile id is valid"),
+            EngineModelId::parse("model-queue").expect("model id is valid"),
+            EngineRouteId::parse("route-queue").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
+}
+
+fn second_fixture_engine_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-queue-2").expect("permission id is valid"),
+        EngineAgentId::parse("agent-queue-2").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-queue-2").expect("profile id is valid"),
+            EngineModelId::parse("model-queue-2").expect("model id is valid"),
+            EngineRouteId::parse("route-queue-2").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
 }
 
 async fn queue(
@@ -134,10 +230,37 @@ async fn queue(
             message_id: message_id(message_value),
             thread_id: thread_id(thread_value),
             payload,
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(accepted_at_ms),
         })
         .await
         .expect("general message fixture should queue");
+}
+
+fn run_id(value: &str) -> RunId {
+    RunId::parse(value).expect("test run id should be valid")
+}
+
+async fn queue_named(
+    repository: &Repository,
+    request_value: &str,
+    message_value: &str,
+    thread_value: &str,
+    payload: QueueMessagePayload,
+    steer_run_id: Option<RunId>,
+    accepted_at_ms: i64,
+) {
+    repository
+        .queue_message(QueueMessageInput {
+            request_id: request(request_value),
+            message_id: message_id(message_value),
+            thread_id: thread_id(thread_value),
+            payload,
+            steer_run_id,
+            accepted_at: UnixMillis::from_millis(accepted_at_ms),
+        })
+        .await
+        .expect("named message fixture should queue");
 }
 
 fn withdrawal(
@@ -293,6 +416,7 @@ async fn queued_withdrawal_is_removed_from_listing_and_retry_cannot_resurrect_it
             message_id: message_id("message-retry-allocated-again"),
             thread_id: thread_id("thread-1"),
             payload,
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(302),
         })
         .await
@@ -1144,5 +1268,246 @@ async fn failed_message_payload_read_rejects_live_withdrawn_and_missing_rows() {
             .expect("mismatched payload read should succeed")
             .is_none(),
         "a mismatched original request must not resolve through the failed seam"
+    );
+}
+
+#[tokio::test]
+async fn unconfigured_accept_refuses_typed_and_persists_nothing() {
+    let (_database, repository) = memory_repository().await;
+    repository
+        .attach_project(AttachProjectInput {
+            request_id: request("attach-bare"),
+            directory_id: DirectoryId::parse("directory-bare").expect("directory should parse"),
+            project_id: project_id("project-bare"),
+            root_path: RootPath::parse("C:/repos/bare").expect("root should parse"),
+            display_name: DisplayName::parse("Bare").expect("display name should parse"),
+            attached_at: UnixMillis::from_millis(100),
+        })
+        .await
+        .expect("project fixture should attach");
+    repository
+        .create_thread(CreateThreadInput {
+            request_id: request("create-bare"),
+            thread_id: thread_id("thread-bare"),
+            project_id: project_id("project-bare"),
+            title: ThreadTitle::parse("Thread bare").expect("thread title should parse"),
+            created_at: UnixMillis::from_millis(200),
+            updated_at: UnixMillis::from_millis(200),
+        })
+        .await
+        .expect("thread fixture should create");
+    let error = repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-bare"),
+            message_id: message_id("message-bare"),
+            thread_id: thread_id("thread-bare"),
+            payload: text_payload("no configuration"),
+            steer_run_id: None,
+            accepted_at: UnixMillis::from_millis(300),
+        })
+        .await
+        .expect_err("unconfigured accept must refuse");
+    assert!(
+        matches!(
+            error,
+            RepositoryError::ThreadEngineNotConfigured { .. }
+        ),
+        "refusal must be typed, got {error:?}"
+    );
+    assert!(
+        repository
+            .lookup_queue_message(
+                &request("queue-bare"),
+                &thread_id("thread-bare"),
+                &text_payload("no configuration"),
+                None,
+            )
+            .await
+            .expect("lookup should work")
+            .is_none(),
+        "refused accept must persist nothing"
+    );
+}
+
+#[tokio::test]
+async fn steer_target_persists_and_claim_payload_returns_it() {
+    let (database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue_named(
+        &repository,
+        "queue-steer",
+        "message-steer",
+        "thread-1",
+        text_payload("steer me"),
+        Some(run_id("run-steer-1")),
+        300,
+    )
+    .await;
+    let dispatch = dispatch(&database, "message-steer").await;
+    assert_eq!(
+        dispatch.steer_run_id.as_deref(),
+        Some("run-steer-1"),
+        "steer target must persist on the dispatch row"
+    );
+    let payload = repository
+        .read_queue_message_dispatch_payload(&message_id("message-steer"))
+        .await
+        .expect("dispatch payload should load")
+        .expect("dispatch payload should exist");
+    assert_eq!(
+        payload.steer_target.as_ref().map(|target| target.run_id()),
+        Some(&run_id("run-steer-1")),
+    );
+    let snapshot = repository
+        .read_receipt_engine_settings(&request("queue-steer"))
+        .await
+        .expect("receipt settings should load")
+        .expect("accept must capture a settings snapshot");
+    assert_eq!(
+        snapshot.config().selection().engine_id(),
+        artisan_domain::EngineId::OpenCode2,
+    );
+}
+
+#[tokio::test]
+async fn same_request_different_target_conflicts_while_identical_replays() {
+    let (_database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue_named(
+        &repository,
+        "queue-target",
+        "message-target",
+        "thread-1",
+        text_payload("same bytes"),
+        Some(run_id("run-target-1")),
+        300,
+    )
+    .await;
+    let conflict = repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-target"),
+            message_id: message_id("message-target-2"),
+            thread_id: thread_id("thread-1"),
+            payload: text_payload("same bytes"),
+            steer_run_id: Some(run_id("run-target-2")),
+            accepted_at: UnixMillis::from_millis(301),
+        })
+        .await
+        .expect_err("same request with a different target must conflict");
+    assert!(
+        matches!(
+            conflict,
+            RepositoryError::IdempotencyConflict { .. }
+        ),
+        "target change must conflict, got {conflict:?}"
+    );
+    let replay = repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-target"),
+            message_id: message_id("message-target-3"),
+            thread_id: thread_id("thread-1"),
+            payload: text_payload("same bytes"),
+            steer_run_id: Some(run_id("run-target-1")),
+            accepted_at: UnixMillis::from_millis(302),
+        })
+        .await
+        .expect("identical retry must replay");
+    assert_eq!(
+        replay.receipt.disposition,
+        ReceiptDisposition::Duplicate,
+    );
+    assert_eq!(replay.message_id, message_id("message-target"));
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_accept_has_one_winner_and_one_replay() {
+    let temporary = TemporaryDatabase::new("queued-message-concurrent-accept");
+    let (_database, repository) = file_repository(temporary.path()).await;
+    setup_thread(&repository).await;
+    let first = repository.clone();
+    let second = repository.clone();
+    let input = || QueueMessageInput {
+        request_id: request("queue-concurrent"),
+        message_id: message_id("message-concurrent"),
+        thread_id: thread_id("thread-1"),
+        payload: text_payload("concurrent bytes"),
+        steer_run_id: None,
+        accepted_at: UnixMillis::from_millis(300),
+    };
+    let (first_result, second_result) =
+        tokio::join!(first.queue_message(input()), second.queue_message(input()));
+    let mut accepted = 0;
+    let mut duplicate = 0;
+    for result in [
+        first_result.expect("first concurrent accept should settle"),
+        second_result.expect("second concurrent accept should settle"),
+    ] {
+        match result.receipt.disposition {
+            ReceiptDisposition::Accepted => accepted += 1,
+            ReceiptDisposition::Duplicate => duplicate += 1,
+        }
+    }
+    assert_eq!(
+        (accepted, duplicate),
+        (1, 1),
+        "exactly one accept plus one replay"
+    );
+}
+
+#[tokio::test]
+async fn retry_after_selection_change_replays_stored_snapshot() {
+    let (_database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue_named(
+        &repository,
+        "queue-snapshot",
+        "message-snapshot",
+        "thread-1",
+        text_payload("snapshot bytes"),
+        None,
+        300,
+    )
+    .await;
+    let before = repository
+        .read_receipt_engine_settings(&request("queue-snapshot"))
+        .await
+        .expect("snapshot should load")
+        .expect("snapshot should exist");
+    let revision = before.revision();
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: request("queue-snapshot-engine-2"),
+            thread_id: thread_id("thread-1"),
+            precondition: EngineConfigUpdatePrecondition::Exact(revision),
+            config: second_fixture_engine_config(),
+            accepted_at: UnixMillis::from_millis(310),
+        })
+        .await
+        .expect("selection change should persist");
+    let replay = repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-snapshot"),
+            message_id: message_id("message-snapshot-2"),
+            thread_id: thread_id("thread-1"),
+            payload: text_payload("snapshot bytes"),
+            steer_run_id: None,
+            accepted_at: UnixMillis::from_millis(320),
+        })
+        .await
+        .expect("retry after selection change must replay");
+    assert_eq!(
+        replay.receipt.disposition,
+        ReceiptDisposition::Duplicate,
+    );
+    assert_eq!(replay.message_id, message_id("message-snapshot"));
+    let after = repository
+        .read_receipt_engine_settings(&request("queue-snapshot"))
+        .await
+        .expect("snapshot should still load")
+        .expect("snapshot should still exist");
+    assert_eq!(
+        after.config().selection().profile_id(),
+        before.config().selection().profile_id(),
+        "retry must replay the stored snapshot, never the current settings"
     );
 }

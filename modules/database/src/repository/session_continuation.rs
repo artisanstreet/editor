@@ -224,6 +224,38 @@ struct ProviderBinding {
 }
 
 impl Repository {
+    /// Reads one run's durable lifecycle plus its immutable engine for
+    /// live-status exposure.
+    ///
+    /// Returns `None` when the row is absent or names another thread
+    /// (fail-closed at the caller, never silently reattributed). The
+    /// engine comes from the run's own immutable configuration snapshot,
+    /// never from current thread settings, so a selection change cannot
+    /// move status attribution to another engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] when the read fails or the row
+    /// violates its domain contract.
+    pub async fn read_assistant_run_status(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &RunId,
+    ) -> Result<Option<(AssistantRunLifecycle, EngineId)>, RepositoryError> {
+        let Some(row) = entities::assistant_run::Entity::find_by_id(run_id.as_str())
+            .one(&self.database)
+            .await
+            .map_err(|source| database_error("read assistant run status", source))?
+        else {
+            return Ok(None);
+        };
+        if row.thread_id.as_str() != thread_id.as_str() {
+            return Ok(None);
+        }
+        let config = load_run_config(&row)?;
+        Ok(Some((row.lifecycle, config.selection().engine_id())))
+    }
+
     /// Reads the newest eligible provider binding for an exact thread and
     /// engine/profile scope.
     ///

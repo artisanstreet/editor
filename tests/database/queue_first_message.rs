@@ -5,12 +5,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use artisan_database::entities::{self, CommandKind, DispatchState};
 use artisan_database::{
     AttachProjectInput, CreateThreadInput, QueueFirstMessageInput, QueueMessageInput, Repository,
-    RepositoryError, SqliteConfig, connect,
+    RepositoryError, SetThreadEngineConfigInput, SqliteConfig, connect,
 };
 use artisan_domain::{
-    AuthoredText, DirectoryId, DisplayName, ImageAttachment, MessageBody, MessageId, ProjectId,
-    QueueMessagePayload, ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadTitle,
-    UnixMillis,
+    ApprovalMode, AuthoredText, ByteLimit, CountLimit, DirectoryId, DisplayName, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, ImageAttachment, MessageBody, MessageId,
+    NetworkAccess, OpenCode2Selection, PermissionId, ProjectId, QueueMessagePayload,
+    ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -94,6 +97,55 @@ async fn create_thread(repository: &Repository, request_id: &str, thread_id: &st
         })
         .await
         .expect("thread should create");
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: request(&format!("{request_id}-engine")),
+            thread_id: self::thread_id(thread_id),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: fixture_engine_config(),
+            accepted_at: UnixMillis::from_millis(250),
+        })
+        .await
+        .expect("thread engine configuration should persist");
+}
+
+fn fixture_engine_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-first").expect("permission id is valid"),
+        EngineAgentId::parse("agent-first").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-first").expect("profile id is valid"),
+            EngineModelId::parse("model-first").expect("model id is valid"),
+            EngineRouteId::parse("route-first").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
 }
 
 async fn setup_thread(repository: &Repository) {
@@ -561,6 +613,7 @@ async fn general_message_preserves_order_replay_and_owned_image_reads_after_reop
             message_id: message_id("queue-media-message"),
             thread_id: thread_id("thread-1"),
             payload: payload.clone(),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(301),
         })
         .await
@@ -584,6 +637,7 @@ async fn general_message_preserves_order_replay_and_owned_image_reads_after_reop
             message_id: message_id("queue-media-message-2"),
             thread_id: thread_id("thread-1"),
             payload: second_payload.clone(),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(302),
         })
         .await
@@ -596,6 +650,7 @@ async fn general_message_preserves_order_replay_and_owned_image_reads_after_reop
             message_id: message_id("discarded-media-message"),
             thread_id: thread_id("thread-1"),
             payload: payload.clone(),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(302),
         })
         .await
@@ -615,6 +670,7 @@ async fn general_message_preserves_order_replay_and_owned_image_reads_after_reop
                 message_id: message_id("conflicting-media-message"),
                 thread_id: thread_id("thread-1"),
                 payload: changed,
+                steer_run_id: None,
                 accepted_at: UnixMillis::from_millis(303),
             })
             .await
@@ -662,6 +718,7 @@ async fn general_message_preserves_order_replay_and_owned_image_reads_after_reop
             &request("queue-media-request"),
             &thread_id("thread-1"),
             &payload,
+            None,
         )
         .await
         .expect("reopened receipt lookup should work")
@@ -720,6 +777,7 @@ async fn general_message_reloads_absent_and_empty_text_exactly_after_reopen() {
             message_id: message_id("queue-text-absent-message"),
             thread_id: thread_id("thread-1"),
             payload: absent.clone(),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(301),
         })
         .await
@@ -730,6 +788,7 @@ async fn general_message_reloads_absent_and_empty_text_exactly_after_reopen() {
             message_id: message_id("queue-text-empty-message"),
             thread_id: thread_id("thread-1"),
             payload: present_empty.clone(),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(302),
         })
         .await
@@ -770,6 +829,7 @@ async fn general_message_reloads_absent_and_empty_text_exactly_after_reopen() {
             message_id: message_id("discarded-text-empty-replay"),
             thread_id: thread_id("thread-1"),
             payload: present_empty.clone(),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(303),
         })
         .await
@@ -783,6 +843,7 @@ async fn general_message_reloads_absent_and_empty_text_exactly_after_reopen() {
                 message_id: message_id("conflicting-text-empty-replay"),
                 thread_id: thread_id("thread-1"),
                 payload: absent,
+                steer_run_id: None,
                 accepted_at: UnixMillis::from_millis(304),
             })
             .await

@@ -253,6 +253,7 @@ async fn queue_second_message(fixture: &Fixture) {
             thread_id: ThreadId::parse(THREAD_ID).expect("thread id"),
             payload: QueueMessagePayload::text_only("second durable body")
                 .expect("payload should be valid"),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(ACCEPTED_2_MS),
         })
         .await

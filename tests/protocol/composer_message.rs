@@ -1,7 +1,8 @@
 //! Composer payloads retain their authored bytes and identities across the wire.
 use artisan_domain::{
     AuthoredText, Command, ImageAttachment, ImageAttachmentRef, MessageId, Query, QueueMessage,
-    QueueMessagePayload, ReadMessageImage, ReceiptDisposition, RequestId, ThreadId, UnixMillis,
+    QueueMessagePayload, ReadMessageImage, ReceiptDisposition, RequestId, RunId, SteerTarget,
+    ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, FrameId, MessageImageResult, ProtocolVersion, QueueMessageReceipt,
@@ -40,6 +41,48 @@ fn assert_roundtrip(value: &WireEnvelope) {
         "wire changed authored payload or identity"
     );
 }
+#[test]
+fn named_steer_target_roundtrips_with_run_identity() {
+    let command = QueueMessage::new(
+        RequestId::parse("composer-request").unwrap(),
+        thread(),
+        QueueMessagePayload::text_only("steer me").unwrap(),
+    )
+    .with_steer_target(SteerTarget::new(RunId::parse("run-steer-1").unwrap()));
+    let value = frame(WireEnvelopeBody::Request(ClientRequest::Command(
+        Command::QueueMessage(command),
+    )));
+    let bytes = encode_envelope(&value).expect("encode");
+    let decoded = decode_envelope(&bytes).expect("decode");
+    assert_eq!(decoded, value, "steer target must survive the wire");
+    let WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueMessage(decoded))) =
+        decoded.body
+    else {
+        panic!("decoded frame must remain a queue-message command");
+    };
+    assert_eq!(
+        decoded.steer_target().map(SteerTarget::run_id),
+        Some(&RunId::parse("run-steer-1").unwrap()),
+    );
+}
+
+#[test]
+fn unnamed_send_roundtrips_without_steer_target() {
+    let value = request(QueueMessagePayload::text_only("fresh send").unwrap());
+    assert_roundtrip(&value);
+    let WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueMessage(decoded))) =
+        decode_envelope(&encode_envelope(&value).unwrap())
+            .expect("decode")
+            .body
+    else {
+        panic!("decoded frame must remain a queue-message command");
+    };
+    assert!(
+        decoded.steer_target().is_none(),
+        "fresh sends carry no steer target"
+    );
+}
+
 #[test]
 fn image_only_absent_empty_and_whitespace_text_remain_distinct() {
     let mut frames = Vec::new();

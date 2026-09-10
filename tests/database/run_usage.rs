@@ -497,6 +497,7 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
                 Vec::new(),
             )
             .expect("payload"),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(5),
         })
         .await
@@ -618,6 +619,7 @@ async fn codex_snapshot_authorizes_exact_usage_and_rejects_scope_mismatch() {
                 Vec::new(),
             )
             .expect("payload"),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(5),
         })
         .await

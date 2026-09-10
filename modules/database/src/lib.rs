@@ -25,7 +25,8 @@ pub use repository::{
     FailRunOutcome, InterruptRun, InterruptRunError, InterruptRunOutcome, InterruptedRunReceipt,
     LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, MessageDispatchPayload,
     MessageImageRead, OBSERVATION_BATCH_MAX_OBSERVATIONS, OBSERVATION_CHECKPOINT_VERSION,
-    OBSERVATION_FORMAT_TAG, ObservationCommitError, ProviderBindingBytes, QueueFirstMessageInput,
+    OBSERVATION_FORMAT_TAG, ObservationCommitError, ProjectSteeredMessage,
+    ProjectSteeredMessageOutcome, ProviderBindingBytes, QueueFirstMessageInput,
     QueueFirstMessageResult, QueueMessageDispatchPayload, QueueMessageInput, QueueMessageResult,
     Repository, RepositoryError, RequeueMessageDispatch, RunBatchReceiptInfo, RunBatchScope,
     RunBindingError, RunErrorCode, RunErrorMessage, RunInteractionError, RunLaunchCredentials,
@@ -34,7 +35,7 @@ pub use repository::{
     StartupReconciliationDisposition, StartupReconciliationDispositionError,
     StartupReconciliationDispositionOutcome, StartupReconciliationDispositionReceipt,
     StartupReconciliationError, StartupReconciliationQuery, StartupRunLifecycle,
-    TerminalRunReceipt, ThreadEngineSettings, TransitionedMessageDispatch,
+    SteeredMessageReceipt, TerminalRunReceipt, ThreadEngineSettings, TransitionedMessageDispatch,
     decode_observation_checkpoint, encode_observation_bytes, encode_observation_checkpoint,
     validate_observation_bind, validate_observation_engine,
 };

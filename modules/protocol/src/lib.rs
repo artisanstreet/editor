@@ -57,7 +57,7 @@ pub use types::{
     MessageImageResult, ModelFavoritesSnapshot, ProtocolFailure, ProtocolValueError,
     ProtocolVersion, QueueMessageReceipt, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
     ReconnectCapabilityError, RegisteredEngineProfilesResult, RespondApprovalReceipt,
-    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, ServerEvent, ServerResponse,
+    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, RunLiveStatus, ServerEvent, ServerResponse,
     SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
     ThreadEngineSettingsResult, VersionOffer, VersionOfferError, Welcome, WireEnvelope,
     WireEnvelopeBody,

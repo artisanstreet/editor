@@ -49,7 +49,7 @@ use artisan_domain::{
     QueueMessagePayloadError, QueuedMessage, QuotaSurface, ReadAccountUsage, ReadActiveRun, ReadComposerCatalog,
     ReadModelFavorites, ReceiptDisposition, RequestId, RespondApproval, RespondQuestion, Revision,
     RootPath, RootPathError, RunId, RunInteractionError, SetModelFavorite, SetThreadEngineConfig,
-    StopRun, THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing,
+    SteerTarget, StopRun, THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing,
     ThreadListingError, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal,
     UnixMillis, UserMessageItem, WebSearchAccess,
 };
@@ -76,7 +76,7 @@ use crate::types::{
     LocalCapability, LocalCapabilityError, MessageImageResult, ModelFavoritesSnapshot,
     ProtocolFailure, ProtocolValueError, ProtocolVersion, QueueMessageReceipt, ReconnectCapability,
     ReconnectCapabilityError, RegisteredEngineProfilesResult, RespondApprovalReceipt,
-    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, ServerEvent, ServerResponse,
+    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, RunLiveStatus, ServerEvent, ServerResponse,
     SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
     VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
@@ -755,6 +755,12 @@ fn encode_request(
                 encoded.set_name(attachment.name());
                 encoded.set_bytes(attachment.bytes());
             }
+            // Empty steer text is the unnamed (fresh send) encoding; a
+            // non-empty value must parse as a RunId on decode.
+            match command.steer_target() {
+                Some(target) => queue.set_steer_run_id(target.run_id().as_str()),
+                None => queue.set_steer_run_id(""),
+            }
         }
         ClientRequest::Command(Command::StopRun(command)) => {
             let mut stop = builder.reborrow().init_stop_run();
@@ -1064,9 +1070,16 @@ fn encode_response_payload(
                     encoded.set_thread_id(thread_id.as_str());
                     encoded.init_state().set_no_active(());
                 }
-                ActiveRunResult::Active { thread_id, run_id } => {
+                ActiveRunResult::Active {
+                    thread_id,
+                    run_id,
+                    status,
+                    engine_id,
+                } => {
                     encoded.set_thread_id(thread_id.as_str());
                     encoded.init_state().set_active(run_id.as_str());
+                    encoded.set_run_status(encode_run_status(*status));
+                    encoded.set_run_engine_id(engine_id.as_str());
                 }
             }
         }
@@ -2354,9 +2367,23 @@ fn decode_queue_message(
         "request.queueMessage.attachments",
     )?;
     let payload = QueueMessagePayload::new(text, attachments)?;
-    Ok(ClientRequest::Command(Command::QueueMessage(
-        QueueMessage::new(request_id, thread_id, payload),
-    )))
+    let command = match read_text(
+        command.get_steer_run_id(),
+        "request.queueMessage.steerRunId",
+    )? {
+        steer_run_id if steer_run_id.is_empty() => {
+            QueueMessage::new(request_id, thread_id, payload)
+        }
+        steer_run_id => {
+            let run_id = parse_run_id(
+                steer_run_id,
+                "request.queueMessage.steerRunId",
+            )?;
+            QueueMessage::new(request_id, thread_id, payload)
+                .with_steer_target(SteerTarget::new(run_id))
+        }
+    };
+    Ok(ClientRequest::Command(Command::QueueMessage(command)))
 }
 
 fn decode_stop_run(
@@ -3941,13 +3968,21 @@ fn decode_active_run_result(
         artisan_capnp::active_run_result::state::Which::NoActive(()) => {
             ActiveRunResult::NoActive { thread_id }
         }
-        artisan_capnp::active_run_result::state::Which::Active(run_id) => ActiveRunResult::Active {
-            thread_id,
-            run_id: parse_run_id(
-                read_text(run_id, "response.activeRun.runId")?,
-                "response.activeRun.runId",
-            )?,
-        },
+        artisan_capnp::active_run_result::state::Which::Active(run_id) => {
+            let status = decode_run_status(result.get_run_status()?)?;
+            let engine_id = EngineId::parse(
+                read_text(result.get_run_engine_id(), "response.activeRun.runEngineId")?.as_str(),
+            )?;
+            ActiveRunResult::Active {
+                thread_id,
+                run_id: parse_run_id(
+                    read_text(run_id, "response.activeRun.runId")?,
+                    "response.activeRun.runId",
+                )?,
+                status,
+                engine_id,
+            }
+        }
     };
     Ok(ResponsePayload::ActiveRun(result))
 }
@@ -4782,6 +4817,30 @@ const fn decode_assistant_message_phase(
         artisan_capnp::AssistantMessagePhase::Unspecified => AssistantMessagePhase::Unspecified,
         artisan_capnp::AssistantMessagePhase::Commentary => AssistantMessagePhase::Commentary,
         artisan_capnp::AssistantMessagePhase::Final => AssistantMessagePhase::Final,
+    }
+}
+
+const fn encode_run_status(status: RunLiveStatus) -> artisan_capnp::RunStatus {
+    match status {
+        RunLiveStatus::Queued => artisan_capnp::RunStatus::Queued,
+        RunLiveStatus::Running => artisan_capnp::RunStatus::Running,
+        RunLiveStatus::Waiting => artisan_capnp::RunStatus::Waiting,
+    }
+}
+
+/// Strict run-status decode: `unknown` is a typed failure, never a
+/// tolerated state. The current backend always emits a live status with
+/// its engine; native QUIC is a same-version build.
+fn decode_run_status(
+    value: artisan_capnp::RunStatus,
+) -> Result<RunLiveStatus, ProtocolDecodeError> {
+    match value {
+        artisan_capnp::RunStatus::Queued => Ok(RunLiveStatus::Queued),
+        artisan_capnp::RunStatus::Running => Ok(RunLiveStatus::Running),
+        artisan_capnp::RunStatus::Waiting => Ok(RunLiveStatus::Waiting),
+        artisan_capnp::RunStatus::Unknown => {
+            Err(ProtocolDecodeError::UnknownDiscriminant { value: 0 })
+        }
     }
 }
 

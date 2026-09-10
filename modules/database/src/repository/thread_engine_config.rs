@@ -234,8 +234,7 @@ impl Repository {
     }
 }
 
-fn encode_config(config: &EngineRunConfig) -> Result<Vec<u8>, RepositoryError> {
-    engine_run_config::encode(config).map_err(|error| match error {
+pub(super) fn encode_config(config: &EngineRunConfig) -> Result<Vec<u8>, RepositoryError> {    engine_run_config::encode(config).map_err(|error| match error {
         EngineRunConfigCodecError::InvalidField { field } => {
             corrupt_data("engine_run_config", field, "invalid configuration")
         }
@@ -401,6 +400,65 @@ async fn insert_set_receipt(
     .exec_without_returning(transaction)
     .await
     .map_err(|source| database_error("record engine-config receipt", source))
+}
+
+impl Repository {
+    /// Reads the engine settings snapshot captured with one accepted
+    /// queue-message receipt, if the receipt carries one.
+    ///
+    /// The snapshot is the authoritative configuration for dispatching
+    /// that message: it is replayed verbatim on idempotent retry WITHOUT
+    /// comparing current thread settings, so a selection change between
+    /// send and retry can never break safe retry or move the message to
+    /// a different engine. Legacy rows without snapshots answer `None`
+    /// and callers use the documented current-read fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] when the read fails or the stored
+    /// snapshot violates its domain contract.
+    pub async fn read_receipt_engine_settings(
+        &self,
+        request_id: &RequestId,
+    ) -> Result<Option<ThreadEngineSettings>, RepositoryError> {
+        let Some(row) = receipt_row_by_id(&self.database, request_id).await? else {
+            return Ok(None);
+        };
+        let (Some(version), Some(blob)) = (
+            row.engine_run_config_version,
+            row.engine_run_config.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        if !matches!(version, 1 | 2) {
+            return Err(corrupt_data(
+                "command_receipts",
+                "engine_run_config_version",
+                "stored codec version is not readable",
+            ));
+        }
+        let revision = row
+            .engine_run_config_result_revision
+            .and_then(|value| u64::try_from(value).ok())
+            .and_then(|value| EngineConfigRevision::new(value).ok())
+            .ok_or_else(|| {
+                corrupt_data(
+                    "command_receipts",
+                    "engine_run_config_result_revision",
+                    "stored revision is outside its domain range",
+                )
+            })?;
+        let config = engine_run_config::decode(blob.as_slice())
+            .map_err(|error| corrupt_data("command_receipts", "engine_run_config", &error))?;
+        if i64::from(config.storage_codec_version()) != version {
+            return Err(corrupt_data(
+                "command_receipts",
+                "engine_run_config_version",
+                "stored codec version does not match its column",
+            ));
+        }
+        Ok(Some(ThreadEngineSettings::new(revision, config)))
+    }
 }
 
 async fn receipt_row_by_id(

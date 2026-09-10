@@ -8,18 +8,19 @@ use std::error::Error;
 use artisan_domain::{
     AuthoredText, AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
     Command, ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
-    ConversationSnapshot, ConversationSubscriptionStart, ConversationTurn, IdentifierError,
-    ImageAttachment, ImageAttachmentRef, ItemId, ItemOrdinal, MESSAGE_BODY_MAX_BYTES, MessageBody,
-    MessageId, PatchBatch, PatchId, PatchSequence, QueueMessage, QueueMessagePayload, RequestId,
-    Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
+    ConversationSnapshot, ConversationSubscriptionStart, ConversationTurn, EngineId,
+    IdentifierError, ImageAttachment, ImageAttachmentRef, ItemId, ItemOrdinal,
+    MESSAGE_BODY_MAX_BYTES, MessageBody, MessageId, PatchBatch, PatchId, PatchSequence,
+    QueueMessage, QueueMessagePayload, RequestId, Revision, RunId, ThreadId, TurnId, TurnOrdinal,
+    UnixMillis, UserMessageItem,
 };
 use artisan_protocol::artisan_capnp::{
     AssistantMessagePhase as WirePhase, ConversationLifecycle as WireLifecycle,
-    assistant_message_item, envelope,
+    RunStatus as WireRunStatus, active_run_result, assistant_message_item, envelope,
 };
 use artisan_protocol::{
-    ClientRequest, ConversationSubscriptionStarted, FrameId, ProtocolDecodeError,
-    ProtocolVersion, ResponsePayload, ServerResponse, WireEnvelope, WireEnvelopeBody,
+    ActiveRunResult, ClientRequest, ConversationSubscriptionStarted, FrameId, ProtocolDecodeError,
+    ProtocolVersion, ResponsePayload, RunLiveStatus, ServerResponse, WireEnvelope, WireEnvelopeBody,
     decode_envelope, encode_envelope,
 };
 use capnp::message::{Builder, HeapAllocator};
@@ -643,4 +644,104 @@ fn raw_assistant_snapshot_with_lifecycle(lifecycle: WireLifecycle) -> Vec<u8> {
     raw_assistant_snapshot(|item| {
         item.set_lifecycle(lifecycle);
     })
+}
+
+/// Builds one otherwise-valid raw active-run response, letting the caller
+/// override the status and engine fields after the valid defaults.
+fn raw_active_run(
+    customize: impl FnOnce(&mut active_run_result::Builder<'_>),
+) -> Vec<u8> {
+    let mut message = raw_message();
+    let mut response = init_raw_envelope(&mut message, "server-active-raw")
+        .init_body()
+        .init_response();
+    response.set_request_id(REQUEST_ID);
+    {
+        let mut active = response.init_active_run();
+        active.set_thread_id(THREAD_ID);
+        active.init_state().set_active(RUN_ID);
+        active.set_run_status(WireRunStatus::Running);
+        active.set_run_engine_id("codex");
+        customize(&mut active);
+    }
+    words(&message)
+}
+
+#[test]
+fn active_run_status_and_engine_roundtrip_through_production_codec(
+) -> Result<(), Box<dyn Error>> {
+    let value = response(
+        "server-active-roundtrip",
+        ResponsePayload::ActiveRun(ActiveRunResult::Active {
+            thread_id: thread_id(),
+            run_id: run_id(),
+            status: RunLiveStatus::Running,
+            engine_id: EngineId::Codex,
+        }),
+    );
+    let decoded = decode_envelope(&encode_envelope(&value)?)?;
+    assert_eq!(decoded, value, "active run status must survive the wire");
+    let WireEnvelopeBody::Response(decoded_response) = decoded.body else {
+        panic!("decoded frame must remain a response");
+    };
+    let ResponsePayload::ActiveRun(ActiveRunResult::Active {
+        status,
+        engine_id,
+        ..
+    }) = decoded_response.payload
+    else {
+        panic!("decoded response must carry an active run");
+    };
+    assert_eq!(status, RunLiveStatus::Running);
+    assert_eq!(engine_id, EngineId::Codex);
+    Ok(())
+}
+
+#[test]
+fn raw_unknown_run_status_returns_the_typed_strict_error() {
+    let error = decode_error(&raw_active_run(|active| {
+        active.set_run_status(WireRunStatus::Unknown);
+    }));
+    assert!(
+        matches!(
+            error,
+            ProtocolDecodeError::UnknownDiscriminant { value: 0 }
+        ),
+        "unknown run status must fail closed, got {error:?}"
+    );
+}
+
+#[test]
+fn raw_empty_run_engine_returns_a_typed_error() {
+    let error = decode_error(&raw_active_run(|active| {
+        active.set_run_engine_id("");
+    }));
+    assert!(
+        matches!(error, ProtocolDecodeError::EngineConfig { .. }),
+        "empty run engine must fail closed, got {error:?}"
+    );
+}
+
+#[test]
+fn raw_invalid_steer_run_id_returns_a_typed_identifier_error() {
+    let mut message = raw_message();
+    let mut request = init_raw_envelope(&mut message, "client-steer-raw")
+        .init_body()
+        .init_request();
+    {
+        let mut queue = request.init_queue_message();
+        queue.set_thread_id(THREAD_ID);
+        queue.init_text().set_present("steer me");
+        queue.init_attachments(0);
+        queue.set_steer_run_id("run leaked id");
+    }
+    let error = decode_error(&words(&message));
+    let ProtocolDecodeError::Identifier { field, source } = error else {
+        panic!("invalid steer run id must return an Identifier error, got {error:?}");
+    };
+    assert_eq!(field, "request.queueMessage.steerRunId");
+    assert_eq!(
+        source,
+        IdentifierError::ForbiddenCharacter { character: ' ' }
+    );
 }

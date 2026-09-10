@@ -830,6 +830,19 @@ struct ActiveRunResult {
     noActive @1 :Void;
     active @2 :Text;
   }
+  # Live lifecycle of the registered run. The current backend always
+  # emits queued/running/waiting; `unknown` is a strict decode error,
+  # never a tolerated state (native QUIC is a same-version build).
+  runStatus @3 :RunStatus;
+  # Engine backing the live run. Empty is a strict decode error.
+  runEngineId @4 :Text;
+}
+
+enum RunStatus {
+  unknown @0;
+  queued @1;
+  running @2;
+  waiting @3;
 }
 
 # Outcome of one explicit native directory-pick interaction.
@@ -2056,7 +2069,9 @@ struct ImageAttachment {
 }
 
 # General message submission. `text` preserves absent versus present-empty so
-# an image-only command never needs a placeholder string.
+# an image-only command never needs a placeholder string. `steerRunId`
+# names the observed live run the message must steer into; empty means a
+# fresh send in every state.
 struct QueueMessageRequest {
   threadId @0 :Text;
   text :union {
@@ -2064,6 +2079,7 @@ struct QueueMessageRequest {
     present @2 :Text;
   }
   attachments @3 :List(ImageAttachment);
+  steerRunId @4 :Text;
 }
 
 # Receipt for a general queued message. It intentionally mirrors

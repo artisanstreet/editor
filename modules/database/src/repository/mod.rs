@@ -49,8 +49,9 @@ pub use run_interaction::{
     StoredInteractionReceipt,
 };
 pub use run_launch::{
-    LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, RunLaunchCredentials,
-    RunLaunchError, RunStartKey,
+    LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, ProjectSteeredMessage,
+    ProjectSteeredMessageOutcome, RunLaunchCredentials, RunLaunchError, RunStartKey,
+    SteeredMessageReceipt,
 };
 pub use run_observation::terminal::{
     AuxiliaryTerminalError, CancelRun, CancelRunError, CancelRunOutcome, CompleteRun,
@@ -95,6 +96,12 @@ pub enum RepositoryError {
 
     #[error("thread `{thread_id}` is not attached to a known project")]
     ThreadNotFound { thread_id: ThreadId },
+
+    #[error("thread `{thread_id}` has no engine configuration; select a model before sending")]
+    ThreadEngineNotConfigured { thread_id: ThreadId },
+
+    #[error("thread `{thread_id}` has no engine configuration; select a model before sending")]
+    ThreadEngineNotConfigured { thread_id: ThreadId },
 
     #[error("thread `{thread_id}` engine configuration revision does not match the precondition")]
     EngineConfigRevisionConflict {

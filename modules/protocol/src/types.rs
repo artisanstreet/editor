@@ -10,7 +10,7 @@ use std::fmt;
 use artisan_catalog::wire::{NativeModelCatalogWireError, decode_catalog};
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
-    ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision,
+    ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision, EngineId,
     EngineProfileId, EngineRunConfig, Event, IdentifierError, ImageAttachmentRef, MessageId,
     ModelFavoriteId, ModelFavoritesRevision,
     ModelFavoritesSnapshot as DomainModelFavoritesSnapshot, ModelFavoritesSnapshotError,
@@ -982,7 +982,33 @@ pub enum ActiveRunResult {
     /// No exact live run is registered for the thread.
     NoActive { thread_id: ThreadId },
     /// Exactly one exact live run is registered for the thread.
-    Active { thread_id: ThreadId, run_id: RunId },
+    ///
+    /// `status` and `engine_id` always describe the live run: the current
+    /// backend emits all three live statuses plus the engine, and wire
+    /// decode rejects anything else (native QUIC is a same-version
+    /// build; there is no cross-version unknown tolerance here).
+    Active {
+        thread_id: ThreadId,
+        run_id: RunId,
+        status: RunLiveStatus,
+        engine_id: EngineId,
+    },
+}
+
+/// Live lifecycle of the registered run, for the starting-guard.
+///
+/// Maps the durable run lifecycle (`assistant_run.lifecycle`):
+/// `Queued|Launching` ⇒ `Queued`, `Running` ⇒ `Running`,
+/// `Waiting|CancelRequested` ⇒ `Waiting`. Settled lifecycles surface
+/// as [`ActiveRunResult::NoActive`], never here.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunLiveStatus {
+    /// The run is accepted but its turn has not started.
+    Queued,
+    /// The run's turn is executing.
+    Running,
+    /// The run's turn is waiting (for example on approval input).
+    Waiting,
 }
 
 /// Successful start of authoritative conversation delivery.

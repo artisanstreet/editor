@@ -2,7 +2,7 @@
 
 use sea_orm::{ConnectionTrait, EntityTrait};
 
-use artisan_domain::{MessageBody, MessageId, QueueMessagePayload, RequestId, ThreadId};
+use artisan_domain::{MessageBody, MessageId, QueueMessagePayload, RequestId, RunId, ThreadId};
 
 use crate::entities;
 
@@ -36,6 +36,10 @@ pub struct QueueMessageDispatchPayload {
     pub correlation_id: RequestId,
     /// Authored text and ordered owned image attachments.
     pub payload: QueueMessagePayload,
+    /// Observed live run the message must steer into, if named at accept.
+    /// Intent only: dispatch revalidates liveness and the same-engine
+    /// rule; explicit-target failures fail typed, never fresh-run.
+    pub steer_target: Option<artisan_domain::SteerTarget>,
 }
 
 impl Repository {
@@ -108,12 +112,23 @@ impl Repository {
         .ok_or(RepositoryError::Invariant {
             reason: "message dispatch references a missing message payload",
         })?;
+        let steer_target = match dispatch.steer_run_id.as_deref() {
+            None | Some("") => None,
+            Some(steer_run_id) => Some(
+                artisan_domain::SteerTarget::new(
+                    RunId::parse(steer_run_id.to_owned()).map_err(|error| {
+                        corrupt_data("message_dispatches", "steer_run_id", &error)
+                    })?,
+                ),
+            ),
+        };
 
         Ok(Some(QueueMessageDispatchPayload {
             message_id: message_id.clone(),
             thread_id,
             correlation_id,
             payload,
+            steer_target,
         }))
     }
 }
