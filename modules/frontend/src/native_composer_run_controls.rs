@@ -14,6 +14,22 @@ pub(super) struct RunControlsState {
     poll: Option<Task<()>>,
 }
 
+impl RunControlsState {
+    /// Clears transient run observation for a terminal transport failure.
+    ///
+    /// An observed active run, pending read, poll task, stop request, and
+    /// availability all resolve against the dead service; dropping them
+    /// stops the controls from claiming an unobservable run. The mounted
+    /// thread scope is preserved so a later service still knows its owner.
+    pub(super) fn clear_transient_observation(&mut self) {
+        self.active = None;
+        self.available = false;
+        self.pending = None;
+        self.stop = None;
+        self.poll = None;
+    }
+}
+
 impl NativeApplication {
     pub(super) fn project_run_controls(&self, snapshot: &mut NativeComposerControlsSnapshot) {
         let current = self.run_controls.thread == self.selected_thread;
@@ -267,5 +283,18 @@ mod tests {
                 assert!(!application.composer_controls.read(cx).snapshot().run_active);
             })
         });
+    }
+}
+
+#[cfg(test)]
+impl super::NativeApplication {
+    /// Seeds one observed active run for terminal-failure presentation tests.
+    ///
+    /// Test-only direct state seeding: production observes runs exclusively
+    /// through the generation-fenced read path.
+    pub(super) fn seed_active_run_for_tests(&mut self, thread_id: ThreadId, run_id: RunId) {
+        self.run_controls.thread = Some(thread_id);
+        self.run_controls.active = Some(run_id);
+        self.run_controls.available = true;
     }
 }

@@ -1528,6 +1528,20 @@ impl ComposerQueueState {
         }
     }
 
+    /// Drops all transient read fences for a terminal service failure.
+    ///
+    /// Queue, failed-listing, and usage reads outstanding against a dead
+    /// service will never resolve; clearing their fences returns the lip
+    /// from a stuck Refreshing to a truthful TransportFailed. Entries,
+    /// restore candidates, payloads, and drafts are untouched: only the
+    /// in-flight read ownership dies with the service.
+    pub(crate) fn mark_service_failed(&mut self) {
+        self.refresh.in_flight = None;
+        self.failed_refresh.in_flight = None;
+        self.usage_read_in_flight = None;
+        self.status = QueueStatus::TransportFailed;
+    }
+
     /// Starts or retains an immutable reporting scope for one exact run.
     ///
     /// A matching scope keeps its last report after settlement. A new run,

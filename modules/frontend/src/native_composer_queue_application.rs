@@ -365,6 +365,19 @@ impl NativeApplication {
         cx.notify();
     }
 
+    /// Drops transient read tokens for a terminal service failure.
+    ///
+    /// Outstanding queue, failed-listing, and usage reads will never
+    /// resolve against a dead service; dropping their tokens returns the
+    /// lip from a stuck Refreshing without touching entries, restore
+    /// candidates, or drafts. No retry is scheduled here.
+    pub(super) fn drop_transient_service_reads(&mut self) {
+        self.composer_queue.refresh = None;
+        self.composer_queue.failed_refresh = None;
+        self.composer_queue.usage = None;
+        self.composer_queue.state.mark_service_failed();
+    }
+
     pub(super) fn handle_composer_state_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::QueuedMessages {

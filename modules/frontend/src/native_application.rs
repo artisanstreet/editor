@@ -3953,6 +3953,18 @@ impl NativeApplication {
         self.message_failure = None;
     }
 
+    /// Clears transient service-owned state for a terminal transport failure.
+    ///
+    /// In-flight queue/failed/usage reads and observed run activity die with
+    /// the service: the lip leaves a stuck Refreshing for a truthful
+    /// TransportFailed and the stop control stops claiming an unobservable
+    /// run. Drafts, restore candidates, failure notices, and the mounted
+    /// transcript are preserved. No retry is scheduled here.
+    fn clear_transient_service_state(&mut self) {
+        self.drop_transient_service_reads();
+        self.run_controls.clear_transient_observation();
+    }
+
     fn handle_message_receipt(&mut self, receipt: QueueMessageReceipt, cx: &mut Context<Self>) {
         let Some(flight) = self.message_flight.as_ref() else {
             return;
@@ -4160,6 +4172,7 @@ impl NativeApplication {
             }
             NativeTransportEvent::Failed(failure) => {
                 self.retain_message_flight(cx);
+                self.clear_transient_service_state();
                 self.thread_switch_flight = None;
                 self.ordinary_unsubscribe_thread = None;
                 self.pending_thread = None;
@@ -4340,6 +4353,7 @@ impl NativeApplication {
     fn handle_service_stopped(&mut self, status: ServiceStopStatus, cx: &mut Context<Self>) {
         self.retain_message_flight(cx);
         self.service_stopped = true;
+        self.clear_transient_service_state();
         self.reset_composer_catalog(cx);
         self.reset_profile_usage_for_connection();
         self.thread_switch_flight = None;
@@ -14062,6 +14076,159 @@ mod tests {
     fn production_title_is_the_native_title() {
         assert_eq!(WINDOW_TITLE, "Artisan Editor");
         assert!(!WINDOW_TITLE.contains("phase"));
+    }
+
+    fn seed_refresh_in_flight(application: &mut NativeApplication, thread: &ThreadId) {
+        application
+            .composer_queue
+            .state
+            .set_scope(Some(thread.clone()), 5);
+        application
+            .composer_queue
+            .state
+            .begin_queue_refresh(true, true, false, false, true)
+            .expect("queue refresh in flight");
+    }
+
+    #[gpui::test]
+    fn terminal_service_failure_clears_transient_state_keeps_draft_and_transcript(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([]);
+        let old_thread = ThreadId::parse("forge-t1").expect("old thread");
+        let run = RunId::parse("run-a").expect("run");
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.selected_project =
+                    Some(ProjectId::parse("forge-p1").expect("project"));
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    old_thread.clone(),
+                    "who are you",
+                    sink,
+                );
+                application.seed_active_run_for_tests(old_thread.clone(), run.clone());
+                seed_refresh_in_flight(application, &old_thread);
+                application.sync_composer_controls(application_cx);
+                assert!(
+                    application
+                        .composer_controls
+                        .read(application_cx)
+                        .snapshot()
+                        .run_active,
+                    "stop control owns the observed run before the failure"
+                );
+                assert!(
+                    application
+                        .composer_queue
+                        .state
+                        .queue_refresh_in_flight()
+                );
+
+                application.handle_service_event(
+                    NativeTransportEvent::Failed(message_failure()),
+                    application_cx,
+                );
+
+                assert_eq!(
+                    application.composer_queue.state.status(),
+                    crate::composer_queue_state::QueueStatus::TransportFailed
+                );
+                assert!(
+                    !application
+                        .composer_queue
+                        .state
+                        .queue_refresh_in_flight()
+                );
+                assert!(
+                    !application
+                        .composer_controls
+                        .read(application_cx)
+                        .snapshot()
+                        .run_active,
+                    "no stop control for an unobservable run"
+                );
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "who are you"
+                );
+                assert!(
+                    application.conversation_host.is_some(),
+                    "transcript host survives service death"
+                );
+                assert!(matches!(
+                    application.state,
+                    NativeViewState::Failure(_)
+                ));
+                assert!(commands.borrow().is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn service_stopped_clears_stale_run_and_refresh_keeps_draft(cx: &mut TestAppContext) {
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([]);
+        let old_thread = ThreadId::parse("forge-t1").expect("old thread");
+        let run = RunId::parse("run-a").expect("run");
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.selected_project =
+                    Some(ProjectId::parse("forge-p1").expect("project"));
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    old_thread.clone(),
+                    "who are you",
+                    sink,
+                );
+                application.seed_active_run_for_tests(old_thread.clone(), run.clone());
+                seed_refresh_in_flight(application, &old_thread);
+                application.sync_composer_controls(application_cx);
+                assert!(
+                    application
+                        .composer_controls
+                        .read(application_cx)
+                        .snapshot()
+                        .run_active
+                );
+
+                application.handle_service_stopped(ServiceStopStatus::Failed, application_cx);
+
+                assert!(application.service_stopped);
+                assert_eq!(
+                    application.composer_queue.state.status(),
+                    crate::composer_queue_state::QueueStatus::TransportFailed
+                );
+                assert!(
+                    !application
+                        .composer_queue
+                        .state
+                        .queue_refresh_in_flight()
+                );
+                assert!(
+                    !application
+                        .composer_controls
+                        .read(application_cx)
+                        .snapshot()
+                        .run_active
+                );
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "who are you"
+                );
+                assert!(application.conversation_host.is_some());
+                assert!(matches!(
+                    application.state,
+                    NativeViewState::Failure(_)
+                ));
+                assert!(commands.borrow().is_empty());
+            });
+        });
     }
 
     fn failed_reason() -> String {

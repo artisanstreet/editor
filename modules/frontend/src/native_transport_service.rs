@@ -2025,6 +2025,12 @@ pub struct SubscriptionCustody {
     active_thread: Option<ThreadId>,
     pending_after: Option<ConversationCursor>,
     last_accepted_cursor: Option<ConversationCursor>,
+    /// Transport-forwarded continuity: the end cursor of the latest validated
+    /// batch. This advances on publish, independent of the application
+    /// acknowledgement above, so a second contiguous batch validates while
+    /// the UI ack is still queued behind other commands. It never marks
+    /// application acceptance and never seeds a resubscribe baseline.
+    received_cursor: Option<ConversationCursor>,
 }
 
 impl SubscriptionCustody {
@@ -2041,6 +2047,7 @@ impl SubscriptionCustody {
             self.last_accepted_cursor = None;
         }
         self.pending_after = after;
+        self.received_cursor = None;
     }
 
     /// Derives and records a Fresh or Resumed server cursor without advancing
@@ -2125,7 +2132,39 @@ impl SubscriptionCustody {
             self.active_thread = None;
             self.pending_after = None;
             self.last_accepted_cursor = None;
+            self.received_cursor = None;
         }
+    }
+
+    /// Records one validated batch as transport-forwarded without marking
+    /// application acceptance.
+    ///
+    /// The next contiguous batch validates against this cursor even when the
+    /// UI acknowledgement is still queued behind other commands. Resubscribe
+    /// baselines keep reading the application-accepted cursor, never this
+    /// one; a fresh subscribe epoch resets it.
+    pub fn on_batch_forwarded(&mut self, to_cursor: ConversationCursor) {
+        self.received_cursor = Some(to_cursor);
+    }
+
+    /// Returns the cursor the next batch must continue from, if any baseline
+    /// exists.
+    ///
+    /// Forwarded transport continuity wins while an epoch is live; the
+    /// subscribe baseline covers the first batch and the accepted cursor
+    /// covers a live epoch with nothing forwarded yet. `None` means no
+    /// baseline exists and the batch must fail closed.
+    #[must_use]
+    pub fn expected_batch_from(&self) -> Option<ConversationCursor> {
+        self.received_cursor
+            .or(self.pending_after)
+            .or(self.last_accepted_cursor)
+    }
+
+    /// Returns the latest transport-forwarded cursor, if any.
+    #[must_use]
+    pub fn received_cursor(&self) -> Option<ConversationCursor> {
+        self.received_cursor
     }
 
     /// Returns the active thread.
@@ -2167,6 +2206,45 @@ struct ServiceRuntime {
 }
 
 impl ServiceRuntime {
+    /// Builds a sessionless, leaseless runtime for delivery-loop tests.
+    ///
+    /// Batch and shutdown arms touch only custody and the event bridge, so
+    /// no network is expected: any reconnect attempt fails closed on the
+    /// missing lease instead of dialing.
+    #[cfg(test)]
+    fn new_for_batch_tests() -> Self {
+        let certificate = CertificateDer::from(vec![7u8; 32]);
+        let pinned_identity = PinnedIdentity::from_certificate(&certificate);
+        let target = LoopbackTarget::new("127.0.0.1:40123".parse().expect("loopback"))
+            .expect("loopback target");
+        let binding = build_reconnect_binding([9u8; 16], target, pinned_identity, 19)
+            .expect("reconnect binding");
+        Self {
+            session: None,
+            reconnect_lease: None,
+            reconnect_binding: binding,
+            certificate,
+            target,
+            pinned_identity,
+            limits: ClientSessionLimits {
+                connect: Duration::from_secs(1),
+                handshake: Duration::from_secs(1),
+                request: Duration::from_secs(1),
+                shutdown: Duration::from_secs(1),
+                admission_budget: 1,
+            },
+            lease: None,
+            cancel: CancelHandle::new(),
+            shutdown_grace: Duration::ZERO,
+            known_threads: HashSet::new(),
+            intake: IntakeState::new(),
+            custody: SubscriptionCustody::new(),
+            delivery_cancel: None,
+            delivery_join: None,
+            delivery_tx: None,
+        }
+    }
+
     async fn reconnect(
         &mut self,
         frames: &mut FrameFactory,
@@ -3037,6 +3115,7 @@ async fn service_main(
                     .await;
                     if let Err(failure) = command_result {
                         status = ServiceStopStatus::Failed;
+                        crate::dev_startup_receipt::report_failed(failure);
                         let _ = publish(&events, NativeTransportEvent::Failed(failure));
                     }
                 }
@@ -3347,13 +3426,15 @@ async fn command_loop_with_delivery(
                         if is_stale {
                             continue;
                         }
-                        // Validate cursor continuity against the pending subscribe baseline or
-                        // last application-accepted cursor.
-                        let Some(expected_from) = runtime
-                            .custody
-                            .pending_after()
-                            .or_else(|| runtime.custody.last_accepted_cursor())
-                        else {
+                        // Validate cursor continuity against transport-forwarded
+                        // position first: a second contiguous batch may arrive
+                        // before the UI acknowledgement is selected from the
+                        // command queue. The subscribe baseline covers the
+                        // first batch of an epoch and the accepted cursor
+                        // covers a live epoch with nothing forwarded yet.
+                        // Forwarding never marks application acceptance: the
+                        // resume baseline stays on the last explicit ack.
+                        let Some(expected_from) = runtime.custody.expected_batch_from() else {
                             let failure = ServiceFailure::new(
                                 ServiceFailureStage::Delivery,
                                 ServiceFailureCategory::Integrity,
@@ -3370,7 +3451,7 @@ async fn command_loop_with_delivery(
                             handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
                             continue;
                         }
-                        // Do not advance cursor here; emit to application and wait for explicit ack
+                        runtime.custody.on_batch_forwarded(batch.to_cursor());
                         publish(events, NativeTransportEvent::PatchBatch(batch))?;
                     }
                     Some(PrivateDelivery::Observation(observation)) => {
@@ -6118,6 +6199,171 @@ mod tests {
         assert!(!text.contains("route-test"));
         assert!(!text.contains("default"));
         assert!(!text.contains("engine-save"));
+    }
+
+    #[test]
+    fn forwarded_continuity_covers_second_batch_before_delayed_ack() {
+        use super::SubscriptionCustody;
+
+        let thread = ThreadId::parse("custody-thread").expect("thread");
+        let mut custody = SubscriptionCustody::new();
+        assert_eq!(custody.expected_batch_from(), None);
+        custody.on_subscribe(thread.clone(), Some(ConversationCursor::new(5)));
+        assert_eq!(
+            custody.expected_batch_from(),
+            Some(ConversationCursor::new(5))
+        );
+        // The first batch validates against the subscribe baseline;
+        // forwarding records transport continuity without marking the
+        // application acknowledgement the resume baseline still waits for.
+        custody.on_batch_forwarded(ConversationCursor::new(6));
+        assert_eq!(
+            custody.expected_batch_from(),
+            Some(ConversationCursor::new(6))
+        );
+        assert_eq!(custody.last_accepted_cursor(), None);
+        // The delayed UI ack advances acceptance only; continuity still
+        // rides the forwarded cursor for the batch already in flight.
+        custody
+            .on_acknowledge(&thread, ConversationCursor::new(6))
+            .expect("ack");
+        assert_eq!(
+            custody.last_accepted_cursor(),
+            Some(ConversationCursor::new(6))
+        );
+        assert_eq!(
+            custody.expected_batch_from(),
+            Some(ConversationCursor::new(6))
+        );
+        custody.on_batch_forwarded(ConversationCursor::new(7));
+        assert_eq!(
+            custody.expected_batch_from(),
+            Some(ConversationCursor::new(7))
+        );
+        // A fresh subscribe epoch resets forwarded continuity; redelivery
+        // validates against the new baseline while the application dedups
+        // replay above this layer.
+        custody.on_subscribe(thread.clone(), Some(ConversationCursor::new(6)));
+        assert_eq!(custody.received_cursor(), None);
+        assert_eq!(
+            custody.expected_batch_from(),
+            Some(ConversationCursor::new(6))
+        );
+        custody.on_unsubscribe(&thread);
+        assert_eq!(custody.expected_batch_from(), None);
+        assert_eq!(custody.active_thread(), None);
+    }
+
+    #[test]
+    fn two_contiguous_batches_publish_before_delayed_ack_without_reconnect() {
+        use super::{NativeTransportEvent, PrivateDelivery, command_loop_with_delivery};
+        use artisan_domain::{
+            ConversationLifecycle, ConversationPatch, PatchBatch, PatchId, PatchSequence,
+            Revision, TurnId, TurnOrdinal,
+        };
+
+        fn batch(thread: &ThreadId, from: u64, to: u64) -> PatchBatch {
+            let turn = artisan_domain::ConversationTurn {
+                turn_id: TurnId::parse("turn-a").expect("turn"),
+                ordinal: TurnOrdinal::new(0),
+                revision: Revision::new(0),
+                lifecycle: ConversationLifecycle::Pending,
+                created_at: UnixMillis::EPOCH,
+                updated_at: UnixMillis::EPOCH,
+            };
+            let patch = ConversationPatch::TurnUpsert {
+                patch_id: PatchId::parse("patch-a").expect("patch"),
+                sequence: PatchSequence::new(to).expect("sequence"),
+                turn,
+            };
+            PatchBatch::new(
+                thread.clone(),
+                ConversationCursor::new(from),
+                ConversationCursor::new(to),
+                vec![patch],
+            )
+            .expect("batch")
+        }
+
+        async fn next_patch(
+            events: &std::sync::mpsc::Receiver<NativeTransportEvent>,
+        ) -> PatchBatch {
+            for _ in 0..10_000 {
+                match events.try_recv() {
+                    Ok(NativeTransportEvent::PatchBatch(batch)) => return batch,
+                    Ok(_) => tokio::task::yield_now().await,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("event bridge closed before both batches published");
+                    }
+                }
+            }
+            panic!("second contiguous batch was not published before any UI ack");
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("loop test runtime");
+        runtime.block_on(async {
+            let mut service = super::ServiceRuntime::new_for_batch_tests();
+            let thread = ThreadId::parse("loop-thread").expect("thread");
+            service
+                .custody
+                .on_subscribe(thread.clone(), Some(ConversationCursor::new(5)));
+            let (command_tx, mut command_rx) =
+                tokio::sync::mpsc::channel::<NativeTransportCommand>(8);
+            let (delivery_tx, mut delivery_rx) =
+                tokio::sync::mpsc::channel::<PrivateDelivery>(8);
+            let (event_tx, event_rx) =
+                std::sync::mpsc::sync_channel::<NativeTransportEvent>(16);
+            let mut frames = FrameFactory::new();
+            let join = tokio::spawn(async move {
+                let outcome = command_loop_with_delivery(
+                    &mut command_rx,
+                    &mut delivery_rx,
+                    &mut service,
+                    &mut frames,
+                    &event_tx,
+                )
+                .await;
+                (outcome, service.custody)
+            });
+            delivery_tx
+                .send(PrivateDelivery::Batch(batch(&thread, 5, 6)))
+                .await
+                .expect("first batch");
+            let first = next_patch(&event_rx).await;
+            assert_eq!(first.from_cursor(), ConversationCursor::new(5));
+            assert_eq!(first.to_cursor(), ConversationCursor::new(6));
+            delivery_tx
+                .send(PrivateDelivery::Batch(batch(&thread, 6, 7)))
+                .await
+                .expect("second batch");
+            let second = next_patch(&event_rx).await;
+            assert_eq!(second.from_cursor(), ConversationCursor::new(6));
+            assert_eq!(second.to_cursor(), ConversationCursor::new(7));
+            command_tx
+                .send(NativeTransportCommand::Shutdown)
+                .await
+                .expect("shutdown");
+            let (outcome, custody) = join.await.expect("loop join");
+            assert!(
+                outcome.is_ok(),
+                "two contiguous batches must publish without reconnecting"
+            );
+            assert_eq!(
+                custody.received_cursor(),
+                Some(ConversationCursor::new(7))
+            );
+            assert_eq!(
+                custody.last_accepted_cursor(),
+                None,
+                "forwarding must not mark application acceptance"
+            );
+        });
     }
 }
 
