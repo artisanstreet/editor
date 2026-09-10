@@ -26,6 +26,7 @@ use artisan_ui::alert::{Alert, AlertStyle, AlertVariant};
 use artisan_ui::asset_seam::asset_glyph;
 use artisan_ui::badge::{BadgeStyle, outline_badge};
 use artisan_ui::gradient::vertical_gradient;
+use artisan_ui::inline_code_text::{inline_runs, summary_line};
 use artisan_ui::button::{
     AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
 };
@@ -38,7 +39,9 @@ use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::selectable_text::SelectableText;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::shimmer_text::ShimmerText;
-use artisan_ui::theme::{ArtisanTheme, SurfaceStep, ThemeMode};
+use artisan_ui::theme::{
+    ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode,
+};
 use gpui::{
     AnyElement, Context, Div, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Modifiers,
     Render, ScrollAnchor, ScrollHandle, SharedString, Stateful, Window, div,
@@ -54,8 +57,9 @@ use crate::approval_presentation::ApprovalKind as PresentationApprovalKind;
 use crate::conversation_scene::{
     ChangeSetBlock, CompactionBlock, ConversationScene, ErrorBlock, FileChangeStatus,
     ModelTransitionBlock, NativeFactBlock, PlanBlock, QuestionBlock, SceneDisclosure,
-    SceneFileChange, SceneId, SteeringBlock, TurnBlock, TurnFooterBlock, TurnFooterSettlement,
-    TurnNarration, TurnScene, UsageInterruptionBlock, UserMessageBlock, WorkGroupBlock, WorkItem,
+    SceneFileChange, SceneId, SessionDetail, SteeringBlock, TurnBlock, TurnFooterBlock,
+    TurnFooterSettlement, TurnNarration, TurnScene, UsageInterruptionBlock, UserMessageBlock,
+    WorkGroupBlock, WorkItem,
 };
 use crate::conversation_scroll_position::conversation_is_following;
 use crate::conversation_turn_navigator::{
@@ -94,6 +98,32 @@ pub const ROOT_SELECTOR: &str = CONVERSATION_SURFACE_SELECTOR;
 
 /// Alias for callers that use the shorter viewport-selector vocabulary.
 pub const VIEWPORT_SELECTOR: &str = CONVERSATION_VIEWPORT_SELECTOR;
+
+/// Stable debug selector for the transcript end-space spacer.
+pub const TRANSCRIPT_END_SPACE_SELECTOR: &str = "artisan-conversation-surface-end-space";
+
+/// Base transcript end space in px, mirroring
+/// `ConversationBaseEndSpacePixels`: the transcript always keeps at least
+/// this much scrollable room after its last turn.
+pub const TRANSCRIPT_END_SPACE_PX: f32 = 192.0;
+
+/// Turn-to-viewport top inset in px, mirroring
+/// `ConversationTurnTopInsetPixels`.
+pub const TRANSCRIPT_TURN_TOP_INSET_PX: f64 = 16.0;
+
+/// Computes end-space height with the reference anchoring formula.
+///
+/// Returns at least the base height, growing so an anchored turn at
+/// `item_top` can still reach the top inset of a `viewport_height` viewport
+/// once the spacer itself starts at `end_space_top`. Pure and total; live
+/// measurement wiring (which turn is anchored, where the spacer paints)
+/// belongs to the viewport/host lane, which feeds this surface.
+#[must_use]
+pub fn end_space_height(viewport_height: f64, item_top: f64, end_space_top: f64) -> f64 {
+    f64::from(TRANSCRIPT_END_SPACE_PX).max(
+        item_top + viewport_height - TRANSCRIPT_TURN_TOP_INSET_PX - end_space_top,
+    )
+}
 
 /// Group name shared by a turn root and its hover-revealed footer.
 ///
@@ -434,17 +464,16 @@ pub fn turn_status_copy(narration: TurnNarration) -> Option<String> {
 /// Returns the live status copy for one narration with its authoritative
 /// elapsed basis.
 ///
-/// While the narration is active work (`Thinking`/`Working`), an authoritative
+/// While the narration is `Thinking`/`Working`, an authoritative
 /// `active_started_at_ms` basis paired with a host-mirrored `frame_now_ms`
 /// renders `Thinking for Xs` / `Working for Xs` with whole-second flooring
-/// (`FormatElapsed` parity). `ProviderWait` — the actual production state
-/// while no scene fact has arrived — counts the same basis with the reference
-/// default verb (`Thinking`, matching the work-session header when no
-/// duration kind is known); the waiting wording itself is preserved as the
-/// row's retained semantic label by the renderer. Either value missing renders
-/// the bare narration copy truthfully: the renderer never reads a clock and
-/// never resets the basis on rerender. A basis on any other narration is
-/// ignored here (scene `build` already rejects it with a typed error).
+/// (`FormatElapsed` parity); the group header counts from the same basis.
+/// `ProviderWait` never counts here — the waiting sentence (generic or
+/// engine-named via [`provider_wait_copy`]) is the row's whole narration.
+/// Either value missing renders the bare narration copy truthfully: the
+/// renderer never reads a clock and never resets the basis on rerender. A
+/// basis on any other narration is ignored here (scene `build` already
+/// rejects it with a typed error).
 #[must_use]
 pub fn live_status_copy(
     narration: TurnNarration,
@@ -452,11 +481,11 @@ pub fn live_status_copy(
     frame_now_ms: Option<i64>,
 ) -> Option<String> {
     match narration {
-        TurnNarration::Thinking | TurnNarration::Working | TurnNarration::ProviderWait => {
+        TurnNarration::Thinking | TurnNarration::Working => {
             let verb = match narration {
-                TurnNarration::Thinking | TurnNarration::ProviderWait => "Thinking",
+                TurnNarration::Thinking => "Thinking",
                 TurnNarration::Working => "Working",
-                _ => unreachable!("active-work match covers every elapsed verb"),
+                _ => unreachable!("elapsed match covers every counted verb"),
             };
             match (active_started_at_ms, frame_now_ms) {
                 (Some(started_at_ms), Some(now_ms)) => {
@@ -518,40 +547,130 @@ pub fn live_group_header_copy(
 
 /// Returns the index of the work group that owns the live header, if any.
 ///
-/// Exactly one group owns it: the latest group, nearest the status row it
-/// replaces. Earlier groups render items only, so the live line paints once
-/// per turn.
+/// Exactly one group owns it: the latest non-superseded group, nearest the
+/// status row it replaces. A superseded session never narrates — the
+/// turn-level status row at turn end narrates current work instead. Earlier
+/// groups render items only, so the live line paints once per turn.
 #[must_use]
 pub fn owning_group_index(turn: &TurnScene) -> Option<usize> {
-    turn.blocks()
-        .iter()
-        .rposition(|block| matches!(block, TurnBlock::WorkGroup(_)))
+    turn.blocks().iter().rposition(|block| match block {
+        TurnBlock::WorkGroup(group) => !group.superseded,
+        _ => false,
+    })
 }
 
-/// Returns whether a group header paints the live shimmer plan.
+/// Reduces the raw scene summary to the one thinking line, if finished.
 ///
-/// True only when no terminal label stopped it and a live line was derived:
-/// settlement always wins, so a stale live basis can never animate a settled
-/// header.
+/// Unfinished phases yield `None` so the caller falls back to the narration,
+/// exactly like the reference.
 #[must_use]
-pub const fn group_header_is_live(terminal_present: bool, live_present: bool) -> bool {
-    !terminal_present && live_present
+pub fn status_summary_copy(summary: Option<&str>) -> Option<String> {
+    summary.and_then(summary_line)
+}
+
+/// Returns the exact pre-response provider wait label.
+///
+/// Mirrors the reference `waiting_label_for`: a known engine names the wait,
+/// unattributed work keeps the generic provider line. Elapsed counting lives
+/// in the group header, never in this sentence.
+#[must_use]
+pub fn provider_wait_copy(engine_label: Option<&str>) -> String {
+    match engine_label {
+        Some(engine) => format!("Waiting for {engine} to respond…"),
+        None => "Waiting for provider to respond…".to_owned(),
+    }
+}
+/// Returns the live header owned by the turn's latest work group, if any.
+///
+/// Combines the ownership rule ([`owning_group_index`]) with the elapsed
+/// derivation ([`live_group_header_copy`]) so render and scroll-identity code
+/// share one decision point.
+#[must_use]
+pub fn turn_owner_header(turn: &TurnScene, frame_now_ms: Option<i64>) -> Option<String> {
+    if owning_group_index(turn).is_none() {
+        return None;
+    }
+    let (narration, basis) = turn.blocks().iter().find_map(|block| match block {
+        TurnBlock::TurnStatus(status) => Some((status.narration, status.active_started_at_ms)),
+        _ => None,
+    })?;
+    live_group_header_copy(narration, basis, frame_now_ms)
+}
+
+/// Computes the exact status row copy: reduced scene summary, engine-named
+/// wait, or live narration copy.
+///
+/// Unfinished or absent summaries fall back through the narration path, so
+/// this returns `None` exactly when no row paints for copy reasons.
+#[must_use]
+pub fn turn_status_copy_text(
+    narration: TurnNarration,
+    active_started_at_ms: Option<i64>,
+    frame_now_ms: Option<i64>,
+    reasoning_summary: Option<&str>,
+    engine_label: Option<&str>,
+) -> Option<String> {
+    match status_summary_copy(reasoning_summary) {
+        Some(summary) => Some(summary),
+        None => match narration {
+            TurnNarration::ProviderWait => Some(provider_wait_copy(engine_label)),
+            _ => live_status_copy(narration, active_started_at_ms, frame_now_ms),
+        },
+    }
+}
+
+/// Returns whether a turn status block paints a child row.
+///
+/// Combines the structural visibility rule with the identical-duplicate
+/// suppression. Render and scroll-identity code share this decision point:
+/// any divergence misaligns measured child bounds with their identities.
+#[must_use]
+pub fn turn_status_paints(
+    turn_has_work_group: bool,
+    narration: TurnNarration,
+    copy: Option<&str>,
+    owner_header: Option<&str>,
+) -> bool {
+    if !status_row_visible(turn_has_work_group, narration) {
+        return false;
+    }
+    if !matches!(
+        narration,
+        TurnNarration::Thinking | TurnNarration::Working
+    ) {
+        return true;
+    }
+    !status_duplicates_owner(copy, owner_header)
+}
+
+/// Returns whether a live status row duplicates the owning group header.
+///
+/// Distinct lines (an elapsed header beside a summary narration) both paint;
+/// identical lines paint once in the header. This keeps the renderer correct
+/// under both scene generations: the current scene emits the same words in
+/// both places, while a suppressing build omits one side entirely.
+#[must_use]
+pub fn status_duplicates_owner(status_copy: Option<&str>, owner_header: Option<&str>) -> bool {
+    matches!(
+        (status_copy, owner_header),
+        (Some(status), Some(header)) if status == header
+    )
 }
 /// Returns whether a status row paints for one narration in a turn that may
 /// already carry its line in a work-group header.
 ///
-/// Terminal durations prefer the group header, and the live Thinking/Working
-/// line is owned by the latest group header (see [`owning_group_index`]), so
-/// the separate status row stands down whenever the turn carries a group.
+/// Terminal durations prefer the group header. Live Thinking/Working rows are
+/// decided by content, not by phase: [`status_duplicates_owner`] suppresses
+/// only the identical duplicate, so a summary narration beside an elapsed
+/// header still paints. `Quiet` and `StreamingSuppression` never paint.
 #[must_use]
 pub fn status_row_visible(turn_has_work_group: bool, narration: TurnNarration) -> bool {
     match turn_status_copy(narration) {
         None => false,
         Some(_) => match narration {
-            TurnNarration::WorkedFor { .. }
-            | TurnNarration::ThoughtFor { .. }
-            | TurnNarration::Thinking
-            | TurnNarration::Working => !turn_has_work_group,
+            TurnNarration::WorkedFor { .. } | TurnNarration::ThoughtFor { .. } => {
+                !turn_has_work_group
+            }
             _ => true,
         },
     }
@@ -647,6 +766,13 @@ pub struct ConversationSurface {
     /// the tick column paints, so full message texts never float beside the
     /// transcript.
     navigator_expanded: bool,
+    /// Transcript end-space height in px, measured live from prepaint.
+    ///
+    /// Starts at the reference base and converges through
+    /// [`end_space_height`] as frames measure the last turn against the
+    /// viewport. The change guard in the observer is what keeps this from
+    /// looping: equal values never notify.
+    end_space_px: f32,
     /// Host-mirrored frame time in millis for live Thinking/Working elapsed.
     ///
     /// This is a paint-time mirror only: the surface never reads a clock and
@@ -922,7 +1048,13 @@ fn block_scroll_identity(turn_id: &TurnId, block: &TurnBlock) -> (Option<SceneId
     match block {
         TurnBlock::UserMessage(block) => text_block_scroll_identity(&block.id),
         TurnBlock::AssistantMessage(block) => text_block_scroll_identity(&block.id),
-        TurnBlock::WorkGroup(block) => (work_group_anchor_id(turn_id, block), None),
+        TurnBlock::WorkGroup(block) => (
+            block
+                .session
+                .clone()
+                .or_else(|| work_group_anchor_id(turn_id, block)),
+            None,
+        ),
         TurnBlock::Compaction(block) => text_block_scroll_identity(&block.id),
         TurnBlock::ChangeSet(block) => text_block_scroll_identity(&block.id),
         TurnBlock::Plan(block) => text_block_scroll_identity(&block.id),
@@ -1001,6 +1133,7 @@ impl ConversationSurface {
             scroll_anchor_paint_token: None,
             navigator_focus: HashMap::new(),
             navigator_expanded: false,
+            end_space_px: TRANSCRIPT_END_SPACE_PX,
             active_now_ms: None,
             status_motion: MotionPolicy::Full,
             footer_mirrors: HashMap::new(),
@@ -1629,6 +1762,51 @@ impl ConversationSurface {
         true
     }
 
+    /// Observes live end-space geometry from the prepaint boundary.
+    ///
+    /// `children_bounds` holds every transcript child in order with the
+    /// spacer last, so all but the last entry are turns and the last entry
+    /// is the spacer itself. The last turn anchors the formula; an empty
+    /// transcript resets to the base. Origins cancel the element offset by
+    /// subtraction, exactly like the painted scroll-offset path, so window
+    /// and content spaces agree. Non-finite measurements are ignored, and an
+    /// unchanged value never notifies, so this converges instead of looping.
+    fn observe_end_space_geometry(
+        &mut self,
+        children_bounds: &[gpui::Bounds<gpui::Pixels>],
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport_height = f64::from(self.scroll_handle.bounds().size.height);
+        let offset = f64::from(window.element_offset().y);
+        let base = f64::from(TRANSCRIPT_END_SPACE_PX);
+        let measured = match children_bounds.split_last() {
+            Some((_, [])) | None => base,
+            Some((_, turns)) => {
+                let Some(last) = turns.last() else {
+                    return;
+                };
+                let item_top = f64::from(last.origin.y) - offset;
+                let end_space_top = f64::from(
+                    children_bounds
+                        .last()
+                        .expect("split yielded a last child")
+                        .origin
+                        .y,
+                ) - offset;
+                end_space_height(viewport_height, item_top, end_space_top)
+            }
+        };
+        if !measured.is_finite() {
+            return;
+        }
+        let measured = measured as f32;
+        if self.end_space_px != measured {
+            self.end_space_px = measured;
+            cx.notify();
+        }
+    }
+
     /// Releases render-only scroll custody when the owning host retires.
     ///
     /// The queue contains only typed targets. The registry and its deferred
@@ -1859,20 +2037,10 @@ impl ConversationSurface {
             .gap(theme.spacing.steps(6.0));
         // At most one group owns the live Thinking/Working line: the latest
         // group headers it once from the same accepted narration and clock,
-        // and the separate status row below stands down. Terminal labels
-        // always win over the live line inside the group.
-        let live_header: Option<String> = turn
-            .blocks()
-            .iter()
-            .find_map(|block| match block {
-                TurnBlock::TurnStatus(status) => {
-                    Some((status.narration, status.active_started_at_ms))
-                }
-                _ => None,
-            })
-            .and_then(|(narration, basis)| {
-                live_group_header_copy(narration, basis, self.active_now_ms)
-            });
+        // and the separate status row below stands down unless it narrates
+        // something distinct. Terminal labels always win over the live line
+        // inside the group.
+        let live_header: Option<String> = turn_owner_header(turn, self.active_now_ms);
         let live_owner = if live_header.is_some() {
             owning_group_index(turn)
         } else {
@@ -1889,10 +2057,33 @@ impl ConversationSurface {
             .blocks()
             .iter()
             .filter_map(|block| {
-                if let TurnBlock::TurnStatus(status) = block
-                    && !status_row_visible(turn_has_work_group, status.narration)
-                {
-                    return None;
+                if let TurnBlock::TurnStatus(status) = block {
+                    // Same paint decision as render_status: structural rule
+                    // plus identical-duplicate suppression, so measured
+                    // children and identities stay one-to-one.
+                    let copy = turn_status_copy_text(
+                        status.narration,
+                        status.active_started_at_ms,
+                        self.active_now_ms,
+                        status.reasoning_summary.as_deref(),
+                        status.engine_label.as_deref(),
+                    );
+                    let owner = if matches!(
+                        status.narration,
+                        TurnNarration::Thinking | TurnNarration::Working
+                    ) {
+                        turn_owner_header(turn, self.active_now_ms)
+                    } else {
+                        None
+                    };
+                    if !turn_status_paints(
+                        turn_has_work_group,
+                        status.narration,
+                        copy.as_deref(),
+                        owner.as_deref(),
+                    ) {
+                        return None;
+                    }
                 }
                 if let TurnBlock::TurnFooter(footer) = block
                     && !footer_has_content(footer)
@@ -1972,7 +2163,7 @@ impl ConversationSurface {
                     None
                 };
                 Some(self.render_work_group(
-                    turn_id, block, selector, entity, theme, anchors, owned, status_motion,
+                    turn_id, block, selector, entity, theme, anchors, owned,
                 ))
             }
             TurnBlock::Compaction(block) => {
@@ -2051,18 +2242,27 @@ impl ConversationSurface {
             // The body text is the shared selectable element: retained state
             // (selection, drag latch, focus) lives in framework element state
             // under the stable body id across frames, with no caller maps or
-            // focus handles. Styling stays on the container exactly as before
-            // (base size, 24 px line height, bubble metrics, gradient), so no
-            // duplicate body, glyph, or padding is introduced.
+            // focus handles. Styling stays on the container (prose size,
+            // 28 px line height, 410 weight, bubble metrics, gradient face
+            // with the reference card shadow beneath), so no duplicate body,
+            // glyph, or padding is introduced.
             let body_id = SharedString::from(body_selector.clone());
             message = message.child(
                 div()
                     .max_w(px(576.0))
-                    .rounded(px(16.0))
+                    .rounded(RadiusTokens::value(RadiusStep::X2l))
                     .bg(vertical_gradient(
                         SurfaceStep::S775.oklch(),
                         SurfaceStep::S850.oklch(),
                     ))
+                    .shadow(
+                        theme
+                            .elevation
+                            .card_shadow
+                            .iter()
+                            .map(|layer| layer.to_box_shadow())
+                            .collect::<Vec<_>>(),
+                    )
                     .px(px(16.0))
                     .py(px(12.0))
                     .debug_selector(move || selector.clone())
@@ -2070,8 +2270,10 @@ impl ConversationSurface {
                         div()
                             .w_full()
                             .min_w_0()
-                            .text_size(theme.typography.editor_text_desktop)
-                            .line_height(theme.spacing.steps(6.0))
+                            .text_size(px(ProseTypography::BODY_SIZE_PX))
+                            .line_height(px(ProseTypography::BODY_LINE_PX))
+                            .font_weight(ProseTypography::BODY_WEIGHT)
+                            .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
                             .whitespace_normal()
                             .debug_selector(move || body_selector.clone())
                             .child(SelectableText::retained(
@@ -2146,17 +2348,25 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
         live_header: Option<String>,
-        status_motion: MotionPolicy,
     ) -> AnyElement {
-        let group_id = work_group_anchor_id(turn_id, block);
+        // The stable anchor prefers the session id (disclosure/scroll key);
+        // legacy positional groups fall back to the first-item derivation.
+        let group_id = block
+            .session
+            .clone()
+            .or_else(|| work_group_anchor_id(turn_id, block));
         // Terminal duration wins; otherwise the owning group headers the
         // turn's live Thinking/Working line once (see render_turn). Earlier
         // groups and the separate status row stand down, so the line paints
-        // exactly once per turn. A settled terminal header always stops the
-        // shimmer, even if a stale live basis lingers.
+        // exactly once per turn. Headers are static text; the sweep lives
+        // only on the status summary line.
         let terminal = work_group_header_copy(block.label);
-        let header_live = group_header_is_live(terminal.is_some(), live_header.is_some());
         let header = terminal.or(live_header);
+        // Engine handoffs fold into the header far end, never as standalone
+        // timeline rows while a session hosts them.
+        let transition = block.transition.as_ref().map(|handoff| {
+            format!("{} → {}", handoff.from_model, handoff.to_model)
+        });
 
         // Controlled state is never overridden: Closed hides through the
         // collapsible in every case, and the toggle always flows through the
@@ -2172,10 +2382,13 @@ impl ConversationSurface {
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(2.0));
-        for item in &block.items {
-            items = items.child(self.render_work_item(
-                item,
+        let rows = ordered_detail_rows(block);
+        for (ordinal, row) in &rows {
+            items = items.child(self.render_detail_row(
+                *row,
+                *ordinal,
                 &selector,
+                entity,
                 theme,
                 anchors,
                 items_mounted,
@@ -2184,10 +2397,14 @@ impl ConversationSurface {
         if header.is_some() {
             items = items.pt(theme.spacing.steps(2.0));
         }
-        let item_identities: Vec<(Option<SceneId>, Option<ItemId>)> = block
-            .items
+        // Identities mirror painted rows in order, so executed scroll
+        // targets resolve against measured child bounds one-to-one.
+        let item_identities: Vec<(Option<SceneId>, Option<ItemId>)> = rows
             .iter()
-            .map(|item| (None, item_id_for_scene_id(work_item_id(item))))
+            .map(|(_, row)| {
+                let id = row.scene_id();
+                (Some(id.clone()), item_id_for_scene_id(id))
+            })
             .collect();
         let surface = entity.downgrade();
         items = items.on_children_prepainted(move |children_bounds, window, app| {
@@ -2204,16 +2421,15 @@ impl ConversationSurface {
             let selector = selector.clone();
             move || selector.clone()
         });
-        match (group_id, header, block.disclosure) {
+        let mut section = match (group_id, header, block.disclosure) {
             (Some(group_id), header, Some(_)) => {
                 // Text header when the group owns one, else the chevron-only
                 // disclosure affordance: chrome, never invented content.
                 let trigger: AnyElement = match header {
                     Some(header_text) => Self::work_group_header(
                         header_text,
+                        transition.clone(),
                         theme,
-                        status_motion,
-                        header_live,
                     ),
                     None => div()
                         .id(format!("{selector}-work-trigger"))
@@ -2247,104 +2463,167 @@ impl ConversationSurface {
                         }
                     });
                 });
-                section.child(collapsible).into_any_element()
+                section.child(collapsible)
             }
             (_, header, _) => {
                 let mut static_section = section;
                 if let Some(header_text) = header {
                     static_section = static_section.child(Self::work_group_header(
                         header_text,
+                        transition.clone(),
                         theme,
-                        status_motion,
-                        header_live,
                     ));
                 }
-                static_section.child(items).into_any_element()
+                static_section.child(items)
             }
-        }
+        };
+        section.into_any_element()
     }
 
-    fn render_work_item(
+    /// Renders one ordered detail row with its scroll anchor.
+    ///
+    /// Per-row disclosure stays data-only: visibility follows the group
+    /// control, matching the reference grouping, which never shows nested
+    /// toggles. Assistant details render full markdown like top-level
+    /// replies; compaction and native facts reuse the native card
+    /// presentation statically.
+    fn render_detail_row(
         &self,
-        item: &WorkItem,
+        row: DetailRow<'_>,
+        ordinal: u64,
         group_selector: &str,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
         mounted: bool,
     ) -> AnyElement {
-        let selector = format!(
-            "{group_selector}-item-{}",
-            work_item_id(item).as_str()
-        );
-        let content: AnyElement = match item {
-            // Settled public summaries render through the shared markdown
-            // path, matching assistant content: the reference keeps code
-            // faces rather than literal backticks, with no kind heading.
-            WorkItem::Reasoning { body, .. } => self
-                .markdown_renderer
-                .render_source(body, *theme, selector.clone()),
-            // The scene carries one body per activity (no label/detail
-            // split); it renders as the reference baseline row's text at
-            // text-sm, with no kind heading and no truncation of content.
-            WorkItem::Activity { body, .. } => div()
-                .w_full()
-                .min_w_0()
-                .text_size(theme.typography.label_text)
-                .text_color(theme.colors.foreground.to_paint())
-                .child(body.clone())
-                .into_any_element(),
-            // Session titles render muted at base size (reference header
-            // tone); counting lives in the group header and status row.
-            WorkItem::WorkSession { title, .. } => div()
-                .w_full()
-                .min_w_0()
-                .text_size(theme.typography.editor_text_desktop)
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .child(title.clone())
-                .into_any_element(),
-        };
-        if mounted {
-            let mut element = anchors.attach(
-                div().w_full().min_w_0(),
-                None,
-                item_id_for_scene_id(work_item_id(item)).as_ref(),
-            );
-            element = element.debug_selector(move || selector.clone());
-            element.child(content).into_any_element()
-        } else {
-            div()
-                .w_full()
-                .min_w_0()
-                .debug_selector(move || selector.clone())
-                .child(content)
-                .into_any_element()
+        let selector = format!("{group_selector}-detail-{ordinal}");
+        let row_id = row.scene_id().clone();
+        match &row {
+            DetailRow::Compaction { id, summary, .. } => self.render_text_block(
+                TextBlockRender {
+                    id,
+                    disclosure: None,
+                    selector,
+                    title: "Compaction",
+                    body: summary,
+                },
+                entity,
+                theme,
+                anchors,
+            ),
+            DetailRow::NativeFact { id, text, .. } => self.render_text_block(
+                TextBlockRender {
+                    id,
+                    disclosure: None,
+                    selector,
+                    title: "Native fact",
+                    body: text,
+                },
+                entity,
+                theme,
+                anchors,
+            ),
+            row => {
+                let content: AnyElement = match &row {
+                    DetailRow::Assistant { body, .. } => {
+                        let rendered = self.markdown_renderer.render_source(
+                            body,
+                            *theme,
+                            format!("{selector}-markdown"),
+                        );
+                        div()
+                            .w_full()
+                            .max_w(px(672.0))
+                            .child(rendered)
+                            .into_any_element()
+                    }
+                    // The scene carries one body per activity (no label/detail
+                    // split); it renders as the reference baseline row's text
+                    // at text-sm, with no kind heading and no truncation of
+                    // content.
+                    DetailRow::Activity { body, .. } => div()
+                        .w_full()
+                        .min_w_0()
+                        .text_size(theme.typography.control_text)
+                        .font_weight(ProseTypography::BODY_WEIGHT)
+                        .letter_spacing(px(ProseTypography::body_tracking_px(14.0)))
+                        .text_color(theme.colors.foreground.to_paint())
+                        .child(body.clone())
+                        .into_any_element(),
+                    // Session titles render muted at base size (reference
+                    // header tone); counting lives in the group header and
+                    // status row.
+                    DetailRow::SessionTitle { title, .. } => div()
+                        .w_full()
+                        .min_w_0()
+                        .text_size(px(ProseTypography::BODY_SIZE_PX))
+                        .line_height(theme.spacing.steps(6.0))
+                        .font_weight(ProseTypography::BODY_WEIGHT)
+                        .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
+                        .text_color(theme.colors.muted_foreground.to_paint())
+                        .child(title.clone())
+                        .into_any_element(),
+                    DetailRow::Compaction { .. } | DetailRow::NativeFact { .. } => {
+                        unreachable!("card rows render above")
+                    }
+                };
+                if mounted {
+                    let mut element = anchors.attach(
+                        div().w_full().min_w_0(),
+                        Some(&row_id),
+                        item_id_for_scene_id(&row_id).as_ref(),
+                    );
+                    element = element.debug_selector(move || selector.clone());
+                    element.child(content).into_any_element()
+                } else {
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .debug_selector(move || selector.clone())
+                        .child(content)
+                        .into_any_element()
+                }
+            }
         }
     }
 
     /// Renders one work-group header row in the reference session-header
-    /// tone, with no generic title.
-    ///
-    /// The text travels through the exact shimmer plan as the turn status
-    /// row: a live header animates under effective `Full`, while a terminal
-    /// header and reduced motion resolve to the same immediate readable
-    /// faces, so settlement always stops the effect.
+    /// tone, with no generic title: base size, single-spaced, muted.
+    /// Static by construction — the sweep lives on the live summary line,
+    /// exactly where the reference puts it, so settlement stops all motion
+    /// structurally. A folded engine handoff reads at the far end, matching
+    /// the reference header layout.
     fn work_group_header(
         title: String,
+        transition: Option<String>,
         theme: &ArtisanTheme,
-        motion: MotionPolicy,
-        active: bool,
-    ) -> AnyElement {
-        let shimmer = ShimmerText::new(title, *theme, motion)
-            .active(active)
-            .delay_seconds(1.5)
-            .duration_seconds(3.0)
-            .text_color(theme.colors.muted_foreground.to_paint());
-        div()
+    ) -> Div {
+        let mut header = div()
             .w_full()
             .min_w_0()
-            .text_size(theme.typography.editor_text_desktop)
-            .child(shimmer)
-            .into_any_element()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(theme.spacing.steps(3.0))
+            .text_size(px(ProseTypography::BODY_SIZE_PX))
+            .line_height(theme.spacing.steps(6.0))
+            .font_weight(ProseTypography::BODY_WEIGHT)
+            .letter_spacing(px(ProseTypography::body_tracking_px(
+                ProseTypography::BODY_SIZE_PX,
+            )))
+            .text_color(theme.colors.muted_foreground.to_paint())
+            .child(title);
+        if let Some(handoff) = transition {
+            header = header.child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child(handoff),
+            );
+        }
+        header
     }
 
     fn render_compaction(
@@ -2771,7 +3050,7 @@ impl ConversationSurface {
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let mut style = AlertStyle::resolve(*theme, AlertVariant::Destructive);
-        style.corner_radius = px(12.0);
+        style.corner_radius = RadiusTokens::value(RadiusStep::Xl);
         style.horizontal_padding = theme.spacing.steps(3.5);
         style.vertical_padding = theme.spacing.steps(3.0);
         style.content_gap = theme.spacing.steps(1.5);
@@ -2898,27 +3177,55 @@ impl ConversationSurface {
     ) -> Option<AnyElement> {
         // The terminal duration prefers the work-group header when the turn
         // carries the group; the reference settles to the header alone.
-        let turn_has_work_group = self
-            .scene
-            .turn_scene(turn_id)
-            .is_some_and(|turn| {
-                turn.blocks()
-                    .iter()
-                    .any(|block| matches!(block, TurnBlock::WorkGroup(_)))
-            });
-        if !status_row_visible(turn_has_work_group, block.narration) {
-            return None;
-        }
-        let copy = live_status_copy(
+        let turn_scene = self.scene.turn_scene(turn_id);
+        let turn_has_work_group = turn_scene.is_some_and(|turn| {
+            turn.blocks()
+                .iter()
+                .any(|block| matches!(block, TurnBlock::WorkGroup(_)))
+        });
+        // The thinking line is the scene summary reduced to one line when
+        // one rides the block; settled rows never carry it (builder
+        // guarantee). An unfinished phase reduces to nothing and falls back
+        // to the narration, exactly like the reference. Otherwise the
+        // narration supplies the verb, with the engine-named wait for a
+        // known provider.
+        let summary: Option<String> =
+            status_summary_copy(block.reasoning_summary.as_deref());
+        let has_summary = summary.is_some();
+        let copy = turn_status_copy_text(
             block.narration,
             block.active_started_at_ms,
             self.active_now_ms,
+            block.reasoning_summary.as_deref(),
+            block.engine_label.as_deref(),
         )?;
+        // A live line identical to the owning group header paints once, in
+        // the header; a distinct narration (a summary counts) still paints.
+        // Render and scroll identities share this exact decision.
+        let owner_header = if matches!(
+            block.narration,
+            TurnNarration::Thinking | TurnNarration::Working
+        ) {
+            turn_scene.and_then(|turn| turn_owner_header(turn, self.active_now_ms))
+        } else {
+            None
+        };
+        if !turn_status_paints(
+            turn_has_work_group,
+            block.narration,
+            Some(copy.as_str()),
+            owner_header.as_deref(),
+        ) {
+            return None;
+        }
         // Parity with the work-session status line: base-size muted copy on a
         // half-rem vertical rhythm. The effective motion resolves the live
         // window signal at render time (see `effective_status_motion`); the
         // shimmer animates only for live rows under `Full` and stays
-        // immediate for settled history and reduced motion.
+        // immediate for settled history and reduced motion. A summary sweeps
+        // with the summary cadence and parses inline marks through the
+        // frozen text-runs contract (faces survive the band identically
+        // under Full and Reduced); verbs keep the verb cadence.
         let live = matches!(
             block.narration,
             TurnNarration::Thinking
@@ -2927,18 +3234,30 @@ impl ConversationSurface {
                 | TurnNarration::Compacting
                 | TurnNarration::BackgroundWait
         );
-        let shimmer = ShimmerText::new(copy, *theme, status_motion)
-            .active(live)
-            .delay_seconds(1.5)
-            .duration_seconds(3.0)
-            .text_color(status_color(theme, block.narration));
-        // The narration wording stays retained for assistive technology even
-        // when the visible clock counts instead: reference keeps the waiting
-        // sentence as the status line's accessible name beside the elapsed
-        // header.
-        let shimmer = match turn_status_copy(block.narration) {
-            Some(semantic) => shimmer.status_label(semantic),
-            None => shimmer,
+        let content: AnyElement = if has_summary {
+            // Faces ride the shared shimmer through the frozen text-runs
+            // contract: the sweep recolors while family and zero tracking
+            // compile at layout, identically under Full and Reduced, with
+            // selection retained per stable id.
+            let runs = inline_runs(&copy, *theme);
+            ShimmerText::new(runs.text, *theme, status_motion)
+                .text_runs(
+                    format!("{selector}-summary"),
+                    runs.highlights,
+                    runs.overrides,
+                )
+                .active(live)
+                .delay_seconds(0.0)
+                .duration_seconds(2.0)
+                .text_color(status_color(theme, block.narration))
+                .into_element()
+        } else {
+            ShimmerText::new(copy, *theme, status_motion)
+                .active(live)
+                .delay_seconds(1.5)
+                .duration_seconds(3.0)
+                .text_color(status_color(theme, block.narration))
+                .into_element()
         };
         let mut status = div()
             .w_full()
@@ -2947,9 +3266,12 @@ impl ConversationSurface {
             .flex_row()
             .items_center()
             .my(theme.spacing.steps(2.0))
-            .text_size(theme.typography.editor_text_desktop)
-            .line_height(theme.spacing.steps(7.0))
-            .child(shimmer);
+            .text_size(px(ProseTypography::BODY_SIZE_PX))
+            .line_height(px(ProseTypography::BODY_LINE_PX))
+            .font_weight(ProseTypography::BODY_WEIGHT)
+            .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
+            .text_color(theme.colors.muted_foreground.to_paint())
+            .child(content);
         status = status.debug_selector(move || selector.clone());
         Some(status.into_any_element())
     }
@@ -3030,7 +3352,9 @@ impl ConversationSurface {
             .flex_row()
             .items_center()
             .gap(theme.spacing.steps(1.0))
-            .text_size(theme.typography.label_text)
+            .text_size(theme.typography.control_text)
+            .font_weight(ProseTypography::BODY_WEIGHT)
+            .letter_spacing(px(ProseTypography::body_tracking_px(14.0)))
             .text_color(theme.colors.muted_foreground.to_paint())
             .opacity(if focused { 1.0 } else { 0.0 })
             .group_hover(TURN_GROUP, |hover| hover.opacity(1.0))
@@ -3819,6 +4143,17 @@ impl Render for ConversationSurface {
                     cx,
                 ));
             }
+            // Base end space keeps scrollable room after the last turn so an
+            // anchored turn can reach the viewport top inset. The height
+            // grows from live measurement via [`end_space_height`] once the
+            // viewport lane supplies it; until then the reference base holds
+            // with no invented cap.
+            transcript = transcript.child(
+                div()
+                    .w_full()
+                    .h(px(self.end_space_px))
+                    .debug_selector(|| TRANSCRIPT_END_SPACE_SELECTOR.to_owned()),
+            );
         }
 
         let scroll_executed = self.drain_painted_scroll_targets(&rendered_anchors, window, cx);
@@ -3842,6 +4177,7 @@ impl Render for ConversationSurface {
         // is not paint evidence and must never mint painted custody.
         transcript = transcript.on_children_prepainted(move |children_bounds, window, app| {
             let _ = surface.update(app, |surface, cx| {
+                surface.observe_end_space_geometry(&children_bounds, window, cx);
                 let current = surface
                     .scroll_anchor_paint_token
                     .as_ref()
@@ -3923,6 +4259,117 @@ impl Render for ConversationSurface {
             root = root.child(rail);
         }
         root
+    }
+}
+
+/// One paintable transcript detail row with its durable ordinal.
+///
+/// Session mode carries the single ordered `session_details` list
+/// (assistant prose, activities, compactions, native facts); legacy
+/// positional groups carry `items` in vec order, which is durable by
+/// construction. The builder guarantees never both, so no interleave can
+/// scramble chronology. Reasoning maps to nothing: it is stripped from
+/// visible details unconditionally and lives only on the thinking line.
+#[derive(Clone, Copy, Debug)]
+enum DetailRow<'a> {
+    /// Assistant prose that is not the promoted reply.
+    Assistant { id: &'a SceneId, body: &'a str },
+    /// Activity or tool-result summary.
+    Activity { id: &'a SceneId, body: &'a str },
+    /// Compaction summary folded into the session.
+    Compaction { id: &'a SceneId, summary: &'a str },
+    /// Native fact folded into the session.
+    NativeFact { id: &'a SceneId, text: &'a str },
+    /// Legacy work-session title (fixture-only in production: no shipped
+    /// producer emits session titles; the variant stays matched).
+    SessionTitle { id: &'a SceneId, title: &'a str },
+}
+
+impl<'a> DetailRow<'a> {
+    /// Returns the stable scene identity carried for scroll anchoring.
+    fn scene_id(&self) -> &SceneId {
+        match self {
+            Self::Assistant { id, .. }
+            | Self::Activity { id, .. }
+            | Self::Compaction { id, .. }
+            | Self::NativeFact { id, .. }
+            | Self::SessionTitle { id, .. } => id,
+        }
+    }
+}
+
+/// Collects one group's paintable rows in exact chronological order.
+///
+/// Session details arrive ordinal-keyed and sort stably; legacy items keep
+/// vec order. Callers paint the returned sequence verbatim.
+fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
+    if !block.session_details.is_empty() {
+        let mut rows: Vec<(u64, DetailRow<'_>)> = block
+            .session_details
+            .iter()
+            .map(|detail| match detail {
+                SessionDetail::Assistant { id, body, ordinal, .. } => (
+                    *ordinal,
+                    DetailRow::Assistant {
+                        id,
+                        body: body.as_str(),
+                    },
+                ),
+                SessionDetail::Activity { id, body, ordinal, .. } => (
+                    *ordinal,
+                    DetailRow::Activity {
+                        id,
+                        body: body.as_str(),
+                    },
+                ),
+                SessionDetail::Compaction {
+                    id, summary, ordinal, ..
+                } => (
+                    *ordinal,
+                    DetailRow::Compaction {
+                        id,
+                        summary: summary.as_str(),
+                    },
+                ),
+                SessionDetail::NativeFact {
+                    id, text, ordinal, ..
+                } => (
+                    *ordinal,
+                    DetailRow::NativeFact {
+                        id,
+                        text: text.as_str(),
+                    },
+                ),
+            })
+            .collect();
+        rows.sort_by_key(|(ordinal, _)| *ordinal);
+        rows
+    } else {
+        block
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let ordinal = u64::try_from(index).unwrap_or(u64::MAX);
+                match item {
+                    WorkItem::Reasoning { .. } => None,
+                    WorkItem::Activity { body, .. } => Some((
+                        ordinal,
+                        DetailRow::Activity {
+                            id: work_item_id(item),
+                            body: body.as_str(),
+                        },
+                    )),
+                    WorkItem::WorkSession { title, .. } => Some((
+                        ordinal,
+                        DetailRow::SessionTitle {
+                            id: work_item_id(item),
+                            title: title.as_str(),
+                        },
+                    )),
+                }
+            })
+            .collect()
     }
 }
 
@@ -4102,7 +4549,7 @@ impl ConversationSurface {
         let rail = div()
             .id(SharedString::from(TURN_NAVIGATOR_SELECTOR))
             .absolute()
-            .right(px(16.0))
+            .right(px(8.0))
             .top(px(64.0))
             .debug_selector(|| TURN_NAVIGATOR_SELECTOR.to_owned())
             .on_hover(move |hovered: &bool, _, app| {
@@ -4316,8 +4763,8 @@ mod tests {
             live_group_header_copy(TurnNarration::Failed, None, None),
             None
         );
-        assert!(!status_row_visible(true, TurnNarration::Thinking));
-        assert!(!status_row_visible(true, TurnNarration::Working));
+        assert!(status_row_visible(true, TurnNarration::Thinking));
+        assert!(status_row_visible(true, TurnNarration::Working));
         assert!(status_row_visible(false, TurnNarration::Thinking));
         assert!(status_row_visible(false, TurnNarration::Working));
     }
@@ -4423,7 +4870,7 @@ mod tests {
         );
         assert_eq!(
             live_status_copy(TurnNarration::ProviderWait, Some(0), Some(5_000)),
-            Some("Thinking for 5s".to_owned())
+            Some("Waiting for provider to respond…".to_owned())
         );
         assert_eq!(
             live_status_copy(TurnNarration::ProviderWait, None, Some(5_000)),
@@ -4432,10 +4879,37 @@ mod tests {
     }
 
     #[test]
-    fn production_provider_wait_renders_the_elapsed_clock() {
+    fn multiline_reasoning_reduces_to_one_headline() {
+        assert_eq!(
+            status_summary_copy(Some(
+                "**First thought**\n\nSome body.\n\n**Planning playful ambiguous response**"
+            )),
+            Some("Planning playful ambiguous response".to_owned())
+        );
+        assert_eq!(
+            status_summary_copy(Some("Unfinished thought without end")),
+            None
+        );
+        assert_eq!(status_summary_copy(None), None);
+    }
+
+    #[test]
+    fn provider_wait_copy_names_the_engine_when_known() {
+        assert_eq!(
+            provider_wait_copy(None),
+            "Waiting for provider to respond…".to_owned()
+        );
+        assert_eq!(
+            provider_wait_copy(Some("Claude")),
+            "Waiting for Claude to respond…".to_owned()
+        );
+    }
+
+    #[test]
+    fn production_provider_wait_keeps_the_waiting_sentence() {
         // Production derives ProviderWait while no scene fact has arrived;
-        // the state machine attaches the authoritative basis to the narration
-        // entry, and the row must count it like the reference header.
+        // the basis may still ride along, but the row narrates the wait —
+        // counting lives in the group header, never in this sentence.
         let scene = ConversationScene::build(
             vec![SceneTurn::new(
                 turn_id("turn_a"),
@@ -4466,16 +4940,77 @@ mod tests {
         assert_eq!(basis, Some(0));
         assert_eq!(
             live_status_copy(narration, basis, Some(65_000)),
-            Some("Thinking for 1m 5s".to_owned())
+            Some("Waiting for provider to respond…".to_owned())
         );
     }
 
     #[test]
-    fn settled_terminal_always_stops_the_header_shimmer() {
-        assert!(group_header_is_live(false, true));
-        assert!(!group_header_is_live(true, true));
-        assert!(!group_header_is_live(false, false));
-        assert!(!group_header_is_live(true, false));
+    fn status_copy_and_paint_share_one_decision() {
+        // Summary wins over narration; unfinished phases fall back through.
+        assert_eq!(
+            turn_status_copy_text(
+                TurnNarration::Working,
+                Some(0),
+                Some(65_000),
+                Some("**Planning it**"),
+                None,
+            ),
+            Some("Planning it".to_owned())
+        );
+        assert_eq!(
+            turn_status_copy_text(
+                TurnNarration::Working,
+                Some(0),
+                Some(65_000),
+                Some("no ending here"),
+                None,
+            ),
+            Some("Working for 1m 5s".to_owned())
+        );
+        assert_eq!(
+            turn_status_copy_text(TurnNarration::Quiet, None, None, None, None),
+            None
+        );
+        // Identical lines paint once; distinct lines both paint.
+        assert!(!turn_status_paints(
+            true,
+            TurnNarration::Working,
+            Some("Working for 1m 5s"),
+            Some("Working for 1m 5s"),
+        ));
+        assert!(turn_status_paints(
+            true,
+            TurnNarration::Working,
+            Some("Planning it"),
+            Some("Working for 1m 5s"),
+        ));
+        assert!(turn_status_paints(
+            false,
+            TurnNarration::Working,
+            Some("Working for 1m 5s"),
+            None,
+        ));
+        assert!(!turn_status_paints(
+            true,
+            TurnNarration::WorkedFor { millis: 1_000 },
+            Some("Worked for 1s"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn identical_status_and_header_paint_once() {
+        assert!(status_duplicates_owner(
+            Some("Working for 1m 5s"),
+            Some("Working for 1m 5s")
+        ));
+        assert!(!status_duplicates_owner(
+            Some("Thinking for 1m 5s"),
+            Some("Working for 1m 5s")
+        ));
+        assert!(!status_duplicates_owner(Some("Working"), None));
+        assert!(!status_duplicates_owner(None, Some("Working for 1m 5s")));
+        assert!(!status_duplicates_owner(None, None));
     }
 
     #[test]
@@ -4490,6 +5025,287 @@ mod tests {
             work_group_header_copy(Some(WorkGroupLabel::ThoughtFor { millis: 5_000 })),
             Some("Thought for 5s".to_owned())
         );
+    }
+
+    #[test]
+    fn end_space_matches_the_reference_anchoring_formula() {
+        assert_eq!(end_space_height(900.0, 0.0, 0.0), 884.0);
+        assert_eq!(end_space_height(900.0, 100.0, 800.0), 192.0);
+        assert_eq!(end_space_height(0.0, 0.0, 0.0), 192.0);
+    }
+
+    #[gpui::test]
+    fn end_space_grows_short_content_to_the_top_inset(cx: &mut TestAppContext) {
+        // One short turn in a tall window: the painted spacer must equal the
+        // anchoring formula applied to live geometry, proving the observer
+        // drives the spacer instead of the fixed base.
+        let user_scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            vec![item(
+                "user-a",
+                1,
+                SceneItemKind::UserMessage {
+                    body: "hi".to_owned(),
+                },
+                None,
+            )],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Quiet,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid");
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(user_scene, ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(720.0), px(600.0)));
+        settle(cx);
+        settle(cx);
+        let turn_bounds = cx
+            .debug_bounds("artisan-conversation-surface-turn-turn_a")
+            .expect("turn must paint");
+        let spacer_bounds = cx
+            .debug_bounds(TRANSCRIPT_END_SPACE_SELECTOR)
+            .expect("end space must paint");
+        let viewport_height = cx.update(|_, app| {
+            f64::from(surface.read(app).scroll_handle().bounds().size.height)
+        });
+        // Window and content spaces agree on differences: the element offset
+        // cancels out of the formula exactly like the scroll-offset path.
+        let expected = end_space_height(
+            viewport_height,
+            f64::from(turn_bounds.origin.y),
+            f64::from(spacer_bounds.origin.y),
+        );
+        assert!(expected >= 192.0);
+        assert!((f64::from(spacer_bounds.size.height) - expected).abs() < 1.0);
+        cx.update(|_, app| {
+            assert!(surface.read(app).pending_actions().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn group_detail_rows_paint_in_durable_order(cx: &mut TestAppContext) {
+        // Mounted order proof to go with the pure merge test: two legacy
+        // activity rows must paint top-to-bottom in vec order.
+        let detail_scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            vec![
+                item(
+                    "work-a",
+                    1,
+                    SceneItemKind::Activity {
+                        body: "first".to_owned(),
+                    },
+                    None,
+                ),
+                item(
+                    "work-b",
+                    2,
+                    SceneItemKind::Activity {
+                        body: "second".to_owned(),
+                    },
+                    None,
+                ),
+            ],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Working,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid");
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(detail_scene, ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        let first = cx
+            .debug_bounds("artisan-conversation-surface-turn-turn_a-block-work-work-a-detail-0")
+            .expect("first detail must paint");
+        let second = cx
+            .debug_bounds("artisan-conversation-surface-turn-turn_a-block-work-work-a-detail-1")
+            .expect("second detail must paint");
+        assert!(first.origin.y < second.origin.y);
+        assert!(first.size.height > px(0.0));
+        cx.update(|_, app| {
+            assert!(surface.read(app).pending_actions().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn group_disclosure_toggle_emits_typed_action(cx: &mut TestAppContext) {
+        // Clicking the group's disclosure trigger must emit exactly one
+        // typed toggle request; the scene stays authoritative afterwards.
+        let open_scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            vec![item(
+                "work-a",
+                1,
+                SceneItemKind::Activity {
+                    body: "first".to_owned(),
+                },
+                Some(SceneDisclosure::Open),
+            )],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Working,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid");
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(open_scene, ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        // Trigger bounds key follows the Collapsible `-trigger` suffix
+        // convention on the group disclosure selector.
+        let trigger = cx
+            .debug_bounds(
+                "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-trigger",
+            )
+            .expect("disclosure trigger must paint");
+        let center = point(
+            trigger.origin.x + px(4.0),
+            trigger.origin.y + px(4.0),
+        );
+        cx.simulate_mouse_down(center, gpui::MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(center, gpui::MouseButton::Left, Modifiers::default());
+        settle(cx);
+        cx.update(|_, app| {
+            let actions = surface.read(app).pending_actions().to_vec();
+            assert_eq!(actions.len(), 1);
+            let (id, requested_open) = match &actions[0] {
+                ConversationSurfaceAction::DisclosureToggleRequested {
+                    id,
+                    requested_open,
+                } => (id.clone(), *requested_open),
+                action => panic!("expected a disclosure toggle, got {action:?}"),
+            };
+            assert_eq!(id.as_str(), "work-a");
+            assert!(!requested_open, "an open group toggles closed");
+        });
+    }
+
+    #[test]
+    fn legacy_group_details_render_in_durable_order() {
+        // Legacy positional groups (no provenance) keep vec order with
+        // reasoning stripped; this holds under both scene generations
+        // because session mode never carries these inputs.
+        let scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            vec![
+                item(
+                    "work-a",
+                    1,
+                    SceneItemKind::Activity {
+                        body: "first".to_owned(),
+                    },
+                    None,
+                ),
+                item(
+                    "work-r",
+                    2,
+                    SceneItemKind::ReasoningSummary {
+                        body: "hidden thought.".to_owned(),
+                    },
+                    None,
+                ),
+                item(
+                    "work-b",
+                    3,
+                    SceneItemKind::Activity {
+                        body: "second".to_owned(),
+                    },
+                    None,
+                ),
+            ],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Working,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid");
+        let turn = scene.turn_scene(&turn_id("turn_a")).expect("turn present");
+        let group = turn
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::WorkGroup(group) => Some(group),
+                _ => None,
+            })
+            .expect("work group present");
+        let rows = ordered_detail_rows(group);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, 0);
+        assert!(matches!(rows[0].1, DetailRow::Activity { .. }));
+        assert_eq!(rows[1].0, 1);
+        assert!(matches!(rows[1].1, DetailRow::Activity { .. }));
+    }
+
+    #[test]
+    fn session_details_sort_by_stable_ordinal() {
+        use crate::conversation_scene::{ProgressPhase, SessionDetail};
+        let group = WorkGroupBlock {
+            items: Vec::new(),
+            label: None,
+            disclosure: None,
+            session: Some(scene_id("session-turn_a")),
+            session_run: None,
+            superseded: false,
+            reasoning_summary: None,
+            progress: ProgressPhase::Work,
+            transition: None,
+            session_details: vec![
+                SessionDetail::Activity {
+                    id: scene_id("act-2"),
+                    body: "second".to_owned(),
+                    ordinal: 4,
+                    disclosure: None,
+                },
+                SessionDetail::Assistant {
+                    id: scene_id("asst-1"),
+                    body: "first".to_owned(),
+                    phase: AssistantPhase::Commentary,
+                    ordinal: 2,
+                    provenance: None,
+                    disclosure: None,
+                },
+                SessionDetail::NativeFact {
+                    id: scene_id("fact-3"),
+                    text: "third".to_owned(),
+                    ordinal: 6,
+                    disclosure: None,
+                },
+            ],
+        };
+        let rows = ordered_detail_rows(&group);
+        assert_eq!(
+            rows.iter().map(|(ordinal, _)| *ordinal).collect::<Vec<_>>(),
+            vec![2, 4, 6]
+        );
+        assert!(matches!(rows[0].1, DetailRow::Assistant { .. }));
+        assert!(matches!(rows[1].1, DetailRow::Activity { .. }));
+        assert!(matches!(rows[2].1, DetailRow::NativeFact { .. }));
     }
 
     #[test]

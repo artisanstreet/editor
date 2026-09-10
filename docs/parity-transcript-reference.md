@@ -108,11 +108,89 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
 - Error card (capture-verified fault): the renderer painted an outer wrapper
   card with a second `Error` heading around the destructive alert. It now
   paints the reference's single destructive card through a specialized
-  `AlertStyle` (rounded-xl 12px, destructive/25 border, destructive/5 tint,
-  14/12px paddings, 6px content gap, 8px icon gap, CircleX icon, muted
-  description; no shared `Alert` global change, no copy action since the scene
-  block carries only the message), always mounted with stable anchor and
-  debug selectors. No visual parity claimed without root capture evidence.
+  `AlertStyle` (rounded-xl 14px per the v4 ramp, destructive/25 border,
+  destructive/5 tint, 14/12px paddings, 6px content gap, 8px icon gap, CircleX
+  icon, muted description; no shared `Alert` global change, no copy action
+  since the scene block carries only the message), always mounted with stable
+  anchor and debug selectors. No visual parity claimed without root capture
+  evidence.
 - Delegated adjustment included: `attribution: None` on the surface test
   `EngineObservationEvent` constructor for the integrated domain row; that
   field does not exist in this tree's domain yet and resolves at integration.
+
+## Session details packet (frozen scene v185)
+
+- Detail rows come from exactly one ordered source per group: session mode
+  carries session_details (assistant/commentary, activity, compaction,
+  native fact, each ordinal-keyed, stably sorted); legacy positional groups
+  carry items in vec order with reasoning stripped. Never both, so no
+  interleave can scramble chronology. Anchors and {group}-detail-{ordinal}
+  selectors follow painted rows one-to-one.
+- Assistant details render full markdown at prose width; compaction and
+  native facts reuse the native card presentation statically (no nested
+  toggles — visibility follows the group control, matching the reference
+  grouping). Per-row disclosure stays data-only.
+- The thinking line is the status row's reduced scene summary
+  (TurnStatusBlock.reasoning_summary, headline/sentence reduced,
+  unfinished phases fall back to narration); Full sweeps it through the
+  shared shimmer text-runs builder (faces survive the band, selection
+  retained per stable id), Reduced resolves to static inline fragments.
+  ProviderWait narrates the engine-named wait, never elapsed.
+- Type scale behind ProseTypography: body 16/28/410/-0.64, text-sm 14,
+  error card 14px radius, bubble 18px radius with the card shadow stack
+  beneath the gradient. Assistant markdown body stays markdown-lane owned.
+- Endspace applies the reference anchoring formula to live prepaint
+  geometry (192px base, 16px inset) with a change-guarded scalar; overlay
+  rail sits at right-2 per reference.
+- Group anchors prefer the session id with legacy fallback; superseded
+  groups never own the live line; engine handoffs fold into the header far
+  end. Footer/host wiring unchanged.
+- Blockers resolved at integration (all doc-exact per frozen v1):
+  SessionDetail, AssistantPhase::Commentary, ProgressPhase,
+  TurnStatusBlock.reasoning_summary/engine_label, WorkGroupBlock
+  session fields, ItemProvenance, ProseTypography, text-runs compiler
+  items, attribution row. No visual parity claimed without root capture
+  evidence.
+## Session details + inline summary packet
+
+- Group details come from exactly one ordered source: session
+  session_details sorted stably by durable ordinal (assistant prose,
+  activities, compactions, native facts), else legacy items in vec order
+  with reasoning stripped. Never both, so chronology cannot scramble.
+  Anchors and \{group}-detail-{ordinal}\ selectors follow painted rows
+  one-to-one; per-row disclosure stays data-only under the group control.
+- Assistant details render full markdown at prose width; compaction and
+  native facts reuse the native card statically. Group anchors prefer the
+  session id; superseded groups never own the live line; engine handoffs
+  fold into the header far end.
+- The thinking line is the status row's reduced scene summary (headline or
+  first finished sentence; unfinished falls back to narration) with inline
+  faces through the frozen text-runs contract — mono family plus zero
+  tracking compile at layout, identically under Full (sweeping) and Reduced
+  (static), selection retained per stable id. ProviderWait narrates the
+  engine-named wait, never elapsed.
+- Type scale behind ProseTypography (16/28/410/-0.64 body, 14 workspace,
+  18px bubble radius with card shadow, 14px error radius). The footer copy
+  control stays 32px IconSmall against reference 24px icon-xs; icon sizing
+  belongs to button/shell lanes.
+- Endspace applies the reference anchoring formula to live prepaint geometry
+  (192px base, 16px inset, change-guarded convergence); overlay rail sits at
+  right-2 per reference (vertical centering still top-anchored, pending a
+  translate primitive).
+- Remaining reference styling explicitly deferred (no claim of completion):
+  work-session header pb-2 and settle-underline growth, disclosure chevron
+  rotation animation, status-enter/text-swap entrances, navigator expand
+  scale, model-handoff icon marks, per-activity label/detail split,
+  per-session elapsed basis, engine display-name resolution, assistant
+  streaming treatment and provenance display, markdown body/plan/prompt
+  sizes, steering labels. Capture judges each.
+- Blockers resolved at integration (all doc-exact per frozen v1):
+  SessionDetail, AssistantPhase::Commentary, ProgressPhase,
+  TurnStatusBlock reasoning_summary and engine_label, WorkGroupBlock session
+  fields, ItemProvenance, ProseTypography, text-runs compiler items, the
+  attribution row, inline module and test registration. No visual parity
+  claimed without root capture evidence.
+## Final renderer packet (frozen v1 consumer)
+
+- Status summary reduces raw scene text (headline/first-sentence, unfinished falls back); Full sweeps faces through ShimmerText text-runs (combine merge, selectable retained id), Reduced resolves static. ProviderWait narrates engine-named waits, never elapsed.
+- Render and scroll identities share turn_status_paints/turn_status_copy_text decision points; endspace measures live prepaint geometry with change-guarded convergence; bubble carries card shadow beneath gradient.
