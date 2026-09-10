@@ -1727,8 +1727,13 @@ async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
         Some(2)
     );
 
-    // Durable history holds exactly the two re-sequenced rows in order under
-    // the Claude engine tag.
+    // The checkpoint blob is a latest-batch sequence cursor, not a history
+    // log: every S1b observation batch commits with CheckpointUpdate::Replace
+    // (see upsert_checkpoint), so each batch overwrites the blob with only
+    // its own rows. Prefix history is proven durably by the per-batch
+    // receipts below plus the advancing chain above (committed == 2,
+    // batch_sequence == 3, sequence Some(2)). The blob therefore holds
+    // exactly the latest one-row batch: the transcript row at sequence 2.
     let checkpoint = entities::run_checkpoint::Entity::find_by_id("run-claude-sub")
         .one(&database)
         .await
@@ -1746,19 +1751,9 @@ async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
     )
     .expect("checkpoint decodes");
     assert_eq!(decoded.engine(), EngineId::Claude);
-    assert_eq!(decoded.observations().len(), 2);
+    assert_eq!(decoded.max_sequence(), Some(2));
+    assert_eq!(decoded.observations().len(), 1);
     match &decoded.observations()[0] {
-        Observation::Subagent(observation) => {
-            assert_eq!(observation.state(), SubagentState::Discovered);
-            assert_eq!(observation.agent_native_thread_id().as_str(), "task-1");
-            assert_eq!(
-                observation.parent_native_thread_id().as_str(),
-                "session-native-1"
-            );
-        }
-        other => panic!("expected subagent row, got {}", other.tag()),
-    }
-    match &decoded.observations()[1] {
         Observation::SubagentTranscript(observation) => {
             assert_eq!(observation.agent_native_thread_id().as_str(), "tool-9");
             assert_eq!(
@@ -1773,6 +1768,20 @@ async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
             }
         }
         other => panic!("expected transcript row, got {}", other.tag()),
+    }
+
+    // Both batches durably persisted: one committed receipt per batch
+    // sequence, so the overwritten blob loses no committed prefix.
+    for batch_sequence in [1, 2] {
+        let receipt = entities::run_batch_receipt::Entity::find_by_id((
+            "run-claude-sub".to_owned(),
+            batch_sequence,
+        ))
+        .one(&database)
+        .await
+        .expect("receipt reads")
+        .expect("batch receipt");
+        assert!(receipt.committed);
     }
 
     // Root text committed verbatim beside the rows, never adopted.
