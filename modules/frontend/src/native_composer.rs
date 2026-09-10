@@ -3221,14 +3221,16 @@ mod tests {
         let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
         cx.simulate_resize(size(px(900.0), px(600.0)));
         focus_editor(cx, &view);
-        // Focused empty field: the caret paints at the text origin.
+        // Focused empty field: the caret paints at the text origin. Its
+        // height is the reference `text-base` leading (24px), matching the
+        // editor's explicit line height.
         set_draft(cx, &view, "");
         let empty = cx.update(|window, app| {
             view.read(app)
                 .caret_quad(window)
                 .expect("focused empty caret")
         });
-        assert_eq!(empty.bounds.size, size(px(2.0), px(22.0)));
+        assert_eq!(empty.bounds.size, size(px(2.0), px(24.0)));
         let editor = cx
             .debug_bounds(NATIVE_COMPOSER_EDITOR_SELECTOR)
             .expect("editor bounds");
@@ -3240,7 +3242,7 @@ mod tests {
                 .caret_quad(window)
                 .expect("focused end caret")
         });
-        assert_eq!(end.bounds.size, size(px(2.0), px(22.0)));
+        assert_eq!(end.bounds.size, size(px(2.0), px(24.0)));
         assert!(
             end.bounds.origin.x > empty.bounds.origin.x,
             "caret must advance past typed text"

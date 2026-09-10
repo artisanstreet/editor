@@ -86,8 +86,10 @@ fn composer_controls_keep_equal_edge_insets_as_the_draft_grows(cx: &mut TestAppC
 }
 
 /// Reference empty box (`thread-composer.svelte:553-587`): 8px card padding
-/// around a 64px editor and a 32px control row, raised by the 128px card
-/// minimum. 8 + 64 + 32 + 8 = 112, so the minimum owns the final 16px.
+/// around a 64px editor base and a 32px control row under the 128px card
+/// minimum. The base sums to 8 + 64 + 32 + 8 = 112, so the minimum binds
+/// the card at 128 and the 16px slack goes entirely to the `flex-1`
+/// editor: the empty editor paints 80px, the card exactly 128px.
 #[gpui::test]
 fn composer_empty_card_matches_the_reference_128px_box(cx: &mut TestAppContext) {
     let (_view, cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
@@ -101,7 +103,11 @@ fn composer_empty_card_matches_the_reference_128px_box(cx: &mut TestAppContext) 
         "empty composer must render the 128px reference minimum, got {card:?}"
     );
     let editor = cx.debug_bounds(NATIVE_COMPOSER_EDITOR_SELECTOR).unwrap();
-    assert_eq!(editor.size.height, px(64.0));
+    assert_eq!(
+        editor.size.height,
+        px(80.0),
+        "flex-1 editor absorbs the 16px card slack over its 64px base, got {editor:?}"
+    );
     assert_eq!(editor.top() - card.top(), px(8.0));
     assert_eq!(editor.left() - card.left(), px(8.0));
     assert_eq!(card.right() - editor.right(), px(8.0));
@@ -171,8 +177,11 @@ fn composer_bounds_long_drafts_at_the_240px_editor_cap(cx: &mut TestAppContext) 
     );
 }
 
-/// Lip rows (`steering-lip.svelte:28-32`): 16px text on a 24px line with
-/// 8px vertical padding, i.e. exactly 40px tall.
+/// Lip rows (`steering-lip.svelte:28-32`, `button.svelte:24`): 16px text on
+/// a 24px line with 8px vertical padding. A recallable row also mounts two
+/// `icon-sm` (32px) buttons, which bind the row content above the 24px
+/// text: 16 + max(24, 32) = 48px. An informing-only row with no actions
+/// paints the bare 16 + 24 = 40px.
 #[gpui::test]
 fn composer_lip_row_matches_reference_geometry(cx: &mut TestAppContext) {
     let snapshot = NativeComposerControlsSnapshot {
@@ -191,9 +200,31 @@ fn composer_lip_row_matches_reference_geometry(cx: &mut TestAppContext) {
         .expect("the queued steer paints exactly one row");
     assert_eq!(
         row.size.height,
-        px(40.0),
-        "lip row must be 40px tall, got {row:?}"
+        px(48.0),
+        "recallable lip row must be 48px tall, got {row:?}"
     );
     assert_eq!(row.left(), lip.left());
     assert_eq!(row.right(), lip.right());
+}
+
+/// An informing-only row carries no 32px actions, so the 24px text binds:
+/// 16 + 24 = 40px.
+#[gpui::test]
+fn composer_informing_lip_row_matches_reference_geometry(cx: &mut TestAppContext) {
+    let snapshot = NativeComposerControlsSnapshot {
+        pending_steering: vec![PendingSteeringRow::new("cmd-2", 3, "Attached image", false)],
+        ..NativeComposerControlsSnapshot::default()
+    };
+    let (_view, cx) = mount_composer(cx, snapshot);
+    cx.simulate_resize(size(px(900.0), px(600.0)));
+    cx.run_until_parked();
+
+    let row = cx
+        .debug_bounds("artisan-native-composer-steering-row-cmd-2-3")
+        .expect("the informing steer paints exactly one row");
+    assert_eq!(
+        row.size.height,
+        px(40.0),
+        "informing lip row must be 40px tall, got {row:?}"
+    );
 }
