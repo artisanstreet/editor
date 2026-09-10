@@ -24,7 +24,7 @@ use conversation_delivery_machine::{
 use conversation_host::{
     ConversationHost, ConversationHostEffect, ConversationHostError, ConversationHostRefusal,
 };
-use conversation_scene::{SceneDisclosure, SceneId, TurnBlock};
+use conversation_scene::{SceneDisclosure, SceneId, SessionDetail, TurnBlock};
 use conversation_state_machine::{
     ConversationStateEffect, ConversationStateError, ConversationStateEvent, SceneFact,
     SceneFactCommand, SceneFactKind,
@@ -304,6 +304,7 @@ fn snapshot_replaces_the_surface_from_pure_scene_order(cx: &mut TestAppContext) 
             ordered_block_kinds(surface.scene()),
             vec![
                 conversation_surface::RenderedBlockKind::UserMessage,
+                conversation_surface::RenderedBlockKind::WorkGroup,
                 conversation_surface::RenderedBlockKind::AssistantMessage,
                 conversation_surface::RenderedBlockKind::TurnStatus,
                 conversation_surface::RenderedBlockKind::TurnFooter,
@@ -430,11 +431,11 @@ fn controller_refusal_is_atomic_and_retained_as_a_typed_effect(cx: &mut TestAppC
 #[gpui::test]
 fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestAppContext) {
     const TRIGGER: &str =
-        "artisan-conversation-surface-turn-turn_a-block-user-user_a-disclosure-trigger";
+        "artisan-conversation-surface-turn-turn_a-block-work-turn_a-disclosure-trigger";
 
     let (host, cx) = add_host(cx);
     let snapshot = baseline_snapshot();
-    let disclosure_id = scene_id(USER_A);
+    let disclosure_id = scene_id("session-turn_a");
     cx.update(|_, app| {
         host.update(app, |host, host_cx| {
             host.dispatch(
@@ -468,15 +469,23 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
             .controller_view()
             .disclosure_views
             .into_iter()
-            .find(|view| view.scene_id.as_str() == USER_A)
+            .find(|view| view.scene_id.as_str() == "session-turn_a")
             .expect("registered disclosure view remains visible");
         assert_eq!(disclosure.state, DisclosureState::UserOpen);
         assert!(host.surface().read(app).pending_actions().is_empty());
-        assert!(matches!(
-            &host.surface().read(app).scene().turn_scenes()[0].blocks()[0],
-            TurnBlock::UserMessage(message)
-                if message.disclosure == Some(SceneDisclosure::Open)
-        ));
+        let work_group = host.surface().read(app).scene().turn_scenes()[0]
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::WorkGroup(group) => Some(group.clone()),
+                _ => None,
+            })
+            .expect("session work group remains in the scene");
+        assert_eq!(
+            work_group.session.as_ref().map(|id| id.as_str()),
+            Some("session-turn_a")
+        );
+        assert_eq!(work_group.disclosure, Some(SceneDisclosure::Open));
     });
 
     let trigger = cx
@@ -490,14 +499,22 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
             .controller_view()
             .disclosure_views
             .into_iter()
-            .find(|view| view.scene_id.as_str() == USER_A)
+            .find(|view| view.scene_id.as_str() == "session-turn_a")
             .expect("registered disclosure view remains visible");
         assert_eq!(disclosure.state, DisclosureState::UserClosed);
-        assert!(matches!(
-            &host.surface().read(app).scene().turn_scenes()[0].blocks()[0],
-            TurnBlock::UserMessage(message)
-                if message.disclosure == Some(SceneDisclosure::Closed)
-        ));
+        let work_group = host.surface().read(app).scene().turn_scenes()[0]
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::WorkGroup(group) => Some(group.clone()),
+                _ => None,
+            })
+            .expect("session work group remains in the scene");
+        assert_eq!(
+            work_group.session.as_ref().map(|id| id.as_str()),
+            Some("session-turn_a")
+        );
+        assert_eq!(work_group.disclosure, Some(SceneDisclosure::Closed));
     });
 }
 
@@ -941,10 +958,29 @@ fn compaction_and_streaming_narration_are_projected_by_the_controller_scene(
     cx.update(|_, app| {
         let host = host.read(app);
         let surface = host.surface().read(app);
+        // Compaction folds into the session group as a session detail in
+        // scene order; it never paints as a top-level transcript block.
         assert!(
-            ordered_block_kinds(surface.scene())
+            !ordered_block_kinds(surface.scene())
                 .contains(&conversation_surface::RenderedBlockKind::Compaction)
         );
+        let work_group = surface.scene().turn_scenes()[0]
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::WorkGroup(group) => Some(group),
+                _ => None,
+            })
+            .expect("compaction folds into the session work group");
+        let compaction = work_group
+            .session_details
+            .iter()
+            .find_map(|detail| match detail {
+                SessionDetail::Compaction { summary, .. } => Some(summary),
+                _ => None,
+            })
+            .expect("session details carry the compaction summary");
+        assert_eq!(compaction.as_str(), "context compacted");
         assert_eq!(
             surface.scene(),
             &host.controller_scene().expect("scene projects")

@@ -152,7 +152,7 @@ fn tall_scene() -> ConversationScene {
 #[test]
 fn status_copy_is_exhaustive_and_suppression_has_no_row() {
     let cases = [
-        (TurnNarration::Quiet, Some("Quiet")),
+        (TurnNarration::Quiet, None),
         (
             TurnNarration::ProviderWait,
             Some("Waiting for provider to respond…"),
@@ -702,6 +702,7 @@ fn jump_to_latest_is_an_overlay_and_pointer_keyboard_activation_is_typed(cx: &mu
         window.focus(&focus, app);
         window.focus_next(app);
     });
+    cx.run_until_parked();
     complete_key_press(cx, "enter");
     complete_key_press(cx, "space");
     let keyboard_actions = drain_surface_actions(&surface, cx);
