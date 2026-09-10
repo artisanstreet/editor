@@ -11,9 +11,7 @@
 use artisan_domain::{
     EngineObservationAttribution, EngineObservationEvent, RunId, ThreadId, TurnId, UnixMillis,
 };
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 use crate::entities::{OpaqueBytes, observation_ledger};
 

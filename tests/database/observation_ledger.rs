@@ -16,7 +16,7 @@
 use artisan_database::{
     AssistantChange, BindRunProvider, BindRunProviderOutcome, BoundRunReceipt, CheckpointUpdate,
     ClaimMessageDispatch, ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome,
-    CreateThreadInput, EngineCheckpoint, LaunchClaimedRun, LaunchClaimedRunOutcome,
+    CreateThreadInput, DispatchLeaseOwner, EngineCheckpoint, LaunchClaimedRun, LaunchClaimedRunOutcome,
     LaunchedRunReceipt, OBSERVATION_BATCH_MAX_OBSERVATIONS, OBSERVATION_CHECKPOINT_VERSION,
     QueueFirstMessageInput, QueueMessageInput, Repository, RepositoryError, RunBatchScope, RunLaunchCredentials,
     RunObservationError, RunStartKey, SetThreadEngineConfigInput, SqliteConfig, ThreadEngineSettings,
