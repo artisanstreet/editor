@@ -1104,3 +1104,173 @@ fn interrupted_failed_cancelled_and_interactive_error_cards_remain_ordered_disti
         Some(TurnBlock::TurnStatus(s)) if s.narration == TurnNarration::Failed
     ));
 }
+
+// ---- 12. footer settlement and active clock basis are additive, typed, and exact ----
+
+#[test]
+fn footers_start_unsettled_and_settle_only_the_exact_turn() {
+    use conversation_scene::{ConversationScene, TurnFooterSettlement};
+
+    let turns = vec![
+        scene_turn("turn_a", 0, ConversationLifecycle::Completed),
+        scene_turn("turn_b", 1, ConversationLifecycle::Completed),
+    ];
+    let items = vec![
+        user_item("user_a", "turn_a", 1, "hi"),
+        assistant_item(
+            "assist_a",
+            "turn_a",
+            2,
+            "hello",
+            AssistantPhase::Final,
+        ),
+        user_item("user_b", "turn_b", 3, "who are you"),
+        assistant_item(
+            "assist_b",
+            "turn_b",
+            4,
+            "artisan",
+            AssistantPhase::Final,
+        ),
+    ];
+    let mut scene =
+        ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect("builds");
+    for turn_scene in scene.turn_scenes() {
+        let footer = turn_scene
+            .blocks
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::TurnFooter(footer) => Some(footer),
+                _ => None,
+            })
+            .expect("one footer per turn");
+        assert!(footer.settlement.is_none());
+    }
+
+    let settlement =
+        TurnFooterSettlement::new("hello".to_owned(), 99).expect("valid settlement");
+    assert!(scene.set_turn_footer_settlement(&turn_id("turn_a"), settlement));
+    assert!(
+        !scene.set_turn_footer_settlement(
+            &turn_id("turn_missing"),
+            TurnFooterSettlement::new("x".to_owned(), 1).expect("valid")
+        )
+    );
+
+    let settled = scene
+        .turn_scene(&turn_id("turn_a"))
+        .expect("turn_a present")
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::TurnFooter(footer) => Some(footer),
+            _ => None,
+        })
+        .expect("turn_a footer");
+    let facts = settled.settlement.as_ref().expect("turn_a settled");
+    assert_eq!(facts.response_text(), "hello");
+    assert_eq!(facts.settled_at_ms(), 99);
+
+    let other = scene
+        .turn_scene(&turn_id("turn_b"))
+        .expect("turn_b present")
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::TurnFooter(footer) => Some(footer),
+            _ => None,
+        })
+        .expect("turn_b footer");
+    assert!(other.settlement.is_none());
+}
+
+#[test]
+fn footer_settlement_rejects_response_text_above_the_body_ceiling() {
+    use conversation_scene::TurnFooterSettlement;
+
+    let too_long = "x".repeat(SCENE_MAX_MESSAGE_BODY_BYTES + 1);
+    let err = TurnFooterSettlement::new(too_long, 7).expect_err("overlong settlement refused");
+    assert!(matches!(err, SceneBuildError::MessageBodyTooLong { .. }));
+}
+
+#[test]
+fn active_clock_basis_flows_to_status_only_for_active_work() {
+    use conversation_scene::ConversationScene;
+
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![assistant_item(
+            "assist_a",
+            "turn_a",
+            1,
+            "draft",
+            AssistantPhase::Streaming,
+        )],
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::Thinking)
+                .with_active_started_at_ms(1_000),
+        ],
+        Vec::new(),
+    )
+    .expect("builds");
+    assert!(matches!(
+        scene.turn_scenes()[0].blocks.iter().find(|block| matches!(
+            block,
+            TurnBlock::TurnStatus(_)
+        )),
+        Some(TurnBlock::TurnStatus(status))
+            if status.narration == TurnNarration::Thinking
+                && status.active_started_at_ms == Some(1_000)
+    ));
+
+    // Quiet and terminal narrations refuse a live basis instead of rendering a
+    // ticking row or forking a second elapsed source.
+    for narration in [
+        TurnNarration::Quiet,
+        TurnNarration::WorkedFor { millis: 4 },
+        TurnNarration::Failed,
+    ] {
+        let err = ConversationScene::build(
+            vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)],
+            Vec::new(),
+            vec![
+                TurnNarrationEntry::new(turn_id("turn_a"), narration)
+                    .with_active_started_at_ms(1_000),
+            ],
+            Vec::new(),
+        )
+        .expect_err("basis without active work is refused");
+        assert!(
+            matches!(err, SceneBuildError::ActiveBasisWithoutActiveNarration { .. }),
+            "unexpected error for {narration:?}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn adjacent_assistant_segments_keep_exact_bytes_and_block_boundaries() {
+    use conversation_scene::ConversationScene;
+
+    // Two durable response segments must never merge and never gain heuristic
+    // spacing: the boundary stays structural (two blocks) and token bytes stay
+    // exact. Visual separation between the blocks belongs to the renderer.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            assistant_item("seg_a", "turn_a", 1, "naturally", AssistantPhase::Streaming),
+            assistant_item("seg_b", "turn_a", 2, "I'm", AssistantPhase::Streaming),
+        ],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("builds");
+    let bodies: Vec<&str> = scene.turn_scenes()[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bodies, vec!["naturally", "I'm"]);
+}

@@ -882,3 +882,307 @@ fn pending_effect_capacity_is_atomic() {
         effects_before_capacity_refusal.as_slice()
     );
 }
+
+fn make_turn_updated(
+    id: &str,
+    ordinal: u64,
+    lifecycle: ConversationLifecycle,
+    updated_millis: i64,
+) -> ConversationTurn {
+    ConversationTurn {
+        turn_id: turn_id(id),
+        ordinal: TurnOrdinal::new(ordinal),
+        revision: Revision::new(0),
+        lifecycle,
+        created_at: stamp(0),
+        updated_at: stamp(updated_millis),
+    }
+}
+
+fn make_assistant_settled(
+    id: &str,
+    turn: &str,
+    ordinal: u64,
+    body: &str,
+    phase: AssistantMessagePhase,
+    lifecycle: ConversationLifecycle,
+) -> ConversationItem {
+    ConversationItem::AssistantMessage(AssistantMessageItem {
+        item_id: item_id(id),
+        turn_id: turn_id(turn),
+        run_id: RunId::parse("run_controller").expect("valid run id"),
+        ordinal: ItemOrdinal::new(ordinal),
+        revision: Revision::new(0),
+        lifecycle,
+        body: AssistantBody::parse(body.to_owned()).expect("valid assistant body"),
+        phase,
+        created_at: stamp(2),
+        updated_at: stamp(10),
+    })
+}
+
+fn turn_footer_settlement(
+    controller: &ConversationStateController,
+    turn: &str,
+) -> Option<(String, i64)> {
+    let scene = controller.scene().expect("scene builds");
+    let turn_scene = scene.turn_scene(&turn_id(turn)).expect("turn present");
+    let footer = turn_scene
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::TurnFooter(footer) => Some(footer),
+            _ => None,
+        })
+        .expect("footer present");
+    footer
+        .settlement
+        .as_ref()
+        .map(|settlement| {
+            (
+                settlement.response_text().to_owned(),
+                settlement.settled_at_ms(),
+            )
+        })
+}
+
+fn turn_status_basis(controller: &ConversationStateController, turn: &str) -> Option<i64> {
+    let scene = controller.scene().expect("scene builds");
+    let turn_scene = scene.turn_scene(&turn_id(turn)).expect("turn present");
+    turn_scene
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::TurnStatus(status) => Some(status.active_started_at_ms),
+            _ => None,
+        })
+        .expect("status present")
+}
+
+fn user_block_count(controller: &ConversationStateController, item: &str) -> usize {
+    let scene = controller.scene().expect("scene builds");
+    scene
+        .turn_scenes()
+        .iter()
+        .flat_map(|turn_scene| turn_scene.blocks.iter())
+        .filter(|block| matches!(
+            block,
+            TurnBlock::UserMessage(message) if message.id.as_str() == item
+        ))
+        .count()
+}
+
+#[test]
+fn completed_turn_with_settled_final_reply_exposes_footer_settlement() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    // Watermark 50 sits above the turn settlement time 42, proving the footer
+    // carries the turn's own authoritative updated_at rather than a clock.
+    let settled = ConversationSnapshot::new(
+        thread_id(),
+        ConversationCursor::new(1),
+        vec![make_turn_updated(
+            TURN_A,
+            0,
+            ConversationLifecycle::Completed,
+            42,
+        )],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hello"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                2,
+                "hello back",
+                AssistantMessagePhase::Final,
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        stamp(50),
+    )
+    .expect("valid authoritative snapshot");
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(settled))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    assert_eq!(
+        turn_footer_settlement(&controller, TURN_A),
+        Some(("hello back".to_owned(), 42))
+    );
+}
+
+#[test]
+fn unsettled_turns_keep_unsettled_footers() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    // Baseline: completed turn but its Final reply never completed, so no
+    // footer facts may appear.
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(
+            baseline_snapshot(),
+        ))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    assert_eq!(turn_footer_settlement(&controller, TURN_A), None);
+
+    // Failed turn with a completed Final reply: still no footer, matching the
+    // reference which settles footers on completed turns only. A fresh owner
+    // takes the failed baseline directly: replaying failure over a completed
+    // turn would violate the sealed-terminal lifecycle instead.
+    let mut failed_controller = ConversationStateController::new(thread_id());
+    let _ = failed_controller.drain_effects();
+    let failed = ConversationSnapshot::new(
+        thread_id(),
+        ConversationCursor::new(2),
+        vec![make_turn_updated(
+            TURN_A,
+            0,
+            ConversationLifecycle::Failed,
+            42,
+        )],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hello"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                2,
+                "hello back",
+                AssistantMessagePhase::Final,
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        stamp(50),
+    )
+    .expect("valid authoritative snapshot");
+    failed_controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(failed))
+        .expect("snapshot delivery succeeds");
+    let _ = failed_controller.drain_effects();
+    assert_eq!(turn_footer_settlement(&failed_controller, TURN_A), None);
+}
+
+#[test]
+fn single_prompt_renders_once_after_receipt_and_replay() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(
+            baseline_snapshot(),
+        ))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    assert_eq!(user_block_count(&controller, USER_A), 1);
+
+    // An identical replay reinstalls without changing visible state: still one
+    // prompt bubble, delivery still ready.
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(
+            baseline_snapshot(),
+        ))
+        .expect("replay delivery succeeds");
+    let _ = controller.drain_effects();
+    assert_eq!(user_block_count(&controller, USER_A), 1);
+    assert_eq!(
+        controller.delivery_view().phase,
+        DeliveryPhase::Ready
+    );
+}
+
+#[test]
+fn streamed_append_preserves_segment_bytes_without_spacing_heuristics() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            1,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+            vec![
+                make_user(USER_A, TURN_A, 1, "hi"),
+                make_assistant(ASSISTANT_A, TURN_A, 2, "naturally", AssistantMessagePhase::Unspecified),
+            ],
+        )))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+
+    // Two streamed token chunks for the SAME logical part concatenate exactly:
+    // no spacing heuristic may enter token continuity. Part separation across
+    // distinct provider parts happens upstream in the backend text helper.
+    let batch = PatchBatch::new(
+        thread_id(),
+        ConversationCursor::new(1),
+        ConversationCursor::new(2),
+        vec![ConversationPatch::ItemAppend {
+            patch_id: patch_id("append_boundary"),
+            sequence: PatchSequence::new(2).expect("valid patch sequence"),
+            item_id: item_id(ASSISTANT_A),
+            revision: Revision::new(1),
+            text: IncrementalText::parse("I'm").expect("valid fragment"),
+            updated_at: stamp(11),
+        }],
+    )
+    .expect("valid append batch envelope");
+    controller
+        .on_delivery(ConversationDeliveryEvent::BatchReceived(batch))
+        .expect("append batch applies");
+    let _ = controller.drain_effects();
+
+    let scene = controller.scene().expect("scene builds");
+    let bodies: Vec<&str> = scene.turn_scenes()[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bodies, vec!["naturallyI'm"]);
+}
+
+#[test]
+fn active_elapsed_basis_survives_snapshot_refresh_without_reset() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .register_turn(turn_id(TURN_A))
+        .expect("turn registration succeeds");
+    controller
+        .on_turn(
+            turn_id(TURN_A),
+            TurnEvent::Thinking { at: 1000, revision: 1 },
+        )
+        .expect("thinking event succeeds");
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            1,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+            vec![make_user(USER_A, TURN_A, 1, "hi")],
+        )))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    let (narration, _) = scene_status(&controller, TURN_A);
+    assert_eq!(narration, SceneTurnNarration::Thinking);
+    assert_eq!(turn_status_basis(&controller, TURN_A), Some(1000));
+
+    // A refresh carrying the same durable turn must not reset the basis.
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            2,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+            vec![make_user(USER_A, TURN_A, 1, "hi")],
+        )))
+        .expect("refresh delivery succeeds");
+    let _ = controller.drain_effects();
+    assert_eq!(turn_status_basis(&controller, TURN_A), Some(1000));
+
+    // Settlement drops the live basis and carries its own terminal duration.
+    controller
+        .on_turn(
+            turn_id(TURN_A),
+            TurnEvent::Completed { at: 1005, revision: 2 },
+        )
+        .expect("completion succeeds");
+    let _ = controller.drain_effects();
+    let (settled, _) = scene_status(&controller, TURN_A);
+    assert_eq!(settled, SceneTurnNarration::WorkedFor { millis: 5 });
+    assert_eq!(turn_status_basis(&controller, TURN_A), None);
+}

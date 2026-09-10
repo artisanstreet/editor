@@ -212,6 +212,22 @@ pub enum TurnNarration {
 }
 
 impl TurnNarration {
+    /// Whether this narration belongs to live work that may carry an
+    /// active-work clock basis. `Quiet` renders no row and terminal narrations
+    /// carry their own settled durations, so neither may take a live basis.
+    #[must_use]
+    pub const fn is_active_work(self) -> bool {
+        matches!(
+            self,
+            Self::ProviderWait
+                | Self::Compacting
+                | Self::Thinking
+                | Self::Working
+                | Self::StreamingSuppression
+                | Self::BackgroundWait
+        )
+    }
+
     fn terminal_label(self) -> Option<WorkGroupLabel> {
         match self {
             Self::WorkedFor { millis } => Some(WorkGroupLabel::WorkedFor { millis }),
@@ -228,13 +244,36 @@ pub struct TurnNarrationEntry {
     pub turn_id: TurnId,
     /// Closed narration value.
     pub narration: TurnNarration,
+    /// Authoritative active-work clock basis in Unix millis, if any.
+    ///
+    /// This is the turn's first active-entry event time, supplied by the
+    /// caller through the turn controller. It is never sampled from a clock
+    /// here, so it stays stable across rerenders, and [`ConversationScene::build`]
+    /// accepts it only alongside an active-work narration.
+    pub active_started_at_ms: Option<i64>,
 }
 
 impl TurnNarrationEntry {
     /// Creates a narration entry.
     #[must_use]
     pub fn new(turn_id: TurnId, narration: TurnNarration) -> Self {
-        Self { turn_id, narration }
+        Self {
+            turn_id,
+            narration,
+            active_started_at_ms: None,
+        }
+    }
+
+    /// Attaches the authoritative active-work clock basis to this entry.
+    ///
+    /// [`ConversationScene::build`] validates that the narration is active
+    /// work; see [`SceneBuildError::ActiveBasisWithoutActiveNarration`].
+    #[must_use]
+    pub fn with_active_started_at_ms(self, started_at_ms: i64) -> Self {
+        Self {
+            active_started_at_ms: Some(started_at_ms),
+            ..self
+        }
     }
 }
 
@@ -659,10 +698,64 @@ pub struct SteeringBlock {
 }
 
 /// Turn status row.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TurnStatusBlock {
     /// Closed narration value.
     pub narration: TurnNarration,
+    /// Authoritative active-work clock basis in Unix millis, if any.
+    ///
+    /// Present only with an active-work narration. The renderer derives a
+    /// stable live elapsed value from its own frame clock minus this basis and
+    /// stops ticking once the narration settles.
+    pub active_started_at_ms: Option<i64>,
+}
+
+/// Settled response facts for one turn footer.
+///
+/// Present only when the turn completed with an eligible settled reply (see
+/// the aggregate scene projection). The response text is the exact copy
+/// payload and the timestamp is the authoritative Forge settlement time; both
+/// stay fixed once set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnFooterSettlement {
+    response_text: String,
+    settled_at_ms: i64,
+}
+
+impl TurnFooterSettlement {
+    /// Creates settled footer facts after validating the response text bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneBuildError::MessageBodyTooLong`] when the response text
+    /// exceeds [`SCENE_MAX_MESSAGE_BODY_BYTES`] UTF-8 bytes.
+    pub fn new(
+        response_text: String,
+        settled_at_ms: i64,
+    ) -> Result<Self, SceneBuildError> {
+        if response_text.len() > SCENE_MAX_MESSAGE_BODY_BYTES {
+            return Err(SceneBuildError::MessageBodyTooLong {
+                length: response_text.len(),
+                maximum: SCENE_MAX_MESSAGE_BODY_BYTES,
+            });
+        }
+        Ok(Self {
+            response_text,
+            settled_at_ms,
+        })
+    }
+
+    /// Returns the exact settled response text retained for the copy payload.
+    #[must_use]
+    pub fn response_text(&self) -> &str {
+        &self.response_text
+    }
+
+    /// Returns the authoritative Forge settlement time in Unix millis.
+    #[must_use]
+    pub const fn settled_at_ms(&self) -> i64 {
+        self.settled_at_ms
+    }
 }
 
 /// Turn footer.
@@ -670,6 +763,9 @@ pub struct TurnStatusBlock {
 pub struct TurnFooterBlock {
     /// Owning turn.
     pub turn_id: TurnId,
+    /// Settled response facts, present only for a completed turn with an
+    /// eligible settled reply. `None` means the renderer shows no footer.
+    pub settlement: Option<TurnFooterSettlement>,
 }
 
 /// One turn's rendered scene.
@@ -742,6 +838,36 @@ impl ConversationScene {
             .find(|scene| &scene.turn_id == turn_id)
     }
 
+    /// Attaches settled footer facts to one turn's footer.
+    ///
+    /// The build emits every footer without a settlement; the aggregate owner
+    /// supplies settlement only for eligible completed turns (see the
+    /// projection contract). Returns whether the turn and its footer were
+    /// present. Exactly one footer exists per turn, so at most one block is
+    /// updated.
+    pub fn set_turn_footer_settlement(
+        &mut self,
+        turn_id: &TurnId,
+        settlement: TurnFooterSettlement,
+    ) -> bool {
+        let mut pending = Some(settlement);
+        let mut applied = false;
+        for scene in &mut self.turn_scenes {
+            if &scene.turn_id != turn_id {
+                continue;
+            }
+            for block in &mut scene.blocks {
+                if let TurnBlock::TurnFooter(footer) = block
+                    && let Some(next) = pending.take()
+                {
+                    footer.settlement = Some(next);
+                    applied = true;
+                }
+            }
+        }
+        applied
+    }
+
     /// Builds a deterministic scene from authoritative inputs.
     ///
     /// Frozen rules:
@@ -756,6 +882,11 @@ impl ConversationScene {
     ///   narration is [`TurnNarration::StreamingSuppression`];
     /// - change cards render only for a terminal domain lifecycle and are
     ///   retained in [`Self::deferred_change_sets`] before that point;
+    /// - an active-work clock basis on a narration entry is copied onto that
+    ///   turn's status block, and is refused on any non-active-work narration;
+    /// - every footer is emitted without a settlement; the aggregate owner
+    ///   attaches one later with [`Self::set_turn_footer_settlement`] only for
+    ///   eligible completed turns;
     /// - ordinary blocks are followed by a terminal change card, one status,
     ///   and one footer;
     /// - each steering placement appears once immediately after its exact
@@ -830,7 +961,7 @@ impl ConversationScene {
             }
         }
 
-        let mut narration_map: HashMap<TurnId, TurnNarration> =
+        let mut narration_map: HashMap<TurnId, TurnNarrationEntry> =
             HashMap::with_capacity(narrations.len());
         for entry in narrations {
             if !turn_ids.contains(&entry.turn_id) {
@@ -838,8 +969,13 @@ impl ConversationScene {
                     turn_id: entry.turn_id.clone(),
                 });
             }
+            if entry.active_started_at_ms.is_some() && !entry.narration.is_active_work() {
+                return Err(SceneBuildError::ActiveBasisWithoutActiveNarration {
+                    narration: entry.narration,
+                });
+            }
             if narration_map
-                .insert(entry.turn_id.clone(), entry.narration)
+                .insert(entry.turn_id.clone(), entry)
                 .is_some()
             {
                 return Err(SceneBuildError::DuplicateNarration {
@@ -936,10 +1072,9 @@ impl ConversationScene {
         let mut deferred = Vec::new();
 
         for turn in &sorted_turns {
-            let narration = narration_map
-                .get(&turn.turn_id)
-                .copied()
-                .unwrap_or(TurnNarration::Quiet);
+            let entry = narration_map.get(&turn.turn_id);
+            let narration = entry.map_or(TurnNarration::Quiet, |entry| entry.narration);
+            let active_started_at_ms = entry.and_then(|entry| entry.active_started_at_ms);
             let turn_items = items_by_turn.remove(&turn.turn_id).unwrap_or_default();
 
             let mut blocks = Vec::new();
@@ -1192,10 +1327,14 @@ impl ConversationScene {
             let suppress_status =
                 has_streaming_assistant && narration == TurnNarration::StreamingSuppression;
             if !suppress_status {
-                blocks.push(TurnBlock::TurnStatus(TurnStatusBlock { narration }));
+                blocks.push(TurnBlock::TurnStatus(TurnStatusBlock {
+                    narration,
+                    active_started_at_ms,
+                }));
             }
             blocks.push(TurnBlock::TurnFooter(TurnFooterBlock {
                 turn_id: turn.turn_id.clone(),
+                settlement: None,
             }));
 
             turn_scenes.push(TurnScene {
@@ -1468,6 +1607,11 @@ pub enum SceneBuildError {
     /// A compaction card was paired with a generic active-work narration.
     #[error("compaction card cannot coexist with {narration:?} narration")]
     CompactionNarrationConflict { narration: TurnNarration },
+    /// An active-work clock basis accompanied a narration that is not active
+    /// work. Only live-work narrations may carry a basis; quiet and terminal
+    /// narrations render no ticking row or carry their own settled durations.
+    #[error("active clock basis requires an active-work narration, found {narration:?}")]
+    ActiveBasisWithoutActiveNarration { narration: TurnNarration },
 }
 
 #[cfg(test)]

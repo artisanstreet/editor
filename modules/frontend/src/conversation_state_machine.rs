@@ -18,8 +18,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use artisan_domain::{
-    AssistantMessagePhase, ConversationItem, ConversationPatch, ConversationSnapshot, ItemId,
-    RequestId, ThreadId, TurnId,
+    AssistantMessagePhase, ConversationItem, ConversationLifecycle, ConversationPatch,
+    ConversationSnapshot, ItemId, RequestId, ThreadId, TurnId,
 };
 use thiserror::Error;
 
@@ -30,7 +30,7 @@ use crate::conversation_delivery_machine::{
 use crate::conversation_scene::{
     AssistantPhase, ConversationScene, SceneBuildError, SceneDisclosure, SceneId, SceneIdError,
     SceneItem, SceneItemKind, SceneTurn, SteeringPlacement as SceneSteeringPlacement,
-    TurnNarration as SceneTurnNarration, TurnNarrationEntry,
+    TurnFooterSettlement, TurnNarration as SceneTurnNarration, TurnNarrationEntry,
 };
 use crate::conversation_steering_machine::{
     ConversationSteeringMachine, SteeringControllerError, SteeringEvent, SteeringLabelKind,
@@ -1233,6 +1233,11 @@ impl ConversationStateController {
     /// intentionally absent from the scene and remain available through
     /// [`Self::view`] and aggregate effects.
     ///
+    /// Active turn controllers contribute their authoritative clock basis to
+    /// the turn status, and eligible completed turns receive their settled
+    /// footer facts; anything else keeps an unsettled footer with no
+    /// fabricated content.
+    ///
     /// # Errors
     ///
     /// Returns [`ConversationStateError::Scene`] when bounded durable or
@@ -1273,10 +1278,20 @@ impl ConversationStateController {
         let mut narrations = Vec::new();
         for (turn_id, controller) in &self.turns {
             if durable_turn_ids.iter().any(|durable| durable == turn_id) {
-                narrations.push(TurnNarrationEntry::new(
+                let view = controller.view();
+                let mut entry = TurnNarrationEntry::new(
                     turn_id.clone(),
-                    scene_narration(&controller.view().narration),
-                ));
+                    scene_narration(&view.narration),
+                );
+                // The basis is the turn's own first active-entry event time,
+                // never a sampled clock, so it stays fixed across rerenders,
+                // resumes, and snapshot refreshes.
+                if view.state.is_active()
+                    && let Some(started_at) = view.started_at
+                {
+                    entry = entry.with_active_started_at_ms(started_at);
+                }
+                narrations.push(entry);
             }
         }
 
@@ -1295,6 +1310,10 @@ impl ConversationStateController {
 
         ConversationScene::build(turns, items, narrations, steerings)
             .map_err(ConversationStateError::Scene)
+            .and_then(|mut scene| {
+                self.annotate_turn_footer_settlements(&mut scene)?;
+                Ok(scene)
+            })
     }
 
     /// Alias for [`Self::scene`] for renderer adapters.
@@ -1748,6 +1767,58 @@ impl ConversationStateController {
         };
         SceneItem::new(id, turn_id, ordinal, kind, disclosure)
             .map_err(ConversationStateError::Scene)
+    }
+
+    /// Attaches settled footer facts to eligible completed turns.
+    ///
+    /// Eligibility mirrors the Electron reference: a footer exists only for a
+    /// turn whose lifecycle is exactly [`ConversationLifecycle::Completed`]
+    /// with the latest-by-ordinal non-empty settled reply — a completed
+    /// [`AssistantMessagePhase::Final`] item — in that same turn. The
+    /// settlement time is the turn's authoritative Forge `updated_at`, never a
+    /// local clock. Anything else keeps its footer without a settlement, so
+    /// the renderer shows no footer rather than a fabricated one.
+    fn annotate_turn_footer_settlements(
+        &self,
+        scene: &mut ConversationScene,
+    ) -> Result<(), ConversationStateError> {
+        let Some(snapshot) = self.delivery.snapshot() else {
+            return Ok(());
+        };
+        for turn in snapshot.turns() {
+            if turn.lifecycle != ConversationLifecycle::Completed {
+                continue;
+            }
+            let mut reply: Option<&artisan_domain::AssistantMessageItem> = None;
+            for item in snapshot.items() {
+                let ConversationItem::AssistantMessage(message) = item else {
+                    continue;
+                };
+                if message.turn_id != turn.turn_id
+                    || message.phase != AssistantMessagePhase::Final
+                    || message.lifecycle != ConversationLifecycle::Completed
+                    || message.body.as_str().is_empty()
+                {
+                    continue;
+                }
+                let newer = reply.is_none_or(|current: &_| {
+                    message.ordinal.get() > current.ordinal.get()
+                });
+                if newer {
+                    reply = Some(message);
+                }
+            }
+            let Some(message) = reply else {
+                continue;
+            };
+            let settlement = TurnFooterSettlement::new(
+                message.body.as_str().to_owned(),
+                turn.updated_at.as_millis(),
+            )
+            .map_err(ConversationStateError::Scene)?;
+            scene.set_turn_footer_settlement(&turn.turn_id, settlement);
+        }
+        Ok(())
     }
 
     fn scene_disclosure(&self, id: &SceneId) -> Option<SceneDisclosure> {
