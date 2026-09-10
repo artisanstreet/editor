@@ -1199,15 +1199,32 @@ async fn serve_activity_delivery(
     cancel: &CancelHandle,
 ) -> Result<(), Box<dyn Error>> {
     let (listener, report) = listener.serve_one(handler, cancel).await?;
-    assert_eq!(report.completed_requests, 4);
-    assert!(matches!(
+    // Diagnostic-first assertions: the termination Debug names the exact
+    // failing delivery stage (Replay = patch/observation history read,
+    // Writer/Send = wire send, Registry = registrar advance,
+    // ResnapshotRequired = cursor beyond the tail), and completed_requests
+    // locates it (1 = initial activation delivery, else the wake drain).
+    if report.completed_requests != 4 {
+        return Err(format!(
+            "activity delivery served {} of 4 requests (termination={:?})",
+            report.completed_requests, report.termination
+        )
+        .into());
+    }
+    if !matches!(
         report.termination,
         RequestTermination::Failed {
             source: DeadlineError::Cancelled {
                 operation: OperationKind::Receive
             }
         }
-    ));
+    ) {
+        return Err(format!(
+            "activity delivery ended with unexpected termination (termination={:?})",
+            report.termination
+        )
+        .into());
+    }
     listener.drain().await?;
     Ok(())
 }
@@ -1289,7 +1306,7 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
             &seeded.run,
             2,
             500,
-            600,
+            700,
             750,
             activity_tool_observation("obs-activity-1", "tool-activity-1", "read", "read 42 lines"),
             "delivery-assistant-item",
@@ -1473,8 +1490,26 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
     };
 
     let (server_result, client_result) = tokio::join!(server, client);
-    server_result?;
-    client_result?;
+    // Propagate both sides together: the server termination names the
+    // failing delivery stage while the client error names the failed read,
+    // so a rerun exposes the actual failure instead of masking one side.
+    match (server_result, client_result) {
+        (Ok(()), Ok(())) => {},
+        (server, client) => {
+            let server_note = match server {
+                Ok(()) => String::from("ok"),
+                Err(error) => format!("FAILED ({error})"),
+            };
+            let client_note = match client {
+                Ok(()) => String::from("ok"),
+                Err(error) => format!("FAILED ({error})"),
+            };
+            return Err(format!(
+                "activity delivery failed: server={server_note}, client={client_note}"
+            )
+            .into());
+        }
+    }
     artisan_transport::shutdown(
         &endpoint,
         quinn::VarInt::from_u32(0),
