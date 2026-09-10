@@ -126,6 +126,8 @@ pub mod project_identity_policy;
 pub mod project_path_policy;
 pub mod project_picker;
 pub mod proof;
+#[cfg(feature = "visual-proof")]
+pub mod parity_visual_proof;
 pub mod reader_attention;
 pub mod reasoning_display;
 pub mod relative_time;

@@ -9,6 +9,14 @@ version.workspace = true
 name = "editor"
 path = "src/main.rs"
 
+[features]
+visual-proof = ["gpui_platform/test-support"]
+
+[[example]]
+name = "parity-visual-proof"
+path = "examples/parity_visual_proof.rs"
+required-features = ["visual-proof"]
+
 [dependencies]
 artisan-assets = { path = "../assets" }
 artisan-catalog = { path = "../catalog" }
