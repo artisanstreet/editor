@@ -789,10 +789,7 @@ impl NativeComposerControls {
             .expect("the failed-dispatch new-chat button is valid")
             .focus_visibility(FocusVisibility::Visible)
             .disabled(self.snapshot.disabled || !self.snapshot.failed_new_chat_ready)
-            .debug_selector({
-                let selector = selector.clone();
-                move || selector.clone()
-            })
+            .debug_selector(selector.clone())
             .on_activate(move |_, _, app| {
                 action_entity.update(app, |controls, controls_cx| {
                     controls.emit_if_allowed(
@@ -1493,7 +1490,7 @@ mod tests {
         let (events, _subscription) = observe_events(cx, &view);
         let selector = format!("{NATIVE_COMPOSER_FAILED_NEW_THREAD_SELECTOR}-command-9");
         let bounds = cx
-            .debug_bounds(selector.as_str())
+            .debug_bounds(selector)
             .expect("the failed new-chat control paints");
         cx.simulate_click(bounds.center(), Modifiers::none());
         assert_eq!(events.borrow().as_slice(), [failed_event()]);
@@ -1506,7 +1503,7 @@ mod tests {
         let (events, _subscription) = observe_events(cx, &view);
         let selector = format!("{NATIVE_COMPOSER_FAILED_NEW_THREAD_SELECTOR}-command-9");
         let bounds = cx
-            .debug_bounds(selector.as_str())
+            .debug_bounds(selector)
             .expect("the failed new-chat control paints");
         cx.simulate_click(bounds.center(), Modifiers::none());
         assert!(events.borrow().is_empty());

@@ -696,7 +696,7 @@ fn failed_listing_rejects_missing_reason_and_inconsistent_counts() {
     ));
 
     let original =
-        FailedMessageListing::new(thread(), 1, 2, vec![]).expect("listing");
+        FailedMessageListing::new(thread(), 2, 2, vec![failed_summary()]).expect("listing");
     let mut message = Builder::new(HeapAllocator::new());
     let mut listing = message.init_root::<composer_state_capnp::failed_message_listing::Builder>();
     encode_failed_message_listing(listing.reborrow(), &original).expect("encode listing");

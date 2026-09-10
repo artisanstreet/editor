@@ -1365,17 +1365,17 @@ impl NativeApplication {
     }
 
     fn failed_recovery_unreadable_failure() -> ServiceFailure {
-        ServiceFailure::new(
-            ServiceFailureStage::Request,
-            ServiceFailureCategory::Integrity,
-        )
+        ServiceFailure {
+            stage: ServiceFailureStage::Request,
+            category: ServiceFailureCategory::Integrity,
+        }
     }
 
     fn failed_recovery_composer_busy_failure() -> ServiceFailure {
-        ServiceFailure::new(
-            ServiceFailureStage::Request,
-            ServiceFailureCategory::InvalidConfiguration,
-        )
+        ServiceFailure {
+            stage: ServiceFailureStage::Request,
+            category: ServiceFailureCategory::InvalidConfiguration,
+        }
     }
 
     /// Arms a pending recovery with the intake-resolved thread when a
@@ -8771,7 +8771,7 @@ mod tests {
         NATIVE_MESSAGE_RETRY_LABEL, NATIVE_MESSAGE_RETRY_SELECTOR, NATIVE_RAIL_ADD_PROJECT_LABEL,
         NativeApplication, NativeMessageFailure, NativeMessageFlight, NativeProjectIntakeOperation,
         NativeProjectIntakeStage, NativeTestCommandSink, NativeTransportCommand,
-        NativeTransportEvent, NativeViewState, PickerRoute, ServiceFailure, ServiceStopStatus,
+        NativeTransportEvent, NativeViewState, PendingFailedRecovery, PickerRoute, ServiceFailure, ServiceStopStatus,
         ThreadSwitchFlight, ThreadSwitchPhase, WINDOW_TITLE, create_message_request_id,
         intake_command, message_status_detail, picker_route, project_options_from_listing,
         ready_membership_is_valid,
@@ -8800,6 +8800,7 @@ mod tests {
         conversation_view_machine::{CompletionRejection, ViewportEffect, ViewportGeneration},
         project_picker::{PickerRow, ProjectOption, ProjectPickerAction},
     };
+    use crate::native_composer_controls::NativeComposerControlsEvent;
     use artisan_domain::{
         ConversationCursor, ConversationSnapshot, ConversationSubscriptionStart, DisplayName,
         ObservationId, ProjectId, ProjectListing, ProjectSummary, ReceiptDisposition, RequestId,
@@ -14279,6 +14280,61 @@ mod tests {
                         NativeTransportCommand::QueueMessage(_)
                     )),
                     "restore never sends"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn failed_recovery_event_routes_through_controls_subscription(cx: &mut TestAppContext) {
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([]);
+        let project_id = ProjectId::parse("forge-p1").expect("project");
+        let old_thread = ThreadId::parse("forge-t1").expect("old thread");
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.test_command_sink = Some(sink);
+                application.selected_project = Some(project_id.clone());
+                application.selected_thread = Some(old_thread.clone());
+                application.composer.update(application_cx, |composer, composer_cx| {
+                    composer.switch_thread(
+                        old_thread.as_str().to_owned(),
+                        true,
+                        composer_cx,
+                    );
+                });
+                seed_failed_entry(application, &old_thread, 5);
+                application.sync_composer_controls(application_cx);
+                application.composer_controls.update(application_cx, |_, controls_cx| {
+                    controls_cx.emit(NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
+                        command_id: "queue-1".to_owned(),
+                        generation: 5,
+                    });
+                });
+            });
+        });
+        cx.update(|app| {
+            view.update(app, |application, _| {
+                let recorded = commands.borrow();
+                assert_eq!(recorded.len(), 1);
+                assert!(
+                    matches!(
+                        recorded[0],
+                        NativeTransportCommand::CreateTask(ref created) if created == &project_id
+                    ),
+                    "the subscription routes the failed event into same-project creation"
+                );
+                assert!(
+                    application.pending_failed_recovery.is_some(),
+                    "the routed event arms the exact failed recovery"
+                );
+                assert!(
+                    !recorded.iter().any(|command| matches!(
+                        command,
+                        NativeTransportCommand::QueueMessage(_)
+                    )),
+                    "routing never sends"
                 );
             });
         });
