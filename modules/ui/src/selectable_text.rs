@@ -828,6 +828,12 @@ impl Element for SelectableText {
                 state.begin_drag(index);
                 if let Some(focus) = focus.as_ref() {
                     window.focus(focus, cx);
+                    // Native `Div` convention (`div.rs` auto-focus): taking
+                    // focus here must suppress ancestor refocus during
+                    // bubbling, or a focusable parent such as the transcript
+                    // `ScrollArea` steals it back. No `stop_propagation` —
+                    // other listeners still run.
+                    window.prevent_default();
                 }
                 window.refresh();
                 cx.notify(current_view);

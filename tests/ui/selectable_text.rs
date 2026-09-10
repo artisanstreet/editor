@@ -409,10 +409,8 @@ impl Render for RetainedProbe {
 /// Resolves drag points inside the painted text line: just inside the left
 /// edge, just inside the right wrapper edge (past the line end, so the head
 /// clamps to the text end regardless of font metrics), and mid-line.
-fn retained_points(cx: &mut VisualTestContext) -> (Point<Pixels>, Point<Pixels>, Point<Pixels>) {
-    let bounds = cx
-        .debug_bounds("retained-wrap")
-        .expect("retained wrap must paint");
+fn wrap_points(cx: &mut VisualTestContext, selector: &'static str) -> (Point<Pixels>, Point<Pixels>, Point<Pixels>) {
+    let bounds = cx.debug_bounds(selector).expect("wrap must paint");
     let left = point(bounds.origin.x + px(1.0), bounds.origin.y + px(10.0));
     let right = point(
         bounds.origin.x + px(399.0),
@@ -423,6 +421,10 @@ fn retained_points(cx: &mut VisualTestContext) -> (Point<Pixels>, Point<Pixels>,
         bounds.origin.y + px(10.0),
     );
     (left, right, inside)
+}
+
+fn retained_points(cx: &mut VisualTestContext) -> (Point<Pixels>, Point<Pixels>, Point<Pixels>) {
+    wrap_points(cx, "retained-wrap")
 }
 
 fn read_clipboard(cx: &mut VisualTestContext) -> Option<String> {
@@ -542,6 +544,67 @@ fn retained_click_focuses_then_keyboard_selects_all(cx: &mut TestAppContext) {
     cx.simulate_mouse_up(inside, gpui::MouseButton::Left, Modifiers::default());
     cx.simulate_keystrokes("ctrl-a");
     cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+
+    assert_eq!(read_clipboard(cx), Some(BODY.to_owned()));
+}
+
+/// Retained text nested under a separately focusable parent, mirroring the
+/// transcript `ScrollArea` around message bodies. The child's press must
+/// keep focus (via the native `Div` prevent-default convention) instead of
+/// letting the ancestor steal it during bubbling.
+struct NestedFocusProbe {
+    parent_focus: FocusHandle,
+    text: String,
+}
+
+impl NestedFocusProbe {
+    fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            parent_focus: cx.focus_handle(),
+            text: BODY.to_owned(),
+        }
+    }
+}
+
+impl Render for NestedFocusProbe {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(400.0))
+            .track_focus(&self.parent_focus)
+            .debug_selector(|| "nested-wrap".to_owned())
+            .child(SelectableText::retained(
+                "nested-text",
+                self.text.clone(),
+                ArtisanTheme::for_mode(ThemeMode::Light),
+                Vec::new(),
+            ))
+    }
+}
+
+#[gpui::test]
+fn nested_child_keeps_focus_against_focusable_parent(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| NestedFocusProbe::new(cx));
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        let parent = view.read(app).parent_focus.clone();
+        window.focus(&parent, app);
+    });
+    cx.run_until_parked();
+    let (left, right, _) = wrap_points(cx, "nested-wrap");
+
+    cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+
+    cx.update(|window, app| {
+        assert!(
+            !view.read(app).parent_focus.is_focused(window),
+            "the focusable ancestor must not steal the child's press focus"
+        );
+    });
     cx.simulate_keystrokes("ctrl-c");
     cx.run_until_parked();
 
