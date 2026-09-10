@@ -27,7 +27,8 @@
 //! block margins, and fence chrome from the reference code snippet. Inline
 //! code reads 400 muted with no wash; mono face and normal tracking ride
 //! the frozen text-run contract through `InlinePresentation.code_ranges`
-//! (see `code_style`).
+//! (see `code_style`). Size has no override in that API, so inline code
+//! keeps the inherited 16 px instead of the reference 0.875 em.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -683,10 +684,12 @@ fn is_openable_link_destination(destination: &str) -> bool {
 fn code_style(theme: ArtisanTheme, in_link: bool) -> HighlightStyle {
     // Reference inline code reads 400 muted with no wash (`prose.css`
     // inline-code over plugin `code`), except inside a link where `a code`
-    // inherits the link color. The 400 weight rides here; mono face
-    // (14 px) and normal tracking ride the frozen text-run contract
+    // inherits the link color. The 400 weight rides here; mono face and
+    // normal tracking ride the frozen text-run contract
     // (`InlinePresentation.code_ranges` → `TextRunOverride` with the mono
-    // family and zero tracking).
+    // family and zero tracking). Size deliberately has no override in that
+    // API, so inline code keeps the inherited 16 px instead of the
+    // reference 0.875 em (14 px) — a stated limit, not parity.
     HighlightStyle {
         color: if in_link {
             None

@@ -140,12 +140,15 @@ blocks. The renderer then painted heading + prose + fence with no list.
 - Honest gaps, no fakes: inline code reads 400 muted; mono face and
   normal tracking ride the frozen text-run contract
   (`InlinePresentation.code_ranges` → `TextRunOverride` with the mono
-  family and zero tracking, wired in `render_inline`). Shared `StyledText`
-  already supports `with_font_family_overrides` (sorted non-overlapping
-  char-boundary ranges) and per-run `TextRun.letter_spacing`, and the
-  renderer consumes them only through the shared selection element —
-  never edited here. Until the dependency integrates (root first, then
-  gate), code spans inherit body face/tracking; blockquote/hr
+  family and zero tracking, wired in `render_inline`). Size deliberately
+  has no override in that API, so inline code keeps the inherited 16 px
+  instead of the reference 0.875 em (14 px) — a stated limit, not parity.
+  Shared `StyledText` already supports `with_font_family_overrides`
+  (sorted non-overlapping char-boundary ranges) and per-run
+  `TextRun.letter_spacing`, and the renderer consumes them only through
+  the shared selection element — never edited here. Until the dependency
+  integrates (root first, then gate), code spans inherit body face/size/
+  tracking; blockquote/hr
   structure has no engine model in this packet (`markdown.rs` frozen) so
   quotes read as paragraphs and rules are dropped — both reported for a
   follow-up engine packet; fence copy/filename chrome has no renderer
