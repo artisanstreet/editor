@@ -24,6 +24,12 @@
 //!   project" — the distinct final row after a hairline separator — emits
 //!   [`ProjectPickerAction::NewProject`].
 //!
+//! An optional case-insensitive substring filter (the home surface's "Search
+//! projects" row) narrows the visible rows for navigation, highlight, and
+//! activation mapping; [`PickerRow::Project`] still addresses catalog
+//! positions. An empty filter is exactly the legacy full-catalog behavior,
+//! and closing clears the filter.
+//!
 //! Actions are recorded explicitly in [`ProjectPickerState`] so unit tests
 //! can assert the full contract without launching a window. The GPUI view is
 //! deliberately small and honest about pinned-GPUI limits: there is no
@@ -98,6 +104,12 @@ use gpui::{
 /// fresh buffer.
 pub const TYPEAHEAD_BUFFER_MILLIS: u64 = 1_000;
 
+/// Maximum filter text the inline project switcher retains, in characters.
+///
+/// Project display names are short; clamping keeps a pasted paragraph from
+/// becoming an unmatchable filter while staying far above any real name.
+pub const PROJECT_FILTER_MAX_CHARS: usize = 64;
+
 /// Fallback subject of the default accessible trigger name.
 const CHOOSE_A_PROJECT: &str = "Choose a project";
 /// Label of the distinct final action row.
@@ -168,6 +180,13 @@ pub struct ProjectPickerState {
     highlight: Option<PickerRow>,
     actions: Vec<ProjectPickerAction>,
     typeahead: TypeaheadBuffer,
+    /// Optional case-insensitive substring filter over project names.
+    ///
+    /// Empty means the full catalog is visible, which is exactly the legacy
+    /// behavior. A nonempty filter hides non-matching rows from navigation,
+    /// highlight, and activation mapping; [`PickerRow::Project`] still
+    /// addresses catalog positions, never visible positions.
+    filter: String,
 }
 
 impl ProjectPickerState {
@@ -185,6 +204,7 @@ impl ProjectPickerState {
             highlight: None,
             actions: Vec::new(),
             typeahead: TypeaheadBuffer::default(),
+            filter: String::new(),
         }
     }
 
@@ -230,17 +250,76 @@ impl ProjectPickerState {
         &self.projects
     }
 
+    /// Returns the current substring filter over project names.
+    #[must_use]
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Replaces the substring filter and re-seats the highlight.
+    ///
+    /// Text is clamped to [`PROJECT_FILTER_MAX_CHARS`] characters. While
+    /// open, the highlight recomputes exactly like a fresh open (the current
+    /// project when still visible, else the first visible row); while closed
+    /// the highlight stays unset.
+    pub fn set_filter(&mut self, filter: impl Into<String>) {
+        let text: String = filter.into().chars().take(PROJECT_FILTER_MAX_CHARS).collect();
+        self.filter = text;
+        if self.open {
+            self.highlight = Some(self.initial_highlight());
+        }
+    }
+
+    /// Catalog positions currently passing the filter, in catalog order.
+    ///
+    /// An empty filter exposes the whole catalog, so every legacy caller
+    /// observes identical indexes.
+    #[must_use]
+    pub fn visible_indexes(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.projects.len()).collect();
+        }
+        let needle = self.filter.to_lowercase();
+        self.projects
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| option.name.to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Number of visible project rows, excluding the final action row.
+    #[must_use]
+    pub fn visible_count(&self) -> usize {
+        self.visible_indexes().len()
+    }
+
+    /// Flattens a row onto the visible selectable-row index space (visible
+    /// project rows first, then the final row). A project row hidden by the
+    /// filter falls back to the origin, matching the legacy scan origin.
+    #[must_use]
+    pub fn flat_index_of(&self, row: PickerRow) -> usize {
+        let visible = self.visible_indexes();
+        match row {
+            PickerRow::Project(index) => visible
+                .iter()
+                .position(|&visible_index| visible_index == index)
+                .unwrap_or(0),
+            PickerRow::NewProject => visible.len(),
+        }
+    }
+
     /// Returns whether the menu is currently open.
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.open
     }
 
-    /// Returns the number of selectable rows: one per project plus the final
-    /// "New project" row.
+    /// Returns the number of selectable rows: one per visible project plus
+    /// the final "New project" row.
     #[must_use]
     pub fn selectable_row_count(&self) -> usize {
-        self.projects.len() + 1
+        self.visible_count() + 1
     }
 
     /// Computes the trigger's accessible name.
@@ -300,10 +379,11 @@ impl ProjectPickerState {
         self.advance(false);
     }
 
-    /// Jumps to the first project row (Home).
+    /// Jumps to the first visible project row (Home), or to the final row
+    /// when the filter hides every project.
     pub fn move_first(&mut self) {
-        if self.open && !self.projects.is_empty() {
-            self.highlight = Some(PickerRow::Project(0));
+        if self.open {
+            self.highlight = Some(self.initial_highlight());
         }
     }
 
@@ -402,28 +482,34 @@ impl ProjectPickerState {
     }
 
     /// Closes and resets transient menu state without emitting anything.
+    ///
+    /// The filter clears with the menu, so every fresh open starts from the
+    /// full catalog exactly like the legacy trigger.
     fn close_without_action(&mut self) {
         self.open = false;
         self.highlight = None;
         self.typeahead.clear();
+        self.filter.clear();
     }
 
     /// The initial highlight for a freshly opened menu: the current
-    /// project's row wins (legacy `FocusSelectedProject`), then the first
-    /// project row, then the unavoidable final row.
+    /// project's row wins when still visible (legacy `FocusSelectedProject`),
+    /// then the first visible project row, then the unavoidable final row.
     fn initial_highlight(&self) -> PickerRow {
-        if self.projects.is_empty() {
+        let visible = self.visible_indexes();
+        if visible.is_empty() {
             return PickerRow::NewProject;
         }
         self.current
             .as_ref()
             .and_then(|id| {
-                self.projects
+                visible
                     .iter()
-                    .position(|option| &option.id == id)
-                    .map(PickerRow::Project)
+                    .find(|&&index| self.projects[index].id == *id)
+                    .copied()
             })
-            .unwrap_or(PickerRow::Project(0))
+            .map(PickerRow::Project)
+            .unwrap_or(PickerRow::Project(visible[0]))
     }
 
     fn advance(&mut self, forward: bool) {
@@ -442,20 +528,22 @@ impl ProjectPickerState {
         self.highlight = Some(self.row_at_flat_index(next));
     }
 
-    /// The highlight flattened onto the selectable-row index space; zero
-    /// while closed or unset, matching the fallback scan origin.
+    /// The highlight flattened onto the visible selectable-row index
+    /// space; zero while closed or unset, matching the fallback scan origin.
     fn flat_highlight(&self) -> usize {
-        self.highlight
-            .map_or(0, |row| row.to_flat_index(self.projects.len()))
+        self.highlight.map_or(0, |row| self.flat_index_of(row))
     }
 
-    /// Restores a flattened index onto a row; indexes at or past the
-    /// project-row count land on the final "New project" row.
+    /// Restores a flattened visible index onto a row; indexes at or past
+    /// the visible project-row count land on the final "New project" row.
+    /// [`PickerRow::Project`] always carries the catalog position, never the
+    /// visible position.
     fn row_at_flat_index(&self, flat: usize) -> PickerRow {
-        if flat >= self.projects.len() {
+        let visible = self.visible_indexes();
+        if flat >= visible.len() {
             PickerRow::NewProject
         } else {
-            PickerRow::Project(flat)
+            PickerRow::Project(visible[flat])
         }
     }
 
@@ -493,17 +581,6 @@ impl ProjectPickerState {
             PickerRow::NewProject => NEW_PROJECT_ROW_LABEL,
         };
         label.to_lowercase().starts_with(lowercased_prefix)
-    }
-}
-
-impl PickerRow {
-    /// Flattens onto the selectable-row index space (project rows first,
-    /// then the final row at position `project_count`).
-    fn to_flat_index(self, project_count: usize) -> usize {
-        match self {
-            Self::Project(index) => index,
-            Self::NewProject => project_count,
-        }
     }
 }
 
@@ -803,11 +880,10 @@ impl ProjectPickerView {
             // item before it has overflow/bounds and silently drops it, so
             // the flat address is also armed for the shell's paint-time
             // probe, which re-issues it after that first draw completes.
-            let project_count = self.state.projects().len();
             let flat = self
                 .state
                 .highlighted_row()
-                .map_or(0, |row| row.to_flat_index(project_count));
+                .map_or(0, |row| self.state.flat_index_of(row));
             self.initial_reveal_flat.set(Some(flat));
             self.reveal_highlight();
         } else {
@@ -825,11 +901,10 @@ impl ProjectPickerView {
         if !self.state.is_open() {
             return;
         }
-        let project_count = self.state.projects().len();
         let flat = self
             .state
             .highlighted_row()
-            .map_or(0, |row| row.to_flat_index(project_count));
+            .map_or(0, |row| self.state.flat_index_of(row));
         self.menu_scroll.scroll_to_item(flat);
     }
 
@@ -1142,5 +1217,117 @@ impl Render for ProjectPickerView {
                     .children(menu.map(deferred))
                     .child(trigger),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn option(id: &str, name: &str) -> ProjectOption {
+        ProjectOption {
+            id: ProjectId::parse(id.to_owned()).expect("fixture project id parses"),
+            name: SharedString::from(name.to_owned()),
+        }
+    }
+
+    fn catalog() -> Vec<ProjectOption> {
+        vec![
+            option("proof-core", "core"),
+            option("proof-docs", "docs-site"),
+            option("proof-play", "playground"),
+        ]
+    }
+
+    #[test]
+    fn empty_filter_exposes_the_full_catalog() {
+        let state = ProjectPickerState::new(catalog(), None);
+        assert_eq!(state.filter(), "");
+        assert_eq!(state.visible_indexes(), vec![0, 1, 2]);
+        assert_eq!(state.selectable_row_count(), 4);
+    }
+
+    #[test]
+    fn substring_filter_narrows_to_matching_catalog_positions() {
+        let mut state = ProjectPickerState::new(catalog(), None);
+        state.set_filter("docs");
+        assert_eq!(state.visible_indexes(), vec![1]);
+        assert_eq!(state.selectable_row_count(), 2);
+        state.set_filter("play");
+        assert_eq!(state.visible_indexes(), vec![2]);
+    }
+
+    #[test]
+    fn activation_under_filter_emits_the_catalog_identity() {
+        let mut state = ProjectPickerState::new(catalog(), None);
+        state.press_trigger();
+        state.set_filter("play");
+        assert_eq!(state.highlighted_row(), Some(PickerRow::Project(2)));
+        state.activate_highlighted();
+        assert_eq!(
+            state.take_actions(),
+            vec![ProjectPickerAction::Choose(
+                ProjectId::parse("proof-play".to_owned()).expect("fixture id parses")
+            )]
+        );
+        // Closing clears the filter back to the full catalog.
+        assert_eq!(state.filter(), "");
+        assert_eq!(state.visible_indexes(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn hidden_current_project_falls_back_to_first_visible() {
+        let core = ProjectId::parse("proof-core".to_owned()).expect("fixture id parses");
+        let mut state = ProjectPickerState::new(catalog(), Some(core));
+        state.press_trigger();
+        assert_eq!(state.highlighted_row(), Some(PickerRow::Project(0)));
+        state.set_filter("play");
+        assert_eq!(state.highlighted_row(), Some(PickerRow::Project(2)));
+    }
+
+    #[test]
+    fn filter_matching_nothing_leaves_only_the_final_row() {
+        let mut state = ProjectPickerState::new(catalog(), None);
+        state.press_trigger();
+        state.set_filter("zzz-no-such-project");
+        assert!(state.visible_indexes().is_empty());
+        assert_eq!(state.selectable_row_count(), 1);
+        assert_eq!(state.highlighted_row(), Some(PickerRow::NewProject));
+        state.activate_highlighted();
+        assert_eq!(
+            state.take_actions(),
+            vec![ProjectPickerAction::NewProject]
+        );
+    }
+
+    #[test]
+    fn clearing_the_filter_restores_full_navigation() {
+        let mut state = ProjectPickerState::new(catalog(), None);
+        state.press_trigger();
+        state.set_filter("play");
+        assert_eq!(state.visible_indexes(), vec![2]);
+        state.set_filter("");
+        assert_eq!(state.visible_indexes(), vec![0, 1, 2]);
+        state.move_next();
+        assert_eq!(state.highlighted_row(), Some(PickerRow::Project(1)));
+        state.move_previous();
+        assert_eq!(state.highlighted_row(), Some(PickerRow::Project(0)));
+    }
+
+    #[test]
+    fn filter_text_is_clamped_to_the_documented_bound() {
+        let mut state = ProjectPickerState::new(catalog(), None);
+        state.set_filter("x".repeat(PROJECT_FILTER_MAX_CHARS + 16));
+        assert_eq!(state.filter().chars().count(), PROJECT_FILTER_MAX_CHARS);
+    }
+
+    #[test]
+    fn setting_filter_while_closed_keeps_the_menu_shut() {
+        let mut state = ProjectPickerState::new(catalog(), None);
+        state.set_filter("play");
+        assert!(!state.is_open());
+        assert_eq!(state.highlighted_row(), None);
+        state.press_trigger();
+        assert_eq!(state.highlighted_row(), Some(PickerRow::Project(2)));
     }
 }

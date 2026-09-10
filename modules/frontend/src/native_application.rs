@@ -29,6 +29,7 @@ use artisan_domain::{
     ProjectListing, QueueMessagePayload, RequestId, SetModelFavorite, ThreadId, ThreadListing,
 };
 use artisan_protocol::{ConversationSubscriptionStarted, QueueMessageReceipt, ServerEvent};
+use artisan_ui::asset_seam::asset_glyph;
 use artisan_ui::button::{
     AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
 };
@@ -55,6 +56,9 @@ use crate::desktop_shell::{
     desktop_shell,
 };
 use crate::editor_route_screen::{EditorScreen, EditorScreenIdentity, EditorSurfaceState};
+use crate::home_project_picker::{
+    HOME_CHOOSE_PROJECT_LABEL, HOME_EMBLEM_SIZE_PX, HOME_HEADLINE_TEXT_PX, HomeProjectPickerView,
+};
 use crate::native_command_menu::{
     CommandMenuAction, CommandMenuEntry, CommandMenuGroup, NativeCommandMenu,
 };
@@ -454,6 +458,8 @@ pub struct NativeApplication {
     message_failure: Option<NativeMessageFailure>,
     picker: Option<Entity<ProjectPickerView>>,
     picker_subscription: Option<Subscription>,
+    home_picker: Option<Entity<HomeProjectPickerView>>,
+    home_picker_subscription: Option<Subscription>,
     project_options: Vec<ProjectOption>,
     selected_project: Option<ProjectId>,
     /// The latest authoritative thread listing for `selected_project`.
@@ -607,7 +613,6 @@ impl NativeApplication {
         });
         let command_menu = cx.new(|menu_cx| {
             NativeCommandMenu::new(vec![CommandMenuGroup::actions()], ThemeMode::Dark, menu_cx)
-                .titlebar_mode()
         });
         let command_menu_observation = cx.observe(&command_menu, |application, menu, cx| {
             application.route_command_action(&menu, cx);
@@ -679,6 +684,8 @@ impl NativeApplication {
             message_failure: None,
             picker: None,
             picker_subscription: None,
+            home_picker: None,
+            home_picker_subscription: None,
             project_options: Vec::new(),
             selected_project: None,
             thread_listing: None,
@@ -810,34 +817,17 @@ impl NativeApplication {
         moved
     }
 
-    /// Renders the concise new-task home surface. All actions and catalog
-    /// rows live in the shell/sidebar; this route only explains the current
-    /// real state and leaves the editable composer to the shell footer.
-    fn new_thread_surface_section(&self) -> Div {
-        let (heading, detail) = if self.project_options.is_empty() {
-            (
-                "Start a task",
-                "Add a project to give Artisan a workspace to work in.".to_owned(),
-            )
-        } else if matches!(&self.state, NativeViewState::Failure(_)) {
-            (
-                "Start a task",
-                "Forge is offline. Existing project and task data will remain visible when it reconnects."
-                    .to_owned(),
-            )
-        } else if let Some(project) = self.selected_project_name() {
-            (
-                "Start a task",
-                format!("Choose a task in {project}, or describe what you need below."),
-            )
-        } else {
-            (
-                "Start a task",
-                "Choose a project from the sidebar, then describe what you need below.".to_owned(),
-            )
-        };
-
-        div()
+    /// Renders the home headline surface: a muted emblem, the centered
+    /// "What should we build…?" heading with the inline project switcher,
+    /// and nothing else — the editable composer lives in the shell footer.
+    /// The Failure branch keeps the actionable offline error; every other
+    /// branch drops the old "Start a task" copy and subtitle.
+    fn new_thread_surface_section(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let root = div()
             .size_full()
             .flex()
             .flex_col()
@@ -846,21 +836,77 @@ impl NativeApplication {
             .px(px(24.0))
             .pb(px(24.0))
             .debug_selector(|| DESKTOP_HOME_SELECTOR.to_string())
-            .child(
+            .child(self.home_emblem());
+        if matches!(&self.state, NativeViewState::Failure(_)) {
+            return root
+                .child(self.home_heading("Forge is offline"))
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .max_w(px(440.0))
+                        .text_size(px(15.0))
+                        .text_color(self.desktop_theme.secondary)
+                        .child(
+                            "Forge is offline. Existing project and task data will remain visible when it reconnects."
+                                .to_owned(),
+                        ),
+                );
+        }
+        match self.selected_project_name() {
+            Some(name) => root.child(
                 div()
-                    .text_size(px(20.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(self.desktop_theme.foreground)
-                    .child(heading),
-            )
-            .child(
-                div()
-                    .mt(px(8.0))
-                    .max_w(px(440.0))
-                    .text_size(px(15.0))
-                    .text_color(self.desktop_theme.secondary)
-                    .child(detail),
-            )
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .child(self.home_heading("What should we build in\u{a0}"))
+                    .child(self.home_project_trigger(&name, window, cx))
+                    .child(self.home_heading("?")),
+            ),
+            None => root
+                .child(self.home_heading("What should we build?"))
+                .child(self.home_project_trigger(HOME_CHOOSE_PROJECT_LABEL, window, cx)),
+        }
+    }
+
+    /// Centered large regular home heading line.
+    fn home_heading(&self, text: &str) -> Div {
+        div()
+            .text_size(px(HOME_HEADLINE_TEXT_PX))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(self.desktop_theme.foreground)
+            .child(text.to_owned())
+    }
+
+    /// Small muted emblem above the home heading.
+    fn home_emblem(&self) -> Div {
+        div().mb(px(16.0)).child(
+            asset_glyph(AssetId::TABLER_TERMINAL_2)
+                .size(px(HOME_EMBLEM_SIZE_PX))
+                .text_color(self.desktop_theme.secondary),
+        )
+    }
+
+    /// The inline project switcher for the home heading: the live picker
+    /// when installed, otherwise the static label (before the first project
+    /// listing arrives). Text styling inherits from the heading container.
+    fn home_project_trigger(
+        &mut self,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(home) = self.home_picker.clone() else {
+            return div()
+                .text_size(px(HOME_HEADLINE_TEXT_PX))
+                .font_weight(FontWeight::NORMAL)
+                .text_color(self.desktop_theme.foreground)
+                .child(label.to_owned())
+                .into_any_element();
+        };
+        home.update(cx, |picker, picker_cx| {
+            picker.render_inline_trigger(label, window, picker_cx)
+        })
     }
 
     fn selected_project_name(&self) -> Option<String> {
@@ -2901,10 +2947,10 @@ impl NativeApplication {
         title
     }
 
-    fn desktop_route_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn desktop_route_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let route = self.route().clone();
         let route_selector = route.selector_suffix();
-        let content = self.route_surface(cx);
+        let content = self.route_surface(window, cx);
         let mut body = div()
             .size_full()
             .min_w(px(0.0))
@@ -4689,7 +4735,8 @@ impl NativeApplication {
             self.state = state;
         }
         let options = self.project_options.clone();
-        self.install_picker(options, self.selected_project.clone(), cx);
+        self.install_picker(options.clone(), self.selected_project.clone(), cx);
+        self.install_home_picker(options, self.selected_project.clone(), cx);
         self.install_thread_picker(
             self.thread_listing
                 .clone()
@@ -4721,7 +4768,8 @@ impl NativeApplication {
         // Recreate the public picker so the previous NewProject action
         // cannot be observed as a second retry before the user acts.
         let options = self.project_options.clone();
-        self.install_picker(options, self.selected_project.clone(), cx);
+        self.install_picker(options.clone(), self.selected_project.clone(), cx);
+        self.install_home_picker(options, self.selected_project.clone(), cx);
         self.install_thread_picker(
             self.thread_listing
                 .clone()
@@ -4789,7 +4837,8 @@ impl NativeApplication {
         } else {
             NativeViewState::Loading
         };
-        self.install_picker(options, Some(project_id), cx);
+        self.install_picker(options.clone(), Some(project_id.clone()), cx);
+        self.install_home_picker(options, Some(project_id), cx);
         self.install_thread_picker(threads.clone(), self.selected_thread.clone(), cx);
         self.try_mount_pending_thread(cx);
         self.sync_command_menu_groups(cx);
@@ -4813,7 +4862,8 @@ impl NativeApplication {
         }
         self.project_options.clone_from(&options);
         self.selected_project = selected_project;
-        self.install_picker(options, self.selected_project.clone(), cx);
+        self.install_picker(options.clone(), self.selected_project.clone(), cx);
+        self.install_home_picker(options, self.selected_project.clone(), cx);
         if self.project_options.is_empty() {
             self.state = NativeViewState::EmptyProjects;
         } else {
@@ -4881,12 +4931,36 @@ impl NativeApplication {
     }
 
     fn set_picker_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
-        let Some(picker) = self.picker.clone() else {
-            return;
-        };
-        picker.update(cx, |picker, picker_cx| {
-            picker.set_disabled(disabled, picker_cx);
+        if let Some(picker) = self.picker.clone() {
+            picker.update(cx, |picker, picker_cx| {
+                picker.set_disabled(disabled, picker_cx);
+            });
+        }
+        if let Some(home_picker) = self.home_picker.clone() {
+            home_picker.update(cx, |picker, picker_cx| {
+                picker.set_disabled(disabled, picker_cx);
+            });
+        }
+    }
+
+    /// Installs the home-surface inline switcher over the same catalog and
+    /// current project as the sidebar picker, observed through the shared
+    /// picker-action routing.
+    fn install_home_picker(
+        &mut self,
+        options: Vec<ProjectOption>,
+        current: Option<ProjectId>,
+        cx: &mut Context<Self>,
+    ) {
+        let picker = cx.new(|picker_cx| {
+            HomeProjectPickerView::new(options, current, self.desktop_theme, picker_cx)
         });
+        let subscription = cx.observe(&picker, |application, picker, cx| {
+            application.route_home_picker_action(&picker, cx);
+        });
+        self.home_picker = Some(picker);
+        drop(self.home_picker_subscription.replace(subscription));
+        self.sync_thread_picker_disabled(cx);
     }
 
     fn set_thread_picker_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
@@ -5167,6 +5241,22 @@ impl NativeApplication {
         let Some(action) = picker.read(cx).last_action() else {
             return;
         };
+        self.route_picker_action_inner(action, cx);
+    }
+
+    fn route_home_picker_action(
+        &mut self,
+        picker: &Entity<HomeProjectPickerView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(action) = picker.read(cx).last_action() else {
+            return;
+        };
+        self.route_picker_action_inner(action, cx);
+    }
+
+    /// Shared admission-deduped routing for both project picker surfaces.
+    fn route_picker_action_inner(&mut self, action: ProjectPickerAction, cx: &mut Context<Self>) {
         if self.last_picker_action.as_ref() == Some(&action) {
             return;
         }
@@ -6775,7 +6865,7 @@ impl Render for NativeApplication {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_composer_controls(cx);
         let sidebar = self.desktop_sidebar(window, cx).into_any_element();
-        let body = self.desktop_route_body(cx);
+        let body = self.desktop_route_body(window, cx);
         let identity = self.desktop_identity(cx).into_any_element();
         let search = self.command_menu.clone().into_any_element();
         let shell = desktop_shell(
@@ -6808,7 +6898,7 @@ impl NativeApplication {
     /// Renders the route content for every route, mounting each
     /// route-port screen on first entry (or when the route identity changes)
     /// and reusing it afterwards.
-    fn route_surface(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn route_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.route().clone() {
             NativeRoute::Onboarding => {
                 if self.onboarding_screen.is_none() {
@@ -6908,7 +6998,9 @@ impl NativeApplication {
                     .expect("settings screen mounted")
                     .into_any_element()
             }
-            NativeRoute::NewThread { .. } => self.new_thread_surface_section().into_any_element(),
+            NativeRoute::NewThread { .. } => self
+                .new_thread_surface_section(window, cx)
+                .into_any_element(),
         }
     }
 }
@@ -7527,7 +7619,7 @@ mod tests {
             CONVERSATION_SURFACE_MAX_SCROLL_TARGETS, ConversationSurfaceTarget,
         },
         conversation_view_machine::{CompletionRejection, ViewportEffect, ViewportGeneration},
-        project_picker::{ProjectOption, ProjectPickerAction},
+        project_picker::{PickerRow, ProjectOption, ProjectPickerAction},
     };
     use artisan_domain::{
         ConversationCursor, ConversationSnapshot, ConversationSubscriptionStart, DisplayName,
@@ -8211,6 +8303,105 @@ mod tests {
 
         // The desktop workspace owns the active frame; the shared button
         // metadata and admission policy remain the contract for the sidebar.
+    }
+
+    #[gpui::test]
+    fn home_project_choice_updates_app_selection_and_scope(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        let beta = ProjectId::parse("home-beta").expect("fixture project");
+
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.test_command_sink = Some(sink);
+                let options = vec![
+                    ProjectOption {
+                        id: ProjectId::parse("home-alpha").expect("fixture project"),
+                        name: "alpha".to_owned().into(),
+                    },
+                    ProjectOption {
+                        id: beta.clone(),
+                        name: "beta".to_owned().into(),
+                    },
+                ];
+                application.project_options.clone_from(&options);
+                application.install_home_picker(options, None, application_cx);
+                let home = application
+                    .home_picker
+                    .clone()
+                    .expect("home picker installed");
+                // Drive the window-free controller seams exactly as the
+                // pointer/keyboard wrappers do, then route the drained action.
+                home.update(application_cx, |picker, picker_cx| {
+                    picker.toggle_menu(picker_cx);
+                    assert!(picker.state().is_open());
+                    picker.commit_row(PickerRow::Project(1), picker_cx);
+                });
+                application.route_home_picker_action(&home, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                assert_eq!(application.selected_project, Some(beta.clone()));
+                assert!(
+                    commands.borrow().iter().any(
+                        |command| matches!(command, NativeTransportCommand::SelectProject(id) if id == &beta)
+                    ),
+                    "choosing a home row submits the real selection command"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn home_project_intake_row_submits_real_intake_command(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Ok(())]);
+
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.test_command_sink = Some(sink);
+                let options = vec![ProjectOption {
+                    id: ProjectId::parse("home-alpha").expect("fixture project"),
+                    name: "alpha".to_owned().into(),
+                }];
+                application.project_options.clone_from(&options);
+                application.install_home_picker(options, None, application_cx);
+                let home = application
+                    .home_picker
+                    .clone()
+                    .expect("home picker installed");
+                home.update(application_cx, |picker, picker_cx| {
+                    picker.toggle_menu(picker_cx);
+                    picker.commit_row(PickerRow::NewProject, picker_cx);
+                });
+                application.route_home_picker_action(&home, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                assert!(
+                    commands
+                        .borrow()
+                        .iter()
+                        .any(|command| matches!(
+                            command,
+                            NativeTransportCommand::BeginProjectIntake
+                        )),
+                    "the home New project row starts the genuine intake flow"
+                );
+                assert_eq!(
+                    application.intake_stage,
+                    Some(NativeProjectIntakeStage::PickingDirectory)
+                );
+            });
+        });
     }
 
     #[gpui::test]

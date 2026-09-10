@@ -76,6 +76,7 @@ pub mod host_identity_controller;
 pub mod host_resume_recovery_policy;
 pub mod hover_pill_geometry_policy;
 pub mod hover_pill_group_policy;
+pub mod home_project_picker;
 pub mod image_inspection_store;
 pub mod image_policy;
 pub mod image_viewer;
