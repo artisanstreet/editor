@@ -24,7 +24,7 @@ use artisan_database::{
     AssistantChange, AttachProjectInput, BindRunProvider, BindRunProviderOutcome,
     CheckpointUpdate, ClaimMessageDispatch, CommitRunBatch, CompleteRun, ConversationPatchReplay,
     CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
-    ProviderBindingBytes, QueueFirstMessageInput, QueueMessageInput, Repository, RunBatchScope,
+    ProviderBindingBytes, QueueFirstMessageInput, Repository, RunBatchScope,
     RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
 };
 use artisan_domain::{

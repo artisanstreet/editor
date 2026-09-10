@@ -1657,8 +1657,9 @@ async fn observation_send_failure_retains_the_cursor() {
     let _server_keepalive = server_connection.clone();
     let writer =
         ConversationDeliveryWriter::new(server_connection, registrar.clone(), ProtocolVersion::V1);
+    let lease_owned = lease.clone();
     let mut delivery = Box::pin(writer.deliver_observation_batch(
-        &lease.clone(),
+        &lease_owned,
         thread_id.clone(),
         batch,
     ));
