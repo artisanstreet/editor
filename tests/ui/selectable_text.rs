@@ -13,7 +13,7 @@ use artisan_ui::selectable_text::{
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
     Context, FocusHandle, FontStyle, FontWeight, HighlightStyle, IntoElement, Modifiers, Pixels,
-    Point, Render, TestAppContext, VisualTestContext, Window, div, point, px,
+    Point, Render, Styled, TestAppContext, VisualTestContext, Window, div, point, px,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -477,8 +477,9 @@ fn retained_streaming_text_change_resets_selection(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     cx.update(|_, app| {
-        view.update(app, |probe, _| {
+        view.update(app, |probe, cx| {
             probe.text = "revised".to_owned();
+            cx.notify();
         });
     });
     cx.run_until_parked();
