@@ -4380,7 +4380,7 @@ async fn steer_images_refused_unsupported_first_and_retry_with_payload_retained(
     let (_temporary, storage) = opened_storage("steer-images").await;
     seed_conversation(storage.repository(), "thread-steer", "steer").await;
     // The run stays live: the image gate fires before any provider contact.
-    let (registry, _lease, inbox) = live_steer("thread-steer", "run-steer");
+    let (registry, _lease, mut inbox) = live_steer("thread-steer", "run-steer");
     let origin = ScriptedOriginHandle::scripted(
         vec![Ok("message-steer-3".to_owned())],
         vec![
