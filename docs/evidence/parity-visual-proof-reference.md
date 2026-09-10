@@ -97,11 +97,13 @@ passes through as plain text), `lib/conversation/store.ts` +
 
 - `reference-settled`: user `Whoopty`; settled reply
   `Whoopty! 😄 Whats up?` (Final, Completed, attributed run);
-  Reasoning fact `Planning a playful response.` plus `WorkSession`
-  marker `Playful greeting`, both run-attributed; Completed turn with a
-  6s own span. Exercises single-run session grouping, the session signal,
-  and `ThoughtFor{6000}` settlement. Tests assert the session group, its
-  run, the 6s label/narration, and the byte-exact emoji reply.
+  Reasoning fact `Planning a playful response.` with the same run;
+  Completed turn with a 6s own span. Exercises single-run session
+  grouping from the real pipeline (assistant provenance plus
+  run-attributed reasoning — no producer emits `WorkSession` markers,
+  so the fixture carries none), and `ThoughtFor{6000}` settlement.
+  Tests assert the session group, its run, the 6s label/narration, and
+  the byte-exact emoji reply.
 - `reference-thinking`: user `Whoopty`; Active turn; Reasoning fact
   ``Checking `mood` for **playful** *tone* before replying.`` with the
   run. Exercises the live thinking summary line with inline code,

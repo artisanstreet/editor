@@ -407,9 +407,10 @@ fn case_snapshot(
             ],
         )?,
         // User complaint reproduction: user "Whoopty", settled reply with
-        // native emoji, run-attributed reasoning summary plus session
-        // marker sharing the reply's run so single-run session grouping
-        // engages; the 6s terminal span settles ThoughtFor{6000}.
+        // native emoji, run-attributed reasoning summary sharing the
+        // reply's run so single-run session grouping engages from the real
+        // pipeline (no producer emits WorkSession markers); the 6s
+        // terminal span settles ThoughtFor{6000}.
         ProofSceneCase::ReferenceSettled => build(
             vec![make_turn(
                 ConversationLifecycle::Completed,
@@ -489,22 +490,13 @@ fn case_facts(case: ProofSceneCase) -> Result<Vec<SceneFact>, String> {
                 message: "fixture failure: transport refused".to_owned(),
             },
         )?]),
-        ProofSceneCase::ReferenceSettled => Ok(vec![
-            attributed_fact(
-                "reference-reasoning",
-                100,
-                SceneFactKind::Reasoning {
-                    body: "Planning a playful response.".to_owned(),
-                },
-            )?,
-            attributed_fact(
-                "reference-session",
-                101,
-                SceneFactKind::WorkSession {
-                    title: "Playful greeting".to_owned(),
-                },
-            )?,
-        ]),
+        ProofSceneCase::ReferenceSettled => Ok(vec![attributed_fact(
+            "reference-reasoning",
+            100,
+            SceneFactKind::Reasoning {
+                body: "Planning a playful response.".to_owned(),
+            },
+        )?]),
         ProofSceneCase::ReferenceThinking => Ok(vec![attributed_fact(
             "reference-thinking",
             100,
