@@ -1705,15 +1705,20 @@ impl RequestHandler {
             })
             .await
             .map_err(|error| repository_failure(&error, request_id))?;
+        if result.receipt.disposition != artisan_domain::ReceiptDisposition::Accepted {
+            // Accept-race duplicate: another transaction won admission for
+            // this exact intent. Settle from durable delivery state — never
+            // bare receipt — so a completed steer replays its receipt, a
+            // failed steer reproduces its typed refusal, and only an open
+            // row reroutes.
+            return self.settle_replayed_steer(request_id, queue, &result).await;
+        }
         let receipt = QueueMessageReceipt {
             request_id: result.receipt.request_id,
             message_id: result.message_id.clone(),
             thread_id: result.thread_id.clone(),
             disposition: result.receipt.disposition,
         };
-        if result.receipt.disposition != artisan_domain::ReceiptDisposition::Accepted {
-            return Ok(outcome(request_id, ResponsePayload::MessageQueued(receipt)));
-        }
         self.deliver_accepted_steer(request_id, queue, &result.message_id, receipt)
             .await
     }
@@ -1721,7 +1726,7 @@ impl RequestHandler {
     /// Delivers a freshly accepted named steer into its owning live run.
     ///
     /// Called only for first-time acceptances carrying a steer target;
-    /// idempotent replays return the stored receipt without re-routing,
+    /// accept-race duplicates settle from durable delivery state instead,
     /// so a retried request can never steer twice. On success the
     /// original receipt stands; on terminal refusal the dispatch row is
     /// failed with the mapped reason and the payload stays preserved
