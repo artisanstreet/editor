@@ -4243,7 +4243,11 @@ async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
         .expect("ack should send");
     let receipt = queued_message_of(second.await.expect("task").expect("retry should route"));
     assert_eq!(receipt.message_id.as_str(), "message-steer-1");
-    assert_eq!(receipt.disposition, ReceiptDisposition::Accepted);
+    assert_eq!(
+        receipt.disposition,
+        ReceiptDisposition::Duplicate,
+        "open-row retry replays the stored duplicate receipt"
+    );
     assert!(
         inbox.try_recv().is_err(),
         "only the two routed envelopes should exist"
@@ -4279,6 +4283,11 @@ async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
     .expect("completed replay should succeed");
     let receipt = queued_message_of(response);
     assert_eq!(receipt.message_id.as_str(), "message-steer-1");
+    assert_eq!(
+        receipt.disposition,
+        ReceiptDisposition::Duplicate,
+        "completed replay answers the stored duplicate receipt"
+    );
     assert!(
         inbox.try_recv().is_err(),
         "completed replay must not write a second time"
