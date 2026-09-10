@@ -9,8 +9,8 @@
 //! highlight runs, and dropless truncated prefixes.
 
 use artisan_ui::markdown::{Block, CodeFence, CodeTokenKind, MarkdownEngine, Span};
-use artisan_ui::markdown_renderer::present_inline;
-use artisan_ui::theme::{ArtisanTheme, ThemeMode};
+use artisan_ui::markdown_renderer::{BlockScope, block_gaps, present_inline};
+use artisan_ui::theme::{ArtisanTheme, ProseTypography, ThemeMode};
 use gpui::{FontStyle, FontWeight};
 
 const CLOSED_RUST_FENCE: &str =
@@ -694,18 +694,29 @@ fn merged_highlights_keep_code_bold_and_link_together() {
     let code = &presentation.highlights[0];
     assert_eq!(&presentation.source[code.0.clone()], "code");
     assert!(
-        code.1.background_color.is_some(),
-        "code keeps its wash, got {code:?}"
+        code.1.background_color.is_none(),
+        "reference inline code carries no wash, got {code:?}"
+    );
+    assert_eq!(
+        code.1.color,
+        Some(theme().colors.muted_foreground.to_paint()),
+        "inline code reads muted, got {code:?}"
+    );
+    assert_eq!(
+        code.1.font_weight,
+        Some(FontWeight::NORMAL),
+        "reference inline code reads 400, got {code:?}"
     );
     let bold = &presentation.highlights[1];
     assert_eq!(&presentation.source[bold.0.clone()], "bold");
-    assert_eq!(bold.1.font_weight, Some(FontWeight::BOLD));
+    assert_eq!(bold.1.font_weight, Some(FontWeight::SEMIBOLD));
     let link = &presentation.highlights[2];
     assert_eq!(&presentation.source[link.0.clone()], "label");
     assert!(
         link.1.underline.is_some(),
         "link keeps its underline, got {link:?}"
     );
+    assert_eq!(link.1.font_weight, Some(FontWeight::MEDIUM));
 
     assert_eq!(presentation.links.len(), 1);
     assert_eq!(
@@ -726,10 +737,14 @@ fn nested_bold_code_merges_into_combined_segments() {
         .iter()
         .find(|(range, _)| &presentation.source[range.clone()] == "code")
         .expect("code segment survives inside bold");
-    assert_eq!(code.1.font_weight, Some(FontWeight::BOLD));
+    assert_eq!(
+        code.1.font_weight,
+        Some(FontWeight::NORMAL),
+        "reference code reads 400 even inside bold, got {code:?}"
+    );
     assert!(
-        code.1.background_color.is_some(),
-        "code wash combines with outer bold, got {code:?}"
+        code.1.background_color.is_none(),
+        "reference code carries no wash even inside bold, got {code:?}"
     );
 
     let bold_only = presentation
@@ -737,7 +752,7 @@ fn nested_bold_code_merges_into_combined_segments() {
         .iter()
         .find(|(range, _)| &presentation.source[range.clone()] == "bold ")
         .expect("outer bold survives around the code");
-    assert_eq!(bold_only.1.font_weight, Some(FontWeight::BOLD));
+    assert_eq!(bold_only.1.font_weight, Some(FontWeight::SEMIBOLD));
     assert!(
         bold_only.1.background_color.is_none(),
         "outer bold carries no code wash, got {bold_only:?}"
@@ -760,7 +775,7 @@ fn nested_bold_link_label_combines_underline_and_weight() {
         .iter()
         .find(|(range, _)| &presentation.source[range.clone()] == "runbook")
         .expect("bold link label survives as one segment");
-    assert_eq!(label.1.font_weight, Some(FontWeight::BOLD));
+    assert_eq!(label.1.font_weight, Some(FontWeight::SEMIBOLD));
     assert!(
         label.1.underline.is_some(),
         "link underline combines with bold, got {label:?}"
@@ -805,6 +820,120 @@ fn relative_and_unsafe_links_expose_no_click_metadata() {
             presentation.highlights
         );
     }
+}
+
+#[test]
+fn two_paragraphs_collapse_to_a_single_gap() {
+    // The mounted gap between two paragraphs is max(20, 20) = 20 — never
+    // the 40 a flex column would stack from both margins.
+    let parsed = engine()
+        .parse_document("alpha\n\nbeta\n")
+        .expect("parse succeeds");
+    assert_eq!(block_gaps(parsed.blocks(), BlockScope::Root), vec![0.0, 20.0]);
+}
+
+#[test]
+fn heading_follower_clears_only_its_own_top_gap() {
+    // `h2 + *` zeroes the follower's top; the heading bottom (24) has no
+    // consumer under top-only rendering, so nothing is dropped and the
+    // pair reads 0. A non-heading follower keeps the full collapse.
+    let parsed = engine()
+        .parse_document("## Head\n\nBody\n")
+        .expect("parse succeeds");
+    assert_eq!(block_gaps(parsed.blocks(), BlockScope::Root), vec![0.0, 0.0]);
+
+    let parsed = engine()
+        .parse_document("# Head\n\nBody\n")
+        .expect("parse succeeds");
+    let gaps = block_gaps(parsed.blocks(), BlockScope::Root);
+    assert_eq!(gaps.len(), 2);
+    assert_eq!(gaps[0], 0.0);
+    assert!(
+        (gaps[1] - 80.0 / 3.0).abs() < 1e-4,
+        "h1 bottom (26.667) collapses against the paragraph top (20), got {}",
+        gaps[1]
+    );
+}
+
+#[test]
+fn item_blocks_collapse_with_item_scope_margins() {
+    // Loose item paragraphs use the 12 px item recipe with zero outer
+    // margins, so two paragraphs inside one item read a single 12 px gap.
+    let parsed = engine()
+        .parse_document("- alpha\n\n  continued\n")
+        .expect("parse succeeds");
+    let found = lists(parsed.blocks());
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        block_gaps(&found[0].2[0].blocks, BlockScope::Item),
+        vec![0.0, 12.0]
+    );
+}
+
+#[test]
+fn prose_helper_freezes_reference_metrics() {
+    assert_eq!(ProseTypography::BODY_SIZE_PX, 16.0);
+    assert_eq!(ProseTypography::BODY_LINE_PX, 28.0);
+    assert_eq!(ProseTypography::BODY_TRACKING_PX, -0.64);
+    for (size, expected) in [(16.0, -0.64), (14.0, -0.56)] {
+        let tracking = ProseTypography::body_tracking_px(size);
+        assert!(
+            (tracking - expected).abs() < 1e-6,
+            "tracking at {size}px resolves −0.04 em, got {tracking}"
+        );
+    }
+    assert_eq!(ProseTypography::PARAGRAPH_MARGIN_PX, 20.0);
+    assert_eq!(ProseTypography::FENCE_MARGIN_PX, 24.0);
+    assert_eq!(ProseTypography::LIST_MARGIN_PX, 20.0);
+    assert_eq!(ProseTypography::LIST_INDENT_PX, 26.0);
+    assert_eq!(ProseTypography::ITEM_GAP_PX, 8.0);
+    assert_eq!(ProseTypography::ITEM_PARAGRAPH_MARGIN_PX, 12.0);
+    assert_eq!(ProseTypography::NESTED_LIST_MARGIN_PX, 12.0);
+    assert_eq!(ProseTypography::CODE_SIZE_PX, 14.0);
+    assert_eq!(ProseTypography::CODE_LINE_PX, 24.0);
+    assert_eq!(ProseTypography::CODE_PAD_PX, 16.0);
+
+    // Per-heading sizes carry the `prose.css` overrides with plugin em
+    // margins resolved at the overridden size.
+    let h1 = ProseTypography::heading(1);
+    assert_eq!(
+        (h1.size_px, h1.line_px, h1.tracking_px),
+        (30.0, 37.5, -1.35)
+    );
+    assert_eq!((h1.margin_top_px, h1.margin_bottom_px), (0.0, 80.0 / 3.0));
+    let h2 = ProseTypography::heading(2);
+    assert_eq!(
+        (h2.size_px, h2.line_px, h2.tracking_px),
+        (24.0, 30.0, -1.08)
+    );
+    assert_eq!((h2.margin_top_px, h2.margin_bottom_px), (48.0, 24.0));
+    let h3 = ProseTypography::heading(3);
+    assert_eq!((h3.size_px, h3.line_px, h3.tracking_px), (20.0, 27.5, -0.9));
+    assert_eq!((h3.margin_top_px, h3.margin_bottom_px), (32.0, 12.0));
+    for level in [4, 5, 6, 9] {
+        let heading = ProseTypography::heading(level);
+        assert_eq!(
+            (
+                heading.size_px,
+                heading.line_px,
+                heading.tracking_px,
+                heading.margin_top_px,
+                heading.margin_bottom_px
+            ),
+            (18.0, 24.75, -0.81, 27.0, 9.0),
+            "level {level} reads as h4–h6"
+        );
+    }
+}
+
+#[test]
+fn prose_reference_weights_request_exact_static_faces() {
+    // 410/630 request the vendored prose statics by OS/2 metadata; strong
+    // and link weights ride established statics.
+    assert_eq!(ProseTypography::BODY_WEIGHT, gpui::FontWeight::from(410.0));
+    assert_eq!(ProseTypography::HEADING_WEIGHT, gpui::FontWeight::from(630.0));
+    assert_eq!(ProseTypography::STRONG_WEIGHT, FontWeight::SEMIBOLD);
+    assert_eq!(ProseTypography::LINK_WEIGHT, FontWeight::MEDIUM);
 }
 
 #[test]

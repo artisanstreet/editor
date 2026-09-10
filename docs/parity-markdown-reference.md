@@ -58,9 +58,10 @@ blocks. The renderer then painted heading + prose + fence with no list.
   parent style combined with the existing `HighlightStyle::highlight`
   helper, leaf text emits only non-default runs, and adjacent equal runs
   coalesce — so formatted-run count never goes quadratic on large replies
-  the renderer re-parses per render: code keeps its wash, strong adds
-  `FontWeight::BOLD`, emphasis adds `FontStyle::Italic`, openable links
-  add accent color + 1px `UnderlineStyle`.
+  the renderer re-parses per render: inline code reads muted with no wash,
+  strong adds `FontWeight::SEMIBOLD` (plugin 600), emphasis adds
+  `FontStyle::Italic`, openable links add accent color, `FontWeight::MEDIUM`
+  (plugin `a` 500), and 1px `UnderlineStyle`.
 - Paragraphs with openable links render as retained `SelectableText`
   whose `.links()` activation opens the clicked destination through
   `cx.open_url` (platform browser); the index is bounds-checked against
@@ -95,6 +96,49 @@ blocks. The renderer then painted heading + prose + fence with no list.
   unchanged by root's internal import/perf fix.
 - `block_needs_plain_fallback` unchanged: open or unhighlighted fences
   still take the plain body path.
+
+## Reference prose typography (frozen shared helper)
+
+- `artisan_ui::theme::ProseTypography` (plus `ProseHeading`) is the frozen
+  recipe for conversation prose AND workspace surfaces. Shell
+  (`thread_screen`, `native_composer`) and renderer (`conversation_surface`,
+  `inline_code_text`) consumers read these instead of re-deriving:
+  - body: `BODY_SIZE_PX` 16, `BODY_LINE_PX` 28, `BODY_WEIGHT`
+    `FontWeight(410)`, `BODY_TRACKING_PX` −0.64; `body_tracking_px(size)`
+    resolves −0.04 em at any size (14 px workspace text takes −0.56);
+  - headings: `HEADING_WEIGHT` `FontWeight(630)`, `heading(level)` returns
+    size/line/tracking/margins — h1 30/37.5/−1.35/0/26.667, h2
+    24/30/−1.08/48/24, h3 20/27.5/−0.9/32/12, h4–h6 18/24.75/−0.81/27/9
+    (plugin em margins at the overridden sizes; `h2/h3/h4 + *` followers
+    and first/last children zero as in CSS);
+  - inline: `STRONG_WEIGHT` SEMIBOLD, `LINK_WEIGHT` MEDIUM,
+    `CODE_SIZE_PX` 14 / `CODE_LINE_PX` 24;
+  - blocks: paragraphs 20, fences 24, lists 20, indent 26, item pitch 8,
+    item paragraphs 12, nested lists 12, fence padding 16;
+  - fence radius has deliberately NO constant: reference `rounded-3xl`
+    resolves through the workspace ramp (base 10 px × 2.2) to 22 px, so
+    renderers use `RadiusTokens::value(RadiusStep::X3l)`;
+  - gaps collapse top-only via `block_gaps(blocks, scope) -> Vec<f32>`
+    (`BlockScope::Root/Item`): each gap renders once as top margin because
+    flex columns never collapse, so two paragraphs read max(20, 20) = 20,
+    never 40; `h2/h3/h4 + *` clears the follower only.
+- Families are unchanged pending the open question: Spline Sans body and
+  headings, Spline Sans Mono code, Artisan Neo wordmark at 600.
+  `editor_text_desktop` is untouched; prose behavior applies at the
+  renderer/helper only.
+- New vendored faces `spline-sans-410.ttf` / `spline-sans-630.ttf`
+  (true `instantiateVariableFont` instances, OS/2 410/630, outlines
+  distinct from 400/600 neighbors) are registered through the existing
+  `static_faces` list; Bazel runfiles entries stay root-owned.
+- Honest gaps, no fakes: inline code keeps body size/face (highlight runs
+  cannot resize/refont, and `SelectableText` has no family-override
+  passthrough); code spans inherit body tracking (reference `code`
+  letter-spacing normal is per-element); blockquote/hr structure has no
+  engine model in this packet (`markdown.rs` frozen) so quotes read as
+  paragraphs and rules are dropped — both reported for a follow-up engine
+  packet; fence copy/filename chrome has no renderer action counterpart;
+  link color stays accent (reference conversation blue has no mapped
+  native token).
 
 ## Streaming / balanced-events contract
 

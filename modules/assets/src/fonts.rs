@@ -4,9 +4,10 @@
 //! Files are embedded at compile time and registered once through
 //! `artisan_ui::fonts::register_bundled_fonts`. Family names and weight ranges
 //! match the source fonts' internal name/fvar tables. Static instances of
-//! weights 300–700 are registered because the WGPU text backend matches faces
-//! by metadata and does not apply variable weight axes. See `fonts/FONTS.md` for
-//! upstream sources, licenses and SHA-256 hashes. TrueType is required by
+//! weights 300–700 plus the conversation-prose weights 410 and 630 are
+//! registered because the WGPU text backend matches faces by metadata and
+//! does not apply variable weight axes. See `fonts/FONTS.md` for upstream
+//! sources, licenses and SHA-256 hashes. TrueType is required by
 //! DirectWrite's in-memory loader; WOFF2 is not supported there.
 
 use core::fmt;
@@ -79,8 +80,10 @@ pub const ALL: &[BundledFont] = &[
         static_faces: &[
             include_bytes!("../fonts/spline-sans-300.ttf"),
             include_bytes!("../fonts/spline-sans-400.ttf"),
+            include_bytes!("../fonts/spline-sans-410.ttf"),
             include_bytes!("../fonts/spline-sans-500.ttf"),
             include_bytes!("../fonts/spline-sans-600.ttf"),
+            include_bytes!("../fonts/spline-sans-630.ttf"),
             include_bytes!("../fonts/spline-sans-700.ttf"),
         ],
     },
@@ -185,11 +188,94 @@ mod tests {
     #[test]
     fn bundled_fonts_shapes_borrowed_slices_for_add_fonts() {
         let shaped = bundled_fonts();
-        assert_eq!(shaped.len(), 12);
+        assert_eq!(shaped.len(), 14);
         let expected = ALL.iter().flat_map(|font| font.static_faces.iter());
         for (shaped, bytes) in shaped.iter().zip(expected) {
             assert_eq!(shaped.as_ref(), *bytes);
         }
+    }
+
+    #[test]
+    fn prose_statics_carry_exact_weight_metadata_and_no_axes() {
+        // The conversation-prose faces (body 410, headings 630) are true
+        // `instantiateVariableFont` instances from `spline-sans-variable.ttf`,
+        // not relabeled 400/600 binaries: outlines differ from their
+        // neighbors, OS/2 `usWeightClass` carries the exact prose weight the
+        // WGPU matcher selects on, and no `fvar` axis remains. Naming mirrors
+        // the neighboring statics (Regular-style linking: nameID 2 stays
+        // `Regular`) so style matching keeps working.
+        let spline = lookup_family("Spline Sans").expect("bundled Spline Sans");
+        assert_eq!(
+            spline.static_faces.len(),
+            7,
+            "300, 400, 410, 500, 600, 630, 700 in ascending order"
+        );
+        let faces: [(&[u8], usize, u16); 2] = [
+            (spline.static_faces[2], 56_792, 410),
+            (spline.static_faces[5], 57_008, 630),
+        ];
+        for (bytes, length, weight) in faces {
+            assert_eq!(
+                &bytes[0..4],
+                b"\x00\x01\x00\x00",
+                "weight {weight}: missing TrueType sfnt magic"
+            );
+            assert_eq!(
+                bytes.len(),
+                length,
+                "weight {weight}: embedded length drift means the binary changed"
+            );
+            assert_eq!(
+                sfnt_weight_class(bytes).expect("OS/2 table with a weight class"),
+                weight,
+                "weight {weight}: OS/2 metadata must carry the exact prose weight"
+            );
+            assert!(
+                !sfnt_has_table(bytes, b"fvar"),
+                "weight {weight}: a remaining fvar axis would defeat static matching"
+            );
+        }
+        // Distinct outlines, not copies: each prose face's `glyf` table
+        // differs from both neighbors it sits between. (Full-binary
+        // inequality would prove nothing about outlines — name and head
+        // metadata alone already differ — so the comparison addresses the
+        // outline table directly.)
+        for (face, left, right) in [
+            (spline.static_faces[2], spline.static_faces[1], spline.static_faces[3]),
+            (spline.static_faces[5], spline.static_faces[4], spline.static_faces[6]),
+        ] {
+            let outline = sfnt_table_bytes(face, b"glyf").expect("glyf table");
+            let left_outline = sfnt_table_bytes(left, b"glyf").expect("left glyf");
+            let right_outline = sfnt_table_bytes(right, b"glyf").expect("right glyf");
+            assert_ne!(outline, left_outline, "outlines must differ from the left neighbor");
+            assert_ne!(outline, right_outline, "outlines must differ from the right neighbor");
+        }
+    }
+
+    /// Reads OS/2 `usWeightClass` (offset 4) without a font parser.
+    fn sfnt_weight_class(bytes: &[u8]) -> Option<u16> {
+        let table = sfnt_table_bytes(bytes, b"OS/2")?;
+        Some(u16::from_be_bytes(table.get(4..6)?.try_into().ok()?))
+    }
+
+    /// Slices one table's bytes from an sfnt directory.
+    fn sfnt_table_bytes<'bytes>(bytes: &'bytes [u8], tag: &[u8; 4]) -> Option<&'bytes [u8]> {
+        let count_bytes = bytes.get(4..6)?;
+        let count_bytes: [u8; 2] = count_bytes.try_into().ok()?;
+        let count = u16::from_be_bytes(count_bytes) as usize;
+        (0..count).find_map(|index| {
+            let record = bytes.get(12 + index * 16..12 + index * 16 + 16)?;
+            if &record[0..4] != tag {
+                return None;
+            }
+            let offset = u32::from_be_bytes(record[8..12].try_into().ok()?) as usize;
+            let length = u32::from_be_bytes(record[12..16].try_into().ok()?) as usize;
+            bytes.get(offset..offset + length)
+        })
+    }
+    /// Reports whether the sfnt directory names `tag`.
+    fn sfnt_has_table(bytes: &[u8], tag: &[u8; 4]) -> bool {
+        sfnt_table_bytes(bytes, tag).is_some()
     }
 
     #[test]

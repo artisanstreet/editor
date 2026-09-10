@@ -15,11 +15,18 @@
 //!
 //! Lists render as native stacked rows with muted markers (`•` or `1.`)
 //! instead of HTML list elements; emphasis and strong survive as inline
-//! structure, and absolute `http(s)`/`mailto:` link labels render underlined
-//! in the accent token and open through the platform browser on click.
+//! structure at reference weights (strong 600, links 500), and absolute
+//! `http(s)`/`mailto:` link labels render underlined in the accent token
+//! and open through the platform browser on click.
 //! Relative and other-scheme destinations keep their plain label: with no
 //! project base the renderer must not open arbitrary local paths, and raw
 //! HTML stays inert text.
+//!
+//! Spacing and type follow [`ProseTypography`](crate::theme::ProseTypography):
+//! 16 px / 28 px body at weight 410, per-heading sizes with collapsing
+//! block margins, and fence chrome from the reference code snippet. Inline
+//! code reads 400 muted with no wash; size, face, and tracking cannot ride
+//! a highlight run (see `inline_code_style`), so those stay reported gaps.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -32,7 +39,7 @@ use gpui::{
 
 use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownEngine, Span};
 use crate::selectable_text::SelectableText;
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens};
 
 /// Synchronous renderer for accepted Markdown message bodies.
 ///
@@ -88,8 +95,13 @@ impl MarkdownRenderer {
         }
 
         let mut root = markdown_root(markdown_selector.clone(), theme);
-        for (index, block) in document.blocks().iter().enumerate() {
-            root = root.child(render_block(index, block, theme, &markdown_selector));
+        let blocks = document.blocks();
+        let gaps = block_gaps(blocks, BlockScope::Root);
+        for (index, block) in blocks.iter().enumerate() {
+            root = root.child(with_block_margins(
+                render_block(index, block, theme, &markdown_selector),
+                gaps[index],
+            ));
         }
         root.into_any_element()
     }
@@ -106,10 +118,9 @@ fn block_needs_plain_fallback(block: &Block) -> bool {
 }
 
 fn markdown_root(selector: String, theme: ArtisanTheme) -> Div {
-    let mut root = body_container(theme)
-        .flex()
-        .flex_col()
-        .gap(theme.spacing.steps(3.0));
+    // No container gap: inter-block spacing lives in per-block margins so
+    // collapsing behavior matches the reference.
+    let mut root = body_container(theme).flex().flex_col();
     root = root.debug_selector(move || selector);
     root
 }
@@ -131,9 +142,97 @@ fn body_container(theme: ArtisanTheme) -> Div {
     div()
         .w_full()
         .min_w_0()
-        .text_size(theme.typography.editor_text_desktop)
-        .line_height(theme.spacing.steps(6.0))
+        .text_size(px(ProseTypography::BODY_SIZE_PX))
+        .line_height(px(ProseTypography::BODY_LINE_PX))
+        .font_weight(ProseTypography::BODY_WEIGHT)
+        .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
         .whitespace_normal()
+}
+
+/// Which margin recipe a block uses: root blocks take plugin margins,
+/// while paragraphs and nested lists inside list items take the
+/// item-scope recipe (`> ul > li p`, `ul ul`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockScope {
+    /// Top-level transcript blocks.
+    Root,
+    /// Blocks inside a list item.
+    Item,
+}
+
+/// Reference top/bottom margins for one block in px.
+fn block_margins(block: &Block, scope: BlockScope) -> (f32, f32) {
+    match block {
+        Block::Heading { level, .. } => {
+            let heading = ProseTypography::heading(*level);
+            (heading.margin_top_px, heading.margin_bottom_px)
+        }
+        Block::Paragraph { .. } => match scope {
+            BlockScope::Root => (
+                ProseTypography::PARAGRAPH_MARGIN_PX,
+                ProseTypography::PARAGRAPH_MARGIN_PX,
+            ),
+            BlockScope::Item => (
+                ProseTypography::ITEM_PARAGRAPH_MARGIN_PX,
+                ProseTypography::ITEM_PARAGRAPH_MARGIN_PX,
+            ),
+        },
+        Block::Code(_) => (
+            ProseTypography::FENCE_MARGIN_PX,
+            ProseTypography::FENCE_MARGIN_PX,
+        ),
+        // Raw HTML arrives as inert text, so it reads as a paragraph.
+        Block::Html { .. } => (
+            ProseTypography::PARAGRAPH_MARGIN_PX,
+            ProseTypography::PARAGRAPH_MARGIN_PX,
+        ),
+        Block::List { .. } => match scope {
+            BlockScope::Root => (
+                ProseTypography::LIST_MARGIN_PX,
+                ProseTypography::LIST_MARGIN_PX,
+            ),
+            BlockScope::Item => (
+                ProseTypography::NESTED_LIST_MARGIN_PX,
+                ProseTypography::NESTED_LIST_MARGIN_PX,
+            ),
+        },
+    }
+}
+
+/// Wraps one rendered block with its collapsed top gap; bottom stays zero
+/// because every gap renders exactly once (see [`block_gaps`]).
+fn with_block_margins(child: AnyElement, top_px: f32) -> AnyElement {
+    div().mt(px(top_px)).child(child).into_any_element()
+}
+
+/// Collapsed top gaps for one block sequence in source order.
+///
+/// CSS margins collapse: the space between two blocks is the larger of the
+/// two facing margins, never their sum — and a flex column does not
+/// collapse at all, so emitting both a bottom margin and a collapsed top
+/// would double every gap (two paragraphs would read 20 + 20 = 40 instead
+/// of 20). Each gap here is therefore rendered exactly once, as top margin
+/// with zero bottom: the first block takes 0, followers of h2–h4 take 0
+/// (`h2/h3/h4 + *` clears the follower only, never the heading's own
+/// bottom, which simply has no consumer under top-only rendering), and
+/// every other gap is the max of the facing margins.
+#[must_use]
+pub fn block_gaps(blocks: &[Block], scope: BlockScope) -> Vec<f32> {
+    let mut gaps = Vec::with_capacity(blocks.len());
+    let mut previous_bottom = 0.0;
+    let mut previous_zeroes_next = false;
+    for (index, block) in blocks.iter().enumerate() {
+        let (margin_top, margin_bottom) = block_margins(block, scope);
+        let gap = if index == 0 || previous_zeroes_next {
+            0.0
+        } else {
+            previous_bottom.max(margin_top)
+        };
+        gaps.push(gap);
+        previous_bottom = margin_bottom;
+        previous_zeroes_next = matches!(block, Block::Heading { level: 2 | 3 | 4, .. });
+    }
+    gaps
 }
 
 fn render_block(
@@ -157,10 +256,13 @@ fn render_block_at_depth(
 
     match block {
         Block::Heading { level, spans, .. } => {
+            let heading = ProseTypography::heading(*level);
             element = element
                 .font_family(theme.typography.heading.family)
-                .font_weight(FontWeight::BOLD)
-                .text_size(heading_size(*level, theme))
+                .font_weight(ProseTypography::HEADING_WEIGHT)
+                .text_size(px(heading.size_px))
+                .line_height(px(heading.line_px))
+                .letter_spacing(px(heading.tracking_px))
                 .child(render_inline(&selector, spans, theme));
         }
         Block::Paragraph { spans, .. } => {
@@ -201,7 +303,10 @@ fn render_block_at_depth(
 }
 
 /// Renders an ordered or unordered list as native rows: one marker plus the
-/// item's own blocks. Nested lists recurse with one indent step per depth.
+/// item's own blocks. Rows keep the `li` 8 px pitch; item content blocks
+/// collapse with the item-scope recipe and zero outer margins, so a tight
+/// single-paragraph item reads exactly its row pitch. Nested lists recurse
+/// with the reference 26 px list indent.
 fn render_list(
     parent_selector: &str,
     ordered: bool,
@@ -215,9 +320,10 @@ fn render_list(
         .min_w_0()
         .flex()
         .flex_col()
-        .gap(theme.spacing.steps(2.0));
+        .gap(px(ProseTypography::ITEM_GAP_PX))
+        .pl(px(ProseTypography::LIST_INDENT_PX));
     if depth > 0 {
-        list = list.pl(theme.spacing.steps(4.0));
+        list = list.pl(px(ProseTypography::LIST_INDENT_PX));
     }
     let base = start.unwrap_or(1);
     for (position, item) in items.iter().enumerate() {
@@ -228,13 +334,17 @@ fn render_list(
             let empty: &[Span] = &[];
             content = content.child(render_inline(&item_selector, empty, theme));
         }
+        let gaps = block_gaps(&item.blocks, BlockScope::Item);
         for (sub_index, block) in item.blocks.iter().enumerate() {
-            content = content.child(render_block_at_depth(
-                sub_index,
-                block,
-                theme,
-                &item_selector,
-                depth.saturating_add(1),
+            content = content.child(with_block_margins(
+                render_block_at_depth(
+                    sub_index,
+                    block,
+                    theme,
+                    &item_selector,
+                    depth.saturating_add(1),
+                ),
+                gaps[sub_index],
             ));
         }
         let mut row = div()
@@ -243,12 +353,15 @@ fn render_list(
             .flex()
             .flex_row()
             .gap(theme.spacing.steps(2.0));
-        row = row.child(
-            div()
-                .flex_shrink_0()
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .child(marker),
-        );
+        // Ordered markers read at 400 (`ol > li::marker`); unordered
+        // markers inherit body weight like the reference.
+        let mut marker_element = div()
+            .flex_shrink_0()
+            .text_color(theme.colors.muted_foreground.to_paint());
+        if ordered {
+            marker_element = marker_element.font_weight(FontWeight::NORMAL);
+        }
+        row = row.child(marker_element.child(marker));
         row = row.child(content);
         let selector = item_selector.clone();
         row = row.debug_selector(move || selector);
@@ -270,16 +383,6 @@ fn item_marker(ordered: bool, base: u64, position: usize, task: Option<bool>) ->
     } else {
         String::from("•")
     }
-}
-
-fn heading_size(level: u8, theme: ArtisanTheme) -> gpui::Pixels {
-    let scale = match level {
-        1 => 1.5,
-        2 => 1.3,
-        3 => 1.15,
-        _ => 1.0,
-    };
-    theme.typography.editor_text_desktop * scale
 }
 
 fn render_inline(selector: &str, spans: &[Span], theme: ArtisanTheme) -> AnyElement {
@@ -324,9 +427,21 @@ fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) ->
         .collect::<Vec<_>>();
     let selector = format!("{parent_selector}-code");
     let id = SharedString::from(format!("{selector}-text"));
+    // Fence chrome follows `docs-code-snippet-body`: 14 px mono at 24 px
+    // leading with 16 px padding and the shared 22 px 3xl radius. Fences
+    // read at 400 with normal tracking (plugin `pre`, `code`
+    // letter-spacing reset), not the body 410/−0.64. The surface gradient
+    // stays a flat muted fill natively; copy and filename chrome have no
+    // renderer action counterpart.
     let mut code = body_container(theme)
         .font_family(theme.typography.mono.family)
+        .text_size(px(ProseTypography::CODE_SIZE_PX))
+        .line_height(px(ProseTypography::CODE_LINE_PX))
+        .font_weight(FontWeight::NORMAL)
+        .letter_spacing(px(0.0))
         .bg(theme.colors.muted.to_paint())
+        .rounded(RadiusTokens::value(RadiusStep::X3l))
+        .p(px(ProseTypography::CODE_PAD_PX))
         .child(SelectableText::retained(id, source, theme, highlights));
     code = code.debug_selector(move || selector);
     code.into_any_element()
@@ -486,16 +601,23 @@ fn is_openable_link_destination(destination: &str) -> bool {
 }
 
 fn inline_code_style(theme: ArtisanTheme) -> HighlightStyle {
+    // Reference inline code reads 400 with no wash: mono at normal weight
+    // in the muted token (`prose.css` inline-code over plugin `code`).
+    // Face, size, and tracking cannot ride a highlight run — `HighlightStyle`
+    // carries color, weight, style, background, underline, strikethrough,
+    // and fade only (`gpui` `style.rs`), and the selection element has no
+    // family-override passthrough — so inline code keeps body face, size,
+    // and tracking. That residual gap is reported, not faked.
     HighlightStyle {
-        color: Some(theme.colors.accent_foreground.to_paint()),
-        background_color: Some(theme.colors.muted.to_paint()),
+        color: Some(theme.colors.muted_foreground.to_paint()),
+        font_weight: Some(FontWeight::NORMAL),
         ..Default::default()
     }
 }
 
 fn strong_style() -> HighlightStyle {
     HighlightStyle {
-        font_weight: Some(FontWeight::BOLD),
+        font_weight: Some(ProseTypography::STRONG_WEIGHT),
         ..Default::default()
     }
 }
@@ -510,6 +632,7 @@ fn emphasis_style() -> HighlightStyle {
 fn link_style(theme: ArtisanTheme) -> HighlightStyle {
     HighlightStyle {
         color: Some(theme.colors.accent_foreground.to_paint()),
+        font_weight: Some(ProseTypography::LINK_WEIGHT),
         underline: Some(UnderlineStyle {
             thickness: px(1.0),
             color: Some(theme.colors.accent_foreground.to_paint()),

@@ -526,6 +526,143 @@ impl TypographyTokens {
     }
 }
 
+/// Reference conversation-prose metrics shared by the Markdown renderer and
+/// the shell/composer surfaces.
+///
+/// Frozen recipe pinned from the web reference: the Tailwind typography
+/// plugin (`@tailwindcss/typography` 0.5.20 DEFAULT theme) for block sizes,
+/// margins, and line heights; `prose.css` headings/links/inline-code
+/// overrides for per-heading sizes; and the workspace type
+/// (`utilities.css` `docs-responsive-surfaces` plus the
+/// `.docs-responsive-surfaces .prose` override) for body weight 410 at
+/// −0.04 em tracking and heading weight 630 at −0.045 em tracking.
+///
+/// Shell (`thread_screen`, `native_composer`) and renderer
+/// (`conversation_surface`, `inline_code_text`) consumers read these
+/// constants instead of re-deriving them so every surface stays on one
+/// recipe. Family choice is deliberately not part of this helper: body and
+/// headings keep Spline Sans and code keeps Spline Sans Mono pending the
+/// open family question, and `editor_text_desktop` is untouched.
+///
+/// Weights are [`FontWeight`] values (request 410/630 exactly) so the
+/// vendored static prose faces match by OS/2 metadata; the WGPU backend
+/// does not instantiate variable axes. Tracking is absolute pixels at the
+/// size it applies to, because GPUI takes absolute tracking: body −0.04 em
+/// at 16 px, headings −0.045 em at each heading size, code keeps normal
+/// tracking (`utilities.css:717–719`).
+pub struct ProseTypography;
+
+/// Per-heading reference metrics: size, line height, tracking, and
+/// block margins for one heading level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProseHeading {
+    /// Reference size in px (`text-3xl/2xl/xl/lg` at the 16 px root).
+    pub size_px: f32,
+    /// Reference line height in px (`leading-tight/snug` factors).
+    pub line_px: f32,
+    /// −0.045 em tracking resolved at `size_px`.
+    pub tracking_px: f32,
+    /// Top margin in px (plugin em margins at the overridden size; first
+    /// children and `h2/h3/h4 + *` followers take 0 instead).
+    pub margin_top_px: f32,
+    /// Bottom margin in px; last children take 0 instead.
+    pub margin_bottom_px: f32,
+}
+
+impl ProseTypography {
+    /// Body text: 16 px / 28 px (plugin `1rem`, 28/16).
+    pub const BODY_SIZE_PX: f32 = 16.0;
+    /// Body line height: 28 px.
+    pub const BODY_LINE_PX: f32 = 28.0;
+    /// Body weight 410: request exactly so the vendored 410 static matches.
+    pub const BODY_WEIGHT: FontWeight = FontWeight(410.0);
+    /// Body tracking: −0.04 em at 16 px.
+    pub const BODY_TRACKING_PX: f32 = -0.64;
+    /// Workspace tracking at any size: −0.04 em resolved at `size_px`, so
+    /// 14 px workspace text takes −0.56 px rather than the fixed body
+    /// value. Shell and composer consumers use this for non-prose sizes.
+    #[must_use]
+    pub const fn body_tracking_px(size_px: f32) -> f32 {
+        size_px * -0.04
+    }
+    /// Heading weight 630: request exactly so the vendored 630 static matches.
+    pub const HEADING_WEIGHT: FontWeight = FontWeight(630.0);
+    /// Strong weight 600 (plugin `strong`), served by the vendored 600 static.
+    pub const STRONG_WEIGHT: FontWeight = FontWeight::SEMIBOLD;
+    /// Link weight 500 (plugin `a`), served by the vendored 500 static.
+    pub const LINK_WEIGHT: FontWeight = FontWeight::MEDIUM;
+    /// Inline code size: 14 px (plugin `code` 0.875 em at 16 px). GPUI
+    /// highlight runs cannot resize runs, so inline code keeps body size;
+    /// only fences render at this size.
+    pub const CODE_SIZE_PX: f32 = 14.0;
+    /// Fence line height: 24 px (plugin `pre` 24/14).
+    pub const CODE_LINE_PX: f32 = 24.0;
+    /// Fence body padding: 16 px (`docs-code-snippet-body` `p-4`).
+    pub const CODE_PAD_PX: f32 = 16.0;
+    /// Fence corner radius: the reference `rounded-3xl`, which resolves
+    /// through the workspace ramp (`theme.css:392–399`: base 10 px × 2.2)
+    /// to 22 px — not the Tailwind default 24 px. Renderers use the shared
+    /// [`RadiusStep::X3l`] token (`RadiusTokens::value`), never a literal.
+    /// (No `CODE_RADIUS_PX` constant exists on purpose.)
+    /// Paragraph margins: 20 px top and bottom (plugin `p`).
+    pub const PARAGRAPH_MARGIN_PX: f32 = 20.0;
+    /// Fence margins: 24 px top and bottom (plugin `pre` at 14 px).
+    pub const FENCE_MARGIN_PX: f32 = 24.0;
+    /// List margins: 20 px top and bottom (plugin `ul`/`ol`).
+    pub const LIST_MARGIN_PX: f32 = 20.0;
+    /// List indent: 26 px (`padding-inline-start` 1.625 em at 16 px).
+    pub const LIST_INDENT_PX: f32 = 26.0;
+    /// Item row pitch: 8 px (`li` top/bottom margins, collapsed).
+    pub const ITEM_GAP_PX: f32 = 8.0;
+    /// Item-scope paragraph margins: 12 px (`> ul > li p`).
+    pub const ITEM_PARAGRAPH_MARGIN_PX: f32 = 12.0;
+    /// Nested list margins: 12 px (`ul ul` and siblings).
+    pub const NESTED_LIST_MARGIN_PX: f32 = 12.0;
+
+    /// Reference metrics for one heading level (1–6; anything else reads
+    /// as 6).
+    ///
+    /// Sizes and line heights come from the `prose.css` overrides
+    /// (`text-3xl/2xl/xl/lg` with `leading-tight/snug`); margins come from
+    /// the plugin em margins resolved at the overridden size — h1 bottom
+    /// is 0.8888889 em at 30 px (26.667 px) and h4–h6 margins are 1.5/0.5
+    /// em at the overridden 18 px (27/9 px) — and tracking is −0.045 em at
+    /// each size.
+    #[must_use]
+    pub const fn heading(level: u8) -> ProseHeading {
+        match level {
+            1 => ProseHeading {
+                size_px: 30.0,
+                line_px: 37.5,
+                tracking_px: -1.35,
+                margin_top_px: 0.0,
+                margin_bottom_px: 80.0 / 3.0,
+            },
+            2 => ProseHeading {
+                size_px: 24.0,
+                line_px: 30.0,
+                tracking_px: -1.08,
+                margin_top_px: 48.0,
+                margin_bottom_px: 24.0,
+            },
+            3 => ProseHeading {
+                size_px: 20.0,
+                line_px: 27.5,
+                tracking_px: -0.9,
+                margin_top_px: 32.0,
+                margin_bottom_px: 12.0,
+            },
+            _ => ProseHeading {
+                size_px: 18.0,
+                line_px: 24.75,
+                tracking_px: -0.81,
+                margin_top_px: 27.0,
+                margin_bottom_px: 9.0,
+            },
+        }
+    }
+}
+
 /// Spacing built on the legacy 4 px base unit (Tailwind's `--spacing`
 /// multiplier: `calc(var(--spacing) * n)`; INVENTORY §2 rows 7/9/12, §5.2;
 /// PLAN "4 px base spacing unit").
