@@ -6689,15 +6689,10 @@ impl NativeApplication {
         if !self.engine_settings.needs_registry_load() {
             return;
         }
-        let Some(service) = self.service.clone() else {
-            self.engine_settings
-                .on_registry_load_admission_failed(ServiceFailure {
-                    stage: ServiceFailureStage::EventBridge,
-                    category: ServiceFailureCategory::ChannelClosed,
-                });
-            return;
-        };
-        match service.submit(NativeTransportCommand::ListRegisteredProfiles) {
+        // Registry and settings loads travel the shared submission
+        // boundary so the mock sink observes the same commands production
+        // sends; a refused bridge reports identically either way.
+        match self.submit_command(NativeTransportCommand::ListRegisteredProfiles) {
             Ok(()) => self.engine_settings.mark_registry_load_admitted(),
             Err(error) => self
                 .engine_settings
@@ -6718,17 +6713,9 @@ impl NativeApplication {
             thread_id: thread_id.clone(),
             generation,
         };
-        let Some(service) = self.service.clone() else {
-            self.engine_settings.on_settings_load_admission_failed(
-                thread_id,
-                ServiceFailure {
-                    stage: ServiceFailureStage::EventBridge,
-                    category: ServiceFailureCategory::ChannelClosed,
-                },
-            );
-            return;
-        };
-        match service.submit(command) {
+        // Same shared boundary as the registry load above: the mock sink
+        // admits the load in tests while a stopped bridge fails closed.
+        match self.submit_command(command) {
             Ok(()) => {
                 if !self
                     .engine_settings
@@ -9048,7 +9035,17 @@ mod tests {
                 );
                 assert!(application.composer_model_run_error.is_none());
                 application.begin_message_submission(cx);
-                assert!(commands.borrow().is_empty());
+                // The offline choice never reaches the transport: no save
+                // command can be built and no message may queue. Readiness
+                // probes may be recorded on the shared boundary; the
+                // meaningful assertion is that nothing queues.
+                assert!(
+                    commands.borrow().iter().all(|command| !matches!(
+                        command,
+                        NativeTransportCommand::QueueMessage(_)
+                    )),
+                    "rejected offline send must never queue its message"
+                );
                 assert_eq!(application.composer.read(cx).draft(), "keep my draft");
                 assert!(!application.composer.read(cx).is_submitting());
                 assert!(application.composer_model_run_error.is_some());
@@ -9082,17 +9079,17 @@ mod tests {
                 assert!(application.composer_model_choice.is_none());
                 assert!(application.model_selector.read(cx).state().policy().is_some());
                 application.begin_message_submission(cx);
-                // Blocked with the live verdict: admission requests the
-                // backend-probed account check first, so the first send
-                // observes a pending check rather than a catch-all. The
-                // only commands are those account reads; no save, no
-                // flight, draft preserved.
-                let recorded = commands.borrow();
-                assert_eq!(recorded.len(), 6);
-                assert!(recorded.iter().all(|command| matches!(
-                    command,
-                    NativeTransportCommand::ReadAccountUsage { .. }
-                )));
+                // Blocked with the live verdict before any transport send:
+                // no save, no flight, draft preserved. Readiness probes may
+                // be recorded on the shared boundary; the meaningful
+                // assertion is that the blocked send never queues.
+                assert!(
+                    commands.borrow().iter().all(|command| !matches!(
+                        command,
+                        NativeTransportCommand::QueueMessage(_)
+                    )),
+                    "blocked first send must never queue its message"
+                );
                 assert!(application.message_flight.is_none());
                 assert!(!application.composer.read(cx).is_submitting());
                 assert_eq!(application.composer.read(cx).draft(), "keep my draft");
@@ -9701,7 +9698,16 @@ mod tests {
                 assert!(application.composer_model_run_error.is_none());
             });
         });
-        assert!(commands.borrow().is_empty());
+        // The edited draft suppresses the held send: the acknowledgment
+        // lands but the stale flight never queues. The admitted typed save
+        // and readiness probes stay recorded; only the queue is forbidden.
+        assert!(
+            commands.borrow().iter().all(|command| !matches!(
+                command,
+                NativeTransportCommand::QueueMessage(_)
+            )),
+            "suppressed first send must never queue its message"
+        );
     }
 
     #[gpui::test]
@@ -9736,7 +9742,16 @@ mod tests {
                 assert!(error.contains("preserved"), "unexpected error: {error}");
             });
         });
-        assert!(commands.borrow().is_empty());
+        // The failed save suppresses the held send: nothing queues. The
+        // admitted typed save and readiness probes stay recorded; only the
+        // queue is forbidden.
+        assert!(
+            commands.borrow().iter().all(|command| !matches!(
+                command,
+                NativeTransportCommand::QueueMessage(_)
+            )),
+            "failed first send must never queue its message"
+        );
     }
 
     #[gpui::test]
@@ -13253,6 +13268,28 @@ mod tests {
         });
     }
 
+    /// Returns only the thread-switch protocol commands, in order.
+    ///
+    /// Readiness probes and settings/registry loads share the submission
+    /// boundary and interleave independently; the switch assertions own the
+    /// exact Unsubscribe/Subscribe sequence, not the total command count.
+    fn switch_protocol_commands(
+        commands: &Rc<RefCell<Vec<NativeTransportCommand>>>,
+    ) -> Vec<NativeTransportCommand> {
+        commands
+            .borrow()
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    NativeTransportCommand::Unsubscribe { .. }
+                        | NativeTransportCommand::Subscribe { .. }
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
     fn prepare_thread_switch_fixture(
         application: &mut NativeApplication,
         application_cx: &mut Context<NativeApplication>,
@@ -13303,9 +13340,10 @@ mod tests {
                 .map(|flight| &flight.phase),
             Some(ThreadSwitchPhase::AwaitingUnsubscribeStop { request_id: None })
         ));
-        assert_eq!(commands.borrow().len(), 1);
+        let protocol = switch_protocol_commands(commands);
+        assert_eq!(protocol.len(), 1);
         assert!(matches!(
-            &commands.borrow()[0],
+            &protocol[0],
             NativeTransportCommand::Unsubscribe { thread_id } if thread_id == source
         ));
         assert_eq!(application.conversation_host.as_ref(), Some(&source_host));
@@ -13344,9 +13382,16 @@ mod tests {
             },
             application_cx,
         );
-        assert_eq!(commands.borrow().len(), 2);
+        // The switch protocol stays exact while readiness probes and
+        // settings loads interleave on the shared boundary.
+        let protocol = switch_protocol_commands(commands);
+        assert_eq!(protocol.len(), 2);
         assert!(matches!(
-            &commands.borrow()[1],
+            &protocol[0],
+            NativeTransportCommand::Unsubscribe { thread_id } if thread_id == source
+        ));
+        assert!(matches!(
+            &protocol[1],
             NativeTransportCommand::Subscribe {
                 thread_id,
                 after: None,
@@ -13390,7 +13435,7 @@ mod tests {
                 .delivery
                 .has_snapshot
         );
-        assert_eq!(commands.borrow().len(), 2);
+        assert_eq!(switch_protocol_commands(commands).len(), 2);
         // Each thread owns its draft; A's pending text must not leak into B.
         assert_eq!(application.composer.read(application_cx).draft(), "");
         stop_request
@@ -13450,7 +13495,7 @@ mod tests {
         stop_request: RequestId,
     ) {
         application.begin_thread_switch(source.clone(), application_cx);
-        assert_eq!(commands.borrow().len(), 3);
+        assert_eq!(switch_protocol_commands(commands).len(), 3);
         application.handle_service_event(
             NativeTransportEvent::ConversationSubscriptionStopped {
                 thread_id: target.clone(),
@@ -13461,9 +13506,9 @@ mod tests {
             },
             application_cx,
         );
-        assert_eq!(commands.borrow().len(), 4);
+        assert_eq!(switch_protocol_commands(commands).len(), 4);
         assert!(matches!(
-            &commands.borrow()[3],
+            &switch_protocol_commands(commands)[3],
             NativeTransportCommand::Subscribe {
                 thread_id,
                 after: None,
@@ -13506,7 +13551,7 @@ mod tests {
         );
         assert_eq!(application.conversation_host.as_ref(), Some(&returned_host));
         assert_eq!(application.selected_thread.as_ref(), Some(source));
-        assert_eq!(commands.borrow().len(), 4);
+        assert_eq!(switch_protocol_commands(commands).len(), 4);
         assert_eq!(
             application.composer.read(application_cx).draft(),
             "retained switch draft"

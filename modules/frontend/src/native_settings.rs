@@ -2707,7 +2707,7 @@ impl SettingsScreen {
             let engine_id = snapshot.engine_id.clone();
             let model_id = model.id.clone();
             let selector = format!("settings-engine-model-{model_id}");
-            row = row
+            row = div().w_full().child(row
                 .id(selector.clone())
                 .debug_selector(move || selector.clone())
                 .on_click(cx.listener(move |_, _, _, cx| {
@@ -2715,7 +2715,7 @@ impl SettingsScreen {
                         engine_id: engine_id.clone(),
                         model_id: model_id.clone(),
                     });
-                }));
+                })));
         }
         row
     }

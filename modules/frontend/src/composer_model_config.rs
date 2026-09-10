@@ -442,13 +442,15 @@ fn policy_for_codex(
                 None => continue,
             },
         };
-        policy.context_window = match window {
-            None => None,
-            Some(wanted) => match window_option(model, wanted) {
+        // A saved base window carries no override, so the projection keeps
+        // the preview default (the canonical `standard` identity) instead
+        // of clearing the axis: both rebuild the same saved configuration.
+        if let Some(wanted) = window {
+            policy.context_window = match window_option(model, wanted) {
                 Some(option) => Some(option),
                 None => continue,
-            },
-        };
+            };
+        }
         if let Ok(verified) = permission_by_rebuild(catalog, "codex", &mut policy, saved) {
             return Ok(verified);
         }
