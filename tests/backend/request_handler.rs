@@ -18,16 +18,21 @@ use artisan_backend::request_handler::{
     ActivatedConversationSubscription, ConversationSubscriptionRegistrar, RequestHandlerReceipt,
 };
 use artisan_backend::run_cancellation::RunCancellationRegistry;
+use artisan_backend::run_interaction::{
+    OwnedInteractionCommand, RunInteractionAck, RunInteractionEnvelope, RunInteractionLease,
+    RunInteractionRegistry,
+};
 use artisan_backend::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, ForgeStorage, RequestHandler,
 };
 use artisan_database::{
     AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
     CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
-    MessageDispatchPayload, ProviderBindingBytes, QueueFirstMessageInput, Repository,
-    RunLaunchCredentials, RunStartKey, SetModelFavoriteInput, SetThreadEngineConfigInput,
-    SqliteConfig,
+    MessageDispatchPayload, ProjectSteeredMessage, ProjectSteeredMessageOutcome,
+    ProviderBindingBytes, QueueFirstMessageInput, Repository, RunLaunchCredentials, RunStartKey,
+    SetModelFavoriteInput, SetThreadEngineConfigInput, SqliteConfig,
 };
+use artisan_database::entities::DispatchState;
 use artisan_domain::{
     ApprovalMode, ByteLimit, CatalogRevision, Command, ConversationCursor, ConversationPatch,
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSubscribe,
@@ -35,17 +40,17 @@ use artisan_domain::{
     EngineConfigRevision, EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy,
     EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, IncrementalText,
-    ItemId, ListAttachedProjects, ListDirectories, ListProjectThreads, MessageBody, MessageId,
-    ModelFavoriteId, NetworkAccess, OpenCode2Selection, PatchBatch, PatchId, PatchSequence,
-    PermissionId, ProjectId, Query, QueryTurnCount, ReadComposerCatalog, ReadModelFavorites,
-    ReceiptDisposition, RequestId, Revision, RootPath, RunId, SetModelFavorite,
-    SetThreadEngineConfig, StopRun, ThreadId, ThreadSummary, ThreadTitle, UnixMillis,
-    WebSearchAccess,
+    ItemId, ImageAttachment, ListAttachedProjects, ListDirectories, ListProjectThreads,
+    MessageBody, MessageId, ModelFavoriteId, NetworkAccess, OpenCode2Selection, PatchBatch,
+    PatchId, PatchSequence, PermissionId, ProjectId, Query, QueryTurnCount, QueueMessage,
+    QueueMessagePayload, ReadComposerCatalog, ReadModelFavorites, ReceiptDisposition, RequestId,
+    Revision, RootPath, RunId, SetModelFavorite, SetThreadEngineConfig, SteerTarget, StopRun,
+    ThreadId, ThreadSummary, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt, FrameId,
-    LifecycleRequest, ProtocolFailure, ProtocolValueError, ProtocolVersion, ResponsePayload,
-    ServerResponse, SetThreadEngineConfigResult, WireEnvelope, WireEnvelopeBody,
+    LifecycleRequest, ProtocolFailure, ProtocolValueError, ProtocolVersion, QueueMessageReceipt,
+    ResponsePayload, ServerResponse, SetThreadEngineConfigResult, WireEnvelope, WireEnvelopeBody,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -3897,12 +3902,14 @@ async fn read_active_run_reports_authoritative_singleton_and_empty_state() {
         .respond(&request("frame-active-one"), &query)
         .await
         .expect("singleton active-run query should succeed");
+    // seed_conversation binds the run at 600, so the durable lifecycle is
+    // Running (launch at 500 leaves Launching only until the bind).
     assert!(matches!(
         active.payload,
         ResponsePayload::ActiveRun(artisan_protocol::ActiveRunResult::Active {
             thread_id: id,
             run_id: active_id,
-            status: artisan_protocol::RunLiveStatus::Queued,
+            status: artisan_protocol::RunLiveStatus::Running,
             engine_id: artisan_domain::EngineId::OpenCode2,
         }) if id == thread_id && active_id == run_id
     ));
@@ -4086,5 +4093,658 @@ async fn persisted_stale_favorite_removal_needs_no_catalog_or_identity() {
         .expect("favorites should remain readable")
         .model_ids()
         .is_empty());
+    storage.close().await.expect("storage should close");
+}
+
+/// Named-steer harness: one live `(thread, run)` inbox behind the handler.
+///
+/// The returned lease must stay alive for the run to keep routing; the
+/// receiver stands in for the owning dispatch loop behind `route_steer`.
+fn live_steer(
+    thread: &str,
+    run: &str,
+) -> (
+    RunInteractionRegistry,
+    RunInteractionLease,
+    tokio::sync::mpsc::Receiver<RunInteractionEnvelope>,
+) {
+    let registry = RunInteractionRegistry::new(8).expect("registry should construct");
+    let (lease, inbox) = registry
+        .register(
+            ThreadId::parse(thread).expect("valid thread id"),
+            RunId::parse(run).expect("valid run id"),
+        )
+        .expect("run should register");
+    (registry, lease, inbox)
+}
+
+/// Builds a text-only named-steer command correlated to `command_id`.
+fn steer_command(command_id: &str, thread: &str, run: &str, body: &str) -> ClientRequest {
+    ClientRequest::Command(Command::QueueMessage(
+        QueueMessage::new(
+            request(command_id),
+            ThreadId::parse(thread).expect("valid thread id"),
+            QueueMessagePayload::text_only(body).expect("valid payload"),
+        )
+        .with_steer_target(SteerTarget::new(RunId::parse(run).expect("valid run id"))),
+    ))
+}
+
+/// Builds an image-only named-steer command correlated to `command_id`.
+fn image_steer_command(command_id: &str, thread: &str, run: &str) -> ClientRequest {
+    let attachment =
+        ImageAttachment::new("image/png", vec![0x89, 0x50, 0x4e, 0x47], "chart.png")
+            .expect("valid image attachment");
+    let payload =
+        QueueMessagePayload::new(None, vec![attachment]).expect("valid image payload");
+    ClientRequest::Command(Command::QueueMessage(
+        QueueMessage::new(
+            request(command_id),
+            ThreadId::parse(thread).expect("valid thread id"),
+            payload,
+        )
+        .with_steer_target(SteerTarget::new(RunId::parse(run).expect("valid run id"))),
+    ))
+}
+
+/// Extracts the queued-message receipt payload from a successful response.
+fn queued_message_of(response: ServerResponse) -> QueueMessageReceipt {
+    let ResponsePayload::MessageQueued(receipt) = response.payload else {
+        panic!("expected a queued-message receipt payload");
+    };
+    receipt
+}
+
+#[tokio::test]
+async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
+    let (_temporary, storage) = opened_storage("steer-identity").await;
+    seed_conversation(storage.repository(), "thread-steer", "steer").await;
+    let (registry, _lease, mut inbox) = live_steer("thread-steer", "run-steer");
+    let origin = ScriptedOriginHandle::deterministic(&["message-steer-1"], 600);
+
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let first = tokio::spawn(async move {
+        handler
+            .respond(
+                &request("request-steer-1"),
+                &steer_command("request-steer-1", "thread-steer", "run-steer", "follow up"),
+            )
+            .await
+    });
+    let envelope = inbox.recv().await.expect("steer envelope should arrive");
+    let OwnedInteractionCommand::Steer {
+        request_id: command_id,
+        message_id,
+        text,
+    } = envelope.command
+    else {
+        panic!("expected a steer envelope");
+    };
+    assert_eq!(command_id, request("request-steer-1"));
+    assert_eq!(message_id.as_str(), "message-steer-1");
+    assert_eq!(text, "follow up");
+    envelope
+        .respond
+        .send(RunInteractionAck::Steered)
+        .expect("ack should send");
+    let response = first.await.expect("task").expect("steer should route");
+    assert_eq!(response.request_id, request("request-steer-1"));
+    let receipt = queued_message_of(response);
+    assert_eq!(receipt.request_id, request("request-steer-1"));
+    assert_eq!(receipt.message_id.as_str(), "message-steer-1");
+    assert_eq!(receipt.disposition, ReceiptDisposition::Accepted);
+
+    // The stub acknowledgement is request-side only: the dispatch row stays
+    // open until the dispatch arm projects it.
+    let (state, _, _) = storage
+        .repository()
+        .read_steered_dispatch_state(
+            &MessageId::parse("message-steer-1").expect("valid message id"),
+        )
+        .await
+        .expect("dispatch state should read");
+    assert!(matches!(state, DispatchState::Queued));
+
+    // A retry of the same command on its correlated frame reroutes the same
+    // original identity instead of minting a second send.
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let second = tokio::spawn(async move {
+        handler
+            .respond(
+                &request("request-steer-1"),
+                &steer_command("request-steer-1", "thread-steer", "run-steer", "follow up"),
+            )
+            .await
+    });
+    let envelope = inbox.recv().await.expect("retry envelope should arrive");
+    let OwnedInteractionCommand::Steer {
+        request_id: command_id,
+        ..
+    } = envelope.command
+    else {
+        panic!("expected a steer envelope");
+    };
+    assert_eq!(
+        command_id,
+        request("request-steer-1"),
+        "retry must keep the original command identity"
+    );
+    envelope
+        .respond
+        .send(RunInteractionAck::Steered)
+        .expect("ack should send");
+    let receipt = queued_message_of(second.await.expect("task").expect("retry should route"));
+    assert_eq!(receipt.message_id.as_str(), "message-steer-1");
+    assert_eq!(receipt.disposition, ReceiptDisposition::Accepted);
+    assert!(
+        inbox.try_recv().is_err(),
+        "only the two routed envelopes should exist"
+    );
+
+    // Once the dispatch arm completes the row, the same command replays its
+    // receipt with no second provider write.
+    let outcome = storage
+        .repository()
+        .project_steered_message(ProjectSteeredMessage {
+            message_id: &MessageId::parse("message-steer-1").expect("valid message id"),
+            thread_id: &ThreadId::parse("thread-steer").expect("valid thread id"),
+            turn_id: &TurnId::parse("turn-steer").expect("valid turn id"),
+            item_id: &ItemId::parse("item-steer-x").expect("valid item id"),
+            patch_id: &PatchId::parse("patch-steer-x").expect("valid patch id"),
+            body: "follow up",
+            operated_at: UnixMillis::from_millis(700),
+        })
+        .await
+        .expect("projection should complete the open row");
+    assert!(matches!(outcome, ProjectSteeredMessageOutcome::Projected(_)));
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handler.respond(
+            &request("request-steer-1"),
+            &steer_command("request-steer-1", "thread-steer", "run-steer", "follow up"),
+        ),
+    )
+    .await
+    .expect("completed replay must answer without routing")
+    .expect("completed replay should succeed");
+    let receipt = queued_message_of(response);
+    assert_eq!(receipt.message_id.as_str(), "message-steer-1");
+    assert!(
+        inbox.try_recv().is_err(),
+        "completed replay must not write a second time"
+    );
+    assert_eq!(origin.identity_calls(), 1);
+    assert_eq!(origin.instant_calls(), 1);
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn steer_failed_replay_reproduces_typed_refusal_without_second_write() {
+    let (_temporary, storage) = opened_storage("steer-failed").await;
+    seed_conversation(storage.repository(), "thread-steer", "steer").await;
+    let (registry, _lease, mut inbox) = live_steer("thread-steer", "run-steer");
+    let origin = ScriptedOriginHandle::scripted(
+        vec![Ok("message-steer-2".to_owned())],
+        vec![
+            Ok(UnixMillis::from_millis(600)),
+            Ok(UnixMillis::from_millis(650)),
+        ],
+    );
+
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let first = tokio::spawn(async move {
+        handler
+            .respond(
+                &request("request-steer-2"),
+                &steer_command("request-steer-2", "thread-steer", "run-steer", "follow up"),
+            )
+            .await
+    });
+    let envelope = inbox.recv().await.expect("steer envelope should arrive");
+    assert!(matches!(envelope.command, OwnedInteractionCommand::Steer { .. }));
+    envelope
+        .respond
+        .send(RunInteractionAck::Refused {
+            reason: "steer write to the provider failed",
+        })
+        .expect("ack should send");
+    let failure = failure_of(first.await.expect("task"));
+    assert_eq!(failure.code, ErrorCode::InvalidInput);
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.detail.as_str(),
+        "steer write to the provider failed"
+    );
+    assert_eq!(failure.request_id, Some(request("request-steer-2")));
+
+    let (state, reason, _) = storage
+        .repository()
+        .read_steered_dispatch_state(
+            &MessageId::parse("message-steer-2").expect("valid message id"),
+        )
+        .await
+        .expect("dispatch state should read");
+    assert!(matches!(state, DispatchState::Failed));
+    assert_eq!(
+        reason.as_deref(),
+        Some("steer write to the provider failed")
+    );
+
+    // The same command replays the stored refusal with no second write.
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let failure = failure_of(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handler.respond(
+                &request("request-steer-2"),
+                &steer_command("request-steer-2", "thread-steer", "run-steer", "follow up"),
+            ),
+        )
+        .await
+        .expect("failed replay must answer without routing"),
+    );
+    assert_eq!(failure.code, ErrorCode::InvalidInput);
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.detail.as_str(),
+        "steer write to the provider failed"
+    );
+    assert!(
+        inbox.try_recv().is_err(),
+        "failed replay must not write a second time"
+    );
+    assert_eq!(origin.identity_calls(), 1);
+    assert_eq!(origin.instant_calls(), 2);
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn steer_images_refused_unsupported_first_and_retry_with_payload_retained() {
+    let (_temporary, storage) = opened_storage("steer-images").await;
+    seed_conversation(storage.repository(), "thread-steer", "steer").await;
+    // The run stays live: the image gate fires before any provider contact.
+    let (registry, _lease, inbox) = live_steer("thread-steer", "run-steer");
+    let origin = ScriptedOriginHandle::scripted(
+        vec![Ok("message-steer-3".to_owned())],
+        vec![
+            Ok(UnixMillis::from_millis(600)),
+            Ok(UnixMillis::from_millis(650)),
+        ],
+    );
+
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("request-steer-3"),
+                &image_steer_command("request-steer-3", "thread-steer", "run-steer"),
+            )
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::UnsupportedFeature);
+    assert!(!failure.retryable);
+    assert!(
+        failure.detail.as_str().contains("image attachments"),
+        "refusal should name the image limitation"
+    );
+    assert!(
+        inbox.try_recv().is_err(),
+        "image refusal must not contact the provider"
+    );
+
+    let message_id = MessageId::parse("message-steer-3").expect("valid message id");
+    let (state, reason, _) = storage
+        .repository()
+        .read_steered_dispatch_state(&message_id)
+        .await
+        .expect("dispatch state should read");
+    assert!(matches!(state, DispatchState::Failed));
+    assert_eq!(
+        reason.as_deref(),
+        Some("steer does not support image attachments")
+    );
+    let retained = storage
+        .repository()
+        .read_queue_message_dispatch_payload(&message_id)
+        .await
+        .expect("dispatch payload should read")
+        .expect("failed steer must keep its payload");
+    assert_eq!(retained.payload.attachments().len(), 1);
+    assert_eq!(
+        retained
+            .steer_target
+            .as_ref()
+            .expect("failed steer must keep its target")
+            .run_id()
+            .as_str(),
+        "run-steer"
+    );
+
+    // The retry reproduces the typed refusal instead of a generic input
+    // error, with the original payload still retained.
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("request-steer-3"),
+                &image_steer_command("request-steer-3", "thread-steer", "run-steer"),
+            )
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::UnsupportedFeature);
+    assert!(!failure.retryable);
+    assert!(
+        failure.detail.as_str().contains("image attachments"),
+        "replayed refusal should keep its typed detail"
+    );
+    assert!(
+        inbox.try_recv().is_err(),
+        "image retry must not contact the provider"
+    );
+    let retained = storage
+        .repository()
+        .read_queue_message_dispatch_payload(&message_id)
+        .await
+        .expect("dispatch payload should read")
+        .expect("failed steer must keep its payload");
+    assert_eq!(retained.payload.attachments().len(), 1);
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn steer_stale_target_fails_typed_with_payload_preserved() {
+    let (_temporary, storage) = opened_storage("steer-stale").await;
+    seed_conversation(storage.repository(), "thread-steer", "steer").await;
+    // No live registration: the named run is gone.
+    let registry = RunInteractionRegistry::new(8).expect("registry should construct");
+    let origin = ScriptedOriginHandle::scripted(
+        vec![Ok("message-steer-4".to_owned())],
+        vec![
+            Ok(UnixMillis::from_millis(600)),
+            Ok(UnixMillis::from_millis(650)),
+        ],
+    );
+
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("request-steer-4"),
+                &steer_command("request-steer-4", "thread-steer", "run-steer", "follow up"),
+            )
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::InvalidInput);
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.detail.as_str(),
+        "steer target run is no longer live"
+    );
+
+    let message_id = MessageId::parse("message-steer-4").expect("valid message id");
+    let (state, reason, _) = storage
+        .repository()
+        .read_steered_dispatch_state(&message_id)
+        .await
+        .expect("dispatch state should read");
+    assert!(matches!(state, DispatchState::Failed));
+    assert_eq!(
+        reason.as_deref(),
+        Some("steer target run is no longer live")
+    );
+    let retained = storage
+        .repository()
+        .read_queue_message_dispatch_payload(&message_id)
+        .await
+        .expect("dispatch payload should read")
+        .expect("stale steer must keep its payload");
+    assert_eq!(
+        retained
+            .payload
+            .text()
+            .expect("stale steer must keep its text")
+            .as_str(),
+        "follow up"
+    );
+
+    // A retry against the still-absent run reproduces the refusal.
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("request-steer-4"),
+                &steer_command("request-steer-4", "thread-steer", "run-steer", "follow up"),
+            )
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        failure.detail.as_str(),
+        "steer target run is no longer live"
+    );
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn steer_second_send_while_first_active_routes_both() {
+    let (_temporary, storage) = opened_storage("steer-second").await;
+    seed_conversation(storage.repository(), "thread-steer", "steer").await;
+    let (registry, _lease, mut inbox) = live_steer("thread-steer", "run-steer");
+    let origin =
+        ScriptedOriginHandle::deterministic(&["message-steer-5a", "message-steer-5b"], 600);
+
+    // The first send stays open: the stub acknowledgement never projects.
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let first = tokio::spawn(async move {
+        handler
+            .respond(
+                &request("request-steer-5a"),
+                &steer_command(
+                    "request-steer-5a",
+                    "thread-steer",
+                    "run-steer",
+                    "first follow up",
+                ),
+            )
+            .await
+    });
+    let envelope = inbox.recv().await.expect("first envelope should arrive");
+    let OwnedInteractionCommand::Steer { text, .. } = envelope.command else {
+        panic!("expected a steer envelope");
+    };
+    assert_eq!(text, "first follow up");
+    envelope
+        .respond
+        .send(RunInteractionAck::Steered)
+        .expect("ack should send");
+    let first_receipt =
+        queued_message_of(first.await.expect("task").expect("first steer should route"));
+    assert_eq!(first_receipt.message_id.as_str(), "message-steer-5a");
+
+    // The second send names the same still-live run while the first row is
+    // open and routes independently.
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let second = tokio::spawn(async move {
+        handler
+            .respond(
+                &request("request-steer-5b"),
+                &steer_command(
+                    "request-steer-5b",
+                    "thread-steer",
+                    "run-steer",
+                    "second follow up",
+                ),
+            )
+            .await
+    });
+    let envelope = inbox.recv().await.expect("second envelope should arrive");
+    let OwnedInteractionCommand::Steer {
+        request_id: command_id,
+        message_id,
+        text,
+    } = envelope.command
+    else {
+        panic!("expected a steer envelope");
+    };
+    assert_eq!(command_id, request("request-steer-5b"));
+    assert_eq!(message_id.as_str(), "message-steer-5b");
+    assert_eq!(text, "second follow up");
+    envelope
+        .respond
+        .send(RunInteractionAck::Steered)
+        .expect("ack should send");
+    let second_receipt =
+        queued_message_of(second.await.expect("task").expect("second steer should route"));
+    assert_eq!(second_receipt.message_id.as_str(), "message-steer-5b");
+    assert_eq!(second_receipt.disposition, ReceiptDisposition::Accepted);
+    assert!(
+        inbox.try_recv().is_err(),
+        "exactly the two routed envelopes should exist"
+    );
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn steer_frame_command_mismatch_rejected_without_admission() {
+    let (_temporary, storage) = opened_storage("steer-mismatch").await;
+    seed_conversation(storage.repository(), "thread-steer", "steer").await;
+    let handler = RequestHandler::new(storage.repository().clone());
+
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("frame-other"),
+                &steer_command("request-steer-x", "thread-steer", "run-steer", "follow up"),
+            )
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::InvalidInput);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("frame-other")));
+
+    // The correlation failure precedes admission: no durable intent exists.
+    let replay = storage
+        .repository()
+        .lookup_queue_message(
+            &request("request-steer-x"),
+            &ThreadId::parse("thread-steer").expect("valid thread id"),
+            &QueueMessagePayload::text_only("follow up").expect("valid payload"),
+            Some(&RunId::parse("run-steer").expect("valid run id")),
+        )
+        .await
+        .expect("replay lookup should work");
+    assert!(replay.is_none(), "mismatched frame must admit nothing");
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn steer_inbox_full_is_transient_and_row_stays_open_for_retry() {
+    let (_temporary, storage) = opened_storage("steer-full").await;
+    seed_conversation(storage.repository(), "thread-steer", "steer").await;
+    let (registry, _lease, mut inbox) = live_steer("thread-steer", "run-steer");
+    let origin = ScriptedOriginHandle::deterministic(&["message-steer-7"], 600);
+
+    // Occupy every inbox slot without draining: the next route reports a
+    // retryable busy inbox instead of recording any outcome.
+    let sender = registry
+        .route(
+            &ThreadId::parse("thread-steer").expect("valid thread id"),
+            &RunId::parse("run-steer").expect("valid run id"),
+        )
+        .expect("route should work")
+        .expect("run should be live");
+    for index in 0..8 {
+        let (ack, _dropped) = tokio::sync::oneshot::channel::<RunInteractionAck>();
+        sender
+            .try_send(RunInteractionEnvelope {
+                thread_id: ThreadId::parse("thread-steer").expect("valid thread id"),
+                run_id: RunId::parse("run-steer").expect("valid run id"),
+                command: OwnedInteractionCommand::Steer {
+                    request_id: request("fill"),
+                    message_id: MessageId::parse(format!("fill-{index}"))
+                        .expect("valid message id"),
+                    text: String::new(),
+                },
+                respond: ack,
+            })
+            .expect("filler envelope should fit");
+    }
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("request-steer-7"),
+                &steer_command("request-steer-7", "thread-steer", "run-steer", "follow up"),
+            )
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::Internal);
+    assert!(failure.retryable);
+    let (state, _, _) = storage
+        .repository()
+        .read_steered_dispatch_state(
+            &MessageId::parse("message-steer-7").expect("valid message id"),
+        )
+        .await
+        .expect("dispatch state should read");
+    assert!(
+        matches!(state, DispatchState::Queued),
+        "busy inbox must leave the row open"
+    );
+
+    // Draining the filler lets the identical retry route.
+    for _ in 0..8 {
+        let envelope = inbox.recv().await.expect("filler should drain");
+        let _ = envelope.respond.send(RunInteractionAck::Unavailable);
+    }
+    let handler = scripted_handler(&storage, &origin)
+        .with_run_interaction_registry(registry.clone());
+    let retry = tokio::spawn(async move {
+        handler
+            .respond(
+                &request("request-steer-7"),
+                &steer_command("request-steer-7", "thread-steer", "run-steer", "follow up"),
+            )
+            .await
+    });
+    let envelope = inbox.recv().await.expect("retry envelope should arrive");
+    let OwnedInteractionCommand::Steer {
+        request_id: command_id,
+        ..
+    } = envelope.command
+    else {
+        panic!("expected a steer envelope");
+    };
+    assert_eq!(command_id, request("request-steer-7"));
+    envelope
+        .respond
+        .send(RunInteractionAck::Steered)
+        .expect("ack should send");
+    let receipt = queued_message_of(retry.await.expect("task").expect("retry should route"));
+    assert_eq!(receipt.message_id.as_str(), "message-steer-7");
+    assert!(
+        inbox.try_recv().is_err(),
+        "no further envelopes should exist"
+    );
+
     storage.close().await.expect("storage should close");
 }

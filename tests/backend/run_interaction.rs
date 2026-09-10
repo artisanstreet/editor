@@ -218,6 +218,12 @@ fn spawn_owner_drainer(
                         Err(_) => RunInteractionAck::Unavailable,
                     }
                 }
+                // Steers never route in these approval/question tests: the
+                // dispatch-side steer arm owns them. Answer transiently
+                // without storing anything, so a stray steer retries
+                // against a live loop instead of recording a false
+                // outcome here.
+                OwnedInteractionCommand::Steer { .. } => RunInteractionAck::Unavailable,
             };
             let _ = envelope.respond.send(ack);
         }
