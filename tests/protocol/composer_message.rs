@@ -54,7 +54,10 @@ fn named_steer_target_roundtrips_with_run_identity() {
     )));
     let bytes = encode_envelope(&value).expect("encode");
     let decoded = decode_envelope(&bytes).expect("decode");
-    assert_eq!(decoded, value, "steer target must survive the wire");
+    assert!(
+        decoded == value,
+        "steer target must survive the wire"
+    );
     let WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueMessage(decoded))) =
         decoded.body
     else {

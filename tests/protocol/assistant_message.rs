@@ -680,7 +680,10 @@ fn active_run_status_and_engine_roundtrip_through_production_codec(
         }),
     );
     let decoded = decode_envelope(&encode_envelope(&value)?)?;
-    assert_eq!(decoded, value, "active run status must survive the wire");
+    assert!(
+        decoded == value,
+        "active run status must survive the wire"
+    );
     let WireEnvelopeBody::Response(decoded_response) = decoded.body else {
         panic!("decoded frame must remain a response");
     };

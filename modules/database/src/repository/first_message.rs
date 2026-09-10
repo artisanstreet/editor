@@ -174,6 +174,7 @@ async fn insert_queued_dispatch(
         lease_owner: Set(None),
         lease_expires_at_ms: Set(None),
         last_error: Set(None),
+        steer_run_id: Set(None),
         updated_at_ms: Set(millis(input.accepted_at)),
     })
     .on_conflict(do_nothing_on_conflict())

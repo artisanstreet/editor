@@ -100,9 +100,6 @@ pub enum RepositoryError {
     #[error("thread `{thread_id}` has no engine configuration; select a model before sending")]
     ThreadEngineNotConfigured { thread_id: ThreadId },
 
-    #[error("thread `{thread_id}` has no engine configuration; select a model before sending")]
-    ThreadEngineNotConfigured { thread_id: ThreadId },
-
     #[error("thread `{thread_id}` engine configuration revision does not match the precondition")]
     EngineConfigRevisionConflict {
         thread_id: ThreadId,
