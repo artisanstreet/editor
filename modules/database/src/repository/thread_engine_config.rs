@@ -439,41 +439,40 @@ pub(super) async fn read_receipt_settings_in(
     let Some(row) = receipt_row_by_id(database, request_id).await? else {
         return Ok(None);
     };
-        let (Some(version), Some(blob)) = (
-            row.engine_run_config_version,
-            row.engine_run_config.as_ref(),
-        ) else {
-            return Ok(None);
-        };
-        if !matches!(version, 1 | 2) {
-            return Err(corrupt_data(
-                "command_receipts",
-                "engine_run_config_version",
-                "stored codec version is not readable",
-            ));
-        }
-        let revision = row
-            .engine_run_config_result_revision
-            .and_then(|value| u64::try_from(value).ok())
-            .and_then(|value| EngineConfigRevision::new(value).ok())
-            .ok_or_else(|| {
-                corrupt_data(
-                    "command_receipts",
-                    "engine_run_config_result_revision",
-                    "stored revision is outside its domain range",
-                )
-            })?;
-        let config = engine_run_config::decode(blob.as_slice())
-            .map_err(|error| corrupt_data("command_receipts", "engine_run_config", &error))?;
-        if i64::from(config.storage_codec_version()) != version {
-            return Err(corrupt_data(
-                "command_receipts",
-                "engine_run_config_version",
-                "stored codec version does not match its column",
-            ));
-        }
-        Ok(Some(ThreadEngineSettings::new(revision, config)))
+    let (Some(version), Some(blob)) = (
+        row.engine_run_config_version,
+        row.engine_run_config.as_ref(),
+    ) else {
+        return Ok(None);
+    };
+    if !matches!(version, 1 | 2) {
+        return Err(corrupt_data(
+            "command_receipts",
+            "engine_run_config_version",
+            "stored codec version is not readable",
+        ));
     }
+    let revision = row
+        .engine_run_config_result_revision
+        .and_then(|value| u64::try_from(value).ok())
+        .and_then(|value| EngineConfigRevision::new(value).ok())
+        .ok_or_else(|| {
+            corrupt_data(
+                "command_receipts",
+                "engine_run_config_result_revision",
+                "stored revision is outside its domain range",
+            )
+        })?;
+    let config = engine_run_config::decode(blob.as_slice())
+        .map_err(|error| corrupt_data("command_receipts", "engine_run_config", &error))?;
+    if i64::from(config.storage_codec_version()) != version {
+        return Err(corrupt_data(
+            "command_receipts",
+            "engine_run_config_version",
+            "stored codec version does not match its column",
+        ));
+    }
+    Ok(Some(ThreadEngineSettings::new(revision, config)))
 }
 
 async fn receipt_row_by_id(
