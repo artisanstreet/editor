@@ -5086,6 +5086,19 @@ mod tests {
         assert!(expected >= 192.0);
         assert!((f64::from(spacer_bounds.size.height) - expected).abs() < 1.0);
         cx.update(|_, app| {
+            // Settling the viewport legitimately emits viewport observations;
+            // drain them and prove nothing else is pending.
+            surface.update(app, |surface, _| {
+                for action in surface.take_actions() {
+                    assert!(
+                        matches!(
+                            action,
+                            ConversationSurfaceAction::ViewportObserved(_)
+                        ),
+                        "only legitimate viewport observations may precede assertions, got {action:?}"
+                    );
+                }
+            });
             assert!(surface.read(app).pending_actions().is_empty());
         });
     }
@@ -5139,6 +5152,17 @@ mod tests {
         assert!(first.origin.y < second.origin.y);
         assert!(first.size.height > px(0.0));
         cx.update(|_, app| {
+            surface.update(app, |surface, _| {
+                for action in surface.take_actions() {
+                    assert!(
+                        matches!(
+                            action,
+                            ConversationSurfaceAction::ViewportObserved(_)
+                        ),
+                        "only legitimate viewport observations may precede assertions, got {action:?}"
+                    );
+                }
+            });
             assert!(surface.read(app).pending_actions().is_empty());
         });
     }
@@ -5189,14 +5213,28 @@ mod tests {
         settle(cx);
         cx.update(|_, app| {
             let actions = surface.read(app).pending_actions().to_vec();
-            assert_eq!(actions.len(), 1);
-            let (id, requested_open) = match &actions[0] {
-                ConversationSurfaceAction::DisclosureToggleRequested {
-                    id,
-                    requested_open,
-                } => (id.clone(), *requested_open),
-                action => panic!("expected a disclosure toggle, got {action:?}"),
-            };
+            for action in &actions {
+                assert!(
+                    matches!(
+                        action,
+                        ConversationSurfaceAction::ViewportObserved(_)
+                            | ConversationSurfaceAction::DisclosureToggleRequested { .. }
+                    ),
+                    "only viewport observations and the toggle may be pending, got {action:?}"
+                );
+            }
+            let toggles: Vec<(_, _)> = actions
+                .iter()
+                .filter_map(|action| match action {
+                    ConversationSurfaceAction::DisclosureToggleRequested {
+                        id,
+                        requested_open,
+                    } => Some((id.clone(), *requested_open)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(toggles.len(), 1, "exactly one toggle, got {actions:?}");
+            let (id, requested_open) = toggles.into_iter().next().expect("one toggle");
             assert_eq!(id.as_str(), "work-a");
             assert!(!requested_open, "an open group toggles closed");
         });
@@ -5205,8 +5243,9 @@ mod tests {
     #[test]
     fn legacy_group_details_render_in_durable_order() {
         // Legacy positional groups (no provenance) keep vec order with
-        // reasoning stripped; this holds under both scene generations
-        // because session mode never carries these inputs.
+        // reasoning stripped but its positional slot retained, so surviving
+        // rows keep their original ordinals; this holds under both scene
+        // generations because session mode never carries these inputs.
         let scene = ConversationScene::build(
             vec![SceneTurn::new(
                 turn_id("turn_a"),
@@ -5259,7 +5298,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, 0);
         assert!(matches!(rows[0].1, DetailRow::Activity { .. }));
-        assert_eq!(rows[1].0, 1);
+        assert_eq!(rows[1].0, 2);
         assert!(matches!(rows[1].1, DetailRow::Activity { .. }));
     }
 
@@ -5512,12 +5551,14 @@ mod tests {
             .debug_bounds("artisan-conversation-surface-turn-turn_a-block-user-user-a-body")
             .expect("user body must paint");
         let left = point(bounds.origin.x + px(1.0), bounds.origin.y + px(10.0));
-        // The head lands past the text end inside the bubble padding, so the
-        // layout clamps it to the exact whole body: an endpoint on the last
-        // glyph resolves to that char start and drops the final character.
+        // The head lands past the text end on the LAST line inside the
+        // bubble padding, so the layout clamps it to the exact whole body:
+        // an endpoint on a last glyph resolves to that char start and drops
+        // the final character, and a single-line head would miss wrapped
+        // lines below it entirely.
         let right = point(
             bounds.origin.x + bounds.size.width + px(8.0),
-            bounds.origin.y + px(10.0),
+            bounds.origin.y + bounds.size.height - px(10.0),
         );
         cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_move(right, gpui::MouseButton::Left, Modifiers::default());
