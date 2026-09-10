@@ -348,7 +348,6 @@ fn strip_one_mark(line: &str) -> Option<&str> {
     {
         return Some(trimmed[1..].trim_start_matches([' ', '\t']));
     }
-    }
     // List markers: 1-2 of '-', '*', '+' plus blank.
     let mut bullets = 0_usize;
     while bullets < bytes.len()
@@ -362,7 +361,6 @@ fn strip_one_mark(line: &str) -> Option<&str> {
         && (bytes[bullets] == b' ' || bytes[bullets] == b'\t')
     {
         return Some(trimmed[bullets..].trim_start_matches([' ', '\t']));
-    }
     }
     // Ordered markers: 1-3 digits plus '.' or ')' plus blank.
     let mut digits = 0_usize;
