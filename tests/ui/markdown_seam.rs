@@ -1,13 +1,17 @@
 //! External coverage for the Markdown engine seam in `artisan_ui`.
 //!
-//! These tests exercise only the public `artisan_ui::markdown` API and pin
-//! the behaviors this lane requires: raw HTML inertness, open-fence
+//! These tests exercise the public `artisan_ui::markdown` API and the pure
+//! `artisan_ui::markdown_renderer::present_inline` presentation helper, and
+//! pin the behaviors this lane requires: raw HTML inertness, open-fence
 //! fallback, closed-fence highlighting over byte ranges, deterministic owned
-//! output, plus list parity (tight, loose, ordered, nested, task), inline
-//! emphasis/strong/link preservation, and dropless malformed/streaming
-//! prefixes.
+//! output, plus list parity (tight, loose, ordered, nested with exact trees,
+//! task), inline emphasis/strong/link preservation, single-call merged
+//! highlight runs, and dropless truncated prefixes.
 
 use artisan_ui::markdown::{Block, CodeFence, CodeTokenKind, MarkdownEngine, Span};
+use artisan_ui::markdown_renderer::present_inline;
+use artisan_ui::theme::{ArtisanTheme, ThemeMode};
+use gpui::{FontStyle, FontWeight};
 
 const CLOSED_RUST_FENCE: &str =
     "// leading\nfn main() {\n    let message = \"artisan\";\n    let count = 42;\n}\n";
@@ -15,6 +19,11 @@ const CLOSED_RUST_FENCE: &str =
 /// Builds a fresh engine; construction is fallible by contract.
 fn engine() -> MarkdownEngine {
     MarkdownEngine::new().expect("markdown engine construction must succeed")
+}
+
+/// Builds the dark theme the presentation helper styles against.
+fn theme() -> ArtisanTheme {
+    ArtisanTheme::for_mode(ThemeMode::Dark)
 }
 
 /// Slices `source` with a stored token range, proving the offsets address the
@@ -450,6 +459,59 @@ fn ordered_loose_nested_and_task_lists_preserve_every_row() {
     assert_eq!(tasks[1].text_content(), "done");
 }
 
+/// Task markers arrive because the engine enables `ENABLE_TASKLISTS`
+/// explicitly: without that option `pulldown-cmark` never emits
+/// `TaskListMarker` and these items would read as plain text.
+#[test]
+fn task_markers_need_no_renderer_to_classify() {
+    let parsed = engine()
+        .parse_document("- [ ] open\n- [x] done\n")
+        .expect("parse succeeds");
+    let found = lists(parsed.blocks());
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].2.len(), 2);
+    assert_eq!(found[0].2[0].task, Some(false));
+    assert_eq!(found[0].2[1].task, Some(true));
+}
+
+#[test]
+fn nested_list_keeps_exact_tree() {
+    let parsed = engine()
+        .parse_document("- outer one\n  - inner one\n  - inner two\n- outer two\n")
+        .expect("parse succeeds");
+    let blocks = parsed.blocks();
+    let found = lists(blocks);
+    assert_eq!(found.len(), 1, "one top-level list, got {blocks:?}");
+    let (ordered, _, outer) = found[0];
+    assert!(!ordered);
+    assert_eq!(outer.len(), 2, "two outer items, got {outer:?}");
+
+    // The first outer item owns exactly its paragraph plus the nested list:
+    // the parent text must not leak into the child list, and the child list
+    // must not strand at the document root.
+    assert_eq!(outer[0].blocks.len(), 2, "outer text + nested list");
+    let first_paragraph = match &outer[0].blocks[0] {
+        Block::Paragraph { spans, .. } => visible(spans),
+        other => panic!("first outer block is its own paragraph, got {other:?}"),
+    };
+    assert_eq!(first_paragraph, "outer one");
+    let nested = match &outer[0].blocks[1] {
+        Block::List { ordered, items, .. } => {
+            assert!(!ordered, "nested list is unordered");
+            items
+        }
+        other => panic!("second outer block is the nested list, got {other:?}"),
+    };
+    assert_eq!(nested.len(), 2, "two inner items, got {nested:?}");
+    assert_eq!(nested[0].text_content(), "inner one");
+    assert_eq!(nested[1].text_content(), "inner two");
+    assert_eq!(nested[0].blocks.len(), 1);
+    assert!(matches!(nested[0].blocks[0], Block::Paragraph { .. }));
+
+    assert_eq!(outer[1].blocks.len(), 1);
+    assert_eq!(outer[1].text_content(), "outer two");
+}
+
 #[test]
 fn emphasis_strong_and_links_survive_with_destinations() {
     let parsed = engine()
@@ -520,8 +582,10 @@ fn unsafe_link_destination_stays_inert_but_keeps_its_label() {
 
 #[test]
 fn truncated_streaming_prefix_drops_no_confirmed_text() {
-    // Tight list cut mid-word, unclosed emphasis, and an unclosed link tail:
-    // every confirmed label must survive exactly once as plain text.
+    // `pulldown-cmark` emits balanced `Start`/`End` pairs even for truncated
+    // input (unclosed fences still close as open, unmatched delimiters stay
+    // literal text), so every confirmed label below arrives through ordinary
+    // events: no end-of-input recovery layer exists to test.
     let input = "Remaining checks:\n\n- narrow viewport keeps the insp\n- **bold tail";
     let parsed = engine().parse_document(input).expect("parse succeeds");
     let joined = parsed
@@ -556,7 +620,8 @@ fn truncated_streaming_prefix_drops_no_confirmed_text() {
         "unclosed link label survives, got {link_joined:?}"
     );
 
-    // An unterminated fence settles open and plain rather than vanishing.
+    // An unterminated fence still closes through the balanced event stream
+    // and settles open and plain rather than vanishing.
     let fence_tail = engine()
         .parse_document("```rust\nlet half = 1;\n")
         .expect("parse succeeds");
@@ -565,4 +630,174 @@ fn truncated_streaming_prefix_drops_no_confirmed_text() {
     assert!(!collected[0].closed);
     assert!(collected[0].tokens.is_none());
     assert!(collected[0].source.contains("let half"));
+}
+
+/// Parses one paragraph and presents its spans through the single merged
+/// highlight path the renderer feeds to `with_highlights`.
+fn presented(source: &str) -> artisan_ui::markdown_renderer::InlinePresentation {
+    let parsed = engine().parse_document(source).expect("parse succeeds");
+    let spans = parsed
+        .blocks()
+        .iter()
+        .find_map(|block| match block {
+            Block::Paragraph { spans, .. } => Some(spans.clone()),
+            _ => None,
+        })
+        .expect("fixture keeps its paragraph");
+    present_inline(&spans, theme())
+}
+
+/// Asserts one merged highlight list: sorted, non-overlapping, in bounds.
+fn assert_merged(presentation: &artisan_ui::markdown_renderer::InlinePresentation) {
+    let highlights = &presentation.highlights;
+    let mut previous_end = 0;
+    for (range, _) in highlights {
+        assert!(
+            range.start >= previous_end,
+            "runs stay ordered and non-overlapping, got {highlights:?}"
+        );
+        assert!(
+            range.end <= presentation.source.len()
+                && presentation.source.is_char_boundary(range.start)
+                && presentation.source.is_char_boundary(range.end),
+            "run {range:?} escapes the flattened source"
+        );
+        previous_end = range.end;
+    }
+}
+
+#[test]
+fn merged_highlights_keep_code_bold_and_link_together() {
+    // One paragraph carrying all three styles: the old three-chained-call
+    // shape would have discarded code and bold, keeping only links.
+    let presentation = presented("Use `code`, **bold**, and [label](https://example.invalid/x).\n");
+    assert_eq!(presentation.source, "Use code, bold, and label.");
+    assert_merged(&presentation);
+    assert_eq!(presentation.highlights.len(), 3, "all three runs survive");
+
+    let code = &presentation.highlights[0];
+    assert_eq!(&presentation.source[code.0.clone()], "code");
+    assert!(
+        code.1.background_color.is_some(),
+        "code keeps its wash, got {code:?}"
+    );
+    let bold = &presentation.highlights[1];
+    assert_eq!(&presentation.source[bold.0.clone()], "bold");
+    assert_eq!(bold.1.font_weight, Some(FontWeight::BOLD));
+    let link = &presentation.highlights[2];
+    assert_eq!(&presentation.source[link.0.clone()], "label");
+    assert!(
+        link.1.underline.is_some(),
+        "link keeps its underline, got {link:?}"
+    );
+
+    assert_eq!(presentation.links.len(), 1);
+    assert_eq!(
+        presentation.links[0].destination,
+        "https://example.invalid/x"
+    );
+    assert_eq!(presentation.links[0].range, link.0);
+}
+
+#[test]
+fn nested_bold_code_merges_into_combined_segments() {
+    let presentation = presented("A **bold `code` word** here.\n");
+    assert_eq!(presentation.source, "A bold code word here.");
+    assert_merged(&presentation);
+
+    let code = presentation
+        .highlights
+        .iter()
+        .find(|(range, _)| &presentation.source[range.clone()] == "code")
+        .expect("code segment survives inside bold");
+    assert_eq!(code.1.font_weight, Some(FontWeight::BOLD));
+    assert!(
+        code.1.background_color.is_some(),
+        "code wash combines with outer bold, got {code:?}"
+    );
+
+    let bold_only = presentation
+        .highlights
+        .iter()
+        .find(|(range, _)| &presentation.source[range.clone()] == "bold ")
+        .expect("outer bold survives around the code");
+    assert_eq!(bold_only.1.font_weight, Some(FontWeight::BOLD));
+    assert!(
+        bold_only.1.background_color.is_none(),
+        "outer bold carries no code wash, got {bold_only:?}"
+    );
+}
+
+#[test]
+fn nested_bold_link_label_combines_underline_and_weight() {
+    let presentation =
+        presented("Open [**runbook**](https://example.invalid/runbook) now.\n");
+    assert_merged(&presentation);
+    assert_eq!(presentation.links.len(), 1);
+    assert_eq!(
+        presentation.links[0].destination,
+        "https://example.invalid/runbook"
+    );
+
+    let label = presentation
+        .highlights
+        .iter()
+        .find(|(range, _)| &presentation.source[range.clone()] == "runbook")
+        .expect("bold link label survives as one segment");
+    assert_eq!(label.1.font_weight, Some(FontWeight::BOLD));
+    assert!(
+        label.1.underline.is_some(),
+        "link underline combines with bold, got {label:?}"
+    );
+    assert_eq!(label.0, presentation.links[0].range);
+}
+
+#[test]
+fn emphasis_presents_as_italic() {
+    let presentation = presented("A *soft* word.\n");
+    assert_merged(&presentation);
+    let soft = presentation
+        .highlights
+        .iter()
+        .find(|(range, _)| &presentation.source[range.clone()] == "soft")
+        .expect("emphasis run survives");
+    assert_eq!(soft.1.font_style, Some(FontStyle::Italic));
+}
+
+#[test]
+fn relative_and_unsafe_links_expose_no_click_metadata() {
+    // Relative destinations need a project base the renderer does not own,
+    // so they keep their plain label with no highlight and no metadata;
+    // unsafe schemes stay inert the same way.
+    for source in [
+        "See [local](/local/path) here.\n",
+        "See [frag](#anchor) here.\n",
+        "See [page](guide/intro) here.\n",
+        "Catch [me](javascript:alert(1)) here.\n",
+        "Take [file](data:text/plain,hi) here.\n",
+    ] {
+        let presentation = presented(source);
+        assert_merged(&presentation);
+        assert!(
+            presentation.links.is_empty(),
+            "no click metadata for {source:?}, got {:?}",
+            presentation.links
+        );
+        assert!(
+            presentation.highlights.is_empty(),
+            "no link affordance for {source:?}, got {:?}",
+            presentation.highlights
+        );
+    }
+}
+
+#[test]
+fn mailto_links_open_like_http() {
+    let presentation = presented("Write [us](mailto:crew@example.invalid) today.\n");
+    assert_merged(&presentation);
+    assert_eq!(presentation.links.len(), 1);
+    assert_eq!(presentation.links[0].destination, "mailto:crew@example.invalid");
+    let label = &presentation.highlights[0];
+    assert_eq!(&presentation.source[label.0.clone()], "us");
+    assert!(label.1.underline.is_some());
 }

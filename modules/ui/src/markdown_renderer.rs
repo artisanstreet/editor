@@ -7,18 +7,20 @@
 //!
 //! Lists render as native stacked rows with muted markers (`•` or `1.`)
 //! instead of HTML list elements; emphasis and strong survive as inline
-//! structure, and link labels render underlined in the accent token only
-//! when the destination matches the Svelte anchor guard (absolute
-//! `http(s)`/`mailto` or scheme-relative/relative paths). Anything else
-//! falls back to its plain label, and raw HTML stays inert text.
+//! structure, and absolute `http(s)`/`mailto:` link labels render underlined
+//! in the accent token and open through the platform browser on click.
+//! Relative and other-scheme destinations keep their plain label: with no
+//! project base the renderer must not open arbitrary local paths, and raw
+//! HTML stays inert text.
 
 #![allow(clippy::module_name_repetitions)]
 
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Div, FontWeight, HighlightStyle, IntoElement, ParentElement, SharedString, Styled,
-    StyledText, UnderlineStyle, div, prelude::InteractiveElement as _, px,
+    AnyElement, Div, FontStyle, FontWeight, HighlightStyle, InteractiveText, IntoElement,
+    ParentElement, SharedString, Styled, StyledText, UnderlineStyle, div,
+    prelude::InteractiveElement as _, px,
 };
 
 use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownEngine, Span};
@@ -144,10 +146,10 @@ fn render_block_at_depth(
                 .font_family(theme.typography.heading.family)
                 .font_weight(FontWeight::BOLD)
                 .text_size(heading_size(*level, theme))
-                .child(render_inline(spans, theme));
+                .child(render_inline(&selector, spans, theme));
         }
         Block::Paragraph { spans, .. } => {
-            element = element.child(render_inline(spans, theme));
+            element = element.child(render_inline(&selector, spans, theme));
         }
         Block::Code(fence) => {
             element = element.child(render_code(&selector, fence, theme));
@@ -201,7 +203,7 @@ fn render_list(
         let mut content = div().flex().flex_1().min_w_0().flex_col();
         if item.blocks.is_empty() {
             let empty: &[Span] = &[];
-            content = content.child(render_inline(empty, theme));
+            content = content.child(render_inline(&item_selector, empty, theme));
         }
         for (sub_index, block) in item.blocks.iter().enumerate() {
             content = content.child(render_block_at_depth(
@@ -257,20 +259,29 @@ fn heading_size(level: u8, theme: ArtisanTheme) -> gpui::Pixels {
     theme.typography.editor_text_desktop * scale
 }
 
-fn render_inline(spans: &[Span], theme: ArtisanTheme) -> StyledText {
-    let InlineText {
-        source,
-        code_ranges,
-        strong_ranges,
-        link_ranges,
-    } = inline_text(spans);
-    let code_style = inline_code_style(theme);
-    let strong_style = strong_style();
-    let link_style = link_style(theme);
-    StyledText::new(source)
-        .with_highlights(code_ranges.into_iter().map(|range| (range, code_style)))
-        .with_highlights(strong_ranges.into_iter().map(|range| (range, strong_style)))
-        .with_highlights(link_ranges.into_iter().map(|range| (range, link_style)))
+fn render_inline(selector: &str, spans: &[Span], theme: ArtisanTheme) -> AnyElement {
+    let presentation = present_inline(spans, theme);
+    let text = StyledText::new(presentation.source).with_highlights(presentation.highlights);
+    if presentation.links.is_empty() {
+        return text.into_any_element();
+    }
+    let ranges = presentation
+        .links
+        .iter()
+        .map(|link| link.range.clone())
+        .collect::<Vec<_>>();
+    let destinations = presentation
+        .links
+        .into_iter()
+        .map(|link| link.destination)
+        .collect::<Vec<_>>();
+    InteractiveText::new(SharedString::from(selector.to_owned()), text)
+        .on_click(ranges, move |index, _window, cx| {
+            if let Some(destination) = destinations.get(index) {
+                cx.open_url(destination);
+            }
+        })
+        .into_any_element()
 }
 
 fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) -> AnyElement {
@@ -302,78 +313,184 @@ fn valid_code_range(token: &CodeToken, source: &str) -> Option<(Range<usize>, Co
     .then_some((range, token.kind))
 }
 
-struct InlineText {
+/// One openable link run: its byte range in the flattened source plus the
+/// verbatim absolute destination it opens. Carried separately from the
+/// highlight runs so click handling and the future selection consumer share
+/// one metadata source.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct InlineLink {
+    /// Byte range of the visible label in the flattened source.
+    pub range: Range<usize>,
+    /// Verbatim absolute destination (`http(s)`/`mailto:` only).
+    pub destination: String,
+}
+
+/// Owned inline presentation for one span slice: flattened text, one
+/// ordered non-overlapping highlight list, and openable-link metadata.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InlinePresentation {
+    /// Flattened visible text.
+    pub source: String,
+    /// Highlight runs in source order, non-overlapping, on character
+    /// boundaries: exactly what one `with_highlights` call consumes.
+    pub highlights: Vec<(Range<usize>, HighlightStyle)>,
+    /// Openable links in source order.
+    pub links: Vec<InlineLink>,
+}
+
+/// Flattens spans into presentation data with a single merged highlight
+/// list.
+///
+/// `StyledText::with_highlights` replaces its stored highlights on every
+/// call, so code, strong, emphasis, and link ranges must merge into one
+/// iterator here. Nested combinations (bold code, bold link labels) sweep
+/// into atomic segments whose styles combine through the existing
+/// [`HighlightStyle::highlight`] helper in source order, then adjacent
+/// equal-styled segments coalesce.
+///
+/// # Must use
+///
+/// The return value owns the flattened text the ranges address; dropping it
+/// silently loses the presentation.
+#[must_use]
+pub fn present_inline(spans: &[Span], theme: ArtisanTheme) -> InlinePresentation {
+    let mut accumulator = InlineAccumulator::default();
+    flatten_spans(spans, &mut accumulator);
+    InlinePresentation {
+        source: accumulator.source,
+        highlights: merge_tagged_ranges(&accumulator.tags, theme),
+        links: accumulator.links,
+    }
+}
+
+/// Inline style tag at a flattened byte range; ranges may overlap and nest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InlineTag {
+    Emphasis,
+    Strong,
+    Link,
+    Code,
+}
+
+#[derive(Default)]
+struct InlineAccumulator {
     source: String,
-    code_ranges: Vec<Range<usize>>,
-    strong_ranges: Vec<Range<usize>>,
-    link_ranges: Vec<Range<usize>>,
+    tags: Vec<(Range<usize>, InlineTag)>,
+    links: Vec<InlineLink>,
 }
 
-fn inline_text(spans: &[Span]) -> InlineText {
-    let mut text = InlineText {
-        source: String::new(),
-        code_ranges: Vec::new(),
-        strong_ranges: Vec::new(),
-        link_ranges: Vec::new(),
-    };
-    flatten_spans(spans, &mut text);
-    text
-}
-
-fn flatten_spans(spans: &[Span], text: &mut InlineText) {
+fn flatten_spans(spans: &[Span], accumulator: &mut InlineAccumulator) {
     for span in spans {
         match span {
-            Span::Text(inline) | Span::Html(inline) => text.source.push_str(inline),
+            Span::Text(inline) | Span::Html(inline) => accumulator.source.push_str(inline),
             Span::Code(code) => {
-                let start = text.source.len();
-                text.source.push_str(code);
-                if start < text.source.len() {
-                    text.code_ranges.push(start..text.source.len());
-                }
+                push_tagged(accumulator, InlineTag::Code, code);
             }
             Span::Emphasis(inner) => {
-                // No native italic highlight in the pinned GPUI build; the
-                // structure survives in the model and the label paints plain.
-                flatten_spans(inner, text);
+                push_wrapped(accumulator, InlineTag::Emphasis, inner);
             }
             Span::Strong(inner) => {
-                let start = text.source.len();
-                flatten_spans(inner, text);
-                if start < text.source.len() {
-                    text.strong_ranges.push(start..text.source.len());
-                }
+                push_wrapped(accumulator, InlineTag::Strong, inner);
             }
             Span::Link { label, destination } => {
-                let start = text.source.len();
-                flatten_spans(label, text);
-                if start < text.source.len() && is_safe_link_destination(destination) {
-                    text.link_ranges.push(start..text.source.len());
+                let start = accumulator.source.len();
+                flatten_spans(label, accumulator);
+                let end = accumulator.source.len();
+                if start < end && is_openable_link_destination(destination) {
+                    let range = start..end;
+                    accumulator.tags.push((range.clone(), InlineTag::Link));
+                    accumulator.links.push(InlineLink {
+                        range,
+                        destination: destination.clone(),
+                    });
                 }
             }
         }
     }
 }
 
-/// Mirrors the Svelte anchor guard (`anchor.svelte`): absolute `http(s)`
-/// and `mailto` destinations are live; scheme-relative and relative paths
-/// stay live; any other scheme (including `javascript:` and `data:`) falls
-/// back to its plain label. The engine keeps every destination verbatim.
-fn is_safe_link_destination(destination: &str) -> bool {
+/// Appends leaf text and tags its full extent when non-empty.
+fn push_tagged(accumulator: &mut InlineAccumulator, tag: InlineTag, text: &str) {
+    let start = accumulator.source.len();
+    accumulator.source.push_str(text);
+    if start < accumulator.source.len() {
+        accumulator.tags.push((start..accumulator.source.len(), tag));
+    }
+}
+
+/// Flattens nested runs, then tags their combined extent when non-empty.
+fn push_wrapped(accumulator: &mut InlineAccumulator, tag: InlineTag, inner: &[Span]) {
+    let start = accumulator.source.len();
+    flatten_spans(inner, accumulator);
+    if start < accumulator.source.len() {
+        accumulator.tags.push((start..accumulator.source.len(), tag));
+    }
+}
+
+/// Merges possibly overlapping tag ranges into ordered, non-overlapping
+/// highlight runs. Each atomic segment combines its active tags through
+/// [`HighlightStyle::highlight`] in tag order (inner tags were pushed
+/// first, so outer tags blend over them deterministically), then adjacent
+/// segments with equal styles coalesce.
+fn merge_tagged_ranges(
+    tags: &[(Range<usize>, InlineTag)],
+    theme: ArtisanTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut bounds = Vec::with_capacity(tags.len().saturating_mul(2));
+    for (range, _) in tags {
+        bounds.push(range.start);
+        bounds.push(range.end);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let mut merged: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    for pair in bounds.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        if start >= end {
+            continue;
+        }
+        let mut style = HighlightStyle::default();
+        for (range, tag) in tags {
+            if range.start <= start && end <= range.end {
+                style = style.highlight(tag_style(*tag, theme));
+            }
+        }
+        if style == HighlightStyle::default() {
+            continue;
+        }
+        if let Some((last_range, last_style)) = merged.last_mut() {
+            if *last_style == style && last_range.end == start {
+                last_range.end = end;
+                continue;
+            }
+        }
+        merged.push((start..end, style));
+    }
+    merged
+}
+
+fn tag_style(tag: InlineTag, theme: ArtisanTheme) -> HighlightStyle {
+    match tag {
+        InlineTag::Emphasis => emphasis_style(),
+        InlineTag::Strong => strong_style(),
+        InlineTag::Link => link_style(theme),
+        InlineTag::Code => inline_code_style(theme),
+    }
+}
+
+/// Only absolute `http(s)` and `mailto` destinations open through the
+/// platform browser. Relative paths need a project base the renderer does
+/// not own, so they keep their plain label instead of opening an arbitrary
+/// local path; any other scheme stays inert. The engine still preserves
+/// every destination verbatim in the model.
+fn is_openable_link_destination(destination: &str) -> bool {
     let trimmed = destination.trim();
     if trimmed.is_empty() {
         return false;
     }
     let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
-    {
-        return true;
-    }
-    // Relative destinations carry no scheme before the first path, query,
-    // or fragment delimiter; anything with a scheme colon is unsafe here.
-    let scheme_end = trimmed
-        .find(|character| matches!(character, '/' | '?' | '#'))
-        .unwrap_or(trimmed.len());
-    !trimmed[..scheme_end].contains(':')
+    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
 }
 
 fn inline_code_style(theme: ArtisanTheme) -> HighlightStyle {
@@ -391,12 +508,19 @@ fn strong_style() -> HighlightStyle {
     }
 }
 
+fn emphasis_style() -> HighlightStyle {
+    HighlightStyle {
+        font_style: Some(FontStyle::Italic),
+        ..Default::default()
+    }
+}
+
 fn link_style(theme: ArtisanTheme) -> HighlightStyle {
     HighlightStyle {
         color: Some(theme.colors.accent_foreground.to_paint()),
         underline: Some(UnderlineStyle {
             thickness: px(1.0),
-            color: Some(theme.colors.accent_foreground),
+            color: Some(theme.colors.accent_foreground.to_paint()),
             wavy: false,
         }),
         ..Default::default()

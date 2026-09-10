@@ -11,9 +11,12 @@
 //!
 //! - Raw HTML is recognized only so it can be carried as inert source text.
 //!   It is never interpreted, rewritten, sanitized into markup, or rendered.
-//! - Only `CommonMark` core constructs are modeled. GFM extensions such as
-//!   tables and strikethrough remain disabled until the renderer phase
-//!   selects them deliberately.
+//! - Only `CommonMark` core constructs are modeled, plus task-list markers:
+//!   GFM extensions such as tables and strikethrough remain disabled until
+//!   the renderer phase selects them deliberately. Task markers need
+//!   [`Options::ENABLE_TASKLISTS`], which only affects list-item marker
+//!   scanning, because `pulldown-cmark` never emits `TaskListMarker`
+//!   otherwise.
 //! - Ordered, unordered, nested, tight, loose, and task lists are preserved
 //!   through the shared `pulldown-cmark` event stream; no parallel parser is
 //!   introduced. Tight item text becomes paragraph blocks so loose and tight
@@ -573,6 +576,10 @@ fn fence_is_closed(region: &str) -> bool {
 /// nested lists, and fences inside items keep source order with no dropped
 /// or duplicated text. Inline emphasis, strong, and links nest through a
 /// small format stack over the same single `pulldown-cmark` event stream.
+///
+/// `pulldown-cmark` always emits balanced `Start`/`End` pairs, including at
+/// end of truncated input, so no end-of-input recovery layer exists: every
+/// stack is empty when the event loop ends (asserted in debug builds).
 #[derive(Default)]
 struct DocumentBuilder {
     blocks: Vec<Block>,
@@ -619,6 +626,10 @@ struct ActiveItem {
     heading_depth: Option<u8>,
     paragraph_open: bool,
     task: Option<bool>,
+    /// Value of `lists.len()` when this item opened: the item belongs to
+    /// the list at that depth, so a closing list only settles items it
+    /// directly owns instead of stealing a parent item.
+    list_depth: usize,
 }
 
 enum FormatFrame {
@@ -644,22 +655,17 @@ impl FormatFrame {
             Self::ImageAlt(spans) => Span::Text(spans_text(&spans)),
         }
     }
-
-    /// Unwinds an unclosed frame at end of input without dropping its label.
-    /// Links keep their label as plain text; the destination was never
-    /// confirmed by a closing tag, so it stays out of the visible copy.
-    fn into_recovery_spans(self) -> Vec<Span> {
-        match self {
-            Self::Emphasis(spans) | Self::Strong(spans) => spans,
-            Self::Link { label, .. } | Self::ImageAlt(label) => label,
-        }
-    }
 }
+
+/// Parser options for the shared engine: `CommonMark` core plus task-list
+/// markers (`- [ ]` / `- [x]`), which `pulldown-cmark` only scans when
+/// [`Options::ENABLE_TASKLISTS`] is set. No other GFM extension is enabled.
+const PARSE_OPTIONS: Options = Options::ENABLE_TASKLISTS;
 
 impl DocumentBuilder {
     /// Walks every offset-tagged event of `source` into blocks.
     fn build(mut self, source: &str) -> MarkdownDocument {
-        for (event, range) in Parser::new_ext(source, Options::empty()).into_offset_iter() {
+        for (event, range) in Parser::new_ext(source, PARSE_OPTIONS).into_offset_iter() {
             match event {
                 Event::Start(tag) => self.start_tag(tag, range.start),
                 Event::End(tag_end) => self.end_tag(tag_end, range, source),
@@ -704,10 +710,31 @@ impl DocumentBuilder {
                 | Event::FootnoteReference(_) => {}
             }
         }
-        self.finish(source);
+        self.finish_invariant();
         MarkdownDocument {
             blocks: std::mem::take(&mut self.blocks),
         }
+    }
+
+    /// Documents the parser's balanced-events contract: every opened
+    /// paragraph, heading, fence, list, item, and inline frame is closed by
+    /// its own `End` event, including at end of truncated input, so all
+    /// builder stacks are empty here.
+    fn finish_invariant(&self) {
+        debug_assert!(
+            self.items.is_empty(),
+            "balanced item events leave no open item"
+        );
+        debug_assert!(
+            self.lists.is_empty(),
+            "balanced list events leave no open list"
+        );
+        debug_assert!(
+            self.formats.is_empty(),
+            "balanced inline events leave no open frame"
+        );
+        debug_assert!(self.code.is_none(), "balanced fence events settle every fence");
+        debug_assert!(self.html.is_none(), "balanced HTML events settle every block");
     }
 
     fn start_tag(&mut self, tag: Tag<'_>, start: usize) {
@@ -753,6 +780,7 @@ impl DocumentBuilder {
                     heading_depth: None,
                     paragraph_open: false,
                     task: None,
+                    list_depth: self.lists.len(),
                 });
             }
             Tag::Emphasis => self.formats.push(FormatFrame::Emphasis(Vec::new())),
@@ -823,8 +851,20 @@ impl DocumentBuilder {
                     });
                 }
             }
-            TagEnd::List => {
-                self.close_open_item(range.end);
+            TagEnd::List(_) => {
+                // `TagEnd::Item` already settled every item this list owns,
+                // so a closing list must never pop again unconditionally:
+                // that stole the still-open parent item into the inner list
+                // and stranded the nested list at the wrong container. Only
+                // an item opened at this list's own depth may settle here,
+                // which balanced input never leaves behind.
+                if self
+                    .items
+                    .last()
+                    .is_some_and(|item| item.list_depth == self.lists.len())
+                {
+                    self.close_open_item(range.end);
+                }
                 if let Some(list) = self.lists.pop() {
                     self.push_block(Block::List {
                         ordered: list.ordered,
@@ -844,90 +884,6 @@ impl DocumentBuilder {
                 }
             }
             _ => {}
-        }
-    }
-
-    /// Flushes truncated input without dropping confirmed text: unclosed
-    /// inline frames recover their labels, tight item text becomes
-    /// paragraphs, open items join their lists, and open lists close at
-    /// end of input. An open fence or HTML block settles as open/inert.
-    fn finish(&mut self, source: &str) {
-        while let Some(frame) = self.formats.pop() {
-            for span in frame.into_recovery_spans() {
-                self.push_inline(span);
-            }
-        }
-        // A fence whose closing tag never arrived stays explicitly open so
-        // streaming consumers keep the plain fallback instead of losing the
-        // tail.
-        self.finish_open_fence(source);
-        if let Some(source_text) = self.html.take() {
-            self.push_block(Block::Html {
-                source: source_text,
-            });
-        }
-        // An unclosed paragraph or heading at EOF still owns its text.
-        let pending_heading = self.take_heading_depth();
-        let paragraph_was_open = self.take_paragraph_flag();
-        let pending_spans = self.take_inline();
-        if !pending_spans.is_empty() || paragraph_was_open || pending_heading.is_some() {
-            let start = self.take_inline_start(source.len());
-            if let Some(level) = pending_heading {
-                self.push_block(Block::Heading {
-                    level,
-                    spans: pending_spans,
-                    range: start..source.len(),
-                });
-            } else {
-                self.push_block(Block::Paragraph {
-                    spans: pending_spans,
-                    range: start..source.len(),
-                });
-            }
-        }
-        // Drain items inside out; each tight remainder becomes a paragraph
-        // so streaming prefixes never lose their tail.
-        while !self.items.is_empty() {
-            self.close_open_item(source.len());
-        }
-        while let Some(list) = self.lists.pop() {
-            let block = Block::List {
-                ordered: list.ordered,
-                start: list.start,
-                items: list.items,
-                range: list.range_start..source.len(),
-            };
-            // A list left open while its parent item is still on the stack
-            // (deeply truncated nesting) belongs to that item.
-            if let Some(item) = self.items.last_mut() {
-                item.blocks.push(block);
-            } else {
-                self.blocks.push(block);
-            }
-        }
-    }
-
-    fn finish_open_fence(&mut self, source: &str) {
-        // Recovery for a fence whose closing tag never arrived in the event
-        // stream. `build` keeps accumulating its body in `self.code`; settle
-        // it here as explicitly open so streaming consumers keep the plain
-        // fallback instead of losing the tail.
-        if self.code.is_none() {
-            return;
-        }
-        if let Some(fence) = self.code.take() {
-            // Only settle when something was actually captured; an empty
-            // opener with no body still deserves its open block so the
-            // source prefix round-trips instead of vanishing.
-            let closed = source
-                .get(fence.start..source.len())
-                .is_some_and(fence_is_closed);
-            self.push_block(Block::Code(CodeFence {
-                language: fence.language,
-                closed,
-                source: fence.source,
-                tokens: None,
-            }));
         }
     }
 
@@ -1047,14 +1003,6 @@ impl DocumentBuilder {
             item.paragraph_open = open;
         } else {
             self.paragraph_open = open;
-        }
-    }
-
-    fn take_paragraph_flag(&mut self) -> bool {
-        if let Some(item) = self.items.last_mut() {
-            std::mem::take(&mut item.paragraph_open)
-        } else {
-            std::mem::take(&mut self.paragraph_open)
         }
     }
 
