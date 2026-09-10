@@ -15,7 +15,7 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
 | assistant branch: chromeless markdown at `max-w-(--prose-body-width)`, `MarkdownContent` | `render_assistant_message`: shared `MarkdownRenderer::render_source`, `max_w(672)`, body verbatim — never joins token chunks; `naturally.I’m` joins originate in backend `OrderedAssistantText` concatenation (projection packet `e6020f4` separates distinct parts; same-part deltas stay byte-exact) |
 | `reasoning_summary`: `ShimmerText active` muted base | work items keep controlled `Collapsible`; reasoning/activity bodies verbatim |
 | `conversation-activity.svelte`: `flex items-baseline gap-3 text-sm`, label + truncated detail | activity rows render the single scene body at text-sm foreground with no kind heading and no content truncation (the scene carries no label/detail split; split is a future scene extension, not invented here) |
-| `conversation-work-session.svelte`: plain `section.t-acc` (no card), header with elapsed label + disclosure chevron, details panel, single status line at flow end | work groups render as plain sections with no card chrome and no generic `Work` title: header is only the terminal duration label; live groups show items with the turn status row below carrying the elapsed line. Reasoning bodies go through shared markdown; session titles render muted base. Controlled disclosure (open/closed/static) and scroll anchors are preserved exactly; a labelless group renders mounted without a collapsible (no reference header exists to hang the control on) |
+| `conversation-work-session.svelte`: plain `section.t-acc` (no card), header with elapsed label + disclosure chevron, details panel, single status line at flow end | work groups render as plain sections with no card chrome and no generic `Work` title: header is the terminal duration label when attached, otherwise the latest group headers the turn's live Thinking/Working line once from the same accepted narration and clock (earlier groups and the separate status row stand down). Controlled open/closed/static disclosure, collapsed defaults, scroll anchors, keyboard/focus, and the disclosure action are preserved in every case; a headerless controlled group uses a chevron-only affordance with an honest accessible name, never invented content |
 | user prompt with markdown source (`#`, `-`, backticks, fences, links) | confirmed intentional: the reference renders `{item.text}` plain with no `MarkdownContent` for user messages, so raw source in the bubble matches. No change. |
 | `conversation-work-session.svelte`: header counts from durable `started_at` on a 1s scoped tick while unsettled; settled `Thought/Worked/Stopped/Failed after X`; single status line at flow end with shimmer (`delay 1.5 dur 3` verb, `delay 0 dur 2` summary) | live `Thinking`/`Working` + `active_started_at_ms` (authoritative controller `started_at`, never frontend clock) + mirrored `frame_now` → `Thinking for Xs` / `Working for Xs` via `live_status_copy` (whole-second floor, `FormatElapsed` parity); terminal `WorkedFor`/`ThoughtFor` attach to the work-group header; status row suppresses the duplicate when the group carries it (`status_row_visible`); shimmer via existing `artisan_ui::shimmer_text` under `MotionPolicy::Reduced` (static, reduced-motion-safe; animates if policy flips to Full) |
 | idle quiet: no visible row | `TurnNarration::Quiet` → `turn_status_copy` returns `None`; no row, no gap slot |
@@ -91,10 +91,11 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
   show the honest waiting/elapsed status rather than the reference's detailed
   activity chain. That data path stays upstream work.
 - Work-group correction (capture-verified fault): no card chrome, no generic
-  `Work`/`Activity`/`Reasoning` headings; live labelless groups render mounted
-  without a collapsible (documented edge: a closed labelless group has no
-  reference header for the control). Intra-turn block gap stays 16px against
-  reference `1lh`; capture judges next.
+  `Work`/`Activity`/`Reasoning` headings; the latest group owns the live
+  Thinking/Working header once while `Closed` is honored in every case through
+  the existing disclosure action (headerless controlled groups use a
+  chevron-only affordance). Intra-turn block gap stays 16px against reference
+  `1lh`; capture judges next.
 - Delegated adjustment included: `attribution: None` on the surface test
   `EngineObservationEvent` constructor for the integrated domain row; that
   field does not exist in this tree's domain yet and resolves at integration.

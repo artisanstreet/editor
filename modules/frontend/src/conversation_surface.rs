@@ -23,6 +23,7 @@ use artisan_protocol::{
     ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt, RespondQuestionReceipt,
 };
 use artisan_ui::alert::{Alert, AlertVariant};
+use artisan_ui::asset_seam::asset_glyph;
 use artisan_ui::badge::{BadgeStyle, outline_badge};
 use artisan_ui::gradient::vertical_gradient;
 use artisan_ui::button::{
@@ -495,21 +496,52 @@ pub const fn effective_status_motion(
 /// group: the scene attaches the same duration as the latest group header and
 /// the reference settles to the header alone, so painting both would double
 /// the duration line.
-/// Returns whether a status row paints for one narration in a turn that may
-/// already carry the terminal duration as its work-group header.
+/// Returns the live Thinking/Working header owned by at most one work group.
 ///
-/// Terminal `WorkedFor`/`ThoughtFor` paint only when the turn has no work
-/// group: the scene attaches the same duration as the latest group header and
-/// the reference settles to the header alone, so painting both would double
-/// the duration line.
+/// Terminal labels always win through [`work_group_header_copy`]; this covers
+/// the live line only. Any other narration yields no group header, so the
+/// turn status row below remains its single owner.
+#[must_use]
+pub fn live_group_header_copy(
+    narration: TurnNarration,
+    active_started_at_ms: Option<i64>,
+    frame_now_ms: Option<i64>,
+) -> Option<String> {
+    match narration {
+        TurnNarration::Thinking | TurnNarration::Working => {
+            live_status_copy(narration, active_started_at_ms, frame_now_ms)
+        }
+        _ => None,
+    }
+}
+
+/// Returns the index of the work group that owns the live header, if any.
+///
+/// Exactly one group owns it: the latest group, nearest the status row it
+/// replaces. Earlier groups render items only, so the live line paints once
+/// per turn.
+#[must_use]
+pub fn owning_group_index(turn: &TurnScene) -> Option<usize> {
+    turn.blocks()
+        .iter()
+        .rposition(|block| matches!(block, TurnBlock::WorkGroup(_)))
+}
+
+/// Returns whether a status row paints for one narration in a turn that may
+/// already carry its line in a work-group header.
+///
+/// Terminal durations prefer the group header, and the live Thinking/Working
+/// line is owned by the latest group header (see [`owning_group_index`]), so
+/// the separate status row stands down whenever the turn carries a group.
 #[must_use]
 pub fn status_row_visible(turn_has_work_group: bool, narration: TurnNarration) -> bool {
     match turn_status_copy(narration) {
         None => false,
         Some(_) => match narration {
-            TurnNarration::WorkedFor { .. } | TurnNarration::ThoughtFor { .. } => {
-                !turn_has_work_group
-            }
+            TurnNarration::WorkedFor { .. }
+            | TurnNarration::ThoughtFor { .. }
+            | TurnNarration::Thinking
+            | TurnNarration::Working => !turn_has_work_group,
             _ => true,
         },
     }
@@ -1812,6 +1844,27 @@ impl ConversationSurface {
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(4.0));
+        // At most one group owns the live Thinking/Working line: the latest
+        // group headers it once from the same accepted narration and clock,
+        // and the separate status row below stands down. Terminal labels
+        // always win over the live line inside the group.
+        let live_header: Option<String> = turn
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::TurnStatus(status) => {
+                    Some((status.narration, status.active_started_at_ms))
+                }
+                _ => None,
+            })
+            .and_then(|(narration, basis)| {
+                live_group_header_copy(narration, basis, self.active_now_ms)
+            });
+        let live_owner = if live_header.is_some() {
+            owning_group_index(turn)
+        } else {
+            None
+        };
         // Identities mirror the children pushed below in block order. A
         // suppressed status row and an unsettled footer paint no child, so
         // neither contributes a slot.
@@ -1854,7 +1907,7 @@ impl ConversationSurface {
         );
         let mut turn_element = turn_element.debug_selector(move || selector.clone());
 
-        for block in turn.blocks() {
+        for (block_index, block) in turn.blocks().iter().enumerate() {
             if let Some(element) = self.render_block(
                 &turn.turn_id,
                 block,
@@ -1863,6 +1916,9 @@ impl ConversationSurface {
                 anchors,
                 &mut *window,
                 status_motion,
+                block_index,
+                &live_header,
+                live_owner,
                 cx,
             ) {
                 turn_element = turn_element.child(element);
@@ -1881,6 +1937,9 @@ impl ConversationSurface {
         anchors: &mut ScrollAnchorRegistry<'_>,
         window: &mut Window,
         status_motion: MotionPolicy,
+        block_index: usize,
+        turn_live_header: &Option<String>,
+        live_owner_index: Option<usize>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let selector = block_selector(turn_id, block);
@@ -1892,7 +1951,16 @@ impl ConversationSurface {
                 Some(self.render_assistant_message(block, selector, entity, theme, anchors))
             }
             TurnBlock::WorkGroup(block) => {
-                Some(self.render_work_group(turn_id, block, selector, entity, theme, anchors))
+                // Only the owning (latest) group headers the live line, so
+                // it paints exactly once per turn.
+                let owned = if live_owner_index == Some(block_index) {
+                    turn_live_header.clone()
+                } else {
+                    None
+                };
+                Some(self.render_work_group(
+                    turn_id, block, selector, entity, theme, anchors, owned,
+                ))
             }
             TurnBlock::Compaction(block) => {
                 Some(self.render_compaction(block, selector, entity, theme, anchors))
@@ -2045,21 +2113,21 @@ impl ConversationSurface {
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
+        live_header: Option<String>,
     ) -> AnyElement {
         let group_id = work_group_anchor_id(turn_id, block);
-        // The header is the terminal duration label when the scene attached
-        // one. Live groups carry no generic title: the reference shows its
-        // elapsed header, whose words the turn status row already provides
-        // from scene data, so a second title here would double the line.
-        let header = work_group_header_copy(block.label);
+        // Terminal duration wins; otherwise the owning group headers the
+        // turn's live Thinking/Working line once (see render_turn). Earlier
+        // groups and the separate status row stand down, so the line paints
+        // exactly once per turn.
+        let header = work_group_header_copy(block.label).or(live_header);
 
-        // A labelless group renders mounted without a collapsible: there is
-        // no reference header to hang a disclosure control on, and live work
-        // is transient pre-settlement state. Labeled groups keep the exact
-        // controlled mapping, so settled collapsed history and the disclosure
-        // action are preserved.
-        let controlled =
-            group_id.is_some() && header.is_some() && block.disclosure.is_some();
+        // Controlled state is never overridden: Closed hides through the
+        // collapsible in every case, and the toggle always flows through the
+        // existing disclosure action. A headerless controlled group uses a
+        // chevron-only affordance with an honest accessible name — disclosure
+        // chrome, never invented content.
+        let controlled = group_id.is_some() && block.disclosure.is_some();
         let items_mounted =
             !controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed));
 
@@ -2100,38 +2168,72 @@ impl ConversationSurface {
             let selector = selector.clone();
             move || selector.clone()
         });
-        let (Some(group_id), Some(header_text)) = (group_id, header) else {
-            return section.child(items).into_any_element();
-        };
-        if !controlled {
-            return section
-                .child(work_group_header(header_text, theme))
-                .child(items)
-                .into_any_element();
-        }
-        let disclosure_selector = format!("{selector}-disclosure");
-        let open = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
-        let mut collapsible = Collapsible::new(
-            SharedString::from(disclosure_selector.clone()),
-            self.disclosure_focus.clone(),
-            open,
-            work_group_header(header_text, theme),
-            items,
-        )
-        .debug_selector(disclosure_selector);
-        let surface = entity.downgrade();
-        collapsible = collapsible.on_change(move |requested_open, _, _, app| {
-            let action = ConversationSurfaceAction::DisclosureToggleRequested {
-                id: group_id.clone(),
-                requested_open,
-            };
-            let _ = surface.update(app, |surface, cx| {
-                if surface.enqueue_action(action) {
-                    cx.notify();
+        match (group_id, header, block.disclosure) {
+            (Some(group_id), Some(header_text), Some(_)) => {
+                let disclosure_selector = format!("{selector}-disclosure");
+                let open = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
+                let mut collapsible = Collapsible::new(
+                    SharedString::from(disclosure_selector.clone()),
+                    self.disclosure_focus.clone(),
+                    open,
+                    work_group_header(header_text, theme),
+                    items,
+                )
+                .debug_selector(disclosure_selector);
+                let surface = entity.downgrade();
+                collapsible = collapsible.on_change(move |requested_open, _, _, app| {
+                    let action = ConversationSurfaceAction::DisclosureToggleRequested {
+                        id: group_id.clone(),
+                        requested_open,
+                    };
+                    let _ = surface.update(app, |surface, cx| {
+                        if surface.enqueue_action(action) {
+                            cx.notify();
+                        }
+                    });
+                });
+                section.child(collapsible).into_any_element()
+            }
+            (Some(group_id), None, Some(_)) => {
+                let disclosure_selector = format!("{selector}-disclosure");
+                let open = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
+                let mut collapsible = Collapsible::new(
+                    SharedString::from(disclosure_selector.clone()),
+                    self.disclosure_focus.clone(),
+                    open,
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .text_color(theme.colors.muted_foreground.to_paint())
+                        .aria_label("Toggle work details")
+                        .child(asset_glyph(AssetId::TABLER_CHEVRON_DOWN).size(px(14.0))),
+                    items,
+                )
+                .debug_selector(disclosure_selector);
+                let surface = entity.downgrade();
+                collapsible = collapsible.on_change(move |requested_open, _, _, app| {
+                    let action = ConversationSurfaceAction::DisclosureToggleRequested {
+                        id: group_id.clone(),
+                        requested_open,
+                    };
+                    let _ = surface.update(app, |surface, cx| {
+                        if surface.enqueue_action(action) {
+                            cx.notify();
+                        }
+                    });
+                });
+                section.child(collapsible).into_any_element()
+            }
+            (_, header, _) => {
+                let mut static_section = section;
+                if let Some(header_text) = header {
+                    static_section =
+                        static_section.child(work_group_header(header_text, theme));
                 }
-            });
-        });
-        section.child(collapsible).into_any_element()
+                static_section.child(items).into_any_element()
+            }
+        }
     }
 
     fn render_work_item(
@@ -4136,7 +4238,94 @@ mod tests {
         assert!(status_row_visible(false, worked));
         assert!(status_row_visible(false, thought));
         assert!(status_row_visible(true, TurnNarration::Failed));
-        assert!(status_row_visible(true, TurnNarration::Thinking));
+        assert!(status_row_visible(true, TurnNarration::ProviderWait));
+    }
+
+    #[test]
+    fn live_line_is_owned_by_the_latest_group_once() {
+        assert_eq!(
+            live_group_header_copy(TurnNarration::Working, Some(0), Some(65_000)),
+            Some("Working for 1m 5s".to_owned())
+        );
+        assert_eq!(
+            live_group_header_copy(TurnNarration::Thinking, None, None),
+            Some("Thinking".to_owned())
+        );
+        assert_eq!(
+            live_group_header_copy(TurnNarration::ProviderWait, Some(0), Some(5_000)),
+            None
+        );
+        assert_eq!(
+            live_group_header_copy(TurnNarration::Failed, None, None),
+            None
+        );
+        assert!(!status_row_visible(true, TurnNarration::Thinking));
+        assert!(!status_row_visible(true, TurnNarration::Working));
+        assert!(status_row_visible(false, TurnNarration::Thinking));
+        assert!(status_row_visible(false, TurnNarration::Working));
+    }
+
+    #[test]
+    fn owning_group_index_selects_the_latest_group() {
+        let scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            vec![
+                item(
+                    "user-a",
+                    1,
+                    SceneItemKind::UserMessage {
+                        body: "hi".to_owned(),
+                    },
+                    None,
+                ),
+                item(
+                    "work-a",
+                    2,
+                    SceneItemKind::Activity {
+                        body: "a".to_owned(),
+                    },
+                    None,
+                ),
+                item(
+                    "assistant-a",
+                    3,
+                    SceneItemKind::AssistantMessage {
+                        body: "hello".to_owned(),
+                        phase: AssistantPhase::Final,
+                    },
+                    None,
+                ),
+                item(
+                    "work-b",
+                    4,
+                    SceneItemKind::Activity {
+                        body: "b".to_owned(),
+                    },
+                    None,
+                ),
+            ],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Working,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid");
+        let turn = scene.turn_scene(&turn_id("turn_a")).expect("turn present");
+        assert_eq!(owning_group_index(turn), Some(3));
+        assert_eq!(
+            ordered_block_kinds(&scene)[3],
+            RenderedBlockKind::WorkGroup
+        );
+        let empty = scene(Vec::new());
+        let empty_turn = empty
+            .turn_scene(&turn_id("turn_a"))
+            .expect("turn present");
+        assert_eq!(owning_group_index(empty_turn), None);
     }
 
     #[test]
