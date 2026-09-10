@@ -146,9 +146,10 @@ fn composer_hides_the_placeholder_once_drafted(cx: &mut TestAppContext) {
 
 /// Reference (`thread-composer.svelte:571-587`): the editor is uncapped with
 /// no internal scroll — long drafts grow the overlay card instead. A 12-line
-/// draft paints 12 × 24px = 288px of editor, so the card settles at
-/// 8 + 288 + 32 + 8 = 336px. Tail clearance below the grown card is the
-/// transcript end space (surface lane), never a reinstated cap.
+/// draft paints 12 × 24px = 288px of text plus the editor's own py-8 padding
+/// (16px) for 304px of editor, so the card settles at 8 + 304 + 32 + 8 =
+/// 352px. Tail clearance below the grown card is the transcript end space
+/// (surface lane), never a reinstated cap.
 #[gpui::test]
 fn composer_grows_uncapped_with_long_drafts(cx: &mut TestAppContext) {
     let (view, cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
@@ -168,13 +169,13 @@ fn composer_grows_uncapped_with_long_drafts(cx: &mut TestAppContext) {
     let editor = cx.debug_bounds(NATIVE_COMPOSER_EDITOR_SELECTOR).unwrap();
     assert_eq!(
         editor.size.height,
-        px(288.0),
+        px(304.0),
         "long drafts grow the editor past the old cap, got {editor:?}"
     );
     assert_eq!(
         card.size.height,
-        px(336.0),
-        "uncapped card must reach 336px, got {card:?}"
+        px(352.0),
+        "uncapped card must reach 352px, got {card:?}"
     );
 }
 
