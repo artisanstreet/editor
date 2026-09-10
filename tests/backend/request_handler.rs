@@ -4172,7 +4172,10 @@ async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
             )
             .await
     });
-    let envelope = inbox.recv().await.expect("steer envelope should arrive");
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+        .await
+        .expect("steer envelope should arrive promptly")
+        .expect("steer envelope should arrive");
     let OwnedInteractionCommand::Steer {
         request_id: command_id,
         message_id,
@@ -4218,7 +4221,10 @@ async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
             )
             .await
     });
-    let envelope = inbox.recv().await.expect("retry envelope should arrive");
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+        .await
+        .expect("retry envelope should arrive promptly")
+        .expect("retry envelope should arrive");
     let OwnedInteractionCommand::Steer {
         request_id: command_id,
         ..
@@ -4306,7 +4312,10 @@ async fn steer_failed_replay_reproduces_typed_refusal_without_second_write() {
             )
             .await
     });
-    let envelope = inbox.recv().await.expect("steer envelope should arrive");
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+        .await
+        .expect("steer envelope should arrive promptly")
+        .expect("steer envelope should arrive");
     assert!(matches!(envelope.command, OwnedInteractionCommand::Steer { .. }));
     envelope
         .respond
@@ -4563,7 +4572,10 @@ async fn steer_second_send_while_first_active_routes_both() {
             )
             .await
     });
-    let envelope = inbox.recv().await.expect("first envelope should arrive");
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+        .await
+        .expect("first envelope should arrive promptly")
+        .expect("first envelope should arrive");
     let OwnedInteractionCommand::Steer { text, .. } = envelope.command else {
         panic!("expected a steer envelope");
     };
@@ -4593,7 +4605,10 @@ async fn steer_second_send_while_first_active_routes_both() {
             )
             .await
     });
-    let envelope = inbox.recv().await.expect("second envelope should arrive");
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+        .await
+        .expect("second envelope should arrive promptly")
+        .expect("second envelope should arrive");
     let OwnedInteractionCommand::Steer {
         request_id: command_id,
         message_id,
@@ -4713,7 +4728,10 @@ async fn steer_inbox_full_is_transient_and_row_stays_open_for_retry() {
 
     // Draining the filler lets the identical retry route.
     for _ in 0..8 {
-        let envelope = inbox.recv().await.expect("filler should drain");
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+            .await
+            .expect("filler should drain promptly")
+            .expect("filler should drain");
         let _ = envelope.respond.send(RunInteractionAck::Unavailable);
     }
     let handler = scripted_handler(&storage, &origin)
@@ -4726,7 +4744,10 @@ async fn steer_inbox_full_is_transient_and_row_stays_open_for_retry() {
             )
             .await
     });
-    let envelope = inbox.recv().await.expect("retry envelope should arrive");
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+        .await
+        .expect("retry envelope should arrive promptly")
+        .expect("retry envelope should arrive");
     let OwnedInteractionCommand::Steer {
         request_id: command_id,
         ..
