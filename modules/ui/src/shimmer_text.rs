@@ -16,10 +16,11 @@ use std::{convert::TryFrom, ops::Range, time::Duration};
 
 use gpui::{
     Animation, AnimationExt, AnyElement, Div, HighlightStyle, Hsla, IntoElement, ParentElement,
-    SharedString, Styled, StyledText, div,
+    SharedString, Styled, StyledText, combine_highlights, div,
 };
 
 use crate::motion::MotionPolicy;
+use crate::selectable_text::{SelectableText, TextRunOverride};
 use crate::theme::ArtisanTheme;
 
 /// The named color treatments reached by the legacy `ShimmerText` wrapper.
@@ -483,6 +484,12 @@ pub struct ShimmerText {
     active: bool,
     motion: MotionPolicy,
     semantic_label: SharedString,
+    /// Stable retained id for the styled-runs path, if any.
+    run_id: Option<SharedString>,
+    /// Caller highlight runs painted under the travelling band.
+    run_highlights: Vec<(Range<usize>, HighlightStyle)>,
+    /// Frozen family/spacing overrides compiled with the highlights.
+    run_overrides: Vec<TextRunOverride>,
 }
 
 impl ShimmerText {
@@ -505,6 +512,9 @@ impl ShimmerText {
             timing: ShimmerTiming::default(),
             active: true,
             motion,
+            run_id: None,
+            run_highlights: Vec::new(),
+            run_overrides: Vec::new(),
         }
     }
 
@@ -676,6 +686,37 @@ impl ShimmerText {
     pub fn status_label(self, label: impl Into<SharedString>) -> Self {
         self.semantic_label(label)
     }
+
+    /// Supplies styled text runs painted under the travelling band.
+    ///
+    /// The band recolors glyphs without restyling them: each base range
+    /// keeps its weight, style, and decorations, gaining the band color
+    /// exactly where the sweep covers it, while family and zero-tracking
+    /// overrides compile at layout through the shared text-runs contract.
+    /// Selection is retained per stable id across frames. Callers without
+    /// runs keep the plain styled-text path byte-identical.
+    #[must_use]
+    pub fn text_runs(
+        mut self,
+        id: impl Into<SharedString>,
+        highlights: Vec<(Range<usize>, HighlightStyle)>,
+        overrides: Vec<TextRunOverride>,
+    ) -> Self {
+        self.run_id = Some(id.into());
+        self.run_highlights = highlights;
+        self.run_overrides = overrides;
+        self
+    }
+
+    /// Returns the styled-runs inputs, if a caller supplied them.
+    #[must_use]
+    pub fn text_runs_value(
+        &self,
+    ) -> Option<(&SharedString, &[(Range<usize>, HighlightStyle)], &[TextRunOverride])> {
+        self.run_id
+            .as_ref()
+            .map(|id| (id, self.run_highlights.as_slice(), self.run_overrides.as_slice()))
+    }
 }
 
 impl Styled for ShimmerText {
@@ -696,14 +737,24 @@ impl IntoElement for ShimmerText {
             timing,
             active,
             motion,
+            run_id,
+            run_highlights,
+            run_overrides,
             ..
         } = self;
         let palette = variant.resolve(theme);
         let plan = ShimmerMotionPlan::for_active_policy(motion, timing, active);
 
-        let text = match plan {
-            ShimmerMotionPlan::Immediate => StyledText::new(content).into_any_element(),
-            ShimmerMotionPlan::Animate(animation) => {
+        let text = match (plan, run_id) {
+            (ShimmerMotionPlan::Immediate, None) => {
+                StyledText::new(content).into_any_element()
+            }
+            (ShimmerMotionPlan::Immediate, Some(id)) => {
+                SelectableText::retained(id, content, theme, run_highlights)
+                    .with_text_run_overrides(run_overrides)
+                    .into_any_element()
+            }
+            (ShimmerMotionPlan::Animate(animation), None) => {
                 let initial = styled_text_for_phase(
                     content.clone(),
                     palette,
@@ -725,6 +776,36 @@ impl IntoElement for ShimmerText {
                     )
                     .into_any_element()
             }
+            (ShimmerMotionPlan::Animate(animation), Some(id)) => {
+                let initial = styled_runs_for_phase(
+                    id.clone(),
+                    content.clone(),
+                    theme,
+                    palette.highlight,
+                    animation.phase_for_progress(0.0),
+                    timing.spread(),
+                    &run_highlights,
+                    &run_overrides,
+                );
+                initial
+                    .with_animation(
+                        SHIMMER_ANIMATION_ID,
+                        animation.gpui_animation(),
+                        move |_, progress| {
+                            styled_runs_for_phase(
+                                id.clone(),
+                                content.clone(),
+                                theme,
+                                palette.highlight,
+                                animation.phase_for_progress(progress),
+                                timing.spread(),
+                                &run_highlights,
+                                &run_overrides,
+                            )
+                        },
+                    )
+                    .into_any_element()
+            }
         };
 
         element.child(text).into_any_element()
@@ -741,6 +822,32 @@ pub fn shimmer_text(
     ShimmerText::new(content, theme, motion)
 }
 
+/// Merges caller base faces under the travelling-band color wash.
+///
+/// Each base range keeps its weight, style, and decorations, gaining the
+/// band color exactly where the sweep covers it. Edges union both inputs;
+/// all edges are caller-supplied character boundaries (or sweep segments,
+/// which the segmenter builds per scalar value), and empty spans never
+/// emit. With no base ranges the output is the sweep wash alone, so callers
+/// without fragments render exactly as before.
+#[must_use]
+pub fn merge_sweep_highlights(
+    base: &[(Range<usize>, HighlightStyle)],
+    sweep: &[Range<usize>],
+    sweep_color: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let sweep = sweep.iter().cloned().map(|range| {
+        (
+            range,
+            HighlightStyle {
+                color: Some(sweep_color),
+                ..HighlightStyle::default()
+            },
+        )
+    });
+    combine_highlights(base.iter().cloned(), sweep).collect()
+}
+
 fn styled_text_for_phase(
     content: SharedString,
     palette: ShimmerTextStyle,
@@ -751,6 +858,28 @@ fn styled_text_for_phase(
         .into_iter()
         .map(|range| (range, HighlightStyle::from(palette.highlight)));
     StyledText::new(content).with_highlights(highlights)
+}
+
+/// Builds one selectable sweep frame with compiled text runs.
+///
+/// The sweep color merges over the caller base faces through the same
+/// combine semantic; family and zero-tracking overrides compile at layout
+/// from the inherited window text style, so selection retains per stable id
+/// with identical metrics while selected or not.
+fn styled_runs_for_phase(
+    id: SharedString,
+    content: SharedString,
+    theme: ArtisanTheme,
+    band: Hsla,
+    phase: f32,
+    spread: f32,
+    base_highlights: &[(Range<usize>, HighlightStyle)],
+    overrides: &[TextRunOverride],
+) -> SelectableText {
+    let sweep = highlighted_ranges(content.as_ref(), phase, spread);
+    let merged = merge_sweep_highlights(base_highlights, &sweep, band);
+    SelectableText::retained(id, content, theme, merged)
+        .with_text_run_overrides(overrides.to_vec())
 }
 
 fn phase_from_seconds(elapsed: f32, duration: f32, delay: f32) -> f32 {

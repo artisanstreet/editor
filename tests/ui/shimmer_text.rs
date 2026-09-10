@@ -10,8 +10,8 @@ use std::time::Duration;
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::shimmer_text::{
     DEFAULT_DELAY, DEFAULT_DURATION, DEFAULT_SPREAD, ShimmerMotionPlan, ShimmerSegmentStyle,
-    ShimmerText, ShimmerTextStyle, ShimmerTextVariant, ShimmerTiming, highlighted_ranges, phase_at,
-    segments_for,
+    ShimmerText, ShimmerTextStyle, ShimmerTextVariant, ShimmerTiming, highlighted_ranges,
+    merge_sweep_highlights, phase_at, segments_for,
 };
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
@@ -221,4 +221,97 @@ fn reduced_motion_shimmer_has_real_nonempty_gpui_geometry(cx: &mut TestAppContex
     assert_eq!(host.size.height, px(80.0));
     assert!(text.size.width > px(0.0));
     assert!(text.size.height > px(0.0));
+}
+
+#[test]
+fn sweep_merge_preserves_fragment_faces_under_band_color() {
+    use gpui::{FontStyle, FontWeight, HighlightStyle};
+    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let band = theme.colors.highlight.to_paint();
+    let base = vec![
+        (
+            5..15,
+            HighlightStyle {
+                font_weight: Some(FontWeight::SEMIBOLD),
+                ..HighlightStyle::default()
+            },
+        ),
+        (
+            16..20,
+            HighlightStyle {
+                font_style: Some(FontStyle::Italic),
+                ..HighlightStyle::default()
+            },
+        ),
+    ];
+    let sweep = vec![0..8, 18..20];
+    let merged = merge_sweep_highlights(&base, &sweep, band);
+    let at = |start: usize| {
+        merged
+            .iter()
+            .find(|(range, _)| range.start == start)
+            .map(|(_, style)| style.clone())
+            .expect("merged sweep covers every union edge")
+    };
+    // Sweep-only span: band color, no inherited weight.
+    assert_eq!(at(0).color, Some(band));
+    assert_eq!(at(0).font_weight, None);
+    // Overlap: band color layered over the fragment semibold.
+    assert_eq!(at(5).color, Some(band));
+    assert_eq!(at(5).font_weight, Some(FontWeight::SEMIBOLD));
+    // Base-only span: fragment style with no band color.
+    assert_eq!(at(8).color, None);
+    assert_eq!(at(8).font_weight, Some(FontWeight::SEMIBOLD));
+    assert_eq!(at(16).font_style, Some(FontStyle::Italic));
+    assert_eq!(at(16).color, None);
+    // Trailing sweep span past the base: color wash alone.
+    assert_eq!(at(18).color, Some(band));
+}
+
+#[test]
+fn sweep_merge_keeps_utf8_boundaries_stable() {
+    use gpui::HighlightStyle;
+    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let band = theme.colors.highlight.to_paint();
+    // "a" + U+1F4A1 (bytes 1..5) + "b": ranges address whole scalars only.
+    let base = vec![(1..5, HighlightStyle::default())];
+    let merged = merge_sweep_highlights(&base, &[0..2], band);
+    assert_eq!(merged.len(), 3);
+    assert_eq!(merged[0].0, 0..1);
+    assert_eq!(merged[1].0, 1..2);
+    assert_eq!(merged[2].0, 2..5);
+    assert_eq!(merged[1].1.color, Some(band));
+    assert_eq!(merged[2].1.color, None);
+}
+
+#[test]
+fn builders_retain_fragment_inputs_with_empty_defaults() {
+    use artisan_ui::selectable_text::TextRunOverride;
+    use gpui::HighlightStyle;
+    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let plain = ShimmerText::new("Working", theme, MotionPolicy::Full);
+    assert!(plain.text_runs_value().is_none());
+    let styled = ShimmerText::new("read Cargo", theme, MotionPolicy::Full).text_runs(
+        "summary-runs",
+        vec![(5..10, HighlightStyle::default())],
+        vec![TextRunOverride {
+            range: 5..10,
+            font_family: Some("Mono".into()),
+            letter_spacing: Some(gpui::px(0.0)),
+        }],
+    );
+    let (id, highlights, overrides) = styled
+        .text_runs_value()
+        .expect("styled runs must be retained");
+    assert_eq!(id.as_ref(), "summary-runs");
+    assert_eq!(highlights, &[(5..10, HighlightStyle::default())]);
+    assert_eq!(overrides.len(), 1);
+    assert_eq!(overrides[0].range, 5..10);
+    assert_eq!(
+        overrides[0].font_family.as_ref().map(AsRef::as_ref),
+        Some("Mono")
+    );
+    // Styled runs never change the motion decision: active Full still
+    // schedules frames, so the sweep animates over compiled runs.
+    assert!(styled.motion_plan().is_animating());
 }
