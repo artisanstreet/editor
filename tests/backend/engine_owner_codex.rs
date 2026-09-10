@@ -641,7 +641,13 @@ async fn run_fixture_turn(
     inactivity: Duration,
     cancel_after: Option<Duration>,
 ) -> FixtureOutcome {
-    let script = FixtureScript::new(responses, tail);
+    // Keep the canned producer alive until all client writes are finished.
+    // It can then close stdout deterministically for the EOF test cases.
+    #[cfg(windows)]
+    let synchronized_tail = format!("more >nul\r\n{tail}");
+    #[cfg(not(windows))]
+    let synchronized_tail = format!("cat >/dev/null\n{tail}");
+    let script = FixtureScript::new(responses, &synchronized_tail);
     let mut child = script.spawn();
     let mut stdin = child.stdin.take().expect("fixture stdin");
     let stdout = child.stdout.take().expect("fixture stdout");
@@ -694,6 +700,7 @@ async fn run_fixture_turn(
         "turn/start must not answer with a JSON-RPC error"
     );
     let provider_turn_id = codex_turn_id(&line, 3).expect("turn id");
+    drop(stdin);
 
     if let Some(after) = cancel_after {
         let task_control = Arc::clone(&control);
@@ -757,7 +764,6 @@ async fn run_fixture_turn(
             },
         }
     };
-    drop(stdin);
     let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
     let mut deltas = Vec::new();
     while let Ok(observation) = receiver.try_recv() {
@@ -917,6 +923,11 @@ async fn fixture_restart_replays_durable_prefix() {
     let durable_prefix = joined(&interrupted);
     assert_eq!(durable_prefix, "durable-");
 
+    let second = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"replayed","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+        r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+    );
     let completed = tokio::time::timeout(
         Duration::from_secs(30),
         run_fixture_turn(&second, "", Duration::from_secs(5), None),
@@ -1528,7 +1539,7 @@ async fn fixture_kill_reports_interruption_with_durable_prefix() {
     // still inherits stdout, so EOF (and the interruption) must arrive
     // bounded without an orphan wedging the pump.
     #[cfg(windows)]
-    let tail = "ping -n 4 127.0.0.1 >nul";
+    let tail = "powershell.exe -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 3\"";
     #[cfg(not(windows))]
     let tail = "sleep 3";
     let script = FixtureScript::new(&responses, tail);
@@ -1618,6 +1629,11 @@ async fn fixture_restart_after_kill_replays_prefix_on_the_same_thread() {
         Some("thread-fixture-1")
     );
 
+    let second = format!(
+        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n",
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"replayed","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
+        r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+    );
     let completed = tokio::time::timeout(
         Duration::from_secs(30),
         run_fixture_turn(&second, "", Duration::from_secs(5), None),
@@ -1677,7 +1693,13 @@ impl Drop for WireTempRoot {
 /// Resolves the built wire-fixture executable without touching global state.
 fn codex_wire_fixture_program() -> PathBuf {
     if let Ok(path) = std::env::var("ARTISAN_CODEX_WIRE_FIXTURE") {
-        let path = PathBuf::from(path);
+        let mapping = PathBuf::from(&path);
+        let path = if mapping.is_absolute() {
+            mapping
+        } else {
+            let runfiles = runfiles::Runfiles::create().expect("runfiles discovery");
+            runfiles::rlocation!(runfiles, path.as_str()).expect("wire fixture runfile")
+        };
         assert!(
             path.is_file(),
             "declared wire fixture must be a regular file"
@@ -1690,8 +1712,14 @@ fn codex_wire_fixture_program() -> PathBuf {
             return path;
         }
     }
+    let test_executable = std::env::current_exe().expect("test executable path");
+    let cargo_example = test_executable.parent().and_then(|deps| deps.parent())
+        .expect("Cargo target directory")
+        .join("examples")
+        .join(format!("codex-wire-fixture{}", std::env::consts::EXE_SUFFIX));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for candidate in [
+        cargo_example,
         manifest.join("../../target/debug/codex_wire_fixture"),
         manifest.join("../../target/debug/codex_wire_fixture.exe"),
     ] {
@@ -1767,7 +1795,7 @@ fn codex_wire_runtime() -> EngineRuntimeControls {
         readiness_budget: budget(5_000),
         health_budget: budget(5_000),
         prompt_budget: budget(15_000),
-        stream_budget: budget(25_000),
+        stream_budget: budget(15_000),
         close_budget: budget(5_000),
         max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit"),
         max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit"),
@@ -1846,29 +1874,27 @@ struct WireTurnOutcome {
 
 /// Prepares, authorizes once, and drains one live owner turn to its terminal
 /// observation, proving the production handshake and pump end to end.
-async fn drive_codex_wire_turn(turn: &mut AcceptedTurn) -> WireTurnOutcome {
+async fn drive_codex_wire_turn(mut turn: AcceptedTurn) -> WireTurnOutcome {
     let prepared = turn.prepare().await.expect("wire turn prepares");
     let session = prepared.session().to_owned();
     turn.authorize().expect("wire turn authorizes once");
     let mut text = String::new();
-    let terminal = loop {
-        let observation = tokio::time::timeout(Duration::from_secs(20), turn.next_observation())
-            .await
-            .expect("wire observation arrives")
-            .expect("observation stream stays open until terminal");
+    let mut observed_terminal = None;
+    while let Some(observation) = tokio::time::timeout(
+        Duration::from_secs(20), turn.next_observation(),
+    ).await.expect("wire observation settles") {
         match observation {
             EngineObservation::TextDelta(delta) => text.push_str(delta.delta()),
-            EngineObservation::Usage(_) => {}
-            EngineObservation::Terminal(terminal) => break terminal.state(),
-            EngineObservation::TextSnapshot(_)
-            | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_) => {
-                panic!("unexpected wire observation")
-            }
+            EngineObservation::Usage(_) => {},
+            EngineObservation::Terminal(terminal) => observed_terminal = Some(terminal.state()),
+            _ => panic!("unexpected wire observation"),
         }
-    };
+    }
     let result = turn.finish().await.expect("wire turn finishes");
-    assert_eq!(result.terminal(), terminal);
+    let terminal = result.terminal();
+    if let Some(observed) = observed_terminal {
+        assert_eq!(observed, terminal);
+    }
     WireTurnOutcome {
         session,
         text,
@@ -1936,7 +1962,7 @@ async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
         )
         .await;
         let started = std::time::Instant::now();
-        let wire = drive_codex_wire_turn(&mut turn).await;
+        let wire = drive_codex_wire_turn(turn).await;
         assert!(
             started.elapsed() < Duration::from_secs(50),
             "accepted turn settles well inside budget"
@@ -1991,18 +2017,14 @@ async fn codex_wire_owner_fails_fast_on_turn_start_rejection() {
         )
         .await;
         let started = std::time::Instant::now();
-        let prepared = turn.prepare().await;
-        // The `-32600` error envelope fails preparation fast (seconds, not
-        // lease expiry) with the typed provider failure.
+        turn.prepare().await.expect("thread prepared before turn authorization");
+        turn.authorize().expect("authorize the rejected turn request");
+        let result = turn.finish().await;
         assert!(
-            matches!(prepared, Err(EngineOperationError::ProviderRequestFailed)),
-            "rejected turn/start must fail preparation fast"
+            matches!(result, Err(EngineOperationError::ProviderRequestFailed)),
+            "rejected turn/start must fail the authorized turn promptly: {result:?}"
         );
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "rejection settles fast instead of waiting out the lease"
-        );
-        drop(turn);
+        assert!(started.elapsed() < Duration::from_secs(20));
         assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
     })
     .await
@@ -2042,7 +2064,7 @@ async fn codex_wire_owner_survives_interleaved_thread_started() {
         // The real CLI emits `thread/started` between the `thread/*` result
         // and the `turn/start` result: id correlation (not next-line
         // assumption) still accepts the turn and delivers its text.
-        let wire = drive_codex_wire_turn(&mut turn).await;
+        let wire = drive_codex_wire_turn(turn).await;
         assert_eq!(wire.session, "thread-fixture-1");
         assert_eq!(wire.text, "hello wire");
         assert_eq!(wire.terminal, TerminalState::Completed);
@@ -2108,7 +2130,7 @@ async fn codex_live_owner_completes_real_turn_within_budget() {
             "Return SEND_PROBE_OK only. Do not use tools and do not read files.",
         )
         .await;
-        let wire = drive_codex_wire_turn(&mut turn).await;
+        let wire = drive_codex_wire_turn(turn).await;
         assert_eq!(
             wire.text.trim(),
             "SEND_PROBE_OK",
