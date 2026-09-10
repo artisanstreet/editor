@@ -101,6 +101,10 @@ pub const THREAD_SCREEN_INSPECTOR_SELECTOR: &str = "artisan-thread-screen-inspec
 /// Stable debug selector for the composer dock.
 pub const THREAD_SCREEN_COMPOSER_SELECTOR: &str = "artisan-thread-screen-composer-dock";
 
+/// Stable debug selector for the centered composer card wrapper inside the
+/// overlay frame (the native `prose-column w-full max-w-(--prose-width)`).
+pub const THREAD_SCREEN_COMPOSER_CARD_SELECTOR: &str = "artisan-thread-screen-composer-card";
+
 /// Stable debug selector for the environment card.
 pub const THREAD_SCREEN_ENV_CARD_SELECTOR: &str = "artisan-thread-screen-env-card";
 
@@ -116,9 +120,26 @@ const COLUMN_PAD_X_PX: f32 = 24.0;
 /// `pt-10` on the transcript column.
 const TRANSCRIPT_PAD_TOP_PX: f32 = 40.0;
 
-/// `pb-4` under the composer dock (`sm:pb-6` is a viewport refinement GPUI
-/// does not express; the base value is kept and noted).
+/// `pb-4` under the composer frame below the `sm` breakpoint.
 const COMPOSER_PAD_BOTTOM_PX: f32 = 16.0;
+
+/// Viewport width where the composer frame steps to its desktop inset.
+const COMPOSER_WIDE_BREAKPOINT_PX: f32 = 640.0;
+
+/// `sm:pb-6` under the composer frame at/above the breakpoint — 24 px. The
+/// native window sets no minimum width, so the frame follows live bounds.
+const COMPOSER_PAD_BOTTOM_WIDE_PX: f32 = 24.0;
+
+/// Resolves the composer frame bottom inset for a window viewport width:
+/// 24 px at/above 640 px, 16 px below (`pb-4 sm:pb-6`,
+/// `thread-composer.svelte:526`).
+pub(crate) const fn composer_pad_bottom(viewport_width_px: f32) -> f32 {
+    if viewport_width_px >= COMPOSER_WIDE_BREAKPOINT_PX {
+        COMPOSER_PAD_BOTTOM_WIDE_PX
+    } else {
+        COMPOSER_PAD_BOTTOM_PX
+    }
+}
 
 /// `max-w-md` on the gate failure column.
 const FAILURE_MAX_WIDTH_PX: f32 = 448.0;
@@ -1015,27 +1036,37 @@ impl ThreadScreen {
             .child(cards)
     }
 
-    /// Renders the composer dock around the packet-2 composer surface.
+    /// Renders the composer overlay frame around the packet-2 composer surface.
     ///
-    /// Legacy geometry (`thread-composer.svelte` frame): a bottom-centered
-    /// `prose-column w-full max-w-(--prose-width)` wrapper with `pb-4`. The
-    /// legacy composer is an absolute overlay whose `LipCard` chrome owns the
-    /// overlap contract with the transcript end space; that chrome belongs to
-    /// packet 2, so this screen docks the composer statically instead of
-    /// floating it over transcript content it cannot reserve space for.
-    fn render_composer_dock(&self, _theme: &ArtisanTheme) -> impl IntoElement {
+    /// Legacy frame (`thread-composer.svelte:526`): `prose-column-frame
+    /// pointer-events-none absolute inset-x-0 bottom-0` with `pb-4 sm:pb-6`,
+    /// holding `prose-column w-full max-w-(--prose-width)` children. GPUI has
+    /// no pointer-events API; the container is a plain div, so only genuinely
+    /// interactive descendants (card drop target, buttons, editor) intercept
+    /// and transcript clicks pass around them — the native equivalent of the
+    /// pass-through frame. The `px-6` frame gutters reproduce the
+    /// `.prose-column-frame` bound (`min(prose, 100% − 3rem)`): identical
+    /// geometry in narrow (24 px gutters) and wide (768 px centered) regimes.
+    /// The frame paints after the transcript, so it sits above it. Tail
+    /// clearance below the card is the transcript end space (surface lane,
+    /// pending): this frame reserves nothing itself.
+    fn render_composer_overlay(&self, pad_bottom_px: f32) -> impl IntoElement {
         div()
+            .absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .bottom(px(0.0))
             .flex()
-            .flex_shrink_0()
-            .justify_center()
-            .w_full()
+            .flex_col()
+            .items_center()
             .px(px(COLUMN_PAD_X_PX))
-            .pb(px(COMPOSER_PAD_BOTTOM_PX))
+            .pb(px(pad_bottom_px))
             .debug_selector(|| THREAD_SCREEN_COMPOSER_SELECTOR.to_owned())
             .child(
                 div()
                     .w_full()
                     .max_w(px(PROSE_WIDTH_PX))
+                    .debug_selector(|| THREAD_SCREEN_COMPOSER_CARD_SELECTOR.to_owned())
                     .child(self.composer.clone()),
             )
     }
@@ -1120,13 +1151,24 @@ impl ThreadScreen {
     /// Renders the opened-route branch (`thread-workspace.svelte` frame).
     ///
     /// Legacy frame (`sectioned-panel.svelte`): the primary column owns the
-    /// transcript and the composer, and the inspector is a separate `{#if
-    /// secondary}` column with no reserved space when closed. The conversation
-    /// column below replays that ownership, so the composer can never extend
-    /// across or cover the inspector; when the inspector hides, the
-    /// conversation reclaims its space.
-    fn render_open(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// transcript full-height while the composer floats as the absolute bottom
+    /// overlay; the inspector is a separate `{#if secondary}` column with no
+    /// reserved space when closed. The conversation wrapper below replays that
+    /// ownership — transcript at full column height with the overlay above its
+    /// tail — so the composer can never extend across or cover the inspector,
+    /// and composer growth never steals transcript height; when the inspector
+    /// hides, the conversation reclaims its space.
+    fn render_open(
+        &self,
+        theme: &ArtisanTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        // No native minimum window width is enforced, so the frame inset
+        // follows the live viewport instead of assuming desktop.
+        let pad_bottom = composer_pad_bottom(f32::from(window.bounds().size.width));
         let conversation = div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -1134,7 +1176,7 @@ impl ThreadScreen {
             .min_h(px(0.0))
             .bg(shell_black())
             .child(self.render_transcript_column(theme, cx))
-            .child(self.render_composer_dock(theme));
+            .child(self.render_composer_overlay(pad_bottom));
         let mut row = div()
             .flex()
             .flex_row()
@@ -1171,10 +1213,12 @@ fn is_live_terminal(session: &TerminalSession) -> bool {
 }
 
 impl Render for ThreadScreen {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ArtisanTheme::for_mode(self.theme_mode);
         match self.gate_branch() {
-            ThreadRouteGateRender::OpenedRoute => self.render_open(&theme, cx).into_any_element(),
+            ThreadRouteGateRender::OpenedRoute => {
+                self.render_open(&theme, window, cx).into_any_element()
+            }
             ThreadRouteGateRender::LoadingIndicator => {
                 Self::render_loading(&theme).into_any_element()
             }
@@ -1366,6 +1410,15 @@ mod tests {
         assert!(show_empty_transcript(0));
         assert!(!show_empty_transcript(1));
         assert!(!show_empty_transcript(24));
+    }
+
+    #[test]
+    fn composer_frame_inset_follows_the_640px_viewport_rule() {
+        assert_eq!(composer_pad_bottom(0.0), COMPOSER_PAD_BOTTOM_PX);
+        assert_eq!(composer_pad_bottom(639.0), COMPOSER_PAD_BOTTOM_PX);
+        assert_eq!(composer_pad_bottom(640.0), COMPOSER_PAD_BOTTOM_WIDE_PX);
+        assert_eq!(composer_pad_bottom(1920.0), COMPOSER_PAD_BOTTOM_WIDE_PX);
+        assert_eq!(COMPOSER_PAD_BOTTOM_WIDE_PX, 24.0);
     }
 
     /// Minimal host mounting one proof screen so the paint tree can be
@@ -1596,6 +1649,102 @@ mod tests {
                 "prose wrapper keeps its max-width rule"
             );
         }
+    }
+
+    /// The composer frame is a bottom overlay, not an in-flow dock: the inner
+    /// card wrapper anchors above the route body bottom by exactly the
+    /// viewport-rule inset (read from real window bounds, 24 wide / 16
+    /// narrow), while strictly overlapping the full-height transcript, so
+    /// editor growth never steals transcript height. Tail clearance below the
+    /// card is the surface endspace (pending counterpart), asserted nowhere
+    /// here.
+    #[gpui::test]
+    fn composer_frame_floats_over_the_full_height_transcript(cx: &mut gpui::TestAppContext) {
+        for (thread, width, height) in [
+            ("shell-proof-overlay-wide", 900.0, 600.0),
+            ("shell-proof-overlay-narrow", 500.0, 600.0),
+        ] {
+            let (_view, cx) =
+                cx.add_window_view(|_, cx| mount_proof_screen(thread, EXPANDED_WIDE_CONTENT, cx));
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            cx.run_until_parked();
+            let viewport_width = cx.update(|window, _| f32::from(window.bounds().size.width));
+            let expected_pad = composer_pad_bottom(viewport_width);
+            let root = cx
+                .debug_bounds(THREAD_SCREEN_SELECTOR)
+                .expect("screen root lays out");
+            let transcript = cx
+                .debug_bounds(THREAD_SCREEN_TRANSCRIPT_SELECTOR)
+                .expect("transcript column lays out");
+            let card = cx
+                .debug_bounds(THREAD_SCREEN_COMPOSER_CARD_SELECTOR)
+                .expect("composer card wrapper lays out");
+            let root_bottom = f32::from(root.origin.y) + f32::from(root.size.height);
+            let card_bottom = f32::from(card.origin.y) + f32::from(card.size.height);
+            assert!(
+                (root_bottom - card_bottom - expected_pad).abs() < 1.0,
+                "card must anchor {expected_pad}px above the body bottom for a {viewport_width}px viewport"
+            );
+            let overlay = cx
+                .debug_bounds(THREAD_SCREEN_COMPOSER_SELECTOR)
+                .expect("composer overlay lays out");
+            let overlay_top = f32::from(overlay.origin.y);
+            let transcript_bottom =
+                f32::from(transcript.origin.y) + f32::from(transcript.size.height);
+            assert!(
+                overlay_top + 1.0 < transcript_bottom,
+                "overlay top {overlay_top}px must strictly overlap the transcript ending at {transcript_bottom}px (an in-flow dock would sit exactly below it)"
+            );
+        }
+    }
+
+    /// Mounted growth evidence: a 12-line draft grows the overlay card while
+    /// the transcript keeps its exact full height — the overlay never squeezes
+    /// the column it floats above.
+    #[gpui::test]
+    fn composer_growth_never_steals_transcript_height(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-growth", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(600.0)));
+        cx.run_until_parked();
+        let transcript_before = cx
+            .debug_bounds(THREAD_SCREEN_TRANSCRIPT_SELECTOR)
+            .expect("transcript column lays out");
+        let card_before = cx
+            .debug_bounds(THREAD_SCREEN_COMPOSER_CARD_SELECTOR)
+            .expect("composer card wrapper lays out");
+        let draft = (1..=12)
+            .map(|line| format!("Line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.update(|_, app| {
+            view.update(app, |probe, probe_cx| {
+                probe.screen.update(probe_cx, |screen, screen_cx| {
+                    screen.composer.update(screen_cx, |composer, composer_cx| {
+                        composer.set_draft(draft.as_str());
+                        composer_cx.notify();
+                    });
+                });
+            });
+        });
+        cx.run_until_parked();
+        let transcript_after = cx
+            .debug_bounds(THREAD_SCREEN_TRANSCRIPT_SELECTOR)
+            .expect("transcript column lays out after growth");
+        let card_after = cx
+            .debug_bounds(THREAD_SCREEN_COMPOSER_CARD_SELECTOR)
+            .expect("composer card wrapper lays out after growth");
+        assert!(
+            f32::from(card_after.size.height) > f32::from(card_before.size.height) + 48.0,
+            "12-line draft must grow the overlay card, before={card_before:?} after={card_after:?}"
+        );
+        assert!(
+            (f32::from(transcript_after.size.height) - f32::from(transcript_before.size.height))
+                .abs()
+                < 1.0,
+            "transcript must keep its full height while the overlay grows"
+        );
     }
 
     /// The mounted single-row environment card honors the `p-1` inset in the

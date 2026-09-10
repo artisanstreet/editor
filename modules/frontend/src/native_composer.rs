@@ -2347,13 +2347,9 @@ impl Render for NativeComposer {
 
         let focus = self.focus_handle.clone();
         // Reference (`thread-composer.svelte:571-587`): `min-h-16 px-3 py-2
-        // text-base`, no radius. The reference editor is uncapped because
-        // its frame is an absolute overlay above the transcript; the native
-        // dock is static in-flow (`thread_screen.rs` composer dock, shell
-        // lane), so an uncapped editor would squeeze the transcript to zero
-        // and swallow the window. The 240px bound plus internal scroll is
-        // the pre-existing transcript protection and stays until the shell
-        // lane owns an overlay dock or a viewport-relative cap.
+        // text-base`, uncapped with no internal scroll. Growth pushes the
+        // absolute overlay taller while the transcript end space preserves
+        // scroll-to-bottom (surface lane); no pixel cap lives here.
         let mut editor = div()
             .id("artisan-native-composer-editor")
             .debug_selector(|| NATIVE_COMPOSER_EDITOR_SELECTOR.to_string())
@@ -2362,14 +2358,12 @@ impl Render for NativeComposer {
             .flex_1()
             .min_w(px(0.0))
             .min_h(px(64.0))
-            .max_h(px(240.0))
             .px(px(12.0))
             .py(px(8.0))
             .text_color(desktop_theme.foreground)
             .text_size(px(16.0))
             .line_height(px(24.0))
             .whitespace_normal()
-            .overflow_y_scroll()
             .track_focus(&focus)
             .child(styled_text);
 
