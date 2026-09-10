@@ -615,6 +615,7 @@ name = "artisan-migrations"
 version = "0.0.0"
 dependencies = [
  "artisan-database",
+ "artisan-domain",
  "sea-orm-migration",
  "thiserror 2.0.20",
  "tokio",
