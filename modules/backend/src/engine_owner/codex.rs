@@ -922,13 +922,17 @@ fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
             if item_id.is_empty() {
                 return CodexEvent::UnknownMethod;
             }
+            // The provider schema allows exactly `completed | declined |
+            // failed | inProgress` here: any other spelling is malformed and
+            // must never fall through into a fabricated completion.
             let status = match item.get("status").and_then(Value::as_str) {
-                Some(status) => status,
-                None => return CodexEvent::UnknownMethod,
+                Some("completed") | Some("inProgress") => "completed",
+                Some("failed") | Some("declined") => "failed",
+                _ => return CodexEvent::UnknownMethod,
             };
             let state = if started {
                 CodexTerminalLifecycle::Started
-            } else if status == "failed" || status == "declined" {
+            } else if status == "failed" {
                 CodexTerminalLifecycle::Failed
             } else {
                 CodexTerminalLifecycle::Completed
@@ -956,9 +960,13 @@ fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
             if item_id.is_empty() {
                 return CodexEvent::UnknownMethod;
             }
-            let status = match item.get("status").and_then(Value::as_str) {
-                Some(status) => status,
-                None => return CodexEvent::UnknownMethod,
+            // The provider schema allows exactly `completed | failed |
+            // inProgress` here: any other spelling is malformed and must
+            // never fall through into a fabricated completion.
+            let failed = match item.get("status").and_then(Value::as_str) {
+                Some("completed") | Some("inProgress") => false,
+                Some("failed") => true,
+                _ => return CodexEvent::UnknownMethod,
             };
             let tool = match nested_text(item, "tool") {
                 Some(tool) => tool,
@@ -979,7 +987,7 @@ fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
             };
             let action = if started {
                 CodexToolAction::Started
-            } else if status == "failed" {
+            } else if failed {
                 CodexToolAction::Failed
             } else {
                 CodexToolAction::Completed
@@ -1743,10 +1751,11 @@ pub(crate) fn codex_rate_limits_read_line(id: u64) -> String {
 // Each emitted [`DomainObservation`] preserves the provider item and turn
 // identities verbatim inside its typed payload; the generated observation id
 // is deterministic in `(run, frame sequence, emission slug)` so replays
-// produce identical ids without collisions, and the sequence is the
-// run-local durable sequence of the source frame (fragments may share it;
-// the dispatcher remints per-row durable identity and the thread-scoped
-// delivery sequence in a separate packet). No wall clocks
+// produce identical ids without collisions, and owner rows carry
+// SOURCE-LOCAL FRAME order only (fragments may share one frame's sequence;
+// the dispatcher remints the monotonic RUN-local observation sequence and
+// identity while the database allocates the separate THREAD-scoped
+// attribution `delivery_sequence`). No wall clocks
 // are minted: none of the target observation types carry timestamps.
 // ---------------------------------------------------------------------------
 
@@ -1801,13 +1810,14 @@ fn activity_observation_id(
     .ok()
 }
 
-/// Reads the run-local durable sequence of one source frame as a domain
-/// sequence.
+/// Reads one source frame's order as a domain sequence.
 ///
-/// Fragment rows from one frame may share it; the dispatcher remints
-/// per-row durable identity and the thread-scoped delivery sequence before
-/// persistence. Returns [`None`] past the finite range so the emission drops
-/// instead of wrapping.
+/// Owner rows carry SOURCE-LOCAL FRAME order only: fragment rows from one
+/// frame may share its sequence. The dispatcher remints the monotonic
+/// RUN-local observation sequence and identity, and the database allocates
+/// the separate THREAD-scoped attribution `delivery_sequence`. Returns
+/// [`None`] past the finite range so the emission drops instead of
+/// wrapping.
 fn activity_sequence(frame_sequence: u64) -> Option<ObservationSequence> {
     ObservationSequence::new(frame_sequence).ok()
 }

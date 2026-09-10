@@ -323,13 +323,13 @@ impl SubagentTranscriptRow {
 /// rows carry validated domain content with their own identities and never
 /// adopt the root turn. `Activity` carries one validated provider-neutral
 /// domain observation (reasoning summary, tool, terminal activity, file,
-/// search, or plan) decoded from rich engine frames; its sequence is the
-/// run-local durable sequence of the source frame, and fragment rows from
-/// one frame may share it. The separate DB attribution `delivery_sequence`
-/// is thread-scoped: the dispatcher remints per-row durable identity and
-/// sequence before persistence. `Eq` is deliberately absent: transcript
-/// content has no total-equality bound, and channel delivery plus matching
-/// need only [`PartialEq`].
+/// search, or plan) decoded from rich engine frames; owner rows carry
+/// SOURCE-LOCAL FRAME order only, and fragment rows from one frame may
+/// share its sequence. The dispatcher remints the monotonic RUN-local
+/// observation sequence and identity; the database allocates the separate
+/// THREAD-scoped attribution `delivery_sequence`. `Eq` is deliberately
+/// absent: transcript content has no total-equality bound, and channel
+/// delivery plus matching need only [`PartialEq`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum EngineObservation {
     TextDelta(TextDelta),

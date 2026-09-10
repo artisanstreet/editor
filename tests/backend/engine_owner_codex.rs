@@ -33,8 +33,8 @@ use tokio::time::Instant;
 
 use super::codex::{
     CODEX_MAX_FRAME_BYTES, CodexContinuationDecision, CodexContinuationGateInput, CodexEvent,
-    CodexPendingTracker, CodexQuotaWindowKind, CodexSettings, CodexTurnState,
-    CodexUsageAttribution, CodexUsageContext, CodexUsageScope, answer_approval, answer_questions,
+    CodexPendingTracker, CodexQuotaWindowKind, CodexSettings, CodexTerminalLifecycle,
+    CodexToolAction, CodexTurnState, CodexUsageAttribution, CodexUsageContext, CodexUsageScope, answer_approval, answer_questions,
     apply_event, check_codex_native_continuation, clamp_codex_percent_used,
     classify_codex_quota_window_kind, classify_exit, codex_account_read_line,
     codex_cli_meets_minimum, codex_rate_limits_read_line, codex_requires_group_termination,
@@ -3038,5 +3038,133 @@ async fn activity_requires_exact_bound_root_thread() {
     let event = parse_frame(&summary("t-1", "turn-1"), 86).expect("activity parses");
     let (_, rows) = apply_activity(event, &run, &mut tracker, &mut active, 86).await;
     assert!(rows.is_empty(), "empty binds stay unbound");
+}
+
+#[test]
+fn malformed_lifecycle_status_never_fabricates_success() {
+    // Unknown lifecycle spellings violate the provider schema (command:
+    // completed|declined|failed|inProgress; tool: completed|failed|
+    // inProgress) and stay observable without ever becoming a success row.
+    for (method, item) in [
+        (
+            "item/completed",
+            r#"{"command":"echo","id":"cmd-9","status":"succeeded","type":"commandExecution"}"#,
+        ),
+        (
+            "item/completed",
+            r#"{"command":"echo","id":"cmd-9","status":"cancelled","type":"commandExecution"}"#,
+        ),
+        (
+            "item/started",
+            r#"{"command":"echo","id":"cmd-9","status":"queued","type":"commandExecution"}"#,
+        ),
+        (
+            "item/completed",
+            r#"{"id":"tool-9","server":"srv","status":"cancelled","tool":"read","type":"mcpToolCall"}"#,
+        ),
+        (
+            "item/started",
+            r#"{"id":"tool-9","server":"srv","status":"weird","tool":"read","type":"mcpToolCall"}"#,
+        ),
+        (
+            "item/completed",
+            r#"{"id":"tool-9","status":"succeeded","tool":"fetch","type":"dynamicToolCall"}"#,
+        ),
+    ] {
+        let line = format!(
+            r#"{{"method":"{method}","params":{{"threadId":"t-1","turnId":"turn-1","item":{item}}}}}"#
+        );
+        assert!(
+            matches!(
+                parse_frame(&line, 90).expect("frame parses"),
+                CodexEvent::UnknownMethod
+            ),
+            "unknown status stays observable: {line}"
+        );
+    }
+
+    // Every schema-allowed spelling still decodes to its exact lifecycle.
+    let command = |method: &str, status: &str| {
+        parse_frame(
+            &format!(
+                r#"{{"method":"{method}","params":{{"threadId":"t-1","turnId":"turn-1","item":{{"command":"echo","id":"cmd-9","status":"{status}","type":"commandExecution"}}}}}}"#
+            ),
+            91,
+        )
+        .expect("valid command parses")
+    };
+    assert!(matches!(
+        command("item/started", "inProgress"),
+        CodexEvent::TerminalLifecycle {
+            state: CodexTerminalLifecycle::Started,
+            ..
+        }
+    ));
+    assert!(matches!(
+        command("item/completed", "completed"),
+        CodexEvent::TerminalLifecycle {
+            state: CodexTerminalLifecycle::Completed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        command("item/completed", "inProgress"),
+        CodexEvent::TerminalLifecycle {
+            state: CodexTerminalLifecycle::Completed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        command("item/completed", "failed"),
+        CodexEvent::TerminalLifecycle {
+            state: CodexTerminalLifecycle::Failed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        command("item/completed", "declined"),
+        CodexEvent::TerminalLifecycle {
+            state: CodexTerminalLifecycle::Failed,
+            ..
+        }
+    ));
+
+    let tool = |method: &str, status: &str| {
+        parse_frame(
+            &format!(
+                r#"{{"method":"{method}","params":{{"threadId":"t-1","turnId":"turn-1","item":{{"id":"tool-9","server":"srv","status":"{status}","tool":"read","type":"mcpToolCall"}}}}}}"#
+            ),
+            92,
+        )
+        .expect("valid tool parses")
+    };
+    assert!(matches!(
+        tool("item/started", "inProgress"),
+        CodexEvent::ToolLifecycle {
+            action: CodexToolAction::Started,
+            ..
+        }
+    ));
+    assert!(matches!(
+        tool("item/completed", "completed"),
+        CodexEvent::ToolLifecycle {
+            action: CodexToolAction::Completed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        tool("item/completed", "inProgress"),
+        CodexEvent::ToolLifecycle {
+            action: CodexToolAction::Completed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        tool("item/completed", "failed"),
+        CodexEvent::ToolLifecycle {
+            action: CodexToolAction::Failed,
+            ..
+        }
+    ));
 }
 
