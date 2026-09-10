@@ -95,8 +95,13 @@ impl SubscriptionView {
         self.cursor
     }
 
-    /// Returns the last delivered engine-observation sequence for this
-    /// entry, or zero when no observation has been delivered yet.
+    /// Returns the last delivered thread-scoped observation `delivery_sequence`
+    /// for this entry, or zero when no observation has been delivered yet.
+    ///
+    /// The cursor tracks the durable thread-scoped attribution sequence across
+    /// runs, never the run-local `Observation.sequence` and never event
+    /// walltime; a fresh or resumed registration restarts at zero so reconnect
+    /// replay redelivers the committed history from the durable ledger.
     #[must_use]
     pub const fn observation_cursor(&self) -> u64 {
         self.observation_cursor

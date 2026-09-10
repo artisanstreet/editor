@@ -11,10 +11,13 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use artisan_domain::{Observation, ThreadId};
+use artisan_domain::ThreadId;
 use artisan_transport::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 
-use crate::activated_conversation_replay::read_activated_conversation_replay;
+use crate::activated_conversation_replay::{
+    OBSERVATION_HISTORY_PAGE_LIMIT, read_activated_conversation_replay,
+    read_activated_observation_history,
+};
 use crate::connection::{
     DeliveryStageError, RequestDispatchOutcome, RequestStageError, ServerFrameStamp,
 };
@@ -78,7 +81,10 @@ impl ConversationDeliveryDriver {
     /// Unsubscribe removes the old active state after its acknowledgement has
     /// finished; replacement removes the old state before the new activated
     /// state is installed. The initial replay is always read from the exact
-    /// activated cursor before the state is retained.
+    /// activated cursor before the state is retained, and the authoritative
+    /// observation history (thread-scoped `delivery_sequence`, including
+    /// settled turns) is drained from the subscriber's observation cursor
+    /// before the state is retained.
     pub(crate) async fn handle_request<F>(
         &mut self,
         outcome: RequestDispatchOutcome,
@@ -102,6 +108,9 @@ impl ConversationDeliveryDriver {
         let subscription = self
             .deliver_until_current(subscription, stamp, limit, cancel)
             .await?;
+        let subscription = self
+            .deliver_observation_history(subscription, stamp, limit, cancel)
+            .await?;
         self.active.insert(thread_id, subscription);
         Ok(())
     }
@@ -109,6 +118,8 @@ impl ConversationDeliveryDriver {
     /// Re-reads every active subscription once after a coalesced process-wide
     /// wake. A successful batch advances its state and the next read uses the
     /// cursor returned by the writer, so repeated wakes cannot duplicate it.
+    /// Patch replay and authoritative observation history both drain to the
+    /// durable tail, so two commits before one wake lose no events.
     pub(crate) async fn deliver_wake<F>(
         &mut self,
         stamp: &mut F,
@@ -126,62 +137,96 @@ impl ConversationDeliveryDriver {
             let subscription = self
                 .deliver_until_current(subscription, stamp, limit, cancel)
                 .await?;
+            let subscription = self
+                .deliver_observation_history(subscription, stamp, limit, cancel)
+                .await?;
             self.active.insert(thread_id, subscription);
         }
         Ok(())
     }
 
-    /// Publishes one durably committed engine-observation batch to the
-    /// thread's active subscriber, if any.
+    /// Drains the authoritative observation history for one active
+    /// subscription to the durable tail.
     ///
-    /// A thread without an active subscription yields `Ok(None)`: with no
-    /// subscribers there is nothing to publish, and the durable history
-    /// stays available for reconnect replay. Otherwise every observation
-    /// newer than the subscriber's observation cursor crosses the wire in
-    /// batch order under the send deadline, and the registry advances only
-    /// after all of those sends succeed. An empty or fully delivered batch
-    /// yields `Ok(None)` without touching the wire or the writer.
-    pub(crate) async fn publish_observations<F>(
+    /// Reads bounded pages via `read_observation_history` from the
+    /// subscriber's thread-scoped observation cursor and publishes each full
+    /// page through the writer before the registrar advances; any send
+    /// failure retains the cursor. A coalesced wake that arrives mid-drain is
+    /// preserved by the process-wide notifier and observed on the next scan,
+    /// so bounded pagination never drops events. With no active subscription
+    /// there is nothing to publish and the durable history stays available
+    /// for reconnect replay.
+    pub(crate) async fn deliver_observation_history<F>(
         &mut self,
-        thread_id: ThreadId,
-        observations: Vec<Observation>,
+        subscription: ActivatedConversationSubscription,
         stamp: &mut F,
         limit: Duration,
         cancel: &CancelHandle,
-    ) -> Result<Option<ObservationBatchDelivery>, DeadlineError<RequestStageError>>
+    ) -> Result<ActivatedConversationSubscription, DeadlineError<RequestStageError>>
     where
         F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
     {
-        let Some(subscription) = self.active.get(&thread_id) else {
-            return Ok(None);
-        };
-        let lease = subscription.lease().clone();
-        if observations.is_empty() {
-            return Ok(None);
+        let thread_id: ThreadId = subscription.lease().thread_id().clone();
+        loop {
+            let after = self
+                .context
+                .registrar()
+                .subscription_view(&thread_id)
+                .await
+                .map(|view| view.observation_cursor())
+                .unwrap_or(0);
+            // Fall back to the just-activated subscription when the registrar
+            // has not yet observed it (initial activation path): the cursor
+            // is zero there by construction.
+            let page = run_with_deadline(
+                OperationKind::Receive,
+                limit,
+                cancel,
+                read_activated_observation_history(
+                    self.context.repository(),
+                    &subscription,
+                    after,
+                    OBSERVATION_HISTORY_PAGE_LIMIT,
+                ),
+            )
+            .await
+            .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+            if page.is_empty() {
+                return Ok(subscription);
+            }
+            let lease = subscription.lease().clone();
+            let mut batch = Vec::with_capacity(page.len());
+            for event in page {
+                let frame = stamp().map_err(|error| DeadlineError::Peer {
+                    operation: OperationKind::Send,
+                    error,
+                })?;
+                batch.push((frame, event));
+            }
+            let writer = self
+                .writer
+                .take()
+                .ok_or_else(|| delivery_failure(OperationKind::Send, DeliveryStageError::Writer))?;
+            let delivered = run_with_deadline(
+                OperationKind::Send,
+                limit,
+                cancel,
+                writer.deliver_observation_batch(&lease, thread_id.clone(), batch),
+            )
+            .await
+            .map_err(map_writer_deadline)?;
+            let (writer, delivered) = delivered;
+            self.writer = Some(writer);
+            match delivered {
+                ObservationBatchDelivery::Current { .. } => return Ok(subscription),
+                ObservationBatchDelivery::Published { .. } => {
+                    // Another page may have committed during the send; loop
+                    // until the durable tail instead of stopping after one
+                    // page so two commits before one ack lose no events.
+                    continue;
+                }
+            }
         }
-        let mut batch = Vec::with_capacity(observations.len());
-        for observation in observations {
-            let stamp = stamp().map_err(|error| DeadlineError::Peer {
-                operation: OperationKind::Send,
-                error,
-            })?;
-            batch.push((stamp, observation));
-        }
-        let writer = self
-            .writer
-            .take()
-            .ok_or_else(|| delivery_failure(OperationKind::Send, DeliveryStageError::Writer))?;
-        let delivered = run_with_deadline(
-            OperationKind::Send,
-            limit,
-            cancel,
-            writer.deliver_observation_batch(&lease, thread_id, batch),
-        )
-        .await
-        .map_err(map_writer_deadline)?;
-        let (writer, delivered) = delivered;
-        self.writer = Some(writer);
-        Ok(Some(delivered))
     }
 
     /// Finishes the one writer and then clears all connection-local registry

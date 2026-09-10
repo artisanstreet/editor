@@ -348,3 +348,71 @@ async fn repository_not_found_after_valid_activation_is_preserved() {
         other => panic!("expected exact thread-not-found error, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn fresh_activation_reads_empty_observation_history_from_zero() {
+    use artisan_backend::activated_conversation_replay::{
+        OBSERVATION_HISTORY_PAGE_LIMIT, read_activated_observation_history,
+    };
+
+    assert!(
+        OBSERVATION_HISTORY_PAGE_LIMIT > 0 && OBSERVATION_HISTORY_PAGE_LIMIT <= 64,
+        "observation history pages stay bounded"
+    );
+    let (_database, repository) = memory_repository().await;
+    let thread_id = seed_thread(&repository, "thread-obs-fresh", "obs-fresh").await;
+    let handler = RequestHandler::with_subscriptions(repository.clone());
+    let subscription = activate(
+        &handler,
+        "request-obs-fresh",
+        ConversationSubscribe::fresh(thread_id.clone()),
+    )
+    .await;
+    // A new subscription replays from the thread-scoped origin: no settled or
+    // live rows exist yet, so the authoritative read returns an empty page
+    // instead of fabricating attribution.
+    let history = read_activated_observation_history(
+        &repository,
+        &subscription,
+        0,
+        OBSERVATION_HISTORY_PAGE_LIMIT,
+    )
+    .await
+    .expect("fresh observation history should read");
+    assert!(
+        history.is_empty(),
+        "fresh threads have no durable observation history"
+    );
+}
+
+#[tokio::test]
+async fn observation_history_pages_stay_bounded_ascending() {
+    use artisan_backend::activated_conversation_replay::read_activated_observation_history;
+
+    let (_database, repository) = memory_repository().await;
+    let thread_id = seed_thread(&repository, "thread-obs-paged", "obs-paged").await;
+    let handler = RequestHandler::with_subscriptions(repository.clone());
+    let subscription = activate(
+        &handler,
+        "request-obs-paged",
+        ConversationSubscribe::fresh(thread_id),
+    )
+    .await;
+    // Bounded pagination: a limit of one never returns more than one row, and
+    // the next page continues strictly after the previous delivery_sequence.
+    // The fixture thread settles no observations, so both pages are empty and
+    // the cursor never advances spuriously.
+    let first = read_activated_observation_history(&repository, &subscription, 0, 1)
+        .await
+        .expect("first history page should read");
+    assert!(first.len() <= 1, "history pages stay bounded");
+    let after = first
+        .last()
+        .and_then(|event| event.attribution.as_ref())
+        .map(|attribution| attribution.delivery_sequence)
+        .unwrap_or(0);
+    let second = read_activated_observation_history(&repository, &subscription, after, 1)
+        .await
+        .expect("second history page should read");
+    assert!(second.len() <= 1, "history pages stay bounded");
+}

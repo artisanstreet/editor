@@ -1522,11 +1522,30 @@ struct EngineObservation {
   }
 }
 
+# Durable thread-scoped attribution for one committed engine observation.
+# `deliverySequence` is the strictly increasing thread-scoped durable cursor
+# across runs (one-based, never zero); `Observation.sequence` stays run-local.
+# `runId`/`turnId` and `committedAtMillis` are the Forge-persisted launch
+# receipt and batch `operated_at` facts, never delivery-stamped clocks.
+struct EngineObservationAttribution {
+  runId @0 :Text;
+  turnId @1 :Text;
+  committedAtMillis @2 :Int64;
+  deliverySequence @3 :UInt64;
+}
+
 # One committed engine observation routed to its thread subscribers.
 struct EngineObservationEvent {
   # Thread whose subscribers receive the observation. Identifier rule.
   threadId @0 :Text;
   observation @1 :EngineObservation;
+  # Additive optional attribution: absent on pre-attribution frames, which
+  # decode as `None`. When present, run/turn ids must parse, the commit time
+  # must be positive, and the delivery sequence must be positive.
+  attribution :union {
+    noAttribution @2 :Void;
+    attribution @3 :EngineObservationAttribution;
+  }
 }
 
 # ---------------------------------------------------------------------------

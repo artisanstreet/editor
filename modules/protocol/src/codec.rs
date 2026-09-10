@@ -3,7 +3,8 @@
 use artisan_domain::{
     AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalKind,
     ApprovalObservation, ApprovalRequest, ApprovalState, ArtisanCode, CompactionObservation,
-    CompactionState, DiagnosticLevel, EngineErrorRef, EngineErrorRefInput, EngineObservationEvent,
+    CompactionState, DiagnosticLevel, EngineErrorRef, EngineErrorRefInput, EngineObservationAttribution,
+    EngineObservationEvent,
     FileAction, FileObservation, LimitScope, MessagePhase, NativeActionObservation,
     OBSERVATION_ANSWERS_MAX, OBSERVATION_PLAN_MAX_ENTRIES, OBSERVATION_QUESTION_MAX_OPTIONS,
     Observation, ObservationError, ObservationId, ObservationSequence, PlanEntry, PlanEntryStatus,
@@ -1621,7 +1622,25 @@ fn encode_event(
         Event::EngineObservation(event) => {
             let mut observation = builder.reborrow().init_engine_observation();
             observation.set_thread_id(event.thread_id.as_str());
-            encode_engine_observation(observation.init_observation(), &event.observation)?;
+            encode_engine_observation(observation.reborrow().init_observation(), &event.observation)?;
+            match &event.attribution {
+                Some(attribution) => {
+                    let mut encoded = observation
+                        .reborrow()
+                        .init_attribution()
+                        .init_attribution();
+                    encoded.set_run_id(attribution.run_id.as_str());
+                    encoded.set_turn_id(attribution.turn_id.as_str());
+                    encoded.set_committed_at_millis(attribution.committed_at.as_millis());
+                    encoded.set_delivery_sequence(attribution.delivery_sequence);
+                }
+                None => {
+                    observation
+                        .reborrow()
+                        .init_attribution()
+                        .set_no_attribution(());
+                }
+            }
         }
     }
     Ok(())
@@ -4255,13 +4274,67 @@ fn decode_event(
                 read_text(value.get_thread_id(), "event.engineObservation.threadId")?,
                 "event.engineObservation.threadId",
             )?;
+            let attribution = decode_engine_observation_attribution(value.get_attribution()?)?;
             Event::EngineObservation(EngineObservationEvent {
                 thread_id,
                 observation: decode_engine_observation(value.get_observation()?)?,
+                attribution,
             })
         }
     };
     Ok(ServerEvent { cursor, event })
+}
+
+/// Decodes the additive optional observation attribution.
+///
+/// Old frames never set the union and decode as `None`, preserving the frozen
+/// v1 bytes. When present, run/turn ids must parse, the commit time must be
+/// positive, and the delivery sequence must be positive; any malformed or
+/// nonpositive value is a typed rejection, never a silent default.
+fn decode_engine_observation_attribution(
+    value: artisan_capnp::engine_observation_event::attribution::Reader<'_>,
+) -> Result<Option<EngineObservationAttribution>, ProtocolDecodeError> {
+    use artisan_capnp::engine_observation_event::attribution::Which;
+    match value.which()? {
+        Which::NoAttribution(()) => Ok(None),
+        Which::Attribution(attribution) => {
+            let attribution = attribution?;
+            let run_id = parse_run_id(
+                read_text(
+                    attribution.get_run_id(),
+                    "event.engineObservation.attribution.runId",
+                )?,
+                "event.engineObservation.attribution.runId",
+            )?;
+            let turn_id = parse_turn_id(
+                read_text(
+                    attribution.get_turn_id(),
+                    "event.engineObservation.attribution.turnId",
+                )?,
+                "event.engineObservation.attribution.turnId",
+            )?;
+            let committed_at_millis = attribution.get_committed_at_millis();
+            if committed_at_millis <= 0 {
+                return Err(ProtocolDecodeError::Observation {
+                    source: artisan_domain::ObservationError::OutOfRange { field: "committed_at" },
+                });
+            }
+            let delivery_sequence = attribution.get_delivery_sequence();
+            if delivery_sequence == 0 {
+                return Err(ProtocolDecodeError::Observation {
+                    source: artisan_domain::ObservationError::OutOfRange {
+                        field: "delivery_sequence",
+                    },
+                });
+            }
+            Ok(Some(EngineObservationAttribution {
+                run_id,
+                turn_id,
+                committed_at: UnixMillis::from_millis(committed_at_millis),
+                delivery_sequence,
+            }))
+        }
+    }
 }
 
 fn decode_protocol_error(

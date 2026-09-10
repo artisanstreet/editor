@@ -8,7 +8,7 @@
 
 #![forbid(unsafe_code)]
 
-use artisan_domain::{ConversationCursor, EngineObservationEvent, Event, Observation, ThreadId};
+use artisan_domain::{ConversationCursor, EngineObservationEvent, Event, ThreadId};
 use artisan_protocol::{EventCursor, ProtocolVersion, ServerEvent, WireEnvelope, WireEnvelopeBody};
 use artisan_transport::EnvelopeSendError;
 use quinn::{ClosedStream, Connection, SendStream, VarInt};
@@ -225,22 +225,34 @@ impl ConversationDeliveryWriter {
     }
 
     /// Delivers one durably committed engine-observation batch to a single
-    /// thread subscriber in durable sequence order.
+    /// thread subscriber in thread-scoped durable order.
     ///
-    /// The batch must arrive in committed (durable sequence) order; rows at
-    /// or below the subscriber's current observation cursor are skipped as
-    /// already delivered, so replaying a committed batch is idempotent. A
-    /// fully skipped batch returns [`ObservationBatchDelivery::Current`]
-    /// without opening a stream or touching the registrar. Otherwise every
-    /// new row is sent as its own [`Event::EngineObservation`] envelope on
-    /// the lazily opened delivery stream — shared with patch batches —
-    /// before the registrar advances past the batch maximum. Any failure
+    /// The batch must arrive in committed `delivery_sequence` order (the
+    /// thread-scoped durable cursor carried by
+    /// `EngineObservationEvent.attribution`); `Observation.sequence` stays
+    /// run-local and is used only as a legacy fallback when `attribution` is
+    /// `None` in unit fixtures. Rows at or below the subscriber's current
+    /// observation cursor are skipped as already delivered, so replaying a
+    /// committed batch is idempotent — including across two runs that reset
+    /// their run-local sequences. A fully skipped batch returns
+    /// [`ObservationBatchDelivery::Current`] without opening a stream or
+    /// touching the registrar. Otherwise every new row is sent as its own
+    /// [`Event::EngineObservation`] envelope (attribution preserved verbatim,
+    /// never restamped) on the lazily opened delivery stream — shared with
+    /// patch batches — before the registrar advances past the batch maximum.
+    /// The full batch crosses the wire before the registrar advances; any
+    /// failure consumes the writer and retains the cursor. Any failure
     /// consumes the writer; the unfinished stream guard resets its send
     /// direction when the operation is cancelled, fails, or is dropped.
     ///
-    /// Approval and question rows carry their provider `approval_id` and
-    /// `question_id` untouched so the later A-approve packet can answer
-    /// them; this method never responds to them.
+    /// Thread authority is fenced: every event's `thread_id` must equal both
+    /// the `thread_id` argument and the lease thread, and production events
+    /// carry `Some` attribution. Legacy `None` attributions are accepted only
+    /// for unit fixtures and order by `observation.sequence()`. Approval and
+    /// question rows carry their provider `approval_id` and `question_id`
+    /// untouched so the later A-approve packet can answer them; this method
+    /// never responds to them. No clocks are stamped and no turn ids are cast
+    /// here.
     ///
     /// # Errors
     ///
@@ -259,7 +271,7 @@ impl ConversationDeliveryWriter {
         mut self,
         lease: &SubscriptionLease,
         thread_id: ThreadId,
-        batch: Vec<(ServerFrameStamp, Observation)>,
+        batch: Vec<(ServerFrameStamp, EngineObservationEvent)>,
     ) -> Result<(Self, ObservationBatchDelivery), ConversationDeliveryError> {
         let from_sequence = self
             .registrar
@@ -267,10 +279,17 @@ impl ConversationDeliveryWriter {
             .await
             .map(|view| view.observation_cursor())
             .unwrap_or(0);
-        let pending: Vec<(ServerFrameStamp, Observation)> = batch
-            .into_iter()
-            .filter(|(_, observation)| observation.sequence().get() > from_sequence)
-            .collect();
+        let mut pending: Vec<(ServerFrameStamp, EngineObservationEvent)> = Vec::new();
+        for (stamp, event) in batch {
+            if event.thread_id != thread_id || event.thread_id != *lease.thread_id() {
+                continue;
+            }
+            if observation_delivery_sequence(&event) <= from_sequence {
+                continue;
+            }
+            pending.push((stamp, event));
+        }
+        pending.sort_by_key(|(_, event)| observation_delivery_sequence(event));
         if pending.is_empty() {
             return Ok((
                 self,
@@ -290,16 +309,13 @@ impl ConversationDeliveryWriter {
 
         let mut delivered = Vec::with_capacity(pending.len());
         let mut to_sequence = from_sequence;
-        for (stamp, observation) in pending {
+        for (stamp, event) in pending {
             let cursor = EventCursor::new(self.next_event_cursor)
                 .expect("a connection delivers fewer than 2^64 events");
-            to_sequence = observation.sequence().get();
+            to_sequence = observation_delivery_sequence(&event).max(to_sequence);
             let event = ServerEvent {
                 cursor,
-                event: Event::EngineObservation(EngineObservationEvent {
-                    thread_id: thread_id.clone(),
-                    observation,
-                }),
+                event: Event::EngineObservation(event),
             };
             let envelope = WireEnvelope {
                 protocol_version: self.protocol_version,
@@ -348,6 +364,21 @@ impl ConversationDeliveryWriter {
         stream.finished = true;
         Ok(())
     }
+}
+
+/// Returns the thread-scoped durable cursor of one ledger event.
+///
+/// Production events carry `Some` attribution and order by
+/// `attribution.delivery_sequence`, which is strictly increasing per thread
+/// across runs. Legacy unit fixtures may carry `None` and order by the
+/// run-local `observation.sequence()` instead; production must never emit
+/// `None`.
+fn observation_delivery_sequence(event: &EngineObservationEvent) -> u64 {
+    event
+        .attribution
+        .as_ref()
+        .map(|attribution| attribution.delivery_sequence)
+        .unwrap_or_else(|| event.observation.sequence().get())
 }
 
 /// Private synchronous cleanup guard for the writer's outbound direction.

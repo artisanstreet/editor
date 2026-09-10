@@ -99,6 +99,27 @@ fn replacement_fences_old_lease_and_unsubscribe_drops_the_entry() {
     assert!(registry.is_empty());
 }
 
+#[test]
+fn observation_cursor_starts_separately_from_the_patch_cursor() {
+    use artisan_backend::conversation_subscription_registry::ConversationSubscriptionRegistry;
+
+    let thread_id = ThreadId::parse("delivery-observation-cursor").expect("valid thread id");
+    let mut registry = ConversationSubscriptionRegistry::new();
+    let lease = registry
+        .register_pending(thread_id.clone(), ConversationCursor::new(9))
+        .expect("pending registration");
+    // The patch cursor declares replay position; the observation cursor always
+    // restarts at the thread-scoped origin so reconnect replay redelivers the
+    // durable history including settled turns.
+    let view = registry.view(&thread_id).expect("pending view");
+    assert_eq!(view.cursor(), ConversationCursor::new(9));
+    assert_eq!(view.observation_cursor(), 0);
+    registry.activate(&lease).expect("activation");
+    let view = registry.view(&thread_id).expect("active view");
+    assert_eq!(view.cursor(), ConversationCursor::new(9));
+    assert_eq!(view.observation_cursor(), 0);
+}
+
 #[tokio::test]
 async fn notifier_coalesces_repeated_commit_wakes_without_payload() {
     let notifier = ConversationCommitNotifier::new();

@@ -74,6 +74,36 @@ fn observation_envelope(frame: &str, cursor: u64, observation: Observation) -> W
             event: Event::EngineObservation(EngineObservationEvent {
                 thread_id: thread_id(),
                 observation,
+                attribution: None,
+            }),
+        }),
+    )
+}
+
+fn attributed_observation_envelope(
+    frame: &str,
+    cursor: u64,
+    observation: Observation,
+    run_id: &str,
+    turn_id: &str,
+    committed_at: i64,
+    delivery_sequence: u64,
+) -> WireEnvelope {
+    envelope(
+        frame,
+        WireEnvelopeBody::Event(ServerEvent {
+            cursor: EventCursor::new(cursor).expect("fixture event cursor is positive"),
+            event: Event::EngineObservation(EngineObservationEvent {
+                thread_id: thread_id(),
+                observation,
+                attribution: Some(artisan_domain::EngineObservationAttribution {
+                    run_id: artisan_domain::RunId::parse(run_id)
+                        .expect("fixture run id is valid"),
+                    turn_id: artisan_domain::TurnId::parse(turn_id)
+                        .expect("fixture turn id is valid"),
+                    committed_at: UnixMillis::from_millis(committed_at),
+                    delivery_sequence,
+                }),
             }),
         }),
     )
@@ -597,6 +627,114 @@ fn approval_and_question_request_ids_survive_the_wire() -> Result<(), Box<dyn Er
         "answers must survive for A-approve settlement"
     );
     Ok(())
+}
+
+#[test]
+fn attributed_observation_roundtrips_with_thread_scoped_cursor() -> Result<(), Box<dyn Error>> {
+    let value = attributed_observation_envelope(
+        "server-event-observation-attributed",
+        41,
+        tool(5),
+        "run-attributed-1",
+        "turn-attributed-1",
+        6_001,
+        17,
+    );
+    let decoded = decode_envelope(&encode_envelope(&value)?)?;
+    let WireEnvelopeBody::Event(event) = decoded.body else {
+        panic!("an attributed observation frame must decode as an event");
+    };
+    let Event::EngineObservation(delivered) = event.event else {
+        panic!("an attributed observation frame must decode as an engine observation");
+    };
+    let attribution = delivered
+        .attribution
+        .as_ref()
+        .expect("attribution must survive the wire");
+    assert_eq!(attribution.run_id.as_str(), "run-attributed-1");
+    assert_eq!(attribution.turn_id.as_str(), "turn-attributed-1");
+    assert_eq!(attribution.committed_at, UnixMillis::from_millis(6_001));
+    assert_eq!(attribution.delivery_sequence, 17);
+    assert_eq!(decoded, value, "attributed envelope must survive field-for-field");
+    Ok(())
+}
+
+#[test]
+fn absent_attribution_decodes_as_none_for_old_frames() -> Result<(), Box<dyn Error>> {
+    // Pre-attribution v1 bytes never set the union, so they must decode as
+    // `None` rather than a defaulted struct.
+    let value = observation_envelope("server-event-observation-legacy", 42, tool(5));
+    let decoded = decode_envelope(&encode_envelope(&value)?)?;
+    let WireEnvelopeBody::Event(event) = decoded.body else {
+        panic!("a legacy observation frame must decode as an event");
+    };
+    let Event::EngineObservation(delivered) = event.event else {
+        panic!("a legacy observation frame must decode as an engine observation");
+    };
+    assert!(
+        delivered.attribution.is_none(),
+        "absent attribution must decode as None"
+    );
+    Ok(())
+}
+
+#[test]
+fn malformed_attribution_is_rejected() {
+    for (frame, build) in [
+        (
+            "raw-attribution-empty-run",
+            |attribution: artisan_protocol::artisan_capnp::engine_observation_attribution::Builder<'_>| {
+                let mut owned = attribution;
+                owned.set_run_id("");
+                owned.set_turn_id("turn-1");
+                owned.set_committed_at_millis(6_001);
+                owned.set_delivery_sequence(1);
+            },
+        ),
+        (
+            "raw-attribution-zero-sequence",
+            |attribution: artisan_protocol::artisan_capnp::engine_observation_attribution::Builder<'_>| {
+                let mut owned = attribution;
+                owned.set_run_id("run-1");
+                owned.set_turn_id("turn-1");
+                owned.set_committed_at_millis(6_001);
+                owned.set_delivery_sequence(0);
+            },
+        ),
+        (
+            "raw-attribution-nonpositive-time",
+            |attribution: artisan_protocol::artisan_capnp::engine_observation_attribution::Builder<'_>| {
+                let mut owned = attribution;
+                owned.set_run_id("run-1");
+                owned.set_turn_id("turn-1");
+                owned.set_committed_at_millis(0);
+                owned.set_delivery_sequence(1);
+            },
+        ),
+    ] as [(&str, fn(artisan_protocol::artisan_capnp::engine_observation_attribution::Builder<'_>)); 3]
+    {
+        let mut message = raw_envelope();
+        let mut root = message.init_root::<envelope::Builder>();
+        root.set_protocol_version(1);
+        root.set_message_id(frame);
+        let mut event = root.reborrow().init_body().init_event();
+        event.set_cursor(43);
+        let mut observation = event.reborrow().init_engine_observation();
+        observation.set_thread_id("thread-obs");
+        let mut tool = observation.reborrow().init_observation().init_tool();
+        tool.set_id("obs-tool");
+        tool.set_sequence(5);
+        tool.set_tool_id("tool-1");
+        tool.set_tool_name("read");
+        tool.set_action(artisan_protocol::artisan_capnp::ObservationToolAction::Completed);
+        tool.set_detail("read 42 lines");
+        build(observation.init_attribution().init_attribution());
+        let encoded = serialize::write_message_to_words(&message);
+        assert!(
+            decode_envelope(&encoded).is_err(),
+            "malformed attribution must be rejected for {frame}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

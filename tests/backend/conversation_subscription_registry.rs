@@ -973,3 +973,56 @@ fn observation_error_display_reports_sequences_without_payloads() {
     };
     assert_eq!(stalled.to_string(), "observation batch does not advance");
 }
+
+#[test]
+fn thread_scoped_delivery_sequence_survives_run_local_resets() {
+    let mut registry = ConversationSubscriptionRegistry::new();
+    let thread_id = thread("thread-delivery-sequence");
+    let lease = registry
+        .register_pending(thread_id.clone(), cursor(0))
+        .expect("registration should succeed");
+    registry.activate(&lease).expect("activation should succeed");
+
+    // Patch cursor and observation cursor advance independently: publishing
+    // patch batches never moves the thread-scoped delivery cursor.
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(0));
+    assert_eq!(view_cursor(&registry, &thread_id), Some(cursor(0)));
+
+    // Two runs reset their run-local `Observation.sequence`, but the ledger
+    // assigns strictly increasing thread-scoped `delivery_sequence` values, so
+    // both batches advance without gaps or duplicates.
+    registry
+        .publish_observation_batch(&lease, &thread_id, 0, 1)
+        .expect("first run batch should advance");
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(1));
+    registry
+        .publish_observation_batch(&lease, &thread_id, 1, 2)
+        .expect("second run batch should advance despite a run-local reset");
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(2));
+
+    // Duplicates, regressions, and gaps all reject without mutating the
+    // cursor, so a redelivered page deduplicates and a skipped page stays a
+    // typed failure for the next authoritative read.
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread_id, 0, 2),
+        Err(ApplyObservationBatchError::CursorMismatch {
+            expected: 2,
+            actual: 0,
+        })
+    );
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread_id, 2, 2),
+        Err(ApplyObservationBatchError::NonAdvancing {
+            from_sequence: 2,
+            to_sequence: 2,
+        })
+    );
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread_id, 3, 4),
+        Err(ApplyObservationBatchError::CursorMismatch {
+            expected: 2,
+            actual: 3,
+        })
+    );
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(2));
+}

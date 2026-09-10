@@ -37,8 +37,8 @@ use artisan_domain::{
     EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody, MessageId, MessagePhase,
     NetworkAccess, Observation, ObservationId, ObservationSequence, OpenCode2Selection, PatchBatch,
-    PatchId, PermissionId, ProjectId, RequestId, RootPath, ThreadId, ThreadTitle, ToolAction,
-    ToolObservation, TurnId, UnixMillis, WebSearchAccess,
+    PatchId, PermissionId, ProjectId, RequestId, RootPath, RunId, ThreadId, ThreadTitle,
+    ToolAction, ToolObservation, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_protocol::{ClientRequest, FrameId, ProtocolVersion, WireEnvelope, WireEnvelopeBody};
@@ -1192,13 +1192,41 @@ fn wire_message_completed(id: &str, sequence_value: u64) -> Observation {
     )
 }
 
+fn attributed_event(
+    thread_id: &ThreadId,
+    observation: Observation,
+    run_id: &str,
+    turn_id: &str,
+    committed_at: i64,
+    delivery_sequence: u64,
+) -> artisan_domain::EngineObservationEvent {
+    artisan_domain::EngineObservationEvent {
+        thread_id: thread_id.clone(),
+        observation,
+        attribution: Some(artisan_domain::EngineObservationAttribution {
+            run_id: RunId::parse(run_id).expect("fixture run id is valid"),
+            turn_id: TurnId::parse(turn_id).expect("fixture turn id is valid"),
+            committed_at: UnixMillis::from_millis(committed_at),
+            delivery_sequence,
+        }),
+    }
+}
+
+fn legacy_event(thread_id: &ThreadId, observation: Observation) -> artisan_domain::EngineObservationEvent {
+    artisan_domain::EngineObservationEvent {
+        thread_id: thread_id.clone(),
+        observation,
+        attribution: None,
+    }
+}
+
 fn assert_observation_frame(
     envelope: WireEnvelope,
     thread_id: &ThreadId,
     frame_id: &str,
     sent_at: i64,
     event_cursor: u64,
-    sequence_value: u64,
+    delivery_sequence: u64,
 ) -> Observation {
     assert_eq!(envelope.protocol_version, ProtocolVersion::V1);
     assert_eq!(envelope.frame_id.as_str(), frame_id);
@@ -1209,7 +1237,12 @@ fn assert_observation_frame(
             match event.event {
                 artisan_domain::Event::EngineObservation(delivered) => {
                     assert_eq!(&delivered.thread_id, thread_id);
-                    assert_eq!(delivered.observation.sequence().get(), sequence_value);
+                    let sequence = delivered
+                        .attribution
+                        .as_ref()
+                        .map(|attribution| attribution.delivery_sequence)
+                        .unwrap_or_else(|| delivered.observation.sequence().get());
+                    assert_eq!(sequence, delivery_sequence);
                     delivered.observation
                 }
                 _ => panic!("an observation delivery must send an engine observation"),
@@ -1243,15 +1276,36 @@ async fn observation_batch_publishes_in_sequence_order_with_cursor_dedup() {
     let batch = vec![
         (
             stamp("frame-obs-1", 5_001),
-            wire_tool_observation("obs-wire-1", 1),
+            attributed_event(
+                &thread_id,
+                wire_tool_observation("obs-wire-1", 1),
+                "run-wire-1",
+                "turn-wire-1",
+                6_001,
+                1,
+            ),
         ),
         (
             stamp("frame-obs-2", 5_002),
-            wire_approval_requested("obs-wire-2", 2, "approval-wire-1"),
+            attributed_event(
+                &thread_id,
+                wire_approval_requested("obs-wire-2", 2, "approval-wire-1"),
+                "run-wire-1",
+                "turn-wire-1",
+                6_002,
+                2,
+            ),
         ),
         (
             stamp("frame-obs-3", 5_003),
-            wire_message_completed("obs-wire-3", 3),
+            attributed_event(
+                &thread_id,
+                wire_message_completed("obs-wire-3", 3),
+                "run-wire-1",
+                "turn-wire-1",
+                6_003,
+                3,
+            ),
         ),
     ];
 
@@ -1339,15 +1393,36 @@ async fn observation_batch_publishes_in_sequence_order_with_cursor_dedup() {
     let replay = vec![
         (
             stamp("frame-obs-replay-1", 5_011),
-            wire_tool_observation("obs-wire-1", 1),
+            attributed_event(
+                &thread_id,
+                wire_tool_observation("obs-wire-1", 1),
+                "run-wire-1",
+                "turn-wire-1",
+                6_001,
+                1,
+            ),
         ),
         (
             stamp("frame-obs-replay-2", 5_012),
-            wire_approval_requested("obs-wire-2", 2, "approval-wire-1"),
+            attributed_event(
+                &thread_id,
+                wire_approval_requested("obs-wire-2", 2, "approval-wire-1"),
+                "run-wire-1",
+                "turn-wire-1",
+                6_002,
+                2,
+            ),
         ),
         (
             stamp("frame-obs-replay-3", 5_013),
-            wire_message_completed("obs-wire-3", 3),
+            attributed_event(
+                &thread_id,
+                wire_message_completed("obs-wire-3", 3),
+                "run-wire-1",
+                "turn-wire-1",
+                6_003,
+                3,
+            ),
         ),
     ];
     let (writer, outcome) = tokio::time::timeout(
@@ -1375,6 +1450,251 @@ async fn observation_batch_publishes_in_sequence_order_with_cursor_dedup() {
         .finish()
         .expect("observation stream should finish cleanly");
     assert_clean_eof(&mut incoming).await;
+    drop(incoming);
+    drop(client_connection);
+    loopback.drain().await;
+}
+
+#[tokio::test]
+async fn two_runs_resetting_run_sequence_lose_no_attributed_events() {
+    let (_database, repository) = memory_repository().await;
+    let thread_id = seed_thread(&repository, "obs-tworuns").await;
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let subscription = activate(
+        &repository,
+        &registrar,
+        "request-obs-tworuns",
+        ConversationSubscribe::fresh(thread_id.clone()),
+    )
+    .await;
+    let lease = subscription.lease().clone();
+
+    // Both runs reset their run-local `Observation.sequence` to 1, but the
+    // thread-scoped `delivery_sequence` stays strictly increasing, so no row
+    // is deduplicated or lost.
+    let batch = vec![
+        (
+            stamp("frame-twouns-1", 5_101),
+            attributed_event(
+                &thread_id,
+                wire_tool_observation("obs-tworuns-1", 1),
+                "run-tworuns-1",
+                "turn-tworuns-1",
+                6_101,
+                1,
+            ),
+        ),
+        (
+            stamp("frame-tworuns-2", 5_102),
+            attributed_event(
+                &thread_id,
+                wire_tool_observation("obs-tworuns-2", 1),
+                "run-tworuns-2",
+                "turn-tworuns-2",
+                6_102,
+                2,
+            ),
+        ),
+    ];
+
+    let mut loopback = spawn_loopback(false);
+    let (server_connection, client_connection) = connected(&mut loopback).await;
+    let _server_keepalive = server_connection.clone();
+    let writer =
+        ConversationDeliveryWriter::new(server_connection, registrar.clone(), ProtocolVersion::V1);
+    let (writer, outcome) = tokio::time::timeout(
+        TEST_DEADLINE,
+        writer.deliver_observation_batch(&lease.clone(), thread_id.clone(), batch),
+    )
+    .await
+    .expect("two-run delivery should finish")
+    .expect("two-run delivery should succeed");
+    match outcome {
+        ObservationBatchDelivery::Published {
+            from_sequence,
+            to_sequence,
+            delivered,
+        } => {
+            assert_eq!(from_sequence, 0);
+            assert_eq!(to_sequence, 2);
+            assert_eq!(delivered.len(), 2);
+        }
+        ObservationBatchDelivery::Current { .. } => {
+            panic!("two runs with distinct delivery sequences must publish")
+        }
+    }
+    let mut incoming = tokio::time::timeout(TEST_DEADLINE, client_connection.accept_uni())
+        .await
+        .expect("two-run stream should become visible")
+        .expect("two-run stream should be accepted");
+    let first = assert_observation_frame(
+        receive_envelope(&mut incoming).await,
+        &thread_id,
+        "frame-twouns-1",
+        5_101,
+        1,
+        1,
+    );
+    assert!(matches!(first, Observation::Tool(_)));
+    let second = assert_observation_frame(
+        receive_envelope(&mut incoming).await,
+        &thread_id,
+        "frame-twouns-2",
+        5_102,
+        2,
+        2,
+    );
+    assert!(matches!(second, Observation::Tool(_)));
+    assert_eq!(
+        registrar
+            .subscription_view(&thread_id)
+            .await
+            .expect("two-run subscription should remain registered")
+            .observation_cursor(),
+        2
+    );
+    writer
+        .finish()
+        .expect("two-run stream should finish cleanly");
+    assert_clean_eof(&mut incoming).await;
+    drop(incoming);
+    drop(client_connection);
+    loopback.drain().await;
+}
+
+#[tokio::test]
+async fn legacy_unattributed_events_fall_back_to_run_local_sequence() {
+    let (_database, repository) = memory_repository().await;
+    let thread_id = seed_thread(&repository, "obs-legacy").await;
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let subscription = activate(
+        &repository,
+        &registrar,
+        "request-obs-legacy",
+        ConversationSubscribe::fresh(thread_id.clone()),
+    )
+    .await;
+    let lease = subscription.lease().clone();
+
+    let batch = vec![(
+        stamp("frame-legacy-1", 5_201),
+        legacy_event(&thread_id, wire_tool_observation("obs-legacy-1", 4)),
+    )];
+    let mut loopback = spawn_loopback(false);
+    let (server_connection, client_connection) = connected(&mut loopback).await;
+    let _server_keepalive = server_connection.clone();
+    let writer =
+        ConversationDeliveryWriter::new(server_connection, registrar.clone(), ProtocolVersion::V1);
+    let (writer, outcome) = tokio::time::timeout(
+        TEST_DEADLINE,
+        writer.deliver_observation_batch(&lease.clone(), thread_id.clone(), batch),
+    )
+    .await
+    .expect("legacy delivery should finish")
+    .expect("legacy delivery should succeed");
+    match outcome {
+        ObservationBatchDelivery::Published {
+            from_sequence,
+            to_sequence,
+            ..
+        } => {
+            assert_eq!(from_sequence, 0);
+            assert_eq!(to_sequence, 4);
+        }
+        ObservationBatchDelivery::Current { .. } => {
+            panic!("a legacy unit row must publish by its run-local sequence")
+        }
+    }
+    let mut incoming = tokio::time::timeout(TEST_DEADLINE, client_connection.accept_uni())
+        .await
+        .expect("legacy stream should become visible")
+        .expect("legacy stream should be accepted");
+    let delivered = assert_observation_frame(
+        receive_envelope(&mut incoming).await,
+        &thread_id,
+        "frame-legacy-1",
+        5_201,
+        1,
+        4,
+    );
+    assert!(matches!(delivered, Observation::Tool(_)));
+    writer
+        .finish()
+        .expect("legacy stream should finish cleanly");
+    assert_clean_eof(&mut incoming).await;
+    drop(incoming);
+    drop(client_connection);
+    loopback.drain().await;
+}
+
+#[tokio::test]
+async fn observation_send_failure_retains_the_cursor() {
+    let (_database, repository) = memory_repository().await;
+    let thread_id = seed_thread(&repository, "obs-send-fail").await;
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let subscription = activate(
+        &repository,
+        &registrar,
+        "request-obs-send-fail",
+        ConversationSubscribe::fresh(thread_id.clone()),
+    )
+    .await;
+    let lease = subscription.lease().clone();
+    let batch = vec![(
+        stamp("frame-obs-fail-1", 5_301),
+        attributed_event(
+            &thread_id,
+            wire_tool_observation("obs-fail-1", 1),
+            "run-fail-1",
+            "turn-fail-1",
+            6_301,
+            1,
+        ),
+    )];
+
+    let mut loopback = spawn_loopback(true);
+    let (server_connection, client_connection) = connected(&mut loopback).await;
+    let _server_keepalive = server_connection.clone();
+    let writer =
+        ConversationDeliveryWriter::new(server_connection, registrar.clone(), ProtocolVersion::V1);
+    let mut delivery = Box::pin(writer.deliver_observation_batch(
+        &lease.clone(),
+        thread_id.clone(),
+        batch,
+    ));
+    let mut accept = Box::pin(client_connection.accept_uni());
+    let mut incoming = tokio::time::timeout(TEST_DEADLINE, async {
+        tokio::select! {
+            incoming = &mut accept => incoming.expect("uni stream should open"),
+            _ = &mut delivery => panic!("a constrained observation frame should still be in flight"),
+        }
+    })
+    .await
+    .expect("observation stream opening should finish under the deadline");
+    incoming
+        .stop(PEER_STOP_CODE)
+        .expect("peer stop should be accepted");
+    let result = tokio::time::timeout(TEST_DEADLINE, &mut delivery)
+        .await
+        .expect("peer stop should settle the observation send");
+    let error = result.expect_err("peer stop must consume the writer with an error");
+    match error {
+        ConversationDeliveryError::Send(EnvelopeSendError::Frame(FrameError::Write(
+            WriteError::Stopped(code),
+        ))) => assert_eq!(code, PEER_STOP_CODE),
+        other => panic!("expected the exact stopped observation source, got {other:?}"),
+    }
+    assert_eq!(
+        registrar
+            .subscription_view(&thread_id)
+            .await
+            .expect("failed observation subscription should remain registered")
+            .observation_cursor(),
+        0,
+        "a send failure must retain the observation cursor"
+    );
+    drop(accept);
+    drop(delivery);
     drop(incoming);
     drop(client_connection);
     loopback.drain().await;

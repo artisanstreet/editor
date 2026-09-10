@@ -28,10 +28,12 @@ use artisan_database::{
     SessionContinuationQuery, SessionContinuationUnavailable, SessionContinuationUnavailableReason,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, EngineId, EngineSelection, IncrementalText, ItemId,
-    Observation, ObservationId, ObservationSequence, PatchId, RespondApproval, RespondQuestion,
-    Revision, RootPath, RunId, SubagentInput, SubagentObservation, SubagentTranscriptObservation,
-    TurnId, UnixMillis,
+    AssistantBody, AssistantMessagePhase, EngineId, EngineSelection, FileObservation,
+    IncrementalText, ItemId, Observation, ObservationId, ObservationSequence, PatchId,
+    PlanEntry, PlanObservation, ReasoningSummaryCompletedObservation,
+    ReasoningSummaryDeltaObservation, RespondApproval, RespondQuestion, Revision, RootPath, RunId,
+    SearchObservation, SubagentInput, SubagentObservation, SubagentTranscriptObservation,
+    TerminalActivityInput, TerminalActivityObservation, ToolObservation, TurnId, UnixMillis,
 };
 use artisan_native_engine::{
     NativeClaudeAuthority, NativeCodexAuthority, NativeOpenCode2Authority, VerifiedClaudeLaunch,
@@ -2880,6 +2882,9 @@ async fn handle_observation(
         EngineObservation::SubagentTranscript(row) => {
             handle_subagent_transcript_row(context, state, turn, row).await;
         }
+        EngineObservation::Activity(observation) => {
+            handle_activity_observation(context, state, turn, observation).await;
+        }
     }
 }
 
@@ -3434,6 +3439,57 @@ async fn handle_subagent_row(
     state.assistant_body = body;
 }
 
+/// Commits one validated rich activity row through the shared S1b checkpoint
+/// batch path.
+///
+/// The row carries source-local durable identity/sequence from the owner
+/// stream; the dispatcher remints both (fresh identity, run-local
+/// base-plus-one sequence freshly read for this batch) before persistence, so
+/// the thread-scoped `delivery_sequence` attribution assigned by the database
+/// stays strictly increasing across runs. Encoding, fencing,
+/// `commit_batch_with_retry`, and the content-neutral assistant projection
+/// are identical to the subagent path: the body is rewritten verbatim so
+/// subscribers receive the wake hint without any transcript mutation. Any
+/// failure marks the turn interrupted with uncertain progress; no row is
+/// discarded and no no-op commit is emitted.
+async fn handle_activity_observation(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    observation: Observation,
+) {
+    let mut cursor = SubagentCommitCursor {
+        scope: copy_scope(&state.scope),
+        engine: state.engine,
+        batch_sequence: state.batch_sequence,
+        assistant_item: state.assistant_item.clone(),
+        assistant_revision: state.assistant_revision,
+        assistant_body: state.assistant_body.clone(),
+    };
+    if !commit_activity_observation(
+        context.repository,
+        context.config,
+        context.origin,
+        &mut cursor,
+        observation,
+    )
+    .await
+    {
+        mark_interrupted(state, turn, true);
+        return;
+    }
+    let updated_at = cursor.scope.expected_updated_at;
+    let revision = cursor.assistant_revision;
+    let sequence = cursor.batch_sequence;
+    let item = cursor.assistant_item.clone();
+    let body = cursor.assistant_body.clone();
+    state.scope.expected_updated_at = updated_at;
+    state.assistant_revision = revision;
+    state.batch_sequence = sequence;
+    state.assistant_item = item;
+    state.assistant_body = body;
+}
+
 /// Commits one re-sequenced subagent observation through the S1b batch path.
 ///
 /// Reads the durable base fresh for this batch and assigns base-plus-one, so
@@ -3597,6 +3653,251 @@ fn resequence_subagent_observation(
                 row.content().clone(),
             ),
         )),
+        _ => None,
+    }
+}
+
+/// Commits one re-sequenced rich activity observation through the S1b batch
+/// path.
+///
+/// Mirrors [`commit_subagent_observation`] exactly (fresh run-local
+/// base-plus-one, dispatcher-minted identity, checkpoint encode under the run
+/// bind, content-neutral assistant change, `commit_batch_with_retry` with the
+/// existing fencing/notifier): only the resequence vocabulary differs. The
+/// thread-scoped `delivery_sequence` is assigned atomically by the database
+/// from the launch receipt plus `operated_at`; the dispatcher never stamps it.
+pub(crate) async fn commit_activity_observation(
+    repository: &Repository,
+    config: &NativeRunDispatcherConfig,
+    origin: &SystemCommandOrigin,
+    cursor: &mut SubagentCommitCursor<'_>,
+    observation: Observation,
+) -> bool {
+    let base = match repository
+        .last_committed_observation_sequence(&cursor.scope.launched.run_id)
+        .await
+    {
+        Ok(base) => base,
+        Err(_) => return false,
+    };
+    let sequence_value = match base {
+        None => 1,
+        Some(maximum) => maximum.saturating_add(1),
+    };
+    let Ok(sequence) = ObservationSequence::new(sequence_value) else {
+        return false;
+    };
+    let Ok(identity) = origin.mint_identity() else {
+        return false;
+    };
+    let Ok(observation_id) = ObservationId::parse(identity) else {
+        return false;
+    };
+    let Some(resequenced) =
+        resequence_activity_observation(&observation, &observation_id, sequence)
+    else {
+        return false;
+    };
+    let Ok(checkpoint) = artisan_database::encode_observation_checkpoint(
+        cursor.engine,
+        cursor.scope.bound.binding_version,
+        base,
+        &[resequenced],
+    ) else {
+        return false;
+    };
+    if artisan_database::validate_observation_bind(
+        cursor.scope.bound.binding_version,
+        cursor.scope.bound,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let Ok(body) = AssistantBody::parse(cursor.assistant_body.clone()) else {
+        return false;
+    };
+    let Some(patch_id) = mint_patch_id(origin) else {
+        return false;
+    };
+    let Some(operated_at) = at_or_after(origin, cursor.scope.expected_updated_at) else {
+        return false;
+    };
+    if let Some(item_id) = cursor.assistant_item.clone() {
+        let changes = [AssistantChange::Replace {
+            item_id: &item_id,
+            expected_revision: cursor.assistant_revision,
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            patch_id: &patch_id,
+        }];
+        if !commit_batch_with_retry(CommitBatchRequest {
+            repository,
+            notifier: &config.notifier,
+            scope: &cursor.scope,
+            batch_sequence: cursor.batch_sequence,
+            operated_at,
+            activate_turn_patch_id: None,
+            changes: &changes,
+            checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+            retries: config.max_command_retries,
+        })
+        .await
+        {
+            return false;
+        }
+        let Ok(next_revision) = cursor.assistant_revision.checked_next() else {
+            return false;
+        };
+        cursor.assistant_revision = next_revision;
+    } else {
+        let Some(item_id) = mint_item_id(origin) else {
+            return false;
+        };
+        let Some(activation_patch_id) = mint_patch_id(origin) else {
+            return false;
+        };
+        let changes = [AssistantChange::Start {
+            item_id: &item_id,
+            phase: AssistantMessagePhase::Unspecified,
+            body: &body,
+            patch_id: &patch_id,
+        }];
+        if !commit_batch_with_retry(CommitBatchRequest {
+            repository,
+            notifier: &config.notifier,
+            scope: &cursor.scope,
+            batch_sequence: cursor.batch_sequence,
+            operated_at,
+            activate_turn_patch_id: Some(&activation_patch_id),
+            changes: &changes,
+            checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+            retries: config.max_command_retries,
+        })
+        .await
+        {
+            return false;
+        }
+        cursor.assistant_item = Some(item_id);
+        cursor.assistant_revision = Revision::new(0);
+    }
+    let Some(next_sequence) = cursor.batch_sequence.checked_add(1) else {
+        return false;
+    };
+    cursor.batch_sequence = next_sequence;
+    cursor.scope.expected_updated_at = operated_at;
+    true
+}
+
+/// Rebuilds one rich activity row onto a dispatcher-assigned identity.
+///
+/// Source-local identity/sequence never cross into durable history: every
+/// supported activity variant (reasoning-summary delta/completed, tool,
+/// terminal activity, file, search, plan) is rebuilt with the dispatcher
+/// base-plus-one run-local sequence and a fresh identity, preserving all
+/// provider payload fields verbatim. Subagent rows stay on the existing
+/// subagent path; any other row rejects so no discard or no-op commit can be
+/// emitted.
+fn resequence_activity_observation(
+    observation: &Observation,
+    observation_id: &ObservationId,
+    sequence: ObservationSequence,
+) -> Option<Observation> {
+    match observation {
+        Observation::ReasoningSummaryDelta(row) => {
+            ReasoningSummaryDeltaObservation::new(
+                observation_id.clone(),
+                sequence,
+                row.item_id().clone(),
+                row.summary_index(),
+                row.delta().to_owned(),
+                row.thinking_tokens(),
+                row.turn_id().clone(),
+            )
+            .ok()
+            .map(Observation::ReasoningSummaryDelta)
+        }
+        Observation::ReasoningSummaryCompleted(row) => {
+            ReasoningSummaryCompletedObservation::new(
+                observation_id.clone(),
+                sequence,
+                row.item_id().clone(),
+                row.text().map(str::to_owned),
+                row.turn_id().clone(),
+            )
+            .ok()
+            .map(Observation::ReasoningSummaryCompleted)
+        }
+        Observation::Tool(row) => ToolObservation::new(
+            observation_id.clone(),
+            sequence,
+            row.tool_id().clone(),
+            row.tool_name().to_owned(),
+            row.action(),
+            row.detail().map(str::to_owned),
+        )
+        .ok()
+        .map(Observation::Tool),
+        Observation::TerminalActivity(row) => TerminalActivityObservation::new(
+            observation_id.clone(),
+            sequence,
+            TerminalActivityInput {
+                activity_id: row.activity_id().clone(),
+                channel: row.channel(),
+                command: row.command().map(str::to_owned),
+                shell: row.shell().map(str::to_owned),
+                output: row.output().map(str::to_owned),
+                exit_code: row.exit_code(),
+                state: row.state(),
+            },
+        )
+        .ok()
+        .map(Observation::TerminalActivity),
+        Observation::File(row) => FileObservation::new(
+            observation_id.clone(),
+            sequence,
+            row.path().to_owned(),
+            row.action(),
+            row.lines_added(),
+            row.lines_deleted(),
+        )
+        .ok()
+        .map(Observation::File),
+        Observation::Search(row) => SearchObservation::new(
+            observation_id.clone(),
+            sequence,
+            row.query().to_owned(),
+            row.scope(),
+            row.search_id().cloned(),
+            row.state(),
+            row.result_count(),
+        )
+        .ok()
+        .map(Observation::Search),
+        Observation::Plan(row) => {
+            let mut entries = Vec::with_capacity(row.entries().len());
+            for entry in row.entries() {
+                entries.push(
+                    PlanEntry::new(
+                        entry.id().clone(),
+                        entry.status(),
+                        entry.text().to_owned(),
+                    )
+                    .ok()?,
+                );
+            }
+            // Rebuilding plan entries keeps provider entry ids: they are
+            // renderer-scoped within the plan payload, while the observation
+            // identity itself is freshly minted above.
+            PlanObservation::new(
+                observation_id.clone(),
+                sequence,
+                entries,
+                row.turn_id().cloned(),
+            )
+            .ok()
+            .map(Observation::Plan)
+        }
         _ => None,
     }
 }
@@ -4315,6 +4616,202 @@ mod continuation_reason_tests {
                 SessionContinuationIncompatibility::ProviderBindingProfile
             )),
             "provider continuation incompatible: the prior binding names a different profile"
+        );
+    }
+}
+
+#[cfg(test)]
+mod activity_resequence_tests {
+    use super::resequence_activity_observation;
+    use artisan_domain::{
+        FileAction, FileObservation, MessagePhase, Observation, ObservationId, ObservationSequence,
+        PlanEntry, PlanEntryStatus, PlanObservation, ReasoningSummaryCompletedObservation,
+        ReasoningSummaryDeltaObservation, SearchObservation, SearchState, TerminalActivityInput,
+        TerminalActivityObservation, TerminalActivityState, ToolAction, ToolObservation,
+    };
+
+    fn observation_id(value: &str) -> ObservationId {
+        ObservationId::parse(value).expect("fixture observation id is valid")
+    }
+
+    fn sequence(value: u64) -> ObservationSequence {
+        ObservationSequence::new(value).expect("fixture sequence is valid")
+    }
+
+    #[test]
+    fn rich_activity_rows_remint_identity_and_run_local_sequence() {
+        let fresh_id = observation_id("dispatcher-minted-activity");
+        let fresh_sequence = sequence(7);
+        let source = Observation::Tool(
+            ToolObservation::new(
+                observation_id("source-tool-row"),
+                sequence(41),
+                observation_id("tool-source-1"),
+                String::from("read"),
+                ToolAction::Completed,
+                Some(String::from("read 42 lines")),
+            )
+            .expect("fixture tool row is valid"),
+        );
+        let resequenced = resequence_activity_observation(&source, &fresh_id, fresh_sequence)
+            .expect("tool activity must resequence");
+        let Observation::Tool(row) = resequenced else {
+            panic!("tool activity must stay a tool row");
+        };
+        assert_eq!(row.id(), &fresh_id);
+        assert_eq!(row.sequence(), fresh_sequence);
+        assert_eq!(row.tool_id().as_str(), "tool-source-1");
+        assert_eq!(row.tool_name(), "read");
+        assert_eq!(row.action(), ToolAction::Completed);
+        assert_eq!(row.detail(), Some("read 42 lines"));
+    }
+
+    #[test]
+    fn file_search_terminal_plan_and_reasoning_rows_preserve_payload() {
+        let fresh_id = observation_id("dispatcher-minted-rich");
+        let fresh_sequence = sequence(8);
+        let rows = vec![
+            Observation::File(
+                FileObservation::new(
+                    observation_id("source-file"),
+                    sequence(42),
+                    String::from("src/main.rs"),
+                    FileAction::Modified,
+                    Some(10),
+                    Some(2),
+                )
+                .expect("fixture file row is valid"),
+            ),
+            Observation::Search(
+                SearchObservation::new(
+                    observation_id("source-search"),
+                    sequence(43),
+                    String::from("observation delivery"),
+                    None,
+                    None,
+                    SearchState::Completed,
+                    Some(7),
+                )
+                .expect("fixture search row is valid"),
+            ),
+            Observation::TerminalActivity(
+                TerminalActivityObservation::new(
+                    observation_id("source-terminal"),
+                    sequence(44),
+                    TerminalActivityInput {
+                        activity_id: observation_id("activity-1"),
+                        channel: None,
+                        command: Some(String::from("cargo test")),
+                        shell: None,
+                        output: Some(String::from("test result: ok")),
+                        exit_code: Some(0),
+                        state: TerminalActivityState::Completed,
+                    },
+                )
+                .expect("fixture terminal row is valid"),
+            ),
+            Observation::Plan(
+                PlanObservation::new(
+                    observation_id("source-plan"),
+                    sequence(45),
+                    vec![
+                        PlanEntry::new(
+                            observation_id("plan-entry-1"),
+                            PlanEntryStatus::Completed,
+                            String::from("Define the vocabulary"),
+                        )
+                        .expect("fixture plan entry is valid"),
+                    ],
+                    None,
+                )
+                .expect("fixture plan is valid"),
+            ),
+            Observation::ReasoningSummaryDelta(
+                ReasoningSummaryDeltaObservation::new(
+                    observation_id("source-reasoning-delta"),
+                    sequence(46),
+                    observation_id("item-2"),
+                    3,
+                    String::from("summary fragment"),
+                    None,
+                    observation_id("turn-1"),
+                )
+                .expect("fixture reasoning delta is valid"),
+            ),
+            Observation::ReasoningSummaryCompleted(
+                ReasoningSummaryCompletedObservation::new(
+                    observation_id("source-reasoning-completed"),
+                    sequence(47),
+                    observation_id("item-2"),
+                    Some(String::from("public summary")),
+                    observation_id("turn-1"),
+                )
+                .expect("fixture settled reasoning is valid"),
+            ),
+        ];
+        for source in &rows {
+            let resequenced =
+                resequence_activity_observation(source, &fresh_id, fresh_sequence)
+                    .unwrap_or_else(|| panic!("{} must resequence", source.tag()));
+            assert_eq!(resequenced.observation_id(), &fresh_id);
+            assert_eq!(resequenced.sequence(), fresh_sequence);
+            assert_eq!(resequenced.tag(), source.tag());
+        }
+        // Plan entry identities stay renderer-scoped while the observation
+        // identity itself is freshly minted.
+        let Observation::Plan(plan) = resequence_activity_observation(
+            &rows[3],
+            &fresh_id,
+            fresh_sequence,
+        )
+        .expect("plan activity must resequence")
+        else {
+            panic!("plan activity must stay a plan row");
+        };
+        assert_eq!(plan.entries().len(), 1);
+        assert_eq!(plan.entries()[0].id().as_str(), "plan-entry-1");
+    }
+
+    #[test]
+    fn unsupported_activity_rows_reject_without_a_no_op_commit() {
+        let fresh_id = observation_id("dispatcher-minted-reject");
+        let fresh_sequence = sequence(9);
+        let usage = Observation::Usage(
+            artisan_domain::UsageObservation::new(
+                observation_id("source-usage"),
+                sequence(48),
+                artisan_domain::UsageInput {
+                    basis: artisan_domain::UsageBasis::Cumulative,
+                    input_tokens: Some(10),
+                    cached_input_tokens: None,
+                    output_tokens: Some(5),
+                    context_tokens: None,
+                    context_window_tokens: None,
+                    cost_usd: None,
+                    provider_route_id: None,
+                    turn_id: None,
+                },
+            )
+            .expect("fixture usage is valid"),
+        );
+        assert!(
+            resequence_activity_observation(&usage, &fresh_id, fresh_sequence).is_none(),
+            "usage must stay on its own commit path, never the activity path"
+        );
+        let message = Observation::AgentMessageCompleted(
+            artisan_domain::AgentMessageCompletedObservation::new(
+                observation_id("source-message"),
+                sequence(49),
+                observation_id("item-1"),
+                MessagePhase::Final,
+                String::from("settled reply"),
+                observation_id("turn-1"),
+            )
+            .expect("fixture completed message is valid"),
+        );
+        assert!(
+            resequence_activity_observation(&message, &fresh_id, fresh_sequence).is_none(),
+            "transcript text must never enter the activity vocabulary"
         );
     }
 }
