@@ -61,13 +61,38 @@ blocks. The renderer then painted heading + prose + fence with no list.
   the renderer re-parses per render: code keeps its wash, strong adds
   `FontWeight::BOLD`, emphasis adds `FontStyle::Italic`, openable links
   add accent color + 1px `UnderlineStyle`.
-- Paragraphs with openable links render as `InteractiveText` whose
-  `on_click` opens the clicked destination through `cx.open_url` (platform
-  browser); the index is bounds-checked against the exposed link metadata.
-  Link-free runs stay plain `StyledText`.
+- Paragraphs with openable links render as retained `SelectableText`
+  whose `.links()` activation opens the clicked destination through
+  `cx.open_url` (platform browser); the index is bounds-checked against
+  the exposed link metadata. The selection element owns link clicks and
+  suppresses drag activation, so no separate click handler lives beside
+  it. Link-free runs stay selection-capable without link ranges.
 - `InlinePresentation.links` exposes openable link ranges plus verbatim
-  destinations as one metadata source for click handling and the future
+  destinations as one metadata source for click handling and the
   selection consumer.
+
+## Selection consumer wiring
+
+- Every text leaf renders through retained
+  `artisan_ui::selectable_text::SelectableText::retained(id, text, theme,
+  base_highlights)` with `.links(ranges, callback)` exactly where links
+  are openable: paragraph and heading runs, code blocks (syntax token
+  highlights as base, no links), inert HTML blocks (verbatim, no
+  highlights), and the plain-source fallback. No `StyledText` or
+  `InteractiveText` output remains in this renderer.
+- Ids are selector-derived per block, inline run, and code leaf
+  (`{selector}-plain`, `{selector}-html`, `{selector}-code-text`, and the
+  block selector itself for inline runs): positional, never built from
+  label text or destinations, so no identity collisions. No caller state,
+  focus maps, caches, or sidecars — retention lives in framework element
+  state under those ids.
+- Typography, wrap, font family, code background, syntax colors, and
+  layout are unchanged: the same container divs wrap the new leaves, and
+  `present_inline` metadata plus the allowlist are untouched, so the
+  preceding gate's nesting/style evidence still binds.
+- The `selectable_text` module itself is integrated by root; this lane
+  only consumes its frozen API (`retained(...).links(...)`), which is
+  unchanged by root's internal import/perf fix.
 - `block_needs_plain_fallback` unchanged: open or unhighlighted fences
   still take the plain body path.
 

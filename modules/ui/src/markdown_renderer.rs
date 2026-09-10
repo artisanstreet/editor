@@ -5,6 +5,14 @@
 //! and immediately turns the resulting blocks into ordinary GPUI elements;
 //! it does not retain message or document state.
 //!
+//! Every text leaf — paragraph and heading runs, code blocks, HTML carried
+//! as inert text, and the plain-source fallback — renders through retained
+//! [`SelectableText`](crate::selectable_text::SelectableText), so transcript
+//! bodies share one drag-select, copy, and link behavior with no
+//! caller-side per-block state. Selection, drag latch, and focus live in
+//! framework element state under stable selector-derived ids; the renderer
+//! itself stays synchronous and stateless.
+//!
 //! Lists render as native stacked rows with muted markers (`•` or `1.`)
 //! instead of HTML list elements; emphasis and strong survive as inline
 //! structure, and absolute `http(s)`/`mailto:` link labels render underlined
@@ -18,12 +26,12 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Div, FontStyle, FontWeight, HighlightStyle, InteractiveText, IntoElement,
-    ParentElement, SharedString, Styled, StyledText, UnderlineStyle, div,
-    prelude::InteractiveElement as _, px,
+    AnyElement, Div, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement,
+    SharedString, Styled, UnderlineStyle, div, prelude::InteractiveElement as _, px,
 };
 
 use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownEngine, Span};
+use crate::selectable_text::SelectableText;
 use crate::theme::ArtisanTheme;
 
 /// Synchronous renderer for accepted Markdown message bodies.
@@ -107,9 +115,16 @@ fn markdown_root(selector: String, theme: ArtisanTheme) -> Div {
 }
 
 fn plain_source(source: &str, theme: ArtisanTheme, selector: String) -> AnyElement {
+    let id = SharedString::from(format!("{selector}-plain"));
     let mut root = body_container(theme);
     root = root.debug_selector(move || selector);
-    root.child(source.to_owned()).into_any_element()
+    root.child(SelectableText::retained(
+        id,
+        source.to_owned(),
+        theme,
+        Vec::new(),
+    ))
+    .into_any_element()
 }
 
 fn body_container(theme: ArtisanTheme) -> Div {
@@ -155,7 +170,15 @@ fn render_block_at_depth(
             element = element.child(render_code(&selector, fence, theme));
         }
         Block::Html { source } => {
-            element = element.child(source.clone());
+            // Carried verbatim as inert data, exactly as before, but
+            // selectable like every other transcript leaf.
+            let id = SharedString::from(format!("{selector}-html"));
+            element = element.child(SelectableText::retained(
+                id,
+                source.clone(),
+                theme,
+                Vec::new(),
+            ));
         }
         Block::List {
             ordered,
@@ -261,10 +284,15 @@ fn heading_size(level: u8, theme: ArtisanTheme) -> gpui::Pixels {
 
 fn render_inline(selector: &str, spans: &[Span], theme: ArtisanTheme) -> AnyElement {
     let presentation = present_inline(spans, theme);
-    let text = StyledText::new(presentation.source).with_highlights(presentation.highlights);
+    let id = SharedString::from(selector.to_owned());
+    let text = SharedString::from(presentation.source);
+    let element = SelectableText::retained(id, text, theme, presentation.highlights);
     if presentation.links.is_empty() {
-        return text.into_any_element();
+        return element.into_any_element();
     }
+    // The selection element owns link clicks and suppresses drag
+    // activation, so no separate click handler lives beside it: one
+    // element, one behavior.
     let ranges = presentation
         .links
         .iter()
@@ -275,8 +303,8 @@ fn render_inline(selector: &str, spans: &[Span], theme: ArtisanTheme) -> AnyElem
         .into_iter()
         .map(|link| link.destination)
         .collect::<Vec<_>>();
-    InteractiveText::new(SharedString::from(selector.to_owned()), text)
-        .on_click(ranges, move |index, _window, cx| {
+    element
+        .links(ranges, move |index, _window, cx| {
             if let Some(destination) = destinations.get(index) {
                 cx.open_url(destination);
             }
@@ -294,12 +322,12 @@ fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) ->
         .filter_map(|token| valid_code_range(token, source.as_ref()))
         .map(|(range, kind)| (range, code_token_style(theme, kind)))
         .collect::<Vec<_>>();
-    let text = StyledText::new(source).with_highlights(highlights);
     let selector = format!("{parent_selector}-code");
+    let id = SharedString::from(format!("{selector}-text"));
     let mut code = body_container(theme)
         .font_family(theme.typography.mono.family)
         .bg(theme.colors.muted.to_paint())
-        .child(text);
+        .child(SelectableText::retained(id, source, theme, highlights));
     code = code.debug_selector(move || selector);
     code.into_any_element()
 }
