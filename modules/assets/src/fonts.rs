@@ -13,14 +13,14 @@
 use core::fmt;
 use std::borrow::Cow;
 
-/// One vendored variable typeface: its family identity plus embedded bytes.
+/// One vendored typeface: its family identity plus embedded bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct BundledFont {
     /// File name under `modules/assets/fonts/`.
     pub file_name: &'static str,
     /// Internal family name used by the native text system.
     pub family: &'static str,
-    /// Inclusive variable-weight range verified from the font’s fvar table.
+    /// Inclusive weight range verified from the font's fvar or OS/2 table.
     pub weights: (u16, u16),
     /// Path of the license or provenance note under `modules/assets/`.
     pub license_path: &'static str,
@@ -102,6 +102,15 @@ pub const ALL: &[BundledFont] = &[
             include_bytes!("../fonts/spline-sans-mono-700.ttf"),
         ],
     },
+    BundledFont {
+        file_name: "twemoji-mozilla.ttf",
+        family: "Twemoji Mozilla",
+        weights: (400, 400),
+        license_path: "fonts/TWEMOJI.md",
+        license_text: include_str!("../fonts/TWEMOJI.md"),
+        bytes: include_bytes!("../fonts/twemoji-mozilla.ttf"),
+        static_faces: &[include_bytes!("../fonts/twemoji-mozilla.ttf")],
+    },
 ];
 
 /// Shapes the embedded bytes for `gpui::TextSystem::add_fonts`.
@@ -137,20 +146,21 @@ mod tests {
     /// Expected `(file name, byte length)` pins: any truncation or
     /// re-encode of a vendored binary fails here before it can reach a
     /// renderer and silently fall back to a system face.
-    const EXPECTED_LENGTHS: [(&str, usize); 4] = [
+    const EXPECTED_LENGTHS: [(&str, usize); 5] = [
         ("artisan-neo-600.ttf", 343_516),
         ("cal-sans-700.ttf", 219_644),
         ("spline-sans-variable.ttf", 146_896),
         ("spline-sans-mono-variable.ttf", 118_744),
+        ("twemoji-mozilla.ttf", 1_474_284),
     ];
 
     #[test]
-    fn catalog_carries_exactly_the_four_declared_faces() {
-        assert_eq!(ALL.len(), 4, "Artisan Neo plus Cal Sans plus the two Spline families");
+    fn catalog_carries_declared_text_and_emoji_faces() {
+        assert_eq!(ALL.len(), 5, "four text families plus the emoji fallback");
         let families: Vec<&str> = ALL.iter().map(|font| font.family).collect();
         assert_eq!(
             families,
-            vec!["Artisan Neo", "Cal Sans", "Spline Sans", "Spline Sans Mono"],
+            vec!["Artisan Neo", "Cal Sans", "Spline Sans", "Spline Sans Mono", "Twemoji Mozilla"],
             "catalog order is by family name for binary search"
         );
         for (font, (file_name, length)) in ALL.iter().zip(EXPECTED_LENGTHS) {
@@ -188,7 +198,7 @@ mod tests {
     #[test]
     fn bundled_fonts_shapes_borrowed_slices_for_add_fonts() {
         let shaped = bundled_fonts();
-        assert_eq!(shaped.len(), 14);
+        assert_eq!(shaped.len(), 15);
         let expected = ALL.iter().flat_map(|font| font.static_faces.iter());
         for (shaped, bytes) in shaped.iter().zip(expected) {
             assert_eq!(shaped.as_ref(), *bytes);

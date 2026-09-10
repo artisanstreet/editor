@@ -4,9 +4,7 @@ Fallback-only color-emoji face for sequences the platform font does not
 cover. Never a primary text family: Spline Sans/Spline Sans Mono remain
 the only text faces (user-selected; typography separately audited), and
 this face participates exclusively through cosmic/fontdb fallback
-resolution. Registration (`fonts.rs`/`FONTS.md`/manifest) is owned by
-the prose worker — this document and the TTF are the complete packet
-here. Shared integration contract:
+resolution. Registration uses the existing bundled font catalog and asset build inputs. Shared integration contract:
 `docs/reference-emoji-interface.md`.
 
 ## Source
@@ -24,12 +22,11 @@ here. Shared integration contract:
 - PostScript nameID 6: `TwemojiMozilla` (allowlisted for the color
   raster path alongside the platform faces).
 - COLR version 0 + CPAL; single GSUB `ccmp` lookup; 1,418 cmap entries,
-  emoji-only (ASCII `a` absent — cannot shadow body text).
+  ASCII `a` absent. Native text precedence is verified separately with shaping tests.
 - Present: U+1F389, U+2764, U+FE0F, U+200D, regional indicators, skin
   tones, `#`, U+20E3, U+1F44D/U+1F468, plus precomposed ZWJ-sequence
   layer glyphs.
-- Absent: `U+FE0E` (VS15 — text-presentation requests correctly fall
-  through to the platform), U+1F6DC, U+1FAE8, and other post-14
+- Absent: `U+FE0E` (VS15; presentation behavior is verified separately), U+1F6DC, U+1FAE8, and other post-14
   additions. Coverage is decided by shaping, never by version guess.
 
 ## License (verbatim from the `v0.7.0` tag `LICENSE.md`)

@@ -140,17 +140,21 @@ FONT_FILES = [
     "fonts/spline-sans-mono-variable.ttf",
     "fonts/spline-sans-300.ttf",
     "fonts/spline-sans-400.ttf",
+    "fonts/spline-sans-410.ttf",
     "fonts/spline-sans-500.ttf",
     "fonts/spline-sans-600.ttf",
+    "fonts/spline-sans-630.ttf",
     "fonts/spline-sans-700.ttf",
     "fonts/spline-sans-mono-300.ttf",
     "fonts/spline-sans-mono-400.ttf",
     "fonts/spline-sans-mono-500.ttf",
     "fonts/spline-sans-mono-600.ttf",
     "fonts/spline-sans-mono-700.ttf",
+    "fonts/twemoji-mozilla.ttf",
 ]
 
 FONT_LICENSES = [
+    "fonts/TWEMOJI.md",
     "licenses/artisan-neo-OFL.txt",
     "licenses/cal-sans-OFL.txt",
     "licenses/spline-sans-OFL.txt",

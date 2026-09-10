@@ -57,3 +57,5 @@ Registration therefore uses static instances at 300, 400, 500, 600 and 700 for e
 | `spline-sans-mono-500.ttf` | 500 | `1c813d8df03beed3811e58dc1389da580e9fa8e81074a346a677ee9f33e28368` |
 | `spline-sans-mono-600.ttf` | 600 | `8e193b99f84c2e2d106840fd794f1764c846894d3fb65b194f6f621153473984` |
 | `spline-sans-mono-700.ttf` | 700 | `74189c4811dbf9abd88f2ad83950d7afcc9d230e7ecc092d36097efffa67090c` |
+
+Twemoji Mozilla is registered as a color emoji fallback through the same catalog. Body and code family selections remain Spline. See [TWEMOJI.md](TWEMOJI.md) for the unmodified Mozilla v0.7.0 font, SHA-256, measured coverage, and licenses. Platform precedence is verified in the shared text backend tests.
