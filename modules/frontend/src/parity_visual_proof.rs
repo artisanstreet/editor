@@ -13,6 +13,12 @@
 //!   captured pixels exercise the real shell background, the real 48 px
 //!   titlebar reservation, the real 218 px sidebar reservation, and the real
 //!   composer dock — no hand-drawn approximation of any of them;
+//! - mounts each case through the shell lane's proof factory
+//!   (`ThreadScreen::mount_proof`: gate, content width, and title in one
+//!   step), publishes the live content width (actual window bounds minus the
+//!   resolved rail, notify-on-change) so narrow and wide viewports render
+//!   different inspector states, and uses the shipping transparent-caption
+//!   window setup;
 //! - seeds every synthetic state through the **real controller path**:
 //!   `SnapshotReceived` domain snapshots plus directly registered
 //!   Activity/Reasoning/Error facts (projection contract `fd6f3aa0`,
@@ -43,10 +49,10 @@ use artisan_domain::{
     ImageAttachmentRef, ItemId, ItemOrdinal, MessageBody, MessageId, MultimodalUserMessageItem,
     Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
-use artisan_ui::theme::{DesktopTheme, ThemeMode};
+use artisan_ui::theme::DesktopTheme;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, Window, WindowBounds,
-    WindowOptions, div,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, div,
     prelude::{IntoElement, Render},
     px, size,
 };
@@ -61,7 +67,7 @@ use crate::conversation_surface::ordered_block_kinds;
 use crate::desktop_shell::{
     DESKTOP_SIDEBAR_WIDTH_PX, DESKTOP_TITLEBAR_HEIGHT_PX, DesktopShellStyle, desktop_shell,
 };
-use crate::thread_screen::{ThreadScreen, ThreadScreenGate, ThreadScreenTitle};
+use crate::thread_screen::{ThreadScreen, thread_inspector_visible};
 
 /// Narrow baseline viewport, logical pixels.
 const NARROW_LOGICAL_WIDTH: f32 = 1024.0;
@@ -472,14 +478,18 @@ fn settle(pending: &Rc<Cell<usize>>, failed_flag: &Rc<Cell<bool>>, failed: bool,
 /// reservation. Both baseline viewports pin the inspector expanded, so the
 /// narrower capture must still reserve it; responsive hiding is a separate
 /// lane and is not what these pixels claim.
-fn print_capture_geometry(slug: &str, width: f32, scale: f32) {
+fn print_capture_geometry(slug: &str, width: f32, scale: f32, content_width: f32) {
     let style = DesktopShellStyle::resolve(false, scale);
     let sidebar_matches = style.sidebar_width == px(DESKTOP_SIDEBAR_WIDTH_PX);
     let titlebar_matches = style.titlebar_height == px(DESKTOP_TITLEBAR_HEIGHT_PX);
-    let content_width = width - DESKTOP_SIDEBAR_WIDTH_PX;
+    let state = if thread_inspector_visible(content_width) {
+        "shown"
+    } else {
+        "hidden"
+    };
     println!(
         "parity-proof geometry {slug}: window={width} scale={scale} \
-         sidebar={} titlebar={} content={content_width} inspector=reserved \
+         sidebar={} titlebar={} content={content_width} inspector={state} \
          title=\"Parity proof thread\"",
         DESKTOP_SIDEBAR_WIDTH_PX, DESKTOP_TITLEBAR_HEIGHT_PX,
     );
@@ -499,8 +509,9 @@ pub struct ParityProofShell {
 }
 
 impl ParityProofShell {
-    /// Mounts the production thread screen, seeds one case, and opens its
-    /// gate, mirroring the shipping route after its thread-open snapshot.
+    /// Mounts the production thread screen through the shell lane's proof
+    /// factory (gate, content width, and title in one step), then seeds one
+    /// case through the controller.
     ///
     /// # Errors
     ///
@@ -508,21 +519,23 @@ impl ParityProofShell {
     /// seeding, as a message bound to the case.
     pub fn mount(
         thread_id: ThreadId,
+        title: String,
+        content_width_px: f32,
         case: ProofSceneCase,
         cx: &mut App,
     ) -> Result<Entity<Self>, String> {
-        let screen = ThreadScreen::mount(thread_id.clone(), ThemeMode::Dark, cx)
-            .map_err(|error| format!("mount refused: {error:?}"))?;
+        let screen =
+            ThreadScreen::mount_proof(thread_id.clone(), title, content_width_px, cx)
+                .map_err(|error| format!("mount refused: {error:?}"))?;
         seed_case(&screen, case, &thread_id, cx)?;
-        screen.update(cx, |screen, _| {
-            screen.set_gate(ThreadScreenGate::Open);
-            screen.set_title(ThreadScreenTitle {
-                title: String::from("Parity proof thread"),
-                ..Default::default()
-            });
-        });
         print_case_manifest(&screen, case, cx);
         Ok(cx.new(|_| Self { screen }))
+    }
+
+    /// Returns the mounted thread screen for live width publication.
+    #[must_use]
+    pub fn screen(&self) -> &Entity<ThreadScreen> {
+        &self.screen
     }
 
     /// Renders the shell around the mounted screen.
@@ -644,7 +657,13 @@ pub fn run() -> ExitCode {
                 capture.viewport_slug
             ))
             .expect("fixture thread id is valid");
-            let shell = match ParityProofShell::mount(thread_id, capture.case, cx) {
+            let shell = match ParityProofShell::mount(
+                thread_id,
+                String::from("Parity proof thread"),
+                capture.width - DESKTOP_SIDEBAR_WIDTH_PX,
+                capture.case,
+                cx,
+            ) {
                 Ok(shell) => shell,
                 Err(error) => {
                     eprintln!("parity-proof seed failed for {stem}: {error}");
@@ -652,14 +671,23 @@ pub fn run() -> ExitCode {
                     continue;
                 }
             };
+            let screen = shell.read(cx).screen().clone();
             let bounds = Bounds::centered(
                 None,
                 size(px(capture.width), px(capture.height)),
                 cx,
             );
+            let caption = stem.clone();
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Shipping caption setup so no native caption consumes
+                    // client height; hidden and unfocused for proof capture.
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(caption.into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    }),
                     focus: false,
                     show: false,
                     ..Default::default()
@@ -671,11 +699,24 @@ pub fn run() -> ExitCode {
                     launch_flag.set(true);
                     let pending = Rc::clone(&remaining);
                     let failed_flag = Rc::clone(&failed);
-                    let updated = cx.update_window(handle.into(), |_, window, _| {
+                    let updated = cx.update_window(handle.into(), |_, window, cx| {
+                        // Publish the actual window width (never the
+                        // requested size or a scaled reading) minus the live
+                        // rail, then notify only on change — the route
+                        // integrator's contract.
+                        let scale = window.scale_factor();
+                        let style = DesktopShellStyle::resolve(false, scale);
+                        let content_width = window.bounds().size.width.as_f32()
+                            - style.sidebar_width.as_f32();
+                        screen.update(cx, |screen, screen_cx| {
+                            if screen.set_content_width(content_width) {
+                                screen_cx.notify();
+                            }
+                        });
                         window.refresh();
                         window.on_next_frame(move |window, cx| {
                             let scale = window.scale_factor();
-                            print_capture_geometry(&stem, capture.width, scale);
+                            print_capture_geometry(&stem, capture.width, scale, content_width);
                             let expected_width = (capture.width * scale).round() as u32;
                             let expected_height = (capture.height * scale).round() as u32;
                             let mut failed = false;
@@ -721,7 +762,7 @@ pub fn run() -> ExitCode {
                         });
                     });
                     if updated.is_err() {
-                        eprintln!("parity-proof update failed for {stem}");
+                        eprintln!("parity-proof update failed for {caption}");
                         settle(&remaining, &failed, true, cx);
                     }
                 }

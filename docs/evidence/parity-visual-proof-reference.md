@@ -9,12 +9,15 @@ New files in this packet: `modules/frontend/src/parity_visual_proof.rs`
 
 | Reference (Electron/Svelte, read-only) | Native owner mounted by the fixture |
 | --- | --- |
-| `routes/components/thread-workspace.svelte` transcript column | `ConversationHost` + `ConversationSurface` via `ThreadScreen::mount` (`modules/frontend/src/thread_screen.rs:287`) |
+| `routes/components/thread-workspace.svelte` transcript column | `ConversationHost` + `ConversationSurface` via `ThreadScreen::mount_proof` (shell lane `ff05bb1f`; this branch reads the pre-shell `mount` shape, root integrates) |
 | `thread-panel.svelte` inspector column geometry | `desktop_shell` sidebar reservation, `DESKTOP_SIDEBAR_WIDTH_PX = 218.0` (`desktop_shell.rs:49`) |
 | titlebar strip | `desktop_shell` titlebar reservation, `DESKTOP_TITLEBAR_HEIGHT_PX = 48.0` (`desktop_shell.rs:47`) |
 | shell background continuity | `desktop_shell()` root gradient face (`desktop_shell.rs:134`), `DesktopTheme::neutral_dark()` (`modules/ui/src/theme.rs:1125`) |
-| composer dock | `NativeComposer` via `cx.new(NativeComposer::new)` inside `ThreadScreen::mount` (`thread_screen.rs:292`) |
-| gate precedence opened > loading > failure | `ThreadScreenGate::Open` set post-mount, mirroring `native_application.rs:8052` |
+| composer dock | `NativeComposer` mounted inside `mount_proof` |
+| gate precedence opened > loading > failure | `ThreadScreenGate::Open` set inside `mount_proof` (shell lane `ff05bb1f`) |
+| live thread title | `mount_proof` title param (`"Parity proof thread"`) |
+| responsive inspector fit/hide | `set_content_width(actual window − rail)` + `thread_inspector_visible` per capture; 806px content hides, 1318px shows |
+| caption height | shipping `TitlebarOptions { appears_transparent: true }` (`native_application.rs:8738`), hidden + unfocused for capture |
 
 Fixture slots the wrapper requires but no lane owns for this packet
 (identity / search / sidebar content) are empty `div`s, marked
@@ -62,11 +65,14 @@ conversation column are.
    wide 1920x1125. The fixture asserts `logical * measured scale` from
    `window.scale_factor()` and fails loudly on mismatch instead of claiming.
 4. Each capture publishes `geometry … window=… scale=… sidebar=218
-   titlebar=48 content={window-218} inspector=reserved
-   title="Parity proof thread"`: both viewports pin the inspector expanded,
-   so the narrower capture must still reserve it. Responsive hiding is a
-   separate lane. Each case also prints its controller-projected block
-   order, binding pixels to real projection output.
+   titlebar=48 content={actual window - rail} inspector={shown|hidden}
+   title="Parity proof thread"`: content width comes from live window
+   bounds via `set_content_width` (notify-on-change), and inspector fit is
+   read from `thread_inspector_visible`, so narrow (806px content) hides
+   while wide (1318px content) shows — the responsive behavior itself is
+   under proof, not pinned expanded. Each case also prints its
+   controller-projected block order, binding pixels to real projection
+   output.
 
 ## Seeding path (production, projection contract `fd6f3aa0`)
 
