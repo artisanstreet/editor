@@ -633,8 +633,10 @@ const BOUNDS_SETTLE_PX: f32 = 0.5;
 /// Settle polls between resize requests, in milliseconds.
 const RESIZE_POLL_MILLIS: u64 = 100;
 
-/// Warmup redraws after the size settles before the capture draw.
-const WARMUP_DRAW_PASSES: u32 = 2;
+/// Warmup redraws after the size settles before the capture draw. The
+/// header entrance holds opacity 0 for 150ms plus a 150ms fade, so six
+/// 100ms passes (600ms) settle it; fewer captured the intentional blank.
+const WARMUP_DRAW_PASSES: u32 = 6;
 
 /// Deterministic thread title published to every proof capture.
 const PROOF_THREAD_TITLE: &str = "Parity proof thread";
