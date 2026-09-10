@@ -14,6 +14,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+use artisan_assets::AssetId;
 use artisan_domain::{
     Command, ItemId, OBSERVATION_ANSWER_MAX_BYTES, ObservationId, RequestId, RunId, ThreadId,
     TurnId,
@@ -23,7 +24,9 @@ use artisan_protocol::{
 };
 use artisan_ui::alert::{Alert, AlertVariant};
 use artisan_ui::badge::{BadgeStyle, outline_badge};
-use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
+use artisan_ui::button::{
+    AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
+};
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::collapsible::Collapsible;
 use artisan_ui::input_state::TextInputState;
@@ -31,6 +34,7 @@ use artisan_ui::markdown_renderer::MarkdownRenderer;
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::separator::{SeparatorAxis, separator};
+use artisan_ui::shimmer_text::ShimmerText;
 use artisan_ui::theme::{ArtisanTheme, SurfaceScale, SurfaceStep, ThemeMode};
 use gpui::{
     AnyElement, Context, Div, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Modifiers,
@@ -47,8 +51,8 @@ use crate::approval_presentation::ApprovalKind as PresentationApprovalKind;
 use crate::conversation_scene::{
     ChangeSetBlock, CompactionBlock, ConversationScene, ErrorBlock, FileChangeStatus,
     ModelTransitionBlock, NativeFactBlock, PlanBlock, QuestionBlock, SceneDisclosure,
-    SceneFileChange, SceneId, SteeringBlock, TurnBlock, TurnFooterBlock, TurnNarration, TurnScene,
-    UsageInterruptionBlock, UserMessageBlock, WorkGroupBlock, WorkItem,
+    SceneFileChange, SceneId, SteeringBlock, TurnBlock, TurnFooterBlock, TurnFooterSettlement,
+    TurnNarration, TurnScene, UsageInterruptionBlock, UserMessageBlock, WorkGroupBlock, WorkItem,
 };
 use crate::conversation_scroll_position::conversation_is_following;
 use crate::conversation_turn_navigator::{
@@ -61,6 +65,7 @@ use crate::engine_approve_ui::{
     RespondQuestionAction, approval_command, mint_answer_request_id, pair_answer_failure,
     pair_approval_answer, pair_question_answer, pending_approval_label, question_command,
 };
+use crate::conversation_turn_footer_policy::{COPY_RESPONSE_LABEL, TURN_ACTIONS_LABEL};
 use crate::engine_observation_state::EngineObservationState;
 use crate::native_transport_service::{CommandSendError, NativeTransportCommand};
 
@@ -86,6 +91,17 @@ pub const ROOT_SELECTOR: &str = CONVERSATION_SURFACE_SELECTOR;
 
 /// Alias for callers that use the shorter viewport-selector vocabulary.
 pub const VIEWPORT_SELECTOR: &str = CONVERSATION_VIEWPORT_SELECTOR;
+
+/// Group name shared by a turn root and its hover-revealed footer.
+///
+/// The reference footer reveals on `group-hover/turn` and
+/// `group-focus-within/turn`; the turn root carries this group and the footer
+/// refines to full opacity on group hover (plus its own focus handle for the
+/// keyboard path).
+pub const TURN_GROUP: &str = "artisan-conversation-turn";
+
+/// Stable debug-selector suffix for the footer copy control.
+pub const FOOTER_COPY_SELECTOR_SUFFIX: &str = "footer-copy";
 
 /// Maximum number of typed observations retained before new observations are
 /// refused. Dropping the newest observation keeps the outbox bounded and
@@ -150,6 +166,26 @@ pub enum ConversationSurfaceAction {
     ScrollIntent {
         /// Stable scene or item target.
         target: ConversationSurfaceTarget,
+    },
+    /// The turn footer became visible through pointer hover or keyboard focus.
+    ///
+    /// The host should take one clock sample for the relative age (mirroring
+    /// [`TurnFooterInput::Hover`](crate::conversation_turn_footer_policy::TurnFooterInput)/`Focus`)
+    /// and mirror the formatted age back through
+    /// [`Self::set_footer_relative_age`]. There is no timer in this surface.
+    TurnFooterRevealed {
+        /// Owning turn of the revealed footer.
+        turn: TurnId,
+    },
+    /// The footer copy control was activated with the exact settlement bytes.
+    ///
+    /// The host owns the clipboard write and mirrors the outcome back through
+    /// [`Self::set_footer_copy_message`].
+    TurnFooterCopyRequested {
+        /// Owning turn of the footer.
+        turn: TurnId,
+        /// Exact response payload from the footer settlement.
+        text: String,
     },
 }
 
@@ -353,13 +389,15 @@ pub fn format_work_group_label(label: crate::conversation_scene::WorkGroupLabel)
 
 /// Returns the exact plain-text status narration for a scene status block.
 ///
-/// `StreamingSuppression` intentionally returns `None`, so a renderer can
+/// `Quiet` paints no row: idleness is the absence of status, not a status, so
+/// the reference shows no idle row and this renderer keeps no gap slot for
+/// one. `StreamingSuppression` intentionally returns `None`, so a renderer can
 /// guarantee that no thinking/working row is painted while a streaming
 /// assistant message owns the visible progress state.
 #[must_use]
 pub fn turn_status_copy(narration: TurnNarration) -> Option<String> {
     match narration {
-        TurnNarration::Quiet => Some("Quiet".to_owned()),
+        TurnNarration::Quiet => None,
         TurnNarration::ProviderWait => Some("Waiting for provider to respond…".to_owned()),
         TurnNarration::Compacting => Some("Compacting the conversation…".to_owned()),
         TurnNarration::Thinking => Some("Thinking".to_owned()),
@@ -376,6 +414,98 @@ pub fn turn_status_copy(narration: TurnNarration) -> Option<String> {
         TurnNarration::Interrupted => Some("Interrupted".to_owned()),
         TurnNarration::Cancelled => Some("Cancelled".to_owned()),
     }
+}
+
+/// Returns the live status copy for one narration with its authoritative
+/// elapsed basis.
+///
+/// While the narration is active work (`Thinking`/`Working`), an authoritative
+/// `active_started_at_ms` basis paired with a host-mirrored `frame_now_ms`
+/// renders `Thinking for Xs` / `Working for Xs` with whole-second flooring
+/// (`FormatElapsed` parity). Either value missing renders the bare verb
+/// truthfully: the renderer never reads a clock and never resets the basis on
+/// rerender. A basis on any other narration is ignored here (scene `build`
+/// already rejects it with a typed error).
+#[must_use]
+pub fn live_status_copy(
+    narration: TurnNarration,
+    active_started_at_ms: Option<i64>,
+    frame_now_ms: Option<i64>,
+) -> Option<String> {
+    match narration {
+        TurnNarration::Thinking | TurnNarration::Working => {
+            let verb = match narration {
+                TurnNarration::Thinking => "Thinking",
+                TurnNarration::Working => "Working",
+                _ => unreachable!("active-work match covers every active verb"),
+            };
+            match (active_started_at_ms, frame_now_ms) {
+                (Some(started_at_ms), Some(now_ms)) => {
+                    let elapsed_ms =
+                        u64::try_from(now_ms.saturating_sub(started_at_ms).max(0)).unwrap_or(0);
+                    Some(format!("{verb} for {}", format_elapsed_millis(elapsed_ms)))
+                }
+                (None, _) | (_, None) => Some(verb.to_owned()),
+            }
+        }
+        _ => turn_status_copy(narration),
+    }
+}
+
+/// Returns whether a status row paints for one narration in a turn that may
+/// already carry the terminal duration as its work-group header.
+///
+/// Terminal `WorkedFor`/`ThoughtFor` paint only when the turn has no work
+/// group: the scene attaches the same duration as the latest group header and
+/// the reference settles to the header alone, so painting both would double
+/// the duration line.
+#[must_use]
+pub fn status_row_visible(turn_has_work_group: bool, narration: TurnNarration) -> bool {
+    match turn_status_copy(narration) {
+        None => false,
+        Some(_) => match narration {
+            TurnNarration::WorkedFor { .. } | TurnNarration::ThoughtFor { .. } => {
+                !turn_has_work_group
+            }
+            _ => true,
+        },
+    }
+}
+
+/// Returns the per-turn key for footer mirrors and footer focus handles.
+#[must_use]
+pub fn footer_key(turn_id: &TurnId) -> String {
+    format!("turn-footer:{}", turn_id.as_str())
+}
+
+/// Returns whether a footer block paints a child.
+///
+/// Only an eligible settlement paints: the reference renders no footer at all
+/// for unsettled turns, and this renderer keeps no placeholder or gap slot.
+#[must_use]
+pub fn footer_has_content(block: &TurnFooterBlock) -> bool {
+    block.settlement.is_some()
+}
+
+/// Returns the settlement carried by a footer block, if it paints one.
+#[must_use]
+pub fn footer_settlement(block: &TurnFooterBlock) -> Option<&TurnFooterSettlement> {
+    block.settlement.as_ref()
+}
+
+/// Host-mirrored view state for one settled turn footer.
+///
+/// The settlement facts (response bytes, settled timestamp) stay scene-owned;
+/// this mirror carries only the adapter-formatted relative age and the
+/// reader-facing copy status staged by the controller through
+/// [`ConversationSurface::set_footer_relative_age`] and
+/// [`ConversationSurface::set_footer_copy_message`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TurnFooterMirror {
+    /// Adapter-formatted relative age; empty until the host samples a clock.
+    pub relative_age: String,
+    /// Reader-facing copy status; empty unless a clipboard write failed.
+    pub copy_message: String,
 }
 
 /// Returns the stable status badge text for a changed-file status.
@@ -426,6 +556,26 @@ pub struct ConversationSurface {
     /// pruned on scene replacement; a focused control that disappears
     /// returns focus to the transcript.
     navigator_focus: HashMap<String, FocusHandle>,
+    /// Whether the turn-navigator rail is expanded from ticks into labels.
+    ///
+    /// The reference hides labels until rail hover or row focus; at rest only
+    /// the tick column paints, so full message texts never float beside the
+    /// transcript.
+    navigator_expanded: bool,
+    /// Host-mirrored frame time in millis for live Thinking/Working elapsed.
+    ///
+    /// This is a paint-time mirror only: the surface never reads a clock and
+    /// never resets the scene's authoritative `active_started_at_ms` basis.
+    /// `None` renders the bare verb truthfully until the host supplies time.
+    active_now_ms: Option<i64>,
+    /// Host-mirrored footer view state keyed by [`footer_key`].
+    footer_mirrors: HashMap<String, TurnFooterMirror>,
+    /// Per-turn footer copy-button focus handles keyed by [`footer_key`].
+    ///
+    /// Handles persist while their turn remains in the scene and are pruned
+    /// on render; a focused control that disappears returns focus to the
+    /// transcript, mirroring `navigator_focus`.
+    footer_focus: HashMap<String, FocusHandle>,
     /// Focus handles for free-form question input rows, keyed by block
     /// identity text.
     ///
@@ -759,6 +909,10 @@ impl ConversationSurface {
             scroll_anchors: Vec::new(),
             scroll_anchor_paint_token: None,
             navigator_focus: HashMap::new(),
+            navigator_expanded: false,
+            active_now_ms: None,
+            footer_mirrors: HashMap::new(),
+            footer_focus: HashMap::new(),
             question_focus: HashMap::new(),
             answer_thread: None,
             answer_run: None,
@@ -872,8 +1026,96 @@ impl ConversationSurface {
     /// the next replacement scene remains authoritative.
     pub fn replace_scene(&mut self, scene: ConversationScene, cx: &mut Context<Self>) {
         self.scene = scene;
+        let live_keys: Vec<String> = self
+            .scene
+            .turn_scenes()
+            .iter()
+            .map(|turn| footer_key(&turn.turn_id))
+            .collect();
+        self.footer_mirrors
+            .retain(|key, _| live_keys.iter().any(|live| live == key));
+        self.footer_focus
+            .retain(|key, _| live_keys.iter().any(|live| live == key));
         self.sync_question_focus(cx);
         cx.notify();
+    }
+
+    /// Mirrors one host clock sample for live Thinking/Working elapsed paint.
+    ///
+    /// The value is display input only; the authoritative elapsed basis stays
+    /// scene-owned and is never reset here.
+    pub fn set_active_now_ms(&mut self, now_ms: Option<i64>, cx: &mut Context<Self>) {
+        if self.active_now_ms != now_ms {
+            self.active_now_ms = now_ms;
+            cx.notify();
+        }
+    }
+
+    /// Mirrors the adapter-formatted relative age for one settled footer.
+    pub fn set_footer_relative_age(
+        &mut self,
+        turn_id: &TurnId,
+        relative_age: String,
+        cx: &mut Context<Self>,
+    ) {
+        let mirror = self
+            .footer_mirrors
+            .entry(footer_key(turn_id))
+            .or_default();
+        if mirror.relative_age != relative_age {
+            mirror.relative_age = relative_age;
+            cx.notify();
+        }
+    }
+
+    /// Mirrors the reader-facing copy status for one settled footer.
+    ///
+    /// An empty message clears a previous failure notice.
+    pub fn set_footer_copy_message(
+        &mut self,
+        turn_id: &TurnId,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let mirror = self
+            .footer_mirrors
+            .entry(footer_key(turn_id))
+            .or_default();
+        if mirror.copy_message != message {
+            mirror.copy_message = message;
+            cx.notify();
+        }
+    }
+
+    /// Ensures per-turn footer focus handles and prunes handles whose turns
+    /// left the scene, returning focus to the transcript when a focused
+    /// control disappears.
+    fn sync_footer_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for turn in self.scene.turn_scenes() {
+            let key = footer_key(&turn.turn_id);
+            self.footer_focus
+                .entry(key)
+                .or_insert_with(|| cx.focus_handle().tab_stop(true));
+        }
+        let live_keys: Vec<String> = self
+            .scene
+            .turn_scenes()
+            .iter()
+            .map(|turn| footer_key(&turn.turn_id))
+            .collect();
+        let stale_keys: Vec<String> = self
+            .footer_focus
+            .keys()
+            .filter(|key| !live_keys.iter().any(|live| live == key))
+            .cloned()
+            .collect();
+        for key in stale_keys {
+            if let Some(handle) = self.footer_focus.remove(&key)
+                && handle.is_focused(window)
+            {
+                self.transcript_focus.focus(window, cx);
+            }
+        }
     }
 
     /// Sets the shared theme mode and repaints the surface when it changes.
@@ -1489,22 +1731,35 @@ impl ConversationSurface {
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selector = turn_selector(&turn.turn_id);
         let turn_element = div()
             .w_full()
+            .relative()
+            .group(TURN_GROUP)
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(4.0));
         // Identities mirror the children pushed below in block order. A
-        // suppressed status row paints no child, so it contributes no slot.
+        // suppressed status row and an unsettled footer paint no child, so
+        // neither contributes a slot.
+        let turn_has_work_group = turn
+            .blocks()
+            .iter()
+            .any(|block| matches!(block, TurnBlock::WorkGroup(_)));
         let child_identities: Vec<(Option<SceneId>, Option<ItemId>)> = turn
             .blocks()
             .iter()
             .filter_map(|block| {
                 if let TurnBlock::TurnStatus(status) = block
-                    && turn_status_copy(status.narration).is_none()
+                    && !status_row_visible(turn_has_work_group, status.narration)
+                {
+                    return None;
+                }
+                if let TurnBlock::TurnFooter(footer) = block
+                    && !footer_has_content(footer)
                 {
                     return None;
                 }
@@ -1530,9 +1785,15 @@ impl ConversationSurface {
         let mut turn_element = turn_element.debug_selector(move || selector.clone());
 
         for block in turn.blocks() {
-            if let Some(element) =
-                self.render_block(&turn.turn_id, block, entity, theme, anchors, cx)
-            {
+            if let Some(element) = self.render_block(
+                &turn.turn_id,
+                block,
+                entity,
+                theme,
+                anchors,
+                &mut *window,
+                cx,
+            ) {
                 turn_element = turn_element.child(element);
             }
         }
@@ -1547,6 +1808,7 @@ impl ConversationSurface {
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let selector = block_selector(turn_id, block);
@@ -1590,8 +1852,12 @@ impl ConversationSurface {
             TurnBlock::SteeringLabel(block) => {
                 Some(Self::render_steering(block, selector, theme, anchors))
             }
-            TurnBlock::TurnStatus(block) => Self::render_status(block, selector, theme),
-            TurnBlock::TurnFooter(block) => Some(Self::render_footer(block, selector, theme)),
+            TurnBlock::TurnStatus(block) => {
+                self.render_status(turn_id, block, selector, theme)
+            }
+            TurnBlock::TurnFooter(block) => {
+                self.render_footer(turn_id, block, selector, entity, theme, window)
+            }
         }
     }
 
@@ -2326,33 +2592,173 @@ impl ConversationSurface {
     }
 
     fn render_status(
+        &self,
+        turn_id: &TurnId,
         block: &crate::conversation_scene::TurnStatusBlock,
         selector: String,
         theme: &ArtisanTheme,
     ) -> Option<AnyElement> {
-        let copy = turn_status_copy(block.narration)?;
+        // The terminal duration prefers the work-group header when the turn
+        // carries the group; the reference settles to the header alone.
+        let turn_has_work_group = self
+            .scene
+            .turn_scene(turn_id)
+            .is_some_and(|turn| {
+                turn.blocks()
+                    .iter()
+                    .any(|block| matches!(block, TurnBlock::WorkGroup(_)))
+            });
+        if !status_row_visible(turn_has_work_group, block.narration) {
+            return None;
+        }
+        let copy = live_status_copy(
+            block.narration,
+            block.active_started_at_ms,
+            self.active_now_ms,
+        )?;
+        // Parity with the work-session status line: base-size muted copy on a
+        // half-rem vertical rhythm. The existing shimmer component carries the
+        // sweep under `MotionPolicy::Full`; this surface holds `Reduced`, so
+        // active rows stay readable and still under stopped/reduced motion.
+        let live = matches!(
+            block.narration,
+            TurnNarration::Thinking
+                | TurnNarration::Working
+                | TurnNarration::ProviderWait
+                | TurnNarration::Compacting
+                | TurnNarration::BackgroundWait
+        );
+        let shimmer = ShimmerText::new(copy, *theme, MotionPolicy::Reduced)
+            .active(live)
+            .delay_seconds(1.5)
+            .duration_seconds(3.0)
+            .text_color(status_color(theme, block.narration));
         let mut status = div()
             .w_full()
             .min_w_0()
-            .text_size(theme.typography.label_text)
-            .text_color(status_color(theme, block.narration));
-        status = status.child(copy);
+            .flex()
+            .flex_row()
+            .items_center()
+            .my(theme.spacing.steps(2.0))
+            .text_size(theme.typography.editor_text_desktop)
+            .line_height(theme.spacing.steps(7.0))
+            .child(shimmer);
         status = status.debug_selector(move || selector.clone());
         Some(status.into_any_element())
     }
 
+    /// Renders the hover/focus-only settled footer for one turn.
+    ///
+    /// Parity with `conversation-turn-footer.svelte`: an absolute row below
+    /// the turn (`top_full` plus a quarter-rem margin), invisible until turn
+    /// hover or copy-button focus, carrying the ghost copy control and the
+    /// relative age. Only an eligible settlement paints; unsettled turns keep
+    /// no placeholder and no gap slot. Hover and focus emit
+    /// [`ConversationSurfaceAction::TurnFooterRevealed`] so the host can take
+    /// its one clock sample; the copy gesture emits
+    /// [`ConversationSurfaceAction::TurnFooterCopyRequested`] with the exact
+    /// settlement bytes.
     fn render_footer(
-        _block: &TurnFooterBlock,
+        &self,
+        turn_id: &TurnId,
+        block: &TurnFooterBlock,
         selector: String,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
-    ) -> AnyElement {
+        window: &mut Window,
+    ) -> Option<AnyElement> {
+        let settlement = footer_settlement(block)?;
+        let key = footer_key(turn_id);
+        let mirror = self.footer_mirrors.get(&key);
+        let relative_age = mirror.map_or("", |staged| staged.relative_age.as_str());
+        let copy_message = mirror.map_or("", |staged| staged.copy_message.as_str());
+        let handle = self
+            .footer_focus
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| self.answer_focus.clone());
+        let focused = handle.is_focused(window);
+
+        let surface = entity.downgrade();
+        let copy_turn = turn_id.clone();
+        let copy_text = settlement.response_text().to_owned();
+        let copy_button = Button::new(
+            SharedString::from(format!("{selector}-copy")),
+            handle,
+            *theme,
+            MotionPolicy::Reduced,
+            ButtonVariant::Ghost,
+            ButtonSize::IconSmall,
+            ButtonContent::icon_only(
+                AssetId::TABLER_COPY,
+                AccessibleLabel::new(COPY_RESPONSE_LABEL)
+                    .expect("static footer copy label is valid"),
+            ),
+        )
+        .expect("static footer copy button configuration is valid")
+        .focus_visibility(FocusVisibility::Visible)
+        .debug_selector(format!("{selector}-{FOOTER_COPY_SELECTOR_SUFFIX}"))
+        .on_activate(move |_, _, app| {
+            let _ = surface.update(app, |surface, cx| {
+                if surface.enqueue_action(ConversationSurfaceAction::TurnFooterCopyRequested {
+                    turn: copy_turn.clone(),
+                    text: copy_text.clone(),
+                }) {
+                    cx.notify();
+                }
+            });
+        });
+
+        let hover_surface = entity.downgrade();
+        let reveal_turn = turn_id.clone();
         let mut footer = div()
-            .w_full()
+            .id(format!("{selector}-footer"))
+            .absolute()
+            .left(px(0.0))
+            .top_full()
+            .mt(theme.spacing.steps(1.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(theme.spacing.steps(1.0))
             .text_size(theme.typography.label_text)
             .text_color(theme.colors.muted_foreground.to_paint())
-            .child("Turn footer");
-        footer = footer.debug_selector(move || selector.clone());
-        footer.into_any_element()
+            .opacity(if focused { 1.0 } else { 0.0 })
+            .group_hover(TURN_GROUP, |hover| hover.opacity(1.0))
+            .aria_label(TURN_ACTIONS_LABEL)
+            .debug_selector(move || selector.clone())
+            .on_hover(move |hovered, _, app| {
+                if *hovered {
+                    let _ = hover_surface.update(app, |surface, cx| {
+                        if surface.enqueue_action(
+                            ConversationSurfaceAction::TurnFooterRevealed {
+                                turn: reveal_turn.clone(),
+                            },
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(copy_button);
+        if !copy_message.is_empty() {
+            let message_selector = format!("{selector}-copy-message");
+            footer = footer.child(
+                div()
+                    .text_color(theme.colors.destructive.to_paint())
+                    .debug_selector(move || message_selector.clone())
+                    .child(copy_message.to_owned()),
+            );
+        }
+        if !relative_age.is_empty() {
+            let time_selector = format!("{selector}-time-{}", settlement.settled_at_ms());
+            footer = footer.child(
+                div()
+                    .debug_selector(move || time_selector.clone())
+                    .child(relative_age.to_owned()),
+            );
+        }
+        Some(footer.into_any_element())
     }
 
     fn render_controlled_card(
@@ -3080,6 +3486,7 @@ impl Render for ConversationSurface {
             .gap(theme.spacing.steps(4.0));
         let previous_anchors = std::mem::take(&mut self.scroll_anchors);
         let mut rendered_anchors = Vec::new();
+        self.sync_footer_focus(&mut *window, cx);
         {
             let mut anchors = ScrollAnchorRegistry {
                 handle: &self.scroll_handle,
@@ -3088,8 +3495,14 @@ impl Render for ConversationSurface {
                 rendered: &mut rendered_anchors,
             };
             for turn in self.scene.turn_scenes() {
-                transcript =
-                    transcript.child(self.render_turn(turn, &entity, &theme, &mut anchors, cx));
+                transcript = transcript.child(self.render_turn(
+                    turn,
+                    &entity,
+                    &theme,
+                    &mut anchors,
+                    &mut *window,
+                    cx,
+                ));
             }
         }
 
@@ -3233,49 +3646,157 @@ impl ConversationSurface {
             }
         }
         if markers.is_empty() {
+            self.navigator_expanded = false;
             return None;
         }
+        // Handles are ensured before any focus observation below, so a
+        // keyboard arrival can expand the rail into labels exactly like rail
+        // hover does in the reference (`group-focus-within`).
+        for marker in &markers {
+            let key = navigator_focus_key(&marker.target);
+            self.navigator_focus
+                .entry(key)
+                .or_insert_with(|| cx.focus_handle().tab_stop(true));
+        }
+        let focus_expanded = markers.iter().any(|marker| {
+            self.navigator_focus
+                .get(&navigator_focus_key(&marker.target))
+                .is_some_and(|handle| handle.is_focused(window))
+        });
+        let expanded = self.navigator_expanded || focus_expanded;
+        // The reference lights the turn the reader is at. Viewport-turn
+        // tracking stays a host extension; the latest marker is the tail the
+        // reader follows, so it carries the active tick.
+        let active_index = markers.len().checked_sub(1);
         let navigator_surface = entity.downgrade();
-        let mut rail = div()
+        let content = if expanded {
+            // Expanded panel at inspector width with the message labels. No
+            // shader glass or scale entrance here: existing GPUI motion only.
+            let mut panel = div()
+                .flex()
+                .flex_col()
+                .gap(theme.spacing.steps(1.0))
+                .w(px(288.0))
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(theme.colors.border.to_paint())
+                .bg(theme.colors.popover.to_paint())
+                .p(px(8.0));
+            for marker in &markers {
+                let key = navigator_focus_key(&marker.target);
+                let Some(handle) = self.navigator_focus.get(&key).cloned() else {
+                    continue;
+                };
+                let target = marker.target.clone();
+                let control_selector = format!(
+                    "{TURN_NAVIGATOR_CONTROL_PREFIX}-{}",
+                    navigator_target_slug(&marker.target)
+                );
+                let surface_handle = navigator_surface.clone();
+                let button = Button::new(
+                    SharedString::from(control_selector.clone()),
+                    handle,
+                    *theme,
+                    MotionPolicy::Reduced,
+                    ButtonVariant::Ghost,
+                    ButtonSize::Small,
+                    ButtonContent::text(marker.label.clone()),
+                )
+                .expect("turn-navigator button configuration is valid")
+                .focus_visibility(FocusVisibility::Visible)
+                .debug_selector(control_selector)
+                .on_activate(move |_, _, app| {
+                    let _ = surface_handle.update(app, |surface, cx| {
+                        surface.request_scroll(target.clone(), cx);
+                    });
+                });
+                panel = panel.child(button);
+            }
+            panel.into_any_element()
+        } else {
+            // At rest only the tick column paints: a 1 px rule per message,
+            // wider and brighter for the latest. Every row stays a focusable
+            // button carrying the message as its accessible name; hovering the
+            // rail or focusing a row expands into the labels above.
+            let mut ticks = div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(theme.spacing.steps(1.0))
+                .w(px(40.0))
+                .py(theme.spacing.steps(2.0));
+            for (index, marker) in markers.iter().enumerate() {
+                let active = Some(index) == active_index;
+                let key = navigator_focus_key(&marker.target);
+                let Some(handle) = self.navigator_focus.get(&key).cloned() else {
+                    continue;
+                };
+                let control_selector = format!(
+                    "{TURN_NAVIGATOR_CONTROL_PREFIX}-{}",
+                    navigator_target_slug(&marker.target)
+                );
+                let click_surface = navigator_surface.clone();
+                let click_target = marker.target.clone();
+                let key_surface = navigator_surface.clone();
+                let key_target = marker.target.clone();
+                let tick_color = if active {
+                    theme.colors.foreground.to_paint()
+                } else {
+                    theme.colors.muted_foreground.with_alpha(0.5).to_paint()
+                };
+                let row = div()
+                    .id(control_selector.clone())
+                    .track_focus(&handle)
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label(marker.label.clone())
+                    .cursor_pointer()
+                    .w_full()
+                    .h(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .debug_selector(move || control_selector.clone())
+                    .on_click(move |_, _, app| {
+                        let _ = click_surface.update(app, |surface, cx| {
+                            surface.request_scroll(click_target.clone(), cx);
+                        });
+                    })
+                    .on_key_down(move |event, _, app| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            let _ = key_surface.update(app, |surface, cx| {
+                                surface.request_scroll(key_target.clone(), cx);
+                            });
+                        }
+                    })
+                    .child(
+                        div()
+                            .h(px(1.0))
+                            .w(px(if active { 24.0 } else { 16.0 }))
+                            .rounded_full()
+                            .bg(tick_color),
+                    );
+                ticks = ticks.child(row);
+            }
+            ticks.into_any_element()
+        };
+        let hover_surface = entity.downgrade();
+        let rail = div()
+            .id(SharedString::from(TURN_NAVIGATOR_SELECTOR))
             .absolute()
             .right(px(16.0))
             .top(px(64.0))
-            .flex()
-            .flex_col()
-            .gap(theme.spacing.steps(1.0))
-            .debug_selector(|| TURN_NAVIGATOR_SELECTOR.to_owned());
-        for marker in &markers {
-            let key = navigator_focus_key(&marker.target);
-            let handle = self
-                .navigator_focus
-                .entry(key)
-                .or_insert_with(|| cx.focus_handle().tab_stop(true))
-                .clone();
-            let target = marker.target.clone();
-            let control_selector = format!(
-                "{TURN_NAVIGATOR_CONTROL_PREFIX}-{}",
-                navigator_target_slug(&marker.target)
-            );
-            let surface_handle = navigator_surface.clone();
-            let button = Button::new(
-                SharedString::from(control_selector.clone()),
-                handle,
-                *theme,
-                MotionPolicy::Reduced,
-                ButtonVariant::Ghost,
-                ButtonSize::Small,
-                ButtonContent::text(marker.label.clone()),
-            )
-            .expect("turn-navigator button configuration is valid")
-            .focus_visibility(FocusVisibility::Visible)
-            .debug_selector(control_selector)
-            .on_activate(move |_, _, app| {
-                let _ = surface_handle.update(app, |surface, cx| {
-                    surface.request_scroll(target.clone(), cx);
+            .debug_selector(|| TURN_NAVIGATOR_SELECTOR.to_owned())
+            .on_hover(move |hovered: &bool, _, app| {
+                let _ = hover_surface.update(app, |surface, cx| {
+                    if surface.navigator_expanded != *hovered {
+                        surface.navigator_expanded = *hovered;
+                        cx.notify();
+                    }
                 });
-            });
-            rail = rail.child(button);
-        }
+            })
+            .child(content);
         Some(rail.into_any_element())
     }
 }
@@ -3340,8 +3861,8 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
 
     use crate::conversation_scene::{
-        ConversationScene, SceneDisclosure, SceneItem, SceneItemKind, SceneTurn, TurnNarration,
-        TurnNarrationEntry,
+        AssistantPhase, ConversationScene, SceneDisclosure, SceneItem, SceneItemKind, SceneTurn,
+        TurnFooterBlock, TurnNarration, TurnNarrationEntry,
     };
 
     fn scene_id(value: &str) -> SceneId {
@@ -3424,6 +3945,141 @@ mod tests {
         cx: &mut VisualTestContext,
     ) -> gpui::Point<gpui::Pixels> {
         cx.update(|_, app| surface.read(app).scroll_handle().offset())
+    }
+
+    #[test]
+    fn quiet_and_suppressed_narrations_paint_no_status_row() {
+        assert_eq!(turn_status_copy(TurnNarration::Quiet), None);
+        assert_eq!(turn_status_copy(TurnNarration::StreamingSuppression), None);
+        assert!(!status_row_visible(false, TurnNarration::Quiet));
+        assert!(!status_row_visible(true, TurnNarration::Quiet));
+        assert!(!status_row_visible(
+            false,
+            TurnNarration::StreamingSuppression
+        ));
+        assert!(status_row_visible(false, TurnNarration::Thinking));
+        assert!(status_row_visible(false, TurnNarration::Working));
+        assert!(status_row_visible(
+            false,
+            TurnNarration::ProviderWait
+        ));
+    }
+
+    #[test]
+    fn terminal_duration_prefers_the_group_header() {
+        let worked = TurnNarration::WorkedFor { millis: 65_000 };
+        let thought = TurnNarration::ThoughtFor { millis: 5_000 };
+        assert_eq!(
+            turn_status_copy(worked),
+            Some("Worked for 1m 5s".to_owned())
+        );
+        assert!(!status_row_visible(true, worked));
+        assert!(!status_row_visible(true, thought));
+        assert!(status_row_visible(false, worked));
+        assert!(status_row_visible(false, thought));
+        assert!(status_row_visible(true, TurnNarration::Failed));
+        assert!(status_row_visible(true, TurnNarration::Thinking));
+    }
+
+    #[test]
+    fn live_status_formats_the_authoritative_elapsed_basis() {
+        assert_eq!(
+            live_status_copy(TurnNarration::Thinking, None, Some(1_000)),
+            Some("Thinking".to_owned())
+        );
+        assert_eq!(
+            live_status_copy(TurnNarration::Thinking, Some(0), None),
+            Some("Thinking".to_owned())
+        );
+        assert_eq!(
+            live_status_copy(TurnNarration::Thinking, Some(0), Some(65_000)),
+            Some("Thinking for 1m 5s".to_owned())
+        );
+        assert_eq!(
+            live_status_copy(TurnNarration::Working, Some(10_000), Some(3_000)),
+            Some("Working for 0s".to_owned())
+        );
+        assert_eq!(
+            live_status_copy(TurnNarration::Working, Some(0), Some(3_661_000)),
+            Some("Working for 1h 1m 1s".to_owned())
+        );
+        assert_eq!(
+            live_status_copy(TurnNarration::Failed, Some(0), Some(5_000)),
+            Some("Failed".to_owned())
+        );
+        assert_eq!(
+            live_status_copy(TurnNarration::Quiet, Some(0), Some(5_000)),
+            None
+        );
+        assert_eq!(
+            live_status_copy(TurnNarration::StreamingSuppression, Some(0), Some(5_000)),
+            None
+        );
+        assert_eq!(
+            live_status_copy(TurnNarration::ProviderWait, Some(0), Some(5_000)),
+            Some("Waiting for provider to respond…".to_owned())
+        );
+    }
+
+    #[test]
+    fn footer_paints_only_with_settlement() {
+        let without = TurnFooterBlock {
+            turn_id: turn_id("turn_a"),
+            settlement: None,
+        };
+        assert!(!footer_has_content(&without));
+        assert!(footer_settlement(&without).is_none());
+    }
+
+    #[test]
+    fn footer_keys_are_stable_per_turn() {
+        assert_eq!(footer_key(&turn_id("turn_a")), "turn-footer:turn_a");
+        assert_ne!(footer_key(&turn_id("turn_a")), footer_key(&turn_id("turn_b")));
+    }
+
+    #[test]
+    fn scene_block_order_is_preserved_with_conditional_paint() {
+        let scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Completed,
+            )],
+            vec![
+                item(
+                    "user-a",
+                    1,
+                    SceneItemKind::UserMessage {
+                        body: "hi".to_owned(),
+                    },
+                    None,
+                ),
+                item(
+                    "assistant-a",
+                    2,
+                    SceneItemKind::AssistantMessage {
+                        body: "hello".to_owned(),
+                        phase: AssistantPhase::Final,
+                    },
+                    None,
+                ),
+            ],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Working,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid");
+        assert_eq!(
+            ordered_block_kinds(&scene),
+            vec![
+                RenderedBlockKind::UserMessage,
+                RenderedBlockKind::AssistantMessage,
+                RenderedBlockKind::TurnStatus,
+                RenderedBlockKind::TurnFooter,
+            ]
+        );
     }
 
     #[gpui::test]
