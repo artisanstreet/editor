@@ -975,7 +975,7 @@ fn compiler_empty_and_plain_edge_cases() {
     assert_eq!(plain.len(), 1);
     let first = plain.first().expect("plain text compiles to one run");
     assert_eq!(first.len, 5);
-    assert_eq!(first.font.family, "Body".into());
+    assert_eq!(first.font.family, SharedString::from("Body"));
     assert_eq!(first.letter_spacing, Some(px(1.5)));
 }
 
