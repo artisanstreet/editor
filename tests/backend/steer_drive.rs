@@ -47,7 +47,7 @@ use artisan_domain::{
     RunId, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
-use artisan_native_engine::NativeCodexAuthority;
+use artisan_native_engine::{NativeCodexAuthority, NativeOpenCode2Authority};
 use artisan_transport::CancelHandle;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
