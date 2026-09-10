@@ -94,6 +94,21 @@ rust_binary(
     visibility = ["//:__pkg__"],
 )
 
+# Independent TEST-ONLY Codex wire child: speaks the app-server JSONL subset
+# the production Codex owner drives and validates the turn/start threadId
+# binding. No backend crate dependency: owner tests consume the binary
+# through the verified-launch path as a certified executable.
+rust_binary(
+    name = "codex_wire_fixture",
+    srcs = ["codex_wire_fixture.rs"],
+    crate_name = "codex_wire_fixture",
+    deps = ["@crates//:serde_json"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    testonly = True,
+    visibility = ["//:__pkg__"],
+)
+
 # Independent TEST-ONLY engine protocol child and its pure helper tests.
 # No backend crate dependency: later owner tests consume the binary as data.
 rust_binary(
@@ -302,6 +317,7 @@ rust_test(
     data = [
         ":directory_controller_fixture",
         ":engine_owner_fixture",
+        ":codex_wire_fixture",
     ],
     deps = [
         "@crates//:rcgen",
@@ -311,6 +327,7 @@ rust_test(
     env = {
         "ARTISAN_DIRECTORY_CONTROLLER_FIXTURE": "$(rlocationpath :directory_controller_fixture)",
         "ARTISAN_ENGINE_OWNER_FIXTURE": "$(rlocationpath :engine_owner_fixture)",
+        "ARTISAN_CODEX_WIRE_FIXTURE": "$(rlocationpath :codex_wire_fixture)",
     },
     lint_config = "//:workspace_lints",
     size = "small",

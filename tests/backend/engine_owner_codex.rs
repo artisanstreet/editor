@@ -7,16 +7,25 @@
 //! and the streaming pump through the shared [`super::codex`] helpers. No
 //! real `codex` binary, no catalog flag, no frontend selection.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use artisan_domain::{
-    ApprovalMode, CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier,
-    EngineAgentId, EngineId, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    FilesystemAccess, NetworkAccess, ObservationId, ObservationSequence, PermissionId, RootPath,
-    RunId, RunUsageBasis, ThreadId, UnixMillis, WebSearchAccess,
+use artisan_database::{
+    AttachProjectInput, CreateThreadInput, SetThreadEngineConfigInput, SqliteConfig, connect,
 };
+use artisan_domain::{
+    ApprovalMode, ByteLimit, CodexModelContextWindow, CodexReasoningEffort, CodexSelection,
+    CodexServiceTier, CountLimit, DirectoryId, DisplayName, EngineAgentId, EngineConfigUpdatePrecondition,
+    EngineId, EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRunConfig,
+    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
+    FiniteMillis, NetworkAccess, ObservationId, ObservationSequence, PermissionId, ProjectId,
+    QueueMessagePayload, RequestId, RootPath, RunId, RunUsageBasis, ThreadId, ThreadTitle,
+    UnixMillis, WebSearchAccess,
+};
+use artisan_migrations::migrate_to_current;
+use artisan_native_engine::NativeCodexAuthority;
 use artisan_transport::CancelHandle;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -36,9 +45,10 @@ use super::codex::{
 };
 use super::observation::{EngineObservation, TerminalState};
 use super::operation::{
-    codex_response_id_matches, codex_resumed_thread_id, codex_thread_id, codex_turn_id,
-    is_codex_result_for,
+    AcceptedTurn, EngineOperationError, codex_response_id_matches, codex_resumed_thread_id,
+    codex_thread_id, codex_turn_id, is_codex_result_for,
 };
+use super::{EngineCodexTurnInput, EngineOwner, EngineOwnerShutdown};
 use crate::native_run_dispatch::{binding_bytes_vec, binding_matches_bytes};
 
 // ---------------------------------------------------------------------------
@@ -907,11 +917,6 @@ async fn fixture_restart_replays_durable_prefix() {
     let durable_prefix = joined(&interrupted);
     assert_eq!(durable_prefix, "durable-");
 
-    let second = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n",
-        r#"{"method":"item/agentMessage/delta","params":{"delta":"replayed","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
-        r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
-    );
     let completed = tokio::time::timeout(
         Duration::from_secs(30),
         run_fixture_turn(&second, "", Duration::from_secs(5), None),
@@ -1613,11 +1618,6 @@ async fn fixture_restart_after_kill_replays_prefix_on_the_same_thread() {
         Some("thread-fixture-1")
     );
 
-    let second = format!(
-        "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n",
-        r#"{"method":"item/agentMessage/delta","params":{"delta":"replayed","itemId":"item-1","threadId":"thread-fixture-1","turnId":"turn-1"}}"#,
-        r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
-    );
     let completed = tokio::time::timeout(
         Duration::from_secs(30),
         run_fixture_turn(&second, "", Duration::from_secs(5), None),
@@ -1629,4 +1629,492 @@ async fn fixture_restart_after_kill_replays_prefix_on_the_same_thread() {
         format!("{durable_prefix}{}", joined(&completed)),
         "durable-replayed"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Production-executor wire proofs (real `execute_codex_turn`, no mocks)
+// ---------------------------------------------------------------------------
+//
+// The canned-stdout harness above bypasses the owner executor by design. The
+// tests below admit real `EngineCodexTurnInput` turns into a live
+// `EngineOwner` whose verified launch points at the `codex_wire_fixture`
+// executable, so the production handshake, threadId binding, reply
+// correlation, and streaming pump all execute. The parent never mutates
+// global environment: each test copies the built fixture to a per-test
+// executable whose basename names the scenario, and the fixture records the
+// received `turn/start` params inside the spawned project-root cwd.
+
+/// Scratch project root plus database path for one wire turn.
+struct WireTempRoot {
+    dir: PathBuf,
+    root: RootPath,
+    db_path: PathBuf,
+}
+
+impl WireTempRoot {
+    fn new(label: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "artisan-codex-wire-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("wire temp root");
+        let root = RootPath::parse(dir.to_str().expect("temp path utf8")).expect("root");
+        let db_path = dir.join("wire.sqlite");
+        Self { dir, root, db_path }
+    }
+}
+
+impl Drop for WireTempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Resolves the built wire-fixture executable without touching global state.
+fn codex_wire_fixture_program() -> PathBuf {
+    if let Ok(path) = std::env::var("ARTISAN_CODEX_WIRE_FIXTURE") {
+        let path = PathBuf::from(path);
+        assert!(
+            path.is_file(),
+            "declared wire fixture must be a regular file"
+        );
+        return path;
+    }
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_codex_wire_fixture") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return path;
+        }
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for candidate in [
+        manifest.join("../../target/debug/codex_wire_fixture"),
+        manifest.join("../../target/debug/codex_wire_fixture.exe"),
+    ] {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    panic!("wire fixture binary not found; build the codex-wire-fixture example");
+}
+
+/// Copies the built fixture to a per-test executable whose basename names
+/// the scenario (`strict`, `reject_always`, or `interleave`).
+fn codex_wire_scenario_program(fixture: &PathBuf, dir: &PathBuf, scenario: &str) -> PathBuf {
+    let named = dir.join(format!(
+        "codex-wire-{scenario}{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    std::fs::copy(fixture, &named).expect("wire fixture copies per test");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&named).expect("meta").permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&named, permissions).expect("chmod");
+    }
+    named
+}
+
+fn codex_wire_selection(profile_id: &str, fast: bool) -> CodexSelection {
+    CodexSelection::new(
+        EngineProfileId::parse(profile_id).expect("profile id"),
+        Some(EngineModelId::parse("codex-model").expect("model id")),
+        permission(
+            ApprovalMode::OnRequest,
+            FilesystemAccess::Workspace,
+            NetworkAccess::Enabled,
+        ),
+        Some(CodexReasoningEffort::High),
+        if fast {
+            Some(CodexServiceTier::Fast)
+        } else {
+            None
+        },
+        Some(CodexModelContextWindow::new(1_000).expect("window")),
+    )
+    .expect("codex wire selection valid")
+}
+
+/// Read-only live-probe selection: the exact requested model at medium
+/// effort, no service tier, no context-window override, never approve, no
+/// filesystem, no network. The probe performs no tools and reads no files;
+/// its prompt is text-only.
+fn codex_live_selection(profile_id: &str) -> CodexSelection {
+    CodexSelection::new(
+        EngineProfileId::parse(profile_id).expect("profile id"),
+        Some(EngineModelId::parse("gpt-5.6-luna").expect("model id")),
+        permission(
+            ApprovalMode::Never,
+            FilesystemAccess::None,
+            NetworkAccess::Disabled,
+        ),
+        Some(CodexReasoningEffort::Medium),
+        None,
+        None,
+    )
+    .expect("codex live selection valid")
+}
+
+fn codex_wire_runtime() -> EngineRuntimeControls {
+    let budget = |ms: u64| FiniteMillis::new(ms).expect("finite millis valid");
+    EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: budget(45_000),
+        readiness_budget: budget(5_000),
+        health_budget: budget(5_000),
+        prompt_budget: budget(15_000),
+        stream_budget: budget(25_000),
+        close_budget: budget(5_000),
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness limit"),
+        max_header_count: CountLimit::new(32).expect("header count"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr"),
+        observation_capacity: CountLimit::new(16).expect("observation cap"),
+    })
+    .expect("runtime valid")
+}
+
+async fn codex_wire_settings(
+    selection: CodexSelection,
+    root: &RootPath,
+    thread_id: &ThreadId,
+) -> artisan_database::ThreadEngineSettings {
+    let config = EngineRunConfig::new(
+        EngineSelection::Codex(selection),
+        codex_wire_runtime(),
+    );
+    let db = connect(
+        SqliteConfig::in_memory()
+            .min_connections(1)
+            .max_connections(1)
+            .sqlx_logging(false),
+    )
+    .await
+    .expect("in-memory db should open");
+    migrate_to_current(&db)
+        .await
+        .expect("migrate should succeed");
+    let repo = artisan_database::Repository::new(db.clone());
+    let now = UnixMillis::from_millis(1);
+    repo.attach_project(AttachProjectInput {
+        request_id: RequestId::parse("req-wire-attach").expect("request id"),
+        directory_id: DirectoryId::parse("dir-wire").expect("directory id"),
+        project_id: ProjectId::parse("proj-wire").expect("project id"),
+        root_path: root.clone(),
+        display_name: DisplayName::parse("wire-proj").expect("display"),
+        attached_at: now,
+    })
+    .await
+    .expect("attach project");
+    repo.create_thread(CreateThreadInput {
+        request_id: RequestId::parse("req-wire-thread").expect("request id"),
+        thread_id: thread_id.clone(),
+        project_id: ProjectId::parse("proj-wire").expect("project id"),
+        title: ThreadTitle::parse("wire-thread").expect("title"),
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .expect("create thread");
+    repo.set_thread_engine_config(SetThreadEngineConfigInput {
+        request_id: RequestId::parse("req-wire-config").expect("request id"),
+        thread_id: thread_id.clone(),
+        precondition: EngineConfigUpdatePrecondition::Unconfigured,
+        config: config.clone(),
+        accepted_at: now,
+    })
+    .await
+    .expect("set config");
+    repo.read_thread_engine_settings(thread_id)
+        .await
+        .expect("read settings")
+        .expect("settings present")
+}
+
+struct WireTurnOutcome {
+    session: String,
+    text: String,
+    terminal: TerminalState,
+}
+
+/// Prepares, authorizes once, and drains one live owner turn to its terminal
+/// observation, proving the production handshake and pump end to end.
+async fn drive_codex_wire_turn(turn: &mut AcceptedTurn) -> WireTurnOutcome {
+    let prepared = turn.prepare().await.expect("wire turn prepares");
+    let session = prepared.session().to_owned();
+    turn.authorize().expect("wire turn authorizes once");
+    let mut text = String::new();
+    let terminal = loop {
+        let observation = tokio::time::timeout(Duration::from_secs(20), turn.next_observation())
+            .await
+            .expect("wire observation arrives")
+            .expect("observation stream stays open until terminal");
+        match observation {
+            EngineObservation::TextDelta(delta) => text.push_str(delta.delta()),
+            EngineObservation::Usage(_) => {}
+            EngineObservation::Terminal(terminal) => break terminal.state(),
+            EngineObservation::TextSnapshot(_)
+            | EngineObservation::Subagent(_)
+            | EngineObservation::SubagentTranscript(_) => {
+                panic!("unexpected wire observation")
+            }
+        }
+    };
+    let result = turn.finish().await.expect("wire turn finishes");
+    assert_eq!(result.terminal(), terminal);
+    WireTurnOutcome {
+        session,
+        text,
+        terminal,
+    }
+}
+
+async fn admit_codex_wire_turn(
+    owner: &EngineOwner,
+    settings: artisan_database::ThreadEngineSettings,
+    launch: artisan_native_engine::VerifiedCodexLaunch,
+    thread_id: ThreadId,
+    run_id: RunId,
+    root: &RootPath,
+    prompt: &str,
+) -> AcceptedTurn {
+    owner
+        .admit_codex_turn(
+            EngineCodexTurnInput {
+                run_id,
+                thread_id,
+                project_root: root.clone(),
+                prompt_id: "prompt-wire-1".to_owned(),
+                prompt: QueueMessagePayload::text_only(prompt).expect("payload"),
+                settings,
+                launch,
+                continuation: None,
+                prompt_delivery: "immediate".to_owned(),
+                stream_after: 0,
+                control_capacity: 1,
+            },
+            Duration::from_secs(50),
+        )
+        .expect("wire turn admits")
+}
+
+#[tokio::test]
+async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let fixture = codex_wire_fixture_program();
+        let temp = WireTempRoot::new("accept");
+        let program = codex_wire_scenario_program(&fixture, &temp.dir, "strict");
+        let thread_id = ThreadId::parse("thread-wire-accept").expect("thread id");
+        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch_with_executable(
+                &temp.db_path,
+                &EngineProfileId::parse("codex-fixture").expect("profile id"),
+                &program,
+                "codex-cli 0.145.0",
+            )
+            .expect("wire launch resolves");
+        let mut owner = EngineOwner::start_configured(
+            NonZeroUsize::new(1).expect("one slot"),
+            &tokio::runtime::Handle::current(),
+        );
+        let mut turn = admit_codex_wire_turn(
+            &owner,
+            settings,
+            launch,
+            thread_id.clone(),
+            RunId::parse("wire-run-accept").expect("run id"),
+            &temp.root,
+            "hello wire",
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let wire = drive_codex_wire_turn(&mut turn).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(50),
+            "accepted turn settles well inside budget"
+        );
+        assert_eq!(wire.session, "thread-fixture-1");
+        assert_eq!(wire.text, "hello wire");
+        assert_eq!(wire.terminal, TerminalState::Completed);
+        // The strict fixture accepts only with a bound threadId: the
+        // recorded params prove the production payload carried it.
+        let recorded: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(temp.dir.join("turn-start-params.json"))
+                .expect("fixture records turn params"),
+        )
+        .expect("recorded params are valid json");
+        assert_eq!(recorded["threadId"], "thread-fixture-1");
+        assert_eq!(recorded["input"][0]["text"], "hello wire");
+        assert_eq!(recorded["serviceTier"], "fast");
+        assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    })
+    .await
+    .expect("wire turn completes inside 60s");
+}
+
+#[tokio::test]
+async fn codex_wire_owner_fails_fast_on_turn_start_rejection() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let fixture = codex_wire_fixture_program();
+        let temp = WireTempRoot::new("reject");
+        let program = codex_wire_scenario_program(&fixture, &temp.dir, "reject_always");
+        let thread_id = ThreadId::parse("thread-wire-reject").expect("thread id");
+        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch_with_executable(
+                &temp.db_path,
+                &EngineProfileId::parse("codex-fixture").expect("profile id"),
+                &program,
+                "codex-cli 0.145.0",
+            )
+            .expect("wire launch resolves");
+        let mut owner = EngineOwner::start_configured(
+            NonZeroUsize::new(1).expect("one slot"),
+            &tokio::runtime::Handle::current(),
+        );
+        let mut turn = admit_codex_wire_turn(
+            &owner,
+            settings,
+            launch,
+            thread_id.clone(),
+            RunId::parse("wire-run-reject").expect("run id"),
+            &temp.root,
+            "hello wire",
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let prepared = turn.prepare().await;
+        // The `-32600` error envelope fails preparation fast (seconds, not
+        // lease expiry) with the typed provider failure.
+        assert!(
+            matches!(prepared, Err(EngineOperationError::ProviderRequestFailed)),
+            "rejected turn/start must fail preparation fast"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "rejection settles fast instead of waiting out the lease"
+        );
+        drop(turn);
+        assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    })
+    .await
+    .expect("rejection settles inside 60s");
+}
+
+#[tokio::test]
+async fn codex_wire_owner_survives_interleaved_thread_started() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let fixture = codex_wire_fixture_program();
+        let temp = WireTempRoot::new("interleave");
+        let program = codex_wire_scenario_program(&fixture, &temp.dir, "interleave");
+        let thread_id = ThreadId::parse("thread-wire-interleave").expect("thread id");
+        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch_with_executable(
+                &temp.db_path,
+                &EngineProfileId::parse("codex-fixture").expect("profile id"),
+                &program,
+                "codex-cli 0.145.0",
+            )
+            .expect("wire launch resolves");
+        let mut owner = EngineOwner::start_configured(
+            NonZeroUsize::new(1).expect("one slot"),
+            &tokio::runtime::Handle::current(),
+        );
+        let mut turn = admit_codex_wire_turn(
+            &owner,
+            settings,
+            launch,
+            thread_id.clone(),
+            RunId::parse("wire-run-interleave").expect("run id"),
+            &temp.root,
+            "hello wire",
+        )
+        .await;
+        // The real CLI emits `thread/started` between the `thread/*` result
+        // and the `turn/start` result: id correlation (not next-line
+        // assumption) still accepts the turn and delivers its text.
+        let wire = drive_codex_wire_turn(&mut turn).await;
+        assert_eq!(wire.session, "thread-fixture-1");
+        assert_eq!(wire.text, "hello wire");
+        assert_eq!(wire.terminal, TerminalState::Completed);
+        assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    })
+    .await
+    .expect("interleaved turn completes inside 60s");
+}
+
+/// Opt-in production acceptance against the installed authenticated CLI.
+///
+/// Ignored by default: requires the real `codex` binary plus an
+/// authenticated account, and performs one tiny read-only turn
+/// (`Return SEND_PROBE_OK only`) in a fresh temp project root. Root runs
+/// it explicitly after the build gate; it never touches a live user
+/// database. The profile comes from `ARTISAN_CODEX_LIVE_PROFILE_ID` when
+/// set, otherwise `codex-live-probe`.
+#[tokio::test]
+#[ignore = "requires installed authenticated codex CLI"]
+async fn codex_live_owner_completes_real_turn_within_budget() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let executable = NativeCodexAuthority::new()
+            .resolve_executable()
+            .expect("live test requires an installed codex executable");
+        let probe = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::process::Command::new(&executable)
+                .arg("--version")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output(),
+        )
+        .await
+        .expect("version probe settles")
+        .expect("version probe spawns");
+        assert!(probe.status.success(), "codex --version must succeed");
+        let stdout = String::from_utf8(probe.stdout).expect("version output is utf8");
+        let profile_name = std::env::var("ARTISAN_CODEX_LIVE_PROFILE_ID")
+            .unwrap_or_else(|_| "codex-live-probe".to_owned());
+        let temp = WireTempRoot::new("live");
+        let thread_id = ThreadId::parse("thread-live-probe").expect("thread id");
+        let settings = codex_wire_settings(codex_live_selection(&profile_name), &temp.root, &thread_id).await;
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch(
+                &temp.db_path,
+                &EngineProfileId::parse(profile_name.as_str()).expect("profile id"),
+                &stdout,
+            )
+            .expect("live launch resolves");
+        let mut owner = EngineOwner::start_configured(
+            NonZeroUsize::new(1).expect("one slot"),
+            &tokio::runtime::Handle::current(),
+        );
+        let mut turn = admit_codex_wire_turn(
+            &owner,
+            settings,
+            launch,
+            thread_id.clone(),
+            RunId::parse("wire-run-live").expect("run id"),
+            &temp.root,
+            "Return SEND_PROBE_OK only",
+        )
+        .await;
+        let wire = drive_codex_wire_turn(&mut turn).await;
+        assert!(
+            wire.text.contains("SEND_PROBE_OK"),
+            "live turn answers with the exact probe marker"
+        );
+        assert_eq!(wire.terminal, TerminalState::Completed);
+        assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    })
+    .await
+    .expect("live turn completes inside 60s");
 }

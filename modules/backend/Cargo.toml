@@ -166,3 +166,8 @@ workspace = true
 [[example]]
 name = "engine-owner-fixture"
 path = "../../tests/backend/engine_owner_fixture.rs"
+
+# Test-only Codex app-server wire fixture; excluded from shipping binary builds.
+[[example]]
+name = "codex-wire-fixture"
+path = "../../tests/backend/codex_wire_fixture.rs"
