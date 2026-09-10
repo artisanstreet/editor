@@ -34,7 +34,7 @@ use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::collapsible::Collapsible;
 use artisan_ui::input_state::TextInputState;
 use artisan_ui::markdown_renderer::MarkdownRenderer;
-use artisan_ui::motion::MotionPolicy;
+use artisan_ui::motion::{MotionCurve, MotionDuration, MotionPlan, MotionPolicy, MotionRecipe};
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::selectable_text::SelectableText;
 use artisan_ui::separator::{SeparatorAxis, separator};
@@ -43,8 +43,9 @@ use artisan_ui::theme::{
     ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode,
 };
 use gpui::{
-    AnyElement, Context, Div, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Modifiers,
-    Render, ScrollAnchor, ScrollHandle, SharedString, Stateful, Window, div,
+    Animation, AnimationExt, AnyElement, Context, Div, ElementId, Entity, Filter, FocusHandle,
+    FontWeight, IntoElement, Modifiers, Render, ScrollAnchor, ScrollHandle, SharedString, Stateful,
+    Window, div,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -2140,8 +2141,27 @@ impl ConversationSurface {
                 } else {
                     None
                 };
+                // Mounted-working freezes in retained window state on first
+                // mount: history that later goes live must never enter.
+                let mounted_working = {
+                    let working_now = owned.is_some();
+                    let state = window.use_keyed_state(
+                        ElementId::Name(SharedString::from(format!("{selector}-mounted-working"))),
+                        cx,
+                        move |_, _| working_now,
+                    );
+                    *state.read(cx)
+                };
                 Some(self.render_work_group(
-                    turn_id, block, selector, entity, theme, anchors, owned,
+                    turn_id,
+                    block,
+                    selector,
+                    entity,
+                    theme,
+                    anchors,
+                    owned,
+                    status_motion,
+                    mounted_working,
                 ))
             }
             TurnBlock::Compaction(block) => {
@@ -2326,6 +2346,8 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
         live_header: Option<String>,
+        status_motion: MotionPolicy,
+        mounted_working: bool,
     ) -> AnyElement {
         // The stable anchor prefers the session id (disclosure/scroll key);
         // legacy positional groups fall back to the first-item derivation.
@@ -2336,22 +2358,22 @@ impl ConversationSurface {
         // Terminal duration wins; otherwise the owning group headers the
         // turn's live Thinking/Working line once (see render_turn). Earlier
         // groups and the separate status row stand down, so the line paints
-        // exactly once per turn. Headers are static text; the sweep lives
-        // only on the status summary line.
+        // exactly once per turn.
         let terminal = work_group_header_copy(block.label);
         let header = terminal.or(live_header);
         // Engine handoffs fold into the header far end, never as standalone
         // timeline rows while a session hosts them.
-        let transition = block.transition.as_ref().map(|handoff| {
-            format!("{} → {}", handoff.from_model, handoff.to_model)
-        });
+        let transition = block
+            .transition
+            .as_ref()
+            .map(|handoff| format!("{} → {}", handoff.from_model, handoff.to_model));
 
         // Controlled state is never overridden: Closed hides through the
         // collapsible in every case, and the toggle always flows through the
-        // existing disclosure action. A headerless controlled group uses a
-        // chevron-only affordance with an honest accessible name — disclosure
-        // chrome, never invented content.
+        // existing disclosure action. Uncontrolled groups always show their
+        // items, exactly like the previous static branch did.
         let controlled = group_id.is_some() && block.disclosure.is_some();
+        let open = !controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed));
         let items_mounted =
             !controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed));
 
@@ -2399,64 +2421,56 @@ impl ConversationSurface {
             let selector = selector.clone();
             move || selector.clone()
         });
-        let mut section = match (group_id, header, block.disclosure) {
-            (Some(group_id), header, Some(_)) => {
-                // Text header when the group owns one, else the chevron-only
-                // disclosure affordance: chrome, never invented content.
-                let trigger: AnyElement = match header {
-                    Some(header_text) => Self::work_group_header(
-                        header_text,
-                        transition.clone(),
-                        theme,
-                    )
-                    .into_any_element(),
-                    None => div()
-                        .id(format!("{selector}-work-trigger"))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .text_color(theme.colors.muted_foreground.to_paint())
-                        .aria_label("Toggle work details")
-                        .child(asset_glyph(AssetId::TABLER_CHEVRON_DOWN).size(px(14.0)))
-                        .into_any_element(),
+        // One header element for the group's whole life: the reference
+        // keeps a single session header carrying both the entrance and the
+        // divider, so plain and disclosable renders share this construction.
+        // Splitting the headers would remount the row the instant the first
+        // detail arrived.
+        let header_row = Self::work_group_header_row(
+            header,
+            transition,
+            open,
+            controlled,
+            &selector,
+            status_motion,
+            mounted_working,
+            theme,
+        );
+        // The disclosure wrapper never conditions the header's ancestry:
+        // the collapsible always wraps header plus items and only its
+        // disabled flag follows control, so registering disclosure later
+        // never remounts the row.
+        let disclosure_selector = format!("{selector}-disclosure");
+        let collapsible = Collapsible::new(
+            SharedString::from(disclosure_selector.clone()),
+            self.disclosure_focus.clone(),
+            open,
+            header_row,
+            items,
+        )
+        .disabled(!controlled)
+        .debug_selector(disclosure_selector);
+        let surface = entity.downgrade();
+        // The toggle callback exists only for controlled groups; the wrapper
+        // itself stays mounted in every case so the header ancestry never
+        // changes. Uncontrolled groups have no scene identity to address,
+        // and their trigger is inert through `disabled` above.
+        let collapsible = if let Some(group_id) = group_id {
+            collapsible.on_change(move |requested_open, _, _, app| {
+                let action = ConversationSurfaceAction::DisclosureToggleRequested {
+                    id: group_id.clone(),
+                    requested_open,
                 };
-                let disclosure_selector = format!("{selector}-disclosure");
-                let open = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
-                let mut collapsible = Collapsible::new(
-                    SharedString::from(disclosure_selector.clone()),
-                    self.disclosure_focus.clone(),
-                    open,
-                    trigger,
-                    items,
-                )
-                .debug_selector(disclosure_selector);
-                let surface = entity.downgrade();
-                collapsible = collapsible.on_change(move |requested_open, _, _, app| {
-                    let action = ConversationSurfaceAction::DisclosureToggleRequested {
-                        id: group_id.clone(),
-                        requested_open,
-                    };
-                    let _ = surface.update(app, |surface, cx| {
-                        if surface.enqueue_action(action) {
-                            cx.notify();
-                        }
-                    });
+                let _ = surface.update(app, |surface, cx| {
+                    if surface.enqueue_action(action) {
+                        cx.notify();
+                    }
                 });
-                section.child(collapsible)
-            }
-            (_, header, _) => {
-                let mut static_section = section;
-                if let Some(header_text) = header {
-                    static_section = static_section.child(Self::work_group_header(
-                        header_text,
-                        transition.clone(),
-                        theme,
-                    ));
-                }
-                static_section.child(items)
-            }
+            })
+        } else {
+            collapsible
         };
-        section.into_any_element()
+        section.child(collapsible).into_any_element()
     }
 
     /// Renders one ordered detail row with its scroll anchor.
@@ -2567,18 +2581,53 @@ impl ConversationSurface {
         }
     }
 
-    /// Renders one work-group header row in the reference session-header
-    /// tone, with no generic title: base size, single-spaced, muted.
-    /// Static by construction — the sweep lives on the live summary line,
-    /// exactly where the reference puts it, so settlement stops all motion
-    /// structurally. A folded engine handoff reads at the far end, matching
-    /// the reference header layout.
-    fn work_group_header(
-        title: String,
+    /// Builds the single session header row shared by plain and disclosable
+    /// renders, mirroring `conversation-work-session.svelte` §469:
+    /// `relative flex w-full items-center justify-between gap-3 pb-2` with
+    /// the label (or disclosure chevron) at the near end, an engine handoff
+    /// at the far end, and the 1 px settled divider pinned to the bottom
+    /// edge. Controlled groups carry the label tone on the chevron;
+    /// uncontrolled text stays static; a headerless controlled group keeps
+    /// the chevron-only affordance with an honest accessible name —
+    /// disclosure chrome, never invented content.
+    fn work_group_header_row(
+        label: Option<String>,
         transition: Option<String>,
+        open: bool,
+        controlled: bool,
+        selector: &str,
+        motion: MotionPolicy,
+        mounted_working: bool,
         theme: &ArtisanTheme,
-    ) -> Div {
+    ) -> AnyElement {
+        let near: AnyElement = match (controlled, label) {
+            (true, Some(label)) => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(theme.spacing.steps(1.0))
+                .min_w_0()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(label)
+                .child(Self::work_group_chevron(open, theme))
+                .into_any_element(),
+            (true, None) => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .aria_label("Toggle work details")
+                .child(Self::work_group_chevron(open, theme))
+                .into_any_element(),
+            (false, Some(label)) => div()
+                .min_w_0()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(label)
+                .into_any_element(),
+            (false, None) => div().into_any_element(),
+        };
         let mut header = div()
+            .relative()
             .w_full()
             .min_w_0()
             .flex()
@@ -2593,7 +2642,12 @@ impl ConversationSurface {
                 ProseTypography::BODY_SIZE_PX,
             )))
             .text_color(theme.colors.muted_foreground.to_paint())
-            .child(title);
+            .pb(theme.spacing.steps(2.0))
+            .debug_selector({
+                let selector = format!("{selector}-header");
+                move || selector.clone()
+            })
+            .child(near);
         if let Some(handoff) = transition {
             header = header.child(
                 div()
@@ -2602,7 +2656,78 @@ impl ConversationSurface {
                     .child(handoff),
             );
         }
-        header
+        // The settled divider: the reference `t-settle-underline` base rule,
+        // always painted at its exact end geometry. Growing it from the
+        // measured label width has no text-measurement primitive here, so no
+        // width tween is faked; the rule rides inside the entrance below
+        // while one plays.
+        header = header.child(
+            separator(theme.colors.border.to_paint(), SeparatorAxis::Horizontal)
+                .absolute()
+                .bottom(px(0.0))
+                .left(px(0.0)),
+        );
+        // Mounted-working entrance only: the reference `status-swap-enter`
+        // plays solely for headers mounted while working, and history
+        // arriving settled stays static. The frozen flag (retained window
+        // state from first mount) means history that later goes live never
+        // enters. The selector-keyed chain plays once per group —
+        // re-renders never restart it — and settling leaves it at its end
+        // state structurally. Hold plus enter mirror the reference 150 ms
+        // delay and 150 ms EaseInOut run; opacity, relative 4 px rise (layout
+        // neutral, like the reference translate), and 2 px blur all ride the
+        // same eased clock. Reduced motion skips the wrapper and rests at
+        // the unfiltered state.
+        if !mounted_working {
+            return header.into_any_element();
+        }
+        match motion.resolve(MotionRecipe::TextSwap) {
+            MotionPlan::Immediate => header.into_any_element(),
+            MotionPlan::Animate(animation) => header
+                .opacity(0.0)
+                .with_animations(
+                    ElementId::Name(SharedString::from(format!("{selector}-header-enter"))),
+                    vec![
+                        Animation::new(MotionDuration::Quick.as_duration()),
+                        animation.gpui_clock(),
+                    ],
+                    |header, index, value| {
+                        if index == 0 {
+                            header
+                                .opacity(0.0)
+                                .top(px(-4.0))
+                                .filter(vec![Filter::Blur(px(2.0))])
+                        } else {
+                            let eased = MotionCurve::EaseInOut.sample(f64::from(value)) as f32;
+                            header
+                                .opacity(eased)
+                                .top(px(-4.0 * (1.0 - eased)))
+                                .filter(vec![Filter::Blur(px(2.0 * (1.0 - eased)))])
+                        }
+                    },
+                )
+                .into_any_element(),
+        }
+    }
+
+    /// Disclosure chevron for one session header: the reference `size-4`
+    /// `ChevronRight` rotated 90 degrees when open. Rotation rides the SVG
+    /// render transformation, which [`AssetGlyph`] does not forward yet, so
+    /// open swaps in the down glyph at the same 16 px muted geometry — the
+    /// accordion lane's own discrete mapping — with no tween claimed. The
+    /// exact rotation needs a minimal shared forwarding,
+    /// `AssetGlyph::with_transformation(Transformation)`, owned by the
+    /// asset-seam lane; with it the chevron becomes one right glyph under
+    /// `Transformation::rotate` on the 250 ms `AccordionChevron` clock.
+    fn work_group_chevron(open: bool, theme: &ArtisanTheme) -> AnyElement {
+        asset_glyph(if open {
+            AssetId::TABLER_CHEVRON_DOWN
+        } else {
+            AssetId::TABLER_CHEVRON_RIGHT
+        })
+        .size(px(16.0))
+        .text_color(theme.colors.muted_foreground.to_paint())
+        .into_any_element()
     }
 
     fn render_compaction(
@@ -5654,6 +5779,66 @@ mod tests {
         let after = offset(&surface, cx);
         assert!(after.y < before.y, "the rendered work item must be reached");
         cx.update(|_, app| assert!(surface.read(app).pending_scroll_targets.is_empty()));
+    }
+
+    #[gpui::test]
+    fn work_group_header_row_wraps_the_disclosure_trigger(cx: &mut TestAppContext) {
+        const HEADER: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-first-header";
+        const TRIGGER: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-first-disclosure-trigger";
+        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                scroll_target_scene(SceneDisclosure::Open),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(240.0)));
+        settle(cx);
+        let header = cx
+            .debug_bounds(HEADER)
+            .expect("controlled header row must paint");
+        let trigger = cx
+            .debug_bounds(TRIGGER)
+            .expect("disclosure trigger must paint");
+        assert!(
+            trigger.origin.y >= header.origin.y
+                && trigger.origin.y + trigger.size.height <= header.origin.y + header.size.height,
+            "the trigger lives inside the shared header row"
+        );
+    }
+
+    #[gpui::test]
+    fn work_group_header_row_paints_without_a_disclosure_wrapper(cx: &mut TestAppContext) {
+        const HEADER: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-plain-first-header";
+        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                scene(vec![
+                    item(
+                        "plain-first",
+                        1,
+                        SceneItemKind::Activity { body: body() },
+                        None,
+                    ),
+                    item(
+                        "plain-target",
+                        2,
+                        SceneItemKind::Activity { body: body() },
+                        None,
+                    ),
+                ]),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(240.0)));
+        settle(cx);
+        assert!(
+            cx.debug_bounds(HEADER).is_some(),
+            "the plain header row paints without a disclosure wrapper"
+        );
     }
 
     #[gpui::test]

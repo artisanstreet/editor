@@ -432,6 +432,7 @@ fn controller_refusal_is_atomic_and_retained_as_a_typed_effect(cx: &mut TestAppC
 fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestAppContext) {
     const TRIGGER: &str =
         "artisan-conversation-surface-turn-turn_a-block-work-turn_a-disclosure-trigger";
+    const HEADER: &str = "artisan-conversation-surface-turn-turn_a-block-work-turn_a-header";
 
     let (host, cx) = add_host(cx);
     let snapshot = baseline_snapshot();
@@ -454,6 +455,9 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
     let trigger = cx
         .debug_bounds(TRIGGER)
         .expect("hosted disclosure trigger must paint bounds");
+    let header_before = cx
+        .debug_bounds(HEADER)
+        .expect("shared header row must paint bounds");
     cx.simulate_click(trigger.center(), Modifiers::none());
     cx.run_until_parked();
     cx.update(|_, app| {
@@ -509,6 +513,15 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
         );
         assert_eq!(work_group.disclosure, Some(SceneDisclosure::Closed));
     });
+    // Toggling disclosure open then closed never remounts or shifts the
+    // shared header row: its ancestry is identical in both states.
+    let header_after = cx
+        .debug_bounds(HEADER)
+        .expect("shared header row must still paint bounds");
+    assert_eq!(
+        header_before, header_after,
+        "the header row is stable across disclosure toggles"
+    );
 }
 
 #[gpui::test]
