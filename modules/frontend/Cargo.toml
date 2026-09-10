@@ -242,6 +242,10 @@ name = "engine_observation_state"
 path = "../../tests/frontend/engine_observation_state.rs"
 
 [[test]]
+name = "conversation_observation_projection"
+path = "../../tests/frontend/conversation_observation_projection.rs"
+
+[[test]]
 name = "engine_usage_cache"
 path = "../../tests/frontend/engine_usage_cache.rs"
 
