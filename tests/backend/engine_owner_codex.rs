@@ -2056,7 +2056,8 @@ async fn codex_wire_owner_survives_interleaved_thread_started() {
 ///
 /// Ignored by default: requires the real `codex` binary plus an
 /// authenticated account, and performs one tiny read-only turn
-/// (`Return SEND_PROBE_OK only`) in a fresh temp project root. Root runs
+/// (`Return SEND_PROBE_OK only. Do not use tools and do not read files.`)
+/// in a fresh temp project root. Root runs
 /// it explicitly after the build gate; it never touches a live user
 /// database. The profile comes from `ARTISAN_CODEX_LIVE_PROFILE_ID` when
 /// set, otherwise `codex-live-probe`.
@@ -2104,13 +2105,14 @@ async fn codex_live_owner_completes_real_turn_within_budget() {
             thread_id.clone(),
             RunId::parse("wire-run-live").expect("run id"),
             &temp.root,
-            "Return SEND_PROBE_OK only",
+            "Return SEND_PROBE_OK only. Do not use tools and do not read files.",
         )
         .await;
         let wire = drive_codex_wire_turn(&mut turn).await;
-        assert!(
-            wire.text.contains("SEND_PROBE_OK"),
-            "live turn answers with the exact probe marker"
+        assert_eq!(
+            wire.text.trim(),
+            "SEND_PROBE_OK",
+            "live turn answers with exactly the probe marker"
         );
         assert_eq!(wire.terminal, TerminalState::Completed);
         assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
