@@ -1501,7 +1501,7 @@ impl ConversationStateController {
         match self.delivery.dispatch(event) {
             Ok(()) => {
                 self.push_delivery_effects();
-                if !rebase.is_empty() && self.delivery.snapshot() != before.as_ref() {
+                if !rebase.is_empty() && self.delivery.snapshot() == before.as_ref() {
                     self.restore_fact_ordinals(&saved);
                     if let Some(index) = rebase_effect_index {
                         self.effects.remove(index);
