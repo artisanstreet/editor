@@ -2193,6 +2193,7 @@ impl ConversationSurface {
                         header_live,
                     ),
                     None => div()
+                        .id(format!("{selector}-work-trigger"))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -4286,7 +4287,7 @@ mod tests {
 
     #[test]
     fn owning_group_index_selects_the_latest_group() {
-        let scene = ConversationScene::build(
+        let live_scene = ConversationScene::build(
             vec![SceneTurn::new(
                 turn_id("turn_a"),
                 0,
@@ -4334,10 +4335,12 @@ mod tests {
             Vec::new(),
         )
         .expect("conversation scene is valid");
-        let turn = scene.turn_scene(&turn_id("turn_a")).expect("turn present");
+        let turn = live_scene
+            .turn_scene(&turn_id("turn_a"))
+            .expect("turn present");
         assert_eq!(owning_group_index(turn), Some(3));
         assert_eq!(
-            ordered_block_kinds(&scene)[3],
+            ordered_block_kinds(&live_scene)[3],
             RenderedBlockKind::WorkGroup
         );
         let empty = scene(Vec::new());
