@@ -1,0 +1,19 @@
+# Parity projection state gate log
+
+## 2026-09-10 — root projection gate on parity-projection lane (base dfa6963b + ThoughtFor correction)
+
+Root ran the projection gate: 17 PASS, 1 FAIL.
+
+- FAIL: `active_elapsed_basis_survives_snapshot_refresh_without_reset`
+  (`tests/frontend/conversation_state_machine.rs:1186`): expected
+  `WorkedFor { millis: 5 }`, actual `ThoughtFor { millis: 5 }`.
+- Diagnosis: the chart is correct. That test drives only `Thinking` (at 1000)
+  then `Completed` (at 1005) with no `Working` event, so `work_seen` is never
+  set and the completion kind is Thought, not Worked. Expectation corrected to
+  `ThoughtFor { millis: 5 }` with a comment; no chart or production change.
+- GREEN (unchanged): footer settlement, adjacent-parts, single-prompt,
+  and all pre-existing scene/state tests per root report.
+
+Correction committed as the next parity-projection commit after dfa6963b.
+State-machine test binary was not run in this worker (source-only lane; root
+runs the gate separately).

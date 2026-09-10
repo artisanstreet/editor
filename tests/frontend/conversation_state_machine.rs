@@ -1175,6 +1175,8 @@ fn active_elapsed_basis_survives_snapshot_refresh_without_reset() {
     assert_eq!(turn_status_basis(&controller, TURN_A), Some(1000));
 
     // Settlement drops the live basis and carries its own terminal duration.
+    // Thinking-only work completes as ThoughtFor: no Working event ever set
+    // work_seen, so the chart correctly reports thought rather than work.
     controller
         .on_turn(
             turn_id(TURN_A),
@@ -1183,6 +1185,6 @@ fn active_elapsed_basis_survives_snapshot_refresh_without_reset() {
         .expect("completion succeeds");
     let _ = controller.drain_effects();
     let (settled, _) = scene_status(&controller, TURN_A);
-    assert_eq!(settled, SceneTurnNarration::WorkedFor { millis: 5 });
+    assert_eq!(settled, SceneTurnNarration::ThoughtFor { millis: 5 });
     assert_eq!(turn_status_basis(&controller, TURN_A), None);
 }
