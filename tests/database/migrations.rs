@@ -5,7 +5,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use artisan_database::{SqliteConfig, connect};
+use artisan_database::{QueueMessageInput, Repository, SetThreadEngineConfigInput, SqliteConfig, connect};
+use artisan_domain::{
+    ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigUpdatePrecondition,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
+    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
+    FiniteMillis, MessageId, NetworkAccess, OpenCode2Selection, PermissionId, QueueMessagePayload,
+    ReceiptDisposition, RequestId, ThreadId, UnixMillis, WebSearchAccess,
+};
 use artisan_migrations::{Migrator, migrate_to_current};
 use sea_orm_migration::MigratorTrait;
 use sea_orm_migration::sea_orm::{ConnectionTrait, DbBackend, Statement};
@@ -20,6 +27,9 @@ const RUN_USAGE_MIGRATION: &str = "m20260905_000007_run_usage";
 const WITHDRAWALS_MIGRATION: &str = "m20260905_000008_queued_message_withdrawals";
 const ENGINE_CONFIG_V2_MIGRATION: &str = "m20260906_000009_engine_run_config_v2";
 const RUN_INTERACTIONS_MIGRATION: &str = "m20260908_000010_run_interactions";
+const OBSERVATION_LEDGER_MIGRATION: &str = "m20260909_000011_observation_ledger";
+const STEER_TARGET_MIGRATION: &str = "m20260910_000012_message_steer_target";
+const QUEUE_SNAPSHOT_MIGRATION: &str = "m20260910_000013_queue_message_config_snapshot";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -106,7 +116,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        10
+        13
     );
     first
         .execute_unprepared(
@@ -140,7 +150,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        10
+        13
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -204,7 +214,10 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             RUN_USAGE_MIGRATION.to_string(),
             WITHDRAWALS_MIGRATION.to_string(),
             ENGINE_CONFIG_V2_MIGRATION.to_string(),
-            RUN_INTERACTIONS_MIGRATION.to_string()
+            RUN_INTERACTIONS_MIGRATION.to_string(),
+            OBSERVATION_LEDGER_MIGRATION.to_string(),
+            STEER_TARGET_MIGRATION.to_string(),
+            QUEUE_SNAPSHOT_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -848,5 +861,163 @@ async fn engine_config_v2_migration_widens_shape_guards_and_down_restores_them()
         )
         .await?;
     downgraded.close().await?;
+    Ok(())
+}
+
+fn upgrade_fixture_engine_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-upgrade").expect("permission id is valid"),
+        EngineAgentId::parse("agent-upgrade").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-upgrade").expect("profile id is valid"),
+            EngineModelId::parse("model-upgrade").expect("model id is valid"),
+            EngineRouteId::parse("route-upgrade").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
+}
+
+/// A user database captured before the steer-target and snapshot
+/// migrations upgrades through them with every row, index, and foreign
+/// key intact: the legacy queue receipt replays, its absent target
+/// reads NULL, and a configured fresh accept succeeds after upgrade.
+#[tokio::test]
+async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    Migrator::up(&database, Some(11)).await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/work/p1', 'Project', 1)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'Thread', 2, 2)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m1', 't1', 0, 'legacy bytes', 3)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO message_dispatches (message_id, correlation_id, state, attempt_count, queued_at_ms, available_at_ms, updated_at_ms) VALUES ('m1', 'queue-legacy', 'queued', 0, 3, 3, 3)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, body, accepted_at_ms) VALUES ('queue-legacy', 'queue_message', 't1', 'm1', 'legacy bytes', 3)",
+        )
+        .await?;
+    migrate_to_current(&database).await?;
+    assert_eq!(
+        scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
+        13
+    );
+    for (table, expected) in [
+        ("messages", 1),
+        ("message_dispatches", 1),
+        ("command_receipts", 1),
+    ] {
+        assert_eq!(
+            scalar_i64(
+                &database,
+                &format!("SELECT count(*) FROM {table}"),
+            )
+            .await?,
+            expected,
+            "{table} rows must survive the upgrade"
+        );
+    }
+    let repository = Repository::new(database.clone());
+    let replay = repository
+        .lookup_queue_message(
+            &RequestId::parse("queue-legacy")?,
+            &ThreadId::parse("t1")?,
+            &QueueMessagePayload::text_only("legacy bytes")?,
+            None,
+        )
+        .await?
+        .ok_or_else(|| std::io::Error::other("legacy receipt should replay"))?;
+    assert_eq!(replay.receipt.disposition, ReceiptDisposition::Duplicate);
+    assert_eq!(replay.message_id.as_str(), "m1");
+    let target: Option<String> = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT steer_run_id FROM message_dispatches WHERE message_id = 'm1'",
+        ))
+        .await?
+        .ok_or_else(|| std::io::Error::other("legacy dispatch should exist"))?
+        .try_get_by_index(0)?;
+    assert_eq!(target, None, "legacy target reads NULL");
+    let violations = database
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA foreign_key_check",
+        ))
+        .await?;
+    assert!(
+        violations.is_empty(),
+        "upgrade must leave no foreign key violations"
+    );
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("upgrade-engine")?,
+            thread_id: ThreadId::parse("t1")?,
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: upgrade_fixture_engine_config(),
+            accepted_at: UnixMillis::from_millis(10),
+        })
+        .await?;
+    let accepted = repository
+        .queue_message(QueueMessageInput {
+            request_id: RequestId::parse("queue-fresh")?,
+            message_id: MessageId::parse("m2")?,
+            thread_id: ThreadId::parse("t1")?,
+            payload: QueueMessagePayload::text_only("fresh bytes")?,
+            steer_run_id: None,
+            accepted_at: UnixMillis::from_millis(20),
+        })
+        .await?;
+    assert_eq!(
+        accepted.receipt.disposition,
+        ReceiptDisposition::Accepted
+    );
+    let snapshot = repository
+        .read_receipt_engine_settings(&RequestId::parse("queue-fresh")?)
+        .await?
+        .ok_or_else(|| std::io::Error::other("fresh accept must capture a snapshot"))?;
+    assert_eq!(
+        snapshot.config().selection().profile_id().as_str(),
+        "profile-upgrade"
+    );
+    database.close().await?;
     Ok(())
 }
