@@ -1077,7 +1077,10 @@ fn encode_response_payload(
                     engine_id,
                 } => {
                     encoded.set_thread_id(thread_id.as_str());
-                    encoded.init_state().set_active(run_id.as_str());
+                    encoded
+                        .reborrow()
+                        .init_state()
+                        .set_active(run_id.as_str());
                     encoded.set_run_status(encode_run_status(*status));
                     encoded.set_run_engine_id(engine_id.as_str());
                 }

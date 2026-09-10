@@ -659,7 +659,7 @@ fn raw_active_run(
     {
         let mut active = response.init_active_run();
         active.set_thread_id(THREAD_ID);
-        active.init_state().set_active(RUN_ID);
+        active.reborrow().init_state().set_active(RUN_ID);
         active.set_run_status(WireRunStatus::Running);
         active.set_run_engine_id("codex");
         customize(&mut active);
