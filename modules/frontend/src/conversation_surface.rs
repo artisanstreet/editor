@@ -592,6 +592,16 @@ pub struct TurnFooterMirror {
     pub copy_message: String,
 }
 
+/// Returns whether an error block's content stays mounted.
+///
+/// The reference shows no disclosure control for errors: the facts stay
+/// visible in every disclosure state, so the renderer never unmounts them.
+/// Exactly one card face and one heading paint (see [`render_error`]).
+#[must_use]
+pub const fn error_content_mounted(_disclosure: Option<SceneDisclosure>) -> bool {
+    true
+}
+
 /// Returns the stable status badge text for a changed-file status.
 #[must_use]
 pub const fn file_change_status_label(status: FileChangeStatus) -> &'static str {
@@ -2728,32 +2738,32 @@ impl ConversationSurface {
         )
     }
 
+    /// Renders one error as the reference's single destructive card.
+    ///
+    /// The alert carries its own face, `role="alert"` semantics, title, and
+    /// description: no outer wrapper card and no second heading. Error facts
+    /// stay mounted in every disclosure state (see [`error_content_mounted`]),
+    /// while the stable anchor and debug selector preserve scroll and test
+    /// addressing.
     fn render_error(
         &self,
         block: &ErrorBlock,
         selector: String,
-        entity: &Entity<Self>,
+        _entity: &Entity<Self>,
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
-        let style = CardStyle::resolve(*theme);
         let alert = Alert::from_theme(*theme, AlertVariant::Destructive)
             .title("Error")
             .description(block.message.clone())
             .debug_selector(format!("{selector}-alert"));
-        self.render_controlled_card(
-            ControlledCardOptions {
-                id: block.id.clone(),
-                item_id: item_id_for_scene_id(&block.id),
-                disclosure: block.disclosure,
-                selector,
-                style,
-            },
-            compact_card_content(style).child(card_heading("Error", theme)),
-            alert,
-            entity,
-            anchors,
-        )
+        let mut element = anchors.attach(
+            div().w_full().min_w_0(),
+            Some(&block.id),
+            item_id_for_scene_id(&block.id).as_ref(),
+        );
+        element = element.debug_selector(move || selector.clone());
+        element.child(alert).into_any_element()
     }
 
     fn render_usage_interruption(
@@ -4453,6 +4463,13 @@ mod tests {
             work_group_header_copy(Some(WorkGroupLabel::ThoughtFor { millis: 5_000 })),
             Some("Thought for 5s".to_owned())
         );
+    }
+
+    #[test]
+    fn error_facts_stay_mounted_without_outer_wrapper() {
+        assert!(error_content_mounted(None));
+        assert!(error_content_mounted(Some(SceneDisclosure::Open)));
+        assert!(error_content_mounted(Some(SceneDisclosure::Closed)));
     }
 
     #[test]

@@ -56,17 +56,19 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
 - Message selection: the fork exposes no text-selection primitive, so there is
   nothing faithful to wire; assistant/user bodies keep rendering through the
   shared `MarkdownRenderer` / `body_text` path verbatim with no regression.
-- Status shimmer defaults to `MotionPolicy::Full` (`status_motion`,
-  `set_status_motion` override); settled rows stay immediate via the
-  component's inactive path. The fork exposes no OS reduced-motion query
-  (only `WindowAppearance`), so a reduced preference arrives through the
-  setter when the application layer owns one.
+- Status shimmer defaults to `MotionPolicy::Full` but follows the live
+  `cx.reduce_motion()` window signal at render time; `set_status_motion` is an
+  explicit override that always wins. Settled rows stay immediate via the
+  component's inactive path. (Historical note: an earlier revision hardcoded
+  `Reduced` with no system wiring; that is superseded.)
 - Host (`conversation_host.rs`) serves the surface footer actions through the
   existing `ConversationTurnFooterPolicy`: reveal takes one `SystemTime` clock
   sample, formats it with `conversation_relative_age`, and mirrors the text;
-  copy writes the scene settlement bytes via the platform clipboard and
-  mirrors the actual outcome. Settlement lookups always come from the accepted
-  scene, never the action echo.
+  copy writes the scene settlement bytes via the platform clipboard (a void
+  API, so success settles unconditionally with no speculative failure path)
+  and mirrors the actual outcome. Settlement lookups always come from the
+  accepted scene, never the action echo. Stale cached policies retire when the
+  canonical settlement revises.
 - Live elapsed: the host runs one 1s task only while the accepted scene
   carries active-work status, pushes the first sample synchronously on start
   (so capture sees `Thinking/Working for X` immediately), mirrors `None` and
@@ -86,16 +88,26 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
   as the work-session header does with unknown duration kind) while the
   waiting sentence stays retained as the row's accessible name. No tool or
   reasoning facts are invented to fill the row.
-- Known limitation, no full runtime-activity parity claimed: actual
-  tool/reasoning detail rows are not delivered to the scene yet, so live turns
-  show the honest waiting/elapsed status rather than the reference's detailed
-  activity chain. That data path stays upstream work.
+- Current activity-pipeline state (verified in-tree, no visual parity claimed
+  without root capture evidence): the scene delivers Reasoning, Activity, and
+  WorkSession items and this renderer paints them (markdown summaries,
+  text-sm rows, muted titles); the turn-chart drive feeds that evidence into
+  the state machine. Still absent from the scene contract: per-activity
+  label/detail splits, per-session live elapsed basis (group headers derive
+  the turn-level line instead), and engine attribution details. Live turns
+  therefore show honest waiting/elapsed status rather than the reference's
+  full per-operation detail rows.
 - Work-group correction (capture-verified fault): no card chrome, no generic
   `Work`/`Activity`/`Reasoning` headings; the latest group owns the live
   Thinking/Working header once while `Closed` is honored in every case through
   the existing disclosure action (headerless controlled groups use a
   chevron-only affordance). Intra-turn block gap stays 16px against reference
   `1lh`; capture judges next.
+- Error card (capture-verified fault): the renderer painted an outer wrapper
+  card with a second `Error` heading around the destructive alert. It now
+  paints the reference's single destructive card (own face, `role="alert"`
+  semantics, one title, message body), always mounted with stable anchor and
+  debug selectors. No visual parity claimed without root capture evidence.
 - Delegated adjustment included: `attribution: None` on the surface test
   `EngineObservationEvent` constructor for the integrated domain row; that
   field does not exist in this tree's domain yet and resolves at integration.
