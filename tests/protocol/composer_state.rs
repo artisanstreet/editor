@@ -700,7 +700,7 @@ fn failed_listing_rejects_missing_reason_and_inconsistent_counts() {
     let mut message = Builder::new(HeapAllocator::new());
     let mut listing = message.init_root::<composer_state_capnp::failed_message_listing::Builder>();
     encode_failed_message_listing(listing.reborrow(), &original).expect("encode listing");
-    listing.set_has_more(true);
+    listing.set_has_more(!original.has_more());
     drop(listing);
     let words = serialize::write_message_to_words(&message);
     let mut encoded = words.as_slice();
