@@ -79,3 +79,12 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
 - Projection `c7892511` adds no new public scene API (internal turn-chart
   drive); this packet builds on `e6020f4` only. Root integrates `c7892511`
   separately.
+- Production currently derives `ProviderWait` while no scene fact has arrived,
+  so the elapsed clock counts it with the reference default verb (`Thinking`,
+  as the work-session header does with unknown duration kind) while the
+  waiting sentence stays retained as the row's accessible name. No tool or
+  reasoning facts are invented to fill the row.
+- Known limitation, no full runtime-activity parity claimed: actual
+  tool/reasoning detail rows are not delivered to the scene yet, so live turns
+  show the honest waiting/elapsed status rather than the reference's detailed
+  activity chain. That data path stays upstream work.

@@ -423,10 +423,14 @@ pub fn turn_status_copy(narration: TurnNarration) -> Option<String> {
 /// While the narration is active work (`Thinking`/`Working`), an authoritative
 /// `active_started_at_ms` basis paired with a host-mirrored `frame_now_ms`
 /// renders `Thinking for Xs` / `Working for Xs` with whole-second flooring
-/// (`FormatElapsed` parity). Either value missing renders the bare verb
-/// truthfully: the renderer never reads a clock and never resets the basis on
-/// rerender. A basis on any other narration is ignored here (scene `build`
-/// already rejects it with a typed error).
+/// (`FormatElapsed` parity). `ProviderWait` — the actual production state
+/// while no scene fact has arrived — counts the same basis with the reference
+/// default verb (`Thinking`, matching the work-session header when no
+/// duration kind is known); the waiting wording itself is preserved as the
+/// row's retained semantic label by the renderer. Either value missing renders
+/// the bare narration copy truthfully: the renderer never reads a clock and
+/// never resets the basis on rerender. A basis on any other narration is
+/// ignored here (scene `build` already rejects it with a typed error).
 #[must_use]
 pub fn live_status_copy(
     narration: TurnNarration,
@@ -434,11 +438,11 @@ pub fn live_status_copy(
     frame_now_ms: Option<i64>,
 ) -> Option<String> {
     match narration {
-        TurnNarration::Thinking | TurnNarration::Working => {
+        TurnNarration::Thinking | TurnNarration::Working | TurnNarration::ProviderWait => {
             let verb = match narration {
-                TurnNarration::Thinking => "Thinking",
+                TurnNarration::Thinking | TurnNarration::ProviderWait => "Thinking",
                 TurnNarration::Working => "Working",
-                _ => unreachable!("active-work match covers every active verb"),
+                _ => unreachable!("active-work match covers every elapsed verb"),
             };
             match (active_started_at_ms, frame_now_ms) {
                 (Some(started_at_ms), Some(now_ms)) => {
@@ -446,13 +450,39 @@ pub fn live_status_copy(
                         u64::try_from(now_ms.saturating_sub(started_at_ms).max(0)).unwrap_or(0);
                     Some(format!("{verb} for {}", format_elapsed_millis(elapsed_ms)))
                 }
-                (None, _) | (_, None) => Some(verb.to_owned()),
+                (None, _) | (_, None) => turn_status_copy(narration),
             }
         }
         _ => turn_status_copy(narration),
     }
 }
 
+/// Resolves the stored shimmer preference against the live system signal.
+///
+/// An explicit `Reduced` override always wins; otherwise the window's
+/// reduced-motion state decides. Settled rows bypass this entirely through
+/// the shimmer's inactive path.
+#[must_use]
+pub const fn effective_status_motion(
+    stored: MotionPolicy,
+    system_reduced: bool,
+) -> MotionPolicy {
+    match stored {
+        MotionPolicy::Reduced => MotionPolicy::Reduced,
+        MotionPolicy::Full => {
+            if system_reduced {
+                MotionPolicy::Reduced
+            } else {
+                MotionPolicy::Full
+            }
+        }
+    }
+}
+///
+/// Terminal `WorkedFor`/`ThoughtFor` paint only when the turn has no work
+/// group: the scene attaches the same duration as the latest group header and
+/// the reference settles to the header alone, so painting both would double
+/// the duration line.
 /// Returns whether a status row paints for one narration in a turn that may
 /// already carry the terminal duration as its work-group header.
 ///
@@ -569,11 +599,11 @@ pub struct ConversationSurface {
     /// never resets the scene's authoritative `active_started_at_ms` basis.
     /// `None` renders the bare verb truthfully until the host supplies time.
     active_now_ms: Option<i64>,
-    /// Motion policy for the live status shimmer. Defaults to `Full` so the
-    /// travelling band actually animates in production; settled rows are
-    /// always immediate via the shimmer's inactive path. The fork exposes no
-    /// OS reduced-motion query, so a reduced preference arrives through
-    /// [`Self::set_status_motion`] when the application layer owns one.
+    /// Motion preference for the live status shimmer. Defaults to `Full`;
+    /// an explicit `Reduced` always wins over the system signal (see
+    /// [`effective_status_motion`]). The fork exposes no OS query beyond the
+    /// live window signal read at render time, so a stored `Full` follows
+    /// `cx.reduce_motion()`.
     status_motion: MotionPolicy,
     /// Host-mirrored footer view state keyed by [`footer_key`].
     footer_mirrors: HashMap<String, TurnFooterMirror>,
@@ -1065,11 +1095,12 @@ impl ConversationSurface {
         self.status_motion
     }
 
-    /// Mirrors a reduced-motion preference for the live status shimmer.
+    /// Mirrors an explicit reduced-motion preference for the live status
+    /// shimmer.
     ///
-    /// `Full` (the default) animates the travelling band while work is live;
-    /// `Reduced` resolves it to immediate static text. Settled rows never
-    /// animate regardless of this policy.
+    /// `Full` (the default) follows the window's reduced-motion signal at
+    /// render time; `Reduced` forces immediate static text regardless of it.
+    /// Settled rows never animate regardless of this preference.
     pub fn set_status_motion(&mut self, motion: MotionPolicy, cx: &mut Context<Self>) {
         if self.status_motion != motion {
             self.status_motion = motion;
@@ -1758,6 +1789,7 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
         window: &mut Window,
+        status_motion: MotionPolicy,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selector = turn_selector(&turn.turn_id);
@@ -1818,6 +1850,7 @@ impl ConversationSurface {
                 theme,
                 anchors,
                 &mut *window,
+                status_motion,
                 cx,
             ) {
                 turn_element = turn_element.child(element);
@@ -1835,6 +1868,7 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
         window: &mut Window,
+        status_motion: MotionPolicy,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let selector = block_selector(turn_id, block);
@@ -1879,7 +1913,7 @@ impl ConversationSurface {
                 Some(Self::render_steering(block, selector, theme, anchors))
             }
             TurnBlock::TurnStatus(block) => {
-                self.render_status(turn_id, block, selector, theme)
+                self.render_status(turn_id, block, selector, theme, status_motion)
             }
             TurnBlock::TurnFooter(block) => {
                 self.render_footer(turn_id, block, selector, entity, theme, window)
@@ -2627,6 +2661,7 @@ impl ConversationSurface {
         block: &crate::conversation_scene::TurnStatusBlock,
         selector: String,
         theme: &ArtisanTheme,
+        status_motion: MotionPolicy,
     ) -> Option<AnyElement> {
         // The terminal duration prefers the work-group header when the turn
         // carries the group; the reference settles to the header alone.
@@ -2647,10 +2682,10 @@ impl ConversationSurface {
             self.active_now_ms,
         )?;
         // Parity with the work-session status line: base-size muted copy on a
-        // half-rem vertical rhythm. The existing shimmer component carries the
-        // sweep under `MotionPolicy::Full` and resolves to immediate static
-        // text under `Reduced` or once the row settles (`active(false)`), so
-        // no effect runs for settled history or reduced motion.
+        // half-rem vertical rhythm. The effective motion resolves the live
+        // window signal at render time (see `effective_status_motion`); the
+        // shimmer animates only for live rows under `Full` and stays
+        // immediate for settled history and reduced motion.
         let live = matches!(
             block.narration,
             TurnNarration::Thinking
@@ -2659,11 +2694,19 @@ impl ConversationSurface {
                 | TurnNarration::Compacting
                 | TurnNarration::BackgroundWait
         );
-        let shimmer = ShimmerText::new(copy, *theme, self.status_motion)
+        let shimmer = ShimmerText::new(copy, *theme, status_motion)
             .active(live)
             .delay_seconds(1.5)
             .duration_seconds(3.0)
             .text_color(status_color(theme, block.narration));
+        // The narration wording stays retained for assistive technology even
+        // when the visible clock counts instead: reference keeps the waiting
+        // sentence as the status line's accessible name beside the elapsed
+        // header.
+        let shimmer = match turn_status_copy(block.narration) {
+            Some(semantic) => shimmer.status_label(semantic),
+            None => shimmer,
+        };
         let mut status = div()
             .w_full()
             .min_w_0()
@@ -3510,6 +3553,9 @@ impl Render for ConversationSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ArtisanTheme::for_mode(self.theme_mode);
         let entity = cx.entity();
+        // Pure read of the live reduced-motion signal: no state writes, so
+        // no notification can loop out of render.
+        let status_motion = effective_status_motion(self.status_motion, cx.reduce_motion());
         // Reference rhythm keeps 32 px (`gap-8`) between turn groups; the
         // settled footer's absolute reveal lives inside that room instead of
         // overlapping the next turn. No per-turn pad is added, so unsettled
@@ -3536,6 +3582,7 @@ impl Render for ConversationSurface {
                     &theme,
                     &mut anchors,
                     &mut *window,
+                    status_motion,
                     cx,
                 ));
             }
@@ -4054,7 +4101,50 @@ mod tests {
         );
         assert_eq!(
             live_status_copy(TurnNarration::ProviderWait, Some(0), Some(5_000)),
+            Some("Thinking for 5s".to_owned())
+        );
+        assert_eq!(
+            live_status_copy(TurnNarration::ProviderWait, None, Some(5_000)),
             Some("Waiting for provider to respond…".to_owned())
+        );
+    }
+
+    #[test]
+    fn production_provider_wait_renders_the_elapsed_clock() {
+        // Production derives ProviderWait while no scene fact has arrived;
+        // the state machine attaches the authoritative basis to the narration
+        // entry, and the row must count it like the reference header.
+        let scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            Vec::new(),
+            vec![
+                TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::ProviderWait)
+                    .with_active_started_at_ms(0),
+            ],
+            Vec::new(),
+        )
+        .expect("provider wait may carry the active basis");
+        let (narration, basis) = scene
+            .turn_scene(&turn_id("turn_a"))
+            .expect("turn present")
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::TurnStatus(status) => {
+                    Some((status.narration, status.active_started_at_ms))
+                }
+                _ => None,
+            })
+            .expect("status block present");
+        assert_eq!(narration, TurnNarration::ProviderWait);
+        assert_eq!(basis, Some(0));
+        assert_eq!(
+            live_status_copy(narration, basis, Some(65_000)),
+            Some("Thinking for 1m 5s".to_owned())
         );
     }
 
@@ -4139,6 +4229,85 @@ mod tests {
                 surface.read(app).status_motion(),
                 MotionPolicy::Reduced
             );
+        });
+    }
+
+    #[test]
+    fn effective_status_motion_matrix() {
+        use artisan_ui::shimmer_text::{ShimmerMotionPlan, ShimmerText};
+        use artisan_ui::theme::ArtisanTheme;
+        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        // Stored Full follows the live system signal.
+        assert_eq!(
+            effective_status_motion(MotionPolicy::Full, false),
+            MotionPolicy::Full
+        );
+        assert_eq!(
+            effective_status_motion(MotionPolicy::Full, true),
+            MotionPolicy::Reduced
+        );
+        // An explicit Reduced override always wins.
+        assert_eq!(
+            effective_status_motion(MotionPolicy::Reduced, false),
+            MotionPolicy::Reduced
+        );
+        assert_eq!(
+            effective_status_motion(MotionPolicy::Reduced, true),
+            MotionPolicy::Reduced
+        );
+        // Live rows animate only under effective Full; settled rows and
+        // reduced motion always resolve to the immediate static path.
+        let animate = ShimmerText::new("Thinking", theme, MotionPolicy::Full)
+            .active(true)
+            .motion_plan();
+        assert!(matches!(animate, ShimmerMotionPlan::Animate(_)));
+        let still = ShimmerText::new("Thinking", theme, MotionPolicy::Reduced)
+            .active(true)
+            .motion_plan();
+        assert!(matches!(still, ShimmerMotionPlan::Immediate));
+        let settled = ShimmerText::new("Worked for 1m 5s", theme, MotionPolicy::Full)
+            .active(false)
+            .motion_plan();
+        assert!(matches!(settled, ShimmerMotionPlan::Immediate));
+    }
+
+    #[gpui::test]
+    fn status_shimmer_tracks_system_reduced_motion(cx: &mut TestAppContext) {
+        let thinking = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            Vec::new(),
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Thinking,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid");
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(thinking, ThemeMode::Dark, surface_cx)
+        });
+        settle(cx);
+        cx.update(|_, app| {
+            app.set_reduce_motion(true);
+        });
+        settle(cx);
+        cx.update(|_, app| {
+            // The system signal never mutates the stored preference and
+            // emits no surface actions on its own: render only reads it.
+            assert_eq!(surface.read(app).status_motion(), MotionPolicy::Full);
+            assert!(surface.read(app).pending_actions().is_empty());
+        });
+        cx.update(|_, app| {
+            app.set_reduce_motion(false);
+        });
+        settle(cx);
+        cx.update(|_, app| {
+            assert_eq!(surface.read(app).status_motion(), MotionPolicy::Full);
+            assert!(surface.read(app).pending_actions().is_empty());
         });
     }
 
