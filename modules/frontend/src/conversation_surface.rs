@@ -35,6 +35,7 @@ use artisan_ui::input_state::TextInputState;
 use artisan_ui::markdown_renderer::MarkdownRenderer;
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::scroll_area::ScrollArea;
+use artisan_ui::selectable_text::SelectableText;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::shimmer_text::ShimmerText;
 use artisan_ui::theme::{ArtisanTheme, SurfaceStep, ThemeMode};
@@ -2047,6 +2048,13 @@ impl ConversationSurface {
             }
         }
         if !block.body.is_empty() {
+            // The body text is the shared selectable element: retained state
+            // (selection, drag latch, focus) lives in framework element state
+            // under the stable body id across frames, with no caller maps or
+            // focus handles. Styling stays on the container exactly as before
+            // (base size, 24 px line height, bubble metrics, gradient), so no
+            // duplicate body, glyph, or padding is introduced.
+            let body_id = SharedString::from(body_selector.clone());
             message = message.child(
                 div()
                     .max_w(px(576.0))
@@ -2059,7 +2067,19 @@ impl ConversationSurface {
                     .py(px(12.0))
                     .debug_selector(move || selector.clone())
                     .child(
-                        body_text(&block.body, theme).debug_selector(move || body_selector.clone()),
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_size(theme.typography.editor_text_desktop)
+                            .line_height(theme.spacing.steps(6.0))
+                            .whitespace_normal()
+                            .debug_selector(move || body_selector.clone())
+                            .child(SelectableText::retained(
+                                body_id,
+                                block.body.clone(),
+                                *theme,
+                                Vec::new(),
+                            )),
                     ),
             );
         }
@@ -4617,6 +4637,55 @@ mod tests {
         settle(cx);
         cx.update(|_, app| {
             assert_eq!(surface.read(app).status_motion(), MotionPolicy::Full);
+            assert!(surface.read(app).pending_actions().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn user_body_renders_selectable_without_disturbing_surface(cx: &mut TestAppContext) {
+        // The harness offers no pointer drag/copy simulation, so this mounts
+        // the real user bubble (with its retained selectable body) and proves
+        // frames settle with scene data intact and no spurious actions;
+        // generic selection behavior is covered by the shared module suite.
+        let user_scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            vec![item(
+                "user-a",
+                1,
+                SceneItemKind::UserMessage {
+                    body: "selectable proof body".to_owned(),
+                },
+                None,
+            )],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Quiet,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid");
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(user_scene, ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(720.0), px(240.0)));
+        settle(cx);
+        cx.update(|_, app| {
+            let body = surface
+                .read(app)
+                .scene()
+                .turn_scene(&turn_id("turn_a"))
+                .expect("turn present")
+                .blocks()
+                .iter()
+                .find_map(|block| match block {
+                    TurnBlock::UserMessage(message) => Some(message.body.clone()),
+                    _ => None,
+                });
+            assert_eq!(body.as_deref(), Some("selectable proof body"));
             assert!(surface.read(app).pending_actions().is_empty());
         });
     }
