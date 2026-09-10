@@ -1160,6 +1160,20 @@ async fn receive_delivery_frame(
     .await??)
 }
 
+/// Names the received frame shape for mismatch diagnostics without decoding
+/// or logging any payload.
+fn frame_kind(body: &WireEnvelopeBody) -> &'static str {
+    match body {
+        WireEnvelopeBody::Event(_) => "event",
+        WireEnvelopeBody::PatchBatch(_) => "patch batch",
+        WireEnvelopeBody::Hello(_)
+        | WireEnvelopeBody::Welcome(_)
+        | WireEnvelopeBody::Request(_)
+        | WireEnvelopeBody::Response(_)
+        | WireEnvelopeBody::ProtocolError(_) => "control",
+    }
+}
+
 struct DeliveredActivity {
     thread_id: ThreadId,
     observation: Observation,
@@ -1171,8 +1185,9 @@ struct DeliveredActivity {
 }
 
 fn decoded_activity(envelope: WireEnvelope, thread_id: &ThreadId) -> DeliveredActivity {
+    let kind = frame_kind(&envelope.body);
     let WireEnvelopeBody::Event(event) = envelope.body else {
-        panic!("an activity delivery must arrive as an event frame");
+        panic!("an activity delivery must arrive as an event frame, got {kind}");
     };
     let Event::EngineObservation(delivered) = event.event else {
         panic!("an activity delivery must carry an engine observation");
@@ -1204,9 +1219,11 @@ async fn serve_activity_delivery(
     // Writer/Send = wire send, Registry = registrar advance,
     // ResnapshotRequired = cursor beyond the tail), and completed_requests
     // locates it (1 = initial activation delivery, else the wake drain).
-    if report.completed_requests != 4 {
+    // Five requests: subscribe, barrier, unsubscribe, resubscribe, final
+    // unsubscribe.
+    if report.completed_requests != 5 {
         return Err(format!(
-            "activity delivery served {} of 4 requests (termination={:?})",
+            "activity delivery served {} of 5 requests (termination={:?})",
             report.completed_requests, report.termination
         )
         .into());
@@ -1293,10 +1310,45 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
         let mut delivery_stream =
             tokio::time::timeout(TEST_DEADLINE, connection.accept_uni()).await??;
         let initial = receive_delivery_frame(&mut delivery_stream).await?;
+        let initial_kind = frame_kind(&initial.body);
         let WireEnvelopeBody::PatchBatch(initial_batch) = initial.body else {
-            return Err("expected the initial replay batch".into());
+            return Err(format!(
+                "expected the initial replay batch, got {initial_kind}"
+            )
+            .into());
         };
         let base_cursor = initial_batch.to_cursor();
+
+        // Ordered barrier proving the initial activation drain (patches plus
+        // the still-empty observation history) finished before any commit:
+        // the driver loop is strictly sequential, so this response can only
+        // arrive after the activation delivery completed. Without it, commits
+        // could land mid-activation and the initial drain would legally send
+        // activity events ahead of the wake patch batch on the shared
+        // stream. Unsubscribing an unknown thread mutates nothing.
+        let (mut barrier_send, mut barrier_recv) = connection.open_bi().await?;
+        artisan_transport::send_envelope(
+            &mut barrier_send,
+            &activity_unsubscribe_envelope(
+                ThreadId::parse("delivery-unknown-thread").expect("thread id"),
+                "delivery-activity-barrier",
+            ),
+        )
+        .await?;
+        drop(barrier_send);
+        let barrier = tokio::time::timeout(
+            TEST_DEADLINE,
+            artisan_transport::receive_envelope(&mut barrier_recv),
+        )
+        .await??;
+        let WireEnvelopeBody::Response(barrier) = barrier.body else {
+            return Err("expected the barrier unsubscribe response".into());
+        };
+        let ResponsePayload::ConversationSubscriptionStopped(stopped) = barrier.payload else {
+            return Err("expected the barrier stop acknowledgement".into());
+        };
+        assert_eq!(stopped.thread_id.as_str(), "delivery-unknown-thread");
+        drop(barrier_recv);
 
         // Two real commits on two runs — the first turn settled — before one
         // coalesced wake.
@@ -1345,9 +1397,13 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
         assert_eq!(history.len(), 2, "both runs must persist one row each");
 
         let _ = notifier.publish(&thread_id);
-        let wake_batch = receive_delivery_frame(&mut delivery_stream).await?;
-        let WireEnvelopeBody::PatchBatch(wake_batch) = wake_batch.body else {
-            return Err("expected the wake patch batch before activity events".into());
+        let wake_frame = receive_delivery_frame(&mut delivery_stream).await?;
+        let wake_kind = frame_kind(&wake_frame.body);
+        let WireEnvelopeBody::PatchBatch(wake_batch) = wake_frame.body else {
+            return Err(format!(
+                "expected the wake patch batch before activity events, got {wake_kind}"
+            )
+            .into());
         };
         assert_eq!(wake_batch.from_cursor(), base_cursor);
 
@@ -1432,9 +1488,10 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
                 ConversationSubscriptionStarted::Resumed { .. }
             )
         ));
-        let replay_batch = receive_delivery_frame(&mut delivery_stream).await?;
-        let WireEnvelopeBody::PatchBatch(replay_batch) = replay_batch.body else {
-            return Err("expected the replay patch batch".into());
+        let replay_frame = receive_delivery_frame(&mut delivery_stream).await?;
+        let replay_kind = frame_kind(&replay_frame.body);
+        let WireEnvelopeBody::PatchBatch(replay_batch) = replay_frame.body else {
+            return Err(format!("expected the replay patch batch, got {replay_kind}").into());
         };
         assert_eq!(replay_batch.from_cursor(), ConversationCursor::default());
         let replayed_first =
