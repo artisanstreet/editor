@@ -57,6 +57,8 @@ use gpui::{
 
 use crate::theme::ArtisanTheme;
 
+pub use crate::text_runs::{TextRunOverride, compile_text_runs};
+
 /// Folds an arbitrary byte index into a valid caret position for `text`.
 ///
 /// Out-of-range indices saturate at the text end; mid-character indices
@@ -494,6 +496,7 @@ pub struct SelectableText {
     id: ElementId,
     text: SharedString,
     base_highlights: Vec<(Range<usize>, HighlightStyle)>,
+    text_run_overrides: Vec<TextRunOverride>,
     selection_style: HighlightStyle,
     source: SelectionSource,
     link_ranges: Vec<Range<usize>>,
@@ -559,6 +562,7 @@ impl SelectableText {
             id: id.into(),
             text: text.into(),
             base_highlights,
+            text_run_overrides: Vec::new(),
             selection_style: selection_style_for_theme(theme),
             source,
             link_ranges: Vec::new(),
@@ -597,6 +601,19 @@ impl SelectableText {
     ) -> Self {
         self.link_ranges = ranges;
         self.on_link = Some(Rc::new(on_link));
+        self
+    }
+
+    /// Supplies per-range font family and letter-spacing overrides.
+    ///
+    /// Code ranges pass their mono family with `Some(px(0.0))` spacing
+    /// while code weight travels in the highlight ranges; the selection
+    /// wash still only touches foreground/background, so selecting never
+    /// changes shaping. Overrides are validated fail-closed at layout
+    /// time (see [`compile_text_runs`]).
+    #[must_use]
+    pub fn with_text_run_overrides(mut self, overrides: Vec<TextRunOverride>) -> Self {
+        self.text_run_overrides = overrides;
         self
     }
 
@@ -734,7 +751,14 @@ impl Element for SelectableText {
         };
         self.snapshot = snapshot;
         self.frame = Some(frame);
-        let mut styled = StyledText::new(self.text.clone()).with_highlights(merged);
+        let default_style = window.text_style();
+        let runs = compile_text_runs(
+            self.text.as_ref(),
+            &default_style,
+            &merged,
+            &self.text_run_overrides,
+        );
+        let mut styled = StyledText::new(self.text.clone()).with_runs(runs);
         let (layout_id, ()) = styled.request_layout(None, inspector_id, window, cx);
         self.styled = Some(styled);
         (layout_id, ())
@@ -751,9 +775,17 @@ impl Element for SelectableText {
     ) -> Hitbox {
         if self.styled.is_none() {
             // Defensive: the framework always runs `request_layout` first,
-            // so this only covers abnormal embedders. Rebuild unhighlighted
-            // (a legal prepaint-phase layout) rather than losing the frame.
-            let mut styled = StyledText::new(self.text.clone());
+            // so this only covers abnormal embedders. Rebuild from the
+            // caller highlights and run overrides (a legal prepaint-phase
+            // layout) rather than losing the frame or the shaping.
+            let default_style = window.text_style();
+            let runs = compile_text_runs(
+                self.text.as_ref(),
+                &default_style,
+                &self.base_highlights,
+                &self.text_run_overrides,
+            );
+            let mut styled = StyledText::new(self.text.clone()).with_runs(runs);
             let _ = styled.request_layout(None, inspector_id, window, cx);
             self.styled = Some(styled);
         }

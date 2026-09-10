@@ -6,15 +6,15 @@
 //! the platform clipboard) exactly like the shared input-surface tests do.
 
 use artisan_ui::selectable_text::{
-    SelectableText, SelectableTextState, clamp_to_char_boundary, is_copy_keystroke,
-    is_select_all_keystroke, merge_selection_highlight, normalize_selection,
-    selection_style_for_theme,
+    SelectableText, SelectableTextState, TextRunOverride, clamp_to_char_boundary,
+    compile_text_runs, is_copy_keystroke, is_select_all_keystroke, merge_selection_highlight,
+    normalize_selection, selection_style_for_theme,
 };
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
     Context, FocusHandle, FontStyle, FontWeight, HighlightStyle, InteractiveElement, IntoElement,
-    Modifiers, ParentElement, Pixels, Point, Render, Styled, TestAppContext, VisualTestContext,
-    Window, div, point, px,
+    Modifiers, ParentElement, Pixels, Point, Render, SharedString, Styled, TestAppContext, TextStyle,
+    VisualTestContext, Window, div, point, px,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -609,4 +609,183 @@ fn nested_child_keeps_focus_against_focusable_parent(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     assert_eq!(read_clipboard(cx), Some(BODY.to_owned()));
+}
+
+/// The real element pipeline: caller code ranges (BOLD weight in the
+/// highlights, mono family with zero spacing in the overrides) merged with
+/// a selection wash that splits the code range. Every mono sub-run must
+/// keep its family, spacing, and weight — the wash only touches
+/// foreground/background — and coverage must stay exact.
+#[test]
+fn text_run_pipeline_keeps_mono_through_selection_split() {
+    let theme = ArtisanTheme::for_mode(ThemeMode::Light);
+    let wash = selection_style_for_theme(theme);
+    let body_family: SharedString = "Body".into();
+    let mono_family: SharedString = "Mono".into();
+    let text = "body `code` tail";
+    let start = text.find("code").expect("fixture contains code");
+    let code = start..start + "code".len();
+    let select = start + 2..text.len();
+    let default = TextStyle {
+        font_family: body_family.clone(),
+        letter_spacing: Some(px(1.5)),
+        ..TextStyle::default()
+    };
+    let highlights = vec![(
+        code.clone(),
+        HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        },
+    )];
+    let merged = merge_selection_highlight(text, highlights, Some(select.clone()), &wash);
+    let overrides = vec![TextRunOverride {
+        range: code.clone(),
+        font_family: Some(mono_family.clone()),
+        letter_spacing: Some(px(0.0)),
+    }];
+    let runs = compile_text_runs(text, &default, &merged, &overrides);
+    assert_eq!(
+        runs.iter().map(|run| run.len).sum::<usize>(),
+        text.len()
+    );
+
+    let mut offset = 0_usize;
+    let mut saw_mono_selected = false;
+    for run in &runs {
+        let end = offset + run.len;
+        if code.start <= offset && end <= code.end {
+            assert_eq!(run.font.family, mono_family);
+            assert_eq!(run.letter_spacing, Some(px(0.0)));
+            assert_eq!(run.font.weight, FontWeight::BOLD);
+            if select.start <= offset && end <= select.end {
+                assert_eq!(run.background_color, wash.background_color);
+                saw_mono_selected = true;
+            }
+        } else {
+            assert_eq!(run.font.family, body_family);
+            assert_eq!(run.letter_spacing, Some(px(1.5)));
+        }
+        offset = end;
+    }
+    assert_eq!(offset, text.len());
+    assert!(
+        saw_mono_selected,
+        "the selection must split the mono range to prove metric stability"
+    );
+}
+
+/// Selectable text with a mono override, mirroring a transcript body with
+/// one inline-code span. Drag-selecting across the family boundary must
+/// still hit-test every byte and copy the exact plaintext.
+struct OverrideProbe {
+    text: String,
+    code_end: usize,
+    with_link: bool,
+    fired: Rc<Cell<(u32, usize)>>,
+}
+
+impl OverrideProbe {
+    fn new(_cx: &mut Context<Self>, text: &str, code_end: usize, with_link: bool) -> Self {
+        Self {
+            text: text.to_owned(),
+            code_end,
+            with_link,
+            fired: Rc::new(Cell::new((0, 0))),
+        }
+    }
+}
+
+impl Render for OverrideProbe {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let code = 0..self.code_end;
+        let element = SelectableText::retained(
+            "override-text",
+            self.text.clone(),
+            ArtisanTheme::for_mode(ThemeMode::Light),
+            vec![(
+                code.clone(),
+                HighlightStyle {
+                    font_weight: Some(FontWeight::BOLD),
+                    ..Default::default()
+                },
+            )],
+        )
+        .with_text_run_overrides(vec![TextRunOverride {
+            range: code,
+            font_family: Some("Mono".into()),
+            letter_spacing: Some(px(0.0)),
+        }]);
+        let element = if self.with_link {
+            let fired = self.fired.clone();
+            let range = 0..self.text.len();
+            element.links(vec![range], move |range_index, _, _| {
+                let (count, _) = fired.get();
+                fired.set((count + 1, range_index));
+            })
+        } else {
+            element
+        };
+        div()
+            .w(px(400.0))
+            .debug_selector(|| "override-wrap".to_owned())
+            .child(element)
+    }
+}
+
+fn override_points(
+    cx: &mut VisualTestContext,
+) -> (Point<Pixels>, Point<Pixels>, Point<Pixels>) {
+    wrap_points(cx, "override-wrap")
+}
+
+#[gpui::test]
+fn overrides_keep_drag_copy_exact(cx: &mut TestAppContext) {
+    const TEXT: &str = "code body here";
+    let (_view, cx) = cx.add_window_view(|_, cx| OverrideProbe::new(cx, TEXT, 4, false));
+    cx.run_until_parked();
+    let (left, right, _) = override_points(cx);
+
+    cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+
+    assert_eq!(read_clipboard(cx), Some(TEXT.to_owned()));
+}
+
+#[gpui::test]
+fn overrides_keep_link_click_firing(cx: &mut TestAppContext) {
+    const TEXT: &str = "code body here";
+    let (view, cx) = cx.add_window_view(|_, cx| OverrideProbe::new(cx, TEXT, 4, true));
+    cx.run_until_parked();
+    let (_, _, inside) = override_points(cx);
+
+    cx.simulate_mouse_down(inside, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(inside, gpui::MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+
+    cx.update(|_, app| {
+        assert_eq!(view.read(app).fired.get(), (1, 0));
+    });
+}
+
+#[gpui::test]
+fn overrides_keep_link_drag_suppressed(cx: &mut TestAppContext) {
+    const TEXT: &str = "code body here";
+    let (view, cx) = cx.add_window_view(|_, cx| OverrideProbe::new(cx, TEXT, 4, true));
+    cx.run_until_parked();
+    let (left, right, _) = override_points(cx);
+
+    cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+
+    cx.update(|_, app| {
+        assert_eq!(view.read(app).fired.get(), (0, 0));
+    });
+    assert_eq!(read_clipboard(cx), Some(TEXT.to_owned()));
 }
