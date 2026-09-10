@@ -56,15 +56,28 @@ bytes, SHA-256
 - No transcript/Markdown image substitution, no parser, no registry, no
   per-screen fallback lists.
 
-## 4. Acceptance (root gates)
+## 4. Acceptance (root gates, Windows-scoped)
 
 - Vendor gate green incl. new tests with the asset present (Twemoji
-  proofs run) and absent (Twemoji proofs skip, predicate + native proofs
-  run).
+  proofs run and assert; a missing asset fails loudly on Windows, never
+  silent-skips). Non-Windows configurations skip platform tests.
 - Preserved: native party popper selects Segoe with Twemoji registered;
   body text stays on the body font; selection bytes unchanged (existing
-  `selectable_text` + Markdown suites); VS15 text presentation falls
-  through; Spline stacks untouched.
+  `selectable_text` + Markdown suites); VS15 text presentation never
+  routes to Twemoji (presentation policy itself is a separate packet);
+  Spline stacks untouched.
+- Deterministic fixtures by measured coverage, never version guess:
+  England tag flag (Segoe covers 1 of 6 scalars, Twemoji all 6 plus a
+  precomposed ligature) proves Twemoji-wins; party popper, VS16, ZWJ
+  family, skin tone, and keycap pin native-first under the established
+  order; VS15 pins Twemoji non-interference.
+- macOS is MISSING work, not claimed: native CoreText keeps Apple
+  first through its own `is_emoji` allowlist
+  (`crates/gpui_macos/src/text_system.rs:414-418`), but Twemoji
+  fallback through CoreText cascade / `memory_source` registration
+  (`:98-134`) is unverified — no macOS test here proves it. Root
+  integration followup required. Linux inherits the shared cosmic
+  predicate (Noto path intact).
 - macOS: native CoreText keeps Apple first (`MacTextSystem`
   `is_emoji` allowlist already covers `AppleColorEmoji`); Twemoji
   fallback there flows through CoreText cascade / `memory_source`
