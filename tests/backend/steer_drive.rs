@@ -444,7 +444,7 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
                 thread_id: thread_id.clone(),
                 payload: QueueMessagePayload::text_only("follow up").expect("payload"),
                 steer_run_id: Some(seed.run_id.clone()),
-                accepted_at: UnixMillis::from_millis(100),
+                accepted_at: UnixMillis::from_millis(seed.bound_op_ms + 10),
             })
             .await
             .expect("steered message should queue");
@@ -683,7 +683,7 @@ async fn codex_steer_reject_fails_typed_with_payload_preserved() {
                 thread_id: thread_id.clone(),
                 payload: QueueMessagePayload::text_only("follow up").expect("payload"),
                 steer_run_id: Some(seed.run_id.clone()),
-                accepted_at: UnixMillis::from_millis(100),
+                accepted_at: UnixMillis::from_millis(seed.bound_op_ms + 10),
             })
             .await
             .expect("steered message should queue");
@@ -858,7 +858,7 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
                 thread_id: thread_id.clone(),
                 payload: QueueMessagePayload::text_only("follow up").expect("payload"),
                 steer_run_id: Some(seed.run_id.clone()),
-                accepted_at: UnixMillis::from_millis(100),
+                accepted_at: UnixMillis::from_millis(seed.bound_op_ms + 10),
             })
             .await
             .expect("steered message should queue");
@@ -1053,7 +1053,7 @@ async fn codex_steer_known_acked_retry_replays_projection_without_provider() {
                 thread_id: thread_id.clone(),
                 payload: QueueMessagePayload::text_only("follow up").expect("payload"),
                 steer_run_id: Some(seed.run_id.clone()),
-                accepted_at: UnixMillis::from_millis(100),
+                accepted_at: UnixMillis::from_millis(seed.bound_op_ms + 10),
             })
             .await
             .expect("steered message should queue");
