@@ -41,6 +41,7 @@ use artisan_ui::motion::{MotionCurve, MotionDuration, MotionPolicy};
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::prelude::FluentBuilder as _;
+use gpui::Focusable as _;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
     FocusHandle, FontWeight, HighlightStyle, KeyBinding, Render, ScrollHandle, ScrollWheelEvent,
@@ -6940,6 +6941,15 @@ impl NativeApplication {
                             screen.update(cx, |screen, _| {
                                 screen.set_gate(ThreadScreenGate::Open);
                             });
+                            // Typed text reaches the composer only while it
+                            // holds window focus (the platform registers its
+                            // text handler for the focused handle, and
+                            // unfocused keystrokes are silently swallowed).
+                            // Focus it once per opened screen so a fresh
+                            // thread is immediately typeable; later renders
+                            // must not steal focus back.
+                            let focus = self.composer.read(cx).focus_handle(cx);
+                            window.focus(&focus);
                             Some(screen)
                         }
                         None => ThreadScreen::mount(thread.clone(), ThemeMode::Dark, cx).ok(),
@@ -7636,7 +7646,9 @@ mod tests {
     };
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
-    use gpui::{Context, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext};
+    use gpui::{
+        Context, Focusable as _, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext,
+    };
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
     fn project(id: &str, name: &str) -> ProjectSummary {
@@ -8353,6 +8365,80 @@ mod tests {
                         |command| matches!(command, NativeTransportCommand::SelectProject(id) if id == &beta)
                     ),
                     "choosing a home row submits the real selection command"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn thread_open_focuses_composer_for_immediate_typing(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let project = ProjectId::parse("thread-focus-project").expect("fixture project");
+        let thread = ThreadId::parse("thread-focus-thread").expect("fixture thread");
+        let host = cx.update(|_, app| {
+            ConversationHost::mount(thread.clone(), ThemeMode::Dark, app).expect("host")
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.project_options = vec![ProjectOption {
+                    id: project.clone(),
+                    name: "focus".to_owned().into(),
+                }];
+                application.selected_project = Some(project.clone());
+                application.conversation_host = Some(host.clone());
+                application.navigate(
+                    NativeRoute::Thread {
+                        project: project.clone(),
+                        thread: thread.clone(),
+                    },
+                    application_cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        // No manual focus step: opening the thread must focus the composer
+        // itself, because typed text only reaches the surface holding
+        // window focus. This is the reported production path with zero
+        // admission bypasses: no set_disabled call anywhere.
+        cx.simulate_input("hello");
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "hello"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn new_thread_composer_accepts_typed_draft_while_send_unready(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.run_until_parked();
+        // Focus exactly as a pointer press does; the composer starts
+        // enabled and no test bypass touches admission.
+        cx.update(|window, app| {
+            view.update(app, |application, cx| {
+                let focus = application.composer.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.simulate_input("hello");
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "hello"
+                );
+                assert!(
+                    !application.message_submission_is_admissible(application_cx),
+                    "typing a local draft must not imply send readiness"
                 );
             });
         });

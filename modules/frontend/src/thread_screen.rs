@@ -247,7 +247,6 @@ pub struct ThreadScreen {
     terminals: Vec<TerminalSession>,
     terminals_loading: bool,
     checklist: Vec<ThreadChecklistEntry>,
-    composer_disabled: bool,
 }
 
 impl ThreadScreen {
@@ -276,9 +275,6 @@ impl ThreadScreen {
             terminals: Vec::new(),
             terminals_loading: false,
             checklist: Vec::new(),
-            // Legacy disables the composer until session and work authority
-            // arrive (`disabled={!session_ready || !work_ready || ...}`).
-            composer_disabled: true,
         }
     }
 
@@ -346,14 +342,6 @@ impl ThreadScreen {
     /// Replaces the owned checklist entries.
     pub fn set_checklist(&mut self, checklist: Vec<ThreadChecklistEntry>) {
         self.checklist = checklist;
-    }
-
-    /// Forwards the composer disabled flag into the packet-2 surface.
-    pub fn set_composer_disabled(&mut self, disabled: bool, cx: &mut App) {
-        self.composer_disabled = disabled;
-        self.composer.update(cx, |composer, composer_cx| {
-            composer.set_disabled(disabled, composer_cx);
-        });
     }
 
     /// Forwards a theme-mode change into the transcript surface.
