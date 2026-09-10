@@ -628,7 +628,8 @@ pub fn run() -> ExitCode {
                             "parity-proof watchdog: {} captures unsettled; quitting",
                             pending.get()
                         );
-                        settle(&pending, &failed_flag, true, cx);
+                        failed_flag.set(true);
+                        cx.quit();
                     }
                 });
             })
