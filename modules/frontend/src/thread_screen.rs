@@ -49,14 +49,17 @@ use artisan_ui::fade_arc::FadeArc;
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, FontWeight, IntoElement, Render,
-    SharedString, Window, div,
+    App, AppContext as _, Context, Entity, FocusHandle, FontWeight, Hsla, IntoElement, Render,
+    SharedString, Subscription, Window, div,
     prelude::{InteractiveElement as _, ParentElement as _, Styled as _},
     px, rgb, rgb_to_hsla,
 };
 
 use crate::conversation_host::{ConversationHost, ConversationHostError};
 use crate::native_composer::NativeComposer;
+use crate::shell_layout::{
+    ProseWidth, desktop_inspector_column_pixels, desktop_thread_inspector_fits,
+};
 use crate::terminal_presentation::{
     TerminalSession, TerminalState, terminal_command_line, terminal_display_name,
 };
@@ -112,9 +115,55 @@ const INSPECTOR_PAD_PX: f32 = 4.0;
 const INSPECTOR_GAP_PX: f32 = 16.0;
 
 /// Inspector column width. Legacy reserves
-/// `w-[calc(clamp(16rem,25vw,350px)+1rem)]` in the shell row; GPUI has no
-/// container-relative clamp, so the midpoint is pinned and named here.
+/// `w-[calc(clamp(16rem,25vw,350px)+1rem)]` in the shell row; the live width
+/// now comes from [`thread_inspector_width`], and this midpoint remains only
+/// as the fallback before the route integrator publishes a viewport width.
 const INSPECTOR_WIDTH_PX: f32 = 320.0;
+
+/// True-black shell paint (`#000000`).
+///
+/// The explicit black-shell request overrides the Electron dark chrome
+/// (`--surface-950` background, `--surface-900/925` card gradient) for shell
+/// surfaces only: title header, transcript column, inspector column gutters,
+/// composer dock, and gate branches. Cards, message bubbles, controls, and
+/// overlays keep their themed fills so intentional contrast survives.
+const SHELL_BLACK_HEX: u32 = 0x0000_0000;
+
+/// Resolves the true-black shell paint.
+pub(crate) fn shell_black() -> Hsla {
+    rgb_to_hsla(rgb(SHELL_BLACK_HEX))
+}
+
+/// Returns whether the inspector column renders for a content width.
+///
+/// This is the `shell-layout.ts` band authority at the native balanced prose
+/// width, measured from the width left after the desktop sidebar (window minus
+/// [`DesktopShellStyle::sidebar_width`](crate::desktop_shell::DesktopShellStyle),
+/// both in logical pixels) — never from a physical-pixel screenshot reading.
+/// A 1280 px window with the expanded rail leaves 1062 px of content (hidden);
+/// 1400 px leaves 1182 px (still hidden, no squeeze); the column returns once
+/// content reaches 1280 px. Non-positive and non-finite widths never fit.
+pub(crate) fn thread_inspector_visible(content_width_px: f32) -> bool {
+    desktop_thread_inspector_fits(f64::from(content_width_px), ProseWidth::Balanced)
+}
+
+/// Resolves the inspector column width for a content width.
+///
+/// This is the `shell-layout.ts` `InspectorColumnPixels` clamp
+/// (`clamp(16rem, 25vw, 350px)`) read from content width. The clamp bounds the
+/// result to the finite 256..350 px range, so the narrowing `as` cast below
+/// is exact and safe (standard Rust has no checked float-narrowing `TryFrom`).
+pub(crate) fn thread_inspector_width(content_width_px: f32) -> f32 {
+    desktop_inspector_column_pixels(f64::from(content_width_px)) as f32
+}
+
+/// Returns whether the empty-transcript overlay shows for a live turn count.
+///
+/// Only a genuinely empty conversation (zero turns) shows it; the first
+/// message removes it, and a thread change remounts with a fresh count.
+pub(crate) const fn show_empty_transcript(turn_view_count: usize) -> bool {
+    turn_view_count == 0
+}
 
 /// `px-2 py-2` on inspector rows and card headings.
 const ROW_PAD_PX: f32 = 8.0;
@@ -192,7 +241,7 @@ pub type ThreadScreenRetry = Rc<dyn Fn(&mut Window, &mut App)>;
 ///
 /// Borrowed [`ThreadTitleInput`] values are built per render so this view
 /// never retains a borrow across frames.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ThreadScreenTitle {
     /// Harness-generated summary title, when the projection supplied one.
     pub summary_title: Option<String>,
@@ -238,11 +287,19 @@ pub struct ThreadChecklistEntry {
 pub struct ThreadScreen {
     host: Entity<ConversationHost>,
     composer: Entity<NativeComposer>,
+    /// Live host observation: re-renders the transcript column (including the
+    /// empty overlay) the moment turns arrive, so `No messages yet` can never
+    /// go stale while data exists.
+    _host_observation: Subscription,
     retry_focus: FocusHandle,
     theme_mode: ThemeMode,
     gate: ThreadScreenGate,
     on_retry: Option<ThreadScreenRetry>,
     title: ThreadScreenTitle,
+    /// Latest content width (window minus desktop sidebar, logical pixels)
+    /// published by the route integrator; `None` until the first publish.
+    /// Drives inspector visibility and width.
+    content_width_px: Option<f32>,
     environment: ThreadEnvironmentInput,
     terminals: Vec<TerminalSession>,
     terminals_loading: bool,
@@ -263,14 +320,19 @@ impl ThreadScreen {
         theme_mode: ThemeMode,
         cx: &mut Context<Self>,
     ) -> Self {
+        let host_observation = cx.observe(&host, |_, _, cx| {
+            cx.notify();
+        });
         Self {
             host,
             composer,
+            _host_observation: host_observation,
             retry_focus: cx.focus_handle(),
             theme_mode,
             gate: ThreadScreenGate::default(),
             on_retry: None,
             title: ThreadScreenTitle::default(),
+            content_width_px: None,
             environment: ThreadEnvironmentInput::default(),
             terminals: Vec::new(),
             terminals_loading: false,
@@ -292,6 +354,39 @@ impl ThreadScreen {
         let host = ConversationHost::mount(thread_id, theme_mode, cx)?;
         let composer = cx.new(NativeComposer::new);
         Ok(cx.new(|screen_cx| Self::new(host, composer, theme_mode, screen_cx)))
+    }
+
+    /// Mounts a presentation-complete thread screen for visual-proof harnesses.
+    ///
+    /// Opens the gate, publishes the content width (window minus desktop
+    /// sidebar, logical pixels), and names the header from an already-resolved
+    /// listing title, so a proof worker can wrap the result in the public
+    /// [`desktop_shell`](crate::desktop_shell::desktop_shell) and capture the
+    /// actual app background, chrome, and containment with no transport.
+    /// Registration of any proof route stays with the root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationHostError::SceneProjection`] when the fresh
+    /// controller cannot produce its empty initial scene.
+    pub fn mount_proof(
+        thread_id: ThreadId,
+        title: String,
+        content_width_px: f32,
+        cx: &mut App,
+    ) -> Result<Entity<Self>, ConversationHostError> {
+        let screen = Self::mount(thread_id, ThemeMode::Dark, cx)?;
+        screen.update(cx, |screen, _| {
+            screen.set_gate(ThreadScreenGate::Open);
+            screen.set_content_width(content_width_px);
+            screen.set_title(ThreadScreenTitle {
+                summary_title: None,
+                title,
+                title_locked: false,
+                mode: ThreadTitleMode::Summary,
+            });
+        });
+        Ok(screen)
     }
 
     /// Returns the mounted conversation host entity.
@@ -320,8 +415,48 @@ impl ThreadScreen {
     }
 
     /// Replaces the owned header-title facts.
-    pub fn set_title(&mut self, title: ThreadScreenTitle) {
-        self.title = title;
+    ///
+    /// Returns whether the facts changed. Callers notify only on change so a
+    /// per-render sync can never busy-loop the frame.
+    pub fn set_title(&mut self, title: ThreadScreenTitle) -> bool {
+        if self.title != title {
+            self.title = title;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Publishes the content width the inspector fit is measured from.
+    ///
+    /// The route integrator calls this every render from live window bounds
+    /// minus the live [`DesktopShellStyle::sidebar_width`](crate::desktop_shell::DesktopShellStyle)
+    /// (both in logical pixels, never a scaled screenshot reading); the
+    /// inspector appears, disappears, and resizes across the content-width
+    /// threshold in both directions with no reserved space while hidden.
+    /// Returns whether the width changed; the caller notifies only then, so
+    /// GPUI cannot retain a stale child across a resize yet never repaints
+    /// when nothing moved.
+    pub fn set_content_width(&mut self, content_width_px: f32) -> bool {
+        if self.content_width_px != Some(content_width_px) {
+            self.content_width_px = Some(content_width_px);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns whether the inspector column renders at the published width.
+    ///
+    /// `None` (no publish yet) keeps the legacy always-show behavior.
+    fn inspector_visible(&self) -> bool {
+        self.content_width_px.is_none_or(thread_inspector_visible)
+    }
+
+    /// Resolves the live inspector column width.
+    fn inspector_width(&self) -> f32 {
+        self.content_width_px
+            .map_or(INSPECTOR_WIDTH_PX, thread_inspector_width)
     }
 
     /// Replaces the owned environment-card input.
@@ -389,6 +524,7 @@ impl ThreadScreen {
             .gap(px(ROW_GAP_PX))
             .px(px(COLUMN_PAD_X_PX))
             .py(px(12.0))
+            .bg(shell_black())
             .child(
                 div()
                     .flex_1()
@@ -414,12 +550,13 @@ impl ThreadScreen {
         theme: &ArtisanTheme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let empty = self.host.read(cx).controller_view().turn_views.is_empty();
+        let empty = show_empty_transcript(self.host.read(cx).controller_view().turn_views.len());
         let mut column = div()
             .relative()
             .min_h_0()
             .flex_1()
             .overflow_hidden()
+            .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_TRANSCRIPT_SELECTOR.to_owned())
             .child(
                 div()
@@ -727,8 +864,10 @@ impl ThreadScreen {
     /// Renders the inspector column (`thread-panel.svelte` root).
     ///
     /// Legacy frame: `div.relative.flex.h-full.min-h-0.flex-col.p-1` around
-    /// the `flex.min-h-0.flex-1.flex-col.gap-4` card group.
-    fn render_inspector(&self, theme: &ArtisanTheme) -> impl IntoElement {
+    /// the `flex.min-h-0.flex-1.flex-col.gap-4` card group. The width is the
+    /// live viewport clamp; cards keep their themed fills against the black
+    /// column gutters.
+    fn render_inspector(&self, theme: &ArtisanTheme, width_px: f32) -> impl IntoElement {
         let mut cards = div()
             .flex()
             .min_h_0()
@@ -745,11 +884,12 @@ impl ThreadScreen {
         div()
             .relative()
             .flex_shrink_0()
-            .w(px(INSPECTOR_WIDTH_PX))
+            .w(px(width_px))
             .min_h_0()
             .flex()
             .flex_col()
             .p(px(INSPECTOR_PAD_PX))
+            .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_INSPECTOR_SELECTOR.to_owned())
             .child(cards)
     }
@@ -792,7 +932,7 @@ impl ThreadScreen {
             .min_h_0()
             .items_center()
             .justify_center()
-            .bg(theme.colors.background.to_paint())
+            .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_LOADING_SELECTOR.to_owned())
             .child(
                 FadeArc::new(SharedString::from(THREAD_SCREEN_LOADING_SELECTOR), *theme)
@@ -837,7 +977,7 @@ impl ThreadScreen {
             .items_center()
             .justify_center()
             .px(px(COLUMN_PAD_X_PX))
-            .bg(theme.colors.background.to_paint())
+            .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_FAILURE_SELECTOR.to_owned())
             .child(
                 div()
@@ -857,26 +997,43 @@ impl ThreadScreen {
     }
 
     /// Renders the opened-route branch (`thread-workspace.svelte` frame).
+    ///
+    /// Legacy frame (`sectioned-panel.svelte`): the primary column owns the
+    /// transcript and the composer, and the inspector is a separate `{#if
+    /// secondary}` column with no reserved space when closed. The conversation
+    /// column below replays that ownership, so the composer can never extend
+    /// across or cover the inspector; when the inspector hides, the
+    /// conversation reclaims its space.
     fn render_open(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> impl IntoElement {
+        let conversation = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .bg(shell_black())
+            .child(self.render_transcript_column(theme, cx))
+            .child(self.render_composer_dock(theme));
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .min_h_0()
+            .flex_1()
+            .bg(shell_black())
+            .child(conversation);
+        if self.inspector_visible() {
+            row = row.child(self.render_inspector(theme, self.inspector_width()));
+        }
         div()
             .relative()
             .flex()
             .flex_col()
             .h_full()
             .min_h_0()
-            .bg(theme.colors.background.to_paint())
+            .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_SELECTOR.to_owned())
             .child(self.render_title_header(theme))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .min_h_0()
-                    .flex_1()
-                    .child(self.render_transcript_column(theme, cx))
-                    .child(self.render_inspector(theme)),
-            )
-            .child(self.render_composer_dock(theme))
+            .child(row)
     }
 }
 
@@ -907,7 +1064,7 @@ impl Render for ThreadScreen {
             ThreadRouteGateRender::EmptyFallback => div()
                 .h_full()
                 .min_h_0()
-                .bg(theme.colors.background.to_paint())
+                .bg(shell_black())
                 .debug_selector(|| THREAD_SCREEN_SELECTOR.to_owned())
                 .into_any_element(),
         }
@@ -1012,5 +1169,219 @@ mod tests {
         assert_eq!(presented.id, "entry-1");
         assert_eq!(presented.state, ChecklistEntryState::Active);
         assert_eq!(presented.text, "Port the transcript");
+    }
+
+    /// Mounted-total equivalents in logical pixels (window minus the live
+    /// [`DesktopShellStyle`](crate::desktop_shell::DesktopShellStyle) rail,
+    /// never a scaled screenshot reading): 1280 px expanded leaves 1062 px,
+    /// 1400 px expanded leaves 1182 px, 1920 px expanded leaves 1702 px, and
+    /// 1400 px collapsed leaves 1342 px.
+    const EXPANDED_1280_CONTENT: f32 = 1062.0;
+    const EXPANDED_1400_CONTENT: f32 = 1182.0;
+    const EXPANDED_WIDE_CONTENT: f32 = 1702.0;
+    const COLLAPSED_1400_CONTENT: f32 = 1342.0;
+
+    #[test]
+    fn inspector_hides_at_mounted_1280_and_1400_with_expanded_rail() {
+        assert!(!thread_inspector_visible(EXPANDED_1280_CONTENT));
+        assert!(!thread_inspector_visible(EXPANDED_1400_CONTENT));
+    }
+
+    #[test]
+    fn inspector_returns_when_wide_with_room_to_spare() {
+        assert!(thread_inspector_visible(EXPANDED_WIDE_CONTENT));
+        let width = thread_inspector_width(EXPANDED_WIDE_CONTENT);
+        assert!(
+            (width - 350.0).abs() < 0.01,
+            "wide content caps the inspector at 350px, got {width}px"
+        );
+    }
+
+    #[test]
+    fn collapsed_rail_seats_the_inspector_at_1400_total() {
+        assert!(thread_inspector_visible(COLLAPSED_1400_CONTENT));
+    }
+
+    #[test]
+    fn inspector_visibility_toggles_in_both_resize_directions() {
+        assert!(thread_inspector_visible(EXPANDED_WIDE_CONTENT));
+        assert!(!thread_inspector_visible(EXPANDED_1280_CONTENT));
+        assert!(thread_inspector_visible(EXPANDED_WIDE_CONTENT));
+        assert!(!thread_inspector_visible(EXPANDED_1400_CONTENT));
+    }
+
+    #[test]
+    fn inspector_never_fits_malformed_content_widths() {
+        assert!(!thread_inspector_visible(0.0));
+        assert!(!thread_inspector_visible(-1280.0));
+        assert!(!thread_inspector_visible(f32::NAN));
+    }
+
+    #[test]
+    fn inspector_width_follows_the_content_clamp() {
+        let narrow = thread_inspector_width(EXPANDED_1280_CONTENT);
+        assert!(
+            (narrow - 265.5).abs() < 0.01,
+            "1062px content reads 25vw, got {narrow}px"
+        );
+        let floored = thread_inspector_width(0.0);
+        assert!(
+            (floored - 256.0).abs() < 0.01,
+            "empty content floors at 256px, got {floored}px"
+        );
+    }
+
+    #[test]
+    fn empty_overlay_shows_only_for_zero_turns() {
+        assert!(show_empty_transcript(0));
+        assert!(!show_empty_transcript(1));
+        assert!(!show_empty_transcript(24));
+    }
+
+    /// Minimal host mounting one proof screen so the paint tree can be
+    /// inspected: the screen is the real entity (mounted through
+    /// [`ThreadScreen::mount_proof`]), not a stub.
+    struct ShellProofProbe {
+        screen: Entity<ThreadScreen>,
+    }
+
+    impl Render for ShellProofProbe {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> impl gpui::IntoElement {
+            self.screen.clone()
+        }
+    }
+
+    fn mount_proof_screen(
+        thread: &str,
+        content_width_px: f32,
+        cx: &mut Context<ShellProofProbe>,
+    ) -> ShellProofProbe {
+        let screen = ThreadScreen::mount_proof(
+            ThreadId::parse(thread).expect("thread id parses"),
+            String::from("Proof thread"),
+            content_width_px,
+            cx,
+        )
+        .expect("proof screen mounts");
+        ShellProofProbe { screen }
+    }
+
+    /// At mounted-1280 content the inspector and its reserved space are gone
+    /// while the composer stays inside the transcript column; the fresh mount
+    /// (zero turns) still shows the empty state.
+    #[gpui::test]
+    fn narrow_content_omits_inspector_and_contains_composer(cx: &mut gpui::TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-narrow", EXPANDED_1280_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR).is_none(),
+            "1280-total content must omit the inspector and its space"
+        );
+        let transcript = cx
+            .debug_bounds(THREAD_SCREEN_TRANSCRIPT_SELECTOR)
+            .expect("transcript column lays out");
+        let composer = cx
+            .debug_bounds(THREAD_SCREEN_COMPOSER_SELECTOR)
+            .expect("composer dock lays out");
+        assert!(
+            cx.debug_bounds(THREAD_SCREEN_EMPTY_SELECTOR).is_some(),
+            "zero turns still show the empty state"
+        );
+        let transcript_left = f32::from(transcript.origin.x);
+        let transcript_right = transcript_left + f32::from(transcript.size.width);
+        let composer_left = f32::from(composer.origin.x);
+        let composer_right = composer_left + f32::from(composer.size.width);
+        assert!(
+            composer_left >= transcript_left - 1.0 && composer_right <= transcript_right + 1.0,
+            "composer [{composer_left}, {composer_right}] must stay inside the transcript column [{transcript_left}, {transcript_right}]"
+        );
+    }
+
+    /// At wide content the inspector returns as a distinct clamped column that
+    /// neither overlaps the transcript nor the composer.
+    #[gpui::test]
+    fn wide_content_seats_a_disjoint_inspector_column(cx: &mut gpui::TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-wide", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        let inspector = cx
+            .debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR)
+            .expect("wide content seats the inspector");
+        let transcript = cx
+            .debug_bounds(THREAD_SCREEN_TRANSCRIPT_SELECTOR)
+            .expect("transcript column lays out");
+        let composer = cx
+            .debug_bounds(THREAD_SCREEN_COMPOSER_SELECTOR)
+            .expect("composer dock lays out");
+        let inspector_width = f32::from(inspector.size.width);
+        assert!(
+            (inspector_width - 350.0).abs() < 1.0,
+            "wide content clamps the inspector at 350px, laid out {inspector_width}px"
+        );
+        let inspector_left = f32::from(inspector.origin.x);
+        let transcript_right =
+            f32::from(transcript.origin.x) + f32::from(transcript.size.width);
+        let composer_right = f32::from(composer.origin.x) + f32::from(composer.size.width);
+        assert!(
+            transcript_right <= inspector_left + 1.0,
+            "transcript right {transcript_right}px must not cross the inspector at {inspector_left}px"
+        );
+        assert!(
+            composer_right <= inspector_left + 1.0,
+            "composer right {composer_right}px must not cross the inspector at {inspector_left}px"
+        );
+    }
+
+    /// Resize is truly live: narrowing a mounted wide screen drops the
+    /// inspector (change-guarded notify defeats GPUI child caching), and
+    /// widening it again seats the clamped column back.
+    #[gpui::test]
+    fn resize_toggles_the_mounted_inspector_column(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-resize", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR).is_some(),
+            "wide mount seats the inspector"
+        );
+        cx.update(|_, app| {
+            view.update(app, |probe, probe_cx| {
+                probe.screen.update(probe_cx, |screen, screen_cx| {
+                    if screen.set_content_width(EXPANDED_1280_CONTENT) {
+                        screen_cx.notify();
+                    }
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR).is_none(),
+            "narrowed content must drop the inspector and its space"
+        );
+        cx.update(|_, app| {
+            view.update(app, |probe, probe_cx| {
+                probe.screen.update(probe_cx, |screen, screen_cx| {
+                    if screen.set_content_width(EXPANDED_WIDE_CONTENT) {
+                        screen_cx.notify();
+                    }
+                });
+            });
+        });
+        cx.run_until_parked();
+        let inspector = cx
+            .debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR)
+            .expect("widened content seats the inspector again");
+        assert!(
+            (f32::from(inspector.size.width) - 350.0).abs() < 1.0,
+            "returned inspector keeps the 350px clamp"
+        );
     }
 }

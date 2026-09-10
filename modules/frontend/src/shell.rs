@@ -57,18 +57,23 @@ pub struct ShellFrameStyle {
     /// The leading edge stays flush so rail and main surface read as one
     /// background plane cut by the card.
     pub surface_padding: Pixels,
-    /// Root window paint: `--background` resolved for the theme mode.
+    /// Root window paint: the true-black shell override.
     pub window_background: Hsla,
 }
 
 impl ShellFrameStyle {
     /// Resolves the shell-frame recipe from shared theme tokens.
+    ///
+    /// The root window paint is the true-black shell override (flowing into
+    /// [`LegacyShellStyle`]); rail width and surface padding stay on the
+    /// shared spacing tokens, and panels keep their themed fills for card
+    /// contrast.
     #[must_use]
     pub fn resolve(theme: ArtisanTheme) -> Self {
         Self {
             rail_width: theme.spacing.steps(14.0),
             surface_padding: theme.spacing.steps(2.0),
-            window_background: theme.colors.background.to_paint(),
+            window_background: crate::thread_screen::shell_black(),
         }
     }
 }
@@ -311,7 +316,7 @@ pub struct LegacyShellStyle {
     /// Rail pill fill: legacy `bg-surface-125 dark:bg-surface-900`
     /// (`sectioned-panel.svelte:182`).
     pub pill_background: Hsla,
-    /// Root window paint: `--background` resolved for the theme mode.
+    /// Root window paint: the true-black shell override.
     pub window_background: Hsla,
 }
 

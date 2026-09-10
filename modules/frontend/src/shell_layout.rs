@@ -94,8 +94,49 @@ pub const fn prose_column_pixels(prose_width: ProseWidth) -> f64 {
 #[must_use]
 pub fn inspector_column_pixels(viewport_width: f64) -> f64 {
     let viewport_width = sanitize_viewport_width(viewport_width);
-    (viewport_width * INSPECTOR_VIEWPORT_RATIO)
-        .clamp(INSPECTOR_MIN_WIDTH_PIXELS, INSPECTOR_MAX_WIDTH_PIXELS)
+    clamp_inspector_width(viewport_width * INSPECTOR_VIEWPORT_RATIO)
+}
+
+/// Resolves the inspector column width from actual content width.
+///
+/// Same clamp as [`inspector_column_pixels`], but measured from the width
+/// left after the desktop sidebar instead of the total window: the legacy
+/// formula's total-window fraction overstates the room beside a 218 px
+/// desktop rail and would squeeze the conversation column.
+#[must_use]
+pub fn desktop_inspector_column_pixels(content_width: f64) -> f64 {
+    clamp_inspector_width(sanitize_viewport_width(content_width) * INSPECTOR_VIEWPORT_RATIO)
+}
+
+fn clamp_inspector_width(raw_width: f64) -> f64 {
+    raw_width.clamp(INSPECTOR_MIN_WIDTH_PIXELS, INSPECTOR_MAX_WIDTH_PIXELS)
+}
+
+/// Returns whether the inspector fits in actual desktop content width.
+///
+/// Same band arithmetic as [`thread_inspector_fits_beside_rail`], but measured
+/// from the width left after the desktop sidebar (`content_width =
+/// window − sidebar`, both in logical pixels) instead of the total window:
+/// the legacy total-window form assumes a 56 px rail, while the desktop rail
+/// is 218 px expanded (58 px collapsed), so the legacy form would seat an
+/// inspector beside a conversation it then squeezes. At 1280 px total with an
+/// expanded rail the content is 1062 px (band −19.5 → hidden); at 1400 px
+/// total it is 1182 px (band 70.5 → still hidden, no squeeze); the balanced
+/// column returns once content reaches 1280 px (window ≥ 1498 px expanded).
+/// Invalid geometry never fits.
+#[must_use]
+pub fn desktop_thread_inspector_fits(content_width: f64, prose_width: ProseWidth) -> bool {
+    if !is_valid_viewport_width(content_width) {
+        return false;
+    }
+
+    let band_width = content_width
+        - desktop_inspector_column_pixels(content_width)
+        - prose_column_pixels(prose_width)
+        - PROSE_GUTTER_PIXELS
+        - THREAD_RAIL_GAP_PIXELS;
+
+    band_width >= THREAD_RAIL_BAND_PIXELS
 }
 
 /// Returns whether the inspector fits beside the transcript proximity rail.

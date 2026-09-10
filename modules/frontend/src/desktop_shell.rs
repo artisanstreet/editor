@@ -9,8 +9,7 @@
 
 use artisan_assets::AssetId;
 use artisan_ui::asset_seam::asset_glyph;
-use artisan_ui::gradient::vertical_gradient;
-use artisan_ui::theme::{ArtisanTheme, DesktopTheme, SurfaceStep, ThemeMode};
+use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::prelude::{
     InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
 };
@@ -125,11 +124,12 @@ pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
 /// Compose the complete native desktop frame around application-owned
 /// surfaces.
 ///
-/// The window carries one continuous top-to-bottom large-card face
-/// (`sectioned-panel.svelte:313/341` dark `from-surface-900 to-surface-925`,
-/// `theme.css:85-86`) painted once at this root. Titlebar, sidebar, and main
-/// wrappers stay transparent so the progression never restarts per pane;
-/// controls, composer, and popovers keep their own glass/material fills.
+/// The window root paints one continuous true-black shell face (the explicit
+/// black-shell request overriding the Electron dark `surface-900 → surface-925`
+/// card gradient for the frame). Titlebar, sidebar, and main wrappers stay
+/// transparent so the shell never restarts a background per pane; controls,
+/// composer, cards, and popovers keep their own glass/material fills for
+/// contrast.
 #[must_use]
 pub fn desktop_shell(
     theme: DesktopTheme,
@@ -143,11 +143,9 @@ pub fn desktop_shell(
 ) -> Div {
     let style = DesktopShellStyle::resolve(collapsed, scale_factor);
     let legacy_theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-    // Electron large content card, dark face: surface-900 (top) to
-    // surface-925 (bottom). `vertical_gradient` is 180 degrees (`to bottom`)
-    // with stops at 0.0/1.0 and Oklab interpolation, matching the Tailwind
-    // `bg-linear-to-b` default progression from the shared ramp.
-    let window_background = vertical_gradient(SurfaceStep::S900.oklch(), SurfaceStep::S925.oklch());
+    // Own paint override: true black for the whole shell frame. Cards,
+    // controls, and overlays paint their own surfaces above this root.
+    let window_background = crate::thread_screen::shell_black();
 
     let controls = div()
         .flex()

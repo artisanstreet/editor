@@ -53,8 +53,8 @@ use gpui::{
 
 use crate::composer::{DraftDisposition, SubmissionBlocked, SubmissionToken};
 use crate::desktop_shell::{
-    DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, desktop_muted, desktop_nav_glyph,
-    desktop_shell,
+    DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, DesktopShellStyle, desktop_muted,
+    desktop_nav_glyph, desktop_shell,
 };
 use crate::editor_route_screen::{EditorScreen, EditorScreenIdentity, EditorSurfaceState};
 use crate::home_project_picker::{
@@ -105,7 +105,7 @@ use crate::onboarding_harness_presentation::{
 };
 use crate::onboarding_screen::{OnboardingHarnessEntry, OnboardingScreen};
 use crate::thread_environment_presentation::{HostIdentitySnapshot, ThreadEnvironmentInput};
-use crate::thread_screen::{ThreadScreen, ThreadScreenGate};
+use crate::thread_screen::{ThreadScreen, ThreadScreenGate, ThreadScreenTitle, shell_black};
 use crate::usage_meter::usage_segment_fraction;
 use crate::workspace_tab_state::EditorViewState;
 use crate::{
@@ -3270,6 +3270,7 @@ impl NativeApplication {
             .min_h(px(0.0))
             .flex()
             .flex_col()
+            .bg(shell_black())
             .debug_selector(move || route_selector.clone());
         if matches!(route, NativeRoute::NewThread { .. }) {
             body = body.child(div().flex_1().min_w(px(0.0)).min_h(px(0.0)).child(content));
@@ -8074,6 +8075,40 @@ impl NativeApplication {
                     };
                     self.thread_screen = mounted;
                     self.thread_screen_key = key;
+                }
+                // Live presentation sync on every render (not just on mount):
+                // the header title follows the authoritative listing instead
+                // of the `"Thread"` default, and the content width (window
+                // minus the live sidebar, both in logical pixels) drives the
+                // inspector fit in both resize directions. Change-guarded
+                // setters keep this free of notify loops.
+                if let Some(screen) = self.thread_screen.clone() {
+                    let listed_title = self
+                        .thread_listing
+                        .as_ref()
+                        .and_then(|listing| {
+                            listing
+                                .threads()
+                                .iter()
+                                .find(|item| item.thread_id == thread)
+                        })
+                        .map(|item| item.title.as_str().to_owned());
+                    let mut screen_title = ThreadScreenTitle::default();
+                    if let Some(listed_title) = listed_title {
+                        screen_title.title = listed_title;
+                    }
+                    let sidebar_width = f32::from(
+                        DesktopShellStyle::resolve(self.sidebar_collapsed, window.scale_factor())
+                            .sidebar_width,
+                    );
+                    let content_width_px = f32::from(window.bounds().size.width) - sidebar_width;
+                    screen.update(cx, |screen, screen_cx| {
+                        let width_changed = screen.set_content_width(content_width_px);
+                        let title_changed = screen.set_title(screen_title);
+                        if width_changed || title_changed {
+                            screen_cx.notify();
+                        }
+                    });
                 }
                 self.thread_screen
                     .clone()
