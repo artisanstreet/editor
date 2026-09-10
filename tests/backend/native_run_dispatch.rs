@@ -3583,3 +3583,277 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
         "follow-up must continue the same provider session"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Persisted activity history across runs (S1b ledger behavioral proof)
+// ---------------------------------------------------------------------------
+
+/// Two real `commit_activity_observation` commits on two runs share one
+/// thread: both source rows carry run-local numbering, yet the durable
+/// thread-scoped history assigns strictly increasing `delivery_sequence`
+/// values with Forge-persisted run/turn/timestamp attribution.
+///
+/// This exercises the real commit path (fresh base-plus-one, dispatcher
+/// identity, checkpoint encode under the run bind, `commit_batch_with_retry`
+/// with the existing fencing/notifier) and the real authoritative history
+/// read — not the pure resequence helper.
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
+    use artisan_domain::{
+        EngineId, Observation, ObservationId, ObservationSequence, Revision, ToolAction,
+        ToolObservation,
+    };
+    use crate::SystemCommandOrigin;
+    use crate::native_run_dispatch::{SubagentCommitCursor, commit_activity_observation};
+
+    let (database, repository, _temp) = temp_repository("activity-history").await;
+    seed_project_and_thread(&database, &repository, "thread-activity-history").await;
+    let thread = ThreadId::parse("thread-activity-history").expect("tid");
+
+    // First run: text first (production order), then one activity row whose
+    // source-local sequence (41) must never cross into durable history.
+    let (claimed1, launched1, key1, creds1) = queue_claim_launch(
+        &repository,
+        "thread-activity-history",
+        "message-activity-1",
+        "run-activity-1",
+        "turn-activity-1",
+    )
+    .await;
+    let bound1 = bind_running(&repository, &claimed1, &launched1, &key1, &creds1).await;
+    let item1 = ItemId::parse("assistant-activity-1").expect("item");
+    commit_running_item(
+        &repository,
+        RunningItemSeed {
+            claimed: &claimed1,
+            receipt: &launched1,
+            bound: &bound1,
+            start_key: &key1,
+            credentials: &creds1,
+            item_id: &item1,
+            turn_patch_id: &PatchId::parse("patch-activity-1-turn").expect("patch"),
+            item_patch_id: &PatchId::parse("patch-activity-1-item").expect("patch"),
+        },
+    )
+    .await;
+    let config = config_for_fixture_dispatch(ConversationCommitNotifier::new()).expect("config");
+    let origin = SystemCommandOrigin;
+    let mut cursor1 = SubagentCommitCursor {
+        scope: artisan_database::RunBatchScope {
+            claimed: &claimed1,
+            launched: &launched1,
+            bound: &bound1,
+            run_start_key: &key1,
+            credentials: &creds1,
+            expected_launch_at: UnixMillis::from_millis(150),
+            expected_updated_at: UnixMillis::from_millis(250),
+        },
+        engine: EngineId::OpenCode2,
+        batch_sequence: 2,
+        assistant_item: Some(item1),
+        assistant_revision: Revision::new(0),
+        assistant_body: String::from("hello assistant"),
+    };
+    let source1 = Observation::Tool(
+        ToolObservation::new(
+            ObservationId::parse("source-tool-r1").expect("source id"),
+            ObservationSequence::new(41).expect("source sequence"),
+            ObservationId::parse("tool-source-r1").expect("tool id"),
+            String::from("read"),
+            ToolAction::Completed,
+            Some(String::from("read 42 lines")),
+        )
+        .expect("source row"),
+    );
+    assert!(
+        commit_activity_observation(&repository, &config, &origin, &mut cursor1, source1).await,
+        "first activity batch must commit"
+    );
+    assert_eq!(cursor1.batch_sequence, 3);
+
+    // Second run on the same thread through the production follow-up seam.
+    // Its source row restarts at run-local sequence 1, exactly like a fresh
+    // owner stream would number it.
+    repository
+        .queue_message(artisan_database::QueueMessageInput {
+            request_id: RequestId::parse("req-activity-followup").expect("req"),
+            message_id: MessageId::parse("message-activity-2").expect("mid"),
+            thread_id: thread.clone(),
+            payload: artisan_domain::QueueMessagePayload::text_only("follow-up activity")
+                .expect("payload"),
+            accepted_at: UnixMillis::from_millis(950),
+        })
+        .await
+        .expect("follow-up message should queue");
+    let claimed2 = repository
+        .claim_next_message_dispatch(artisan_database::ClaimMessageDispatch {
+            owner: artisan_database::DispatchLeaseOwner::new([DISPATCH_OWNER_BYTE; 32]),
+            claimed_at: UnixMillis::from_millis(1_000),
+            lease_expires_at: UnixMillis::from_millis(2_000),
+        })
+        .await
+        .expect("claim")
+        .expect("follow-up claimed");
+    let run2 = RunId::parse("run-activity-2").expect("run");
+    let turn2 = TurnId::parse("turn-activity-2").expect("turn");
+    let engine_settings = repository
+        .read_thread_engine_settings(&thread)
+        .await
+        .expect("engine settings read")
+        .expect("engine settings present");
+    let launched2 = match repository
+        .launch_claimed_run(artisan_database::LaunchClaimedRun {
+            claimed: &claimed2,
+            run_id: &run2,
+            turn_id: &turn2,
+            item_id: &ItemId::parse("item-run-activity-2").expect("item"),
+            first_patch_id: &PatchId::parse("patch-run-activity-2-a").expect("patch"),
+            second_patch_id: &PatchId::parse("patch-run-activity-2-b").expect("patch"),
+            operated_at: UnixMillis::from_millis(1_100),
+            run_start_key: &key1,
+            credentials: &creds1,
+            engine_settings: &engine_settings,
+        })
+        .await
+        .expect("second run should launch")
+    {
+        artisan_database::LaunchClaimedRunOutcome::Started(receipt) => receipt,
+        artisan_database::LaunchClaimedRunOutcome::AlreadyStarted(_) => {
+            panic!("follow-up launch should be fresh")
+        }
+    };
+    let bound2 = match repository
+        .bind_run_provider(BindRunProvider {
+            claimed: &claimed2,
+            receipt: &launched2,
+            run_start_key: &key1,
+            credentials: &creds1,
+            expected_launch_at: UnixMillis::from_millis(1_100),
+            bound_at: UnixMillis::from_millis(1_200),
+            binding_version: 2,
+            binding_bytes: &ProviderBindingBytes::new(vec![0xab; 16]).expect("binding"),
+        })
+        .await
+        .expect("second run should bind")
+    {
+        artisan_database::BindRunProviderOutcome::Bound(bound)
+        | artisan_database::BindRunProviderOutcome::AlreadyBound(bound) => bound,
+    };
+    let item2 = ItemId::parse("assistant-activity-2").expect("item");
+    let body2 = AssistantBody::parse("hello assistant").expect("body");
+    repository
+        .commit_run_batch(artisan_database::CommitRunBatch {
+            scope: artisan_database::RunBatchScope {
+                claimed: &claimed2,
+                launched: &launched2,
+                bound: &bound2,
+                run_start_key: &key1,
+                credentials: &creds1,
+                expected_launch_at: UnixMillis::from_millis(1_100),
+                expected_updated_at: UnixMillis::from_millis(1_200),
+            },
+            batch_sequence: 1,
+            operated_at: UnixMillis::from_millis(1_300),
+            activate_turn_patch_id: Some(&PatchId::parse("patch-activity-2-turn").expect("patch")),
+            changes: &[AssistantChange::Start {
+                item_id: &item2,
+                phase: AssistantMessagePhase::Final,
+                body: &body2,
+                patch_id: &PatchId::parse("patch-activity-2-item").expect("patch"),
+            }],
+            checkpoint: artisan_database::CheckpointUpdate::Keep,
+        })
+        .await
+        .expect("second assistant batch should commit");
+    let mut cursor2 = SubagentCommitCursor {
+        scope: artisan_database::RunBatchScope {
+            claimed: &claimed2,
+            launched: &launched2,
+            bound: &bound2,
+            run_start_key: &key1,
+            credentials: &creds1,
+            expected_launch_at: UnixMillis::from_millis(1_100),
+            expected_updated_at: UnixMillis::from_millis(1_300),
+        },
+        engine: EngineId::OpenCode2,
+        batch_sequence: 2,
+        assistant_item: Some(item2),
+        assistant_revision: Revision::new(0),
+        assistant_body: String::from("hello assistant"),
+    };
+    let source2 = Observation::Tool(
+        ToolObservation::new(
+            ObservationId::parse("source-tool-r2").expect("source id"),
+            ObservationSequence::new(1).expect("source sequence"),
+            ObservationId::parse("tool-source-r2").expect("tool id"),
+            String::from("grep"),
+            ToolAction::Completed,
+            Some(String::from("3 matches")),
+        )
+        .expect("source row"),
+    );
+    assert!(
+        commit_activity_observation(&repository, &config, &origin, &mut cursor2, source2).await,
+        "second activity batch must commit"
+    );
+
+    // The authoritative read returns both rows in thread-scoped order with
+    // Forge-persisted attribution; run-local sequences both read 1 while the
+    // durable cursor strictly increases.
+    let history = repository
+        .read_observation_history(&thread, 0, 64)
+        .await
+        .expect("history reads");
+    assert_eq!(history.len(), 2, "both runs must persist one row each");
+    assert_eq!(history[0].observation.sequence().get(), 1);
+    assert_eq!(history[1].observation.sequence().get(), 1);
+    let first = history[0]
+        .attribution
+        .as_ref()
+        .expect("production rows carry attribution");
+    let second = history[1]
+        .attribution
+        .as_ref()
+        .expect("production rows carry attribution");
+    assert_eq!(first.run_id, launched1.run_id);
+    assert_eq!(first.turn_id, launched1.turn_id);
+    assert_eq!(second.run_id, launched2.run_id);
+    assert_eq!(second.turn_id, launched2.turn_id);
+    assert_eq!(first.delivery_sequence, 1);
+    assert_eq!(second.delivery_sequence, 2);
+    assert!(first.committed_at.as_millis() > 0);
+    assert!(second.committed_at.as_millis() >= first.committed_at.as_millis());
+    assert_ne!(
+        history[0].observation.observation_id().as_str(),
+        "source-tool-r1",
+        "dispatcher must remint durable identity"
+    );
+    match &history[0].observation {
+        Observation::Tool(row) => {
+            assert_eq!(row.tool_name(), "read");
+            assert_eq!(row.detail(), Some("read 42 lines"));
+        }
+        other => panic!("first row must stay a tool row, got {}", other.tag()),
+    }
+    match &history[1].observation {
+        Observation::Tool(row) => {
+            assert_eq!(row.tool_name(), "grep");
+            assert_eq!(row.detail(), Some("3 matches"));
+        }
+        other => panic!("second row must stay a tool row, got {}", other.tag()),
+    }
+    // Bounded pagination from the first cursor yields exactly the second row.
+    let tail = repository
+        .read_observation_history(&thread, 1, 64)
+        .await
+        .expect("tail reads");
+    assert_eq!(tail.len(), 1);
+    assert_eq!(
+        tail[0]
+            .attribution
+            .as_ref()
+            .expect("tail row carries attribution")
+            .delivery_sequence,
+        2
+    );
+}

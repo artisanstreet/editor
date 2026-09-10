@@ -21,19 +21,21 @@ use artisan_backend::{
     ForgeListener, ForgeStartupError, ListenerLimits, RequestHandler, RequestTermination,
 };
 use artisan_database::{
-    AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
-    ConversationPatchReplay, CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun,
-    LaunchClaimedRunOutcome, ProviderBindingBytes, QueueFirstMessageInput, Repository,
+    AssistantChange, AttachProjectInput, BindRunProvider, BindRunProviderOutcome,
+    CheckpointUpdate, ClaimMessageDispatch, CommitRunBatch, CompleteRun, ConversationPatchReplay,
+    CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
+    ProviderBindingBytes, QueueFirstMessageInput, QueueMessageInput, Repository, RunBatchScope,
     RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
 };
 use artisan_domain::{
     ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, ConversationCursor,
     ConversationRequest, ConversationSubscribe, ConversationUnsubscribe, CountLimit, DisplayName,
-    EngineAgentId, EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy,
+    EngineAgentId, EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
     EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
-    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, ItemId,
-    MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PatchId, PermissionId, ProjectId,
-    RequestId, RootPath, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
+    EngineRuntimeControlsInput, EngineSelection, Event, FilesystemAccess, FiniteMillis, ItemId,
+    MessageBody, MessageId, NetworkAccess, Observation, ObservationId, ObservationSequence,
+    OpenCode2Selection, PatchId, PermissionId, ProjectId, RequestId, Revision, RootPath, ThreadId,
+    ThreadTitle, ToolAction, ToolObservation, UnixMillis, WebSearchAccess,
 };
 use artisan_protocol::{
     APPLICATION_PROTOCOL_VERSION, ClientRequest, ConversationSubscriptionStarted, FrameId, Hello,
@@ -872,6 +874,608 @@ async fn peer_loss_releases_connection_owned_delivery() -> Result<(), Box<dyn Er
         &endpoint,
         quinn::VarInt::from_u32(0),
         b"delivery peer-loss test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Persisted activity history: live wake delivery plus reconnect replay
+// ---------------------------------------------------------------------------
+
+fn activity_tool_observation(id: &str, tool_id: &str, tool_name: &str, detail: &str) -> Observation {
+    Observation::Tool(
+        ToolObservation::new(
+            ObservationId::parse(id).expect("fixture observation id is valid"),
+            ObservationSequence::new(1).expect("run-local sequence restarts per run"),
+            ObservationId::parse(tool_id).expect("fixture tool id is valid"),
+            tool_name.to_owned(),
+            ToolAction::Completed,
+            Some(detail.to_owned()),
+        )
+        .expect("fixture tool row is valid"),
+    )
+}
+
+/// Commits one activity row through the canonical S1b batch path the
+/// dispatcher uses: fresh run-local base, checkpoint encode under the run
+/// bind, content-neutral assistant rewrite, existing fencing and notifier.
+async fn commit_activity_batch(
+    repository: &Repository,
+    run: &SeededRun,
+    batch_sequence: i64,
+    expected_updated_at_ms: i64,
+    operated_at_ms: i64,
+    observation: Observation,
+    item_id: &str,
+    patch_id: &str,
+) -> Result<(), Box<dyn Error>> {
+    let base = repository
+        .last_committed_observation_sequence(&run.launched.run_id)
+        .await?;
+    let checkpoint = artisan_database::encode_observation_checkpoint(
+        EngineId::OpenCode2,
+        run.bound.binding_version,
+        base,
+        &[observation],
+    )
+    .map_err(|_| "activity checkpoint should encode")?;
+    artisan_database::validate_observation_bind(run.bound.binding_version, &run.bound)
+        .map_err(|_| "activity bind should validate")?;
+    let item_id = ItemId::parse(item_id)?;
+    let patch_id = PatchId::parse(patch_id)?;
+    let body = AssistantBody::parse("delivery assistant output")?;
+    let outcome = repository
+        .commit_run_batch(CommitRunBatch {
+            scope: RunBatchScope {
+                claimed: &run.claimed,
+                launched: &run.launched,
+                bound: &run.bound,
+                run_start_key: &run.start_key,
+                credentials: &run.credentials,
+                expected_launch_at: UnixMillis::from_millis(500),
+                expected_updated_at: UnixMillis::from_millis(expected_updated_at_ms),
+            },
+            batch_sequence,
+            operated_at: UnixMillis::from_millis(operated_at_ms),
+            activate_turn_patch_id: None,
+            changes: &[AssistantChange::Replace {
+                item_id: &item_id,
+                expected_revision: Revision::new(0),
+                body: &body,
+                phase: AssistantMessagePhase::Unspecified,
+                patch_id: &patch_id,
+            }],
+            checkpoint: CheckpointUpdate::Replace(&checkpoint),
+        })
+        .await
+        .map_err(|_| "activity batch should commit")?;
+    if !matches!(
+        outcome,
+        artisan_database::CommitRunBatchOutcome::Committed(_)
+    ) {
+        return Err("activity batch should be newly committed".into());
+    }
+    Ok(())
+}
+
+async fn commit_assistant_start_at(
+    repository: &Repository,
+    run: &SeededRun,
+    item_id: &str,
+    activation_patch_id: &str,
+    item_patch_id: &str,
+    expected_launch_at_ms: i64,
+    expected_updated_at_ms: i64,
+    operated_at_ms: i64,
+) -> Result<(), Box<dyn Error>> {
+    let item_id = ItemId::parse(item_id)?;
+    let activation_patch = PatchId::parse(activation_patch_id)?;
+    let item_patch = PatchId::parse(item_patch_id)?;
+    let body = AssistantBody::parse("delivery assistant output")?;
+    let outcome = repository
+        .commit_run_batch(CommitRunBatch {
+            scope: RunBatchScope {
+                claimed: &run.claimed,
+                launched: &run.launched,
+                bound: &run.bound,
+                run_start_key: &run.start_key,
+                credentials: &run.credentials,
+                expected_launch_at: UnixMillis::from_millis(expected_launch_at_ms),
+                expected_updated_at: UnixMillis::from_millis(expected_updated_at_ms),
+            },
+            batch_sequence: 1,
+            operated_at: UnixMillis::from_millis(operated_at_ms),
+            activate_turn_patch_id: Some(&activation_patch),
+            changes: &[AssistantChange::Start {
+                item_id: &item_id,
+                phase: AssistantMessagePhase::Final,
+                body: &body,
+                patch_id: &item_patch,
+            }],
+            checkpoint: CheckpointUpdate::Keep,
+        })
+        .await?;
+    if !matches!(
+        outcome,
+        artisan_database::CommitRunBatchOutcome::Committed(_)
+    ) {
+        return Err("assistant batch should be newly committed".into());
+    }
+    Ok(())
+}
+
+/// Settles one run terminal so its turn counts as settled history while its
+/// committed observations stay replayable.
+async fn settle_run_completed(
+    repository: &Repository,
+    run: &SeededRun,
+    expected_updated_at_ms: i64,
+    operated_at_ms: i64,
+    item_id: &str,
+) -> Result<(), Box<dyn Error>> {
+    let item_id = ItemId::parse(item_id)?;
+    let body = AssistantBody::parse("delivery assistant output")?;
+    let item_patch = PatchId::parse("delivery-settle-item")?;
+    let turn_patch = PatchId::parse("delivery-settle-turn")?;
+    repository
+        .complete_run(CompleteRun {
+            scope: RunBatchScope {
+                claimed: &run.claimed,
+                launched: &run.launched,
+                bound: &run.bound,
+                run_start_key: &run.start_key,
+                credentials: &run.credentials,
+                expected_launch_at: UnixMillis::from_millis(500),
+                expected_updated_at: UnixMillis::from_millis(expected_updated_at_ms),
+            },
+            operated_at: UnixMillis::from_millis(operated_at_ms),
+            item_id: &item_id,
+            expected_revision: Revision::new(1),
+            body: &body,
+            phase: AssistantMessagePhase::Final,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+        })
+        .await?;
+    Ok(())
+}
+
+/// Seeds the production follow-up run on the same thread: second message,
+/// claim, launch, and bind with Forge-minted follow-up identities.
+async fn seed_followup_run(
+    repository: &Repository,
+    thread_id: &ThreadId,
+) -> Result<SeededRun, Box<dyn Error>> {
+    repository
+        .queue_message(artisan_database::QueueMessageInput {
+            request_id: RequestId::parse("delivery-message-2-request")?,
+            message_id: MessageId::parse("delivery-message-2")?,
+            thread_id: thread_id.clone(),
+            payload: artisan_domain::QueueMessagePayload::text_only("delivery follow-up body")?,
+            accepted_at: UnixMillis::from_millis(950),
+        })
+        .await?;
+    let claimed = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: DispatchLeaseOwner::new([0x22; 32]),
+            claimed_at: UnixMillis::from_millis(1_000),
+            lease_expires_at: UnixMillis::from_millis(2_000),
+        })
+        .await?
+        .ok_or("follow-up dispatch should be claimable")?;
+    let run_id = artisan_domain::RunId::parse("delivery-run-2")?;
+    let turn_id = artisan_domain::TurnId::parse("delivery-turn-2")?;
+    let item_id = ItemId::parse("delivery-item-2")?;
+    let first_patch_id = PatchId::parse("delivery-patch-2-first")?;
+    let second_patch_id = PatchId::parse("delivery-patch-2-second")?;
+    let run_start_key = RunStartKey::new([0x45; 32]);
+    let credentials = RunLaunchCredentials::new([0xa2; 32], [0xb3; 32], [0xc4; 32]);
+    let settings = repository
+        .read_thread_engine_settings(thread_id)
+        .await?
+        .ok_or("delivery settings should exist")?;
+    let launched = repository
+        .launch_claimed_run(LaunchClaimedRun {
+            claimed: &claimed,
+            run_id: &run_id,
+            turn_id: &turn_id,
+            item_id: &item_id,
+            first_patch_id: &first_patch_id,
+            second_patch_id: &second_patch_id,
+            operated_at: UnixMillis::from_millis(1_100),
+            run_start_key: &run_start_key,
+            credentials: &credentials,
+            engine_settings: &settings,
+        })
+        .await?;
+    let launched = match launched {
+        LaunchClaimedRunOutcome::Started(receipt)
+        | LaunchClaimedRunOutcome::AlreadyStarted(receipt) => receipt,
+    };
+    let binding = ProviderBindingBytes::new(vec![0xab; 16])?;
+    let bound = match repository
+        .bind_run_provider(BindRunProvider {
+            claimed: &claimed,
+            receipt: &launched,
+            run_start_key: &run_start_key,
+            credentials: &credentials,
+            expected_launch_at: UnixMillis::from_millis(1_100),
+            bound_at: UnixMillis::from_millis(1_200),
+            binding_version: 1,
+            binding_bytes: &binding,
+        })
+        .await?
+    {
+        BindRunProviderOutcome::Bound(receipt) | BindRunProviderOutcome::AlreadyBound(receipt) => {
+            receipt
+        }
+    };
+    Ok(SeededRun {
+        claimed,
+        launched,
+        bound,
+        start_key: run_start_key,
+        credentials,
+    })
+}
+
+fn activity_subscribe_envelope(thread_id: ThreadId, frame_id: &str) -> WireEnvelope {
+    WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: FrameId::parse(frame_id).expect("request frame id"),
+        sent_at: UnixMillis::from_millis(20),
+        body: WireEnvelopeBody::Request(ClientRequest::Conversation(
+            ConversationRequest::Subscribe(ConversationSubscribe::resume(
+                thread_id,
+                ConversationCursor::default(),
+            )),
+        )),
+    }
+}
+
+fn activity_unsubscribe_envelope(thread_id: ThreadId, frame_id: &str) -> WireEnvelope {
+    WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: FrameId::parse(frame_id).expect("unsubscribe frame id"),
+        sent_at: UnixMillis::from_millis(30),
+        body: WireEnvelopeBody::Request(ClientRequest::Conversation(
+            ConversationRequest::Unsubscribe(ConversationUnsubscribe { thread_id }),
+        )),
+    }
+}
+
+async fn receive_delivery_frame(
+    stream: &mut quinn::RecvStream,
+) -> Result<WireEnvelope, Box<dyn Error>> {
+    Ok(tokio::time::timeout(
+        TEST_DEADLINE,
+        artisan_transport::receive_envelope(stream),
+    )
+    .await??)
+}
+
+struct DeliveredActivity {
+    thread_id: ThreadId,
+    observation: Observation,
+    run_id: String,
+    turn_id: String,
+    committed_at_ms: i64,
+    delivery_sequence: u64,
+    event_cursor: u64,
+}
+
+fn decoded_activity(envelope: WireEnvelope, thread_id: &ThreadId) -> DeliveredActivity {
+    let WireEnvelopeBody::Event(event) = envelope.body else {
+        panic!("an activity delivery must arrive as an event frame");
+    };
+    let Event::EngineObservation(delivered) = event.event else {
+        panic!("an activity delivery must carry an engine observation");
+    };
+    assert_eq!(&delivered.thread_id, thread_id);
+    let attribution = delivered
+        .attribution
+        .as_ref()
+        .expect("persisted rows carry attribution");
+    DeliveredActivity {
+        thread_id: delivered.thread_id,
+        observation: delivered.observation,
+        run_id: attribution.run_id.as_str().to_owned(),
+        turn_id: attribution.turn_id.as_str().to_owned(),
+        committed_at_ms: attribution.committed_at.as_millis(),
+        delivery_sequence: attribution.delivery_sequence,
+        event_cursor: event.cursor.get(),
+    }
+}
+
+async fn serve_activity_delivery(
+    listener: ForgeListener,
+    handler: &RequestHandler,
+    cancel: &CancelHandle,
+) -> Result<(), Box<dyn Error>> {
+    let (listener, report) = listener.serve_one(handler, cancel).await?;
+    assert_eq!(report.completed_requests, 4);
+    assert!(matches!(
+        report.termination,
+        RequestTermination::Failed {
+            source: DeadlineError::Cancelled {
+                operation: OperationKind::Receive
+            }
+        }
+    ));
+    listener.drain().await?;
+    Ok(())
+}
+
+/// Two real S1b observation commits on two runs share one thread and settle
+/// the first turn; one commit wake then drives both attributed events in
+/// thread-scoped order over the real delivery stream, and a resubscribe
+/// replays the same persisted history from the durable ledger.
+///
+/// Both durable rows restart at run-local sequence 1 while their
+/// `delivery_sequence` values strictly increase (1, 2) with Forge-persisted
+/// run/turn/committed-at attribution — the exact live-plus-reconnect route.
+#[tokio::test]
+async fn activity_history_drives_live_delivery_and_reconnect_replay(
+) -> Result<(), Box<dyn Error>> {
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    let thread_id = seeded.thread_id.clone();
+
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler = RequestHandler::new(repository.clone())
+        .with_conversation_commit_notifier(notifier.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(8).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+
+    let server = serve_activity_delivery(listener, &handler, &cancel);
+    let client = async {
+        let connection = connect_client(&endpoint, address).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        let _welcome =
+            artisan_transport::client_handshake(&mut control_send, &mut control_recv, hello_envelope())
+                .await?;
+        let (mut request_send, mut request_recv) = connection.open_bi().await?;
+        artisan_transport::send_envelope(
+            &mut request_send,
+            &activity_subscribe_envelope(thread_id.clone(), "delivery-activity-subscribe"),
+        )
+        .await?;
+        drop(request_send);
+        let response = tokio::time::timeout(
+            TEST_DEADLINE,
+            artisan_transport::receive_envelope(&mut request_recv),
+        )
+        .await??;
+        let WireEnvelopeBody::Response(response) = response.body else {
+            return Err("expected the correlated subscription response".into());
+        };
+        let ResponsePayload::ConversationSubscriptionStarted(
+            ConversationSubscriptionStarted::Resumed { cursor, .. },
+        ) = response.payload
+        else {
+            return Err("expected a resumed subscription acknowledgement".into());
+        };
+        assert_eq!(cursor, ConversationCursor::default());
+        let mut delivery_stream =
+            tokio::time::timeout(TEST_DEADLINE, connection.accept_uni()).await??;
+        let initial = receive_delivery_frame(&mut delivery_stream).await?;
+        let WireEnvelopeBody::PatchBatch(initial_batch) = initial.body else {
+            return Err("expected the initial replay batch".into());
+        };
+        let base_cursor = initial_batch.to_cursor();
+
+        // Two real commits on two runs — the first turn settled — before one
+        // coalesced wake.
+        commit_assistant_start(&repository, &seeded.run).await?;
+        commit_activity_batch(
+            &repository,
+            &seeded.run,
+            2,
+            600,
+            750,
+            activity_tool_observation("obs-activity-1", "tool-activity-1", "read", "read 42 lines"),
+            "delivery-assistant-item",
+            "delivery-obs-1-patch",
+        )
+        .await?;
+        settle_run_completed(&repository, &seeded.run, 750, 800, "delivery-assistant-item").await?;
+        let run2 = seed_followup_run(&repository, &thread_id).await?;
+        commit_assistant_start_at(
+            &repository,
+            &run2,
+            "delivery-assistant-item-2",
+            "delivery-assistant-2-activation",
+            "delivery-assistant-2-patch",
+            1_100,
+            1_200,
+            1_300,
+        )
+        .await?;
+        commit_activity_batch(
+            &repository,
+            &run2,
+            2,
+            1_300,
+            1_400,
+            activity_tool_observation("obs-activity-2", "tool-activity-2", "grep", "3 matches"),
+            "delivery-assistant-item-2",
+            "delivery-obs-2-patch",
+        )
+        .await?;
+
+        // The authoritative read already orders both rows thread-scoped before
+        // the wake fires.
+        let history = repository.read_observation_history(&thread_id, 0, 64).await?;
+        assert_eq!(history.len(), 2, "both runs must persist one row each");
+
+        let _ = notifier.publish(&thread_id);
+        let wake_batch = receive_delivery_frame(&mut delivery_stream).await?;
+        let WireEnvelopeBody::PatchBatch(wake_batch) = wake_batch.body else {
+            return Err("expected the wake patch batch before activity events".into());
+        };
+        assert_eq!(wake_batch.from_cursor(), base_cursor);
+
+        let first = decoded_activity(receive_delivery_frame(&mut delivery_stream).await?, &thread_id);
+        assert_eq!(first.event_cursor, 1);
+        assert_eq!(first.delivery_sequence, 1);
+        assert_eq!(first.run_id, "delivery-run");
+        assert_eq!(first.turn_id, "delivery-turn");
+        assert_eq!(first.committed_at_ms, 750);
+        match &first.observation {
+            Observation::Tool(row) => {
+                assert_eq!(row.sequence().get(), 1);
+                assert_eq!(row.tool_name(), "read");
+                assert_eq!(row.detail(), Some("read 42 lines"));
+            }
+            other => return Err(format!("first row must stay a tool row, got {}", other.tag()).into()),
+        }
+        let second = decoded_activity(receive_delivery_frame(&mut delivery_stream).await?, &thread_id);
+        assert_eq!(second.event_cursor, 2);
+        assert_eq!(second.delivery_sequence, 2);
+        assert_eq!(second.run_id, "delivery-run-2");
+        assert_eq!(second.turn_id, "delivery-turn-2");
+        assert_eq!(second.committed_at_ms, 1_400);
+        match &second.observation {
+            Observation::Tool(row) => {
+                assert_eq!(row.sequence().get(), 1);
+                assert_eq!(row.tool_name(), "grep");
+                assert_eq!(row.detail(), Some("3 matches"));
+            }
+            other => return Err(format!("second row must stay a tool row, got {}", other.tag()).into()),
+        }
+        // One wake delivered everything: no duplicate or trailing frame.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                artisan_transport::receive_envelope(&mut delivery_stream),
+            )
+            .await
+            .is_err()
+        );
+
+        let (mut unsubscribe_send, mut unsubscribe_recv) = connection.open_bi().await?;
+        artisan_transport::send_envelope(
+            &mut unsubscribe_send,
+            &activity_unsubscribe_envelope(thread_id.clone(), "delivery-activity-unsubscribe"),
+        )
+        .await?;
+        drop(unsubscribe_send);
+        let stopped = tokio::time::timeout(
+            TEST_DEADLINE,
+            artisan_transport::receive_envelope(&mut unsubscribe_recv),
+        )
+        .await??;
+        let WireEnvelopeBody::Response(stopped) = stopped.body else {
+            return Err("expected the unsubscribe response".into());
+        };
+        assert!(matches!(
+            stopped.payload,
+            ResponsePayload::ConversationSubscriptionStopped(_)
+        ));
+
+        // Resubscribe replays the same persisted history from the durable
+        // ledger, including the settled first turn, on the shared stream.
+        let (mut resubscribe_send, mut resubscribe_recv) = connection.open_bi().await?;
+        artisan_transport::send_envelope(
+            &mut resubscribe_send,
+            &activity_subscribe_envelope(thread_id.clone(), "delivery-activity-resubscribe"),
+        )
+        .await?;
+        drop(resubscribe_send);
+        let resumed = tokio::time::timeout(
+            TEST_DEADLINE,
+            artisan_transport::receive_envelope(&mut resubscribe_recv),
+        )
+        .await??;
+        let WireEnvelopeBody::Response(resumed) = resumed.body else {
+            return Err("expected the resubscribe response".into());
+        };
+        assert!(matches!(
+            resumed.payload,
+            ResponsePayload::ConversationSubscriptionStarted(
+                ConversationSubscriptionStarted::Resumed { .. }
+            )
+        ));
+        let replay_batch = receive_delivery_frame(&mut delivery_stream).await?;
+        let WireEnvelopeBody::PatchBatch(replay_batch) = replay_batch.body else {
+            return Err("expected the replay patch batch".into());
+        };
+        assert_eq!(replay_batch.from_cursor(), ConversationCursor::default());
+        let replayed_first =
+            decoded_activity(receive_delivery_frame(&mut delivery_stream).await?, &thread_id);
+        assert_eq!(replayed_first.event_cursor, 3);
+        assert_eq!(replayed_first.delivery_sequence, 1);
+        assert_eq!(replayed_first.run_id, "delivery-run");
+        assert_eq!(replayed_first.committed_at_ms, 750);
+        let replayed_second =
+            decoded_activity(receive_delivery_frame(&mut delivery_stream).await?, &thread_id);
+        assert_eq!(replayed_second.event_cursor, 4);
+        assert_eq!(replayed_second.delivery_sequence, 2);
+        assert_eq!(replayed_second.run_id, "delivery-run-2");
+        assert_eq!(replayed_second.committed_at_ms, 1_400);
+
+        let (mut stop_send, mut stop_recv) = connection.open_bi().await?;
+        artisan_transport::send_envelope(
+            &mut stop_send,
+            &activity_unsubscribe_envelope(thread_id.clone(), "delivery-activity-unsubscribe-2"),
+        )
+        .await?;
+        drop(stop_send);
+        let stopped = tokio::time::timeout(
+            TEST_DEADLINE,
+            artisan_transport::receive_envelope(&mut stop_recv),
+        )
+        .await??;
+        let WireEnvelopeBody::Response(stopped) = stopped.body else {
+            return Err("expected the final unsubscribe response".into());
+        };
+        assert!(matches!(
+            stopped.payload,
+            ResponsePayload::ConversationSubscriptionStopped(_)
+        ));
+        cancel.cancel();
+        let eof = tokio::time::timeout(
+            TEST_DEADLINE,
+            artisan_transport::receive_envelope(&mut delivery_stream),
+        )
+        .await?;
+        assert!(
+            eof.is_err(),
+            "finished delivery stream should contain no frame"
+        );
+        drop(control_send);
+        drop(control_recv);
+        drop(request_recv);
+        drop(unsubscribe_recv);
+        drop(resubscribe_recv);
+        drop(stop_recv);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery activity test complete",
         TEST_DEADLINE,
     )
     .await?;

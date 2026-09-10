@@ -4274,7 +4274,7 @@ fn decode_event(
                 read_text(value.get_thread_id(), "event.engineObservation.threadId")?,
                 "event.engineObservation.threadId",
             )?;
-            let attribution = decode_engine_observation_attribution(value.get_attribution()?)?;
+            let attribution = decode_engine_observation_attribution(value.get_attribution())?;
             Event::EngineObservation(EngineObservationEvent {
                 thread_id,
                 observation: decode_engine_observation(value.get_observation()?)?,
