@@ -424,6 +424,7 @@ async fn upgraded_dispatch_collision_rolls_back_every_provisional_row() {
         lease_owner: Set(None),
         lease_expires_at_ms: Set(None),
         last_error: Set(None),
+        steer_run_id: Set(None),
         updated_at_ms: Set(250),
     }
     .insert(&database)

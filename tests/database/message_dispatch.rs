@@ -125,6 +125,7 @@ async fn seed_dispatch(
         lease_owner: Set(None),
         lease_expires_at_ms: Set(None),
         last_error: Set(Some("previous failure".to_owned())),
+        steer_run_id: Set(None),
         updated_at_ms: Set(queued_at_ms),
     }
     .insert(database)
