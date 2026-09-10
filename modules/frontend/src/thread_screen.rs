@@ -88,6 +88,10 @@ pub const THREAD_SCREEN_RETRY_SELECTOR: &str = "artisan-thread-screen-retry";
 /// Stable debug selector for the transcript column.
 pub const THREAD_SCREEN_TRANSCRIPT_SELECTOR: &str = "artisan-thread-screen-transcript";
 
+/// Stable debug selector for the centered prose wrapper inside the transcript
+/// column (the native `prose-column`: `w-full max-w-(--prose-width)`).
+pub const THREAD_SCREEN_PROSE_SELECTOR: &str = "artisan-thread-screen-prose";
+
 /// Stable debug selector for the empty-transcript state.
 pub const THREAD_SCREEN_EMPTY_SELECTOR: &str = "artisan-thread-screen-empty";
 
@@ -632,8 +636,13 @@ impl ThreadScreen {
     ///
     /// Legacy frame: `main.relative.h-full.min-h-0.overflow-hidden` holding
     /// `div.prose-column.w-full.max-w-(--prose-width).px-6.pt-10` around the
-    /// turn sections. The host's own surface paints the scroll area, turn
-    /// navigator rail, and jump-to-latest control.
+    /// turn sections. The wrapper centers with horizontal auto margins (the
+    /// `prose-column` default `margin-inline: auto`), so transcript and
+    /// composer share one centered reading column; the rail-shift variant is
+    /// a legacy-shell fact the native route does not mount. The host's own
+    /// surface paints the scroll area, turn navigator rail, and
+    /// jump-to-latest control; the empty overlay stays centered on the column
+    /// itself, not the wrapper.
     fn render_transcript_column(
         &self,
         theme: &ArtisanTheme,
@@ -652,8 +661,10 @@ impl ThreadScreen {
                     .w_full()
                     .h_full()
                     .max_w(px(PROSE_WIDTH_PX))
+                    .mx_auto()
                     .px(px(COLUMN_PAD_X_PX))
                     .pt(px(TRANSCRIPT_PAD_TOP_PX))
+                    .debug_selector(|| THREAD_SCREEN_PROSE_SELECTOR.to_owned())
                     .child(self.host.clone()),
             );
         if empty {
@@ -1551,6 +1562,40 @@ mod tests {
             REFERENCE_ENV_CARD_PX
         );
         assert_eq!(REFERENCE_ENV_CARD_PX, 44.0);
+    }
+
+    /// Transcript and composer share one centered reading column: the prose
+    /// wrapper's center coincides with the composer dock's center at wide and
+    /// narrow content widths alike, while the wrapper keeps its max-width
+    /// rule. Both assertions read the real mounted wrappers, not helpers.
+    #[gpui::test]
+    fn prose_wrapper_and_composer_share_one_center(cx: &mut gpui::TestAppContext) {
+        for (thread, content) in [
+            ("shell-proof-center-wide", EXPANDED_WIDE_CONTENT),
+            ("shell-proof-center-narrow", EXPANDED_1280_CONTENT),
+        ] {
+            let (_view, cx) =
+                cx.add_window_view(|_, cx| mount_proof_screen(thread, content, cx));
+            cx.run_until_parked();
+            let prose = cx
+                .debug_bounds(THREAD_SCREEN_PROSE_SELECTOR)
+                .expect("prose wrapper lays out");
+            let composer = cx
+                .debug_bounds(THREAD_SCREEN_COMPOSER_SELECTOR)
+                .expect("composer dock lays out");
+            let prose_center =
+                f32::from(prose.origin.x) + f32::from(prose.size.width) / 2.0;
+            let composer_center =
+                f32::from(composer.origin.x) + f32::from(composer.size.width) / 2.0;
+            assert!(
+                (prose_center - composer_center).abs() < 1.0,
+                "prose center {prose_center}px must match composer center {composer_center}px"
+            );
+            assert!(
+                f32::from(prose.size.width) <= PROSE_WIDTH_PX + 1.0,
+                "prose wrapper keeps its max-width rule"
+            );
+        }
     }
 
     /// The mounted single-row environment card honors the `p-1` inset in the
