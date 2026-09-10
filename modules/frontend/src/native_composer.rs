@@ -3117,11 +3117,11 @@ mod tests {
                 .caret_quad(window)
                 .expect("focused empty caret")
         });
-        assert_eq!(empty.size, size(px(2.0), px(22.0)));
+        assert_eq!(empty.bounds.size, size(px(2.0), px(22.0)));
         let editor = cx
             .debug_bounds(NATIVE_COMPOSER_EDITOR_SELECTOR)
             .expect("editor bounds");
-        assert!(editor.contains(&empty.origin));
+        assert!(editor.contains(&empty.bounds.origin));
         // A collapsed multibyte selection follows typing.
         set_draft(cx, &view, "a😀b");
         let end = cx.update(|window, app| {
@@ -3129,12 +3129,12 @@ mod tests {
                 .caret_quad(window)
                 .expect("focused end caret")
         });
-        assert_eq!(end.size, size(px(2.0), px(22.0)));
+        assert_eq!(end.bounds.size, size(px(2.0), px(22.0)));
         assert!(
-            end.origin.x > empty.origin.x,
+            end.bounds.origin.x > empty.bounds.origin.x,
             "caret must advance past typed text"
         );
-        assert!(editor.contains(&end.origin));
+        assert!(editor.contains(&end.bounds.origin));
         // A selection hides the caret in favor of the highlight.
         cx.update(|_, app| {
             view.update(app, |composer, composer_cx| {
