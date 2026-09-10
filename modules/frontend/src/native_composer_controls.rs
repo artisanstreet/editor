@@ -590,8 +590,12 @@ impl NativeComposerControls {
             let identity = row.identity.clone();
             let row_selector = row_selector(&identity);
             let row_element_id = ElementId::Name(row_selector.clone().into());
-            let mut row_view =
-                Self::lip_row_base(row_element_id, row_selector, still.label, desktop_theme);
+            let mut row_view = Self::lip_row_base(
+                row_element_id,
+                row_selector.clone(),
+                still.label,
+                desktop_theme,
+            );
 
             if row.editable {
                 let edit_key = SteeringFocusKey {
