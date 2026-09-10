@@ -49,10 +49,10 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Element, ElementId, FocusHandle,
-    GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    KeyDownEvent, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, SharedString, StyledText, Window,
+    App, AppContext as _, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Element, ElementId,
+    FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, KeyDownEvent, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, SharedString, StyledText, Window,
 };
 
 use crate::theme::ArtisanTheme;
@@ -130,16 +130,16 @@ fn overlay_style(base: &HighlightStyle, wash: &HighlightStyle) -> HighlightStyle
 ///
 /// The result is sorted and non-overlapping, every range is clamped to a
 /// character boundary inside `text`, and caller ranges keep their own
-/// styles outside the selection. Inside the selection each segment keeps
-/// its caller style with only foreground/background overlaid; the
-/// innermost (latest-starting) caller range wins a segment, and gaps with
-/// no caller range paint the pure wash. With no selection the sanitized
-/// caller ranges pass through unchanged, so plain and syntax-highlighted
-/// bodies render exactly as before.
+/// styles outside the selection. Inside the selection each intersecting
+/// caller range keeps its style with only foreground/background overlaid,
+/// and gaps with no caller range paint the pure wash. With no selection
+/// the sanitized caller ranges pass through unchanged, so plain and
+/// syntax-highlighted bodies render exactly as before.
 ///
 /// `base` is expected sorted and non-overlapping, as produced by the
-/// Markdown syntax seam; overlapping input still resolves deterministically
-/// but the inner-wins rule applies.
+/// Markdown syntax seam; the merge is one ordered pass over it. Overlapping
+/// input still resolves deterministically without panicking, but overlapping
+/// coverage is not normalized — callers keep their ranges disjoint.
 #[must_use]
 pub fn merge_selection_highlight(
     text: &str,
@@ -172,6 +172,7 @@ pub fn merge_selection_highlight(
     };
 
     let mut merged = Vec::with_capacity(sanitized.len().saturating_add(2));
+    let mut covered = selection.start;
     for (range, style) in &sanitized {
         if range.end <= selection.start || range.start >= selection.end {
             merged.push((range.clone(), *style));
@@ -180,29 +181,19 @@ pub fn merge_selection_highlight(
         if range.start < selection.start {
             merged.push((range.start..selection.start, *style));
         }
+        let segment_start = range.start.max(selection.start);
+        if covered < segment_start {
+            merged.push((covered..segment_start, *wash));
+        }
+        let segment_end = range.end.min(selection.end);
+        merged.push((segment_start..segment_end, overlay_style(style, wash)));
+        covered = segment_end;
         if range.end > selection.end {
             merged.push((selection.end..range.end, *style));
         }
     }
-
-    let mut points = vec![selection.start, selection.end];
-    for (range, _) in &sanitized {
-        if range.start > selection.start && range.start < selection.end {
-            points.push(range.start);
-        }
-        if range.end > selection.start && range.end < selection.end {
-            points.push(range.end);
-        }
-    }
-    points.sort_unstable();
-    points.dedup();
-    for (start, end) in points.iter().zip(points.iter().skip(1)) {
-        let (start, end) = (*start, *end);
-        let style = sanitized
-            .iter()
-            .rfind(|(range, _)| range.start <= start && end <= range.end)
-            .map_or(*wash, |(_, base)| overlay_style(base, wash));
-        merged.push((start..end, style));
+    if covered < selection.end {
+        merged.push((covered..selection.end, *wash));
     }
 
     merged.sort_by(|left, right| left.0.start.cmp(&right.0.start));
@@ -656,7 +647,7 @@ impl SelectableText {
                     };
                     return ((merged, None, frame, false), None);
                 };
-                let mut retained: RetainedSelection = inner.unwrap_or_default();
+                let retained: RetainedSelection = inner.unwrap_or_default();
                 retained.state.validate_for_text(self.text.as_ref());
                 let snapshot = retained.state.selection_range();
                 let needs_focus = retained.focus.is_none();

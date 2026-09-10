@@ -136,7 +136,7 @@ fn select_all_is_empty_safe_and_clear_resets_press_latch() {
 }
 
 #[test]
-fn merge_passes_plain_ranges_through_and_selection_wins_overlaps() {
+fn merge_overlays_selection_wash_onto_caller_ranges() {
     let theme = ArtisanTheme::for_mode(ThemeMode::Light);
     let selection_style = selection_style_for_theme(theme);
     assert_eq!(
@@ -152,17 +152,22 @@ fn merge_passes_plain_ranges_through_and_selection_wins_overlaps() {
     let passthrough = merge_selection_highlight(BODY, base.clone(), None, &selection_style);
     assert_eq!(passthrough, base);
 
+    let overlaid = HighlightStyle {
+        color: selection_style.color,
+        background_color: selection_style.background_color,
+        ..base_style()
+    };
     let merged = merge_selection_highlight(BODY, base, Some(4..7), &selection_style);
     assert_eq!(
-        merged
-            .iter()
-            .map(|(range, _)| range.clone())
-            .collect::<Vec<_>>(),
-        vec![0..4, 4..7, 7..11]
+        merged,
+        vec![
+            (0..4, base_style()),
+            (4..5, overlaid),
+            (5..6, selection_style),
+            (6..7, overlaid),
+            (7..11, base_style()),
+        ]
     );
-    assert_eq!(merged[1].1, selection_style);
-    assert_eq!(merged[0].1, base_style());
-    assert_eq!(merged[2].1, base_style());
 
     // Degenerate and out-of-range caller ranges never reach StyledText.
     let messy = vec![(3..3, base_style()), (9..10_000, base_style())];
@@ -210,7 +215,7 @@ fn merge_overlays_wash_preserving_nested_weight_and_style() {
     };
 
     let text = "01234567890";
-    let base = vec![(0..11, bold), (4..7, italic)];
+    let base = vec![(0..4, bold), (4..7, italic), (7..11, bold)];
     let merged = merge_selection_highlight(text, base, Some(2..9), &wash);
 
     assert_eq!(
