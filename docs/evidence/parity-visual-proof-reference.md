@@ -45,18 +45,42 @@ conversation column are.
 
 ## Fixture invocation (root-owned steps marked)
 
-1. Root registers the module (`mod parity_visual_proof;`, feature-gated at
+1. Root registers the module (`mod parity_visual_proof;`, feature gate at
    root discretion) and enables `test-support` on the workspace
-   `gpui_platform` dependency plus Bazel wiring.
-2. Root runs the fixture binary/harness on Windows; it opens two hidden
-   windows (`show: false, focus: false`), 1024x720 and 1536x900 logical,
-   mounts shell + screen + gate-Open, captures on next frame, and saves
-   `parity-proof-{narrow,wide}-{logical}-scale{measured}-{WxH}.png`.
-3. Expected physical sizes at the 125% reference scale: narrow 1280x900,
+   `gpui_platform` dependency plus binary/export and Bazel wiring.
+2. Root runs the fixture binary/harness on Windows with shipping boot
+   parity (`.with_assets(CatalogAssetSource)` +
+   `register_bundled_fonts`, mirroring `native_application::run`); it
+   opens hidden windows (`show: false, focus: false`) for 7 states ×
+   narrow/wide (14 captures), mounts shell + screen + gate-Open +
+   deterministic title, seeds through the controller, captures on next
+   frame, and saves
+   `parity-proof-{case}-{viewport}-{logical}-scale{measured}-{WxH}.png`.
+3. Every terminal path (seed refusal, open/update failure, capture
+   ok/error, 120s watchdog) settles one slot and quits at zero — no hang.
+   Expected physical sizes at the 125% reference scale: narrow 1280x900,
    wide 1920x1125. The fixture asserts `logical * measured scale` from
    `window.scale_factor()` and fails loudly on mismatch instead of claiming.
-4. The pure scene manifest (`print_scene_manifest`, six states) runs first
-   and needs no renderer.
+4. Each capture publishes `geometry … window=… scale=… sidebar=218
+   titlebar=48 content={window-218} inspector=reserved
+   title="Parity proof thread"`: both viewports pin the inspector expanded,
+   so the narrower capture must still reserve it. Responsive hiding is a
+   separate lane. Each case also prints its controller-projected block
+   order, binding pixels to real projection output.
+
+## Seeding path (production, projection contract `fd6f3aa0`)
+
+Manual `RegisterTurn`/`Turn` driving is gone. Each case dispatches a domain
+`SnapshotReceived` and, where the state needs one, directly registers
+Activity/Reasoning/Error facts (`SceneFactCommand::Register`) — the
+delivery-owned turn sync derives the drive
+(`evidence/parity-projection-interface.md` in the projection lane): live
+`Streaming`-lifecycle reply text yields streaming, Activity/ChangedFiles
+facts yield working, Reasoning facts yield thinking, terminal turn
+lifecycles settle on their own `updated_at` span. All turn/item times are
+current-relative (`SystemTime`, never 1970) so the timed host clock renders
+live spans. A controller refusal is recorded against its case; nothing
+paints a hand-built scene.
 
 ## Exact support requested from root
 
@@ -69,6 +93,16 @@ conversation column are.
 3. Real sidebar-slot content for full containment pixels (currently
    fixture-owned empty `div`s; content owned by `NativeApplication`,
    private). Geometry (218 px reservation) is production regardless.
+
+## Known limits (no pixel claims from source alone)
+
+- Nothing here renders until root registers, enables, and runs: no PNG
+  exists, and the full reference comparison remains outstanding.
+- Active states depend on the projection lane's delivery-owned sync being
+  integrated alongside this fixture; before that they project Quiet and the
+  runner records (not hides) the shortfall per case.
+- Hidden-window next-frame delivery is unverified from source alone; the
+  120s watchdog bounds that risk instead of assuming it away.
 
 ## Electron isolated render without user data / new dependencies
 

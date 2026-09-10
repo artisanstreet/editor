@@ -14,13 +14,13 @@
 //!   titlebar reservation, the real 218 px sidebar reservation, and the real
 //!   composer dock — no hand-drawn approximation of any of them;
 //! - seeds every synthetic state through the **real controller path**:
-//!   [`ConversationHost::dispatch`](crate::conversation_host::ConversationHost::dispatch)
-//!   with `SnapshotReceived` domain snapshots plus `RegisterTurn` / `Turn`
-//!   events, copied from the `conversation_host` black-box tests. Nothing
-//!   paints a hand-built scene: the surface renders whatever the controller
-//!   projects, and the fixture prints the projected block order per case;
-//! - captures all six states (empty / thinking / working / streaming /
-//!   completed / error) at two baseline viewports, 1024x720 and 1536x900
+//!   `SnapshotReceived` domain snapshots plus directly registered
+//!   Activity/Reasoning/Error facts (projection contract `fd6f3aa0`,
+//!   delivery-owned turn sync — no manual `RegisterTurn`). Timestamps are
+//!   current-relative so the timed host clock renders live spans, and the
+//!   fixture prints the projected block order per case;
+//! - captures all seven states (empty / thinking / working / streaming /
+//!   completed / error / longform) at two baseline viewports, 1024x720 and 1536x900
 //!   logical, hidden (`show: false`, never presented, no OS screen capture,
 //!   no Win32 control).
 //!
@@ -35,12 +35,13 @@
 use std::cell::Cell;
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::time::Duration;
 
 use artisan_domain::{
-    AssistantBody, AssistantMessageItem, AssistantMessagePhase, ConversationCursor,
-    ConversationItem, ConversationLifecycle, ConversationSnapshot, ConversationTurn, ItemId,
-    ItemOrdinal, MessageBody, Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis,
-    UserMessageItem,
+    AssistantBody, AssistantMessageItem, AssistantMessagePhase, AuthoredText, ConversationCursor,
+    ConversationItem, ConversationLifecycle, ConversationSnapshot, ConversationTurn,
+    ImageAttachmentRef, ItemId, ItemOrdinal, MessageBody, MessageId, MultimodalUserMessageItem,
+    Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
 use artisan_ui::theme::{DesktopTheme, ThemeMode};
 use gpui::{
@@ -52,11 +53,15 @@ use gpui::{
 
 use crate::conversation_delivery_machine::ConversationDeliveryEvent;
 use crate::conversation_host::{ConversationHost, ConversationHostError};
-use crate::conversation_state_machine::ConversationStateEvent;
+use crate::conversation_scene::SceneId;
+use crate::conversation_state_machine::{
+    ConversationStateEvent, SceneFact, SceneFactCommand, SceneFactKind,
+};
 use crate::conversation_surface::ordered_block_kinds;
-use crate::conversation_turn_machine::{FailureKind, TurnEvent};
-use crate::desktop_shell::desktop_shell;
-use crate::thread_screen::{ThreadScreen, ThreadScreenGate};
+use crate::desktop_shell::{
+    DESKTOP_SIDEBAR_WIDTH_PX, DESKTOP_TITLEBAR_HEIGHT_PX, DesktopShellStyle, desktop_shell,
+};
+use crate::thread_screen::{ThreadScreen, ThreadScreenGate, ThreadScreenTitle};
 
 /// Narrow baseline viewport, logical pixels.
 const NARROW_LOGICAL_WIDTH: f32 = 1024.0;
@@ -87,6 +92,8 @@ pub enum ProofSceneCase {
     Completed,
     /// Active turn with a `Failed` event.
     Error,
+    /// Settled exchange carrying long markdown plus one image attachment.
+    Longform,
 }
 
 impl ProofSceneCase {
@@ -100,12 +107,13 @@ impl ProofSceneCase {
             Self::Streaming => "streaming",
             Self::Completed => "completed",
             Self::Error => "error",
+            Self::Longform => "longform",
         }
     }
 
     /// Every case in matrix order.
     #[must_use]
-    pub fn all() -> [Self; 6] {
+    pub fn all() -> [Self; 7] {
         [
             Self::Empty,
             Self::Thinking,
@@ -113,30 +121,48 @@ impl ProofSceneCase {
             Self::Streaming,
             Self::Completed,
             Self::Error,
+            Self::Longform,
         ]
     }
 }
 
-fn stamp(millis: i64) -> UnixMillis {
-    UnixMillis::from_millis(millis)
+/// Current wall-clock millis for fixture timestamps. The timed host clock
+/// derives elapsed/settled spans from the turn's own `created_at` /
+/// `updated_at`, so fixtures use current-relative times (never 1970):
+/// active states tick from ~65s ago, terminal states settle on their own
+/// recent span.
+fn system_now_millis() -> Result<i64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .map_err(|error| format!("fixture clock unavailable: {error:?}"))
 }
 
 fn proof_turn_id() -> TurnId {
     TurnId::parse("parity-proof-turn").expect("fixture turn id is valid")
 }
 
-fn make_turn(lifecycle: ConversationLifecycle) -> ConversationTurn {
+fn make_turn(
+    lifecycle: ConversationLifecycle,
+    created_at: UnixMillis,
+    updated_at: UnixMillis,
+) -> ConversationTurn {
     ConversationTurn {
         turn_id: proof_turn_id(),
         ordinal: TurnOrdinal::new(0),
         revision: Revision::new(0),
         lifecycle,
-        created_at: stamp(0),
-        updated_at: stamp(10),
+        created_at,
+        updated_at,
     }
 }
 
-fn make_user(ordinal: u64, body: &str) -> ConversationItem {
+fn make_user(
+    ordinal: u64,
+    body: &str,
+    created_at: UnixMillis,
+    updated_at: UnixMillis,
+) -> ConversationItem {
     ConversationItem::UserMessage(UserMessageItem {
         item_id: ItemId::parse(format!("parity-proof-user-{ordinal}"))
             .expect("fixture item id is valid"),
@@ -145,8 +171,50 @@ fn make_user(ordinal: u64, body: &str) -> ConversationItem {
         revision: Revision::new(0),
         lifecycle: ConversationLifecycle::Pending,
         body: MessageBody::parse(body.to_owned()).expect("fixture user body is valid"),
-        created_at: stamp(1),
-        updated_at: stamp(10),
+        created_at,
+        updated_at,
+    })
+}
+
+/// Long user prompt exercising markdown structure: heading, list, code
+/// span, and a fenced block reference.
+const LONGFORM_USER_BODY: &str = "# Parity drill\n\nProve the transcript keeps structure:\n\n- heading survives\n- `code span` survives\n- [reference link](https://example.invalid/parity) survives\n\n```text\nplain fenced block\n```\n";
+
+/// Long assistant reply exercising markdown structure: heading, paragraph,
+/// fenced code, list, and link.
+const LONGFORM_ASSISTANT_BODY: &str = "## Result\n\nThe shell, transcript, and composer match the reference.\n\n```rust\nlet content_width = window_width - sidebar_width;\n```\n\nRemaining checks:\n\n- narrow viewport keeps the inspector\n- wide viewport keeps the composer docked\n- [runbook](https://example.invalid/runbook) attached\n";
+
+fn proof_message_id() -> MessageId {
+    MessageId::parse("parity-proof-message").expect("fixture message id is valid")
+}
+
+fn make_multimodal(
+    thread: &ThreadId,
+    ordinal: u64,
+    created_at: UnixMillis,
+    updated_at: UnixMillis,
+) -> ConversationItem {
+    let attachment = ImageAttachmentRef::new(
+        proof_message_id(),
+        thread.clone(),
+        0,
+        "image/png",
+        "chart.png",
+        18_432,
+        [7_u8; 32],
+    )
+    .expect("fixture attachment reference is valid");
+    ConversationItem::MultimodalUserMessage(MultimodalUserMessageItem {
+        item_id: ItemId::parse(format!("parity-proof-multimodal-{ordinal}"))
+            .expect("fixture item id is valid"),
+        turn_id: proof_turn_id(),
+        ordinal: ItemOrdinal::new(ordinal),
+        revision: Revision::new(0),
+        lifecycle: ConversationLifecycle::Pending,
+        text: Some(AuthoredText::parse(LONGFORM_USER_BODY).expect("fixture text is valid")),
+        attachments: vec![attachment],
+        created_at,
+        updated_at,
     })
 }
 
@@ -154,6 +222,9 @@ fn make_assistant(
     ordinal: u64,
     body: &str,
     phase: AssistantMessagePhase,
+    lifecycle: ConversationLifecycle,
+    created_at: UnixMillis,
+    updated_at: UnixMillis,
 ) -> ConversationItem {
     ConversationItem::AssistantMessage(AssistantMessageItem {
         item_id: ItemId::parse(format!("parity-proof-assistant-{ordinal}"))
@@ -162,77 +233,176 @@ fn make_assistant(
         run_id: RunId::parse("parity-proof-run").expect("fixture run id is valid"),
         ordinal: ItemOrdinal::new(ordinal),
         revision: Revision::new(0),
-        lifecycle: ConversationLifecycle::Pending,
+        lifecycle,
         body: AssistantBody::parse(body.to_owned()).expect("fixture assistant body is valid"),
         phase,
-        created_at: stamp(2),
-        updated_at: stamp(10),
+        created_at,
+        updated_at,
     })
 }
 
-/// Builds the domain snapshot each case dispatches. The empty case has no
-/// snapshot: its state is the fresh mount. Active cases carry an `Active`
-/// turn plus the user prompt; the completed case mirrors the black-box
-/// baseline (completed turn, user + final assistant).
-fn case_snapshot(case: ProofSceneCase, thread: &ThreadId) -> Option<ConversationSnapshot> {
-    let snapshot = match case {
-        ProofSceneCase::Empty => return None,
-        ProofSceneCase::Completed => ConversationSnapshot::new(
+/// Builds the domain snapshot each case dispatches, with current-relative
+/// turn times so the timed host clock renders live spans.
+///
+/// Production path (projection contract `fd6f3aa0`): the delivery-owned sync
+/// derives turn drive from snapshot lifecycles plus registered facts — no
+/// manual `RegisterTurn`. Active turns tick from their own `created_at`;
+/// terminal turns settle on their own `updated_at` span:
+fn case_snapshot(
+    case: ProofSceneCase,
+    thread: &ThreadId,
+    now: UnixMillis,
+) -> Result<Option<ConversationSnapshot>, String> {
+    let at = now.as_millis();
+    let ago = |millis: i64| UnixMillis::from_millis(at - millis);
+    let build = |turns, items| {
+        ConversationSnapshot::new(
             thread.clone(),
             ConversationCursor::new(1),
-            vec![make_turn(ConversationLifecycle::Completed)],
+            turns,
+            items,
+            now,
+        )
+        .map_err(|error| format!("fixture snapshot invalid: {error:?}"))
+    };
+    let snapshot = match case {
+        ProofSceneCase::Empty => return Ok(None),
+        ProofSceneCase::Completed => build(
+            vec![make_turn(
+                ConversationLifecycle::Completed,
+                ago(125_000),
+                ago(5_000),
+            )],
             vec![
-                make_user(1, "fixture prompt: prove visual parity"),
+                make_user(
+                    1,
+                    "fixture prompt: prove visual parity",
+                    ago(120_000),
+                    ago(5_000),
+                ),
                 make_assistant(
                     2,
                     "fixture reply: shell, transcript, and composer match.",
                     AssistantMessagePhase::Final,
+                    ConversationLifecycle::Completed,
+                    ago(110_000),
+                    ago(5_000),
                 ),
             ],
-            stamp(10),
-        ),
-        ProofSceneCase::Thinking | ProofSceneCase::Working | ProofSceneCase::Streaming => {
-            ConversationSnapshot::new(
-                thread.clone(),
-                ConversationCursor::new(1),
-                vec![make_turn(ConversationLifecycle::Active)],
-                vec![make_user(1, "fixture prompt: prove visual parity")],
-                stamp(10),
-            )
-        }
-        ProofSceneCase::Error => ConversationSnapshot::new(
-            thread.clone(),
-            ConversationCursor::new(1),
-            vec![make_turn(ConversationLifecycle::Active)],
-            vec![make_user(1, "fixture prompt: trigger failure")],
-            stamp(10),
-        ),
+        )?,
+        ProofSceneCase::Thinking | ProofSceneCase::Working => build(
+            vec![make_turn(
+                ConversationLifecycle::Active,
+                ago(65_000),
+                now,
+            )],
+            vec![make_user(
+                1,
+                "fixture prompt: prove visual parity",
+                ago(60_000),
+                now,
+            )],
+        )?,
+        ProofSceneCase::Streaming => build(
+            vec![make_turn(
+                ConversationLifecycle::Active,
+                ago(65_000),
+                now,
+            )],
+            vec![
+                make_user(
+                    1,
+                    "fixture prompt: prove visual parity",
+                    ago(60_000),
+                    now,
+                ),
+                make_assistant(
+                    2,
+                    "fixture partial: rendering the",
+                    AssistantMessagePhase::Final,
+                    ConversationLifecycle::Streaming,
+                    ago(30_000),
+                    now,
+                ),
+            ],
+        )?,
+        ProofSceneCase::Error => build(
+            vec![make_turn(
+                ConversationLifecycle::Failed,
+                ago(65_000),
+                ago(5_000),
+            )],
+            vec![make_user(
+                1,
+                "fixture prompt: trigger failure",
+                ago(60_000),
+                ago(5_000),
+            )],
+        )?,
+        ProofSceneCase::Longform => build(
+            vec![make_turn(
+                ConversationLifecycle::Completed,
+                ago(185_000),
+                ago(5_000),
+            )],
+            vec![
+                make_multimodal(thread, 1, ago(180_000), ago(5_000)),
+                make_assistant(
+                    2,
+                    LONGFORM_ASSISTANT_BODY,
+                    AssistantMessagePhase::Final,
+                    ConversationLifecycle::Completed,
+                    ago(170_000),
+                    ago(5_000),
+                ),
+            ],
+        )?,
     };
-    Some(snapshot.expect("fixture snapshot is valid"))
+    Ok(Some(snapshot))
 }
 
-/// Turn events after `RegisterTurn` for the active cases. The streaming
-/// sequence mirrors the `streaming_narration` black-box test exactly.
-fn case_turn_events(case: ProofSceneCase) -> Vec<TurnEvent> {
+/// Facts each case registers directly after its snapshot. Activity feeds a
+/// `Working` drive, Reasoning a `Thinking` drive, Error the failure card —
+/// the same delivery-plus-fact path the shipping app relies on.
+fn case_facts(case: ProofSceneCase) -> Result<Vec<SceneFact>, String> {
+    let fact = |name: &str, kind: SceneFactKind| {
+        SceneFact::new(
+            SceneId::parse(format!("parity-proof-{name}")).expect("fixture fact id is valid"),
+            proof_turn_id(),
+            100,
+            kind,
+        )
+        .map_err(|error| format!("fixture fact invalid: {error:?}"))
+    };
     match case {
-        ProofSceneCase::Empty | ProofSceneCase::Completed => Vec::new(),
-        ProofSceneCase::Thinking => vec![TurnEvent::Thinking { at: 1, revision: 1 }],
-        ProofSceneCase::Working => vec![TurnEvent::Working { at: 1, revision: 1 }],
-        ProofSceneCase::Streaming => vec![
-            TurnEvent::Thinking { at: 1, revision: 1 },
-            TurnEvent::StreamingReply { at: 2, revision: 2 },
-        ],
-        ProofSceneCase::Error => vec![TurnEvent::Failed {
-            at: 1,
-            revision: 1,
-            kind: Some(FailureKind::Generic),
-        }],
+        ProofSceneCase::Thinking => Ok(vec![fact(
+            "thinking-fact",
+            SceneFactKind::Reasoning {
+                body: "fixture trace: resolving references".to_owned(),
+            },
+        )?]),
+        ProofSceneCase::Working => Ok(vec![fact(
+            "working-fact",
+            SceneFactKind::Activity {
+                body: "fixture work: reading Cargo.toml".to_owned(),
+            },
+        )?]),
+        ProofSceneCase::Error => Ok(vec![fact(
+            "error-fact",
+            SceneFactKind::Error {
+                message: "fixture failure: transport refused".to_owned(),
+            },
+        )?]),
+        _ => Ok(Vec::new()),
     }
 }
 
-/// Seeds one case through the public host boundary. A refusal is returned
-/// as a message so the runner records it against the case instead of
-/// painting an undriven window.
+/// Seeds one case through the production delivery-plus-fact path: snapshot
+/// (and, where the case needs one, directly registered Activity/Reasoning/
+/// Error facts). No manual `RegisterTurn`: the delivery-owned sync derives
+/// turn drive, per projection contract `fd6f3aa0`. A refusal is returned as
+/// a message so the runner records it against the case instead of painting
+/// an undriven window.
 fn seed_case(
     screen: &Entity<ThreadScreen>,
     case: ProofSceneCase,
@@ -240,9 +410,9 @@ fn seed_case(
     cx: &mut App,
 ) -> Result<(), String> {
     let host: Entity<ConversationHost> = screen.read(cx).host().clone();
-    let snapshot = case_snapshot(case, thread);
-    let events = case_turn_events(case);
-    let turn_id = proof_turn_id();
+    let now = UnixMillis::from_millis(system_now_millis()?);
+    let snapshot = case_snapshot(case, thread, now)?;
+    let facts = case_facts(case)?;
     host.update(cx, |host, host_cx| {
         if let Some(snapshot) = snapshot {
             host.dispatch(
@@ -253,25 +423,12 @@ fn seed_case(
             )
             .map_err(|error| format!("snapshot refused: {error:?}"))?;
         }
-        if events.is_empty() {
-            return Ok(());
-        }
-        host.dispatch(
-            ConversationStateEvent::RegisterTurn {
-                turn_id: turn_id.clone(),
-            },
-            host_cx,
-        )
-        .map_err(|error| format!("register refused: {error:?}"))?;
-        for event in events {
+        for fact in facts {
             host.dispatch(
-                ConversationStateEvent::Turn {
-                    turn_id: turn_id.clone(),
-                    event,
-                },
+                ConversationStateEvent::Fact(SceneFactCommand::Register(fact)),
                 host_cx,
             )
-            .map_err(|error| format!("turn event refused: {error:?}"))?;
+            .map_err(|error| format!("fact refused: {error:?}"))?;
         }
         Ok(())
     })
@@ -293,6 +450,40 @@ fn print_case_manifest(screen: &Entity<ThreadScreen>, case: ProofSceneCase, cx: 
             case.slug()
         ),
     }
+}
+
+/// Settles one capture slot: records failure, decrements the outstanding
+/// count, and quits the application when nothing remains. Every terminal
+/// path (seed refusal, window-open failure, update failure, capture
+/// success/failure, watchdog) runs through here, so the runner can neither
+/// hang nor quit early with captures outstanding.
+fn settle(pending: &Rc<Cell<usize>>, failed_flag: &Rc<Cell<bool>>, failed: bool, cx: &mut App) {
+    if failed {
+        failed_flag.set(true);
+    }
+    pending.set(pending.get().saturating_sub(1));
+    if pending.get() == 0 {
+        cx.quit();
+    }
+}
+
+/// Publishes the shell geometry bound to one capture: actual window width
+/// minus the resolved (expanded) sidebar reservation, plus the titlebar
+/// reservation. Both baseline viewports pin the inspector expanded, so the
+/// narrower capture must still reserve it; responsive hiding is a separate
+/// lane and is not what these pixels claim.
+fn print_capture_geometry(slug: &str, width: f32, scale: f32) {
+    let style = DesktopShellStyle::resolve(false, scale);
+    let sidebar_matches = style.sidebar_width == px(DESKTOP_SIDEBAR_WIDTH_PX);
+    let titlebar_matches = style.titlebar_height == px(DESKTOP_TITLEBAR_HEIGHT_PX);
+    let content_width = width - DESKTOP_SIDEBAR_WIDTH_PX;
+    println!(
+        "parity-proof geometry {slug}: window={width} scale={scale} \
+         sidebar={} titlebar={} content={content_width} inspector=reserved \
+         title=\"Parity proof thread\"",
+        DESKTOP_SIDEBAR_WIDTH_PX, DESKTOP_TITLEBAR_HEIGHT_PX,
+    );
+    debug_assert!(sidebar_matches && titlebar_matches);
 }
 
 /// Fixture root: production thread screen inside the production desktop
@@ -325,6 +516,10 @@ impl ParityProofShell {
         seed_case(&screen, case, &thread_id, cx)?;
         screen.update(cx, |screen, _| {
             screen.set_gate(ThreadScreenGate::Open);
+            screen.set_title(ThreadScreenTitle {
+                title: String::from("Parity proof thread"),
+                ..Default::default()
+            });
         });
         print_case_manifest(&screen, case, cx);
         Ok(cx.new(|_| Self { screen }))
@@ -405,8 +600,41 @@ pub fn run() -> ExitCode {
         .collect();
     let remaining = Rc::new(Cell::new(captures.len()));
     let failed = Rc::new(Cell::new(false));
+    let failed_after_run = Rc::clone(&failed);
 
-    gpui_platform::application().run(move |cx: &mut App| {
+    gpui_platform::application()
+        .with_assets(artisan_ui::asset_seam::CatalogAssetSource)
+        .run(move |cx: &mut App| {
+        // Shipping boot parity: vendored typefaces and catalog assets before
+        // any window opens, mirroring `native_application::run`.
+        if let Err(error) = artisan_ui::fonts::register_bundled_fonts(cx) {
+            eprintln!("bundled font registration failed, using system faces: {error}");
+        }
+
+        // Bounded watchdog: hidden windows may never deliver a next frame
+        // (vendor frame scheduling for never-shown windows is unverified
+        // from source alone). If anything is still outstanding after the
+        // budget, record the failure and quit instead of hanging.
+        {
+            let pending = Rc::clone(&remaining);
+            let failed_flag = Rc::clone(&failed);
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(120))
+                    .await;
+                let _ = cx.update(|cx| {
+                    if pending.get() > 0 {
+                        eprintln!(
+                            "parity-proof watchdog: {} captures unsettled; quitting",
+                            pending.get()
+                        );
+                        settle(&pending, &failed_flag, true, cx);
+                    }
+                });
+            })
+            .detach();
+        }
+
         for capture in captures {
             let stem = capture.file_stem();
             let thread_id = ThreadId::parse(format!(
@@ -419,7 +647,7 @@ pub fn run() -> ExitCode {
                 Ok(shell) => shell,
                 Err(error) => {
                     eprintln!("parity-proof seed failed for {stem}: {error}");
-                    failed.set(true);
+                    settle(&remaining, &failed, true, cx);
                     continue;
                 }
             };
@@ -442,12 +670,14 @@ pub fn run() -> ExitCode {
                     launch_flag.set(true);
                     let pending = Rc::clone(&remaining);
                     let failed_flag = Rc::clone(&failed);
-                    let _ = cx.update_window(handle.into(), |_, window, _| {
+                    let updated = cx.update_window(handle.into(), |_, window, _| {
                         window.refresh();
                         window.on_next_frame(move |window, cx| {
                             let scale = window.scale_factor();
+                            print_capture_geometry(&stem, capture.width, scale);
                             let expected_width = (capture.width * scale).round() as u32;
                             let expected_height = (capture.height * scale).round() as u32;
+                            let mut failed = false;
                             match window.render_to_image() {
                                 Ok(image) => {
                                     let actual = (image.width(), image.height());
@@ -460,9 +690,13 @@ pub fn run() -> ExitCode {
                                             "parity-proof dimension mismatch for {stem}: \
                                              logical {}x{} at scale {scale} (reference \
                                              {REFERENCE_SCALE}) produced {}x{}, expected \
-                                             {expected_width}x{expected_height}"
+                                             {expected_width}x{expected_height}",
+                                            capture.width,
+                                            capture.height,
+                                            actual.0,
+                                            actual.1,
                                         );
-                                        failed_flag.set(true);
+                                        failed = true;
                                     }
                                     if let Err(error) =
                                         image::DynamicImage::ImageRgba8(image).save(&path)
@@ -470,7 +704,7 @@ pub fn run() -> ExitCode {
                                         eprintln!(
                                             "parity-proof could not save {path}: {error:?}"
                                         );
-                                        failed_flag.set(true);
+                                        failed = true;
                                     } else {
                                         println!("parity-proof saved {path}");
                                     }
@@ -479,25 +713,29 @@ pub fn run() -> ExitCode {
                                     eprintln!(
                                         "parity-proof capture failed for {stem}: {error:?}"
                                     );
-                                    failed_flag.set(true);
+                                    failed = true;
                                 }
                             }
-                            pending.set(pending.get().saturating_sub(1));
-                            if pending.get() == 0 {
-                                cx.quit();
-                            }
+                            settle(&pending, &failed_flag, failed, cx);
                         });
                     });
+                    if updated.is_err() {
+                        eprintln!("parity-proof update failed for {stem}");
+                        settle(&remaining, &failed, true, cx);
+                    }
                 }
                 Err(error) => {
                     eprintln!("parity-proof could not open its window: {error:?}");
-                    failed.set(true);
+                    settle(&remaining, &failed, true, cx);
                 }
             }
         }
+        if remaining.get() == 0 {
+            cx.quit();
+        }
     });
 
-    if launched.get() && !failed.get() {
+    if launched.get() && !failed_after_run.get() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -506,52 +744,87 @@ pub fn run() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProofSceneCase, case_snapshot, case_turn_events};
-    use artisan_domain::ThreadId;
+    use super::{ProofSceneCase, case_facts, case_snapshot};
+    use crate::conversation_state_machine::SceneFactKind;
+    use artisan_domain::{ThreadId, UnixMillis};
 
     fn thread() -> ThreadId {
         ThreadId::parse("parity-proof-test").expect("fixture thread id is valid")
     }
 
+    fn now() -> UnixMillis {
+        UnixMillis::from_millis(1_700_000_000_000)
+    }
+
     #[test]
     fn empty_case_dispatches_nothing() {
-        assert!(case_snapshot(ProofSceneCase::Empty, &thread()).is_none());
-        assert!(case_turn_events(ProofSceneCase::Empty).is_empty());
+        assert!(
+            case_snapshot(ProofSceneCase::Empty, &thread(), now())
+                .expect("empty builds")
+                .is_none()
+        );
+        assert!(case_facts(ProofSceneCase::Empty).expect("empty facts").is_empty());
     }
 
     #[test]
-    fn completed_case_needs_no_turn_events() {
-        assert!(case_snapshot(ProofSceneCase::Completed, &thread()).is_some());
-        assert!(case_turn_events(ProofSceneCase::Completed).is_empty());
+    fn completed_case_needs_no_facts() {
+        assert!(
+            case_snapshot(ProofSceneCase::Completed, &thread(), now())
+                .expect("completed builds")
+                .is_some()
+        );
+        assert!(
+            case_facts(ProofSceneCase::Completed)
+                .expect("completed facts")
+                .is_empty()
+        );
     }
 
     #[test]
-    fn streaming_case_replays_thinking_then_reply() {
-        use crate::conversation_turn_machine::TurnEvent;
-        let events = case_turn_events(ProofSceneCase::Streaming);
-        assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], TurnEvent::Thinking { .. }));
-        assert!(matches!(events[1], TurnEvent::StreamingReply { .. }));
+    fn thinking_case_registers_a_reasoning_fact() {
+        let facts = case_facts(ProofSceneCase::Thinking).expect("thinking facts");
+        assert_eq!(facts.len(), 1);
+        assert!(matches!(facts[0].kind, SceneFactKind::Reasoning { .. }));
     }
 
     #[test]
-    fn every_active_case_constructs_a_snapshot() {
-        for case in [
-            ProofSceneCase::Thinking,
-            ProofSceneCase::Working,
-            ProofSceneCase::Streaming,
-            ProofSceneCase::Error,
-        ] {
-            assert!(
-                case_snapshot(case, &thread()).is_some(),
-                "case {} must build a snapshot",
-                case.slug()
-            );
-            assert!(
-                !case_turn_events(case).is_empty(),
-                "case {} must drive turn events",
-                case.slug()
-            );
-        }
+    fn working_case_registers_an_activity_fact() {
+        let facts = case_facts(ProofSceneCase::Working).expect("working facts");
+        assert_eq!(facts.len(), 1);
+        assert!(matches!(facts[0].kind, SceneFactKind::Activity { .. }));
+    }
+
+    #[test]
+    fn streaming_case_comes_from_a_live_item_not_facts() {
+        assert!(
+            case_snapshot(ProofSceneCase::Streaming, &thread(), now())
+                .expect("streaming builds")
+                .is_some()
+        );
+        assert!(
+            case_facts(ProofSceneCase::Streaming)
+                .expect("streaming facts")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn error_case_registers_an_error_fact() {
+        let facts = case_facts(ProofSceneCase::Error).expect("error facts");
+        assert_eq!(facts.len(), 1);
+        assert!(matches!(facts[0].kind, SceneFactKind::Error { .. }));
+    }
+
+    #[test]
+    fn longform_case_carries_markdown_and_one_attachment() {
+        let snapshot = case_snapshot(ProofSceneCase::Longform, &thread(), now())
+            .expect("longform builds")
+            .expect("longform snapshot builds");
+        assert!(case_facts(ProofSceneCase::Longform).expect("longform facts").is_empty());
+        let debug = format!("{snapshot:?}");
+        assert!(
+            debug.contains("MultimodalUserMessage"),
+            "longform user item must be multimodal, got {debug}"
+        );
     }
 }
