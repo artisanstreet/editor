@@ -42,21 +42,26 @@
 
 use std::rc::Rc;
 
+use artisan_assets::AssetId;
 use artisan_domain::ThreadId;
 use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
-use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::fade_arc::FadeArc;
+use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use artisan_ui::motion::MotionPolicy;
-use artisan_ui::theme::{ArtisanTheme, ThemeMode};
+use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, FontWeight, Hsla, IntoElement, Render,
-    SharedString, Subscription, Window, div,
+    App, AppContext as _, Context, Div, Entity, FocusHandle, FontWeight, Hsla, IntoElement,
+    Render, SharedString, Subscription, Window, div,
     prelude::{InteractiveElement as _, ParentElement as _, Styled as _},
     px, rgb, rgb_to_hsla,
 };
 
 use crate::conversation_host::{ConversationHost, ConversationHostError};
 use crate::native_composer::NativeComposer;
+use crate::native_composer_material::{
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
+};
 use crate::shell_layout::{
     ProseWidth, desktop_inspector_column_pixels, desktop_thread_inspector_fits,
 };
@@ -91,6 +96,12 @@ pub const THREAD_SCREEN_INSPECTOR_SELECTOR: &str = "artisan-thread-screen-inspec
 
 /// Stable debug selector for the composer dock.
 pub const THREAD_SCREEN_COMPOSER_SELECTOR: &str = "artisan-thread-screen-composer-dock";
+
+/// Stable debug selector for the environment card.
+pub const THREAD_SCREEN_ENV_CARD_SELECTOR: &str = "artisan-thread-screen-env-card";
+
+/// Stable debug selector for one environment-card row.
+pub const THREAD_SCREEN_ENV_ROW_SELECTOR: &str = "artisan-thread-screen-env-row";
 
 /// `--prose-width: 48rem` (`lib/styles/theme.css:157`); `1rem` is `16px`.
 const PROSE_WIDTH_PX: f32 = 768.0;
@@ -163,6 +174,84 @@ pub(crate) fn thread_inspector_width(content_width_px: f32) -> f32 {
 /// message removes it, and a thread change remounts with a fresh count.
 pub(crate) const fn show_empty_transcript(turn_view_count: usize) -> bool {
     turn_view_count == 0
+}
+
+/// Inspector glass-card inner inset: the card child's `p-1`
+/// (`thread-environment-card.svelte:294`, `thread-terminals-card.svelte:201`)
+/// — 4 px, not the 16 px compact-card band.
+const CARD_INSET_PX: f32 = 4.0;
+
+/// Inspector loading-shimmer inner padding: `p-3`
+/// (`thread-terminals-card.svelte:194`) — 12 px.
+const LOADING_PAD_PX: f32 = 12.0;
+
+/// Inspector loading-shimmer bar height: `h-4`
+/// (`thread-terminals-card.svelte:195-196`) — 16 px.
+const LOADING_BAR_PX: f32 = 16.0;
+
+/// Which inspector row a glyph belongs to.
+///
+/// Identities transcribe the `@tabler/icons-svelte` imports in
+/// `thread-environment-card.svelte:2-6` (`device-laptop`, `file-diff`,
+/// `git-branch`, `folder-code`) and `thread-terminals.svelte:2`
+/// (`terminal-2`). Host-mark brand icons and dropdown chevrons have no exact
+/// catalog glyph behind an honest affordance and stay gaps.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum InspectorRowIcon {
+    /// `device-laptop` on the Machine row.
+    Machine,
+    /// `file-diff` on the Changes row.
+    Changes,
+    /// `git-branch` on the Branch row.
+    Branch,
+    /// `folder-code` on the Worktree row.
+    Worktree,
+    /// `terminal-2` on terminal rows.
+    Terminal,
+}
+
+/// Returns the exact catalog glyph for an inspector row kind.
+#[must_use]
+pub(crate) const fn inspector_row_icon(kind: InspectorRowIcon) -> AssetId {
+    match kind {
+        InspectorRowIcon::Machine => AssetId::TABLER_DEVICE_LAPTOP,
+        InspectorRowIcon::Changes => AssetId::TABLER_FILE_DIFF,
+        InspectorRowIcon::Branch => AssetId::TABLER_GIT_BRANCH,
+        InspectorRowIcon::Worktree => AssetId::TABLER_FOLDER_CODE,
+        InspectorRowIcon::Terminal => AssetId::TABLER_TERMINAL_2,
+    }
+}
+
+/// Builds one inspector glass card: the native `ShaderGlassSurface` default
+/// (quiet) treatment at the `radius-xl` (14 px) card radius, with the material
+/// and highlight paint layers from the shared composer/picker helper. Content
+/// carries its own padding (card `p-1`, loading `p-3`) like the reference.
+fn inspector_glass_card(theme: &ArtisanTheme, content: impl IntoElement) -> Div {
+    let radius = RadiusTokens::value(RadiusStep::Xl);
+    div()
+        .relative()
+        .overflow_hidden()
+        .w_full()
+        .min_w_0()
+        .min_h_0()
+        .rounded(radius)
+        .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
+        .bg(glass_foreground_base(*theme))
+        .shadow(glass_card_shadows())
+        .child(glass_material_layer(GlassStrength::Quiet, radius))
+        .child(glass_highlight_layer(GlassStrength::Quiet, radius))
+        .child(content)
+}
+
+/// Builds one 16 px muted inspector row glyph (`size-4 text-muted-foreground`).
+fn inspector_row_glyph(theme: &ArtisanTheme, kind: InspectorRowIcon) -> impl IntoElement {
+    icon(IconStyle::resolve(
+        *theme,
+        inspector_row_icon(kind),
+        IconSize::Default,
+        IconTint::Muted,
+    ))
+    .flex_shrink_0()
 }
 
 /// `px-2 py-2` on inspector rows and card headings.
@@ -588,15 +677,16 @@ impl ThreadScreen {
         column
     }
 
-    /// Renders one environment-card row: flexible label plus truncating value.
+    /// Renders one environment-card row: glyph, flexible label, truncating value.
     ///
     /// Legacy frame: `div.flex.min-w-0.items-center.gap-2.rounded-lg.px-2.py-2`
-    /// with a `flex-1` label and a `max-w-36 truncate` value. Row icons are a
-    /// gap (Tabler glyphs have no asset-glyph plumbing yet); rows keep their
-    /// label/value structure without them.
+    /// with the `size-4 text-muted-foreground` row glyph, a `flex-1` label,
+    /// and a `max-w-36 truncate` value
+    /// (`thread-environment-card.svelte:372-376`).
     fn render_environment_row(
         label: &str,
         value: String,
+        icon: InspectorRowIcon,
         theme: &ArtisanTheme,
     ) -> impl IntoElement {
         div()
@@ -604,8 +694,11 @@ impl ThreadScreen {
             .min_w_0()
             .items_center()
             .gap(px(ROW_GAP_PX))
+            .rounded(RadiusTokens::value(RadiusStep::Lg))
             .px(px(ROW_PAD_PX))
             .py(px(ROW_PAD_PX))
+            .debug_selector(|| THREAD_SCREEN_ENV_ROW_SELECTOR.to_owned())
+            .child(inspector_row_glyph(theme, icon))
             .child(
                 div()
                     .flex_1()
@@ -627,20 +720,22 @@ impl ThreadScreen {
 
     /// Renders the environment card (`thread-environment-card.svelte`).
     ///
-    /// Legacy frame: `section[aria-label="Thread context"]` around the card
-    /// with Machine, Changes, Branch, and Worktree rows. The project selector
-    /// row belongs to packet 2's project picker and is a gap; the remote chip
-    /// is icon-only in legacy and is a gap until an asset glyph exists.
+    /// Legacy frame: `ShaderGlassSurface` at `radius-xl` around the `p-1`
+    /// child holding Machine, Changes, Branch, and Worktree rows. The project
+    /// selector row belongs to packet 2's project picker and is a gap; the
+    /// remote chip is icon-only in legacy with a host-mark brand glyph that
+    /// has no exact catalog entry, so it stays a gap rather than a fake chip.
     fn render_environment_card(&self, theme: &ArtisanTheme) -> impl IntoElement {
         let projection = present_thread_environment(&self.environment);
-        let style = CardStyle::resolve(*theme);
         let mut rows = div()
             .flex()
             .min_w_0()
             .flex_col()
+            .text_size(theme.typography.control_text)
             .child(Self::render_environment_row(
                 "Machine",
                 projection.machine_label,
+                InspectorRowIcon::Machine,
                 theme,
             ));
         if let Some(summary) = projection.change_summary {
@@ -650,8 +745,11 @@ impl ThreadScreen {
                     .min_w_0()
                     .items_center()
                     .gap(px(ROW_GAP_PX))
+                    .rounded(RadiusTokens::value(RadiusStep::Lg))
                     .px(px(ROW_PAD_PX))
                     .py(px(ROW_PAD_PX))
+                    .debug_selector(|| THREAD_SCREEN_ENV_ROW_SELECTOR.to_owned())
+                    .child(inspector_row_glyph(theme, InspectorRowIcon::Changes))
                     .child(
                         div()
                             .flex_1()
@@ -677,62 +775,64 @@ impl ThreadScreen {
             );
         }
         if let Some(branch_label) = projection.current_branch_label {
-            rows = rows.child(Self::render_environment_row("Branch", branch_label, theme));
+            rows = rows.child(Self::render_environment_row(
+                "Branch",
+                branch_label,
+                InspectorRowIcon::Branch,
+                theme,
+            ));
         }
         if let Some(worktree_label) = projection.current_worktree_label {
             rows = rows.child(Self::render_environment_row(
                 "Worktree",
                 worktree_label,
+                InspectorRowIcon::Worktree,
                 theme,
             ));
         }
-        div().w_full().min_w_0().child(
-            compact_card(style).w_full().child(
-                compact_card_content(style).child(
-                    div()
-                        .min_w_0()
-                        .text_size(theme.typography.control_text)
-                        .child(rows),
-                ),
-            ),
-        )
+        div()
+            .w_full()
+            .min_w_0()
+            .debug_selector(|| THREAD_SCREEN_ENV_CARD_SELECTOR.to_owned())
+            .child(inspector_glass_card(
+                theme,
+                div().min_w_0().p(px(CARD_INSET_PX)).child(rows),
+            ))
     }
 
     /// Renders the terminals card (`thread-terminals-card.svelte`).
     ///
-    /// Legacy branches: a skeleton shimmer while loading, the card only when
-    /// at least one live terminal exists, and nothing otherwise. Liveness is
-    /// `opening | active` (`lib/terminal/presentation.ts`
+    /// Legacy branches: a skeleton shimmer while loading (`flex flex-col
+    /// gap-2 p-3` with `h-4` bars at 3/5 and 2/5 widths), the glass card only
+    /// when at least one live terminal exists, and nothing otherwise. Liveness
+    /// is `opening | active` (`lib/terminal/presentation.ts`
     /// `is_live_terminal`); exited terminals disappear like finished agents.
-    /// Rows follow `thread-terminals.svelte`: display name plus mono command
-    /// line. Click-to-inspect and the tail-viewer dialog need transport
-    /// wiring and are gaps, so rows render without a fake affordance.
+    /// Rows follow `thread-terminals.svelte`: the `terminal-2` glyph plus
+    /// display name plus muted command line. Click-to-inspect and the
+    /// tail-viewer dialog need transport wiring and are gaps, so rows render
+    /// without a fake affordance.
     fn render_terminals_card(&self, theme: &ArtisanTheme) -> Option<impl IntoElement> {
-        let style = CardStyle::resolve(*theme);
         if self.terminals_loading {
-            let bar = |width: f32| {
+            let bar = |fraction: f32| {
                 div()
-                    .h(px(16.0))
-                    .w(px(width))
+                    .h(px(LOADING_BAR_PX))
+                    .w(gpui::relative(fraction))
                     .rounded(px(4.0))
                     .bg(theme.colors.muted.to_paint())
             };
-            return Some(
-                compact_card(style).w_full().child(
-                    compact_card_content(style).child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(ROW_GAP_PX))
-                            .p(px(12.0))
-                            .debug_selector(|| {
-                                String::from("artisan-thread-screen-terminals-loading")
-                            })
-                            .child(bar(180.0))
-                            .child(bar(120.0)),
-                    ),
-                ),
-            );
+            return Some(div().w_full().min_w_0().child(inspector_glass_card(
+                theme,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ROW_GAP_PX))
+                    .p(px(LOADING_PAD_PX))
+                    .debug_selector(|| {
+                        String::from("artisan-thread-screen-terminals-loading")
+                    })
+                    .child(bar(0.6))
+                    .child(bar(0.4)),
+            )));
         }
         let live: Vec<&TerminalSession> = self
             .terminals
@@ -752,16 +852,26 @@ impl ThreadScreen {
                     .items_center()
                     .justify_between()
                     .gap(px(INSPECTOR_GAP_PX))
+                    .rounded(RadiusTokens::value(RadiusStep::Lg))
                     .px(px(ROW_PAD_PX))
                     .py(px(ROW_PAD_PX))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_size(theme.typography.control_text)
-                            .text_color(theme.colors.foreground.to_paint())
-                            .child(terminal_display_name(session)),
+                            .flex()
+                            .items_center()
+                            .gap(px(ROW_GAP_PX))
+                            .child(inspector_row_glyph(theme, InspectorRowIcon::Terminal))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(theme.typography.control_text)
+                                    .text_color(theme.colors.foreground.to_paint())
+                                    .child(terminal_display_name(session)),
+                            ),
                     )
                     .child(
                         div()
@@ -775,42 +885,41 @@ impl ThreadScreen {
             );
         }
         Some(
-            compact_card(style).w_full().child(
-                compact_card_content(style)
-                    .child(
-                        div().flex().min_w_0().flex_col().child(
-                            div()
-                                .px(px(ROW_PAD_PX))
-                                .pt(px(ROW_PAD_PX))
-                                .pb(px(4.0))
-                                .text_size(theme.typography.control_text)
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.colors.foreground.to_paint())
-                                .child("Terminals"),
-                        ),
-                    )
-                    .child(list),
-            ),
+            div().w_full().min_w_0().child(inspector_glass_card(
+                theme,
+                div().min_w_0().p(px(CARD_INSET_PX)).child(
+                    div().flex().min_w_0().flex_col().child(
+                        div()
+                            .px(px(ROW_PAD_PX))
+                            .pt(px(ROW_PAD_PX))
+                            .pb(px(4.0))
+                            .text_size(theme.typography.control_text)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.colors.foreground.to_paint())
+                            .child("Terminals"),
+                    ),
+                )
+                .child(list),
+            )),
         )
     }
 
     /// Renders the checklist card (`thread-panel.svelte` plan section).
     ///
-    /// Legacy frame: `section[aria-labelledby]` with an
-    /// `h2.px-2.pt-2.pb-1.text-sm.font-medium` "Checklist" heading and a
-    /// `ul.list-disc` of `li.rounded-lg.px-2.py-2.text-sm` rows. Tone maps
-    /// the exact legacy classes to theme colors: active
-    /// (`font-medium text-foreground`) keeps weight and foreground;
+    /// Legacy frame: `ShaderGlassSurface` at `radius-xl` around the `p-1`
+    /// child holding the `h2.px-2.pt-2.pb-1.text-sm.font-medium` "Checklist"
+    /// heading and the `rounded-lg.px-2.py-2.text-sm` rows. Tone maps the
+    /// exact legacy classes to theme colors: active (`font-medium
+    /// text-foreground`) keeps weight and foreground;
     /// completed/pending/skipped (`text-muted-foreground`, with
     /// `line-through` on completed/skipped) use the muted token with
-    /// strikethrough where legacy crosses out. The screen-reader
-    /// `"{state}: "` prefix has no GPUI equivalent on plain text and is a
-    /// gap.
+    /// strikethrough where legacy crosses out. The `list-disc` markers and
+    /// the screen-reader `"{state}: "` prefix have no GPUI equivalent on
+    /// plain text and stay gaps rather than faked bullets.
     fn render_checklist_card(&self, theme: &ArtisanTheme) -> Option<impl IntoElement> {
         if self.checklist.is_empty() {
             return None;
         }
-        let style = CardStyle::resolve(*theme);
         let mut list = div().flex().min_w_0().flex_col();
         for entry in &self.checklist {
             let presented = present_checklist_entry(ChecklistEntry::new(
@@ -819,6 +928,7 @@ impl ThreadScreen {
                 entry.text.as_str(),
             ));
             let mut row = div()
+                .rounded(RadiusTokens::value(RadiusStep::Lg))
                 .px(px(ROW_PAD_PX))
                 .py(px(ROW_PAD_PX))
                 .text_size(theme.typography.control_text)
@@ -842,22 +952,22 @@ impl ThreadScreen {
             list = list.child(row.child(presented.text.to_owned()));
         }
         Some(
-            compact_card(style).w_full().child(
-                compact_card_content(style)
-                    .child(
-                        div().flex().min_w_0().flex_col().child(
-                            div()
-                                .px(px(ROW_PAD_PX))
-                                .pt(px(ROW_PAD_PX))
-                                .pb(px(4.0))
-                                .text_size(theme.typography.control_text)
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.colors.foreground.to_paint())
-                                .child("Checklist"),
-                        ),
+            div().w_full().min_w_0().child(inspector_glass_card(
+                theme,
+                div().min_w_0().p(px(CARD_INSET_PX)).child(
+                    div().flex().min_w_0().flex_col().child(
+                        div()
+                            .px(px(ROW_PAD_PX))
+                            .pt(px(ROW_PAD_PX))
+                            .pb(px(4.0))
+                            .text_size(theme.typography.control_text)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.colors.foreground.to_paint())
+                            .child("Checklist"),
                     )
                     .child(list),
-            ),
+                ),
+            )),
         )
     }
 
@@ -1074,6 +1184,15 @@ impl Render for ThreadScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reference `text-sm` line height (Tailwind sets 14 px type on a 20 px
+    /// line). Test-only: layout never measures text with it.
+    const REFERENCE_TEXT_LINE_PX: f32 = 20.0;
+
+    /// Reference single-row environment-card height: `p-1` (4 + 4) around one
+    /// `px-2 py-2` row (8 + 20 + 8) — 44 px
+    /// (`thread-environment-card.svelte:294,372-376`). Test-only pin.
+    const REFERENCE_ENV_CARD_PX: f32 = 44.0;
 
     fn empty_title() -> ThreadScreenTitle {
         ThreadScreenTitle::default()
@@ -1382,6 +1501,83 @@ mod tests {
         assert!(
             (f32::from(inspector.size.width) - 350.0).abs() < 1.0,
             "returned inspector keeps the 350px clamp"
+        );
+    }
+
+    #[test]
+    fn inspector_row_icons_map_to_the_exact_reference_glyphs() {
+        assert_eq!(
+            inspector_row_icon(InspectorRowIcon::Machine),
+            AssetId::TABLER_DEVICE_LAPTOP
+        );
+        assert_eq!(
+            inspector_row_icon(InspectorRowIcon::Changes),
+            AssetId::TABLER_FILE_DIFF
+        );
+        assert_eq!(
+            inspector_row_icon(InspectorRowIcon::Branch),
+            AssetId::TABLER_GIT_BRANCH
+        );
+        assert_eq!(
+            inspector_row_icon(InspectorRowIcon::Worktree),
+            AssetId::TABLER_FOLDER_CODE
+        );
+        assert_eq!(
+            inspector_row_icon(InspectorRowIcon::Terminal),
+            AssetId::TABLER_TERMINAL_2
+        );
+    }
+
+    #[test]
+    fn environment_card_matches_the_reference_density_arithmetic() {
+        // Card child `p-1`, rows `px-2 py-2`, cards `radius-xl`, rows
+        // `rounded-lg` — all resolved from shared tokens, never local magic.
+        assert_eq!(CARD_INSET_PX, 4.0);
+        assert_eq!(ROW_PAD_PX, 8.0);
+        assert_eq!(
+            RadiusTokens::value(RadiusStep::Xl),
+            px(14.0),
+            "inspector glass cards keep the reference radius-xl"
+        );
+        assert_eq!(
+            RadiusTokens::value(RadiusStep::Lg),
+            px(10.0),
+            "inspector rows keep the reference rounded-lg"
+        );
+        // Single-row card: p-1 (4 + 4) around one py-2 row (8 + 20 + 8)
+        // on the text-sm 20 px line — the reference 44 px.
+        assert_eq!(
+            CARD_INSET_PX * 2.0 + (ROW_PAD_PX * 2.0 + REFERENCE_TEXT_LINE_PX),
+            REFERENCE_ENV_CARD_PX
+        );
+        assert_eq!(REFERENCE_ENV_CARD_PX, 44.0);
+    }
+
+    /// The mounted single-row environment card honors the `p-1` inset in the
+    /// real tree: card minus row is exactly 8 px whatever the font metrics,
+    /// and the card stays near the 44 px reference instead of the 72 px
+    /// compact-card mismatch.
+    #[gpui::test]
+    fn environment_card_keeps_reference_inset_in_layout(cx: &mut gpui::TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-density", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        let card = cx
+            .debug_bounds(THREAD_SCREEN_ENV_CARD_SELECTOR)
+            .expect("environment card lays out");
+        let row = cx
+            .debug_bounds(THREAD_SCREEN_ENV_ROW_SELECTOR)
+            .expect("machine row lays out");
+        let card_height = f32::from(card.size.height);
+        let row_height = f32::from(row.size.height);
+        assert!(
+            (card_height - row_height - 2.0 * CARD_INSET_PX).abs() < 1.0,
+            "card {card_height}px must exceed its single row {row_height}px by exactly the p-1 inset"
+        );
+        assert!(
+            card_height <= REFERENCE_ENV_CARD_PX + 8.0,
+            "single-row card {card_height}px must stay near the 44px reference, not the 72px compact mismatch"
         );
     }
 }
