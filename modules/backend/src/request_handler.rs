@@ -51,7 +51,7 @@ use artisan_protocol::{
     ActiveRunResult, ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome,
     ErrorCode, ErrorDetail, FirstMessageReceipt, MessageImageResult, ProtocolFailure,
     QueueMessageReceipt, RegisteredEngineProfilesResult, RespondApprovalReceipt,
-    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, ServerResponse,
+    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, RunLiveStatus, ServerResponse,
     SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
 };
 use tokio::sync::Mutex;
@@ -1751,6 +1751,7 @@ impl RequestHandler {
         let has_attachments = !queue.payload.attachments().is_empty();
         self.settle_named_steer(
             request_id,
+            &queue.request_id,
             &queue.thread_id,
             target.run_id(),
             message_id,
@@ -1797,12 +1798,31 @@ impl RequestHandler {
                 request_id,
                 ResponsePayload::MessageQueued(receipt),
             )),
-            artisan_database::entities::DispatchState::Failed => Err(typed_failure(
-                ErrorCode::InvalidInput,
-                reason.unwrap_or_else(|| "steered send failed".to_owned()),
-                false,
-                request_id,
-            )),
+            artisan_database::entities::DispatchState::Failed => {
+                return Err(match reason.as_deref() {
+                    // Image refusals keep their first-error code on replay:
+                    // the stored reason reproduces the typed refusal
+                    // instead of collapsing to a generic input error.
+                    Some("steer does not support image attachments") => typed_failure(
+                        ErrorCode::UnsupportedFeature,
+                        "steer does not support image attachments; resend without images or as a fresh message",
+                        false,
+                        request_id,
+                    ),
+                    Some(stored) => typed_failure(
+                        ErrorCode::InvalidInput,
+                        stored.to_owned(),
+                        false,
+                        request_id,
+                    ),
+                    None => typed_failure(
+                        ErrorCode::InvalidInput,
+                        "steered send failed",
+                        false,
+                        request_id,
+                    ),
+                });
+            }
             artisan_database::entities::DispatchState::Queued => {
                 let text = replay
                     .payload
@@ -1811,6 +1831,7 @@ impl RequestHandler {
                 let has_attachments = !replay.payload.attachments().is_empty();
                 self.settle_named_steer(
                     request_id,
+                    &replay.receipt.request_id,
                     &replay.thread_id,
                     target.run_id(),
                     &replay.message_id,
@@ -1833,15 +1854,19 @@ impl RequestHandler {
     /// Settles one named steer: attachments gate, live route, ack mapping.
     ///
     /// Shared by first acceptances and open-row replays so both funnel
-    /// through identical gating. Image attachments are refused BEFORE any
-    /// provider contact — provider steer verbs carry text only — with the
-    /// row failed typed and the original payload preserved for recovery
-    /// as a fresh send. Text subsets or blank image-only sends never
-    /// succeed here.
+    /// through identical gating. `request_id` is the frame correlation for
+    /// responses and failures; `command_request_id` is the durable command
+    /// identity carried in the steer envelope, so snapshot reads and ledger
+    /// dedup stay stable across retry frames. Image attachments are refused
+    /// BEFORE any provider contact — provider steer verbs carry text only —
+    /// with the row failed typed and the original payload preserved for
+    /// recovery as a fresh send. Text subsets or blank image-only sends
+    /// never succeed here.
     #[allow(clippy::too_many_arguments)]
     async fn settle_named_steer(
         &self,
         request_id: &RequestId,
+        command_request_id: &RequestId,
         thread_id: &ThreadId,
         target_run_id: &artisan_domain::RunId,
         message_id: &MessageId,
@@ -1864,7 +1889,7 @@ impl RequestHandler {
             ));
         }
         let command = OwnedInteractionCommand::Steer {
-            request_id: request_id.clone(),
+            request_id: command_request_id.clone(),
             message_id: message_id.clone(),
             text,
         };

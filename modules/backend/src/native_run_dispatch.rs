@@ -30,11 +30,12 @@ use artisan_database::{
 };
 use artisan_domain::{
     AssistantBody, AssistantMessagePhase, EngineId, EngineSelection, FileObservation,
-    IncrementalText, ItemId, Observation, ObservationId, ObservationSequence, PatchId,
+    IncrementalText, ItemId, MessageId, Observation, ObservationId, ObservationSequence, PatchId,
     PlanEntry, PlanObservation, ReasoningSummaryCompletedObservation,
-    ReasoningSummaryDeltaObservation, RespondApproval, RespondQuestion, Revision, RootPath, RunId,
-    SearchObservation, SubagentInput, SubagentObservation, SubagentTranscriptObservation,
-    TerminalActivityInput, TerminalActivityObservation, ToolObservation, TurnId, UnixMillis,
+    ReasoningSummaryDeltaObservation, RequestId, RespondApproval, RespondQuestion, Revision,
+    RootPath, RunId, SearchObservation, SubagentInput, SubagentObservation,
+    SubagentTranscriptObservation, TerminalActivityInput, TerminalActivityObservation, ThreadId,
+    ToolObservation, TurnId, UnixMillis,
 };
 use artisan_native_engine::{
     NativeClaudeAuthority, NativeCodexAuthority, NativeOpenCode2Authority, VerifiedClaudeLaunch,
