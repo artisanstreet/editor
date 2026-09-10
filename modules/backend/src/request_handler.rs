@@ -1412,9 +1412,7 @@ impl RequestHandler {
             .route(thread_id, run_id)
             .map_err(|error| run_interaction_failure(error, request_id))?
         else {
-            return Ok(unsubmitted_wrong_run(
-                request_id, thread_id, run_id, command,
-            ));
+            return unsubmitted_wrong_run(request_id, thread_id, run_id, command);
         };
         let (respond, acknowledged) = tokio::sync::oneshot::channel();
         let envelope = RunInteractionEnvelope {
@@ -1434,9 +1432,7 @@ impl RequestHandler {
                 ));
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                return Ok(unsubmitted_wrong_run(
-                    request_id, thread_id, run_id, command,
-                ));
+                return unsubmitted_wrong_run(request_id, thread_id, run_id, command);
             }
         }
         match acknowledged.await {
@@ -1447,9 +1443,9 @@ impl RequestHandler {
                 false,
                 request_id,
             )),
-            Ok(RunInteractionAck::WrongRun) => Ok(unsubmitted_wrong_run(
-                request_id, thread_id, run_id, command,
-            )),
+            Ok(RunInteractionAck::WrongRun) => {
+                unsubmitted_wrong_run(request_id, thread_id, run_id, command)
+            }
             Ok(RunInteractionAck::Unavailable) => Err(typed_failure(
                 ErrorCode::Internal,
                 "live run interaction is temporarily unavailable",
@@ -2265,39 +2261,54 @@ fn unsubmitted_wrong_run(
     thread_id: &ThreadId,
     run_id: &artisan_domain::RunId,
     command: &OwnedInteractionCommand,
-) -> artisan_database::StoredInteractionReceipt {
-    let (interaction_id, approved, answers) = match command {
+) -> Result<artisan_database::StoredInteractionReceipt, ProtocolFailure> {
+    // Steers never route through the approval/question path and carry no
+    // receipt-table row, so there is no unstored receipt to build. Fail
+    // closed with a typed unreachable-path error instead of inventing a
+    // target identity or panicking.
+    let (interaction_id, kind, approved, answers) = match command {
         OwnedInteractionCommand::RespondApproval {
             approval_id,
             approved,
             ..
-        } => (approval_id.clone(), Some(*approved), Vec::new()),
+        } => (
+            approval_id.clone(),
+            artisan_domain::InteractionKind::Approval,
+            Some(*approved),
+            Vec::new(),
+        ),
         OwnedInteractionCommand::RespondQuestion {
             question_id,
             answers,
             ..
-        } => (question_id.clone(), None, answers.clone()),
+        } => (
+            question_id.clone(),
+            artisan_domain::InteractionKind::Question,
+            None,
+            answers.clone(),
+        ),
+        OwnedInteractionCommand::Steer { .. } => {
+            return Err(typed_failure(
+                ErrorCode::Internal,
+                "steer responses never route through the approval/question path",
+                false,
+                request_id,
+            ));
+        }
     };
-    artisan_database::StoredInteractionReceipt {
+    Ok(artisan_database::StoredInteractionReceipt {
         request_id: request_id.clone(),
         thread_id: thread_id.clone(),
         run_id: run_id.clone(),
         interaction_id,
-        kind: match command {
-            OwnedInteractionCommand::RespondApproval { .. } => {
-                artisan_domain::InteractionKind::Approval
-            }
-            OwnedInteractionCommand::RespondQuestion { .. } => {
-                artisan_domain::InteractionKind::Question
-            }
-        },
+        kind,
         outcome: InteractionOutcome::WrongRun,
         disposition: artisan_domain::ReceiptDisposition::Accepted,
         approved,
         answers,
         binding_version: 0,
         responded_at_ms: 0,
-    }
+    })
 }
 
 /// Replays the exact intent fingerprint instead of trusting the stored row.
@@ -2356,15 +2367,18 @@ fn interaction_intent_matches(
             command.intent_key()
         }
     };
-    fingerprint == intent_key
-        && stored.interaction_id
-            == match command {
-                OwnedInteractionCommand::RespondApproval { approval_id, .. } => approval_id.clone(),
-                OwnedInteractionCommand::RespondQuestion { question_id, .. } => question_id.clone(),
-                // Steers carry no receipt-table row: this match only
-                // typechecks the resolve path, which never routes them.
-                OwnedInteractionCommand::Steer { .. } => String::new(),
-            }
+    // Steers carry no receipt-table row: intent matching never applies
+    // to them. Bind the compared target as an option so the Steer arm
+    // fails closed without inventing a target identity.
+    let command_target = match command {
+        OwnedInteractionCommand::RespondApproval { approval_id, .. } => Some(approval_id.clone()),
+        OwnedInteractionCommand::RespondQuestion { question_id, .. } => Some(question_id.clone()),
+        OwnedInteractionCommand::Steer { .. } => None,
+    };
+    let Some(command_target) = command_target else {
+        return false;
+    };
+    fingerprint == intent_key && stored.interaction_id == command_target
 }
 
 /// Maps a stored domain outcome to its wire disposition.
