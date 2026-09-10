@@ -19,6 +19,7 @@ pub mod gradient;
 pub mod icon;
 pub mod input;
 pub mod input_group;
+pub mod inline_code_text;
 pub mod input_state;
 pub mod link_preview;
 pub mod lip_card;

@@ -62,3 +62,11 @@ path = "../../tests/ui/markdown_seam.rs"
 [[test]]
 name = "selectable_text"
 path = "../../tests/ui/selectable_text.rs"
+
+[[test]]
+name = "inline_code_text"
+path = "../../tests/ui/inline_code_text.rs"
+
+[[test]]
+name = "shimmer_text"
+path = "../../tests/ui/shimmer_text.rs"
