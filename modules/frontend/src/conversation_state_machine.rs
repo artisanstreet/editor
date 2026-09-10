@@ -2266,9 +2266,14 @@ impl ConversationStateController {
 /// a controller exists (skipped when the turn registry is full) and dispatches
 /// the events derived from canonical lifecycle and item evidence. Derived
 /// refusals leave state unchanged: they only mean the controller already
-/// covers that durable state. Pushes at most one
-/// [`ConversationStateEffect::SceneInvalidated`], only when a controller
-/// actually changed leaf state, so replays and refreshes stay effect-quiet.
+/// covers that durable state. Late historical fact evidence for an
+/// already-settled success rebuilds the delivery-owned controller from the
+/// same canonical times and replays the fuller evidence, so the narration
+/// becomes truthfully `Worked for` with identical elapsed; other sealed
+/// outcomes and explicitly driven turns are never rebuilt. Pushes at most one
+/// [`ConversationStateEffect::SceneInvalidated`], only when a controller's
+/// rendered narration actually changed, so replays and refreshes stay
+/// effect-quiet.
 fn synchronize_turns(
     turns: &mut BTreeMap<TurnId, ConversationTurnController>,
     explicit_turns: &BTreeSet<TurnId>,
@@ -2318,17 +2323,39 @@ fn synchronize_turns(
             }
             turns.insert(turn.turn_id.clone(), ConversationTurnController::new());
         }
+        let work = work_by_turn.contains(&turn.turn_id);
+        let items: &[&ConversationItem] = items_by_turn
+            .get(&turn.turn_id)
+            .map_or(&[], Vec::as_slice);
+        // Late historical work evidence for an already-settled success:
+        // sealed states refuse re-derivation, so a turn that settled before
+        // its persisted tool history arrived would narrate `Thought for`
+        // forever. Reconstruct the delivery-owned controller from the same
+        // canonical turn, items, and facts and replay the fuller evidence:
+        // the work pre-step plants the same creation basis and the same
+        // settlement instant, so elapsed stays canonical while the narration
+        // becomes truthfully `Worked for`. Other sealed outcomes narrate
+        // independently of work evidence and keep their controllers.
+        let settled_thought_success = turns.get(&turn.turn_id).is_some_and(|controller| {
+            controller.state() == StateKind::Completed
+                && work
+                && matches!(
+                    controller.view().narration,
+                    TurnNarration::ThoughtFor { .. }
+                )
+        });
+        if settled_thought_success {
+            turns.insert(turn.turn_id.clone(), ConversationTurnController::new());
+        }
         let controller = turns
             .get_mut(&turn.turn_id)
             .expect("turn controller was ensured above");
         let before = controller.state();
-        let items: &[&ConversationItem] = items_by_turn
-            .get(&turn.turn_id)
-            .map_or(&[], Vec::as_slice);
+        let narration_before = controller.view().narration;
         for event in derive_turn_events(
             turn,
             items,
-            work_by_turn.contains(&turn.turn_id),
+            work,
             thought_by_turn.contains(&turn.turn_id),
             controller,
         ) {
@@ -2336,7 +2363,7 @@ fn synchronize_turns(
             // this durable state is already covered.
             let _ = controller.dispatch(event);
         }
-        changed |= controller.state() != before;
+        changed |= controller.state() != before || controller.view().narration != narration_before;
     }
     if changed {
         effects.push(ConversationStateEffect::SceneInvalidated);

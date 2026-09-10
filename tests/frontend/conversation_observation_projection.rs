@@ -1061,18 +1061,21 @@ fn capacity_blocked_delivery_mutates_neither_ordinals_nor_effects() {
     let projection = project_activities(&state, &snapshot_for_growth());
     upsert_all(&mut controller, projection.facts);
 
-    // Fill the bounded outbox through ordinary turn events (one invalidation
-    // each) so the delivery reservation fails before any registry mutation.
-    let mut revision = 1_u64;
+    // Fill the bounded outbox through accepted ordinary turn events (one
+    // invalidation each) so the delivery reservation fails before any
+    // registry mutation. Revisions ride above the delivery-derived lane so
+    // every fill event is accepted; only exhaustion stops the loop.
+    let mut i = 1_u64;
     loop {
         let event = TurnEvent::Working {
-            at: 6_000 + revision as i64,
-            revision,
+            at: 6_000 + i as i64,
+            revision: 1_000 + i,
         };
-        if controller.on_turn(turn_id(TURN_A), event).is_err() {
-            break;
+        match controller.on_turn(turn_id(TURN_A), event) {
+            Ok(()) => i += 1,
+            Err(ConversationStateError::CapacityExhausted { .. }) => break,
+            Err(other) => panic!("fill must only stop on exhausted capacity, got {other:?}"),
         }
-        revision += 1;
     }
     assert_eq!(controller.pending_effect_count(), MAX_PENDING_EFFECTS);
     let scene_before = controller.scene().expect("scene builds");
