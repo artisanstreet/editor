@@ -1113,7 +1113,7 @@ fn footers_start_unsettled_and_settle_only_the_exact_turn() {
 
     let turns = vec![
         scene_turn("turn_a", 0, ConversationLifecycle::Completed),
-        scene_turn("turn_b", 1, ConversationLifecycle::Completed),
+        scene_turn("turn_b", 10, ConversationLifecycle::Completed),
     ];
     let items = vec![
         user_item("user_a", "turn_a", 1, "hi"),
@@ -1124,11 +1124,11 @@ fn footers_start_unsettled_and_settle_only_the_exact_turn() {
             "hello",
             AssistantPhase::Final,
         ),
-        user_item("user_b", "turn_b", 3, "who are you"),
+        user_item("user_b", "turn_b", 11, "who are you"),
         assistant_item(
             "assist_b",
             "turn_b",
-            4,
+            12,
             "artisan",
             AssistantPhase::Final,
         ),
