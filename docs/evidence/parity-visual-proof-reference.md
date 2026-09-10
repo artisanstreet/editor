@@ -75,15 +75,13 @@ conversation column are.
 4. Expected physical sizes at the 125% reference scale: narrow 1280x900,
    wide 1920x1125. The fixture asserts `logical * measured scale` from
    `window.scale_factor()` and fails loudly on mismatch instead of claiming.
-4. Each capture publishes `geometry … window=… scale=… sidebar=218
-   titlebar=48 content={actual window - rail} inspector={shown|hidden}
-   title="Parity proof thread"`: content width comes from live window
-   bounds via `set_content_width` (notify-on-change), and inspector fit is
-   read from `thread_inspector_visible`, so narrow (806px content) hides
-   while wide (1318px content) shows — the responsive behavior itself is
-   under proof, not pinned expanded. Each case also prints its
-   controller-projected block order, binding pixels to real projection
-   output.
+5. Each capture publishes `geometry … requested=… actual=… scale=…
+   sidebar=218 titlebar=48 content={actual window - rail}
+   inspector={shown|hidden} title="Parity proof thread"`, a `manifest …`
+   line (published title, composer draft + attachment count read back from
+   the live entities, projected block order), and a `paint … quads=N`
+   line. Zero painted quads fails the capture outright: no image is
+   accepted from dimensions alone. Requested is never labeled actual.
 
 ## Seeding path (production, projection contract `fd6f3aa0`)
 

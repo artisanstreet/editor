@@ -456,6 +456,22 @@ fn seed_case(
     })
 }
 
+/// Prints the text manifest bound to one capture: the published thread
+/// title plus the composer draft and attachment count read back from the
+/// live entities. These are inputs and projection output, honestly labeled:
+/// pixel presence stays root's comparison, but a capture is rejected when
+/// its manifest or painted-quad count is wrong before pixels matter.
+fn print_proof_manifest(screen: &Entity<ThreadScreen>, stem: &str, cx: &mut App) {
+    let composer = screen.read(cx).composer().clone();
+    let state = composer.read(cx);
+    println!(
+        "parity-proof manifest {stem}: title={PROOF_THREAD_TITLE:?} \
+         composer_draft={:?} composer_attachments={}",
+        state.draft(),
+        state.attachment_count(),
+    );
+}
+
 /// Prints the controller-projected block order for one seeded case: the
 /// surface renders exactly this scene, so the manifest binds the saved
 /// pixels to real projection output rather than a hand-built expectation.
@@ -528,8 +544,11 @@ const BOUNDS_SETTLE_PX: f32 = 0.5;
 /// Settle polls between resize requests, in milliseconds.
 const RESIZE_POLL_MILLIS: u64 = 100;
 
-/// Maximum resize settle polls before the capture fails (~5s, well under
-/// root's external 45s guard).
+/// Warmup redraws after the size settles before the capture draw.
+const WARMUP_DRAW_PASSES: u32 = 2;
+
+/// Deterministic thread title published to every proof capture.
+const PROOF_THREAD_TITLE: &str = "Parity proof thread";
 const RESIZE_MAX_POLLS: u32 = 50;
 
 /// One resize-settle poll outcome.
@@ -705,7 +724,7 @@ pub fn run() -> ExitCode {
         .expect("fixture thread id is valid");
         let shell = match ParityProofShell::mount(
             thread_id,
-            String::from("Parity proof thread"),
+            String::from(PROOF_THREAD_TITLE),
             capture.width - DESKTOP_SIDEBAR_WIDTH_PX,
             capture.case,
             cx,
@@ -758,6 +777,7 @@ pub fn run() -> ExitCode {
                     cx.spawn(async move |cx| {
                         let clock = cx.background_executor().clone();
                         let mut cx = cx;
+                        let mut warmup_draws = 0u32;
                         for _ in 0..RESIZE_MAX_POLLS {
                             let outcome =
                                 cx.update_window(any_handle, |_, window, cx| {
@@ -786,6 +806,22 @@ pub fn run() -> ExitCode {
                                             screen_cx.notify();
                                         }
                                     });
+                                    // Settle the frame: a hidden window paints
+                                    // nothing on its own, and one draw can
+                                    // reuse incomplete cached paint while the
+                                    // async asset/text pipeline lands (seen as
+                                    // missing title/composer glyphs with
+                                    // shapes intact). Refresh plus bounded
+                                    // redraws with yields between, then the
+                                    // capture draw — all through the
+                                    // production renderer, no present.
+                                    window.refresh();
+                                    let arena = window.draw(cx);
+                                    arena.clear(cx);
+                                    warmup_draws += 1;
+                                    if warmup_draws < WARMUP_DRAW_PASSES {
+                                        return ResizePoll::Waiting;
+                                    }
                                     print_capture_geometry(
                                         &stem,
                                         capture.width,
@@ -795,18 +831,29 @@ pub fn run() -> ExitCode {
                                         scale,
                                         content_width,
                                     );
+                                    print_proof_manifest(&screen, &stem, cx);
                                     // Synchronous frame with no present, then
                                     // the shipping wgpu readback of that
                                     // scene, then the arena release on the
                                     // same context.
                                     let arena = window.draw(cx);
+                                    let quads = window.painted_quads().len();
                                     let capture_result = window.render_to_image();
                                     arena.clear(cx);
+                                    println!(
+                                        "parity-proof paint {stem}: quads={quads}"
+                                    );
                                     let expected_width =
                                         (capture.width * scale).round() as u32;
                                     let expected_height =
                                         (capture.height * scale).round() as u32;
-                                    let mut failed = false;
+                                    let mut failed = quads == 0;
+                                    if failed {
+                                        eprintln!(
+                                            "parity-proof paint failed for {stem}: \
+                                             no quads painted"
+                                        );
+                                    }
                                     match capture_result {
                             Ok(image) => {
                                 let actual = (image.width(), image.height());
