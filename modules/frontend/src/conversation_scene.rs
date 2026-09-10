@@ -974,12 +974,13 @@ impl ConversationScene {
                     narration: entry.narration,
                 });
             }
+            let narration_turn_id = entry.turn_id.clone();
             if narration_map
-                .insert(entry.turn_id.clone(), entry)
+                .insert(narration_turn_id.clone(), entry)
                 .is_some()
             {
                 return Err(SceneBuildError::DuplicateNarration {
-                    turn_id: entry.turn_id.clone(),
+                    turn_id: narration_turn_id,
                 });
             }
         }
