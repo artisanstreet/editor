@@ -2588,12 +2588,18 @@ pub(crate) async fn service_codex_steer_delivery<W: tokio::io::AsyncWrite + Unpi
 /// Routes one inbound line to its pending steer delivery, if correlated.
 ///
 /// Returns true when the line answers an outstanding `turn/steer`
-/// request: a result envelope resolves the delivery successfully and an
-/// error envelope resolves it failed, and the line never becomes a turn
-/// event either way — a steer response is not turn completion, and a
-/// rejected follow-up fails only its own delivery, never the turn.
-/// Uncorrelated lines return false and keep the existing turn handling
-/// (notably the fail-fast on unrelated error envelopes).
+/// request: a VALID result envelope (matching id plus a `result` member,
+/// the only shape the protocol requires of a `turn/steer` reply — see
+/// `session.Request("turn/steer", ...)` in
+/// `modules/engines/src/codex/engine.ts`) resolves the delivery
+/// successfully, and a valid error envelope resolves it failed. A
+/// matching id with NEITHER (for example a bare `{id}` with no result)
+/// is a malformed provider reply and resolves typed failure, never
+/// success. The line never becomes a turn event either way — a steer
+/// response is not turn completion, and a rejected follow-up fails only
+/// its own delivery, never the turn. Uncorrelated lines return false and
+/// keep the existing turn handling (notably the fail-fast on unrelated
+/// error envelopes).
 pub(crate) fn ack_codex_steer_response(
     line: &str,
     pending_acks: &mut HashMap<u64, oneshot::Sender<Result<(), SteerError>>>,
@@ -2606,8 +2612,10 @@ pub(crate) fn ack_codex_steer_response(
     };
     if super::codex::is_codex_error_response(line) {
         let _ = ack.send(Err(SteerError::DeliveryFailed));
-    } else {
+    } else if is_codex_result_for(line, id) {
         let _ = ack.send(Ok(()));
+    } else {
+        let _ = ack.send(Err(SteerError::DeliveryFailed));
     }
     true
 }
@@ -5153,6 +5161,7 @@ async fn create_configured_session(
                 authorize,
                 observations,
                 respond,
+                steer_rx,
             },
             parts,
             EngineOperationError::Configuration,
@@ -5194,6 +5203,7 @@ async fn create_configured_session(
                         authorize,
                         observations,
                         respond,
+                        steer_rx,
                     },
                     parts,
                     map_resume_error(error),
@@ -5244,6 +5254,7 @@ async fn create_configured_session(
                         authorize,
                         observations,
                         respond,
+                        steer_rx,
                     },
                     parts,
                     map_prompt_error(error),
@@ -5315,6 +5326,7 @@ async fn authorize_configured_session(
                     authorize,
                     observations,
                     respond,
+                    steer_rx,
                 },
                 parts,
                 map_stream_error(error),

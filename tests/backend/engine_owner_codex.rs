@@ -534,6 +534,20 @@ fn steer_ack_routing_resolves_typed_never_as_turn_event() {
     ));
     assert_eq!(ack_rx.try_recv(), Ok(Ok(())));
 
+    // A matching id with NEITHER a valid result nor a valid error (a bare
+    // `{id}` with no result) is a malformed provider reply: it still
+    // consumes the entry so the line never becomes a turn event, but it
+    // resolves typed failure, never success.
+    let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+    pending.insert(45, ack_tx);
+    assert!(ack_codex_steer_response(r#"{"id":45}"#, &mut pending));
+    assert!(pending.is_empty());
+    assert_eq!(
+        ack_rx.try_recv(),
+        Ok(Err(SteerError::DeliveryFailed)),
+        "malformed matching reply fails typed, never success"
+    );
+
     // Anything uncorrelated keeps the existing turn handling: unknown ids,
     // method notifications, and error envelopes for other requests all
     // return false and leave pending entries intact.
