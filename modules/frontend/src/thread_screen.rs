@@ -48,9 +48,9 @@ use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, Focus
 use artisan_ui::fade_arc::FadeArc;
 use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use artisan_ui::motion::MotionPolicy;
-use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
+use artisan_ui::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::{
-    App, AppContext as _, Context, Div, Entity, FocusHandle, FontWeight, Hsla, IntoElement,
+    App, AppContext as _, Context, Div, Entity, FocusHandle, Hsla, IntoElement,
     Render, SharedString, Subscription, Window, div,
     prelude::{InteractiveElement as _, ParentElement as _, Styled as _},
     px, rgb, rgb_to_hsla,
@@ -277,6 +277,13 @@ fn inspector_row_glyph(theme: &ArtisanTheme, kind: InspectorRowIcon) -> impl Int
         IconTint::Muted,
     ))
     .flex_shrink_0()
+}
+
+/// Workspace body tracking at the control size: −0.04 em resolved through
+/// the shared helper, so 14 px workspace text takes −0.56 px
+/// (`docs-responsive-surfaces`, `ProseTypography::body_tracking_px`).
+fn workspace_body_tracking(theme: &ArtisanTheme) -> f32 {
+    ProseTypography::body_tracking_px(f32::from(theme.typography.control_text))
 }
 
 /// `px-2 py-2` on inspector rows and card headings.
@@ -645,7 +652,8 @@ impl ThreadScreen {
                     .min_w_0()
                     .truncate()
                     .text_size(theme.typography.control_text)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(ProseTypography::BODY_WEIGHT)
+                    .letter_spacing(px(workspace_body_tracking(theme)))
                     .text_color(theme.colors.foreground.to_paint())
                     .child(self.display_title().to_owned()),
             )
@@ -701,6 +709,8 @@ impl ThreadScreen {
                     .child(
                         div()
                             .text_size(theme.typography.control_text)
+                            .font_weight(ProseTypography::BODY_WEIGHT)
+                            .letter_spacing(px(workspace_body_tracking(theme)))
                             .text_color(theme.colors.muted_foreground.to_paint())
                             .child("No messages yet."),
                     ),
@@ -736,6 +746,8 @@ impl ThreadScreen {
                     .flex_1()
                     .min_w_0()
                     .text_size(theme.typography.control_text)
+                    .font_weight(ProseTypography::BODY_WEIGHT)
+                    .letter_spacing(px(workspace_body_tracking(theme)))
                     .text_color(theme.colors.foreground.to_paint())
                     .child(label.to_owned()),
             )
@@ -745,6 +757,8 @@ impl ThreadScreen {
                     .max_w(px(ENV_VALUE_MAX_WIDTH_PX))
                     .truncate()
                     .text_size(theme.typography.control_text)
+                    .font_weight(ProseTypography::BODY_WEIGHT)
+                    .letter_spacing(px(workspace_body_tracking(theme)))
                     .text_color(theme.colors.foreground.to_paint())
                     .child(value),
             )
@@ -787,6 +801,8 @@ impl ThreadScreen {
                             .flex_1()
                             .min_w_0()
                             .text_size(theme.typography.control_text)
+                            .font_weight(ProseTypography::BODY_WEIGHT)
+                            .letter_spacing(px(workspace_body_tracking(theme)))
                             .text_color(theme.colors.foreground.to_paint())
                             .child("Changes"),
                     )
@@ -794,6 +810,9 @@ impl ThreadScreen {
                         div()
                             .flex_shrink_0()
                             .text_size(theme.typography.control_text)
+                            // Mono numerals keep normal tracking
+                            // (`utilities.css:717-719` code rule).
+                            .letter_spacing(px(0.0))
                             .text_color(rgb_to_hsla(rgb(ADDED_LINES_GREEN)))
                             .child(format!("+{}", summary.lines_added)),
                     )
@@ -801,6 +820,7 @@ impl ThreadScreen {
                         div()
                             .flex_shrink_0()
                             .text_size(theme.typography.control_text)
+                            .letter_spacing(px(0.0))
                             .text_color(rgb_to_hsla(rgb(DELETED_LINES_RED)))
                             .child(format!("{MINUS_SIGN}{}", summary.lines_deleted)),
                     ),
@@ -901,6 +921,8 @@ impl ThreadScreen {
                                     .min_w_0()
                                     .truncate()
                                     .text_size(theme.typography.control_text)
+                                    .font_weight(ProseTypography::BODY_WEIGHT)
+                                    .letter_spacing(px(workspace_body_tracking(theme)))
                                     .text_color(theme.colors.foreground.to_paint())
                                     .child(terminal_display_name(session)),
                             ),
@@ -911,6 +933,9 @@ impl ThreadScreen {
                             .max_w(px(160.0))
                             .truncate()
                             .text_size(theme.typography.label_text)
+                            // Mono command keeps normal tracking
+                            // (`utilities.css:717-719` code rule).
+                            .letter_spacing(px(0.0))
                             .text_color(theme.colors.muted_foreground.to_paint())
                             .child(terminal_command_line(session)),
                     ),
@@ -926,7 +951,8 @@ impl ThreadScreen {
                             .pt(px(ROW_PAD_PX))
                             .pb(px(4.0))
                             .text_size(theme.typography.control_text)
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(ProseTypography::BODY_WEIGHT)
+                            .letter_spacing(px(workspace_body_tracking(theme)))
                             .text_color(theme.colors.foreground.to_paint())
                             .child("Terminals"),
                     ),
@@ -940,9 +966,10 @@ impl ThreadScreen {
     ///
     /// Legacy frame: `ShaderGlassSurface` at `radius-xl` around the `p-1`
     /// child holding the `h2.px-2.pt-2.pb-1.text-sm.font-medium` "Checklist"
-    /// heading and the `rounded-lg.px-2.py-2.text-sm` rows. Tone maps the
-    /// exact legacy classes to theme colors: active (`font-medium
-    /// text-foreground`) keeps weight and foreground;
+    /// heading and the `rounded-lg.px-2.py-2.text-sm` rows. `font-medium`
+    /// resolves through the redefined token to the workspace 410, so every
+    /// row and the heading take it with surface tracking; tone maps the exact
+    /// legacy classes to theme colors otherwise: active keeps foreground;
     /// completed/pending/skipped (`text-muted-foreground`, with
     /// `line-through` on completed/skipped) use the muted token with
     /// strikethrough where legacy crosses out. The `list-disc` markers and
@@ -964,13 +991,18 @@ impl ThreadScreen {
                 .px(px(ROW_PAD_PX))
                 .py(px(ROW_PAD_PX))
                 .text_size(theme.typography.control_text)
+                // Every row inherits the workspace 410 (`docs-responsive-surfaces`
+                // scope; `font-medium` resolves through the redefined token);
+                // tone and strikethrough stay per state below.
+                .font_weight(ProseTypography::BODY_WEIGHT)
+                .letter_spacing(px(workspace_body_tracking(theme)))
                 .debug_selector(|| {
                     format!("artisan-thread-screen-checklist-entry-{}", presented.id)
                 });
             row = match presented.state {
-                ChecklistEntryState::Active => row
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.colors.foreground.to_paint()),
+                ChecklistEntryState::Active => {
+                    row.text_color(theme.colors.foreground.to_paint())
+                }
                 ChecklistEntryState::Completed => row
                     .text_color(theme.colors.muted_foreground.to_paint())
                     .line_through(),
@@ -993,7 +1025,8 @@ impl ThreadScreen {
                             .pt(px(ROW_PAD_PX))
                             .pb(px(4.0))
                             .text_size(theme.typography.control_text)
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(ProseTypography::BODY_WEIGHT)
+                            .letter_spacing(px(workspace_body_tracking(theme)))
                             .text_color(theme.colors.foreground.to_paint())
                             .child("Checklist"),
                     )
@@ -1141,6 +1174,8 @@ impl ThreadScreen {
                     .child(
                         div()
                             .text_size(theme.typography.control_text)
+                            .font_weight(ProseTypography::BODY_WEIGHT)
+                            .letter_spacing(px(workspace_body_tracking(theme)))
                             .text_color(theme.colors.destructive.to_paint())
                             .child(message.to_owned()),
                     )
@@ -1566,6 +1601,18 @@ mod tests {
             (f32::from(inspector.size.width) - 350.0).abs() < 1.0,
             "returned inspector keeps the 350px clamp"
         );
+    }
+
+    #[test]
+    fn workspace_body_type_derives_from_the_shared_helper() {
+        // Workspace surfaces inherit 410 / −0.04 em (`docs-responsive-surfaces`);
+        // 14 px control text resolves tracking through the shared helper.
+        assert_eq!(ProseTypography::BODY_WEIGHT.0, 410.0);
+        assert!(
+            (ProseTypography::body_tracking_px(14.0) - -0.56).abs() < 1e-6,
+            "14px workspace tracking must resolve −0.04 em"
+        );
+        assert_eq!(ProseTypography::BODY_TRACKING_PX, -0.64);
     }
 
     #[test]

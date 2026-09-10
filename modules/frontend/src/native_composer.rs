@@ -14,7 +14,7 @@ use artisan_ui::{
     asset_seam::asset_glyph,
     button::{AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility},
     motion::MotionPolicy,
-    theme::{ArtisanTheme, DesktopTheme, ThemeMode},
+    theme::{ArtisanTheme, DesktopTheme, ProseTypography, ThemeMode},
 };
 use gpui::ColorExt;
 use gpui::StyledImage;
@@ -2363,6 +2363,8 @@ impl Render for NativeComposer {
             .text_color(desktop_theme.foreground)
             .text_size(px(16.0))
             .line_height(px(24.0))
+            .font_weight(ProseTypography::BODY_WEIGHT)
+            .letter_spacing(px(ProseTypography::body_tracking_px(16.0)))
             .whitespace_normal()
             .track_focus(&focus)
             .child(styled_text);
