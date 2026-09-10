@@ -58,12 +58,22 @@ neither lives in this struct.
 ## Semantics
 
 `compile_text_runs` is a pure, windowless compiler. It unions the
-boundaries of the highlight ranges and the override ranges, resolves
-overlapping highlights with the existing vendor
-`gpui::combine_highlights` semantic, then emits one `TextRun` per atomic
-segment as `default.highlight(segment_highlight).to_run(len)` with the
-active `font_family` / `letter_spacing` override applied. Adjacent runs
-with identical shaping properties are coalesced. Guarantees:
+boundaries of the highlight ranges and the override ranges, then emits
+one run per atomic segment as `default.highlight(segment).to_run(len)`
+with the active `font_family` / `letter_spacing` override applied.
+Adjacent runs with identical shaping properties are coalesced.
+
+Highlight contract: callers pass sorted, non-overlapping highlight
+ranges, as produced by the Markdown seam and by
+`merge_selection_highlight`. Anything else is still accepted without
+panicking: unsorted input is normalized by position, and overlapping
+ranges resolve through the existing vendor `gpui::combine_highlights`
+sweep. Overlaps that agree on discrete properties (weight, style) merge
+deterministically; overlaps with conflicting discrete properties
+resolve in vendor fold order, so which one wins is unspecified — keep
+conflicting highlight ranges disjoint. Overlapping overrides keep the
+earliest range and drop the later one after sorting by start
+(deterministic). Guarantees:
 
 - Exact coverage: run lengths sum to `text.len()`; concatenated runs
   reproduce the plaintext bytes. Copy/hit-test inputs never change.

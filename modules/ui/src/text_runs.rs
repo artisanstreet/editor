@@ -42,13 +42,21 @@ pub struct TextRunOverride {
 /// The caller merges the selection wash into `highlights` first (see
 /// [`crate::selectable_text::merge_selection_highlight`], which only
 /// touches foreground/background), then this function unions the
-/// highlight and override boundaries, resolves overlapping highlights
-/// with the existing vendor
-/// [`combine_highlights`](gpui::combine_highlights) semantic, and emits
-/// one run per atomic segment as
-/// `default.highlight(segment).to_run(len)` with the active family and
-/// spacing overrides applied. Adjacent runs with identical shaping
-/// properties are coalesced.
+/// highlight and override boundaries and emits one run per atomic
+/// segment as `default.highlight(segment).to_run(len)` with the active
+/// family and spacing overrides applied. Adjacent runs with identical
+/// shaping properties are coalesced.
+///
+/// Highlight contract: callers pass sorted, non-overlapping highlight
+/// ranges, as produced by the Markdown seam and by
+/// [`crate::selectable_text::merge_selection_highlight`]. Anything else
+/// is still accepted without panicking: unsorted input is normalized by
+/// position, and overlapping ranges resolve through the existing vendor
+/// [`combine_highlights`](gpui::combine_highlights) sweep. Overlaps that
+/// agree on discrete properties (weight, style) merge deterministically;
+/// overlaps with conflicting discrete properties resolve in vendor fold
+/// order, so which one wins is unspecified — keep conflicting highlight
+/// ranges disjoint.
 ///
 /// Guarantees: run lengths sum to `text.len()` so plaintext and copied
 /// bytes stay exact; every boundary is a character boundary; weights,
@@ -199,170 +207,4 @@ fn runs_equal(left: &TextRun, right: &TextRun) -> bool {
         && left.underline == right.underline
         && left.strikethrough == right.strikethrough
         && left.letter_spacing == right.letter_spacing
-}
-
-#[cfg(test)]
-mod tests {
-    use std::ops::Range;
-
-    use gpui::{FontWeight, HighlightStyle, TextStyle, px};
-
-    use super::{TextRunOverride, compile_text_runs};
-
-    fn body_style() -> TextStyle {
-        TextStyle {
-            font_family: "Body".into(),
-            letter_spacing: Some(px(1.5)),
-            ..TextStyle::default()
-        }
-    }
-
-    fn mono(range: Range<usize>) -> TextRunOverride {
-        TextRunOverride {
-            range,
-            font_family: Some("Mono".into()),
-            letter_spacing: Some(px(0.0)),
-        }
-    }
-
-    fn bold(range: Range<usize>) -> (Range<usize>, HighlightStyle) {
-        (
-            range,
-            HighlightStyle {
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            },
-        )
-    }
-
-    #[test]
-    fn mono_override_splits_runs_with_exact_coverage() {
-        let text = "a💡b code";
-        let code = text.find("code").map(|s| s..s + "code".len()).unwrap_or(0..0);
-        let runs = compile_text_runs(text, &body_style(), &[], &[mono(code.clone())]);
-        assert_eq!(
-            runs.iter().map(|run| run.len).sum::<usize>(),
-            text.len()
-        );
-        let mut offset = 0_usize;
-        let mut saw_mono = false;
-        let mut saw_body = false;
-        for run in &runs {
-            let end = offset + run.len;
-            assert!(text.is_char_boundary(offset));
-            assert!(text.is_char_boundary(end));
-            if code.start <= offset && end <= code.end {
-                assert_eq!(run.font.family, "Mono".into());
-                assert_eq!(run.letter_spacing, Some(px(0.0)));
-                saw_mono = true;
-            } else {
-                assert_eq!(run.font.family, "Body".into());
-                assert_eq!(run.letter_spacing, Some(px(1.5)));
-                saw_body = true;
-            }
-            offset = end;
-        }
-        assert!(saw_mono && saw_body);
-    }
-
-    #[test]
-    fn weights_survive_overlapping_highlights_and_overrides() {
-        let text = "0123456789";
-        let highlights = vec![bold(0..6), bold(4..10)];
-        let runs = compile_text_runs(text, &body_style(), &highlights, &[mono(2..8)]);
-        assert_eq!(
-            runs.iter().map(|run| run.len).sum::<usize>(),
-            text.len()
-        );
-        let mut offset = 0_usize;
-        for run in &runs {
-            let end = offset + run.len;
-            assert_eq!(run.font.weight, FontWeight::BOLD);
-            if 2 <= offset && end <= 8 {
-                assert_eq!(run.font.family, "Mono".into());
-                assert_eq!(run.letter_spacing, Some(px(0.0)));
-            } else {
-                assert_eq!(run.font.family, "Body".into());
-            }
-            offset = end;
-        }
-    }
-
-    #[test]
-    fn invalid_ranges_drop_entirely_without_shifting_text() {
-        // "a💡b": `a` is 0..1, `💡` is 1..5, `b` is 5..6.
-        let text = "a💡b";
-        let marker = HighlightStyle {
-            font_weight: Some(FontWeight::BOLD),
-            ..Default::default()
-        };
-        let highlights = vec![
-            (2..4, marker),
-            (0..99, marker),
-            (4..2, marker),
-            (1..1, marker),
-            (0..1, marker),
-        ];
-        let overrides = vec![
-            TextRunOverride {
-                range: 1..2,
-                font_family: Some("Mono".into()),
-                letter_spacing: Some(px(0.0)),
-            },
-            TextRunOverride {
-                range: 5..99,
-                font_family: Some("Mono".into()),
-                letter_spacing: Some(px(0.0)),
-            },
-            mono(0..1),
-            TextRunOverride {
-                range: 0..5,
-                font_family: Some("Other".into()),
-                letter_spacing: None,
-            },
-        ];
-        let runs = compile_text_runs(text, &body_style(), &highlights, &overrides);
-        assert_eq!(
-            runs.iter().map(|run| run.len).sum::<usize>(),
-            text.len()
-        );
-        let mut offset = 0_usize;
-        for run in &runs {
-            let end = offset + run.len;
-            if end <= 1 {
-                // The one valid highlight plus the one valid override.
-                assert_eq!(run.font.weight, FontWeight::BOLD);
-                assert_eq!(run.font.family, "Mono".into());
-            } else {
-                // Mid-emoji and out-of-bounds ranges were dropped
-                // entirely, not clamped onto the emoji: no leaked
-                // weight, no leaked mono family.
-                assert_eq!(run.font.weight, TextStyle::default().font_weight);
-                assert_eq!(run.font.family, "Body".into());
-                assert_eq!(run.letter_spacing, Some(px(1.5)));
-            }
-            offset = end;
-        }
-        assert_eq!(offset, text.len());
-    }
-
-    #[test]
-    fn empty_text_yields_no_runs() {
-        let runs = compile_text_runs(
-            "",
-            &body_style(),
-            &[bold(0..1)],
-            &[mono(0..1)],
-        );
-        assert!(runs.is_empty());
-    }
-
-    #[test]
-    fn plain_text_compiles_to_a_single_default_run() {
-        let runs = compile_text_runs("hello", &body_style(), &[], &[]);
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].len, 5);
-        assert_eq!(runs[0].font.family, "Body".into());
-        assert_eq!(runs[0].letter_spacing, Some(px(1.5)));
-    }
 }

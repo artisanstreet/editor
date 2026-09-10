@@ -675,6 +675,310 @@ fn text_run_pipeline_keeps_mono_through_selection_split() {
     );
 }
 
+/// Pure compiler coverage through the frozen consumer path: a mono
+/// override splits body runs with exact byte coverage across
+/// unicode/emoji, and every boundary stays on a character boundary.
+#[test]
+fn compiler_splits_mono_with_exact_coverage() {
+    let body_family: SharedString = "Body".into();
+    let mono_family: SharedString = "Mono".into();
+    let default = TextStyle {
+        font_family: body_family.clone(),
+        letter_spacing: Some(px(1.5)),
+        ..TextStyle::default()
+    };
+    let text = "a💡b code";
+    let code = text
+        .find("code")
+        .map(|s| s..s + "code".len())
+        .unwrap_or(0..0);
+    let runs = compile_text_runs(
+        text,
+        &default,
+        &[],
+        &[TextRunOverride {
+            range: code.clone(),
+            font_family: Some(mono_family.clone()),
+            letter_spacing: Some(px(0.0)),
+        }],
+    );
+    assert_eq!(
+        runs.iter().map(|run| run.len).sum::<usize>(),
+        text.len()
+    );
+    let mut offset = 0_usize;
+    let mut saw_mono = false;
+    let mut saw_body = false;
+    for run in &runs {
+        let end = offset + run.len;
+        assert!(text.is_char_boundary(offset));
+        assert!(text.is_char_boundary(end));
+        if code.start <= offset && end <= code.end {
+            assert_eq!(run.font.family, mono_family);
+            assert_eq!(run.letter_spacing, Some(px(0.0)));
+            saw_mono = true;
+        } else {
+            assert_eq!(run.font.family, body_family);
+            assert_eq!(run.letter_spacing, Some(px(1.5)));
+            saw_body = true;
+        }
+        offset = end;
+    }
+    assert!(saw_mono && saw_body);
+}
+
+/// Same-weight overlaps merge deterministically under a mono override:
+/// every run keeps BOLD, the override span keeps its family and zero
+/// spacing, and coverage stays exact.
+#[test]
+fn compiler_merges_agreeing_overlaps_deterministically() {
+    let body_family: SharedString = "Body".into();
+    let mono_family: SharedString = "Mono".into();
+    let default = TextStyle {
+        font_family: body_family.clone(),
+        letter_spacing: Some(px(1.5)),
+        ..TextStyle::default()
+    };
+    let text = "0123456789";
+    let bold = HighlightStyle {
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    let runs = compile_text_runs(
+        text,
+        &default,
+        &[(0..6, bold), (4..10, bold)],
+        &[TextRunOverride {
+            range: 2..8,
+            font_family: Some(mono_family.clone()),
+            letter_spacing: Some(px(0.0)),
+        }],
+    );
+    assert_eq!(
+        runs.iter().map(|run| run.len).sum::<usize>(),
+        text.len()
+    );
+    let mut offset = 0_usize;
+    for run in &runs {
+        let end = offset + run.len;
+        assert_eq!(run.font.weight, FontWeight::BOLD);
+        if 2 <= offset && end <= 8 {
+            assert_eq!(run.font.family, mono_family);
+            assert_eq!(run.letter_spacing, Some(px(0.0)));
+        } else {
+            assert_eq!(run.font.family, body_family);
+        }
+        offset = end;
+    }
+    assert_eq!(offset, text.len());
+}
+
+/// Unsorted highlight input normalizes by position: the same ranges in
+/// either order compile to identical runs.
+#[test]
+fn compiler_normalizes_unsorted_highlights() {
+    let default = TextStyle {
+        font_family: "Body".into(),
+        letter_spacing: None,
+        ..TextStyle::default()
+    };
+    let text = "0123456789";
+    let ordered = vec![
+        (
+            0..4,
+            HighlightStyle {
+                font_weight: Some(FontWeight::NORMAL),
+                ..Default::default()
+            },
+        ),
+        (
+            6..10,
+            HighlightStyle {
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        ),
+    ];
+    let mut reversed = ordered.clone();
+    reversed.reverse();
+    assert_eq!(
+        compile_text_runs(text, &default, &ordered, &[]),
+        compile_text_runs(text, &default, &reversed, &[])
+    );
+    let runs = compile_text_runs(text, &default, &reversed, &[]);
+    assert_eq!(
+        runs.iter().map(|run| run.len).sum::<usize>(),
+        text.len()
+    );
+    let mut offset = 0_usize;
+    for run in &runs {
+        let end = offset + run.len;
+        if end <= 4 {
+            assert_eq!(run.font.weight, FontWeight::NORMAL);
+        } else if offset >= 6 {
+            assert_eq!(run.font.weight, FontWeight::BOLD);
+        } else {
+            assert_eq!(run.font.weight, TextStyle::default().font_weight);
+        }
+        offset = end;
+    }
+    assert_eq!(offset, text.len());
+}
+
+/// Conflicting overlap (BOLD vs EXTRA_BOLD) stays fail-closed: exact
+/// coverage, deterministic outer regions, and the overlap winner is one
+/// of the two inputs — which one wins is unspecified by contract, so no
+/// winner is asserted.
+#[test]
+fn compiler_conflicting_overlap_resolves_without_shift() {
+    let default = TextStyle {
+        font_family: "Body".into(),
+        letter_spacing: None,
+        ..TextStyle::default()
+    };
+    let text = "0123456789";
+    let highlights = vec![
+        (
+            0..6,
+            HighlightStyle {
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        ),
+        (
+            4..10,
+            HighlightStyle {
+                font_weight: Some(FontWeight::EXTRA_BOLD),
+                ..Default::default()
+            },
+        ),
+    ];
+    let runs = compile_text_runs(text, &default, &highlights, &[]);
+    assert_eq!(
+        runs.iter().map(|run| run.len).sum::<usize>(),
+        text.len()
+    );
+    let mut offset = 0_usize;
+    for run in &runs {
+        let end = offset + run.len;
+        if end <= 4 {
+            assert_eq!(run.font.weight, FontWeight::BOLD);
+        } else if offset >= 6 {
+            assert_eq!(run.font.weight, FontWeight::EXTRA_BOLD);
+        } else {
+            assert!(
+                run.font.weight == FontWeight::BOLD
+                    || run.font.weight == FontWeight::EXTRA_BOLD,
+                "overlap winner must be one of the two inputs"
+            );
+        }
+        offset = end;
+    }
+    assert_eq!(offset, text.len());
+}
+
+/// Invalid ranges drop entirely without shifting surviving text: the
+/// mid-emoji and out-of-bounds markers must not clamp onto the emoji,
+/// and the overlapping override loses to the earliest range.
+#[test]
+fn compiler_drops_invalid_ranges_entirely() {
+    let body_family: SharedString = "Body".into();
+    let mono_family: SharedString = "Mono".into();
+    let default = TextStyle {
+        font_family: body_family.clone(),
+        letter_spacing: Some(px(1.5)),
+        ..TextStyle::default()
+    };
+    // "a💡b": `a` is 0..1, `💡` is 1..5, `b` is 5..6.
+    let text = "a💡b";
+    let marker = HighlightStyle {
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    let highlights = vec![
+        (2..4, marker),
+        (0..99, marker),
+        (4..2, marker),
+        (1..1, marker),
+        (0..1, marker),
+    ];
+    let overrides = vec![
+        TextRunOverride {
+            range: 1..2,
+            font_family: Some(mono_family.clone()),
+            letter_spacing: Some(px(0.0)),
+        },
+        TextRunOverride {
+            range: 5..99,
+            font_family: Some(mono_family.clone()),
+            letter_spacing: Some(px(0.0)),
+        },
+        TextRunOverride {
+            range: 0..1,
+            font_family: Some(mono_family.clone()),
+            letter_spacing: Some(px(0.0)),
+        },
+        TextRunOverride {
+            range: 0..5,
+            font_family: Some("Other".into()),
+            letter_spacing: None,
+        },
+    ];
+    let runs = compile_text_runs(text, &default, &highlights, &overrides);
+    assert_eq!(
+        runs.iter().map(|run| run.len).sum::<usize>(),
+        text.len()
+    );
+    let mut offset = 0_usize;
+    for run in &runs {
+        let end = offset + run.len;
+        if end <= 1 {
+            // The one valid highlight plus the one valid override.
+            assert_eq!(run.font.weight, FontWeight::BOLD);
+            assert_eq!(run.font.family, mono_family);
+        } else {
+            assert_eq!(run.font.weight, TextStyle::default().font_weight);
+            assert_eq!(run.font.family, body_family);
+            assert_eq!(run.letter_spacing, Some(px(1.5)));
+        }
+        offset = end;
+    }
+    assert_eq!(offset, text.len());
+}
+
+/// Empty text yields zero runs without touching invalid ranges; plain
+/// text coalesces to a single default run.
+#[test]
+fn compiler_empty_and_plain_edge_cases() {
+    let default = TextStyle {
+        font_family: "Body".into(),
+        letter_spacing: Some(px(1.5)),
+        ..TextStyle::default()
+    };
+    let bold = HighlightStyle {
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    let empty = compile_text_runs(
+        "",
+        &default,
+        &[(0..1, bold)],
+        &[TextRunOverride {
+            range: 0..1,
+            font_family: Some("Mono".into()),
+            letter_spacing: Some(px(0.0)),
+        }],
+    );
+    assert!(empty.is_empty());
+
+    let plain = compile_text_runs("hello", &default, &[], &[]);
+    assert_eq!(plain.len(), 1);
+    let first = plain.first().expect("plain text compiles to one run");
+    assert_eq!(first.len, 5);
+    assert_eq!(first.font.family, "Body".into());
+    assert_eq!(first.letter_spacing, Some(px(1.5)));
+}
+
 /// Selectable text with a mono override, mirroring a transcript body with
 /// one inline-code span. Drag-selecting across the family boundary must
 /// still hit-test every byte and copy the exact plaintext.
