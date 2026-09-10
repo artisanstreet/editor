@@ -53,7 +53,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use super::{
     NativeRunDispatcherConfig, NativeRunDispatcherConfigInput, TurnConsumptionContext,
-    TurnConsumptionState, handle_steer,
+    TurnConsumptionState, handle_observation, handle_steer,
 };
 use crate::{
     SystemCommandOrigin,
@@ -409,16 +409,6 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
             .expect("wire turn admits");
         turn.prepare().await.expect("wire turn prepares");
         turn.authorize().expect("wire turn authorizes once");
-        // The burst scenario stays live after its initial delta: this first
-        // observation proves the pump runs before the steer is sent.
-        let initial = tokio::time::timeout(OBSERVE_DEADLINE, turn.next_observation())
-            .await
-            .expect("initial observation settles")
-            .expect("initial observation exists");
-        assert!(
-            matches!(initial, EngineObservation::TextDelta(_)),
-            "burst scenario must open with a valid delta"
-        );
 
         // The steered message is accepted after the Codex configuration, so
         // its receipt snapshot names the live engine.
@@ -457,10 +447,19 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
                 run_start_key: &seed.run_start_key,
                 credentials: &seed.credentials,
                 expected_launch_at: UnixMillis::from_millis(500),
-                expected_updated_at: UnixMillis::from_millis(500),
+                expected_updated_at: UnixMillis::from_millis(600),
             },
             EngineId::Codex,
         );
+        // The opening delta goes through the real observation handler like
+        // every later frame, keeping state and durable counters honest
+        // before the steer is sent.
+        let initial = tokio::time::timeout(OBSERVE_DEADLINE, turn.next_observation())
+            .await
+            .expect("initial observation settles")
+            .expect("initial observation exists");
+        assert!(matches!(initial, EngineObservation::TextDelta(_)));
+        handle_observation(&context, &mut state, &mut turn, initial).await;
         let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
         handle_steer(
             &context,
@@ -480,7 +479,7 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
             .expect("steer ack sends");
         assert!(
             matches!(ack, RunInteractionAck::Steered),
-            "burst ack must steer"
+            "burst ack must steer, got {ack:?}"
         );
         // The Steered ack only leaves the Acked(Ok) arm, which never saw a
         // terminal: the message completes while the original turn is live.
@@ -557,7 +556,7 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
             .expect("replay ack sends");
         assert!(
             matches!(replay, RunInteractionAck::Steered),
-            "completed replay must steer without resending"
+            "completed replay must steer without resending, got {replay:?}"
         );
         assert_eq!(
             steer_request_lines(&temp.dir).len(),
@@ -647,14 +646,6 @@ async fn codex_steer_reject_fails_typed_with_payload_preserved() {
             .expect("wire turn admits");
         turn.prepare().await.expect("wire turn prepares");
         turn.authorize().expect("wire turn authorizes once");
-        let initial = tokio::time::timeout(OBSERVE_DEADLINE, turn.next_observation())
-            .await
-            .expect("initial observation settles")
-            .expect("initial observation exists");
-        assert!(
-            matches!(initial, EngineObservation::TextDelta(_)),
-            "reject scenario must open with a valid delta"
-        );
 
         let command_id = RequestId::parse("request-steer-1").expect("request id");
         let message_id = MessageId::parse("message-steer-1").expect("message id");
@@ -691,10 +682,19 @@ async fn codex_steer_reject_fails_typed_with_payload_preserved() {
                 run_start_key: &seed.run_start_key,
                 credentials: &seed.credentials,
                 expected_launch_at: UnixMillis::from_millis(500),
-                expected_updated_at: UnixMillis::from_millis(500),
+                expected_updated_at: UnixMillis::from_millis(600),
             },
             EngineId::Codex,
         );
+        // The opening delta goes through the real observation handler like
+        // every later frame, keeping state and durable counters honest
+        // before the steer is sent.
+        let initial = tokio::time::timeout(OBSERVE_DEADLINE, turn.next_observation())
+            .await
+            .expect("initial observation settles")
+            .expect("initial observation exists");
+        assert!(matches!(initial, EngineObservation::TextDelta(_)));
+        handle_observation(&context, &mut state, &mut turn, initial).await;
         let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
         handle_steer(
             &context,
@@ -719,7 +719,7 @@ async fn codex_steer_reject_fails_typed_with_payload_preserved() {
                     reason: "steer write to the provider failed",
                 }
             ),
-            "provider rejection must refuse typed"
+            "provider rejection must refuse typed, got {ack:?}"
         );
 
         let (dispatch_state, reason, _) = repository
@@ -817,11 +817,6 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
             .expect("wire turn admits");
         turn.prepare().await.expect("wire turn prepares");
         turn.authorize().expect("wire turn authorizes once");
-        let initial = tokio::time::timeout(OBSERVE_DEADLINE, turn.next_observation())
-            .await
-            .expect("initial observation settles")
-            .expect("initial observation exists");
-        assert!(matches!(initial, EngineObservation::TextDelta(_)));
 
         let command_id = RequestId::parse("request-steer-1").expect("request id");
         let message_id = MessageId::parse("message-steer-1").expect("message id");
@@ -863,10 +858,19 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
                 run_start_key: &seed.run_start_key,
                 credentials: &seed.credentials,
                 expected_launch_at: UnixMillis::from_millis(500),
-                expected_updated_at: UnixMillis::from_millis(500),
+                expected_updated_at: UnixMillis::from_millis(600),
             },
             EngineId::Codex,
         );
+        // The opening delta goes through the real observation handler like
+        // every later frame, keeping state and durable counters honest
+        // before the steer is sent.
+        let initial = tokio::time::timeout(OBSERVE_DEADLINE, turn.next_observation())
+            .await
+            .expect("initial observation settles")
+            .expect("initial observation exists");
+        assert!(matches!(initial, EngineObservation::TextDelta(_)));
+        handle_observation(&context, &mut state, &mut turn, initial).await;
         let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
         handle_steer(
             &context,
@@ -886,7 +890,7 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
             .expect("cancel ack sends");
         assert!(
             matches!(ack, RunInteractionAck::Unavailable),
-            "pre-ack cancellation must answer transiently"
+            "pre-ack cancellation must answer transiently, got {ack:?}"
         );
         let (dispatch_state, _, _) = repository
             .read_steered_dispatch_state(&message_id)
@@ -934,7 +938,7 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
             .expect("retry ack sends");
         assert!(
             matches!(ack, RunInteractionAck::Steered),
-            "retry after cancel must steer"
+            "retry after cancel must steer, got {ack:?}"
         );
         assert_eq!(
             steer_request_lines(&temp.dir).len(),
@@ -1004,11 +1008,6 @@ async fn codex_steer_known_acked_retry_replays_projection_without_provider() {
             .expect("wire turn admits");
         turn.prepare().await.expect("wire turn prepares");
         turn.authorize().expect("wire turn authorizes once");
-        let initial = tokio::time::timeout(OBSERVE_DEADLINE, turn.next_observation())
-            .await
-            .expect("initial observation settles")
-            .expect("initial observation exists");
-        assert!(matches!(initial, EngineObservation::TextDelta(_)));
 
         let command_id = RequestId::parse("request-steer-1").expect("request id");
         let message_id = MessageId::parse("message-steer-1").expect("message id");
@@ -1068,10 +1067,19 @@ async fn codex_steer_known_acked_retry_replays_projection_without_provider() {
                 run_start_key: &seed.run_start_key,
                 credentials: &seed.credentials,
                 expected_launch_at: UnixMillis::from_millis(500),
-                expected_updated_at: UnixMillis::from_millis(500),
+                expected_updated_at: UnixMillis::from_millis(600),
             },
             EngineId::Codex,
         );
+        // The opening delta goes through the real observation handler like
+        // every later frame, keeping state and durable counters honest
+        // before the steer is sent.
+        let initial = tokio::time::timeout(OBSERVE_DEADLINE, turn.next_observation())
+            .await
+            .expect("initial observation settles")
+            .expect("initial observation exists");
+        assert!(matches!(initial, EngineObservation::TextDelta(_)));
+        handle_observation(&context, &mut state, &mut turn, initial).await;
         let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
         handle_steer(
             &context,
@@ -1091,7 +1099,7 @@ async fn codex_steer_known_acked_retry_replays_projection_without_provider() {
             .expect("retry ack sends");
         assert!(
             matches!(ack, RunInteractionAck::Steered),
-            "known-acked retry must steer from the open row"
+            "known-acked retry must steer from the open row, got {ack:?}"
         );
         let (dispatch_state, _, _) = repository
             .read_steered_dispatch_state(&message_id)
