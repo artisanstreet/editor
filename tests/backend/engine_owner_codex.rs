@@ -2701,7 +2701,7 @@ async fn activity_ids_are_stable_and_fragments_are_bounded() {
     assert_eq!(replayed, rows, "replay reproduces identical observations");
 
     // Multi-byte text fragments on UTF-8 boundaries without corruption.
-    let wide = "é".repeat(3_000);
+    let wide = "é".repeat(5_000);
     let event = parse_frame(
         &format!(
             r#"{{"method":"item/commandExecution/outputDelta","params":{{"delta":"{wide}","itemId":"cmd-1","threadId":"t-1","turnId":"turn-1"}}}}"#
@@ -2710,14 +2710,28 @@ async fn activity_ids_are_stable_and_fragments_are_bounded() {
     )
     .expect("wide output parses");
     let (_, rows) = apply_activity(event, &run, &mut tracker, &mut active, 41).await;
-    assert_eq!(rows.len(), 2, "6000 bytes split at the 8192-byte output ceiling");
+    assert_eq!(
+        rows.len(),
+        2,
+        "10000 bytes split at the 8192-byte output ceiling"
+    );
     let mut joined = String::new();
-    for row in &rows {
+    for (index, row) in rows.iter().enumerate() {
         let artisan_domain::Observation::TerminalActivity(activity) = row else {
             panic!("expected terminal output rows");
         };
         assert_eq!(activity.state(), artisan_domain::TerminalActivityState::Output);
-        joined.push_str(activity.output().expect("output chunk present"));
+        let output = activity.output().expect("output chunk present");
+        assert!(
+            output.len() <= artisan_domain::OBSERVATION_OUTPUT_MAX_BYTES,
+            "each fragment respects the domain output ceiling"
+        );
+        assert_eq!(
+            activity.id().as_str(),
+            format!("codex-run-1:codex:41:term:cmd-1:out:{index}"),
+            "fragment suffix disambiguates without collision"
+        );
+        joined.push_str(output);
     }
     assert_eq!(joined, wide, "wide fragments reassemble exactly");
 
