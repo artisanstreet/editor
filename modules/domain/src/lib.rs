@@ -80,7 +80,8 @@ pub use engine_config::{
     OpenCode2Selection, WebSearchAccess,
 };
 pub use events::{
-    EngineObservationEvent, Event, FirstMessageQueued, ProjectAttached, ThreadCreated,
+    EngineObservationAttribution, EngineObservationEvent, Event, FirstMessageQueued, ProjectAttached,
+    ThreadCreated,
 };
 pub use identifiers::{
     DirectoryId, EngineAgentId, EngineModelId, EngineProfileId, EngineProfileIdError,

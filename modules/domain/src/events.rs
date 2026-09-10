@@ -15,9 +15,10 @@
 //! only [`PartialEq`]. Every exhaustive `match` on this enum names the
 //! engine arm explicitly; no wildcard may hide it.
 
-use crate::ThreadId;
 use crate::model::{ProjectSummary, QueuedMessage, ThreadSummary};
 use crate::observation::Observation;
+use crate::time::UnixMillis;
+use crate::{RunId, ThreadId, TurnId};
 
 /// One directory attach completed and its project identity was minted.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,4 +78,32 @@ pub struct EngineObservationEvent {
     pub thread_id: ThreadId,
     /// The committed observation row.
     pub observation: Observation,
+    /// Durable delivery attribution of the committed row.
+    ///
+    /// `None` marks legacy unattributed events only. Every row the
+    /// observation ledger appends reads back as `Some`: the producing run,
+    /// the Forge turn that run launched from, the caller-injected commit
+    /// instant, and the thread-scoped delivery sequence.
+    pub attribution: Option<EngineObservationAttribution>,
+}
+
+/// Durable delivery attribution of one committed engine observation.
+///
+/// The Forge turn is resolved from the run scope at commit time, never
+/// derived from a provider string. The commit instant is the
+/// caller-injected batch operation time; no new wall-clock is sampled.
+/// The delivery sequence is a thread-scoped strictly increasing positive
+/// counter allocated in the commit transaction, separate from the
+/// run-local [`ObservationSequence`](crate::ObservationSequence) the
+/// observation itself carries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EngineObservationAttribution {
+    /// Run that produced the observation.
+    pub run_id: RunId,
+    /// Forge turn the producing run launched from.
+    pub turn_id: TurnId,
+    /// Caller-injected commit instant of the producing batch.
+    pub committed_at: UnixMillis,
+    /// Thread-scoped delivery sequence, strictly after the read cursor.
+    pub delivery_sequence: u64,
 }

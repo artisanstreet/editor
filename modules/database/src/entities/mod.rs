@@ -12,6 +12,7 @@ pub mod execution_value;
 pub mod message;
 pub mod message_dispatch;
 pub mod message_image_attachment;
+pub mod observation_ledger;
 pub mod pending_run_interaction;
 pub mod run_batch_receipt;
 pub mod run_checkpoint;
@@ -33,6 +34,7 @@ pub use execution_value::{
 pub use message::Model as Message;
 pub use message_dispatch::{DispatchState, Model as MessageDispatch};
 pub use message_image_attachment::Model as MessageImageAttachment;
+pub use observation_ledger::Model as ObservationLedger;
 pub use pending_run_interaction::{
     InteractionKind as PendingInteractionKind, InteractionState as PendingInteractionState,
     Model as PendingRunInteraction,

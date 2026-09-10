@@ -5,6 +5,7 @@ mod conversation_projection;
 mod dispatch_payload;
 mod first_message;
 mod message_dispatch;
+mod observation_ledger;
 mod project_catalog;
 mod project_threads;
 mod queue_message;

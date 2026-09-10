@@ -19,6 +19,8 @@ mod m20260906_000009_engine_run_config_v2;
 
 mod m20260908_000010_run_interactions;
 
+mod m20260909_000011_observation_ledger;
+
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseConnection;
 use thiserror::Error;
@@ -40,6 +42,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260905_000008_queued_message_withdrawals::Migration),
             Box::new(m20260906_000009_engine_run_config_v2::Migration),
             Box::new(m20260908_000010_run_interactions::Migration),
+            Box::new(m20260909_000011_observation_ledger::Migration),
         ]
     }
 }

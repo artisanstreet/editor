@@ -14,6 +14,7 @@ use crate::entities::{
     RenderPhase,
 };
 use crate::repository::database_error;
+use crate::repository::observation_ledger;
 
 use super::{CheckpointUpdate, RunObservationError};
 
@@ -116,6 +117,9 @@ pub(super) struct PersistencePlan {
     pub state: StateRow,
     pub checkpoint: CheckpointRow,
     pub receipt: ReceiptRow,
+    /// Immutable ledger rows appended with the batch; empty when the
+    /// checkpoint carries no claimed observation batch.
+    pub ledger: Vec<observation_ledger::LedgerInsert>,
 }
 
 pub(super) async fn load_conversation_state(
@@ -317,6 +321,7 @@ pub(super) async fn persist_plan(
     .map_err(|source| {
         RunObservationError::Repository(database_error("insert batch receipt", source))
     })?;
+    observation_ledger::insert_rows(transaction, &plan.ledger).await?;
     Ok(())
 }
 

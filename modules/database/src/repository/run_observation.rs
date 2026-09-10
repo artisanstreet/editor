@@ -406,10 +406,14 @@ impl Repository {
     /// the checkpoint, conversation state, origin turn, and every target
     /// item through the same transaction, then persists the ordinal ledger,
     /// item, patch, counter, checkpoint, and receipt effects and commits
-    /// once. Any failure explicitly rolls back everything including the
-    /// tentative fences. A commit error has unknown outcome: the caller may
-    /// retry the exact command for receipt classification but must never
-    /// reissue an external prompt.
+    /// once. When the checkpoint carries the typed observation tag, every
+    /// observation in the batch is also appended to the thread-scoped
+    /// observation ledger in the same transaction; `Keep` and opaque
+    /// non-observation checkpoints append nothing, and an exact receipt
+    /// replay appends nothing. Any failure explicitly rolls back everything
+    /// including the tentative fences. A commit error has unknown outcome:
+    /// the caller may retry the exact command for receipt classification but
+    /// must never reissue an external prompt.
     ///
     /// # Errors
     ///
@@ -910,6 +914,8 @@ async fn build_plan(
         plan_change(transaction, command, &mut accumulator, change).await?;
     }
 
+    let ledger = build_ledger_inserts(transaction, command).await?;
+
     Ok(projection::PersistencePlan {
         thread_id: launched.thread_id.as_str().to_owned(),
         fresh_ordinals: accumulator.fresh_ordinals,
@@ -935,7 +941,109 @@ async fn build_plan(
             batch_sequence: command.batch_sequence,
             digest: *digest,
         },
+        ledger,
     })
+}
+
+/// Extracts the claimed observation batch staged for the ledger, if any.
+///
+/// Returns `None` for `Keep` and for opaque non-observation checkpoints:
+/// a checkpoint counts as claimed when its bytes parse as a JSON envelope
+/// carrying [`OBSERVATION_FORMAT_TAG`], regardless of the outer checkpoint
+/// version. Anything else is an unrelated opaque checkpoint that stages no
+/// rows, preserving Replace semantics exactly. A claimed envelope always
+/// goes through strict canonical decoding with its stored version, so a
+/// claimed envelope with a mismatched version or corrupt body is a typed
+/// rejection: the batch commits neither its checkpoint nor partial ledger
+/// rows.
+fn claimed_observation_batch(
+    checkpoint: CheckpointUpdate<'_>,
+) -> Result<Option<DecodedObservationBatch>, RunObservationError> {
+    let CheckpointUpdate::Replace(engine) = checkpoint else {
+        return Ok(None);
+    };
+    let bytes = engine.as_slice();
+    let value: Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let Some(envelope) = value.as_object() else {
+        return Ok(None);
+    };
+    let claimed = envelope.get("format").and_then(Value::as_str) == Some(OBSERVATION_FORMAT_TAG);
+    if !claimed {
+        return Ok(None);
+    }
+    decode_observation_checkpoint(engine.version(), bytes)
+        .map(Some)
+        .map_err(|_| RunObservationError::InvalidCheckpoint {
+            reason: "claimed observation checkpoint is not canonical",
+        })
+}
+
+/// Stages one immutable ledger row per claimed observation.
+///
+/// Delivery sequences allocate in-transaction across runs on the batch
+/// thread; attribution resolves the Forge turn and commit instant from the
+/// batch scope, never from a provider string. Each row payload is the
+/// canonical single-observation envelope, reusing the batch codec without
+/// duplicating its vocabulary.
+async fn build_ledger_inserts(
+    transaction: &sea_orm::DatabaseTransaction,
+    command: &CommitRunBatch<'_>,
+) -> Result<Vec<super::observation_ledger::LedgerInsert>, RunObservationError> {
+    let Some(batch) = claimed_observation_batch(command.checkpoint)? else {
+        return Ok(Vec::new());
+    };
+    let launched = command.scope.launched;
+    let observations = batch.observations();
+    let base = super::observation_ledger::allocate_delivery_base(
+        transaction,
+        launched.thread_id.as_str(),
+        observations.len(),
+    )
+    .await?;
+    let mut rows = Vec::with_capacity(observations.len());
+    for (index, observation) in observations.iter().enumerate() {
+        let offset = i64::try_from(index).map_err(|_| RunObservationError::CounterOverflow {
+            counter: "delivery sequence",
+            value: i64::MAX,
+        })?;
+        let delivery_sequence =
+            base.checked_add(offset)
+                .ok_or(RunObservationError::CounterOverflow {
+                    counter: "delivery sequence",
+                    value: base,
+                })?;
+        let observation_sequence = i64::try_from(observation.sequence().get()).map_err(|_| {
+            RunObservationError::CounterOverflow {
+                counter: "observation sequence",
+                value: i64::MAX,
+            }
+        })?;
+        let payload = encode_observation_bytes(
+            batch.engine(),
+            batch.binding_version(),
+            None,
+            std::slice::from_ref(observation),
+        )
+        .map_err(|_| RunObservationError::InvalidCheckpoint {
+            reason: "observation ledger payload exceeds its byte ceiling",
+        })?;
+        rows.push(super::observation_ledger::LedgerInsert {
+            thread_id: launched.thread_id.as_str().to_owned(),
+            delivery_sequence,
+            run_id: launched.run_id.as_str().to_owned(),
+            observation_sequence,
+            turn_id: launched.turn_id.as_str().to_owned(),
+            committed_at_ms: millis(command.operated_at),
+            engine: batch.engine().as_str().to_owned(),
+            binding_version: batch.binding_version(),
+            observation_version: OBSERVATION_CHECKPOINT_VERSION,
+            observation_bytes: payload,
+        });
+    }
+    Ok(rows)
 }
 
 /// Validates one declared change and stages its tentative effects.
@@ -1302,15 +1410,18 @@ const fn dispatch_state_label(state: &DispatchState) -> &'static str {
 // S1a: version-tagged typed observation checkpoint codec
 // ---------------------------------------------------------------------------
 //
-// Typed engine observations ride the existing batch payload instead of a new
-// table: [`encode_observation_checkpoint`] packs one bounded, engine-tagged,
-// monotonically sequenced batch into an [`EngineCheckpoint`] with the explicit
-// format tag [`OBSERVATION_FORMAT_TAG`], exactly like the engine run config
-// codec packs typed selections into version-tagged JSON. Callers commit the
-// checkpoint through the existing [`Repository::commit_run_batch`] path with
-// [`CheckpointUpdate::Replace`], so no migration was needed; the database
-// tests prove this by committing fixture observations end to end and decoding
-// the persisted `run_checkpoints` row.
+// Typed engine observations ride the existing batch payload: [`encode_observation_checkpoint`]
+// packs one bounded, engine-tagged, monotonically sequenced batch into an
+// [`EngineCheckpoint`] with the explicit format tag [`OBSERVATION_FORMAT_TAG`],
+// exactly like the engine run config codec packs typed selections into
+// version-tagged JSON. Callers commit the checkpoint through the existing
+// [`Repository::commit_run_batch`] path with [`CheckpointUpdate::Replace`];
+// the checkpoint row still keeps only the latest batch per run, and the
+// append-only observation ledger (sibling `observation_ledger` module plus
+// its migration) preserves every committed batch as immutable per-row
+// history in the same transaction. The database tests prove the checkpoint
+// half by committing fixture observations end to end and decoding the
+// persisted `run_checkpoints` row.
 //
 // No `serde` derives leak into the domain crate: canonical encoding lives on
 // the private `Stored*` structs below, strict decoding is manual with exact
