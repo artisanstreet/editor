@@ -7,8 +7,9 @@
 //! non-`std` dependency is `serde_json`. The production spawner passes no
 //! scenario plumbing, so the fixture selects behavior without any parent
 //! environment mutation: the copied executable basename names the scenario
-//! (`codex-wire-strict`, `codex-wire-reject_always`, or
-//! `codex-wire-interleave`, plus the platform executable suffix), and the
+//! (`codex-wire-strict`, `codex-wire-reject_always`, `codex-wire-interleave`,
+//! `codex-wire-resume_interleave`, or `codex-wire-resume_mismatch`, plus the
+//! platform executable suffix), and the
 //! received `turn/start` params are recorded to
 //! `turn-start-params.json` inside the spawned working directory (the
 //! owner's exact project root).
@@ -22,7 +23,13 @@
 //! Scenarios: `strict` validates and accepts, `reject_always` answers
 //! `-32600` for every `turn/start`, and `interleave` validates and accepts
 //! but emits the real-CLI `thread/started` notification between the
-//! `thread/*` result and the `turn/start` result.
+//! `thread/*` result and the `turn/start` result. `resume_interleave`
+//! mirrors the real CLI around `thread/resume`: the `remoteControl`,
+//! `deprecationNotice`, `mcpStartup`, and `threadStatus` notification burst
+//! arrives before the id-matched resume result, which still reopens the
+//! same thread. `resume_mismatch` answers `thread/resume` with a foreign
+//! thread id so the owner must fail closed instead of silently starting
+//! fresh.
 //!
 //! Notifications (no `id`) receive no reply. After the terminal turn event
 //! the fixture holds stdin until EOF and exits 0, so owner teardown observes
@@ -111,9 +118,36 @@ fn main() {
                 }}),
             ),
             "thread/start" | "thread/resume" => {
+                let resume_burst = method == "thread/resume" && scenario == "resume_interleave";
+                if resume_burst {
+                    // Real-CLI order: the notification burst arrives before
+                    // the id-matched resume result.
+                    for notice in [
+                        serde_json::json!({"method": "remoteControl/status/changed", "params": {
+                            "status": "connected",
+                        }}),
+                        serde_json::json!({"method": "deprecationNotice", "params": {
+                            "message": "test deprecation",
+                        }}),
+                        serde_json::json!({"method": "mcpStartup", "params": {
+                            "status": "ok",
+                        }}),
+                        serde_json::json!({"method": "threadStatus", "params": {
+                            "threadId": THREAD_ID,
+                            "status": "inProgress",
+                        }}),
+                    ] {
+                        emit(&mut output, &notice);
+                    }
+                }
+                let resumed_id = if method == "thread/resume" && scenario == "resume_mismatch" {
+                    "thread-fixture-foreign"
+                } else {
+                    THREAD_ID
+                };
                 emit(
                     &mut output,
-                    &serde_json::json!({"id": id, "result": {"thread": {"id": THREAD_ID}}}),
+                    &serde_json::json!({"id": id, "result": {"thread": {"id": resumed_id}}}),
                 );
                 if scenario == "interleave" {
                     emit(
@@ -194,7 +228,9 @@ fn scenario_from_basename(argv0: &str) -> Option<String> {
         .and_then(|stem| stem.to_str())?;
     let scenario = stem.strip_prefix(SCENARIO_PREFIX)?;
     match scenario {
-        "strict" | "reject_always" | "interleave" => Some(scenario.to_owned()),
+        "strict" | "reject_always" | "interleave" | "resume_interleave" | "resume_mismatch" => {
+            Some(scenario.to_owned())
+        }
         _ => None,
     }
 }

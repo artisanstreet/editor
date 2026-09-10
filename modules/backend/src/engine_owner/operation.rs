@@ -1833,33 +1833,22 @@ async fn execute_codex_turn(
         .await;
     }
     let mut line = String::new();
-    if read_codex_line(
+    // Correlated wait: the server may emit notifications before the
+    // `initialize` result, so the reply is matched by request id.
+    match codex_await_preflight_result(
         &mut reader,
         &mut line,
+        1,
         phase_deadline(runtime.limits.prompt, request.deadline),
         shutdown,
         &request.control,
     )
     .await
-    .is_err()
     {
-        let error = if shutdown.is_cancelled() {
-            EngineOperationError::Shutdown
-        } else if request.control.is_cancelled() {
-            EngineOperationError::Cancelled
-        } else {
-            EngineOperationError::ProviderRequestFailed
-        };
-        return finish_configured_start(request, parts, error, runtime.limits.close).await;
-    }
-    if !is_codex_result_for(&line, 1) {
-        return finish_configured_start(
-            request,
-            parts,
-            EngineOperationError::ProviderRequestFailed,
-            runtime.limits.close,
-        )
-        .await;
+        CodexPreflightWait::Ready => {}
+        CodexPreflightWait::Failed(error) => {
+            return finish_configured_start(request, parts, error, runtime.limits.close).await;
+        }
     }
     // Official handshake order (`Handshake` in
     // `modules/engines/src/codex/app-server-session.ts`): the client notifies
@@ -1895,7 +1884,9 @@ async fn execute_codex_turn(
             )
             .await;
         };
-        let resume_line = codex_runtime::request_line(next_id, "thread/resume", &resume_params);
+        let thread_request_id = next_id;
+        let resume_line =
+            codex_runtime::request_line(thread_request_id, "thread/resume", &resume_params);
         next_id += 1;
         if write_codex_line(&mut stdin, &resume_line).await.is_err() {
             return finish_configured_start(
@@ -1906,27 +1897,25 @@ async fn execute_codex_turn(
             )
             .await;
         }
-        line.clear();
-        if read_codex_line(
+        // Correlated wait: notifications arrive before the `thread/resume`
+        // result, so the reply is matched by request id; a mismatch or a
+        // matching error fails closed without a silent fresh start.
+        match codex_await_preflight_result(
             &mut reader,
             &mut line,
+            thread_request_id,
             phase_deadline(runtime.limits.prompt, request.deadline),
             shutdown,
             &request.control,
         )
         .await
-        .is_err()
         {
-            let error = if shutdown.is_cancelled() {
-                EngineOperationError::Shutdown
-            } else if request.control.is_cancelled() {
-                EngineOperationError::Cancelled
-            } else {
-                EngineOperationError::ProviderRequestFailed
-            };
-            return finish_configured_start(request, parts, error, runtime.limits.close).await;
+            CodexPreflightWait::Ready => {}
+            CodexPreflightWait::Failed(error) => {
+                return finish_configured_start(request, parts, error, runtime.limits.close).await;
+            }
         }
-        let Some(thread_id) = codex_resumed_thread_id(&line, 2, stored) else {
+        let Some(thread_id) = codex_resumed_thread_id(&line, thread_request_id, stored) else {
             return finish_configured_start(
                 request,
                 parts,
@@ -1937,8 +1926,9 @@ async fn execute_codex_turn(
         };
         thread_id
     } else {
+        let thread_request_id = next_id;
         let thread_line = codex_runtime::request_line(
-            next_id,
+            thread_request_id,
             "thread/start",
             &settings.thread_params(&request.input.project_root),
         );
@@ -1952,27 +1942,23 @@ async fn execute_codex_turn(
             )
             .await;
         }
-        line.clear();
-        if read_codex_line(
+        // Correlated wait, matching the resume branch above.
+        match codex_await_preflight_result(
             &mut reader,
             &mut line,
+            thread_request_id,
             phase_deadline(runtime.limits.prompt, request.deadline),
             shutdown,
             &request.control,
         )
         .await
-        .is_err()
         {
-            let error = if shutdown.is_cancelled() {
-                EngineOperationError::Shutdown
-            } else if request.control.is_cancelled() {
-                EngineOperationError::Cancelled
-            } else {
-                EngineOperationError::ProviderRequestFailed
-            };
-            return finish_configured_start(request, parts, error, runtime.limits.close).await;
+            CodexPreflightWait::Ready => {}
+            CodexPreflightWait::Failed(error) => {
+                return finish_configured_start(request, parts, error, runtime.limits.close).await;
+            }
         }
-        let Some(thread_id) = codex_thread_id(&line, 2) else {
+        let Some(thread_id) = codex_thread_id(&line, thread_request_id) else {
             return finish_configured_start(
                 request,
                 parts,
@@ -2150,6 +2136,64 @@ async fn execute_codex_turn(
 enum CodexPumpOutcome {
     Terminal(super::observation::TerminalState),
     Failed(EngineOperationError),
+}
+
+/// Outcome of one bounded preflight reply wait.
+enum CodexPreflightWait {
+    /// The matching result arrived; the raw line stays in the caller's buffer
+    /// for id-specific extraction.
+    Ready,
+    /// Shutdown, cancellation, deadline, EOF, or a matching error envelope.
+    Failed(EngineOperationError),
+}
+
+/// Waits for one preflight reply (`initialize`, `thread/start`,
+/// `thread/resume`) while surviving interleaved traffic.
+///
+/// The real server emits notifications (for example `remoteControl/*`,
+/// `deprecationNotice`, `mcpStartup`, `threadStatus`, `thread/started`)
+/// before the matching result, so every line is correlated by request id
+/// instead of assuming the next line is the reply. Non-matching traffic —
+/// method notifications, uncorrelated results/errors, unparseable lines —
+/// keeps the wait alive inside the same absolute phase deadline; the turn
+/// is not yet authorized, so nothing is forwarded to the observation sink.
+/// A matching error envelope fails fast. Shutdown, cancellation, deadline,
+/// and EOF map exactly like the previous single-read sites, and a failed
+/// resume never falls back to a fresh start.
+async fn codex_await_preflight_result(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    line: &mut String,
+    expected_id: u64,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+) -> CodexPreflightWait {
+    use super::codex as codex_runtime;
+
+    loop {
+        if read_codex_line(reader, line, deadline, shutdown, control)
+            .await
+            .is_err()
+        {
+            let error = if shutdown.is_cancelled() {
+                EngineOperationError::Shutdown
+            } else if control.is_cancelled() {
+                EngineOperationError::Cancelled
+            } else {
+                EngineOperationError::ProviderRequestFailed
+            };
+            return CodexPreflightWait::Failed(error);
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+        if codex_runtime::is_codex_error_response(&trimmed)
+            && codex_response_id_matches(&trimmed, expected_id)
+        {
+            return CodexPreflightWait::Failed(EngineOperationError::ProviderRequestFailed);
+        }
+        if is_codex_result_for(&trimmed, expected_id) {
+            return CodexPreflightWait::Ready;
+        }
+    }
 }
 
 /// Outcome of the bounded `turn/start` reply wait.

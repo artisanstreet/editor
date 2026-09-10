@@ -48,7 +48,7 @@ use super::operation::{
     AcceptedTurn, EngineOperationError, codex_response_id_matches, codex_resumed_thread_id,
     codex_thread_id, codex_turn_id, is_codex_result_for,
 };
-use super::{EngineCodexTurnInput, EngineOwner, EngineOwnerShutdown};
+use super::{EngineCodexTurnInput, EngineContinuation, EngineOwner, EngineOwnerShutdown};
 use crate::native_run_dispatch::{binding_bytes_vec, binding_matches_bytes};
 
 // ---------------------------------------------------------------------------
@@ -1946,6 +1946,31 @@ async fn admit_codex_wire_turn(
     root: &RootPath,
     prompt: &str,
 ) -> AcceptedTurn {
+    admit_codex_wire_resume_turn(
+        owner,
+        settings,
+        launch,
+        thread_id,
+        run_id,
+        root,
+        prompt,
+        None,
+    )
+    .await
+}
+
+/// Admits one wire turn with an optional gated provider continuation, so
+/// resume paths drive `thread/resume` instead of `thread/start`.
+async fn admit_codex_wire_resume_turn(
+    owner: &EngineOwner,
+    settings: artisan_database::ThreadEngineSettings,
+    launch: artisan_native_engine::VerifiedCodexLaunch,
+    thread_id: ThreadId,
+    run_id: RunId,
+    root: &RootPath,
+    prompt: &str,
+    continuation: Option<EngineContinuation>,
+) -> AcceptedTurn {
     owner
         .admit_codex_turn(
             EngineCodexTurnInput {
@@ -1956,7 +1981,7 @@ async fn admit_codex_wire_turn(
                 prompt: QueueMessagePayload::text_only(prompt).expect("payload"),
                 settings,
                 launch,
-                continuation: None,
+                continuation,
                 prompt_delivery: "immediate".to_owned(),
                 stream_after: 0,
                 control_capacity: 1,
@@ -2107,6 +2132,110 @@ async fn codex_wire_owner_survives_interleaved_thread_started() {
     })
     .await
     .expect("interleaved turn completes inside 60s");
+}
+
+#[tokio::test]
+async fn codex_wire_owner_resumes_through_interleaved_notifications() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let fixture = codex_wire_fixture_program();
+        let temp = WireTempRoot::new("resume-interleave");
+        let program = codex_wire_scenario_program(&fixture, &temp.dir, "resume_interleave");
+        let thread_id = ThreadId::parse("thread-wire-resume").expect("thread id");
+        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch_with_executable(
+                &temp.db_path,
+                &EngineProfileId::parse("codex-fixture").expect("profile id"),
+                &program,
+                "codex-cli 0.145.0",
+            )
+            .expect("wire launch resolves");
+        let mut owner = EngineOwner::start_configured(
+            NonZeroUsize::new(1).expect("one slot"),
+            &tokio::runtime::Handle::current(),
+        );
+        let turn = admit_codex_wire_resume_turn(
+            &owner,
+            settings,
+            launch,
+            thread_id.clone(),
+            RunId::parse("wire-run-resume").expect("run id"),
+            &temp.root,
+            "hello wire",
+            EngineContinuation::new("thread-fixture-1".to_owned()),
+        )
+        .await;
+        // The real CLI emits its notification burst (remoteControl,
+        // deprecation, mcp, thread status) before the id-matched
+        // `thread/resume` result: the correlated preflight wait still
+        // reopens the same provider thread and delivers the turn.
+        let wire = drive_codex_wire_turn(turn).await;
+        assert_eq!(wire.session, "thread-fixture-1");
+        assert_eq!(wire.text, "hello wire");
+        assert_eq!(wire.terminal, TerminalState::Completed);
+        assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    })
+    .await
+    .expect("interleaved resume completes inside 60s");
+}
+
+#[tokio::test]
+async fn codex_wire_owner_rejects_foreign_resume_thread_without_fresh_start() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let fixture = codex_wire_fixture_program();
+        let temp = WireTempRoot::new("resume-mismatch");
+        let program = codex_wire_scenario_program(&fixture, &temp.dir, "resume_mismatch");
+        let thread_id = ThreadId::parse("thread-wire-resume-foreign").expect("thread id");
+        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch_with_executable(
+                &temp.db_path,
+                &EngineProfileId::parse("codex-fixture").expect("profile id"),
+                &program,
+                "codex-cli 0.145.0",
+            )
+            .expect("wire launch resolves");
+        let mut owner = EngineOwner::start_configured(
+            NonZeroUsize::new(1).expect("one slot"),
+            &tokio::runtime::Handle::current(),
+        );
+        let mut turn = admit_codex_wire_resume_turn(
+            &owner,
+            settings,
+            launch,
+            thread_id.clone(),
+            RunId::parse("wire-run-resume-foreign").expect("run id"),
+            &temp.root,
+            "hello wire",
+            EngineContinuation::new("thread-fixture-1".to_owned()),
+        )
+        .await;
+        // A resume result naming another thread fails closed: no silent
+        // fresh start, so preparation itself fails and no prompt is ever
+        // authorized and no turn starts.
+        let started = std::time::Instant::now();
+        let prepared = turn.prepare().await;
+        assert!(
+            matches!(
+                prepared,
+                Err(EngineOperationError::ProviderRequestFailed)
+            ),
+            "foreign resume thread must fail preparation fast: {prepared:?}"
+        );
+        let result = turn.finish().await;
+        assert!(
+            matches!(result, Err(EngineOperationError::ProviderRequestFailed)),
+            "foreign resume thread must fail the turn promptly: {result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(
+            !temp.dir.join("turn-start-params.json").exists(),
+            "no turn may start after a rejected resume"
+        );
+        assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    })
+    .await
+    .expect("rejected resume settles inside 60s");
 }
 
 /// Opt-in production acceptance against the installed authenticated CLI.
