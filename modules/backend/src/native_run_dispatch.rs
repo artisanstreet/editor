@@ -5284,3 +5284,7 @@ mod activity_resequence_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/backend/steer_drive.rs"]
+mod steer_drive_tests;
