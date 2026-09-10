@@ -375,6 +375,18 @@ fn format_elapsed_seconds(total_seconds: u64) -> String {
     }
 }
 
+/// Returns the work-group header copy for one terminal label.
+///
+/// `None` stays headerless: live groups carry no generic title, since the
+/// reference shows its elapsed header whose words the turn status row already
+/// provides from scene data. A second title here would double the line.
+#[must_use]
+pub fn work_group_header_copy(
+    label: Option<crate::conversation_scene::WorkGroupLabel>,
+) -> Option<String> {
+    label.map(format_work_group_label)
+}
+
 /// Returns the scene-owned display label for one terminal work-group label.
 #[must_use]
 pub fn format_work_group_label(label: crate::conversation_scene::WorkGroupLabel) -> String {
@@ -2034,26 +2046,39 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
-        let style = CardStyle::resolve(*theme);
         let group_id = work_group_anchor_id(turn_id, block);
-        let title = block
-            .label
-            .map_or_else(|| "Work".to_owned(), format_work_group_label);
+        // The header is the terminal duration label when the scene attached
+        // one. Live groups carry no generic title: the reference shows its
+        // elapsed header, whose words the turn status row already provides
+        // from scene data, so a second title here would double the line.
+        let header = work_group_header_copy(block.label);
+
+        // A labelless group renders mounted without a collapsible: there is
+        // no reference header to hang a disclosure control on, and live work
+        // is transient pre-settlement state. Labeled groups keep the exact
+        // controlled mapping, so settled collapsed history and the disclosure
+        // action are preserved.
+        let controlled =
+            group_id.is_some() && header.is_some() && block.disclosure.is_some();
+        let items_mounted =
+            !controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed));
 
         let mut items = div()
             .w_full()
             .flex()
             .flex_col()
-            .gap(theme.spacing.steps(3.0));
-        let items_mounted = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
+            .gap(theme.spacing.steps(2.0));
         for item in &block.items {
-            items = items.child(Self::render_work_item(
+            items = items.child(self.render_work_item(
                 item,
                 &selector,
                 theme,
                 anchors,
                 items_mounted,
             ));
+        }
+        if header.is_some() {
+            items = items.pt(theme.spacing.steps(2.0));
         }
         let item_identities: Vec<(Option<SceneId>, Option<ItemId>)> = block
             .items
@@ -2067,65 +2092,114 @@ impl ConversationSurface {
             });
         });
 
-        let Some(group_id) = group_id else {
-            let fallback_selector = selector.clone();
-            let mut card = anchors.attach(compact_card(style).w_full(), None, None);
-            card = card.debug_selector(move || fallback_selector.clone());
-            return card
-                .child(compact_card_content(style).child(card_heading(title, theme)))
-                .child(compact_card_content(style).child(items))
-                .into_any_element();
+        // Plain section on the transcript surface: reference work sessions
+        // and activity rows render without card chrome.
+        let section = div().w_full().min_w_0().flex().flex_col();
+        let mut section = anchors.attach(section, group_id.as_ref(), None);
+        section = section.debug_selector({
+            let selector = selector.clone();
+            move || selector.clone()
+        });
+        let (Some(group_id), Some(header_text)) = (group_id, header) else {
+            return section.child(items).into_any_element();
         };
-
-        self.render_controlled_card(
-            ControlledCardOptions {
-                id: group_id,
-                item_id: None,
-                disclosure: block.disclosure,
-                selector,
-                style,
-            },
-            compact_card_content(style).child(card_heading(title, theme)),
-            compact_card_content(style).child(items),
-            entity,
-            anchors,
+        if !controlled {
+            return section
+                .child(work_group_header(header_text, theme))
+                .child(items)
+                .into_any_element();
+        }
+        let disclosure_selector = format!("{selector}-disclosure");
+        let open = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
+        let mut collapsible = Collapsible::new(
+            SharedString::from(disclosure_selector.clone()),
+            self.disclosure_focus.clone(),
+            open,
+            work_group_header(header_text, theme),
+            items,
         )
+        .debug_selector(disclosure_selector);
+        let surface = entity.downgrade();
+        collapsible = collapsible.on_change(move |requested_open, _, _, app| {
+            let action = ConversationSurfaceAction::DisclosureToggleRequested {
+                id: group_id.clone(),
+                requested_open,
+            };
+            let _ = surface.update(app, |surface, cx| {
+                if surface.enqueue_action(action) {
+                    cx.notify();
+                }
+            });
+        });
+        section.child(collapsible).into_any_element()
     }
 
     fn render_work_item(
+        &self,
         item: &WorkItem,
         group_selector: &str,
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
         mounted: bool,
     ) -> AnyElement {
-        let (id, title, text) = match item {
-            WorkItem::Reasoning { id, body, .. } => (id, "Reasoning", body.as_str()),
-            WorkItem::Activity { id, body, .. } => (id, "Activity", body.as_str()),
-            WorkItem::WorkSession { id, title, .. } => (id, "Work session", title.as_str()),
+        let selector = format!(
+            "{group_selector}-item-{}",
+            work_item_id(item).as_str()
+        );
+        let content: AnyElement = match item {
+            // Settled public summaries render through the shared markdown
+            // path, matching assistant content: the reference keeps code
+            // faces rather than literal backticks, with no kind heading.
+            WorkItem::Reasoning { body, .. } => self
+                .markdown_renderer
+                .render_source(body, *theme, selector.clone()),
+            // The scene carries one body per activity (no label/detail
+            // split); it renders as the reference baseline row's text at
+            // text-sm, with no kind heading and no truncation of content.
+            WorkItem::Activity { body, .. } => div()
+                .w_full()
+                .min_w_0()
+                .text_size(theme.typography.label_text)
+                .text_color(theme.colors.foreground.to_paint())
+                .child(body.clone())
+                .into_any_element(),
+            // Session titles render muted at base size (reference header
+            // tone); counting lives in the group header and status row.
+            WorkItem::WorkSession { title, .. } => div()
+                .w_full()
+                .min_w_0()
+                .text_size(theme.typography.editor_text_desktop)
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(title.clone())
+                .into_any_element(),
         };
-        let selector = format!("{group_selector}-item-{}", id.as_str());
-        let item_element = div()
+        if mounted {
+            let mut element = anchors.attach(
+                div().w_full().min_w_0(),
+                None,
+                item_id_for_scene_id(work_item_id(item)).as_ref(),
+            );
+            element = element.debug_selector(move || selector.clone());
+            element.child(content).into_any_element()
+        } else {
+            div()
+                .w_full()
+                .min_w_0()
+                .debug_selector(move || selector.clone())
+                .child(content)
+                .into_any_element()
+        }
+    }
+
+    /// Renders one work-group header row: the terminal duration label in the
+    /// reference session-header tone, with no generic title.
+    fn work_group_header(title: String, theme: &ArtisanTheme) -> Div {
+        div()
             .w_full()
             .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(theme.spacing.steps(1.0));
-        if mounted {
-            let mut item_element =
-                anchors.attach(item_element, None, item_id_for_scene_id(id).as_ref());
-            item_element = item_element.debug_selector(move || selector.clone());
-            item_element = item_element
-                .child(card_heading(title, theme))
-                .child(body_text(text, theme));
-            item_element.into_any_element()
-        } else {
-            let mut item_element = item_element.debug_selector(move || selector.clone());
-            item_element = item_element
-                .child(card_heading(title, theme))
-                .child(body_text(text, theme));
-            item_element.into_any_element()
-        }
+            .text_size(theme.typography.editor_text_desktop)
+            .text_color(theme.colors.muted_foreground.to_paint())
+            .child(title)
     }
 
     fn render_compaction(
@@ -4149,6 +4223,20 @@ mod tests {
     }
 
     #[test]
+    fn work_group_header_has_no_generic_fallback() {
+        use crate::conversation_scene::WorkGroupLabel;
+        assert_eq!(work_group_header_copy(None), None);
+        assert_eq!(
+            work_group_header_copy(Some(WorkGroupLabel::WorkedFor { millis: 65_000 })),
+            Some("Worked for 1m 5s".to_owned())
+        );
+        assert_eq!(
+            work_group_header_copy(Some(WorkGroupLabel::ThoughtFor { millis: 5_000 })),
+            Some("Thought for 5s".to_owned())
+        );
+    }
+
+    #[test]
     fn footer_paints_only_with_settlement() {
         let without = TurnFooterBlock {
             turn_id: turn_id("turn_a"),
@@ -4482,6 +4570,9 @@ mod tests {
             EngineObservationEvent {
                 thread_id: thread_id(),
                 observation,
+                // Integrated domain carries the optional engine attribution
+                // row on every observation event; fixtures leave it absent.
+                attribution: None,
             }
         }
 
