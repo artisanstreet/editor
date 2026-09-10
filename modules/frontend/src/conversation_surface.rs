@@ -527,6 +527,15 @@ pub fn owning_group_index(turn: &TurnScene) -> Option<usize> {
         .rposition(|block| matches!(block, TurnBlock::WorkGroup(_)))
 }
 
+/// Returns whether a group header paints the live shimmer plan.
+///
+/// True only when no terminal label stopped it and a live line was derived:
+/// settlement always wins, so a stale live basis can never animate a settled
+/// header.
+#[must_use]
+pub const fn group_header_is_live(terminal_present: bool, live_present: bool) -> bool {
+    !terminal_present && live_present
+}
 /// Returns whether a status row paints for one narration in a turn that may
 /// already carry its line in a work-group header.
 ///
@@ -1959,7 +1968,7 @@ impl ConversationSurface {
                     None
                 };
                 Some(self.render_work_group(
-                    turn_id, block, selector, entity, theme, anchors, owned,
+                    turn_id, block, selector, entity, theme, anchors, owned, status_motion,
                 ))
             }
             TurnBlock::Compaction(block) => {
@@ -2114,13 +2123,17 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
         live_header: Option<String>,
+        status_motion: MotionPolicy,
     ) -> AnyElement {
         let group_id = work_group_anchor_id(turn_id, block);
         // Terminal duration wins; otherwise the owning group headers the
         // turn's live Thinking/Working line once (see render_turn). Earlier
         // groups and the separate status row stand down, so the line paints
-        // exactly once per turn.
-        let header = work_group_header_copy(block.label).or(live_header);
+        // exactly once per turn. A settled terminal header always stops the
+        // shimmer, even if a stale live basis lingers.
+        let terminal = work_group_header_copy(block.label);
+        let header_live = group_header_is_live(terminal.is_some(), live_header.is_some());
+        let header = terminal.or(live_header);
 
         // Controlled state is never overridden: Closed hides through the
         // collapsible in every case, and the toggle always flows through the
@@ -2169,45 +2182,32 @@ impl ConversationSurface {
             move || selector.clone()
         });
         match (group_id, header, block.disclosure) {
-            (Some(group_id), Some(header_text), Some(_)) => {
-                let disclosure_selector = format!("{selector}-disclosure");
-                let open = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
-                let mut collapsible = Collapsible::new(
-                    SharedString::from(disclosure_selector.clone()),
-                    self.disclosure_focus.clone(),
-                    open,
-                    work_group_header(header_text, theme),
-                    items,
-                )
-                .debug_selector(disclosure_selector);
-                let surface = entity.downgrade();
-                collapsible = collapsible.on_change(move |requested_open, _, _, app| {
-                    let action = ConversationSurfaceAction::DisclosureToggleRequested {
-                        id: group_id.clone(),
-                        requested_open,
-                    };
-                    let _ = surface.update(app, |surface, cx| {
-                        if surface.enqueue_action(action) {
-                            cx.notify();
-                        }
-                    });
-                });
-                section.child(collapsible).into_any_element()
-            }
-            (Some(group_id), None, Some(_)) => {
-                let disclosure_selector = format!("{selector}-disclosure");
-                let open = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
-                let mut collapsible = Collapsible::new(
-                    SharedString::from(disclosure_selector.clone()),
-                    self.disclosure_focus.clone(),
-                    open,
-                    div()
+            (Some(group_id), header, Some(_)) => {
+                // Text header when the group owns one, else the chevron-only
+                // disclosure affordance: chrome, never invented content.
+                let trigger: AnyElement = match header {
+                    Some(header_text) => Self::work_group_header(
+                        header_text,
+                        theme,
+                        status_motion,
+                        header_live,
+                    ),
+                    None => div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .text_color(theme.colors.muted_foreground.to_paint())
                         .aria_label("Toggle work details")
-                        .child(asset_glyph(AssetId::TABLER_CHEVRON_DOWN).size(px(14.0))),
+                        .child(asset_glyph(AssetId::TABLER_CHEVRON_DOWN).size(px(14.0)))
+                        .into_any_element(),
+                };
+                let disclosure_selector = format!("{selector}-disclosure");
+                let open = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
+                let mut collapsible = Collapsible::new(
+                    SharedString::from(disclosure_selector.clone()),
+                    self.disclosure_focus.clone(),
+                    open,
+                    trigger,
                     items,
                 )
                 .debug_selector(disclosure_selector);
@@ -2228,8 +2228,12 @@ impl ConversationSurface {
             (_, header, _) => {
                 let mut static_section = section;
                 if let Some(header_text) = header {
-                    static_section =
-                        static_section.child(work_group_header(header_text, theme));
+                    static_section = static_section.child(Self::work_group_header(
+                        header_text,
+                        theme,
+                        status_motion,
+                        header_live,
+                    ));
                 }
                 static_section.child(items).into_any_element()
             }
@@ -2293,15 +2297,30 @@ impl ConversationSurface {
         }
     }
 
-    /// Renders one work-group header row: the terminal duration label in the
-    /// reference session-header tone, with no generic title.
-    fn work_group_header(title: String, theme: &ArtisanTheme) -> Div {
+    /// Renders one work-group header row in the reference session-header
+    /// tone, with no generic title.
+    ///
+    /// The text travels through the exact shimmer plan as the turn status
+    /// row: a live header animates under effective `Full`, while a terminal
+    /// header and reduced motion resolve to the same immediate readable
+    /// faces, so settlement always stops the effect.
+    fn work_group_header(
+        title: String,
+        theme: &ArtisanTheme,
+        motion: MotionPolicy,
+        active: bool,
+    ) -> AnyElement {
+        let shimmer = ShimmerText::new(title, *theme, motion)
+            .active(active)
+            .delay_seconds(1.5)
+            .duration_seconds(3.0)
+            .text_color(theme.colors.muted_foreground.to_paint());
         div()
             .w_full()
             .min_w_0()
             .text_size(theme.typography.editor_text_desktop)
-            .text_color(theme.colors.muted_foreground.to_paint())
-            .child(title)
+            .child(shimmer)
+            .into_any_element()
     }
 
     fn render_compaction(
@@ -4409,6 +4428,14 @@ mod tests {
             live_status_copy(narration, basis, Some(65_000)),
             Some("Thinking for 1m 5s".to_owned())
         );
+    }
+
+    #[test]
+    fn settled_terminal_always_stops_the_header_shimmer() {
+        assert!(group_header_is_live(false, true));
+        assert!(!group_header_is_live(true, true));
+        assert!(!group_header_is_live(false, false));
+        assert!(!group_header_is_live(true, false));
     }
 
     #[test]
