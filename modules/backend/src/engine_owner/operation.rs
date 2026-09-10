@@ -5326,7 +5326,11 @@ async fn authorize_configured_session(
                     authorize,
                     observations,
                     respond,
-                    steer_rx,
+                    // PreparedConfiguredSession carries no steer binding:
+                    // this OpenCode2 path never wires a channel, so
+                    // `None` (typed `Unsupported` downstream), not a
+                    // fabricated sender.
+                    steer_rx: None,
                 },
                 parts,
                 map_stream_error(error),
