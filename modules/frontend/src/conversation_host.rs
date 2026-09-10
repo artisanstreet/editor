@@ -13,13 +13,19 @@
 
 #![forbid(unsafe_code)]
 
-use artisan_domain::{IdentifierError, ThreadId};
+use artisan_domain::{IdentifierError, ThreadId, TurnId};
 use artisan_ui::theme::ThemeMode;
-use gpui::{App, AppContext as _, Context, Entity, IntoElement, Render, Subscription, Window};
+use gpui::{
+    App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, Render, Subscription,
+    Window,
+};
 use thiserror::Error;
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::conversation_delivery_machine::ConversationDeliveryEffect;
-use crate::conversation_scene::ConversationScene;
+use crate::conversation_relative_age::format_relative_age;
+use crate::conversation_scene::{ConversationScene, TurnBlock};
 use crate::conversation_state_machine::{
     ConversationStateController, ConversationStateEffect, ConversationStateError,
     ConversationStateEvent, ConversationStateView, MAX_PENDING_EFFECTS,
@@ -27,6 +33,9 @@ use crate::conversation_state_machine::{
 use crate::conversation_steering_machine::SteeringEffect;
 use crate::conversation_surface::{
     ConversationSurface, ConversationSurfaceAction, ConversationSurfaceTarget,
+};
+use crate::conversation_turn_footer_policy::{
+    ConversationTurnFooterPolicy, CopyOutcome, TurnFooterAction, TurnFooterInput,
 };
 use crate::conversation_view_machine::{ViewportEffect, ViewportEvent};
 
@@ -96,6 +105,107 @@ enum SurfaceRouteDecision {
     Backpressured,
 }
 
+/// Cadence of the host clock mirror while an authoritative turn is active.
+///
+/// One frame-time sample per second matches the reference work-session tick;
+/// the task runs only while the accepted scene carries active work and stops
+/// on settlement or host drop.
+const CLOCK_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Samples the host clock as Unix millis for footer ages and frame time.
+///
+/// A clock failure floors to zero rather than failing the caller; both
+/// consumers clamp forward.
+#[must_use]
+pub fn host_now_millis() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0),
+    )
+    .unwrap_or(i64::MAX)
+}
+
+/// Formats Unix millis as a canonical UTC ISO-8601 instant for the relative
+/// age adapter and the footer's machine-readable timestamp.
+///
+/// Negative inputs clamp to the epoch; output always carries millisecond
+/// precision with a `Z` suffix, matching the forms
+/// [`format_relative_age`] parses.
+#[must_use]
+pub fn format_settled_iso(millis: i64) -> String {
+    let clamped = millis.max(0);
+    let days = clamped.div_euclid(86_400_000);
+    let remainder = clamped.rem_euclid(86_400_000);
+    let (year, month, day) = civil_from_days(days);
+    let hour = remainder / 3_600_000;
+    let minute = (remainder % 3_600_000) / 60_000;
+    let second = (remainder % 60_000) / 1_000;
+    let millisecond = remainder % 1_000;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z")
+}
+
+/// Converts days since 1970-01-01 into a civil date (Howard Hinnant's
+/// civil-from-days algorithm).
+fn civil_from_days(days: i64) -> (i64, u8, u8) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let full_year = year + i64::from(month <= 2);
+    (
+        full_year,
+        u8::try_from(month).unwrap_or(1),
+        u8::try_from(day).unwrap_or(1),
+    )
+}
+
+/// Returns whether the accepted scene carries authoritative active work.
+///
+/// The scene is the authority: a ticking clock exists only while a status
+/// block narrates active work, and stops the moment the scene settles.
+#[must_use]
+pub fn scene_has_active_work(scene: &ConversationScene) -> bool {
+    scene.turn_scenes().iter().any(|turn| {
+        turn.blocks().iter().any(|block| {
+            matches!(block, TurnBlock::TurnStatus(status) if status.narration.is_active_work())
+        })
+    })
+}
+
+/// Returns the settled footer's machine-readable timestamp and exact response
+/// bytes for one turn, if that turn paints a footer.
+///
+/// The scene settlement is authoritative; the action echo is never used.
+#[must_use]
+pub fn settled_footer_for(scene: &ConversationScene, turn_id: &TurnId) -> Option<(String, String)> {
+    let turn = scene.turn_scene(turn_id)?;
+    turn.blocks().iter().find_map(|block| match block {
+        TurnBlock::TurnFooter(footer) => footer.settlement.as_ref().map(|settlement| {
+            (
+                format_settled_iso(settlement.settled_at_ms()),
+                settlement.response_text().to_owned(),
+            )
+        }),
+        _ => None,
+    })
+}
+
 /// The native host for one fixed conversation thread.
 pub struct ConversationHost {
     controller: ConversationStateController,
@@ -105,6 +215,16 @@ pub struct ConversationHost {
     _surface_subscription: Subscription,
     effects: Vec<ConversationHostEffect>,
     pending_extent_changes: usize,
+    /// Per-turn footer policies keyed by owning turn.
+    ///
+    /// Each policy owns one settled footer's clock-sample and clipboard
+    /// flow through the existing [`ConversationTurnFooterPolicy`]; entries
+    /// are pruned to scene turns on every accepted scene replacement.
+    footer_policies: HashMap<TurnId, ConversationTurnFooterPolicy>,
+    /// Whether the bounded clock task is currently running.
+    clock_running: bool,
+    /// Retained clock task; dropping the host drops the task with it.
+    clock_task: Option<gpui::Task<()>>,
 }
 
 impl ConversationHost {
@@ -169,6 +289,9 @@ impl ConversationHost {
             _surface_subscription: surface_subscription,
             effects: Vec::with_capacity(CONVERSATION_HOST_MAX_EFFECTS),
             pending_extent_changes: 0,
+            footer_policies: HashMap::new(),
+            clock_running: false,
+            clock_task: None,
         };
         host.flush_controller_effects();
         host
@@ -310,9 +433,18 @@ impl ConversationHost {
                             return Err(ConversationHostError::SceneProjection(error));
                         }
                     };
+                    let live_turns: Vec<TurnId> = scene
+                        .turn_scenes()
+                        .iter()
+                        .map(|turn| turn.turn_id.clone())
+                        .collect();
+                    let clock_wanted = scene_has_active_work(&scene);
                     self.surface.update(cx, |surface, surface_cx| {
                         surface.replace_scene(scene, surface_cx);
                     });
+                    self.footer_policies
+                        .retain(|turn_id, _| live_turns.contains(turn_id));
+                    self.reconcile_clock(clock_wanted, cx);
                 }
                 if requires_extent_change {
                     self.pending_extent_changes = self.pending_extent_changes.saturating_add(1);
@@ -378,6 +510,12 @@ impl ConversationHost {
                 ConversationSurfaceAction::ScrollIntent { target } => {
                     self.route_scroll_intent(target, cx)
                 }
+                ConversationSurfaceAction::TurnFooterRevealed { turn } => {
+                    self.route_footer_revealed(turn, surface, cx)
+                }
+                ConversationSurfaceAction::TurnFooterCopyRequested { turn, text: _ } => {
+                    self.route_footer_copy(turn, surface, cx)
+                }
             };
 
             match decision {
@@ -428,6 +566,119 @@ impl ConversationHost {
         self.effects
             .push(ConversationHostEffect::ScrollIntent { target });
         cx.notify();
+        SurfaceRouteDecision::Accepted
+    }
+
+    /// Starts or stops the bounded clock mirror from the scene's authority.
+    ///
+    /// A running task is never restarted while work stays active, so the
+    /// one-second cadence holds without a busy loop. Stopping clears the
+    /// mirrored frame time immediately; the retained task exits on its next
+    /// tick, and host drop ends it through the failed entity update.
+    fn reconcile_clock(&mut self, active: bool, cx: &mut Context<Self>) {
+        if active == self.clock_running {
+            return;
+        }
+        self.clock_running = active;
+        if active {
+            // Push the current frame time at once so capture and first paint
+            // already say `Thinking/Working for X` instead of the bare verb.
+            let now_ms = host_now_millis();
+            self.surface.update(cx, |surface, surface_cx| {
+                surface.set_active_now_ms(Some(now_ms), surface_cx);
+            });
+            let task = cx.spawn(async move |host, cx| {
+                loop {
+                    cx.background_executor().timer(CLOCK_TICK_INTERVAL).await;
+                    let tick = host.update(cx, |host, cx| host.tick_clock(cx)).ok();
+                    if tick != Some(true) {
+                        break;
+                    }
+                }
+            });
+            self.clock_task = Some(task);
+        } else {
+            self.clock_task = None;
+            self.surface.update(cx, |surface, surface_cx| {
+                surface.set_active_now_ms(None, surface_cx);
+            });
+        }
+    }
+
+    /// Mirrors one frame-time sample while the clock is wanted.
+    ///
+    /// Returns whether the task should continue: false stops it at this tick.
+    fn tick_clock(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.clock_running {
+            return false;
+        }
+        let now_ms = host_now_millis();
+        self.surface.update(cx, |surface, surface_cx| {
+            surface.set_active_now_ms(Some(now_ms), surface_cx);
+        });
+        true
+    }
+
+    /// Serves one footer reveal through the existing footer policy.
+    ///
+    /// The scene settlement supplies the timestamp and response bytes; the
+    /// reveal takes exactly one clock sample, formats it through the existing
+    /// relative-age adapter, and mirrors the text into the surface. A reveal
+    /// with no settlement is stale paint and drains as a no-op.
+    fn route_footer_revealed(
+        &mut self,
+        turn: TurnId,
+        surface: &Entity<ConversationSurface>,
+        cx: &mut Context<Self>,
+    ) -> SurfaceRouteDecision {
+        let staged: Option<(String, String)> =
+            settled_footer_for(surface.read(cx).scene(), &turn);
+        let Some((settled_at, response_text)) = staged else {
+            return SurfaceRouteDecision::Accepted;
+        };
+        let policy = self
+            .footer_policies
+            .entry(turn.clone())
+            .or_insert_with(|| {
+                ConversationTurnFooterPolicy::new(settled_at.clone(), response_text, String::new())
+            });
+        if policy.observe(TurnFooterInput::Hover) == TurnFooterAction::RequestClockSample {
+            let age = format_relative_age(host_now_millis(), &settled_at);
+            policy.set_relative_age(age.clone());
+            surface.update(cx, |surface, surface_cx| {
+                surface.set_footer_relative_age(&turn, age, surface_cx);
+            });
+        }
+        SurfaceRouteDecision::Accepted
+    }
+
+    /// Serves one footer copy through the existing footer policy and the
+    /// platform clipboard, mirroring the actual outcome into the surface.
+    fn route_footer_copy(
+        &mut self,
+        turn: TurnId,
+        surface: &Entity<ConversationSurface>,
+        cx: &mut Context<Self>,
+    ) -> SurfaceRouteDecision {
+        let staged: Option<(String, String)> =
+            settled_footer_for(surface.read(cx).scene(), &turn);
+        let Some((settled_at, response_text)) = staged else {
+            return SurfaceRouteDecision::Accepted;
+        };
+        let policy = self
+            .footer_policies
+            .entry(turn.clone())
+            .or_insert_with(|| {
+                ConversationTurnFooterPolicy::new(settled_at, response_text, String::new())
+            });
+        if let TurnFooterAction::CopyResponse { text } = policy.start_copy() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            policy.settle_copy(CopyOutcome::Succeeded);
+        }
+        let message = policy.copy_message().to_owned();
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_footer_copy_message(&turn, message, surface_cx);
+        });
         SurfaceRouteDecision::Accepted
     }
 
@@ -518,5 +769,167 @@ fn effect_requires_extent_change(effect: &ConversationStateEffect) -> bool {
 impl Render for ConversationHost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.surface.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_settled_iso, host_now_millis, scene_has_active_work, settled_footer_for};
+    use crate::conversation_relative_age::format_relative_age;
+    use crate::conversation_scene::{
+        ConversationScene, SceneTurn, TurnFooterSettlement, TurnNarration, TurnNarrationEntry,
+    };
+    use crate::conversation_turn_footer_policy::{
+        ConversationTurnFooterPolicy, CopyOutcome, TurnFooterAction, TurnFooterInput,
+    };
+    use artisan_domain::{ConversationLifecycle, TurnId};
+
+    fn turn_id(value: &str) -> TurnId {
+        TurnId::parse(value).expect("turn id is valid")
+    }
+
+    fn scene_with_narration(narration: TurnNarration) -> ConversationScene {
+        ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            Vec::new(),
+            vec![TurnNarrationEntry::new(turn_id("turn_a"), narration)],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid")
+    }
+
+    #[test]
+    fn settled_iso_vectors() {
+        assert_eq!(format_settled_iso(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(format_settled_iso(1), "1970-01-01T00:00:00.001Z");
+        assert_eq!(format_settled_iso(1_000), "1970-01-01T00:00:01.000Z");
+        assert_eq!(format_settled_iso(60_000), "1970-01-01T00:01:00.000Z");
+        assert_eq!(format_settled_iso(3_600_000), "1970-01-01T01:00:00.000Z");
+        assert_eq!(format_settled_iso(86_400_000), "1970-01-02T00:00:00.000Z");
+        assert_eq!(
+            format_settled_iso(1_704_067_200_000),
+            "2024-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            format_settled_iso(1_709_164_800_000),
+            "2024-02-29T00:00:00.000Z"
+        );
+        assert_eq!(
+            format_settled_iso(-5_000),
+            "1970-01-01T00:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn relative_age_accepts_settled_iso() {
+        assert_eq!(
+            format_relative_age(1_704_067_200_000 + 90_000, "2024-01-01T00:00:00.000Z"),
+            "1m ago"
+        );
+        assert_eq!(
+            format_relative_age(1_704_067_200_000, "2024-01-01T00:00:00.000Z"),
+            "0s ago"
+        );
+    }
+
+    #[test]
+    fn host_clock_is_sane_and_nondecreasing() {
+        let first = host_now_millis();
+        assert!(
+            first > 1_700_000_000_000,
+            "host clock must read current wall time"
+        );
+        assert!(host_now_millis() >= first);
+    }
+
+    #[test]
+    fn scene_active_work_reflects_narration() {
+        assert!(scene_has_active_work(&scene_with_narration(
+            TurnNarration::Working
+        )));
+        assert!(scene_has_active_work(&scene_with_narration(
+            TurnNarration::Thinking
+        )));
+        assert!(!scene_has_active_work(&scene_with_narration(
+            TurnNarration::Quiet
+        )));
+        assert!(!scene_has_active_work(&scene_with_narration(
+            TurnNarration::WorkedFor { millis: 1_000 }
+        )));
+        assert!(!scene_has_active_work(&scene_with_narration(
+            TurnNarration::Failed
+        )));
+    }
+
+    #[test]
+    fn settled_footer_absent_without_settlement() {
+        let scene = scene_with_narration(TurnNarration::WorkedFor { millis: 1_000 });
+        assert!(settled_footer_for(&scene, &turn_id("turn_a")).is_none());
+        assert!(settled_footer_for(&scene, &turn_id("turn_missing")).is_none());
+    }
+
+    #[test]
+    fn unknown_turn_rejects_footer_settlement() {
+        let mut scene = scene_with_narration(TurnNarration::WorkedFor { millis: 1_000 });
+        let settlement =
+            TurnFooterSettlement::new("hello".to_owned(), 1_704_067_200_000).expect("bounded");
+        assert!(!scene.set_turn_footer_settlement(&turn_id("turn_missing"), settlement));
+    }
+
+    #[test]
+    fn settled_footer_returns_exact_facts() {
+        let mut scene = scene_with_narration(TurnNarration::WorkedFor { millis: 1_000 });
+        let settlement =
+            TurnFooterSettlement::new("hello".to_owned(), 1_704_067_200_000).expect("bounded");
+        assert!(scene.set_turn_footer_settlement(&turn_id("turn_a"), settlement));
+        assert_eq!(
+            settled_footer_for(&scene, &turn_id("turn_a")),
+            Some((
+                "2024-01-01T00:00:00.000Z".to_owned(),
+                "hello".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn footer_policy_reveal_and_copy_flow() {
+        let mut policy = ConversationTurnFooterPolicy::new(
+            "2024-01-01T00:00:00.000Z",
+            "hello",
+            String::new(),
+        );
+        assert_eq!(
+            policy.observe(TurnFooterInput::Hover),
+            TurnFooterAction::RequestClockSample
+        );
+        assert_eq!(
+            policy.observe(TurnFooterInput::Focus),
+            TurnFooterAction::RequestClockSample
+        );
+        policy.set_relative_age("1m ago");
+        assert_eq!(policy.relative_age(), "1m ago");
+        assert_eq!(policy.response_text(), "hello");
+        let TurnFooterAction::CopyResponse { text } = policy.start_copy() else {
+            panic!("copy input must start the exact copy command");
+        };
+        assert_eq!(text, "hello");
+        policy.settle_copy(CopyOutcome::Succeeded);
+        assert_eq!(policy.copy_message(), "");
+        policy.settle_copy(CopyOutcome::Failed);
+        assert!(!policy.copy_message().is_empty());
+    }
+
+    #[test]
+    fn footer_policy_rejects_timer_wakeups() {
+        let mut policy =
+            ConversationTurnFooterPolicy::new("2024-01-01T00:00:00.000Z", "hello", String::new());
+        assert_eq!(
+            policy.observe(TurnFooterInput::PeriodicTick),
+            TurnFooterAction::NoOp
+        );
     }
 }

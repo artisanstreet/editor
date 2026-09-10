@@ -44,3 +44,38 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
   `AssistantMessagePhase::Final` disclosure for complete footer coverage;
   viewport active-turn identity for the navigator active tick; activity
   label/detail split.
+
+## Follow-up packet (host clock/footer wiring, gradient, motion, shell)
+
+- User bubble uses the existing two-stop GPUI gradient
+  (`artisan_ui::gradient::vertical_gradient`, S775 top → S850 bottom for
+  reference `bg-linear-to-t from-surface-850 to-surface-775`); the earlier
+  "no gradient fill" comment was stale and is removed.
+- Message selection: the fork exposes no text-selection primitive, so there is
+  nothing faithful to wire; assistant/user bodies keep rendering through the
+  shared `MarkdownRenderer` / `body_text` path verbatim with no regression.
+- Status shimmer defaults to `MotionPolicy::Full` (`status_motion`,
+  `set_status_motion` override); settled rows stay immediate via the
+  component's inactive path. The fork exposes no OS reduced-motion query
+  (only `WindowAppearance`), so a reduced preference arrives through the
+  setter when the application layer owns one.
+- Host (`conversation_host.rs`) serves the surface footer actions through the
+  existing `ConversationTurnFooterPolicy`: reveal takes one `SystemTime` clock
+  sample, formats it with `conversation_relative_age`, and mirrors the text;
+  copy writes the scene settlement bytes via the platform clipboard and
+  mirrors the actual outcome. Settlement lookups always come from the accepted
+  scene, never the action echo.
+- Live elapsed: the host runs one 1s task only while the accepted scene
+  carries active-work status, pushes the first sample synchronously on start
+  (so capture sees `Thinking/Working for X` immediately), mirrors `None` and
+  drops the task on settlement, and ends with host drop. Footer ages refresh
+  on hover/focus only, per reference.
+- Shell: the transcript viewport paints no opaque fill (thread-screen black
+  shows through); cards, bubbles, panels, and popovers keep their faces.
+- Turn rhythm: inter-turn gap is the reference `gap-8` (32px); the absolute
+  footer reveals inside that room. No per-turn pad is added, so unsettled
+  turns carry no phantom gap. Intra-turn block gap stays 16px against the
+  reference `1lh`; capture will judge.
+- Projection `c7892511` adds no new public scene API (internal turn-chart
+  drive); this packet builds on `e6020f4` only. Root integrates `c7892511`
+  separately.

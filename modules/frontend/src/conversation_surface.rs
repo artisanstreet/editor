@@ -24,6 +24,7 @@ use artisan_protocol::{
 };
 use artisan_ui::alert::{Alert, AlertVariant};
 use artisan_ui::badge::{BadgeStyle, outline_badge};
+use artisan_ui::gradient::vertical_gradient;
 use artisan_ui::button::{
     AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
 };
@@ -35,7 +36,7 @@ use artisan_ui::motion::MotionPolicy;
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::shimmer_text::ShimmerText;
-use artisan_ui::theme::{ArtisanTheme, SurfaceScale, SurfaceStep, ThemeMode};
+use artisan_ui::theme::{ArtisanTheme, SurfaceStep, ThemeMode};
 use gpui::{
     AnyElement, Context, Div, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Modifiers,
     Render, ScrollAnchor, ScrollHandle, SharedString, Stateful, Window, div,
@@ -568,6 +569,12 @@ pub struct ConversationSurface {
     /// never resets the scene's authoritative `active_started_at_ms` basis.
     /// `None` renders the bare verb truthfully until the host supplies time.
     active_now_ms: Option<i64>,
+    /// Motion policy for the live status shimmer. Defaults to `Full` so the
+    /// travelling band actually animates in production; settled rows are
+    /// always immediate via the shimmer's inactive path. The fork exposes no
+    /// OS reduced-motion query, so a reduced preference arrives through
+    /// [`Self::set_status_motion`] when the application layer owns one.
+    status_motion: MotionPolicy,
     /// Host-mirrored footer view state keyed by [`footer_key`].
     footer_mirrors: HashMap<String, TurnFooterMirror>,
     /// Per-turn footer copy-button focus handles keyed by [`footer_key`].
@@ -911,6 +918,7 @@ impl ConversationSurface {
             navigator_focus: HashMap::new(),
             navigator_expanded: false,
             active_now_ms: None,
+            status_motion: MotionPolicy::Full,
             footer_mirrors: HashMap::new(),
             footer_focus: HashMap::new(),
             question_focus: HashMap::new(),
@@ -1047,6 +1055,24 @@ impl ConversationSurface {
     pub fn set_active_now_ms(&mut self, now_ms: Option<i64>, cx: &mut Context<Self>) {
         if self.active_now_ms != now_ms {
             self.active_now_ms = now_ms;
+            cx.notify();
+        }
+    }
+
+    /// Returns the motion policy applied to the live status shimmer.
+    #[must_use]
+    pub const fn status_motion(&self) -> MotionPolicy {
+        self.status_motion
+    }
+
+    /// Mirrors a reduced-motion preference for the live status shimmer.
+    ///
+    /// `Full` (the default) animates the travelling band while work is live;
+    /// `Reduced` resolves it to immediate static text. Settled rows never
+    /// animate regardless of this policy.
+    pub fn set_status_motion(&mut self, motion: MotionPolicy, cx: &mut Context<Self>) {
+        if self.status_motion != motion {
+            self.status_motion = motion;
             cx.notify();
         }
     }
@@ -1869,9 +1895,10 @@ impl ConversationSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Parity with conversation-message.svelte user branch: right-aligned
-        // gradient bubble (surface-850 to surface-775), rounded-2xl, plain
-        // pre-wrap paragraph, no title. GPUI has no gradient fill, so the
-        // bubble uses the solid ramp midpoint (surface-800); documented.
+        // gradient bubble, rounded-2xl, plain pre-wrap paragraph, no title.
+        // Reference `bg-linear-to-t from-surface-850 to-surface-775` lays the
+        // from-stop at the bottom, so the native face runs S775 (top) to
+        // S850 (bottom) through the existing two-stop GPUI gradient.
         let body_selector = format!("{selector}-body");
         let mut message = div().w_full().flex().flex_col().items_end().gap(px(8.0));
         if let Some(images) = self.message_images.as_ref() {
@@ -1898,7 +1925,10 @@ impl ConversationSurface {
                 div()
                     .max_w(px(576.0))
                     .rounded(px(16.0))
-                    .bg(SurfaceScale.value(SurfaceStep::S800).to_paint())
+                    .bg(vertical_gradient(
+                        SurfaceStep::S775.oklch(),
+                        SurfaceStep::S850.oklch(),
+                    ))
                     .px(px(16.0))
                     .py(px(12.0))
                     .debug_selector(move || selector.clone())
@@ -2618,8 +2648,9 @@ impl ConversationSurface {
         )?;
         // Parity with the work-session status line: base-size muted copy on a
         // half-rem vertical rhythm. The existing shimmer component carries the
-        // sweep under `MotionPolicy::Full`; this surface holds `Reduced`, so
-        // active rows stay readable and still under stopped/reduced motion.
+        // sweep under `MotionPolicy::Full` and resolves to immediate static
+        // text under `Reduced` or once the row settles (`active(false)`), so
+        // no effect runs for settled history or reduced motion.
         let live = matches!(
             block.narration,
             TurnNarration::Thinking
@@ -2628,7 +2659,7 @@ impl ConversationSurface {
                 | TurnNarration::Compacting
                 | TurnNarration::BackgroundWait
         );
-        let shimmer = ShimmerText::new(copy, *theme, MotionPolicy::Reduced)
+        let shimmer = ShimmerText::new(copy, *theme, self.status_motion)
             .active(live)
             .delay_seconds(1.5)
             .duration_seconds(3.0)
@@ -3479,11 +3510,15 @@ impl Render for ConversationSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ArtisanTheme::for_mode(self.theme_mode);
         let entity = cx.entity();
+        // Reference rhythm keeps 32 px (`gap-8`) between turn groups; the
+        // settled footer's absolute reveal lives inside that room instead of
+        // overlapping the next turn. No per-turn pad is added, so unsettled
+        // turns carry no phantom gap.
         let mut transcript = div()
             .w_full()
             .flex()
             .flex_col()
-            .gap(theme.spacing.steps(4.0));
+            .gap(theme.spacing.steps(8.0));
         let previous_anchors = std::mem::take(&mut self.scroll_anchors);
         let mut rendered_anchors = Vec::new();
         self.sync_footer_focus(&mut *window, cx);
@@ -3565,11 +3600,13 @@ impl Render for ConversationSurface {
         // the accepted ordered block tree.
         self.schedule_viewport_observation(window, cx);
 
+        // The viewport inherits the thread-screen shell (black): no opaque fill
+        // here, so the transcript never paints over its parent. Cards,
+        // bubbles, panels, and popovers keep their own faces.
         let scroll_area = ScrollArea::new(self.scroll_handle.clone(), theme)
             .focus_handle(self.transcript_focus.clone())
             .debug_selector(CONVERSATION_SURFACE_SELECTOR)
             .size_full()
-            .bg(theme.colors.background.to_paint())
             .child(transcript);
 
         let mut root = div().relative().size_full().child(scroll_area);
@@ -4080,6 +4117,29 @@ mod tests {
                 RenderedBlockKind::TurnFooter,
             ]
         );
+    }
+
+    #[gpui::test]
+    fn status_motion_defaults_to_full_with_reduced_override(
+        cx: &mut TestAppContext,
+    ) {
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(scene(Vec::new()), ThemeMode::Dark, surface_cx)
+        });
+        cx.update(|_, app| {
+            assert_eq!(surface.read(app).status_motion(), MotionPolicy::Full);
+        });
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                surface.set_status_motion(MotionPolicy::Reduced, surface_cx);
+            });
+        });
+        cx.update(|_, app| {
+            assert_eq!(
+                surface.read(app).status_motion(),
+                MotionPolicy::Reduced
+            );
+        });
     }
 
     #[gpui::test]
