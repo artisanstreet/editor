@@ -89,6 +89,10 @@ mod engine_owner_preflight;
 mod engine_owner_codex;
 
 #[cfg(test)]
+#[path = "../../../../tests/backend/codex_activity_fixture.rs"]
+mod codex_activity_fixture;
+
+#[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_claude.rs"]
 mod engine_owner_claude;
 

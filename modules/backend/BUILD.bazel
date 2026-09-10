@@ -96,6 +96,7 @@ rust_library(
         "//tests/backend:engine_owner_configuration.rs",
         "//tests/backend:engine_owner_configured.rs",
         "//tests/backend:engine_owner_codex.rs",
+        "//tests/backend:codex_activity_fixture.rs",
         "//tests/backend:engine_owner_claude.rs",
         "//tests/backend:engine_owner_grok.rs",
         "//tests/backend:engine_owner_hermes.rs",

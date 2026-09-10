@@ -1,6 +1,23 @@
 load("@rules_rust//rust:defs.bzl", "rust_test")
 
 rust_test(
+    name = "observation_ledger_test",
+    srcs = ["observation_ledger.rs"],
+    crate_name = "observation_ledger_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "migrations",
     srcs = ["migrations.rs"],
     crate_name = "migrations",
