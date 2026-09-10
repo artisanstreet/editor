@@ -25,10 +25,9 @@
 //! Spacing and type follow [`ProseTypography`](crate::theme::ProseTypography):
 //! 16 px / 28 px body at weight 410, per-heading sizes with collapsing
 //! block margins, and fence chrome from the reference code snippet. Inline
-//! code reads 400 muted with no wash; mono face, 14 px size, and normal
-//! tracking ride the shared `StyledText` range APIs through
-//! `InlinePresentation.code_ranges` once the selection extension exposes
-//! them (see `inline_code_style`).
+//! code reads 400 muted with no wash; mono face and normal tracking ride
+//! the frozen text-run contract through `InlinePresentation.code_ranges`
+//! (see `code_style`).
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -40,7 +39,7 @@ use gpui::{
 };
 
 use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownEngine, Span};
-use crate::selectable_text::SelectableText;
+use crate::selectable_text::{SelectableText, TextRunOverride};
 use crate::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
 
 /// Synchronous renderer for accepted Markdown message bodies.
@@ -222,7 +221,7 @@ fn with_block_margins(child: AnyElement, top_px: f32) -> AnyElement {
 #[must_use]
 pub fn block_gaps(blocks: &[Block], scope: BlockScope) -> Vec<f32> {
     let mut gaps = Vec::with_capacity(blocks.len());
-    let mut previous_bottom = 0.0;
+    let mut previous_bottom: f32 = 0.0;
     let mut previous_zeroes_follower = false;
     for (index, block) in blocks.iter().enumerate() {
         let (margin_top, margin_bottom) = block_margins(block, scope);
@@ -395,7 +394,20 @@ fn render_inline(selector: &str, spans: &[Span], theme: ArtisanTheme) -> AnyElem
     let presentation = present_inline(spans, theme);
     let id = SharedString::from(selector.to_owned());
     let text = SharedString::from(presentation.source);
-    let element = SelectableText::retained(id, text, theme, presentation.highlights);
+    // Inline code rides the frozen text-run contract: mono family plus
+    // zero tracking per code range. Weight (400) and muted color already
+    // ride the highlight runs.
+    let overrides = presentation
+        .code_ranges
+        .iter()
+        .map(|range| TextRunOverride {
+            range: range.clone(),
+            font_family: Some(SharedString::from(theme.typography.mono.family)),
+            letter_spacing: Some(px(0.0)),
+        })
+        .collect::<Vec<_>>();
+    let element = SelectableText::retained(id, text, theme, presentation.highlights)
+        .with_text_run_overrides(overrides);
     if presentation.links.is_empty() {
         return element.into_any_element();
     }
@@ -664,14 +676,10 @@ fn is_openable_link_destination(destination: &str) -> bool {
 fn code_style(theme: ArtisanTheme, in_link: bool) -> HighlightStyle {
     // Reference inline code reads 400 muted with no wash (`prose.css`
     // inline-code over plugin `code`), except inside a link where `a code`
-    // inherits the link color. The 400 weight rides here; face (mono,
-    // 14 px) and normal tracking do NOT ride `HighlightStyle` — they ride
-    // the shared `StyledText` range APIs (`with_highlights` only carries
-    // color/weight/style/background/underline/strike/fade). Those ranges
-    // are exposed as `InlinePresentation.code_ranges` for the selection
-    // extension (family override plus run-level tracking reset); until that
-    // extension lands, inline code keeps body face, size, and tracking.
-    // That is an open dependency, not accepted parity.
+    // inherits the link color. The 400 weight rides here; mono face
+    // (14 px) and normal tracking ride the frozen text-run contract
+    // (`InlinePresentation.code_ranges` → `TextRunOverride` with the mono
+    // family and zero tracking).
     HighlightStyle {
         color: if in_link {
             None

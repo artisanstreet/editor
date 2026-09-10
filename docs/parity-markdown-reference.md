@@ -137,18 +137,15 @@ blocks. The renderer then painted heading + prose + fence with no list.
   (true `instantiateVariableFont` instances, OS/2 410/630, outlines
   distinct from 400/600 neighbors) are registered through the existing
   `static_faces` list; Bazel runfiles entries stay root-owned.
-- Honest gaps, no fakes: inline code reads 400 muted today with body face,
-  size, and tracking. That is an open dependency, not a GPUI limit and not
-  accepted parity: shared `StyledText` already supports
-  `with_font_family_overrides` (sorted non-overlapping char-boundary
-  ranges) and per-run `TextRun.letter_spacing`; only the shared
-  `SelectableText` element exposes neither yet. The frozen
-  `InlinePresentation` range API carries exactly what that extension
-  needs — `highlights` for `with_highlights`, `code_ranges` for the mono
-  family override plus run-level tracking reset, `links` for activation —
-  additive changes only. Until the extension lands (separate worker or
-  follow-up, root delegates), code spans inherit body tracking
-  (reference `code` letter-spacing normal is per-element); blockquote/hr
+- Honest gaps, no fakes: inline code reads 400 muted; mono face and
+  normal tracking ride the frozen text-run contract
+  (`InlinePresentation.code_ranges` → `TextRunOverride` with the mono
+  family and zero tracking, wired in `render_inline`). Shared `StyledText`
+  already supports `with_font_family_overrides` (sorted non-overlapping
+  char-boundary ranges) and per-run `TextRun.letter_spacing`, and the
+  renderer consumes them only through the shared selection element —
+  never edited here. Until the dependency integrates (root first, then
+  gate), code spans inherit body face/tracking; blockquote/hr
   structure has no engine model in this packet (`markdown.rs` frozen) so
   quotes read as paragraphs and rules are dropped — both reported for a
   follow-up engine packet; fence copy/filename chrome has no renderer

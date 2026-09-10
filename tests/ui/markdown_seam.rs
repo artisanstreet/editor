@@ -12,8 +12,8 @@ use artisan_ui::markdown::{Block, CodeFence, CodeTokenKind, MarkdownEngine, Span
 use artisan_ui::markdown_renderer::{BlockScope, MarkdownRenderer, block_gaps, present_inline};
 use artisan_ui::theme::{ArtisanTheme, ProseTypography, ThemeMode};
 use gpui::{
-    Context, FontStyle, FontWeight, IntoElement, ParentElement, Render, TestAppContext, Window,
-    div, px,
+    Context, FontStyle, FontWeight, IntoElement, ParentElement, Render, Styled, TestAppContext,
+    Window, div, px,
 };
 
 const CLOSED_RUST_FENCE: &str =
@@ -696,6 +696,11 @@ fn merged_highlights_keep_code_bold_and_link_together() {
 
     let code = &presentation.highlights[0];
     assert_eq!(&presentation.source[code.0.clone()], "code");
+    assert_eq!(
+        presentation.code_ranges,
+        vec![code.0.clone()],
+        "code ranges feed the frozen family-override contract"
+    );
     assert!(
         code.1.background_color.is_none(),
         "reference inline code carries no wash, got {code:?}"
@@ -1018,8 +1023,8 @@ impl Render for MountedMarkdownProbe {
 fn mounted_block_gap(
     cx: &mut TestAppContext,
     source: &'static str,
-    first: &str,
-    second: &str,
+    first: &'static str,
+    second: &'static str,
 ) -> gpui::Pixels {
     let (_, cx) = cx.add_window_view(|_, _| MountedMarkdownProbe {
         renderer: MarkdownRenderer::new(),
