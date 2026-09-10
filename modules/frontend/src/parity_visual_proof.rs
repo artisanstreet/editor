@@ -684,7 +684,7 @@ pub fn run() -> ExitCode {
                     // Shipping caption setup so no native caption consumes
                     // client height; hidden and unfocused for proof capture.
                     titlebar: Some(TitlebarOptions {
-                        title: Some(caption.into()),
+                        title: Some(caption.clone().into()),
                         appears_transparent: true,
                         ..Default::default()
                     }),
