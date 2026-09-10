@@ -435,7 +435,8 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
 
     let (host, cx) = add_host(cx);
     let snapshot = baseline_snapshot();
-    let disclosure_id = scene_id("session-turn_a");
+    // The session disclosure is auto-registered from scene evidence on
+    // snapshot accept; registering it again would refuse as a duplicate.
     cx.update(|_, app| {
         host.update(app, |host, host_cx| {
             host.dispatch(
@@ -445,14 +446,6 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
                 host_cx,
             )
             .expect("snapshot dispatch succeeds");
-            host.dispatch(
-                ConversationStateEvent::RegisterDisclosure {
-                    scene_id: disclosure_id,
-                    initially_working: false,
-                },
-                host_cx,
-            )
-            .expect("disclosure registration succeeds");
         });
     });
     cx.simulate_resize(size(px(720.0), px(520.0)));
@@ -470,7 +463,7 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
             .disclosure_views
             .into_iter()
             .find(|view| view.scene_id.as_str() == "session-turn_a")
-            .expect("registered disclosure view remains visible");
+            .expect("auto-registered session disclosure view remains visible");
         assert_eq!(disclosure.state, DisclosureState::UserOpen);
         assert!(host.surface().read(app).pending_actions().is_empty());
         let work_group = host.surface().read(app).scene().turn_scenes()[0]
@@ -500,7 +493,7 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
             .disclosure_views
             .into_iter()
             .find(|view| view.scene_id.as_str() == "session-turn_a")
-            .expect("registered disclosure view remains visible");
+            .expect("auto-registered session disclosure view remains visible");
         assert_eq!(disclosure.state, DisclosureState::UserClosed);
         let work_group = host.surface().read(app).scene().turn_scenes()[0]
             .blocks()

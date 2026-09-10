@@ -702,7 +702,6 @@ fn jump_to_latest_is_an_overlay_and_pointer_keyboard_activation_is_typed(cx: &mu
         window.focus(&focus, app);
         window.focus_next(app);
     });
-    cx.run_until_parked();
     complete_key_press(cx, "enter");
     complete_key_press(cx, "space");
     let keyboard_actions = drain_surface_actions(&surface, cx);
@@ -1277,10 +1276,18 @@ fn loaded_turn_navigator_pointer_activation_emits_exact_item_scroll_intent(
     cx: &mut TestAppContext,
 ) {
     let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
+    // Real pointer path: hovering the rail swaps the rest-state ticks for
+    // the label controls, so hover first and settle, then click whatever
+    // control is actually painted for the oldest marker.
+    let tick = cx
+        .debug_bounds(NAV_FIRST_CONTROL)
+        .expect("oldest marker must paint a stable control");
+    cx.simulate_mouse_move(tick.center(), None::<gpui::MouseButton>, Modifiers::none());
+    cx.run_until_parked();
     let offset_before = cx.update(|_, app| surface.read(app).scroll_handle().offset());
     let button = cx
         .debug_bounds(NAV_FIRST_CONTROL)
-        .expect("oldest marker must paint a stable control");
+        .expect("hovered marker must keep a stable control");
     cx.simulate_click(button.center(), Modifiers::none());
     cx.run_until_parked();
     let offset_after = cx.update(|_, app| surface.read(app).scroll_handle().offset());
