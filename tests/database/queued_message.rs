@@ -1455,8 +1455,7 @@ async fn concurrent_duplicate_accept_has_one_winner_and_one_replay() {
 }
 
 #[tokio::test]
-async fn retry_after_selection_change_replays_stored_snapshot() {
-    let (_database, repository) = memory_repository().await;
+async fn retry_after_selection_change_replays_stored_snapshot() {    let (_database, repository) = memory_repository().await;
     setup_thread(&repository).await;
     queue_named(
         &repository,
@@ -1506,8 +1505,89 @@ async fn retry_after_selection_change_replays_stored_snapshot() {
         .expect("snapshot should still load")
         .expect("snapshot should still exist");
     assert_eq!(
-        after.config().selection().profile_id(),
-        before.config().selection().profile_id(),
+        after.config().selection().profile_id().as_str(),
+        before.config().selection().profile_id().as_str(),
         "retry must replay the stored snapshot, never the current settings"
     );
+}
+
+#[tokio::test]
+async fn legacy_null_snapshot_rows_replay_and_read_as_absent() {
+    let (database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    // A row accepted before snapshots existed: all snapshot columns
+    // NULL, written directly to bypass the capturing admission path.
+    entities::message::Entity::insert(entities::message::ActiveModel {
+        message_id: Set("message-legacy".to_owned()),
+        thread_id: Set("thread-1".to_owned()),
+        ordinal: Set(0),
+        body: Set("legacy bytes".to_owned()),
+        accepted_at_ms: Set(300),
+    })
+    .exec(&database)
+    .await
+    .expect("legacy message fixture should insert");
+    entities::message_dispatch::Entity::insert(entities::message_dispatch::ActiveModel {
+        message_id: Set("message-legacy".to_owned()),
+        correlation_id: Set("queue-legacy".to_owned()),
+        state: Set(DispatchState::Queued),
+        attempt_count: Set(0),
+        queued_at_ms: Set(300),
+        available_at_ms: Set(300),
+        lease_owner: Set(None),
+        lease_expires_at_ms: Set(None),
+        last_error: Set(None),
+        steer_run_id: Set(None),
+        updated_at_ms: Set(300),
+    })
+    .exec(&database)
+    .await
+    .expect("legacy dispatch fixture should insert");
+    entities::command_receipt::Entity::insert(entities::command_receipt::ActiveModel {
+        request_id: Set("queue-legacy".to_owned()),
+        command_kind: Set(artisan_database::entities::CommandKind::QueueMessage),
+        directory_id: Set(None),
+        project_id: Set(None),
+        thread_id: Set(Some("thread-1".to_owned())),
+        title: Set(None),
+        message_id: Set(Some("message-legacy".to_owned())),
+        body: Set(Some("legacy bytes".to_owned())),
+        accepted_at_ms: Set(300),
+        engine_run_config_version: Set(None),
+        engine_run_config: Set(None),
+        engine_run_config_expected_revision: Set(None),
+        engine_run_config_result_revision: Set(None),
+    })
+    .exec(&database)
+    .await
+    .expect("legacy receipt fixture should insert");
+    let replay = repository
+        .lookup_queue_message(
+            &request("queue-legacy"),
+            &thread_id("thread-1"),
+            &text_payload("legacy bytes"),
+            None,
+        )
+        .await
+        .expect("legacy lookup should work")
+        .expect("legacy receipt should replay");
+    assert_eq!(
+        replay.receipt.disposition,
+        ReceiptDisposition::Duplicate,
+    );
+    assert_eq!(replay.message_id, message_id("message-legacy"));
+    assert!(
+        repository
+            .read_receipt_engine_settings(&request("queue-legacy"))
+            .await
+            .expect("legacy snapshot read should work")
+            .is_none(),
+        "legacy rows without snapshots read as absent for the documented fallback"
+    );
+    let payload = repository
+        .read_queue_message_dispatch_payload(&message_id("message-legacy"))
+        .await
+        .expect("legacy dispatch payload should load")
+        .expect("legacy dispatch payload should exist");
+    assert!(payload.steer_target.is_none());
 }
