@@ -34,8 +34,9 @@ pub mod engine_config;
 pub mod events;
 pub mod identifiers;
 mod legacy_workspace_id;
-pub mod model;
 pub mod message;
+pub mod model;
+pub mod observation;
 pub mod text;
 pub mod time;
 
@@ -65,31 +66,62 @@ pub use conversation::{
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
     ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
     ConversationTurn, ConversationUnsubscribe, CounterError, IncrementalText, IncrementalTextError,
-    ItemOrdinal, LifecycleTransitionError, PatchBatch, PatchBatchError, PatchSequence,
-    MultimodalUserMessageItem, QueryTurnCount, QueryTurnCountError, Revision, TurnOrdinal,
-    UserMessageItem,
+    ItemOrdinal, LifecycleTransitionError, MultimodalUserMessageItem, PatchBatch, PatchBatchError,
+    PatchSequence, QueryTurnCount, QueryTurnCountError, Revision, TurnOrdinal, UserMessageItem,
 };
 pub use engine_config::{
-    ApprovalMode, ByteLimit, CountLimit, EngineConfigError, EngineConfigReason,
-    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EnginePermissionPolicy,
-    EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection,
-    FilesystemAccess, FiniteMillis, NetworkAccess, OpenCode2Selection, WebSearchAccess,
+    ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
+    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier, CountLimit,
+    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed, EngineConfigError,
+    EngineConfigReason, EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId,
+    EnginePermissionPolicy, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, GrokPermissionMode, GrokReasoningEffort,
+    GrokSelection, HermesPermissionMode, HermesReasoningEffort, HermesSelection, NetworkAccess,
+    OpenCode2Selection, WebSearchAccess,
 };
-pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
+pub use events::{
+    EngineObservationEvent, Event, FirstMessageQueued, ProjectAttached, ThreadCreated,
+};
 pub use identifiers::{
     DirectoryId, EngineAgentId, EngineModelId, EngineProfileId, EngineProfileIdError,
     EngineRouteId, EngineVariantId, IdentifierError, ItemId, MessageId, PatchId, PermissionId,
     ProjectId, RequestId, RunId, ThreadId, TurnId,
+};
+pub use message::{
+    AuthoredText, AuthoredTextError, ImageAttachment, ImageAttachmentError, ImageAttachmentRef,
+    ImageAttachmentRefError, ImageMimeType, ImageMimeTypeError, QueueMessagePayload,
+    QueueMessagePayloadError,
 };
 pub use model::{
     CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,
     DirectoryPlace, PlaceKind, ProjectListing, ProjectListingError, ProjectSummary, QueuedMessage,
     ReceiptDisposition, ThreadListing, ThreadListingError, ThreadSummary,
 };
-pub use message::{
-    AuthoredText, AuthoredTextError, ImageAttachment, ImageAttachmentError, ImageAttachmentRef,
-    ImageAttachmentRefError, ImageMimeType, ImageMimeTypeError, QueueMessagePayload,
-    QueueMessagePayloadError,
+pub use observation::{
+    AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalKind,
+    ApprovalObservation, ApprovalRequest, ApprovalState, ArtisanCode, CompactionObservation,
+    CompactionState, DiagnosticLevel, EngineErrorRef, EngineErrorRefInput, FileAction,
+    FileObservation, LimitScope, MessagePhase, NativeActionObservation,
+    OBSERVATION_ANSWER_MAX_BYTES, OBSERVATION_ANSWERS_MAX, OBSERVATION_ARTISAN_CODE_MAX_BYTES,
+    OBSERVATION_COMMAND_MAX_BYTES, OBSERVATION_COUNT_MAX, OBSERVATION_DELTA_MAX_BYTES,
+    OBSERVATION_DESCRIPTION_MAX_BYTES, OBSERVATION_DURATION_MAX_MILLIS, OBSERVATION_ID_MAX_BYTES,
+    OBSERVATION_LABEL_MAX_BYTES, OBSERVATION_LIMIT_LABEL_MAX_BYTES, OBSERVATION_MESSAGE_MAX_BYTES,
+    OBSERVATION_OUTPUT_MAX_BYTES, OBSERVATION_PATH_MAX_BYTES, OBSERVATION_PLAN_MAX_ENTRIES,
+    OBSERVATION_PLAN_TEXT_MAX_BYTES, OBSERVATION_PROVIDER_CODE_MAX_BYTES,
+    OBSERVATION_QUERY_MAX_BYTES, OBSERVATION_QUESTION_MAX_OPTIONS, OBSERVATION_REASON_MAX_BYTES,
+    OBSERVATION_SEQUENCE_MAX, OBSERVATION_SUMMARY_INDEX_MAX, OBSERVATION_TEXT_MAX_BYTES,
+    OBSERVATION_TIMESTAMP_MAX_BYTES, OBSERVATION_TITLE_MAX_BYTES, Observation, ObservationError,
+    ObservationId, ObservationSequence, PlanEntry, PlanEntryStatus, PlanObservation,
+    ProcessDiagnosticObservation, ProtocolDiagnosticObservation, QuestionInput,
+    QuestionObservation, QuestionOption, QuestionState, ReasoningSummaryCompletedObservation,
+    ReasoningSummaryDeltaObservation, RetryAttemptState, RetryObservation, RunState,
+    RunStateObservation, RunTerminalObservation, RunTerminalState, SearchObservation, SearchScope,
+    SearchState, SubagentInput, SubagentObservation, SubagentState, SubagentTranscriptObservation,
+    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, TerminalChannel,
+    ToolAction, ToolObservation, TranscriptAgentMessageCompleted, TranscriptAgentMessageDelta,
+    TranscriptContent, TranscriptFile, TranscriptReasoningSummaryCompleted,
+    TranscriptReasoningSummaryDelta, TranscriptSearch, TranscriptTerminalActivity, TranscriptTool,
+    TurnState, TurnStateObservation, UsageBasis, UsageInput, UsageObservation,
 };
 pub use text::{
     DisplayName, DisplayNameError, MessageBody, MessageBodyError, RootPath, RootPathError,
@@ -100,18 +132,37 @@ pub use time::UnixMillis;
 pub use legacy_workspace_id::{WorkspaceId, WorkspaceIdError};
 
 mod model_favorites;
-pub use model_favorites::{ModelFavoriteId, ModelFavoriteIdError, ModelFavoritesRevision, ModelFavoritesRevisionError, ModelFavoritesSnapshot, ModelFavoritesSnapshotError, MODEL_FAVORITES_MAX_MODELS, MODEL_FAVORITES_MAX_SNAPSHOT_BYTES};
+pub use model_favorites::{
+    MODEL_FAVORITES_MAX_MODELS, MODEL_FAVORITES_MAX_SNAPSHOT_BYTES, ModelFavoriteId,
+    ModelFavoriteIdError, ModelFavoritesRevision, ModelFavoritesRevisionError,
+    ModelFavoritesSnapshot, ModelFavoritesSnapshotError,
+};
 
 mod run_usage;
-pub use run_usage::{RUN_USAGE_PROVIDER_SESSION_MAX_BYTES,RUN_USAGE_PROVIDER_TURN_MAX_BYTES,RUN_USAGE_MAX_SOURCE_SEQUENCE,RUN_USAGE_MAX_TOKEN_COUNT,RunUsageBasis,RunUsageReportInput,RunUsageReport,RunUsageReportError};
+pub use run_usage::{
+    RUN_USAGE_MAX_SOURCE_SEQUENCE, RUN_USAGE_MAX_TOKEN_COUNT, RUN_USAGE_PROVIDER_SESSION_MAX_BYTES,
+    RUN_USAGE_PROVIDER_TURN_MAX_BYTES, RunUsageBasis, RunUsageReport, RunUsageReportError,
+    RunUsageReportInput,
+};
 
 mod queued_message;
-pub use queued_message::{QUEUED_MESSAGE_LIST_MAX,QueuedMessageListOrder,ListQueuedMessages,QueuedMessageListError,QueuedMessageSummary,QueuedMessageListing,QueuedMessageListingError,WithdrawQueuedMessage,QueuedMessageWithdrawalOutcome,WithdrawQueuedMessageResult};
+pub use queued_message::{
+    ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListError, QueuedMessageListOrder,
+    QueuedMessageListing, QueuedMessageListingError, QueuedMessageSummary,
+    QueuedMessageWithdrawalOutcome, WithdrawQueuedMessage, WithdrawQueuedMessageResult,
+};
+mod run_interaction;
+pub use run_interaction::{
+    InteractionKind, InteractionOutcome, RespondApproval, RespondQuestion, RunInteractionError,
+};
 
 pub use model_favorites::MODEL_FAVORITE_ID_MAX_BYTES;
 
 pub mod composer_catalog;
-pub use composer_catalog::{CATALOG_REVISION_MAX_BYTES, CatalogRevision, CatalogRevisionError, ReadComposerCatalog, ReadModelFavorites, SetModelFavorite};
+pub use composer_catalog::{
+    CATALOG_REVISION_MAX_BYTES, CatalogRevision, CatalogRevisionError, ReadComposerCatalog,
+    ReadModelFavorites, SetModelFavorite,
+};
 
 pub mod account_usage;
 pub use account_usage::{
@@ -121,4 +172,7 @@ pub use account_usage::{
 };
 
 pub mod composer_state;
-pub use composer_state::{ReadRecalledMessage, ReadRunUsage, RecalledMessageResult, RunUsageResult, WithdrawQueuedMessageCommand, QueuedMessageWithdrawalResult};
+pub use composer_state::{
+    QueuedMessageWithdrawalResult, ReadRecalledMessage, ReadRunUsage, RecalledMessageResult,
+    RunUsageResult, WithdrawQueuedMessageCommand,
+};

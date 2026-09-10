@@ -1,11 +1,13 @@
 //! Bounded observation types for SSE-derived assistant content.
 //!
 //! Pure, minimal subset: distinct terminal states and lossless UTF-8-safe
-//! chunking of assistant text with stable IDs and preserved durable sequences.
+//! chunking of assistant text with stable IDs and preserved durable sequences,
+//! plus validated provider-native subagent lifecycle and transcript rows that
+//! travel the same owner channel without ever adopting the root turn.
 //! No raw frames, credentials, serde persistence, database calls, or public
 //! exports are added here.
 
-use artisan_domain::{RunId, RunUsageReport};
+use artisan_domain::{RunId, RunUsageReport, SubagentObservation, SubagentTranscriptObservation};
 use artisan_transport::CancelHandle;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -133,9 +135,10 @@ pub(crate) fn chunk_text(
 /// Typed terminal observation preserving caller-supplied identity and state.
 ///
 /// Keeps the provided [`RunId`], durable sequence, one of the four distinct
-/// [`TerminalState`] values, and optional reason/error reference strings.
-/// No sequence is invented, no `Interrupted` is collapsed into `Cancelled`,
-/// and no raw frames, auth, secrets, or serialization are added.
+/// [`TerminalState`] values, optional reason/error reference strings, and an
+/// optional generated session title captured at the terminal fence. No
+/// sequence is invented, no `Interrupted` is collapsed into `Cancelled`, and
+/// no raw frames, auth, secrets, or serialization are added.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TerminalObservation {
     run_id: RunId,
@@ -143,6 +146,7 @@ pub(crate) struct TerminalObservation {
     state: TerminalState,
     reason: Option<String>,
     error_ref: Option<String>,
+    summary_title: Option<String>,
 }
 
 impl TerminalObservation {
@@ -160,7 +164,16 @@ impl TerminalObservation {
             state,
             reason,
             error_ref,
+            summary_title: None,
         }
+    }
+
+    /// Attaches the harness-generated session title captured at the terminal
+    /// fence. Engines that capture no title leave the observation unchanged.
+    #[must_use]
+    pub(crate) fn with_summary_title(mut self, summary_title: Option<String>) -> Self {
+        self.summary_title = summary_title;
+        self
     }
 
     #[must_use]
@@ -186,6 +199,13 @@ impl TerminalObservation {
     #[must_use]
     pub(crate) fn error_ref(&self) -> Option<&str> {
         self.error_ref.as_deref()
+    }
+
+    /// Returns the harness-generated session title, when the engine produced
+    /// one by the time the run settled.
+    #[must_use]
+    pub(crate) fn summary_title(&self) -> Option<&str> {
+        self.summary_title.as_deref()
     }
 }
 
@@ -251,13 +271,67 @@ impl UsageObservation {
     }
 }
 
+/// A validated provider-native subagent lifecycle row.
+///
+/// Carries the domain lifecycle row through the owner channel; its public
+/// content travels separately as transcript rows, never as root text.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SubagentLifecycleRow {
+    observation: SubagentObservation,
+}
+
+impl SubagentLifecycleRow {
+    /// Wraps a validated domain lifecycle row for channel delivery.
+    #[must_use]
+    pub(crate) fn new(observation: SubagentObservation) -> Self {
+        Self { observation }
+    }
+
+    /// Releases the carried domain row for the dispatcher commit.
+    #[must_use]
+    pub(crate) fn into_observation(self) -> SubagentObservation {
+        self.observation
+    }
+}
+
+/// A validated provider-native subagent transcript row.
+///
+/// Carries renderer-safe projected content with its own durable identity
+/// plus both native thread identities through the owner channel.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SubagentTranscriptRow {
+    observation: SubagentTranscriptObservation,
+}
+
+impl SubagentTranscriptRow {
+    /// Wraps a validated domain transcript row for channel delivery.
+    #[must_use]
+    pub(crate) fn new(observation: SubagentTranscriptObservation) -> Self {
+        Self { observation }
+    }
+
+    /// Releases the carried domain row for the dispatcher commit.
+    #[must_use]
+    pub(crate) fn into_observation(self) -> SubagentTranscriptObservation {
+        self.observation
+    }
+}
+
 /// Minimal wakeable observation carrying normalized provider state.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Subagent rows ride beside text deltas: lifecycle reports and transcript
+/// rows carry validated domain content with their own identities and never
+/// adopt the root turn. `Eq` is deliberately absent: transcript content has
+/// no total-equality bound, and channel delivery plus matching need only
+/// [`PartialEq`].
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum EngineObservation {
     TextDelta(TextDelta),
     TextSnapshot(TextSnapshot),
     Usage(UsageObservation),
     Terminal(TerminalObservation),
+    Subagent(SubagentLifecycleRow),
+    SubagentTranscript(SubagentTranscriptRow),
 }
 
 /// Payload-free error for one bounded observation delivery.

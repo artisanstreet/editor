@@ -3,14 +3,19 @@
 use std::error::Error;
 
 use artisan_domain::{
-    ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigRevision,
-    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis, NetworkAccess,
-    OpenCode2Selection, PermissionId, ReceiptDisposition, RequestId, SetThreadEngineConfig,
-    ThreadId, UnixMillis, WebSearchAccess,
+    ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
+    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier, CountLimit,
+    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed, EngineAgentId,
+    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EngineModelId,
+    EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
+    GrokPermissionMode, GrokReasoningEffort, GrokSelection, HermesPermissionMode,
+    HermesReasoningEffort, HermesSelection, NetworkAccess, OpenCode2Selection, PermissionId,
+    ReceiptDisposition, RequestId, SetThreadEngineConfig, ThreadId, UnixMillis, WebSearchAccess,
 };
-use artisan_protocol::artisan_capnp::{envelope, request, response};
+use artisan_protocol::artisan_capnp::{
+    engine_permission_policy, engine_selection_v2, envelope, request, response,
+};
 use artisan_protocol::{
     ClientRequest as ProtocolClientRequest, FrameId, ProtocolDecodeError, ProtocolEncodeError,
     ProtocolValueError, ResponsePayload, ServerResponse, WireEnvelope, WireEnvelopeBody,
@@ -19,9 +24,9 @@ use artisan_protocol::{
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
 
-fn config(with_variant: bool) -> EngineRunConfig {
+fn test_runtime() -> EngineRuntimeControls {
     let one = FiniteMillis::new(1).expect("one millisecond is valid");
-    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+    EngineRuntimeControls::new(EngineRuntimeControlsInput {
         attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
         readiness_budget: one,
         health_budget: one,
@@ -37,15 +42,23 @@ fn config(with_variant: bool) -> EngineRunConfig {
         max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
         observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
     })
-    .expect("runtime relationships are valid");
-    let permission = EnginePermissionPolicy::new(
-        PermissionId::parse("permission-protocol").expect("permission id is valid"),
-        EngineAgentId::parse("agent-protocol").expect("agent id is valid"),
+    .expect("runtime relationships are valid")
+}
+
+fn test_permission(label: &str) -> EnginePermissionPolicy {
+    EnginePermissionPolicy::new(
+        PermissionId::parse(format!("permission-{label}")).expect("permission id is valid"),
+        EngineAgentId::parse(format!("agent-{label}")).expect("agent id is valid"),
         ApprovalMode::OnRequest,
         FilesystemAccess::Workspace,
         NetworkAccess::Enabled,
         WebSearchAccess::Disabled,
-    );
+    )
+}
+
+fn config(with_variant: bool) -> EngineRunConfig {
+    let runtime = test_runtime();
+    let permission = test_permission("protocol");
     EngineRunConfig::new(
         EngineSelection::OpenCode2(OpenCode2Selection::new(
             EngineProfileId::parse("profile-protocol").expect("profile id is valid"),
@@ -863,4 +876,402 @@ fn pre1_engine_settings_ordinals_and_round_trips_remain_frozen() -> Result<(), B
     assert!(decode_envelope(&encode_envelope(&read_request)?)? == read_request);
     assert!(decode_envelope(&encode_envelope(&configured)?)? == configured);
     Ok(())
+}
+
+fn codex_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Codex(
+            CodexSelection::new(
+                EngineProfileId::parse("profile-codex").expect("profile id is valid"),
+                Some(EngineModelId::parse("model-codex").expect("model id is valid")),
+                test_permission("codex"),
+                Some(CodexReasoningEffort::High),
+                Some(CodexServiceTier::Fast),
+                Some(CodexModelContextWindow::new(200_000).expect("window is valid")),
+            )
+            .expect("codex selection is valid"),
+        ),
+        test_runtime(),
+    )
+}
+
+fn claude_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Claude(
+            ClaudeSelection::new(
+                EngineProfileId::parse("profile-claude").expect("profile id is valid"),
+                Some(EngineModelId::parse("model-claude").expect("model id is valid")),
+                test_permission("claude"),
+                Some(ClaudeEffort::Medium),
+                Some(ClaudePermissionMode::Plan),
+                false,
+                false,
+            )
+            .expect("claude selection is valid"),
+        ),
+        test_runtime(),
+    )
+}
+
+fn grok_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Grok(GrokSelection::new(
+            EngineProfileId::parse("profile-grok").expect("profile id is valid"),
+            Some(EngineModelId::parse("model-grok").expect("model id is valid")),
+            test_permission("grok"),
+            Some(GrokReasoningEffort::parse("high").expect("effort is valid")),
+            Some(GrokPermissionMode::Auto),
+        )),
+        test_runtime(),
+    )
+}
+
+fn cursor_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Cursor(CursorSelection::new(
+            EngineProfileId::parse("profile-cursor").expect("profile id is valid"),
+            Some(EngineModelId::parse("model-cursor").expect("model id is valid")),
+            test_permission("cursor"),
+            Some(CursorReasoningEffort::parse("medium").expect("effort is valid")),
+            Some(CursorSpeed::Fast),
+            Some(CursorPermissionMode::Force),
+        )),
+        test_runtime(),
+    )
+}
+
+fn hermes_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Hermes(HermesSelection::new(
+            EngineProfileId::parse("profile-hermes").expect("profile id is valid"),
+            EngineModelId::parse("model-hermes").expect("model id is valid"),
+            EngineRouteId::parse("route-hermes").expect("route id is valid"),
+            HermesPermissionMode::Yolo,
+            Some(HermesReasoningEffort::parse("medium").expect("effort is valid")),
+            true,
+        )),
+        test_runtime(),
+    )
+}
+
+fn request_for(
+    frame_id: &str,
+    precondition: EngineConfigUpdatePrecondition,
+    config: EngineRunConfig,
+) -> WireEnvelope {
+    let request_id = RequestId::parse(frame_id).expect("request id is valid");
+    WireEnvelope {
+        protocol_version: artisan_protocol::ProtocolVersion::V1,
+        frame_id: FrameId::parse(frame_id).expect("frame id is valid"),
+        sent_at: UnixMillis::from_millis(7),
+        body: WireEnvelopeBody::Request(ProtocolClientRequest::Command(
+            artisan_domain::Command::SetThreadEngineConfig(Box::new(SetThreadEngineConfig::new(
+                request_id,
+                ThreadId::parse("thread-protocol").expect("thread id is valid"),
+                precondition,
+                config,
+            ))),
+        )),
+    }
+}
+
+fn wire_selection_arm(value: &WireEnvelope) -> String {
+    let encoded = encode_envelope(value).expect("envelope should encode");
+    let mut slice = encoded.as_slice();
+    let message = serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new())
+        .expect("envelope should parse");
+    let root: envelope::Reader = message.get_root().expect("envelope should read");
+    let envelope::body::Which::Request(set_request) =
+        root.get_body().which().expect("body should read")
+    else {
+        panic!("expected a request body");
+    };
+    let request::Which::SetThreadEngineConfig(set) = set_request
+        .expect("request should read")
+        .which()
+        .expect("arm should read")
+    else {
+        panic!("expected set-thread-engine-config");
+    };
+    let config = set
+        .expect("command should read")
+        .get_config()
+        .expect("config should read");
+    let version = config.get_schema_version();
+    let arm = match config
+        .get_selection_v2()
+        .expect("selection should read")
+        .which()
+        .expect("union should read")
+    {
+        engine_selection_v2::Which::Unset(()) => "unset",
+        engine_selection_v2::Which::Codex(_) => "codex",
+        engine_selection_v2::Which::Claude(_) => "claude",
+        engine_selection_v2::Which::Grok(_) => "grok",
+        engine_selection_v2::Which::Cursor(_) => "cursor",
+        engine_selection_v2::Which::Hermes(_) => "hermes",
+    };
+    format!("v{version}:{arm}")
+}
+
+#[test]
+fn every_engine_kind_round_trips_through_the_owned_envelope_with_its_wire_generation()
+-> Result<(), Box<dyn Error>> {
+    let cases: Vec<(EngineId, EngineRunConfig, &str)> = vec![
+        (EngineId::OpenCode2, config(false), "v1:unset"),
+        (EngineId::Codex, codex_config(), "v2:codex"),
+        (EngineId::Claude, claude_config(), "v2:claude"),
+        (EngineId::Grok, grok_config(), "v2:grok"),
+        (EngineId::Cursor, cursor_config(), "v2:cursor"),
+        (EngineId::Hermes, hermes_config(), "v2:hermes"),
+    ];
+    for (engine, expected, wire) in cases {
+        let frame_id = format!("engine-{}-wire", engine.as_str());
+        let value = request_for(
+            &frame_id,
+            EngineConfigUpdatePrecondition::Unconfigured,
+            expected.clone(),
+        );
+        let encoded = encode_envelope(&value)?;
+        assert!(
+            decode_envelope(&encoded)? == value,
+            "wire envelope round-trip mismatch"
+        );
+        assert_eq!(wire_selection_arm(&value), wire);
+
+        // The configured-settings response carries the same config shape.
+        let response = read_settings_response_envelope(
+            "thread-protocol",
+            Some(9),
+            Some(expected.clone()),
+            &format!("server-{}-wire", engine.as_str()),
+            &frame_id,
+        );
+        assert!(
+            decode_envelope(&encode_envelope(&response)?)? == response,
+            "wire envelope round-trip mismatch"
+        );
+    }
+    Ok(())
+}
+
+fn set_test_permission(mut permission: engine_permission_policy::Builder<'_>) {
+    permission.set_permission_id("permission-protocol");
+    permission.set_agent_id("agent-protocol");
+    permission.set_approval("on_request");
+    permission.set_filesystem("workspace");
+    permission.set_network("enabled");
+    permission.set_web_search("disabled");
+}
+
+fn set_test_runtime(
+    mut runtime: artisan_protocol::artisan_capnp::engine_runtime_controls::Builder<'_>,
+) {
+    runtime.set_attempt_budget_ms(100);
+    runtime.set_readiness_budget_ms(1);
+    runtime.set_health_budget_ms(1);
+    runtime.set_prompt_budget_ms(1);
+    runtime.set_stream_budget_ms(1);
+    runtime.set_close_budget_ms(1);
+    runtime.set_max_json_body_bytes(8_192);
+    runtime.set_max_sse_line_bytes(4_096);
+    runtime.set_max_sse_event_bytes(8_192);
+    runtime.set_max_readiness_line_bytes(4_096);
+    runtime.set_max_header_count(8);
+    runtime.set_max_http_buffer_bytes(8_192);
+    runtime.set_max_stderr_bytes(4_096);
+    runtime.set_observation_capacity(16);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn raw_v2_engine_config_frame(
+    schema_version: u16,
+    engine: &str,
+    legacy_profile: &str,
+    arm_kind: &str,
+    arm_profile: &str,
+    arm_model: &str,
+    arm_option: &str,
+) -> Vec<u8> {
+    let mut message = Builder::new(HeapAllocator::new());
+    let mut root = message.init_root::<envelope::Builder>();
+    root.set_protocol_version(1);
+    root.set_message_id("raw-v2-engine-config");
+    root.set_sent_at_millis(7);
+    let request = root.init_body().init_request();
+    let mut encoded = request.init_set_thread_engine_config();
+    encoded.set_thread_id("thread-protocol");
+    let mut precondition = encoded.reborrow().init_precondition();
+    precondition.set_kind("unconfigured");
+    precondition.set_revision(0);
+    let mut config = encoded.init_config();
+    config.set_schema_version(schema_version);
+    config.set_engine(engine);
+    config.set_profile_id(legacy_profile);
+    config.set_model_id("model-protocol");
+    config.set_route_id("route-protocol");
+    let mut variant = config.reborrow().init_variant();
+    variant.set_kind("none");
+    variant.set_id("");
+    set_test_permission(config.reborrow().init_permission());
+    set_test_runtime(config.reborrow().init_runtime());
+    let mut selection = config.init_selection_v2();
+    match arm_kind {
+        "unset" => selection.set_unset(()),
+        "codex" => {
+            let mut arm = selection.init_codex();
+            arm.set_profile_id(arm_profile);
+            arm.set_model_id(arm_model);
+            arm.set_reasoning_effort(arm_option);
+            arm.set_service_tier("");
+            arm.set_model_context_window(0);
+            set_test_permission(arm.reborrow().init_permission());
+        }
+        "claude" => {
+            let mut arm = selection.init_claude();
+            arm.set_profile_id(arm_profile);
+            arm.set_model_id(arm_model);
+            arm.set_effort(arm_option);
+            arm.set_permission_mode("");
+            arm.set_disable_tools(false);
+            arm.set_safe_mode(false);
+            set_test_permission(arm.reborrow().init_permission());
+        }
+        "grok" => {
+            let mut arm = selection.init_grok();
+            arm.set_profile_id(arm_profile);
+            arm.set_model_id(arm_model);
+            arm.set_reasoning_effort(arm_option);
+            arm.set_permission_mode("");
+            set_test_permission(arm.reborrow().init_permission());
+        }
+        "cursor" => {
+            let mut arm = selection.init_cursor();
+            arm.set_profile_id(arm_profile);
+            arm.set_model_id(arm_model);
+            arm.set_reasoning_effort(arm_option);
+            arm.set_speed("");
+            arm.set_permission_mode("");
+            set_test_permission(arm.reborrow().init_permission());
+        }
+        "hermes" => {
+            let mut arm = selection.init_hermes();
+            arm.set_profile_id(arm_profile);
+            arm.set_model_id(arm_model);
+            arm.set_route_id("route-protocol");
+            arm.set_reasoning_effort("");
+            arm.set_permission_mode(arm_option);
+            arm.set_fast(false);
+        }
+        other => panic!("unknown test arm {other}"),
+    }
+    serialize::write_message_to_words(&message)
+}
+
+#[test]
+fn v2_frames_reject_unknown_mismatched_and_invalid_selections() {
+    // An invented seventh engine spelling never defaults to a known engine.
+    assert!(matches!(
+        decode_envelope(&raw_v2_engine_config_frame(
+            2,
+            "acp",
+            "profile-protocol",
+            "unset",
+            "",
+            "",
+            ""
+        )),
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+    // Unknown schema generations are unsupported.
+    assert!(matches!(
+        decode_envelope(&raw_v2_engine_config_frame(
+            99,
+            "opencode2",
+            "profile-protocol",
+            "unset",
+            "",
+            "",
+            ""
+        )),
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+    // The authority arm must match the engine text.
+    assert!(matches!(
+        decode_envelope(&raw_v2_engine_config_frame(
+            2,
+            "codex",
+            "profile-protocol",
+            "claude",
+            "profile-protocol",
+            "model-protocol",
+            ""
+        )),
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+    // A version 2 codex frame needs its codex arm.
+    assert!(matches!(
+        decode_envelope(&raw_v2_engine_config_frame(
+            2,
+            "codex",
+            "profile-protocol",
+            "unset",
+            "",
+            "",
+            ""
+        )),
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+    // Unknown typed option labels are rejected, not ignored.
+    assert!(matches!(
+        decode_envelope(&raw_v2_engine_config_frame(
+            2,
+            "codex",
+            "profile-protocol",
+            "codex",
+            "profile-protocol",
+            "model-protocol",
+            "turbo"
+        )),
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+    // Hermes requires a model identity.
+    assert!(matches!(
+        decode_envelope(&raw_v2_engine_config_frame(
+            2,
+            "hermes",
+            "profile-protocol",
+            "hermes",
+            "profile-protocol",
+            "",
+            "yolo"
+        )),
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+    // Version 1 frames must not smuggle a version 2 arm.
+    assert!(matches!(
+        decode_envelope(&raw_v2_engine_config_frame(
+            1,
+            "opencode2",
+            "profile-protocol",
+            "codex",
+            "profile-protocol",
+            "model-protocol",
+            ""
+        )),
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+    // The legacy mirror profile must agree with the authority arm.
+    assert!(matches!(
+        decode_envelope(&raw_v2_engine_config_frame(
+            2,
+            "codex",
+            "other-profile",
+            "codex",
+            "profile-protocol",
+            "model-protocol",
+            ""
+        )),
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
 }

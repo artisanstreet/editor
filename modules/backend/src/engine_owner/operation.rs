@@ -23,7 +23,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use artisan_domain::RunId;
+use artisan_domain::{ObservationId, RunId};
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -35,7 +36,12 @@ use super::http::{
     ResumeError, ResumeInput, ResumeSelection, perform_create_session, perform_interrupt,
     perform_prompt, perform_resume,
 };
-use super::observation::{EngineObservation, TerminalState};
+use super::interaction::{
+    InteractionDeliveryError, InteractionTarget, TurnInteractionLedger, TurnInteractionOutcome,
+};
+use super::observation::{
+    EngineObservation, SubagentLifecycleRow, SubagentTranscriptRow, TerminalState,
+};
 use super::process::{
     ChildParts, CleanupObservation, LaunchRecipe, LifelineWriter, RetainedEngine, StderrCounter,
     cleanup_after_abort, eventual_wait_once, spawn_configured_engine, spawn_engine,
@@ -454,10 +460,12 @@ pub(crate) struct AcceptedTurn {
     observations: mpsc::Receiver<EngineObservation>,
     receiver: Option<oneshot::Receiver<TurnResult>>,
     control: Arc<CancelHandle>,
+    interactions: TurnInteractionLedger,
 }
 
 impl AcceptedTurn {
     pub(crate) fn from_parts(
+        run_id: RunId,
         prepared: oneshot::Receiver<Result<PreparedSession, EngineOperationError>>,
         authorize_sender: oneshot::Sender<()>,
         observations: mpsc::Receiver<EngineObservation>,
@@ -465,6 +473,7 @@ impl AcceptedTurn {
         control: Arc<CancelHandle>,
     ) -> Self {
         Self {
+            interactions: TurnInteractionLedger::new(run_id),
             prepared,
             authorize_sender: Some(authorize_sender),
             observations,
@@ -490,6 +499,36 @@ impl AcceptedTurn {
 
     pub(crate) async fn next_observation(&mut self) -> Option<EngineObservation> {
         self.observations.recv().await
+    }
+
+    /// Notes one pending provider target on this turn's delivery ledger.
+    ///
+    /// The owning dispatch loop seeds pending targets from durable state
+    /// before delivering their responses. Re-noting never regresses a
+    /// resolved target.
+    pub(crate) fn note_interaction_requested(
+        &mut self,
+        target_id: &ObservationId,
+        target: InteractionTarget,
+    ) {
+        self.interactions.note_requested(target_id, target);
+    }
+
+    /// Delivers one validated mid-turn response onto this turn.
+    ///
+    /// Applies idempotent command ids and per-target resolution tracking to
+    /// the turn ledger with [`CommandTargetError`] on unknown or resolved
+    /// ids. Delivery records the decision only and never disturbs control
+    /// flow: answering never cancels, interrupts, or steers the turn.
+    pub(crate) fn deliver_interaction_response(
+        &mut self,
+        command_id: &str,
+        target_id: &ObservationId,
+        target: InteractionTarget,
+        intent: &str,
+    ) -> Result<TurnInteractionOutcome, InteractionDeliveryError> {
+        self.interactions
+            .deliver(command_id, target_id, target, intent)
     }
 
     pub(crate) async fn finish(mut self) -> TurnResult {
@@ -886,6 +925,26 @@ fn prepare_preflight_context(request: PreflightRequest) -> Result<PreflightConte
             fixture.scenario,
             secret.as_str(),
         ),
+        super::InternalLaunch::Codex(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Claude(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Grok(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Cursor(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Hermes(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
     };
     let Ok(mut child) = child_result else {
         let _ = respond.send(Err(EngineOperationError::SpawnFailed));
@@ -1154,6 +1213,26 @@ fn prepare_catalog_context(request: CatalogRequest) -> Result<CatalogContext, Ex
             fixture.scenario,
             secret.as_str(),
         ),
+        super::InternalLaunch::Codex(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Claude(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Grok(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Cursor(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
+        super::InternalLaunch::Hermes(_) => {
+            let _ = respond.send(Err(EngineOperationError::Configuration));
+            return Err(Execution::Completed);
+        }
     };
     let Ok(mut child) = child_result else {
         let _ = respond.send(Err(EngineOperationError::SpawnFailed));
@@ -1431,6 +1510,34 @@ async fn execute_legacy_job(
     handle_health_phase(parts, generation, endpoint, secret, respond, ctx).await
 }
 
+/// Per-engine image-attachment applicability enforced at owner intake.
+///
+/// Mirrors the TypeScript `image_input` evidence
+/// (`docs/plans/native-engines/README.md` section 1): Codex data-URL images,
+/// Claude base64 blocks, OpenCode2 per-model data-URI, Grok embedded
+/// resources, and Cursor native blocks are provider-supported, so those turns
+/// pass intake unchanged here. Hermes reports `image_input: false`, so any
+/// image fails the turn closed with the existing typed
+/// [`HermesTurnError::ImagesUnsupported`](super::hermes::HermesTurnError)
+/// reject instead of sending a degraded text-only prompt. Runnable catalog
+/// support never implies an installed binary: executable resolution and the
+/// readiness handshake stay the live gate in each per-engine executor.
+fn check_turn_attachment_applicability(
+    engine: artisan_domain::EngineId,
+    prompt: &artisan_domain::QueueMessagePayload,
+) -> Result<(), EngineOperationError> {
+    match engine {
+        artisan_domain::EngineId::Hermes => {
+            super::hermes::reject_image_attachments(prompt).map_err(map_hermes_turn_error)
+        }
+        artisan_domain::EngineId::OpenCode2
+        | artisan_domain::EngineId::Codex
+        | artisan_domain::EngineId::Claude
+        | artisan_domain::EngineId::Grok
+        | artisan_domain::EngineId::Cursor => Ok(()),
+    }
+}
+
 /// Executes one configured `OpenCode2` turn.  The profile capability and the
 /// settings snapshot are moved into this owner call and are never reread from
 /// durable state or ambient process configuration.
@@ -1462,9 +1569,23 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         Ok(runtime) => runtime,
         Err(error) => return request.fail(error),
     };
-    let selection = request.input.settings.config().selection().as_opencode2();
-    if request.input.launch.profile_id() != selection.profile_id().as_str() {
+    let selected_profile = match request.input.settings.config().selection() {
+        artisan_domain::EngineSelection::OpenCode2(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Codex(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Claude(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Grok(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Cursor(selection) => selection.profile_id().as_str(),
+        artisan_domain::EngineSelection::Hermes(selection) => selection.profile_id().as_str(),
+        _ => return request.fail(EngineOperationError::Configuration),
+    };
+    if request.input.launch.profile_id() != selected_profile {
         return request.fail(EngineOperationError::Configuration);
+    }
+    if let Err(error) = check_turn_attachment_applicability(
+        request.input.settings.config().selection().engine_id(),
+        &request.input.prompt,
+    ) {
+        return request.fail(error);
     }
     if shutdown.is_cancelled() {
         return request.fail(EngineOperationError::Shutdown);
@@ -1473,6 +1594,21 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         return request.fail(EngineOperationError::Cancelled);
     }
 
+    if matches!(request.input.launch, super::InternalLaunch::Codex(_)) {
+        return Box::pin(execute_codex_turn(request, runtime, shutdown)).await;
+    }
+    if matches!(request.input.launch, super::InternalLaunch::Claude(_)) {
+        return Box::pin(execute_claude_turn(request, runtime, shutdown)).await;
+    }
+    if matches!(request.input.launch, super::InternalLaunch::Grok(_)) {
+        return Box::pin(execute_grok_turn(request, runtime, shutdown)).await;
+    }
+    if matches!(request.input.launch, super::InternalLaunch::Cursor(_)) {
+        return Box::pin(execute_cursor_turn(request, runtime, shutdown)).await;
+    }
+    if matches!(request.input.launch, super::InternalLaunch::Hermes(_)) {
+        return Box::pin(execute_hermes_turn(request, runtime, shutdown)).await;
+    }
     Box::pin(execute_configured_turn(request, runtime, shutdown)).await
 }
 
@@ -1586,6 +1722,2354 @@ async fn execute_configured_turn(
     Box::pin(execute_configured_session(process, shutdown)).await
 }
 
+/// Executes one finite Codex turn over `codex app-server --stdio`.
+///
+/// Single-owner match arm beside the OpenCode2 executor: no second task, no
+/// second queue. Performs initialize, thread/start (or `thread/resume` for a
+/// gated continuation that reopens the same provider thread), the bind
+/// authorization gate, then turn/start plus the streaming pump. Text deltas
+/// normalize onto the shared S1a vocabulary; token-usage frames project
+/// best-effort to cumulative usage observations without blocking the turn;
+/// approval/question frames populate the pending tracker with no
+/// control-flow side effect; child-thread frames never adopt the root turn.
+/// External-kill EOF maps to `Interrupted`, explicit cancel to `Cancelled`,
+/// and stall/failure to `Failed`. Teardown terminates the whole process
+/// group (no orphaned codex grandchildren holding pipes) and quarantines on
+/// unobserved reaps.
+async fn execute_codex_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::codex as codex_runtime;
+    use super::process::spawn_codex_engine;
+
+    let artisan_domain::EngineSelection::Codex(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = match codex_runtime::CodexSettings::from_selection(selection) {
+        Ok(settings) => settings,
+        Err(_) => return request.fail(EngineOperationError::Configuration),
+    };
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Codex(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    // X3 continuation gate: same-engine is fenced by the dispatcher (codex
+    // bindings only); the owner additionally requires an explicit target
+    // model and CLI >= 0.145.0. Anything else is typed incompatible — never
+    // a silent fresh start and never a cross-engine resume.
+    let resume_stored_thread_id: Option<String> = match &request.input.continuation {
+        None => None,
+        Some(continuation) => {
+            let gate = codex_runtime::check_codex_native_continuation(
+                &codex_runtime::CodexContinuationGateInput {
+                    cli_version: request.input.launch.version(),
+                    target_model: selection.model_id().map(|model| model.as_str()),
+                    advertised_models: None,
+                    same_engine: true,
+                },
+            );
+            if !matches!(gate, codex_runtime::CodexContinuationDecision::Compatible) {
+                return request.fail(EngineOperationError::Configuration);
+            }
+            Some(continuation.provider_session_id().to_owned())
+        }
+    };
+    let mut child = match spawn_codex_engine(launch.as_ref(), &request.input.project_root) {
+        Ok(child) => child,
+        Err(_) => return request.fail(EngineOperationError::SpawnFailed),
+    };
+    let stdin_opt = child.stdin.take();
+    let stdout_opt = child.stdout.take();
+    let stderr_opt = child.stderr.take();
+    let lifeline = LifelineWriter::take(&mut child);
+    let stderr_counter = StderrCounter::new(stderr_opt, runtime.bounds.stderr_cap_bytes);
+    let (mut stdin, stdout) = match (stdin_opt, stdout_opt) {
+        (Some(stdin), Some(stdout)) => (stdin, stdout),
+        _ => {
+            let parts = ChildParts {
+                child,
+                lifeline,
+                stdout: None,
+                stderr_counter,
+            };
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::SpawnFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut next_id: u64 = 1;
+
+    // initialize ---------------------------------------------------------
+    let init_line = codex_runtime::request_line(
+        next_id,
+        "initialize",
+        &codex_runtime::initialize_params("artisan-editor", "0.3.0"),
+    );
+    next_id += 1;
+    if write_codex_line(&mut stdin, &init_line).await.is_err() {
+        return finish_configured_start(
+            request,
+            parts,
+            EngineOperationError::ProviderRequestFailed,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    let mut line = String::new();
+    if read_codex_line(
+        &mut reader,
+        &mut line,
+        phase_deadline(runtime.limits.prompt, request.deadline),
+        shutdown,
+        &request.control,
+    )
+    .await
+    .is_err()
+    {
+        let error = if shutdown.is_cancelled() {
+            EngineOperationError::Shutdown
+        } else if request.control.is_cancelled() {
+            EngineOperationError::Cancelled
+        } else {
+            EngineOperationError::ProviderRequestFailed
+        };
+        return finish_configured_start(request, parts, error, runtime.limits.close).await;
+    }
+    if !is_codex_result_for(&line, 1) {
+        return finish_configured_start(
+            request,
+            parts,
+            EngineOperationError::ProviderRequestFailed,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    // thread/start or thread/resume ---------------------------------------
+    // A gated continuation reopens the stored provider thread
+    // (`thread/resume` over the same options a fresh start would use); the
+    // response must name the same thread id or the turn fails closed. Fresh
+    // turns start exactly one thread. Either way provider-owned state is
+    // resumed, never invented, and a restart never duplicates provider
+    // effects with a second thread.
+    let thread_id = if let Some(stored) = resume_stored_thread_id.as_deref() {
+        let Some(resume_params) =
+            codex_runtime::thread_resume_params(&settings, &request.input.project_root, stored)
+        else {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::Configuration,
+                runtime.limits.close,
+            )
+            .await;
+        };
+        let resume_line = codex_runtime::request_line(next_id, "thread/resume", &resume_params);
+        next_id += 1;
+        if write_codex_line(&mut stdin, &resume_line).await.is_err() {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+        line.clear();
+        if read_codex_line(
+            &mut reader,
+            &mut line,
+            phase_deadline(runtime.limits.prompt, request.deadline),
+            shutdown,
+            &request.control,
+        )
+        .await
+        .is_err()
+        {
+            let error = if shutdown.is_cancelled() {
+                EngineOperationError::Shutdown
+            } else if request.control.is_cancelled() {
+                EngineOperationError::Cancelled
+            } else {
+                EngineOperationError::ProviderRequestFailed
+            };
+            return finish_configured_start(request, parts, error, runtime.limits.close).await;
+        }
+        let Some(thread_id) = codex_resumed_thread_id(&line, 2, stored) else {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        };
+        thread_id
+    } else {
+        let thread_line = codex_runtime::request_line(
+            next_id,
+            "thread/start",
+            &settings.thread_params(&request.input.project_root),
+        );
+        next_id += 1;
+        if write_codex_line(&mut stdin, &thread_line).await.is_err() {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+        line.clear();
+        if read_codex_line(
+            &mut reader,
+            &mut line,
+            phase_deadline(runtime.limits.prompt, request.deadline),
+            shutdown,
+            &request.control,
+        )
+        .await
+        .is_err()
+        {
+            let error = if shutdown.is_cancelled() {
+                EngineOperationError::Shutdown
+            } else if request.control.is_cancelled() {
+                EngineOperationError::Cancelled
+            } else {
+                EngineOperationError::ProviderRequestFailed
+            };
+            return finish_configured_start(request, parts, error, runtime.limits.close).await;
+        }
+        let Some(thread_id) = codex_thread_id(&line, 2) else {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        };
+        thread_id
+    };
+
+    // Bind authorization gate: the dispatcher binds the native thread id
+    // before exactly one prompt is authorized. Destructure here so the
+    // prepared session carries the exact native identity.
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        mut authorize,
+        observations,
+        respond,
+    } = request;
+    if prepared
+        .send(Ok(PreparedSession::new(thread_id.clone())))
+        .is_err()
+    {
+        drop(stdin);
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::Cancelled),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    if let Err(error) =
+        wait_for_authorization(&mut parts, &mut authorize, deadline, shutdown, &control).await
+    {
+        drop(stdin);
+        return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+    }
+
+    // turn/start + streaming pump -----------------------------------------
+    let prompt_text = input
+        .prompt
+        .text()
+        .map(|text| text.as_str().to_owned())
+        .unwrap_or_default();
+    let turn_params = serde_json::json!({ "input": [{ "text": prompt_text, "text_elements": [], "type": "text" }] });
+    let turn_line = codex_runtime::request_line(next_id, "turn/start", &turn_params);
+    next_id += 1;
+    if write_codex_line(&mut stdin, &turn_line).await.is_err() {
+        drop(stdin);
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::ProviderRequestFailed),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    let inactivity = runtime.limits.sse;
+    let mut tracker = codex_runtime::CodexPendingTracker::new();
+    let mut active_turn: Option<String> = None;
+    let mut frame_sequence: u64 = 0;
+    let mut last_activity = Instant::now();
+    // Best-effort usage scope: explicit model plus thread scope, else usage
+    // frames stay diagnostics. Usage never blocks the turn.
+    let usage_attribution = match (&input.thread_id, input.settings.config().selection()) {
+        (Some(thread_id), artisan_domain::EngineSelection::Codex(selection)) => selection
+            .model_id()
+            .map(|model| codex_runtime::CodexUsageAttribution {
+                thread_id: thread_id.clone(),
+                model_id: model.clone(),
+            }),
+        _ => None,
+    };
+    let usage_scope =
+        usage_attribution
+            .as_ref()
+            .map(|attribution| codex_runtime::CodexUsageScope {
+                thread_id: &attribution.thread_id,
+                model_id: &attribution.model_id,
+                provider_session_id: thread_id.as_str(),
+            });
+    let terminal = codex_pump_loop(
+        &mut reader,
+        &mut stdin,
+        &mut parts,
+        &mut line,
+        &input.run_id,
+        &mut tracker,
+        &mut active_turn,
+        &mut frame_sequence,
+        &mut last_activity,
+        inactivity,
+        deadline,
+        shutdown,
+        &control,
+        &observations,
+        &thread_id,
+        usage_scope.as_ref(),
+    )
+    .await;
+    drop(stdin);
+    let _ = next_id;
+    match terminal {
+        CodexPumpOutcome::Terminal(state) => {
+            drop(observations);
+            finish_turn_result(
+                parts,
+                Ok(EngineTurnResult { terminal: state }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        CodexPumpOutcome::Failed(error) => {
+            finish_turn_result(parts, Err(error), respond, runtime.limits.close).await
+        }
+    }
+}
+
+enum CodexPumpOutcome {
+    Terminal(super::observation::TerminalState),
+    Failed(EngineOperationError),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn codex_pump_loop(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    stdin: &mut tokio::process::ChildStdin,
+    parts: &mut ChildParts,
+    line: &mut String,
+    run_id: &artisan_domain::RunId,
+    tracker: &mut super::codex::CodexPendingTracker,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    inactivity: Duration,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+    thread_id: &str,
+    usage: Option<&super::codex::CodexUsageScope<'_>>,
+) -> CodexPumpOutcome {
+    use super::codex as codex_runtime;
+    use tokio::io::AsyncBufReadExt as _;
+
+    loop {
+        if shutdown.is_cancelled() {
+            return CodexPumpOutcome::Failed(EngineOperationError::Shutdown);
+        }
+        if control.is_cancelled() {
+            // Best-effort provider interrupt before reporting cancellation.
+            if let Some(turn_id) = active_turn.clone() {
+                let mut request_id = u64::MAX;
+                let _ =
+                    codex_runtime::interrupt_live_turn(stdin, &mut request_id, thread_id, &turn_id)
+                        .await;
+            }
+            return CodexPumpOutcome::Terminal(TerminalState::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return CodexPumpOutcome::Failed(EngineOperationError::Deadline);
+        }
+        if codex_runtime::has_stalled(
+            active_turn.is_some(),
+            *last_activity,
+            inactivity,
+            Instant::now(),
+        ) {
+            return CodexPumpOutcome::Terminal(TerminalState::Failed);
+        }
+        let stall_at = last_activity
+            .checked_add(inactivity)
+            .unwrap_or(deadline)
+            .min(deadline);
+        line.clear();
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => return CodexPumpOutcome::Failed(EngineOperationError::Shutdown),
+            () = control.wait() => {
+                if let Some(turn_id) = active_turn.clone() {
+                    let mut request_id = u64::MAX;
+                    let _ = codex_runtime::interrupt_live_turn(stdin, &mut request_id, thread_id, &turn_id).await;
+                }
+                return CodexPumpOutcome::Terminal(TerminalState::Cancelled);
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return CodexPumpOutcome::Failed(EngineOperationError::Deadline);
+            }
+            () = tokio::time::sleep_until(stall_at) => {
+                if codex_runtime::has_stalled(
+                    active_turn.is_some(),
+                    *last_activity,
+                    inactivity,
+                    Instant::now(),
+                ) {
+                    return CodexPumpOutcome::Terminal(TerminalState::Failed);
+                }
+                let _ = parts.stderr_counter.pump().await;
+            }
+            read = reader.read_line(line) => {
+                match read {
+                    Ok(0) => {
+                        // External kill: interruption, never cancel/failure.
+                        return CodexPumpOutcome::Terminal(TerminalState::Interrupted);
+                    }
+                    Ok(_) => {
+                        *last_activity = Instant::now();
+                        *frame_sequence += 1;
+                        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                        match codex_runtime::parse_frame(&trimmed, *frame_sequence) {
+                            Ok(event) => {
+                                if let Some(terminal) = codex_runtime::apply_event(
+                                    event,
+                                    run_id,
+                                    tracker,
+                                    active_turn,
+                                    observations,
+                                    *frame_sequence,
+                                    usage,
+                                ).await {
+                                    return CodexPumpOutcome::Terminal(terminal);
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    Err(_) => return CodexPumpOutcome::Failed(EngineOperationError::StreamFailed),
+                }
+            }
+        }
+    }
+}
+
+async fn write_codex_line(
+    stdin: &mut tokio::process::ChildStdin,
+    line: &str,
+) -> Result<(), EngineOperationError> {
+    use tokio::io::AsyncWriteExt as _;
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|_| EngineOperationError::ProviderRequestFailed)?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|_| EngineOperationError::ProviderRequestFailed)?;
+    stdin
+        .flush()
+        .await
+        .map_err(|_| EngineOperationError::ProviderRequestFailed)?;
+    Ok(())
+}
+
+async fn read_codex_line(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    line: &mut String,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+) -> Result<(), EngineOperationError> {
+    use tokio::io::AsyncBufReadExt as _;
+    line.clear();
+    tokio::select! {
+        biased;
+        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+        () = control.wait() => Err(EngineOperationError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => Err(EngineOperationError::Deadline),
+        read = reader.read_line(line) => match read {
+            Ok(0) => Err(EngineOperationError::ProviderRequestFailed),
+            Ok(_) => Ok(()),
+            Err(_) => Err(EngineOperationError::ProviderRequestFailed),
+        },
+    }
+}
+
+/// Returns whether one handshake line is the result for the request id.
+///
+/// Bounds the line before parsing and requires a `result` member; anything
+/// else fails the handshake closed without spawning further phases.
+pub(crate) fn is_codex_result_for(line: &str, id: u64) -> bool {
+    if line.len() > super::codex::CODEX_MAX_FRAME_BYTES {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    let matches_id = value.get("id").is_some_and(|candidate| {
+        candidate.as_u64() == Some(id)
+            || candidate
+                .as_str()
+                .is_some_and(|text| text == id.to_string())
+    });
+    matches_id && value.get("result").is_some()
+}
+
+/// Extracts the exact native thread identity from a `thread/start` result.
+///
+/// Returns `None` on id mismatch, missing thread, or out-of-bound identity
+/// so the dispatcher never binds a corrupt session.
+pub(crate) fn codex_thread_id(line: &str, id: u64) -> Option<String> {
+    if line.len() > super::codex::CODEX_MAX_FRAME_BYTES {
+        return None;
+    }
+    let value: Value = serde_json::from_str(line).ok()?;
+    let matches_id = value.get("id").is_some_and(|candidate| {
+        candidate.as_u64() == Some(id)
+            || candidate
+                .as_str()
+                .is_some_and(|text| text == id.to_string())
+    });
+    if !matches_id {
+        return None;
+    }
+    let thread = value.get("result")?.get("thread")?;
+    let id = thread.get("id")?.as_str()?;
+    if id.is_empty() || id.len() > 256 {
+        return None;
+    }
+    Some(id.to_owned())
+}
+
+/// Extracts the resumed native thread identity, requiring the same thread.
+///
+/// `thread/resume` reopens provider-owned state only: a result naming any
+/// other thread fails closed (`None`) instead of adopting a foreign session,
+/// so resume reopens the same thread id and a restart replays the durable
+/// prefix without duplicating provider effects.
+pub(crate) fn codex_resumed_thread_id(
+    line: &str,
+    id: u64,
+    stored_thread_id: &str,
+) -> Option<String> {
+    let resumed = codex_thread_id(line, id)?;
+    (resumed.as_str() == stored_thread_id).then_some(resumed)
+}
+
+/// Executes one finite Claude turn over `claude -p --output-format stream-json`.
+///
+/// Single-owner match arm beside the Codex executor: no second task, no
+/// second queue. Writes the first user message over stdin (or reopens the
+/// stored native session through `--resume` for a gated continuation),
+/// waits for the `system/init` session identity behind the bind authorization
+/// gate, then pumps the stream. Text deltas normalize onto the shared S1a
+/// vocabulary with verbatim phases; usage frames project best-effort to
+/// cumulative usage observations without blocking the turn; the generated
+/// title is captured best-effort at the terminal fence;
+/// `AskUserQuestion` frames populate pending questions lifted out of the
+/// approval path; child transcript frames never adopt the root turn. EOF
+/// before `result` maps to `Interrupted`, explicit cancel to `Cancelled`,
+/// and stall/failure to `Failed`. Teardown terminates the whole process
+/// group (no orphaned claude grandchildren holding pipes) and quarantines on
+/// unobserved reaps.
+async fn execute_claude_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::claude as claude_runtime;
+    use super::process::spawn_claude_engine;
+    use tokio::io::AsyncBufReadExt as _;
+
+    let artisan_domain::EngineSelection::Claude(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = match claude_runtime::ClaudeSettings::from_selection(selection) {
+        Ok(settings) => settings,
+        Err(_) => return request.fail(EngineOperationError::Configuration),
+    };
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Claude(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    // L3 continuation gate: same-engine is fenced by the dispatcher (claude
+    // bindings only); the owner additionally requires an explicit target
+    // model and CLI >= 2.1.220. Anything else is typed incompatible — never
+    // a silent fresh start and never a cross-engine resume.
+    let resume_stored_session_id: Option<String> = match &request.input.continuation {
+        None => None,
+        Some(continuation) => {
+            let gate = claude_runtime::check_claude_native_continuation(
+                &claude_runtime::ClaudeContinuationGateInput {
+                    cli_version: launch.version(),
+                    target_model: selection.model_id().map(|model| model.as_str()),
+                    advertised_models: None,
+                    same_engine: true,
+                },
+            );
+            if !matches!(gate, claude_runtime::ClaudeContinuationDecision::Compatible) {
+                return request.fail(EngineOperationError::Configuration);
+            }
+            Some(continuation.provider_session_id().to_owned())
+        }
+    };
+    // A gated continuation reopens the stored native session (`--resume`
+    // over the same flags a fresh start would use); fresh turns mint exactly
+    // one session. Either way provider-owned state is resumed, never
+    // invented, and a restart never duplicates provider effects with a second
+    // session.
+    let session = match resume_stored_session_id.as_deref() {
+        Some(stored) => match claude_runtime::claude_resume_session(stored) {
+            Some(session) => session,
+            None => return request.fail(EngineOperationError::Configuration),
+        },
+        None => match claude_runtime::new_session_id() {
+            Some(fresh) => claude_runtime::ClaudeSession::Start(fresh),
+            None => return request.fail(EngineOperationError::EntropyFailed),
+        },
+    };
+    let session_id = session.session_id().to_owned();
+    let args = settings.spawn_args(&session);
+    let mut child = match spawn_claude_engine(launch.as_ref(), &request.input.project_root, &args) {
+        Ok(child) => child,
+        Err(_) => return request.fail(EngineOperationError::SpawnFailed),
+    };
+    let stdin_opt = child.stdin.take();
+    let stdout_opt = child.stdout.take();
+    let stderr_opt = child.stderr.take();
+    let lifeline = LifelineWriter::take(&mut child);
+    let stderr_counter = StderrCounter::new(stderr_opt, runtime.bounds.stderr_cap_bytes);
+    let (mut stdin, stdout) = match (stdin_opt, stdout_opt) {
+        (Some(stdin), Some(stdout)) => (stdin, stdout),
+        _ => {
+            let parts = ChildParts {
+                child,
+                lifeline,
+                stdout: None,
+                stderr_counter,
+            };
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::SpawnFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let mut reader = tokio::io::BufReader::new(stdout);
+
+    // First user message ----------------------------------------------------
+    // The prompt travels as the first stdin line; there is no `turn/start`
+    // RPC on this transport.
+    if let Some(prompt_text) = request
+        .input
+        .prompt
+        .text()
+        .map(|text| text.as_str().to_owned())
+    {
+        let line = settings.user_message_line(&session, &prompt_text);
+        if claude_runtime::write_line(&mut stdin, &line).await.is_err() {
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    }
+
+    // init-event gate ---------------------------------------------------------
+    // The CLI speaks first: the bind authorization gate opens only after the
+    // exact spawned session announces itself. Pre-init lines that are not
+    // init are not replayed; a wrong session fails closed.
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if read_claude_line(
+            &mut reader,
+            &mut line,
+            phase_deadline(runtime.limits.prompt, request.deadline),
+            shutdown,
+            &request.control,
+        )
+        .await
+        .is_err()
+        {
+            let error = if shutdown.is_cancelled() {
+                EngineOperationError::Shutdown
+            } else if request.control.is_cancelled() {
+                EngineOperationError::Cancelled
+            } else {
+                EngineOperationError::ProviderRequestFailed
+            };
+            return finish_configured_start(request, parts, error, runtime.limits.close).await;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+        match claude_runtime::parse_frame(&trimmed, 0) {
+            Ok(claude_runtime::ClaudeEvent::Init {
+                session_id: announced,
+            }) if announced == session_id => break,
+            Ok(claude_runtime::ClaudeEvent::Init { .. }) => {
+                return finish_configured_start(
+                    request,
+                    parts,
+                    EngineOperationError::ProviderRequestFailed,
+                    runtime.limits.close,
+                )
+                .await;
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+
+    // Bind authorization gate: the dispatcher binds the native session id
+    // before exactly one prompt is authorized. Destructure here so the
+    // prepared session carries the exact native identity.
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        mut authorize,
+        observations,
+        respond,
+    } = request;
+    if prepared
+        .send(Ok(PreparedSession::new(session_id.clone())))
+        .is_err()
+    {
+        drop(stdin);
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::Cancelled),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    if let Err(error) =
+        wait_for_authorization(&mut parts, &mut authorize, deadline, shutdown, &control).await
+    {
+        drop(stdin);
+        return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+    }
+
+    // streaming pump ----------------------------------------------------------
+    let mut stdin = Some(stdin);
+    let mut tracker = claude_runtime::ClaudePendingTracker::new();
+    let mut active_turn: Option<String> = None;
+    let mut frame_sequence: u64 = 0;
+    let mut last_activity = Instant::now();
+    let inactivity = runtime.limits.sse;
+    // Best-effort usage scope: explicit model plus thread scope, else usage
+    // frames stay diagnostics. Usage never blocks the turn.
+    let usage_attribution = match (&input.thread_id, input.settings.config().selection()) {
+        (Some(thread_id), artisan_domain::EngineSelection::Claude(selection)) => selection
+            .model_id()
+            .map(|model| claude_runtime::ClaudeUsageAttribution {
+                thread_id: thread_id.clone(),
+                model_id: model.clone(),
+            }),
+        _ => None,
+    };
+    let usage_scope =
+        usage_attribution
+            .as_ref()
+            .map(|attribution| claude_runtime::ClaudeUsageScope {
+                thread_id: &attribution.thread_id,
+                model_id: &attribution.model_id,
+                provider_session_id: session_id.as_str(),
+            });
+    let terminal = claude_pump_loop(
+        &mut reader,
+        &mut stdin,
+        &mut parts,
+        &mut line,
+        &input.run_id,
+        &session_id,
+        &mut tracker,
+        &mut active_turn,
+        &mut frame_sequence,
+        &mut last_activity,
+        inactivity,
+        deadline,
+        shutdown,
+        &control,
+        &observations,
+        usage_scope.as_ref(),
+    )
+    .await;
+    drop(stdin);
+    match terminal {
+        ClaudePumpOutcome::Terminal {
+            state,
+            subagent_rows,
+        } => {
+            // Rows traversed the pump loop beside the text channel; forward
+            // them through the owner channel in emission order ahead of
+            // terminal settlement, exactly like text deltas flow. A closed
+            // sink or a non-subagent row ends forwarding without disturbing
+            // the turn result: only lifecycle and transcript rows ever
+            // accumulate in the pump buffer.
+            forward_subagent_rows(&observations, subagent_rows).await;
+            // Terminal fence: capture the generated title best-effort and
+            // carry it on the terminal observation beside settlement, exactly
+            // like text deltas flow. A closed sink ends the send without
+            // disturbing the turn result.
+            settle_claude_terminal_title(&input, &session_id, &mut tracker);
+            let terminal_observation = super::observation::TerminalObservation::new(
+                input.run_id.clone(),
+                frame_sequence,
+                state,
+                None,
+                None,
+            )
+            .with_summary_title(tracker.summary_title().map(str::to_owned));
+            let _ = observations
+                .send(EngineObservation::Terminal(terminal_observation))
+                .await;
+            drop(observations);
+            finish_turn_result(
+                parts,
+                Ok(EngineTurnResult { terminal: state }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        ClaudePumpOutcome::Failed {
+            error,
+            subagent_rows,
+        } => {
+            forward_subagent_rows(&observations, subagent_rows).await;
+            // The fence still captures the title on failure paths and carries
+            // it on a Failed terminal observation; dispatcher precedence
+            // (forced flags, then observation state, then the owner result)
+            // settles exactly as the owner result alone would have.
+            settle_claude_terminal_title(&input, &session_id, &mut tracker);
+            let terminal_observation = super::observation::TerminalObservation::new(
+                input.run_id.clone(),
+                frame_sequence,
+                TerminalState::Failed,
+                None,
+                None,
+            )
+            .with_summary_title(tracker.summary_title().map(str::to_owned));
+            let _ = observations
+                .send(EngineObservation::Terminal(terminal_observation))
+                .await;
+            finish_turn_result(parts, Err(error), respond, runtime.limits.close).await
+        }
+    }
+}
+
+/// Captures the CLI's generated session title at the terminal fence.
+///
+/// Best-effort beside settlement: any failure means "no title yet" and the
+/// turn settles exactly as it would have without the read.
+fn settle_claude_terminal_title(
+    input: &super::InternalTurnInput,
+    session_id: &str,
+    tracker: &mut super::claude::ClaudePendingTracker,
+) {
+    if let Some(title) =
+        super::claude::claude_transcript_title_for_session(&input.project_root, session_id)
+    {
+        tracker.note_summary_title(title);
+    }
+}
+
+enum ClaudePumpOutcome {
+    Terminal {
+        state: super::observation::TerminalState,
+        subagent_rows: Vec<artisan_domain::Observation>,
+    },
+    Failed {
+        error: EngineOperationError,
+        subagent_rows: Vec<artisan_domain::Observation>,
+    },
+}
+
+/// Forwards buffered subagent rows through the owner observation channel.
+///
+/// Wraps each domain row into its channel event in buffer order and sends it
+/// ahead of terminal settlement. A closed sink or an unexpected row kind
+/// ends forwarding without disturbing the turn result; the caller settles
+/// the turn exactly as it would have without rows.
+async fn forward_subagent_rows(
+    observations: &mpsc::Sender<EngineObservation>,
+    subagent_rows: Vec<artisan_domain::Observation>,
+) {
+    for row in subagent_rows {
+        let event = match row {
+            artisan_domain::Observation::Subagent(observation) => {
+                EngineObservation::Subagent(SubagentLifecycleRow::new(observation))
+            }
+            artisan_domain::Observation::SubagentTranscript(observation) => {
+                EngineObservation::SubagentTranscript(SubagentTranscriptRow::new(observation))
+            }
+            _ => break,
+        };
+        if observations.send(event).await.is_err() {
+            break;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn claude_pump_loop(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    stdin: &mut Option<tokio::process::ChildStdin>,
+    parts: &mut ChildParts,
+    line: &mut String,
+    run_id: &artisan_domain::RunId,
+    expected_session: &str,
+    tracker: &mut super::claude::ClaudePendingTracker,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    inactivity: Duration,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+    usage: Option<&super::claude::ClaudeUsageScope<'_>>,
+) -> ClaudePumpOutcome {
+    use super::claude as claude_runtime;
+    use tokio::io::AsyncBufReadExt as _;
+
+    let mut exited: Option<std::process::ExitStatus> = None;
+    // Emission buffer beside the text channel: drained per applied frame so
+    // rows traverse the loop in emission order instead of accumulating in
+    // the tracker. Delivery beyond the loop awaits the owner-channel
+    // follow-up; see the handoff marker where the pump settles.
+    let mut subagent_rows: Vec<artisan_domain::Observation> = Vec::new();
+    loop {
+        if shutdown.is_cancelled() {
+            return ClaudePumpOutcome::Failed {
+                error: EngineOperationError::Shutdown,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
+        }
+        if control.is_cancelled() {
+            // No provider interrupt verb exists on this transport (the
+            // adapter settles cancel without one); closing stdin is the only
+            // turn-side signal before reporting cancellation.
+            drop(stdin.take());
+            return ClaudePumpOutcome::Terminal {
+                state: TerminalState::Cancelled,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
+        }
+        if Instant::now() >= deadline {
+            return ClaudePumpOutcome::Failed {
+                error: EngineOperationError::Deadline,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
+        }
+        if claude_runtime::has_stalled(
+            active_turn.is_some(),
+            *last_activity,
+            inactivity,
+            Instant::now(),
+        ) {
+            return ClaudePumpOutcome::Terminal {
+                state: TerminalState::Failed,
+                subagent_rows: std::mem::take(&mut subagent_rows),
+            };
+        }
+        let stall_at = last_activity
+            .checked_add(inactivity)
+            .unwrap_or(deadline)
+            .min(deadline);
+        line.clear();
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => {
+                return ClaudePumpOutcome::Failed {
+                    error: EngineOperationError::Shutdown,
+                    subagent_rows: std::mem::take(&mut subagent_rows),
+                };
+            }
+            () = control.wait() => {
+                drop(stdin.take());
+                return ClaudePumpOutcome::Terminal {
+                    state: TerminalState::Cancelled,
+                    subagent_rows: std::mem::take(&mut subagent_rows),
+                };
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return ClaudePumpOutcome::Failed {
+                    error: EngineOperationError::Deadline,
+                    subagent_rows: std::mem::take(&mut subagent_rows),
+                };
+            }
+            () = tokio::time::sleep_until(stall_at) => {
+                if claude_runtime::has_stalled(
+                    active_turn.is_some(),
+                    *last_activity,
+                    inactivity,
+                    Instant::now(),
+                ) {
+                    return ClaudePumpOutcome::Terminal {
+                        state: TerminalState::Failed,
+                        subagent_rows: std::mem::take(&mut subagent_rows),
+                    };
+                }
+                let _ = parts.stderr_counter.pump().await;
+            }
+            status = parts.child.wait(), if exited.is_none() => {
+                match status {
+                    Ok(status) => exited = Some(status),
+                    Err(_) => {
+                        return ClaudePumpOutcome::Failed {
+                            error: EngineOperationError::StreamFailed,
+                            subagent_rows: std::mem::take(&mut subagent_rows),
+                        };
+                    }
+                }
+            }
+            read = reader.read_line(line) => {
+                match read {
+                    Ok(0) => {
+                        // EOF is the observed close: a `result` before it is
+                        // a clean turn (modulo exit failure and semantic
+                        // failure); EOF before `result` is an external kill,
+                        // never cancel and never failure-by-code.
+                        let clean_exit = match exited {
+                            None => true,
+                            Some(status) => status.success(),
+                        };
+                        let subagent_rows = std::mem::take(&mut subagent_rows);
+                        if tracker.result_seen() && !tracker.semantic_failure() && clean_exit {
+                            return ClaudePumpOutcome::Terminal {
+                                state: TerminalState::Completed,
+                                subagent_rows,
+                            };
+                        }
+                        if tracker.result_seen() {
+                            return ClaudePumpOutcome::Terminal {
+                                state: TerminalState::Failed,
+                                subagent_rows,
+                            };
+                        }
+                        return ClaudePumpOutcome::Terminal {
+                            state: TerminalState::Interrupted,
+                            subagent_rows,
+                        };
+                    }
+                    Ok(_) => {
+                        *last_activity = Instant::now();
+                        *frame_sequence += 1;
+                        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                        match claude_runtime::parse_frame(&trimmed, *frame_sequence) {
+                            Ok(event) => {
+                                let outcome = claude_runtime::apply_event(
+                                    event,
+                                    run_id,
+                                    expected_session,
+                                    tracker,
+                                    active_turn,
+                                    observations,
+                                    *frame_sequence,
+                                    usage,
+                                )
+                                .await;
+                                // Drain beside the text channel: rows traverse
+                                // the loop in emission order.
+                                subagent_rows.extend(tracker.take_subagent_rows());
+                                match outcome {
+                                    claude_runtime::ClaudeApplyOutcome::Continue { end_input } => {
+                                        if end_input {
+                                            // `result` seen: EndInput
+                                            // equivalent, then the CLI exits
+                                            // and EOF classifies the turn.
+                                            drop(stdin.take());
+                                        }
+                                    }
+                                    claude_runtime::ClaudeApplyOutcome::Terminal(state) => {
+                                        return ClaudePumpOutcome::Terminal {
+                                            state,
+                                            subagent_rows: std::mem::take(&mut subagent_rows),
+                                        };
+                                    }
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    Err(_) => {
+                        return ClaudePumpOutcome::Failed {
+                            error: EngineOperationError::StreamFailed,
+                            subagent_rows: std::mem::take(&mut subagent_rows),
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn read_claude_line(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    line: &mut String,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+) -> Result<(), EngineOperationError> {
+    use tokio::io::AsyncBufReadExt as _;
+    line.clear();
+    tokio::select! {
+        biased;
+        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+        () = control.wait() => Err(EngineOperationError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => Err(EngineOperationError::Deadline),
+        read = reader.read_line(line) => match read {
+            Ok(0) => Err(EngineOperationError::ProviderRequestFailed),
+            Ok(_) => Ok(()),
+            Err(_) => Err(EngineOperationError::ProviderRequestFailed),
+        },
+    }
+}
+
+/// Executes one finite Grok turn over `grok agent stdio` through the shared
+/// ACP core.
+///
+/// Single-owner match arm beside the Codex/Claude executors: no second task,
+/// no second queue, no loop fork. Performs the bounded `initialize`
+/// handshake with the row's auth classifier, `session/new` (or
+/// `session/load` for a gated continuation that reopens the same provider
+/// conversation), the bind authorization gate carrying the exact native
+/// session identity, then exactly one prompt with the update pump. Streaming
+/// session updates carry no root-text projection in G3 (a later packet);
+/// per-round usage projects best-effort onto the shared usage vocabulary
+/// without blocking the turn; permission and elicitation agent requests
+/// normalize through the A2 bridges into the pending table with no
+/// control-flow side effect and are never auto-answered. EOF before the
+/// prompt result maps to `Interrupted`, explicit cancel to `Cancelled`, and
+/// stall/failure to `Failed`. Teardown closes the stdin lifeline first,
+/// terminates the whole process group (no orphaned grok grandchildren
+/// holding pipes), and reaps within the close budget; an unobserved reap
+/// reports `UnresolvedReapDuring` without owner quarantine (see
+/// `finish_grok_turn`).
+#[allow(clippy::too_many_lines)]
+async fn execute_grok_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::acp as acp_core;
+    use super::grok as grok_runtime;
+
+    let artisan_domain::EngineSelection::Grok(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = grok_runtime::GrokSettings::from_selection(selection);
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Grok(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    // G3 continuation gate: same-engine is fenced by the dispatcher (grok
+    // bindings only); the owner additionally requires an explicit target
+    // model and a recorded CLI version. Anything else is typed
+    // incompatible — never a silent fresh start and never a cross-engine
+    // resume.
+    let resume_stored_session_id: Option<String> = match &request.input.continuation {
+        None => None,
+        Some(continuation) => {
+            let gate = grok_runtime::check_grok_native_continuation(
+                &grok_runtime::GrokContinuationGateInput {
+                    cli_version: launch.version(),
+                    target_model: selection.model_id().map(|model| model.as_str()),
+                    advertised_models: None,
+                    same_engine: true,
+                },
+            );
+            if !matches!(gate, grok_runtime::GrokContinuationDecision::Compatible) {
+                return request.fail(EngineOperationError::Configuration);
+            }
+            Some(continuation.provider_session_id().to_owned())
+        }
+    };
+    let definition = settings.definition();
+    let argv = (definition.build_args)(&settings.launch_args());
+    let mut child = match acp_core::spawn_acp_child(
+        launch.executable_path().as_os_str(),
+        &argv,
+        Some(std::path::Path::new(request.input.project_root.as_str())),
+    ) {
+        Ok(child) => child,
+        Err(_) => return request.fail(EngineOperationError::SpawnFailed),
+    };
+    let Some(pipes) = child.take_pipes() else {
+        let ConfiguredTurnRequest {
+            prepared, respond, ..
+        } = request;
+        let _ = prepared.send(Err(EngineOperationError::SpawnFailed));
+        return finish_grok_turn(
+            child,
+            Err(EngineOperationError::SpawnFailed),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    };
+    let acp_core::AcpPipes {
+        stdin,
+        stdout,
+        stderr,
+    } = pipes;
+    let mut stderr_counter = StderrCounter::new(Some(stderr), runtime.bounds.stderr_cap_bytes);
+    // Owner bounds map onto the caller-supplied ACP transport bounds: the
+    // SSE line ceiling bounds NDJSON lines, the generic JSON ceiling bounds
+    // envelopes, the handshake window is the prompt budget, and the stream
+    // budget arms the inactivity deadline the update loop recomputes.
+    let bounds = match acp_core::AcpBounds::new(
+        runtime.bounds.max_sse_line,
+        runtime.bounds.max_json_body,
+        grok_runtime::GROK_MAX_SESSION_ID_BYTES,
+        runtime.limits.prompt,
+        runtime.limits.sse,
+        runtime.limits.close,
+    ) {
+        Ok(bounds) => bounds,
+        Err(_) => {
+            let ConfiguredTurnRequest {
+                prepared, respond, ..
+            } = request;
+            let _ = prepared.send(Err(EngineOperationError::Configuration));
+            return finish_grok_turn(
+                child,
+                Err(EngineOperationError::Configuration),
+                respond,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut transport = acp_core::AcpTransport::new(stdout, stdin, bounds);
+
+    // initialize ----------------------------------------------------------
+    let handshake_deadline = phase_deadline(runtime.limits.prompt, request.deadline);
+    let initialize = tokio::select! {
+        biased;
+        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+        () = request.control.wait() => Err(EngineOperationError::Cancelled),
+        () = tokio::time::sleep_until(handshake_deadline) => Err(EngineOperationError::Deadline),
+        result = transport.initialize() => result.map_err(map_grok_acp_error),
+    };
+    let initialize = match initialize {
+        Ok(initialize) => initialize,
+        Err(error) => {
+            return finish_grok_start(Some(transport), child, request, error, runtime.limits.close)
+                .await;
+        }
+    };
+    let available: Vec<&str> = initialize.auth_methods.iter().map(String::as_str).collect();
+    let Some(auth_method) =
+        (definition.select_auth_method)(&available, grok_runtime::api_key_present())
+    else {
+        // No usable auth method is durable configuration state (the user
+        // must sign in), not a transient provider failure.
+        return finish_grok_start(
+            Some(transport),
+            child,
+            request,
+            EngineOperationError::Configuration,
+            runtime.limits.close,
+        )
+        .await;
+    };
+    let authenticated = tokio::select! {
+        biased;
+        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+        () = request.control.wait() => Err(EngineOperationError::Cancelled),
+        () = tokio::time::sleep_until(handshake_deadline) => Err(EngineOperationError::Deadline),
+        result = transport.authenticate(auth_method) => result.map_err(map_grok_acp_error),
+    };
+    if let Err(error) = authenticated {
+        return finish_grok_start(Some(transport), child, request, error, runtime.limits.close)
+            .await;
+    }
+
+    // session/new or session/load -------------------------------------------
+    // A gated continuation reopens the stored provider conversation
+    // (`session/load` over the same cwd a fresh start would use); the
+    // prepared identity must equal the stored one, so resume reopens the
+    // same conversation id. Fresh turns open exactly one new session.
+    // Either way provider-owned state is resumed, never invented, and a
+    // restart replays the durable prefix without duplicating provider
+    // effects with a second conversation.
+    let cwd = request.input.project_root.as_str().to_owned();
+    let session = if let Some(stored) = resume_stored_session_id.as_deref() {
+        let Some(validated) = grok_runtime::grok_resume_session_id(stored) else {
+            let _ = transport.shutdown_writer().await;
+            return finish_grok_start(
+                Some(transport),
+                child,
+                request,
+                EngineOperationError::Configuration,
+                runtime.limits.close,
+            )
+            .await;
+        };
+        let Ok(resumed) =
+            acp_core::SessionId::parse(validated.as_str(), grok_runtime::GROK_MAX_SESSION_ID_BYTES)
+        else {
+            let _ = transport.shutdown_writer().await;
+            return finish_grok_start(
+                Some(transport),
+                child,
+                request,
+                EngineOperationError::Configuration,
+                runtime.limits.close,
+            )
+            .await;
+        };
+        let loaded = tokio::select! {
+            biased;
+            () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+            () = request.control.wait() => Err(EngineOperationError::Cancelled),
+            () = tokio::time::sleep_until(handshake_deadline) => Err(EngineOperationError::Deadline),
+            result = transport.load_session(&resumed, cwd.as_str()) => result.map_err(map_grok_acp_error),
+        };
+        if let Err(error) = loaded {
+            return finish_grok_start(Some(transport), child, request, error, runtime.limits.close)
+                .await;
+        }
+        if !grok_runtime::grok_loaded_session_is_stored(resumed.as_str(), stored) {
+            return finish_grok_start(
+                Some(transport),
+                child,
+                request,
+                EngineOperationError::ProviderRequestFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+        resumed
+    } else {
+        let fresh = tokio::select! {
+            biased;
+            () = shutdown.wait() => Err(EngineOperationError::Shutdown),
+            () = request.control.wait() => Err(EngineOperationError::Cancelled),
+            () = tokio::time::sleep_until(handshake_deadline) => Err(EngineOperationError::Deadline),
+            result = transport.new_session(cwd.as_str()) => result.map_err(map_grok_acp_error),
+        };
+        match fresh {
+            Ok(session) => session,
+            Err(error) => {
+                return finish_grok_start(
+                    Some(transport),
+                    child,
+                    request,
+                    error,
+                    runtime.limits.close,
+                )
+                .await;
+            }
+        }
+    };
+
+    // Bind authorization gate: the dispatcher binds the native session id
+    // before exactly one prompt is authorized. Destructure here so the
+    // prepared session carries the exact native identity.
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        mut authorize,
+        observations,
+        respond,
+    } = request;
+    if prepared
+        .send(Ok(PreparedSession::new(session.as_str().to_owned())))
+        .is_err()
+    {
+        let _ = transport.shutdown_writer().await;
+        drop(transport);
+        return finish_grok_turn(
+            child,
+            Err(EngineOperationError::Cancelled),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    let authorized = loop {
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => break Err(EngineOperationError::Shutdown),
+            () = control.wait() => break Err(EngineOperationError::Cancelled),
+            () = tokio::time::sleep_until(deadline) => break Err(EngineOperationError::Deadline),
+            result = &mut authorize => {
+                break result.map_err(|_| EngineOperationError::ProviderRequestFailed);
+            }
+            event = stderr_counter.pump(), if stderr_counter.state() == super::process::StderrState::Open => {
+                let _ = event;
+            }
+        }
+    };
+    if let Err(error) = authorized {
+        let _ = transport.shutdown_writer().await;
+        drop(transport);
+        return finish_grok_turn(child, Err(error), respond, runtime.limits.close).await;
+    }
+
+    // session/prompt + update pump -----------------------------------------
+    let prompt_text = input
+        .prompt
+        .text()
+        .map(|text| text.as_str().to_owned())
+        .unwrap_or_default();
+    let content =
+        match acp_core::build_prompt_content(definition.image_mode, &prompt_text, &[], None) {
+            Ok(content) => content,
+            Err(error) => {
+                let _ = transport.shutdown_writer().await;
+                drop(transport);
+                return finish_grok_turn(
+                    child,
+                    Err(map_grok_acp_error(error)),
+                    respond,
+                    runtime.limits.close,
+                )
+                .await;
+            }
+        };
+    let prompt_id = match transport.prompt(&session, content).await {
+        Ok(prompt_id) => prompt_id,
+        Err(error) => {
+            let _ = transport.shutdown_writer().await;
+            drop(transport);
+            return finish_grok_turn(
+                child,
+                Err(map_grok_acp_error(error)),
+                respond,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut bridges = super::acp_bridges::PendingBridgeTable::new();
+    // Best-effort usage scope: explicit model plus thread scope, else usage
+    // results stay diagnostics. Usage never blocks the turn.
+    let usage_attribution = match (&input.thread_id, input.settings.config().selection()) {
+        (Some(thread_id), artisan_domain::EngineSelection::Grok(selection)) => selection
+            .model_id()
+            .map(|model| grok_runtime::GrokUsageAttribution {
+                thread_id: thread_id.clone(),
+                model_id: model.clone(),
+            }),
+        _ => None,
+    };
+    let usage_scope = usage_attribution
+        .as_ref()
+        .map(|attribution| grok_runtime::GrokUsageScope {
+            thread_id: &attribution.thread_id,
+            model_id: &attribution.model_id,
+            provider_session_id: session.as_str(),
+        });
+    let outcome = grok_pump_loop(
+        &mut transport,
+        &session,
+        &prompt_id,
+        &mut bridges,
+        deadline,
+        shutdown,
+        &control,
+        &mut stderr_counter,
+        &observations,
+        &input.run_id,
+        usage_scope.as_ref(),
+    )
+    .await;
+    let _ = transport.shutdown_writer().await;
+    drop(transport);
+    drop(observations);
+    match outcome {
+        GrokPumpOutcome::Terminal(state) => {
+            finish_grok_turn(
+                child,
+                Ok(EngineTurnResult { terminal: state }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        GrokPumpOutcome::Failed(error) => {
+            finish_grok_turn(child, Err(error), respond, runtime.limits.close).await
+        }
+    }
+}
+
+enum GrokPumpOutcome {
+    Terminal(super::observation::TerminalState),
+    Failed(EngineOperationError),
+}
+
+/// Drives one authorized Grok prompt round to its terminal state.
+///
+/// Mirrors the Codex pump structure over the ACP update loop: owner
+/// shutdown, explicit cancellation (with a best-effort provider cancel),
+/// and the attempt deadline preempt the transport; EOF before the prompt
+/// result is interruption, a silent window is failure, and only the matching
+/// prompt result settles the turn. Agent requests normalize into the pending
+/// bridge table; per-round usage projects best-effort onto the shared usage
+/// vocabulary without blocking the turn; streaming updates await the later
+/// text-projection packet.
+#[allow(clippy::too_many_arguments)]
+async fn grok_pump_loop(
+    transport: &mut super::acp::AcpTransport<
+        tokio::process::ChildStdout,
+        tokio::process::ChildStdin,
+    >,
+    session: &super::acp::SessionId,
+    prompt: &super::acp::AcpId,
+    bridges: &mut super::acp_bridges::PendingBridgeTable,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    stderr_counter: &mut StderrCounter,
+    observations: &mpsc::Sender<EngineObservation>,
+    run_id: &RunId,
+    usage: Option<&super::grok::GrokUsageScope<'_>>,
+) -> GrokPumpOutcome {
+    use super::acp::AcpError;
+    use super::acp::UpdateEvent;
+
+    let mut usage_sequence: u64 = 0;
+    loop {
+        if shutdown.is_cancelled() {
+            return GrokPumpOutcome::Failed(EngineOperationError::Shutdown);
+        }
+        if control.is_cancelled() {
+            // Best-effort provider cancel before reporting cancellation.
+            let _ = transport.cancel(session).await;
+            return GrokPumpOutcome::Terminal(TerminalState::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return GrokPumpOutcome::Failed(EngineOperationError::Deadline);
+        }
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => return GrokPumpOutcome::Failed(EngineOperationError::Shutdown),
+            () = control.wait() => {
+                let _ = transport.cancel(session).await;
+                return GrokPumpOutcome::Terminal(TerminalState::Cancelled);
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return GrokPumpOutcome::Failed(EngineOperationError::Deadline);
+            }
+            event = stderr_counter.pump(), if stderr_counter.state() == super::process::StderrState::Open => {
+                let _ = event;
+            }
+            update = transport.next_update(session, prompt) => match update {
+                Ok(UpdateEvent::SessionUpdate(_)) => {}
+                Ok(UpdateEvent::AgentRequest { id, method, params }) => {
+                    note_grok_agent_request(bridges, &id, &method, &params);
+                }
+                Ok(UpdateEvent::PromptResult(outcome)) => {
+                    if let Some(sample) = outcome
+                        .usage
+                        .as_ref()
+                        .and_then(super::grok::grok_sample_from_token_usage)
+                    {
+                        usage_sequence = usage_sequence.saturating_add(1);
+                        if super::grok::project_grok_usage_sample(
+                            observations,
+                            run_id,
+                            usage,
+                            usage_sequence,
+                            &sample,
+                        )
+                        .await
+                        .is_some()
+                        {
+                            return GrokPumpOutcome::Terminal(TerminalState::Interrupted);
+                        }
+                    }
+                    return GrokPumpOutcome::Terminal(if outcome.cancelled {
+                        TerminalState::Cancelled
+                    } else {
+                        TerminalState::Completed
+                    });
+                }
+                Err(AcpError::Cancelled) => {
+                    let _ = transport.cancel(session).await;
+                    return GrokPumpOutcome::Terminal(TerminalState::Cancelled);
+                }
+                Err(AcpError::PeerClosed) => {
+                    return GrokPumpOutcome::Terminal(TerminalState::Interrupted);
+                }
+                Err(AcpError::InactivityStall) => {
+                    return GrokPumpOutcome::Terminal(TerminalState::Failed);
+                }
+                Err(error) => return GrokPumpOutcome::Failed(map_grok_acp_error(error)),
+            },
+        }
+    }
+}
+
+/// Tracks one agent-initiated ACP request in the pending bridge table.
+///
+/// Permission and elicitation frames normalize through the A2 bridges and
+/// validate fail-closed: malformed frames never reach the durable rails.
+/// Unknown methods (including cursor-specific extensions on the shared wire)
+/// stay untracked and unanswered; the bridges never auto-answer.
+fn note_grok_agent_request(
+    table: &mut super::acp_bridges::PendingBridgeTable,
+    id: &super::acp::AcpId,
+    method: &str,
+    params: &Value,
+) {
+    if method == super::grok::GROK_PERMISSION_METHOD {
+        if let Ok(pending) = super::acp_bridges::normalize_permission_request(params) {
+            let _ = table.insert_approval(super::grok::GROK_MAX_PENDING_REQUESTS, pending);
+        }
+    } else if method == super::grok::GROK_ELICITATION_METHOD {
+        let provider_id = match id {
+            super::acp::AcpId::Number(number) => number.to_string(),
+            super::acp::AcpId::Text(text) => text.clone(),
+        };
+        if let Ok(pending) =
+            super::acp_bridges::normalize_elicitation_request(provider_id.as_str(), params)
+        {
+            let _ = table.insert_elicitation(super::grok::GROK_MAX_PENDING_REQUESTS, pending);
+        }
+    }
+}
+
+/// Maps one ACP core failure onto the owner error vocabulary.
+///
+/// Cancellation stays distinct; a protocol version mismatch surfaces as
+/// `IncompatibleVersion`; every other wire failure (including auth,
+/// framing, stall, and child errors) is a provider request failure. No
+/// provider bytes cross this boundary: the core error is payload-free.
+fn map_grok_acp_error(error: super::acp::AcpError) -> EngineOperationError {
+    match error {
+        super::acp::AcpError::Cancelled => EngineOperationError::Cancelled,
+        super::acp::AcpError::UnsupportedVersion => EngineOperationError::IncompatibleVersion,
+        _ => EngineOperationError::ProviderRequestFailed,
+    }
+}
+
+/// Runs the fixed pre-prompt teardown for a faulted Grok start and settles
+/// both owner channels: the stdin lifeline closes first so an EOF-clean
+/// agent can exit on its own, then the child reaps within the close budget.
+async fn finish_grok_start(
+    transport: Option<
+        super::acp::AcpTransport<tokio::process::ChildStdout, tokio::process::ChildStdin>,
+    >,
+    child: super::acp::AcpChild,
+    request: ConfiguredTurnRequest,
+    error: EngineOperationError,
+    close_budget: Duration,
+) -> Execution {
+    if let Some(mut transport) = transport {
+        let _ = transport.shutdown_writer().await;
+    }
+    let ConfiguredTurnRequest {
+        prepared, respond, ..
+    } = request;
+    let _ = prepared.send(Err(error.clone()));
+    finish_grok_turn(child, Err(error), respond, close_budget).await
+}
+
+/// Settles one Grok turn after its transport is gone.
+///
+/// Mirrors the success path of the shared cleanup (bounded reap, then
+/// settle) over the ACP child's fixed teardown. An unobserved reap cannot
+/// quarantine through the owner `process` contract (`AcpRetainedChild`
+/// carries no observable wait): the retained handle drops ÔÇö the spawn sets
+/// `kill_on_drop`, and ACP children hold no ports or secrets ÔÇö while the
+/// caller still observes `UnresolvedReapDuring`. Full quarantine returns
+/// with the verified-launch authority packet.
+async fn finish_grok_turn(
+    child: super::acp::AcpChild,
+    result: TurnResult,
+    respond: oneshot::Sender<TurnResult>,
+    close_budget: Duration,
+) -> Execution {
+    match super::acp::shutdown_acp_child(child, close_budget).await {
+        super::acp::AcpShutdown::ReapedWithoutKill(_)
+        | super::acp::AcpShutdown::ReapedAfterKill(_) => {
+            let _ = respond.send(result);
+            Execution::Completed
+        }
+        super::acp::AcpShutdown::Retained(retained) => {
+            drop(retained);
+            let primary = result
+                .err()
+                .map_or_else(|| Box::new(EngineOperationError::ReapUnresolved), Box::new);
+            let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring { primary }));
+            Execution::Completed
+        }
+    }
+}
+
+/// Executes one finite Cursor turn over the shared ACP core.
+///
+/// Single-owner match arm beside the Codex and Claude executors: no second
+/// task, no second queue. C3 proves admission agreement (durable cursor
+/// selection, typed [`CursorSettings`](super::cursor::CursorSettings), and
+/// the cursor launch capability carry the same managed profile) and gates a
+/// provider continuation through the C3 gate (same engine, explicit target
+/// model, CLI >= 2026.08.11-e8db854; anything else is typed incompatible),
+/// then still fails closed: the probe authority, live spawn/pump, catalog
+/// merge, and frontend selection belong to later packets. The cursor-shaped
+/// ACP wire itself is proven by the fixture script tests in `super::cursor`
+/// and `tests/backend/engine_owner_cursor.rs`, which drive the exact
+/// definition row (`--model` resolution, `--mode ask`, `--force`, `acp`;
+/// image-block mode; permission deny-then-allow; plan-approval extensions;
+/// resume; cancel/close; malformed frames; `AE-PROVIDER-206`) through the
+/// shared transport core without spawning the real CLI.
+async fn execute_cursor_turn(
+    request: ConfiguredTurnRequest,
+    _runtime: ConfiguredRuntime,
+    _shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::cursor as cursor_runtime;
+
+    let artisan_domain::EngineSelection::Cursor(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = match cursor_runtime::CursorSettings::from_selection(selection) {
+        Ok(settings) => settings,
+        Err(_) => return request.fail(EngineOperationError::Configuration),
+    };
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Cursor(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    if launch.profile_id() != settings.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    // C3 continuation gate: same-engine is fenced by the dispatcher (cursor
+    // bindings only); the owner additionally requires an explicit target
+    // model and CLI >= 2026.08.11-e8db854, plus a bounded stored session id.
+    // Anything else is typed incompatible — never a silent fresh start and
+    // never a cross-engine resume. The validated session id is consumed by
+    // the live `session/load` resume once the runnable packet lands; C3 still
+    // fails closed before spawning.
+    if let Some(continuation) = request.input.continuation.as_ref() {
+        let gate = cursor_runtime::check_cursor_native_continuation(
+            &cursor_runtime::CursorContinuationGateInput {
+                cli_version: request.input.launch.version(),
+                target_model: selection.model_id().map(|model| model.as_str()),
+                advertised_models: None,
+                same_engine: true,
+            },
+        );
+        if !matches!(gate, cursor_runtime::CursorContinuationDecision::Compatible) {
+            return request.fail(EngineOperationError::Configuration);
+        }
+        if cursor_runtime::cursor_resume_session_id(continuation.provider_session_id()).is_none() {
+            return request.fail(EngineOperationError::Configuration);
+        }
+    }
+    let _definition = cursor_runtime::CursorSettings::definition();
+    request.fail(EngineOperationError::Configuration)
+}
+
+/// Executes one finite Hermes turn over the private-service gateway WebSocket.
+///
+/// Single-owner match arm beside the Codex/Claude executors: no second task,
+/// no second queue. Mints the dashboard session token, spawns the verified
+/// service, drives `HERMES_BACKEND_READY` readiness, connects the JSON-RPC
+/// gateway, validates the live `model.options` inventory against the durable
+/// selection, opens (or resumes with original-model enforcement behind the H3
+/// gate: same engine, explicit target model, recorded service >= 0.20.0)
+/// exactly one session, passes the bind authorization gate, submits one prompt, then
+/// pumps the stream. Text deltas normalize onto the shared S1a vocabulary;
+/// approval/question frames populate the pending tracker with no
+/// control-flow side effect; images fail closed before spawn. Stall, failure,
+/// and close-before-terminal map distinctly; teardown reuses the owner
+/// process contract and quarantines on unobserved reaps.
+async fn execute_hermes_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    use super::hermes as hermes_runtime;
+    use super::process::spawn_hermes_engine;
+
+    let artisan_domain::EngineSelection::Hermes(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    let settings = hermes_runtime::HermesSettings::from_selection(selection);
+    if settings.profile_id() != request.input.launch.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    let super::InternalLaunch::Hermes(launch) = &request.input.launch else {
+        return request.fail(EngineOperationError::Configuration);
+    };
+    // H3 continuation gate: same-engine is fenced by the dispatcher (hermes
+    // bindings only); the owner additionally requires an explicit target
+    // model and service >= 0.20.0. Anything else is typed incompatible —
+    // never a silent fresh start and never a cross-engine resume. The live
+    // model.options inventory below pre-validates the exact target model
+    // before the resume request.
+    let resume_stored_session_id: Option<String> = match &request.input.continuation {
+        None => None,
+        Some(continuation) => {
+            let gate = hermes_runtime::check_hermes_native_continuation(
+                &hermes_runtime::HermesContinuationGateInput {
+                    service_version: launch.version(),
+                    target_model: Some(settings.model_id()),
+                    advertised_models: None,
+                    same_engine: true,
+                },
+            );
+            if !matches!(gate, hermes_runtime::HermesContinuationDecision::Compatible) {
+                return request.fail(EngineOperationError::Configuration);
+            }
+            Some(continuation.provider_session_id().to_owned())
+        }
+    };
+    if let Err(error) = hermes_runtime::reject_image_attachments(&request.input.prompt) {
+        return request.fail(map_hermes_turn_error(error));
+    }
+    let Some(session_token) = hermes_runtime::new_session_token() else {
+        return request.fail(EngineOperationError::EntropyFailed);
+    };
+    let mut child = match spawn_hermes_engine(launch, &request.input.project_root, &session_token) {
+        Ok(child) => child,
+        Err(_) => return request.fail(EngineOperationError::SpawnFailed),
+    };
+    let stdin_opt = child.stdin.take();
+    let stdout_opt = child.stdout.take();
+    let stderr_opt = child.stderr.take();
+    let lifeline = LifelineWriter::take(&mut child);
+    let stderr_counter = StderrCounter::new(stderr_opt, runtime.bounds.stderr_cap_bytes);
+    let (_held_stdin, stdout) = match (stdin_opt, stdout_opt) {
+        (Some(stdin), Some(stdout)) => (stdin, stdout),
+        _ => {
+            let parts = ChildParts {
+                child,
+                lifeline,
+                stdout: None,
+                stderr_counter,
+            };
+            return finish_configured_start(
+                request,
+                parts,
+                EngineOperationError::SpawnFailed,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let mut parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let mut stdout = stdout;
+    let port = match hermes_runtime::drive_service_readiness(
+        &mut stdout,
+        &mut parts,
+        phase_deadline(runtime.limits.readiness, request.deadline),
+        shutdown,
+        &request.control,
+        runtime.bounds.max_readiness_line,
+    )
+    .await
+    {
+        Ok(port) => port,
+        Err(error) => {
+            drop(stdout);
+            return finish_configured_start(
+                request,
+                parts,
+                map_readiness_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    drop(stdout);
+    let address =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+    let connect_scope = hermes_runtime::RequestScope {
+        deadline: phase_deadline(runtime.limits.health, request.deadline),
+        cancel: &request.control,
+        shutdown,
+    };
+    let mut client =
+        match hermes_runtime::GatewayClient::connect(address, &session_token, &connect_scope).await
+        {
+            Ok(client) => client,
+            Err(error) => {
+                return finish_configured_start(
+                    request,
+                    parts,
+                    map_hermes_gateway_error(error),
+                    runtime.limits.close,
+                )
+                .await;
+            }
+        };
+    let provider_scope = hermes_runtime::RequestScope {
+        deadline: phase_deadline(runtime.limits.prompt, request.deadline),
+        cancel: &request.control,
+        shutdown,
+    };
+    let mut early_events = Vec::new();
+    let inventory_value = match client
+        .request(
+            "model.options",
+            serde_json::json!({
+                "explicit_only": true,
+                "include_unconfigured": false,
+                "refresh": false,
+            }),
+            &provider_scope,
+        )
+        .await
+    {
+        Ok((value, events)) => {
+            early_events.extend(events);
+            value
+        }
+        Err(error) => {
+            client.close().await;
+            return finish_configured_start(
+                request,
+                parts,
+                map_hermes_gateway_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    let inventory = match hermes_runtime::validate_model_options_inventory(&inventory_value) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            client.close().await;
+            return finish_configured_start(
+                request,
+                parts,
+                map_hermes_inventory_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    if !hermes_runtime::inventory_supports(&inventory, settings.route_id(), settings.model_id()) {
+        client.close().await;
+        return finish_configured_start(
+            request,
+            parts,
+            EngineOperationError::Configuration,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    let open_input = hermes_runtime::OpenSessionInput {
+        settings: &settings,
+        project_root: request.input.project_root.as_str(),
+        guidance_sections: &[],
+        resume_stored_session_id: resume_stored_session_id.as_deref(),
+    };
+    let opened = match hermes_runtime::open_session(&mut client, &open_input, &provider_scope).await
+    {
+        Ok(opened) => opened,
+        Err(error) => {
+            client.close().await;
+            return finish_configured_start(
+                request,
+                parts,
+                map_hermes_session_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
+    early_events.extend(opened.setup_events);
+
+    // Bind authorization gate: the dispatcher binds the durable stored
+    // session before exactly one prompt is authorized. Destructure here so
+    // the prepared session carries the exact durable identity.
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        mut authorize,
+        observations,
+        respond,
+    } = request;
+    if prepared
+        .send(Ok(PreparedSession::new(opened.durable_session_id.clone())))
+        .is_err()
+    {
+        client.close().await;
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::Cancelled),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+    if let Err(error) =
+        wait_for_authorization(&mut parts, &mut authorize, deadline, shutdown, &control).await
+    {
+        client.close().await;
+        return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+    }
+
+    // Prompt submit ---------------------------------------------------------
+    // Images were rejected before spawn; only text travels here.
+    let prompt_text = input
+        .prompt
+        .text()
+        .map(|text| text.as_str().to_owned())
+        .unwrap_or_default();
+    let submit_scope = hermes_runtime::RequestScope {
+        deadline: phase_deadline(runtime.limits.prompt, deadline),
+        cancel: &control,
+        shutdown,
+    };
+    if client
+        .request(
+            "prompt.submit",
+            serde_json::json!({
+                "session_id": opened.runtime_session_id,
+                "text": prompt_text,
+            }),
+            &submit_scope,
+        )
+        .await
+        .is_err()
+    {
+        client.close().await;
+        return finish_turn_result(
+            parts,
+            Err(EngineOperationError::ProviderRequestFailed),
+            respond,
+            runtime.limits.close,
+        )
+        .await;
+    }
+
+    // Streaming pump ----------------------------------------------------------
+    let mut normalizer = hermes_runtime::HermesNormalizer::new();
+    let mut tracker = hermes_runtime::HermesPendingTracker::new();
+    let mut active_turn: Option<String> = None;
+    let mut frame_sequence: u64 = 0;
+    let mut last_activity = Instant::now();
+    let terminal = hermes_pump_loop(
+        &mut client,
+        &mut normalizer,
+        &mut tracker,
+        &settings,
+        &input.run_id,
+        input.thread_id.as_ref(),
+        &opened.runtime_session_id,
+        early_events,
+        &mut active_turn,
+        &mut frame_sequence,
+        &mut last_activity,
+        runtime.limits.sse,
+        deadline,
+        shutdown,
+        &control,
+        &observations,
+        &mut parts,
+    )
+    .await;
+    let close_scope = hermes_runtime::RequestScope {
+        deadline: phase_deadline(runtime.limits.close, deadline),
+        cancel: &control,
+        shutdown,
+    };
+    let _ = client
+        .request(
+            "session.close",
+            serde_json::json!({ "session_id": opened.runtime_session_id }),
+            &close_scope,
+        )
+        .await;
+    client.close().await;
+    match terminal {
+        HermesPumpOutcome::Terminal(state) => {
+            drop(observations);
+            finish_turn_result(
+                parts,
+                Ok(EngineTurnResult { terminal: state }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        HermesPumpOutcome::Failed(error) => {
+            finish_turn_result(parts, Err(error), respond, runtime.limits.close).await
+        }
+    }
+}
+
+enum HermesPumpOutcome {
+    Terminal(super::observation::TerminalState),
+    Failed(EngineOperationError),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn hermes_pump_loop(
+    client: &mut super::hermes::GatewayClient,
+    normalizer: &mut super::hermes::HermesNormalizer,
+    tracker: &mut super::hermes::HermesPendingTracker,
+    settings: &super::hermes::HermesSettings,
+    run_id: &artisan_domain::RunId,
+    thread_id: Option<&artisan_domain::ThreadId>,
+    runtime_session: &str,
+    early_events: Vec<super::hermes::HermesEvent>,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    inactivity: Duration,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+    parts: &mut ChildParts,
+) -> HermesPumpOutcome {
+    use super::hermes as hermes_runtime;
+
+    for event in &early_events {
+        *frame_sequence = frame_sequence.wrapping_add(1);
+        *last_activity = Instant::now();
+        if let Some(terminal) = hermes_runtime::apply_observations(
+            normalizer,
+            event,
+            hermes_runtime::ApplyContext {
+                run_id,
+                thread_id,
+                settings,
+                runtime_session_id: runtime_session,
+                tracker,
+                active_turn,
+                observations,
+                frame_sequence: *frame_sequence,
+            },
+        )
+        .await
+        {
+            return HermesPumpOutcome::Terminal(terminal);
+        }
+    }
+    loop {
+        if shutdown.is_cancelled() {
+            return HermesPumpOutcome::Failed(EngineOperationError::Shutdown);
+        }
+        if control.is_cancelled() {
+            let scope = hermes_runtime::RequestScope {
+                deadline: Instant::now()
+                    .checked_add(Duration::from_secs(5))
+                    .unwrap_or(deadline)
+                    .min(deadline),
+                cancel: control,
+                shutdown,
+            };
+            let _ = hermes_runtime::interrupt_live_turn(client, runtime_session, &scope).await;
+            return HermesPumpOutcome::Terminal(TerminalState::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return HermesPumpOutcome::Failed(EngineOperationError::Deadline);
+        }
+        if hermes_runtime::has_stalled(
+            active_turn.is_some(),
+            *last_activity,
+            inactivity,
+            Instant::now(),
+        ) {
+            return HermesPumpOutcome::Terminal(TerminalState::Failed);
+        }
+        let stall_at = last_activity
+            .checked_add(inactivity)
+            .unwrap_or(deadline)
+            .min(deadline);
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => return HermesPumpOutcome::Failed(EngineOperationError::Shutdown),
+            () = control.wait() => {
+                let scope = hermes_runtime::RequestScope {
+                    deadline: Instant::now()
+                        .checked_add(Duration::from_secs(5))
+                        .unwrap_or(deadline)
+                        .min(deadline),
+                    cancel: control,
+                    shutdown,
+                };
+                let _ = hermes_runtime::interrupt_live_turn(client, runtime_session, &scope).await;
+                return HermesPumpOutcome::Terminal(TerminalState::Cancelled);
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return HermesPumpOutcome::Failed(EngineOperationError::Deadline);
+            }
+            () = tokio::time::sleep_until(stall_at) => {
+                if hermes_runtime::has_stalled(
+                    active_turn.is_some(),
+                    *last_activity,
+                    inactivity,
+                    Instant::now(),
+                ) {
+                    return HermesPumpOutcome::Terminal(TerminalState::Failed);
+                }
+                let _ = parts.stderr_counter.pump().await;
+            }
+            event = client.next_event(control, shutdown) => {
+                match event {
+                    Ok(event) => {
+                        *last_activity = Instant::now();
+                        *frame_sequence = frame_sequence.wrapping_add(1);
+                        if let Some(terminal) = hermes_runtime::apply_observations(
+                            normalizer,
+                            &event,
+                            hermes_runtime::ApplyContext {
+                                run_id,
+                                thread_id,
+                                settings,
+                                runtime_session_id: runtime_session,
+                                tracker,
+                                active_turn,
+                                observations,
+                                frame_sequence: *frame_sequence,
+                            },
+                        )
+                        .await
+                        {
+                            return HermesPumpOutcome::Terminal(terminal);
+                        }
+                    }
+                    Err(hermes_runtime::GatewayError::Closed) => {
+                        return HermesPumpOutcome::Terminal(TerminalState::Interrupted);
+                    }
+                    Err(hermes_runtime::GatewayError::Shutdown) => {
+                        return HermesPumpOutcome::Failed(EngineOperationError::Shutdown);
+                    }
+                    Err(hermes_runtime::GatewayError::Cancelled) => {
+                        return HermesPumpOutcome::Failed(EngineOperationError::Cancelled);
+                    }
+                    Err(hermes_runtime::GatewayError::Timeout) => {
+                        return HermesPumpOutcome::Failed(EngineOperationError::Deadline);
+                    }
+                    Err(_) => {
+                        return HermesPumpOutcome::Failed(EngineOperationError::StreamFailed);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn map_hermes_turn_error(error: super::hermes::HermesTurnError) -> EngineOperationError {
+    match error {
+        super::hermes::HermesTurnError::Configuration
+        | super::hermes::HermesTurnError::ImagesUnsupported => EngineOperationError::Configuration,
+        super::hermes::HermesTurnError::StreamFailed => EngineOperationError::StreamFailed,
+    }
+}
+
+fn map_hermes_gateway_error(error: super::hermes::GatewayError) -> EngineOperationError {
+    match error {
+        super::hermes::GatewayError::Shutdown => EngineOperationError::Shutdown,
+        super::hermes::GatewayError::Cancelled => EngineOperationError::Cancelled,
+        super::hermes::GatewayError::Timeout => EngineOperationError::Deadline,
+        _ => EngineOperationError::ProviderRequestFailed,
+    }
+}
+
+fn map_hermes_session_error(error: super::hermes::SessionError) -> EngineOperationError {
+    match error {
+        super::hermes::SessionError::Shutdown => EngineOperationError::Shutdown,
+        super::hermes::SessionError::Cancelled => EngineOperationError::Cancelled,
+        super::hermes::SessionError::Deadline => EngineOperationError::Deadline,
+        super::hermes::SessionError::IncompatibleVersion => {
+            EngineOperationError::IncompatibleVersion
+        }
+        super::hermes::SessionError::Configuration => EngineOperationError::Configuration,
+        super::hermes::SessionError::ProviderRequestFailed
+        | super::hermes::SessionError::StreamFailed => EngineOperationError::ProviderRequestFailed,
+    }
+}
+
+fn map_hermes_inventory_error(error: super::hermes::InventoryError) -> EngineOperationError {
+    match error {
+        super::hermes::InventoryError::InvalidShape
+        | super::hermes::InventoryError::DuplicateModel => EngineOperationError::Configuration,
+    }
+}
+
 async fn prepare_configured_process(
     request: ConfiguredTurnRequest,
     runtime: ConfiguredRuntime,
@@ -1607,6 +4091,21 @@ async fn prepare_configured_process(
                 fixture.scenario,
                 secret.as_str(),
             )
+        }
+        crate::engine_owner::InternalLaunch::Codex(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
+        }
+        crate::engine_owner::InternalLaunch::Claude(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
+        }
+        crate::engine_owner::InternalLaunch::Grok(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
+        }
+        crate::engine_owner::InternalLaunch::Cursor(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
+        }
+        crate::engine_owner::InternalLaunch::Hermes(_) => {
+            return Err(request.fail(EngineOperationError::Configuration));
         }
     }) else {
         return Err(request.fail(EngineOperationError::SpawnFailed));
@@ -1699,6 +4198,15 @@ async fn create_configured_session(
     process: ConfiguredProcess,
     shutdown: &Arc<CancelHandle>,
 ) -> Result<PreparedConfiguredSession, Execution> {
+    // The configured session below is OpenCode2-shaped end to end. Any other
+    // selection fails closed instead of executing as OpenCode2.
+    if !matches!(
+        process.request.input.settings.config().selection(),
+        artisan_domain::EngineSelection::OpenCode2(_)
+    ) {
+        let ConfiguredProcess { request, .. } = process;
+        return Err(request.fail(EngineOperationError::Configuration));
+    }
     let ConfiguredProcess {
         request,
         runtime,
@@ -1715,7 +4223,26 @@ async fn create_configured_session(
         observations,
         respond,
     } = request;
-    let selection = input.settings.config().selection().as_opencode2();
+    let artisan_domain::EngineSelection::OpenCode2(selection) = input.settings.config().selection()
+    else {
+        // Unreachable after the guard above, but fails closed without
+        // coercing another engine into an OpenCode2 session.
+        return Err(finish_configured_start(
+            ConfiguredTurnRequest {
+                input,
+                deadline,
+                control,
+                prepared,
+                authorize,
+                observations,
+                respond,
+            },
+            parts,
+            EngineOperationError::Configuration,
+            runtime.limits.close,
+        )
+        .await);
+    };
     let permission = selection.permission();
     let session_details = if let Some(continuation) = input.continuation.as_ref() {
         let resume_selection = ResumeSelection::new(
@@ -1848,31 +4375,37 @@ async fn authorize_configured_session(
         stream_after,
     } = state;
     let initial_stream = match &input.launch {
-        super::InternalLaunch::Verified(_) => StreamState::for_run(input.run_id.clone(), session.clone(), stream_after),
+        super::InternalLaunch::Verified(_) => {
+            StreamState::for_run(input.run_id.clone(), session.clone(), stream_after)
+        }
+        super::InternalLaunch::Codex(_) => Err(StreamError::InvalidSession),
+        super::InternalLaunch::Claude(_) => Err(StreamError::InvalidSession),
+        super::InternalLaunch::Grok(_) => Err(StreamError::InvalidSession),
+        super::InternalLaunch::Cursor(_) => Err(StreamError::InvalidSession),
+        super::InternalLaunch::Hermes(_) => Err(StreamError::InvalidSession),
         #[cfg(test)]
         super::InternalLaunch::Fixture(_) => Ok(StreamState::new(stream_after)),
     };
-    let stream_state =
-        match initial_stream {
-            Ok(state) => state,
-            Err(error) => {
-                return finish_configured_start(
-                    ConfiguredTurnRequest {
-                        input,
-                        deadline,
-                        control,
-                        prepared,
-                        authorize,
-                        observations,
-                        respond,
-                    },
-                    parts,
-                    map_stream_error(error),
-                    runtime.limits.close,
-                )
-                .await;
-            }
-        };
+    let stream_state = match initial_stream {
+        Ok(state) => state,
+        Err(error) => {
+            return finish_configured_start(
+                ConfiguredTurnRequest {
+                    input,
+                    deadline,
+                    control,
+                    prepared,
+                    authorize,
+                    observations,
+                    respond,
+                },
+                parts,
+                map_stream_error(error),
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
     let session = ConfiguredSession {
         input,
         deadline,
@@ -1993,7 +4526,14 @@ async fn execute_authorized_configured_turn(
 
 fn stream_usage_context(input: &super::InternalTurnInput) -> Option<StreamUsageContext> {
     let thread_id = input.thread_id.as_ref()?.clone();
-    let selection = input.settings.config().selection().as_opencode2();
+    // Usage attribution is OpenCode2-shaped; other selections carry no
+    // usage scope instead of attributing as OpenCode2. Claude usage travels
+    // its own pump scope in `execute_claude_turn` (cumulative reports with a
+    // replacing context gauge); the `/usage` CLI buckets stay diagnostics.
+    let artisan_domain::EngineSelection::OpenCode2(selection) = input.settings.config().selection()
+    else {
+        return None;
+    };
     Some(StreamUsageContext::new(
         input.run_id.clone(),
         thread_id,
@@ -2405,5 +4945,65 @@ async fn finish_success(
                 Execution::Quarantined(engine)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod intake_attachment_tests {
+    use artisan_domain::{AuthoredText, EngineId, ImageAttachment, QueueMessagePayload};
+
+    use super::*;
+
+    fn text_prompt() -> QueueMessagePayload {
+        QueueMessagePayload::text_only("hello").expect("text prompt builds")
+    }
+
+    fn image_prompt() -> QueueMessagePayload {
+        let attachment = ImageAttachment::new("image/png", vec![1, 2, 3, 4], "shot.png")
+            .expect("image attachment builds");
+        QueueMessagePayload::new(
+            Some(AuthoredText::parse("see this").expect("authored text parses")),
+            vec![attachment],
+        )
+        .expect("image prompt builds")
+    }
+
+    #[test]
+    fn text_prompts_pass_intake_for_every_engine() {
+        for engine in EngineId::ALL {
+            assert!(
+                check_turn_attachment_applicability(engine, &text_prompt()).is_ok(),
+                "{engine:?} admits a text-only turn"
+            );
+        }
+    }
+
+    #[test]
+    fn image_prompts_pass_except_hermes() {
+        for engine in [
+            EngineId::OpenCode2,
+            EngineId::Codex,
+            EngineId::Claude,
+            EngineId::Grok,
+            EngineId::Cursor,
+        ] {
+            assert!(
+                check_turn_attachment_applicability(engine, &image_prompt()).is_ok(),
+                "{engine:?} supports provider images at intake"
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_images_fail_closed_with_the_typed_reject() {
+        assert_eq!(
+            check_turn_attachment_applicability(EngineId::Hermes, &image_prompt()),
+            Err(EngineOperationError::Configuration)
+        );
+        assert_eq!(
+            map_hermes_turn_error(crate::engine_owner::hermes::HermesTurnError::ImagesUnsupported),
+            EngineOperationError::Configuration
+        );
+        assert!(check_turn_attachment_applicability(EngineId::Hermes, &text_prompt()).is_ok());
     }
 }

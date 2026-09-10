@@ -1297,3 +1297,2080 @@ const fn dispatch_state_label(state: &DispatchState) -> &'static str {
         DispatchState::Failed => "failed",
     }
 }
+
+// ---------------------------------------------------------------------------
+// S1a: version-tagged typed observation checkpoint codec
+// ---------------------------------------------------------------------------
+//
+// Typed engine observations ride the existing batch payload instead of a new
+// table: [`encode_observation_checkpoint`] packs one bounded, engine-tagged,
+// monotonically sequenced batch into an [`EngineCheckpoint`] with the explicit
+// format tag [`OBSERVATION_FORMAT_TAG`], exactly like the engine run config
+// codec packs typed selections into version-tagged JSON. Callers commit the
+// checkpoint through the existing [`Repository::commit_run_batch`] path with
+// [`CheckpointUpdate::Replace`], so no migration was needed; the database
+// tests prove this by committing fixture observations end to end and decoding
+// the persisted `run_checkpoints` row.
+//
+// No `serde` derives leak into the domain crate: canonical encoding lives on
+// the private `Stored*` structs below, strict decoding is manual with exact
+// key sets per tag (mirroring `deny_unknown_fields`), and every rejection is
+// a payload-free [`ObservationCommitError`].
+
+use serde::Serialize;
+use serde_json::{Map, Value};
+
+use artisan_domain::{
+    AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalKind,
+    ApprovalObservation, ApprovalRequest, ApprovalState, ArtisanCode, CompactionObservation,
+    CompactionState, DiagnosticLevel, EngineErrorRef, EngineErrorRefInput, EngineId, FileAction,
+    FileObservation, LimitScope, MessagePhase, NativeActionObservation, Observation,
+    ObservationError, ObservationId, ObservationSequence, PlanEntry, PlanEntryStatus,
+    PlanObservation, ProcessDiagnosticObservation, ProtocolDiagnosticObservation, QuestionInput,
+    QuestionObservation, QuestionOption, QuestionState, ReasoningSummaryCompletedObservation,
+    ReasoningSummaryDeltaObservation, RetryAttemptState, RetryObservation, RunState,
+    RunStateObservation, RunTerminalObservation, RunTerminalState, SearchObservation, SearchScope,
+    SearchState, SubagentInput, SubagentObservation, SubagentState, SubagentTranscriptObservation,
+    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, TerminalChannel,
+    ToolAction, ToolObservation, TranscriptAgentMessageCompleted, TranscriptAgentMessageDelta,
+    TranscriptContent, TranscriptFile, TranscriptReasoningSummaryCompleted,
+    TranscriptReasoningSummaryDelta, TranscriptSearch, TranscriptTerminalActivity, TranscriptTool,
+    TurnState, TurnStateObservation, UsageBasis, UsageInput, UsageObservation,
+};
+
+/// Engine checkpoint version carrying a typed observation batch.
+pub const OBSERVATION_CHECKPOINT_VERSION: i64 = 1;
+
+/// Explicit format tag of every observation checkpoint payload.
+pub const OBSERVATION_FORMAT_TAG: &str = "artisan.observation.v1";
+
+/// Maximum observations in one committed batch.
+///
+/// Mirrors the conversation patch batch ceiling so one commit stays bounded
+/// end to end.
+pub const OBSERVATION_BATCH_MAX_OBSERVATIONS: usize = 64;
+
+/// Typed failures of the observation checkpoint codec and bind agreement.
+///
+/// No variant carries observation text, identities, or provider payloads;
+/// counts and lengths are bounded numbers only.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum ObservationCommitError {
+    /// The batch carried no observations.
+    #[error("observation batch must carry at least one observation")]
+    EmptyBatch,
+    /// The batch exceeded its documented entry ceiling.
+    #[error("observation batch has {count} observations; the maximum is {maximum}")]
+    TooMany {
+        /// Offending observation count.
+        count: usize,
+        /// The documented batch ceiling.
+        maximum: usize,
+    },
+    /// The encoded payload exceeded the engine checkpoint byte ceiling.
+    #[error("observation checkpoint is {length} bytes; the maximum is {maximum}")]
+    TooLarge {
+        /// Offending length in bytes.
+        length: usize,
+        /// The checkpoint byte ceiling.
+        maximum: usize,
+    },
+    /// The binding version did not match the bound run.
+    #[error("observation binding version does not match the bound run")]
+    BindMismatch,
+    /// The engine tag did not match the previously committed batch.
+    #[error("observation engine tag does not match the committed batch")]
+    EngineMismatch,
+    /// The checkpoint version is not the observation version.
+    #[error("observation checkpoint version does not match")]
+    VersionMismatch,
+    /// The checkpoint format tag is not the observation tag.
+    #[error("observation checkpoint format tag does not match")]
+    FormatMismatch,
+    /// Observation sequences were not strictly increasing.
+    #[error("observation sequences are not strictly increasing")]
+    SequenceNotMonotonic,
+    /// An observation tag is not a modeled engine observation.
+    #[error("observation tag is unknown")]
+    UnknownObservation,
+    /// An engine tag is not a modeled engine.
+    #[error("observation engine tag is unknown")]
+    UnknownEngine,
+    /// The checkpoint bytes are not a JSON observation envelope.
+    #[error("observation checkpoint bytes are malformed")]
+    Malformed,
+    /// The checkpoint bytes decode but are not the canonical encoding.
+    #[error("observation checkpoint bytes are not canonical")]
+    NonCanonical,
+    /// The batch could not be encoded.
+    #[error("observation checkpoint could not be encoded")]
+    Encode,
+    /// The encoded payload failed checkpoint validation.
+    #[error("observation checkpoint payload is invalid")]
+    InvalidCheckpoint,
+    /// One observation value violated its domain bounds.
+    #[error(transparent)]
+    InvalidObservation(#[from] ObservationError),
+}
+
+/// One decoded, engine-tagged observation batch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedObservationBatch {
+    engine: EngineId,
+    binding_version: i64,
+    observations: Vec<Observation>,
+}
+
+impl DecodedObservationBatch {
+    /// Returns the engine tag the batch was committed under.
+    #[must_use]
+    pub const fn engine(&self) -> EngineId {
+        self.engine
+    }
+
+    /// Returns the binding version the batch was committed under.
+    #[must_use]
+    pub const fn binding_version(&self) -> i64 {
+        self.binding_version
+    }
+
+    /// Returns the decoded observations in durable sequence order.
+    #[must_use]
+    pub const fn observations(&self) -> &Vec<Observation> {
+        &self.observations
+    }
+
+    /// Returns the greatest durable sequence in the batch, if any.
+    #[must_use]
+    pub fn max_sequence(&self) -> Option<u64> {
+        self.observations
+            .iter()
+            .map(|observation| observation.sequence().get())
+            .max()
+    }
+}
+
+/// Encodes one bounded observation batch to its canonical bytes.
+///
+/// This is the byte-level form of [`encode_observation_checkpoint`]: same
+/// validation and the same canonical layout, without the checkpoint wrapper.
+/// Tests and tooling use it to verify canonical bytes; production commits wrap
+/// it in an [`EngineCheckpoint`] so checkpoint bytes stay redacted.
+///
+/// # Errors
+///
+/// Returns [`ObservationCommitError`] for an empty or oversized batch,
+/// non-positive binding versions, non-monotonic sequences, oversized payloads,
+/// or domain bound violations.
+pub fn encode_observation_bytes(
+    engine: EngineId,
+    binding_version: i64,
+    base_sequence: Option<u64>,
+    observations: &[Observation],
+) -> Result<Vec<u8>, ObservationCommitError> {
+    if binding_version <= 0 {
+        return Err(ObservationCommitError::InvalidObservation(
+            ObservationError::OutOfRange {
+                field: "binding_version",
+            },
+        ));
+    }
+    if observations.is_empty() {
+        return Err(ObservationCommitError::EmptyBatch);
+    }
+    if observations.len() > OBSERVATION_BATCH_MAX_OBSERVATIONS {
+        return Err(ObservationCommitError::TooMany {
+            count: observations.len(),
+            maximum: OBSERVATION_BATCH_MAX_OBSERVATIONS,
+        });
+    }
+    let mut previous = base_sequence;
+    for observation in observations {
+        let sequence = observation.sequence().get();
+        if previous.is_some_and(|bound| sequence <= bound) {
+            return Err(ObservationCommitError::SequenceNotMonotonic);
+        }
+        previous = Some(sequence);
+    }
+    let encoded = encode_bytes(engine, binding_version, observations)?;
+    if encoded.len() > ENGINE_CHECKPOINT_MAX_BYTES {
+        return Err(ObservationCommitError::TooLarge {
+            length: encoded.len(),
+            maximum: ENGINE_CHECKPOINT_MAX_BYTES,
+        });
+    }
+    Ok(encoded)
+}
+
+/// Packs one bounded observation batch into an engine checkpoint.
+///
+/// Sequences must be strictly increasing and strictly greater than
+/// `base_sequence` (the previously committed maximum, [`None`] for the first
+/// batch of a run). Bind agreement is checked separately with
+/// [`validate_observation_bind`]; the checkpoint embeds the engine tag and
+/// binding version so durable history stays attributable.
+///
+/// # Errors
+///
+/// Returns [`ObservationCommitError`] for an empty or oversized batch,
+/// non-positive binding versions, non-monotonic sequences, oversized payloads,
+/// or domain bound violations. No SQL is opened here; commit the returned
+/// checkpoint through [`Repository::commit_run_batch`].
+pub fn encode_observation_checkpoint(
+    engine: EngineId,
+    binding_version: i64,
+    base_sequence: Option<u64>,
+    observations: &[Observation],
+) -> Result<EngineCheckpoint, ObservationCommitError> {
+    let encoded = encode_observation_bytes(engine, binding_version, base_sequence, observations)?;
+    EngineCheckpoint::new(OBSERVATION_CHECKPOINT_VERSION, encoded)
+        .map_err(|_| ObservationCommitError::InvalidCheckpoint)
+}
+
+/// Decodes one persisted observation checkpoint and proves canonicality.
+///
+/// The caller supplies the stored checkpoint version and blob (for example
+/// from the `run_checkpoints` row written by [`Repository::commit_run_batch`])
+/// and receives the engine tag, binding version, and validated observations.
+/// Unknown engines, tags, and provider values reject with typed errors.
+///
+/// # Errors
+///
+/// Returns [`ObservationCommitError`] for version, format, engine, sequence,
+/// bound, shape, and canonicality violations.
+pub fn decode_observation_checkpoint(
+    version: i64,
+    bytes: &[u8],
+) -> Result<DecodedObservationBatch, ObservationCommitError> {
+    if version != OBSERVATION_CHECKPOINT_VERSION {
+        return Err(ObservationCommitError::VersionMismatch);
+    }
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|_| ObservationCommitError::Malformed)?;
+    let envelope = value.as_object().ok_or(ObservationCommitError::Malformed)?;
+    require_keys(
+        envelope,
+        &[
+            "format",
+            "version",
+            "engine",
+            "binding_version",
+            "observations",
+        ],
+    )?;
+    if get_str(envelope, "format")? != OBSERVATION_FORMAT_TAG {
+        return Err(ObservationCommitError::FormatMismatch);
+    }
+    if get_i64(envelope, "version")? != OBSERVATION_CHECKPOINT_VERSION {
+        return Err(ObservationCommitError::VersionMismatch);
+    }
+    let engine = EngineId::parse(get_str(envelope, "engine")?)
+        .map_err(|_| ObservationCommitError::UnknownEngine)?;
+    let binding_version = get_i64(envelope, "binding_version")?;
+    if binding_version <= 0 {
+        return Err(ObservationCommitError::InvalidObservation(
+            ObservationError::OutOfRange {
+                field: "binding_version",
+            },
+        ));
+    }
+    let raw = envelope
+        .get("observations")
+        .and_then(Value::as_array)
+        .ok_or(ObservationCommitError::Malformed)?;
+    if raw.is_empty() {
+        return Err(ObservationCommitError::EmptyBatch);
+    }
+    if raw.len() > OBSERVATION_BATCH_MAX_OBSERVATIONS {
+        return Err(ObservationCommitError::TooMany {
+            count: raw.len(),
+            maximum: OBSERVATION_BATCH_MAX_OBSERVATIONS,
+        });
+    }
+    let mut observations = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let object = entry.as_object().ok_or(ObservationCommitError::Malformed)?;
+        observations.push(decode_observation(object)?);
+    }
+    let canonical = encode_bytes(engine, binding_version, &observations)?;
+    if canonical.as_slice() != bytes {
+        return Err(ObservationCommitError::NonCanonical);
+    }
+    Ok(DecodedObservationBatch {
+        engine,
+        binding_version,
+        observations,
+    })
+}
+
+/// Requires an observation batch to agree with its run bind.
+///
+/// The binding version must equal the bound receipt's version: observations
+/// commit only under the bind they were produced for, never across a rebind.
+///
+/// # Errors
+///
+/// Returns [`ObservationCommitError::BindMismatch`] on any version divergence.
+pub fn validate_observation_bind(
+    binding_version: i64,
+    bound: &BoundRunReceipt,
+) -> Result<(), ObservationCommitError> {
+    if binding_version != bound.binding_version {
+        return Err(ObservationCommitError::BindMismatch);
+    }
+    Ok(())
+}
+
+/// Requires a decoded batch to continue the committed engine history.
+///
+/// The engine tag of a newly decoded batch must equal the expected engine so
+/// a run's durable observation history never mixes engine vocabularies.
+///
+/// # Errors
+///
+/// Returns [`ObservationCommitError::EngineMismatch`] on any tag divergence.
+pub fn validate_observation_engine(
+    engine: EngineId,
+    batch: &DecodedObservationBatch,
+) -> Result<(), ObservationCommitError> {
+    if batch.engine != engine {
+        return Err(ObservationCommitError::EngineMismatch);
+    }
+    Ok(())
+}
+
+fn encode_bytes(
+    engine: EngineId,
+    binding_version: i64,
+    observations: &[Observation],
+) -> Result<Vec<u8>, ObservationCommitError> {
+    let mut stored = Vec::with_capacity(observations.len());
+    for observation in observations {
+        stored.push(stored_observation(observation));
+    }
+    let batch = StoredBatch {
+        format: OBSERVATION_FORMAT_TAG,
+        version: OBSERVATION_CHECKPOINT_VERSION,
+        engine: engine.as_str(),
+        binding_version,
+        observations: stored,
+    };
+    serde_json::to_vec(&batch).map_err(|_| ObservationCommitError::Encode)
+}
+
+// ---------------------------------------------------------------------------
+// Canonical encoding structs (field order is the persisted contract)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct StoredBatch<'a> {
+    format: &'static str,
+    version: i64,
+    engine: &'static str,
+    binding_version: i64,
+    observations: Vec<StoredObservation<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum StoredObservation<'a> {
+    AgentMessageDelta(StoredAgentMessageDelta<'a>),
+    AgentMessageCompleted(StoredAgentMessageCompleted<'a>),
+    Approval(StoredApproval<'a>),
+    Compaction(StoredCompaction<'a>),
+    File(StoredFile<'a>),
+    NativeAction(StoredNativeAction<'a>),
+    Plan(StoredPlan<'a>),
+    ProcessDiagnostic(StoredProcessDiagnostic<'a>),
+    ProtocolDiagnostic(StoredProtocolDiagnostic<'a>),
+    Question(StoredQuestion<'a>),
+    ReasoningSummaryCompleted(StoredReasoningSummaryCompleted<'a>),
+    ReasoningSummaryDelta(StoredReasoningSummaryDelta<'a>),
+    Retry(StoredRetry<'a>),
+    RunState(StoredRunState<'a>),
+    RunTerminal(StoredRunTerminal<'a>),
+    Search(StoredSearch<'a>),
+    Subagent(StoredSubagent<'a>),
+    SubagentTranscript(StoredSubagentTranscript<'a>),
+    TerminalActivity(StoredTerminalActivity<'a>),
+    Tool(StoredTool<'a>),
+    TurnState(StoredTurnState<'a>),
+    Usage(StoredUsage<'a>),
+}
+
+#[derive(Serialize)]
+struct StoredAgentMessageDelta<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    item_id: &'a str,
+    phase: &'static str,
+    delta: &'a str,
+    turn_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredAgentMessageCompleted<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    item_id: &'a str,
+    phase: &'static str,
+    message: &'a str,
+    turn_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredReasoningSummaryDelta<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    item_id: &'a str,
+    summary_index: u64,
+    delta: &'a str,
+    thinking_tokens: Option<u64>,
+    turn_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredReasoningSummaryCompleted<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    item_id: &'a str,
+    text: Option<&'a str>,
+    turn_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredTool<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    tool_id: &'a str,
+    tool_name: &'a str,
+    action: &'static str,
+    detail: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredFile<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    path: &'a str,
+    action: &'static str,
+    lines_added: Option<u64>,
+    lines_deleted: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct StoredSearch<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    query: &'a str,
+    scope: Option<&'static str>,
+    search_id: Option<&'a str>,
+    state: &'static str,
+    result_count: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct StoredTerminalActivity<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    activity_id: &'a str,
+    channel: Option<&'static str>,
+    command: Option<&'a str>,
+    shell: Option<&'a str>,
+    output: Option<&'a str>,
+    exit_code: Option<i32>,
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+struct StoredApprovalRequest<'a> {
+    kind: &'static str,
+    command: Option<&'a str>,
+    cwd: Option<&'a str>,
+    reason: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredApproval<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    approval_id: &'a str,
+    state: &'static str,
+    description: &'a str,
+    request: StoredApprovalRequest<'a>,
+    approved: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct StoredQuestionOption<'a> {
+    label: &'a str,
+    description: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredQuestion<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    question_id: &'a str,
+    state: &'static str,
+    text: &'a str,
+    header: Option<&'a str>,
+    multi_select: bool,
+    options: Option<Vec<StoredQuestionOption<'a>>>,
+    answers: Option<&'a Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct StoredPlanEntry<'a> {
+    id: &'a str,
+    status: &'static str,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredPlan<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    entries: Vec<StoredPlanEntry<'a>>,
+    turn_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredCompaction<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    state: &'static str,
+    compaction_id: Option<&'a str>,
+    duration_ms: Option<u64>,
+    summary: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredRetry<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    turn_id: &'a str,
+    attempt_state: &'static str,
+    will_retry: bool,
+    message: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredRunState<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+struct StoredTurnState<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    turn_id: &'a str,
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+struct StoredSubagent<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    agent_native_thread_id: &'a str,
+    parent_native_thread_id: &'a str,
+    state: &'static str,
+    activity: Option<&'a str>,
+    agent_path: Option<&'a str>,
+    turn_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum StoredTranscriptContent<'a> {
+    AgentMessageDelta(StoredTranscriptAgentMessageDelta<'a>),
+    AgentMessageCompleted(StoredTranscriptAgentMessageCompleted<'a>),
+    ReasoningSummaryDelta(StoredTranscriptReasoningSummaryDelta<'a>),
+    ReasoningSummaryCompleted(StoredTranscriptReasoningSummaryCompleted<'a>),
+    TerminalActivity(StoredTranscriptTerminalActivity<'a>),
+    Tool(StoredTranscriptTool<'a>),
+    File(StoredTranscriptFile<'a>),
+    Search(StoredTranscriptSearch<'a>),
+}
+
+#[derive(Serialize)]
+struct StoredTranscriptAgentMessageDelta<'a> {
+    tag: &'static str,
+    item_id: &'a str,
+    phase: &'static str,
+    delta: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredTranscriptAgentMessageCompleted<'a> {
+    tag: &'static str,
+    item_id: &'a str,
+    phase: &'static str,
+    message: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredTranscriptReasoningSummaryDelta<'a> {
+    tag: &'static str,
+    item_id: &'a str,
+    summary_index: u64,
+    delta: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredTranscriptReasoningSummaryCompleted<'a> {
+    tag: &'static str,
+    item_id: &'a str,
+    text: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredTranscriptTerminalActivity<'a> {
+    tag: &'static str,
+    activity_id: &'a str,
+    channel: Option<&'static str>,
+    command: Option<&'a str>,
+    exit_code: Option<i32>,
+    output: Option<&'a str>,
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+struct StoredTranscriptTool<'a> {
+    tag: &'static str,
+    tool_id: &'a str,
+    tool_name: &'a str,
+    action: &'static str,
+    detail: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredTranscriptFile<'a> {
+    tag: &'static str,
+    path: &'a str,
+    action: &'static str,
+    lines_added: Option<u64>,
+    lines_deleted: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct StoredTranscriptSearch<'a> {
+    tag: &'static str,
+    query: &'a str,
+    result_count: Option<u64>,
+    scope: Option<&'static str>,
+    search_id: Option<&'a str>,
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+struct StoredSubagentTranscript<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    agent_native_thread_id: &'a str,
+    parent_native_thread_id: &'a str,
+    content: StoredTranscriptContent<'a>,
+}
+
+#[derive(Serialize)]
+struct StoredUsage<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    basis: &'static str,
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    context_tokens: Option<u64>,
+    context_window_tokens: Option<u64>,
+    cost_usd: Option<f64>,
+    provider_route_id: Option<&'a str>,
+    turn_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredErrorRef<'a> {
+    artisan_code: &'a str,
+    provider_code: Option<&'a str>,
+    detail: Option<&'a str>,
+    affected_model_id: Option<&'a str>,
+    limit_id: Option<&'a str>,
+    limit_label: Option<&'a str>,
+    limit_scope: Option<&'static str>,
+    resets_at: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredNativeAction<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    action: &'a str,
+    detail: Option<&'a str>,
+    diagnostic: bool,
+    error_ref: Option<StoredErrorRef<'a>>,
+}
+
+#[derive(Serialize)]
+struct StoredProcessDiagnostic<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    level: &'static str,
+    message: &'a str,
+    error_ref: Option<StoredErrorRef<'a>>,
+}
+
+#[derive(Serialize)]
+struct StoredProtocolDiagnostic<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    level: &'static str,
+    message: &'a str,
+}
+
+#[derive(Serialize)]
+struct StoredRunTerminal<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    state: &'static str,
+    error_ref: Option<StoredErrorRef<'a>>,
+    summary_title: Option<&'a str>,
+}
+
+fn stored_error_ref(value: &EngineErrorRef) -> StoredErrorRef<'_> {
+    StoredErrorRef {
+        artisan_code: value.artisan_code().as_str(),
+        provider_code: value.provider_code(),
+        detail: value.detail(),
+        affected_model_id: value.affected_model_id(),
+        limit_id: value.limit_id(),
+        limit_label: value.limit_label(),
+        limit_scope: value.limit_scope().map(LimitScope::as_str),
+        resets_at: value.resets_at(),
+    }
+}
+
+fn stored_transcript_content(value: &TranscriptContent) -> StoredTranscriptContent<'_> {
+    match value {
+        TranscriptContent::AgentMessageDelta(content) => {
+            StoredTranscriptContent::AgentMessageDelta(StoredTranscriptAgentMessageDelta {
+                tag: value.tag(),
+                item_id: content.item_id().as_str(),
+                phase: content.phase().as_str(),
+                delta: content.delta(),
+            })
+        }
+        TranscriptContent::AgentMessageCompleted(content) => {
+            StoredTranscriptContent::AgentMessageCompleted(StoredTranscriptAgentMessageCompleted {
+                tag: value.tag(),
+                item_id: content.item_id().as_str(),
+                phase: content.phase().as_str(),
+                message: content.message(),
+            })
+        }
+        TranscriptContent::ReasoningSummaryDelta(content) => {
+            StoredTranscriptContent::ReasoningSummaryDelta(StoredTranscriptReasoningSummaryDelta {
+                tag: value.tag(),
+                item_id: content.item_id().as_str(),
+                summary_index: content.summary_index(),
+                delta: content.delta(),
+            })
+        }
+        TranscriptContent::ReasoningSummaryCompleted(content) => {
+            StoredTranscriptContent::ReasoningSummaryCompleted(
+                StoredTranscriptReasoningSummaryCompleted {
+                    tag: value.tag(),
+                    item_id: content.item_id().as_str(),
+                    text: content.text(),
+                },
+            )
+        }
+        TranscriptContent::TerminalActivity(content) => {
+            StoredTranscriptContent::TerminalActivity(StoredTranscriptTerminalActivity {
+                tag: value.tag(),
+                activity_id: content.activity_id().as_str(),
+                channel: content.channel().map(TerminalChannel::as_str),
+                command: content.command(),
+                exit_code: content.exit_code(),
+                output: content.output(),
+                state: content.state().as_str(),
+            })
+        }
+        TranscriptContent::Tool(content) => StoredTranscriptContent::Tool(StoredTranscriptTool {
+            tag: value.tag(),
+            tool_id: content.tool_id().as_str(),
+            tool_name: content.tool_name(),
+            action: content.action().as_str(),
+            detail: content.detail(),
+        }),
+        TranscriptContent::File(content) => StoredTranscriptContent::File(StoredTranscriptFile {
+            tag: value.tag(),
+            path: content.path(),
+            action: content.action().as_str(),
+            lines_added: content.lines_added(),
+            lines_deleted: content.lines_deleted(),
+        }),
+        TranscriptContent::Search(content) => {
+            StoredTranscriptContent::Search(StoredTranscriptSearch {
+                tag: value.tag(),
+                query: content.query(),
+                result_count: content.result_count(),
+                scope: content.scope().map(SearchScope::as_str),
+                search_id: content.search_id().map(ObservationId::as_str),
+                state: content.state().as_str(),
+            })
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn stored_observation(observation: &Observation) -> StoredObservation<'_> {
+    match observation {
+        Observation::AgentMessageDelta(value) => {
+            StoredObservation::AgentMessageDelta(StoredAgentMessageDelta {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                item_id: value.item_id().as_str(),
+                phase: value.phase().as_str(),
+                delta: value.delta(),
+                turn_id: value.turn_id().as_str(),
+            })
+        }
+        Observation::AgentMessageCompleted(value) => {
+            StoredObservation::AgentMessageCompleted(StoredAgentMessageCompleted {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                item_id: value.item_id().as_str(),
+                phase: value.phase().as_str(),
+                message: value.message(),
+                turn_id: value.turn_id().as_str(),
+            })
+        }
+        Observation::Approval(value) => StoredObservation::Approval(StoredApproval {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            approval_id: value.approval_id().as_str(),
+            state: value.state().as_str(),
+            description: value.description(),
+            request: StoredApprovalRequest {
+                kind: value.request().kind().as_str(),
+                command: value.request().command_text(),
+                cwd: value.request().cwd(),
+                reason: value.request().reason(),
+            },
+            approved: value.approved(),
+        }),
+        Observation::Compaction(value) => StoredObservation::Compaction(StoredCompaction {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            state: value.state().as_str(),
+            compaction_id: value.compaction_id().map(ObservationId::as_str),
+            duration_ms: value.duration_ms(),
+            summary: value.summary(),
+        }),
+        Observation::File(value) => StoredObservation::File(StoredFile {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            path: value.path(),
+            action: value.action().as_str(),
+            lines_added: value.lines_added(),
+            lines_deleted: value.lines_deleted(),
+        }),
+        Observation::NativeAction(value) => StoredObservation::NativeAction(StoredNativeAction {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            action: value.action(),
+            detail: value.detail(),
+            diagnostic: value.diagnostic(),
+            error_ref: value.error_ref().map(stored_error_ref),
+        }),
+        Observation::Plan(value) => {
+            let mut entries = Vec::with_capacity(value.entries().len());
+            for entry in value.entries() {
+                entries.push(StoredPlanEntry {
+                    id: entry.id().as_str(),
+                    status: entry.status().as_str(),
+                    text: entry.text(),
+                });
+            }
+            StoredObservation::Plan(StoredPlan {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                entries,
+                turn_id: value.turn_id().map(ObservationId::as_str),
+            })
+        }
+        Observation::ProcessDiagnostic(value) => {
+            StoredObservation::ProcessDiagnostic(StoredProcessDiagnostic {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                level: value.level().as_str(),
+                message: value.message(),
+                error_ref: value.error_ref().map(stored_error_ref),
+            })
+        }
+        Observation::ProtocolDiagnostic(value) => {
+            StoredObservation::ProtocolDiagnostic(StoredProtocolDiagnostic {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                level: value.level().as_str(),
+                message: value.message(),
+            })
+        }
+        Observation::Question(value) => {
+            let options = value.options().map(|options| {
+                let mut stored = Vec::with_capacity(options.len());
+                for option in options {
+                    stored.push(StoredQuestionOption {
+                        label: option.label(),
+                        description: option.description(),
+                    });
+                }
+                stored
+            });
+            StoredObservation::Question(StoredQuestion {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                question_id: value.question_id().as_str(),
+                state: value.state().as_str(),
+                text: value.text(),
+                header: value.header(),
+                multi_select: value.multi_select(),
+                options,
+                answers: value.answers(),
+            })
+        }
+        Observation::ReasoningSummaryCompleted(value) => {
+            StoredObservation::ReasoningSummaryCompleted(StoredReasoningSummaryCompleted {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                item_id: value.item_id().as_str(),
+                text: value.text(),
+                turn_id: value.turn_id().as_str(),
+            })
+        }
+        Observation::ReasoningSummaryDelta(value) => {
+            StoredObservation::ReasoningSummaryDelta(StoredReasoningSummaryDelta {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                item_id: value.item_id().as_str(),
+                summary_index: value.summary_index(),
+                delta: value.delta(),
+                thinking_tokens: value.thinking_tokens(),
+                turn_id: value.turn_id().as_str(),
+            })
+        }
+        Observation::Retry(value) => StoredObservation::Retry(StoredRetry {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            turn_id: value.turn_id().as_str(),
+            attempt_state: value.attempt_state().as_str(),
+            will_retry: value.will_retry(),
+            message: value.message(),
+        }),
+        Observation::RunState(value) => StoredObservation::RunState(StoredRunState {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            state: value.state().as_str(),
+        }),
+        Observation::RunTerminal(value) => StoredObservation::RunTerminal(StoredRunTerminal {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            state: value.state().as_str(),
+            error_ref: value.error_ref().map(stored_error_ref),
+            summary_title: value.summary_title(),
+        }),
+        Observation::Search(value) => StoredObservation::Search(StoredSearch {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            query: value.query(),
+            scope: value.scope().map(SearchScope::as_str),
+            search_id: value.search_id().map(ObservationId::as_str),
+            state: value.state().as_str(),
+            result_count: value.result_count(),
+        }),
+        Observation::Subagent(value) => StoredObservation::Subagent(StoredSubagent {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            agent_native_thread_id: value.agent_native_thread_id().as_str(),
+            parent_native_thread_id: value.parent_native_thread_id().as_str(),
+            state: value.state().as_str(),
+            activity: value.activity(),
+            agent_path: value.agent_path(),
+            turn_id: value.turn_id().map(ObservationId::as_str),
+        }),
+        Observation::SubagentTranscript(value) => {
+            StoredObservation::SubagentTranscript(StoredSubagentTranscript {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                agent_native_thread_id: value.agent_native_thread_id().as_str(),
+                parent_native_thread_id: value.parent_native_thread_id().as_str(),
+                content: stored_transcript_content(value.content()),
+            })
+        }
+        Observation::TerminalActivity(value) => {
+            StoredObservation::TerminalActivity(StoredTerminalActivity {
+                tag: observation.tag(),
+                id: value.id().as_str(),
+                sequence: value.sequence().get(),
+                activity_id: value.activity_id().as_str(),
+                channel: value.channel().map(TerminalChannel::as_str),
+                command: value.command(),
+                shell: value.shell(),
+                output: value.output(),
+                exit_code: value.exit_code(),
+                state: value.state().as_str(),
+            })
+        }
+        Observation::Tool(value) => StoredObservation::Tool(StoredTool {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            tool_id: value.tool_id().as_str(),
+            tool_name: value.tool_name(),
+            action: value.action().as_str(),
+            detail: value.detail(),
+        }),
+        Observation::TurnState(value) => StoredObservation::TurnState(StoredTurnState {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            turn_id: value.turn_id().as_str(),
+            state: value.state().as_str(),
+        }),
+        Observation::Usage(value) => StoredObservation::Usage(StoredUsage {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            basis: value.basis().as_str(),
+            input_tokens: value.input_tokens(),
+            cached_input_tokens: value.cached_input_tokens(),
+            output_tokens: value.output_tokens(),
+            context_tokens: value.context_tokens(),
+            context_window_tokens: value.context_window_tokens(),
+            cost_usd: value.cost_usd(),
+            provider_route_id: value.provider_route_id().map(ObservationId::as_str),
+            turn_id: value.turn_id().map(ObservationId::as_str),
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strict decoding (exact key sets per tag, typed provider values)
+// ---------------------------------------------------------------------------
+
+fn require_keys(
+    object: &Map<String, Value>,
+    expected: &[&str],
+) -> Result<(), ObservationCommitError> {
+    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+        return Err(ObservationCommitError::Malformed);
+    }
+    Ok(())
+}
+
+fn get_str<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, ObservationCommitError> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or(ObservationCommitError::Malformed)
+}
+
+fn get_opt_str<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a str>, ObservationCommitError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .ok_or(ObservationCommitError::Malformed)
+            .map(Some),
+    }
+}
+
+fn get_bool(object: &Map<String, Value>, key: &str) -> Result<bool, ObservationCommitError> {
+    object
+        .get(key)
+        .and_then(Value::as_bool)
+        .ok_or(ObservationCommitError::Malformed)
+}
+
+fn get_i64(object: &Map<String, Value>, key: &str) -> Result<i64, ObservationCommitError> {
+    object
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or(ObservationCommitError::Malformed)
+}
+
+fn get_u64(object: &Map<String, Value>, key: &str) -> Result<u64, ObservationCommitError> {
+    object
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or(ObservationCommitError::Malformed)
+}
+
+fn get_opt_u64(
+    object: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<u64>, ObservationCommitError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .ok_or(ObservationCommitError::Malformed)
+            .map(Some),
+    }
+}
+
+fn get_opt_i32(
+    object: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<i32>, ObservationCommitError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let raw = value.as_i64().ok_or(ObservationCommitError::Malformed)?;
+            i32::try_from(raw)
+                .map(Some)
+                .map_err(|_| ObservationCommitError::Malformed)
+        }
+    }
+}
+
+fn get_opt_f64(
+    object: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<f64>, ObservationCommitError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .ok_or(ObservationCommitError::Malformed)
+            .map(Some),
+    }
+}
+
+fn get_opt_object<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a Map<String, Value>>, ObservationCommitError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_object()
+            .ok_or(ObservationCommitError::Malformed)
+            .map(Some),
+    }
+}
+
+fn get_opt_string_array(
+    object: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<Vec<String>>, ObservationCommitError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let raw = value.as_array().ok_or(ObservationCommitError::Malformed)?;
+            let mut out = Vec::with_capacity(raw.len());
+            for entry in raw {
+                out.push(
+                    entry
+                        .as_str()
+                        .ok_or(ObservationCommitError::Malformed)?
+                        .to_owned(),
+                );
+            }
+            Ok(Some(out))
+        }
+    }
+}
+
+fn get_opt_id(
+    object: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<ObservationId>, ObservationCommitError> {
+    match get_opt_str(object, key)? {
+        None => Ok(None),
+        Some(text) => ObservationId::parse(text.to_owned())
+            .map(Some)
+            .map_err(ObservationError::Identifier)
+            .map_err(ObservationCommitError::InvalidObservation),
+    }
+}
+
+fn header(
+    object: &Map<String, Value>,
+) -> Result<(ObservationId, ObservationSequence), ObservationCommitError> {
+    let id = ObservationId::parse(get_str(object, "id")?.to_owned())
+        .map_err(ObservationError::Identifier)?;
+    let sequence = ObservationSequence::new(get_u64(object, "sequence")?)?;
+    Ok((id, sequence))
+}
+
+fn decode_error_ref(object: &Map<String, Value>) -> Result<EngineErrorRef, ObservationCommitError> {
+    require_keys(
+        object,
+        &[
+            "artisan_code",
+            "provider_code",
+            "detail",
+            "affected_model_id",
+            "limit_id",
+            "limit_label",
+            "limit_scope",
+            "resets_at",
+        ],
+    )?;
+    let artisan_code = ArtisanCode::parse(get_str(object, "artisan_code")?.to_owned())?;
+    let limit_scope = match get_opt_str(object, "limit_scope")? {
+        None => None,
+        Some(scope) => Some(LimitScope::parse(scope)?),
+    };
+    EngineErrorRef::new(EngineErrorRefInput {
+        artisan_code,
+        provider_code: get_opt_str(object, "provider_code")?.map(str::to_owned),
+        detail: get_opt_str(object, "detail")?.map(str::to_owned),
+        affected_model_id: get_opt_str(object, "affected_model_id")?.map(str::to_owned),
+        limit_id: get_opt_str(object, "limit_id")?.map(str::to_owned),
+        limit_label: get_opt_str(object, "limit_label")?.map(str::to_owned),
+        limit_scope,
+        resets_at: get_opt_str(object, "resets_at")?.map(str::to_owned),
+    })
+    .map_err(ObservationCommitError::InvalidObservation)
+}
+
+fn decode_opt_error_ref(
+    object: &Map<String, Value>,
+) -> Result<Option<EngineErrorRef>, ObservationCommitError> {
+    match get_opt_object(object, "error_ref")? {
+        None => Ok(None),
+        Some(nested) => decode_error_ref(nested).map(Some),
+    }
+}
+
+fn decode_approval_request(
+    object: &Map<String, Value>,
+) -> Result<ApprovalRequest, ObservationCommitError> {
+    require_keys(object, &["kind", "command", "cwd", "reason"])?;
+    let kind = ApprovalKind::parse(get_str(object, "kind")?)?;
+    match kind {
+        ApprovalKind::Command => ApprovalRequest::command(
+            get_str(object, "command")?.to_owned(),
+            get_opt_str(object, "cwd")?.map(str::to_owned),
+            get_opt_str(object, "reason")?.map(str::to_owned),
+        ),
+        ApprovalKind::FileChange => {
+            if get_opt_str(object, "command")?.is_some() || get_opt_str(object, "cwd")?.is_some() {
+                return Err(ObservationCommitError::Malformed);
+            }
+            ApprovalRequest::file_change(get_opt_str(object, "reason")?.map(str::to_owned))
+        }
+        ApprovalKind::Action => {
+            if get_opt_str(object, "command")?.is_some() || get_opt_str(object, "cwd")?.is_some() {
+                return Err(ObservationCommitError::Malformed);
+            }
+            ApprovalRequest::action(get_opt_str(object, "reason")?.map(str::to_owned))
+        }
+    }
+    .map_err(ObservationCommitError::InvalidObservation)
+}
+
+fn decode_question_options(
+    object: &Map<String, Value>,
+) -> Result<Option<Vec<QuestionOption>>, ObservationCommitError> {
+    match object.get("options") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let raw = value.as_array().ok_or(ObservationCommitError::Malformed)?;
+            let mut options = Vec::with_capacity(raw.len());
+            for entry in raw {
+                let option = entry.as_object().ok_or(ObservationCommitError::Malformed)?;
+                require_keys(option, &["label", "description"])?;
+                options.push(
+                    QuestionOption::new(
+                        get_str(option, "label")?.to_owned(),
+                        get_opt_str(option, "description")?.map(str::to_owned),
+                    )
+                    .map_err(ObservationCommitError::InvalidObservation)?,
+                );
+            }
+            Ok(Some(options))
+        }
+    }
+}
+
+fn decode_plan_entries(
+    object: &Map<String, Value>,
+) -> Result<Vec<PlanEntry>, ObservationCommitError> {
+    let raw = object
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or(ObservationCommitError::Malformed)?;
+    let mut entries = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let item = entry.as_object().ok_or(ObservationCommitError::Malformed)?;
+        require_keys(item, &["id", "status", "text"])?;
+        entries.push(
+            PlanEntry::new(
+                ObservationId::parse(get_str(item, "id")?.to_owned())
+                    .map_err(ObservationError::Identifier)
+                    .map_err(ObservationCommitError::InvalidObservation)?,
+                PlanEntryStatus::parse(get_str(item, "status")?)
+                    .map_err(ObservationCommitError::InvalidObservation)?,
+                get_str(item, "text")?.to_owned(),
+            )
+            .map_err(ObservationCommitError::InvalidObservation)?,
+        );
+    }
+    Ok(entries)
+}
+
+fn decode_transcript_content(
+    object: &Map<String, Value>,
+) -> Result<TranscriptContent, ObservationCommitError> {
+    let tag = get_str(object, "tag")?;
+    match tag {
+        "agent_message_delta" => {
+            require_keys(object, &["tag", "item_id", "phase", "delta"])?;
+            TranscriptAgentMessageDelta::new(
+                ObservationId::parse(get_str(object, "item_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                MessagePhase::parse(get_str(object, "phase")?)?,
+                get_str(object, "delta")?.to_owned(),
+            )
+            .map(TranscriptContent::AgentMessageDelta)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "agent_message_completed" => {
+            require_keys(object, &["tag", "item_id", "phase", "message"])?;
+            TranscriptAgentMessageCompleted::new(
+                ObservationId::parse(get_str(object, "item_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                MessagePhase::parse(get_str(object, "phase")?)?,
+                get_str(object, "message")?.to_owned(),
+            )
+            .map(TranscriptContent::AgentMessageCompleted)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "reasoning_summary_delta" => {
+            require_keys(object, &["tag", "item_id", "summary_index", "delta"])?;
+            TranscriptReasoningSummaryDelta::new(
+                ObservationId::parse(get_str(object, "item_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                get_u64(object, "summary_index")?,
+                get_str(object, "delta")?.to_owned(),
+            )
+            .map(TranscriptContent::ReasoningSummaryDelta)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "reasoning_summary_completed" => {
+            require_keys(object, &["tag", "item_id", "text"])?;
+            TranscriptReasoningSummaryCompleted::new(
+                ObservationId::parse(get_str(object, "item_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                get_opt_str(object, "text")?.map(str::to_owned),
+            )
+            .map(TranscriptContent::ReasoningSummaryCompleted)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "terminal_activity" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "activity_id",
+                    "channel",
+                    "command",
+                    "exit_code",
+                    "output",
+                    "state",
+                ],
+            )?;
+            let channel = match get_opt_str(object, "channel")? {
+                None => None,
+                Some(channel) => Some(TerminalChannel::parse(channel)?),
+            };
+            TranscriptTerminalActivity::new(
+                ObservationId::parse(get_str(object, "activity_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                channel,
+                get_opt_str(object, "command")?.map(str::to_owned),
+                get_opt_i32(object, "exit_code")?,
+                get_opt_str(object, "output")?.map(str::to_owned),
+                TerminalActivityState::parse(get_str(object, "state")?)?,
+            )
+            .map(TranscriptContent::TerminalActivity)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "tool" => {
+            require_keys(object, &["tag", "tool_id", "tool_name", "action", "detail"])?;
+            TranscriptTool::new(
+                ObservationId::parse(get_str(object, "tool_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                get_str(object, "tool_name")?.to_owned(),
+                ToolAction::parse(get_str(object, "action")?)?,
+                get_opt_str(object, "detail")?.map(str::to_owned),
+            )
+            .map(TranscriptContent::Tool)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "file" => {
+            require_keys(
+                object,
+                &["tag", "path", "action", "lines_added", "lines_deleted"],
+            )?;
+            TranscriptFile::new(
+                get_str(object, "path")?.to_owned(),
+                FileAction::parse(get_str(object, "action")?)?,
+                get_opt_u64(object, "lines_added")?,
+                get_opt_u64(object, "lines_deleted")?,
+            )
+            .map(TranscriptContent::File)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "search" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "query",
+                    "result_count",
+                    "scope",
+                    "search_id",
+                    "state",
+                ],
+            )?;
+            let scope = match get_opt_str(object, "scope")? {
+                None => None,
+                Some(scope) => Some(SearchScope::parse(scope)?),
+            };
+            TranscriptSearch::new(
+                get_str(object, "query")?.to_owned(),
+                get_opt_u64(object, "result_count")?,
+                scope,
+                get_opt_id(object, "search_id")?,
+                SearchState::parse(get_str(object, "state")?)?,
+            )
+            .map(TranscriptContent::Search)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        _ => Err(ObservationCommitError::UnknownObservation),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn decode_observation(object: &Map<String, Value>) -> Result<Observation, ObservationCommitError> {
+    let tag = get_str(object, "tag")?;
+    match tag {
+        "agent_message_delta" => {
+            require_keys(
+                object,
+                &[
+                    "tag", "id", "sequence", "item_id", "phase", "delta", "turn_id",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            AgentMessageDeltaObservation::new(
+                id,
+                sequence,
+                ObservationId::parse(get_str(object, "item_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                MessagePhase::parse(get_str(object, "phase")?)?,
+                get_str(object, "delta")?.to_owned(),
+                ObservationId::parse(get_str(object, "turn_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+            )
+            .map(Observation::AgentMessageDelta)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "agent_message_completed" => {
+            require_keys(
+                object,
+                &[
+                    "tag", "id", "sequence", "item_id", "phase", "message", "turn_id",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            AgentMessageCompletedObservation::new(
+                id,
+                sequence,
+                ObservationId::parse(get_str(object, "item_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                MessagePhase::parse(get_str(object, "phase")?)?,
+                get_str(object, "message")?.to_owned(),
+                ObservationId::parse(get_str(object, "turn_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+            )
+            .map(Observation::AgentMessageCompleted)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "approval" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "approval_id",
+                    "state",
+                    "description",
+                    "request",
+                    "approved",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            let approval_id = ObservationId::parse(get_str(object, "approval_id")?.to_owned())
+                .map_err(ObservationError::Identifier)?;
+            let state = ApprovalState::parse(get_str(object, "state")?)?;
+            let description = get_str(object, "description")?.to_owned();
+            let request_object = object
+                .get("request")
+                .and_then(Value::as_object)
+                .ok_or(ObservationCommitError::Malformed)?;
+            let request = decode_approval_request(request_object)?;
+            let approved = match object.get("approved") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(value.as_bool().ok_or(ObservationCommitError::Malformed)?),
+            };
+            match (state, approved) {
+                (ApprovalState::Requested, None) => {
+                    ApprovalObservation::requested(id, sequence, approval_id, description, request)
+                }
+                (ApprovalState::Resolved, Some(decision)) => ApprovalObservation::resolved(
+                    id,
+                    sequence,
+                    approval_id,
+                    description,
+                    request,
+                    decision,
+                ),
+                (ApprovalState::Requested, Some(_)) => {
+                    Err(ObservationError::UnexpectedField { field: "approved" })
+                }
+                (ApprovalState::Resolved, None) => {
+                    Err(ObservationError::MissingField { field: "approved" })
+                }
+            }
+            .map(Observation::Approval)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "compaction" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "state",
+                    "compaction_id",
+                    "duration_ms",
+                    "summary",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            CompactionObservation::new(
+                id,
+                sequence,
+                CompactionState::parse(get_str(object, "state")?)?,
+                get_opt_id(object, "compaction_id")?,
+                get_opt_u64(object, "duration_ms")?,
+                get_opt_str(object, "summary")?.map(str::to_owned),
+            )
+            .map(Observation::Compaction)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "file" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "path",
+                    "action",
+                    "lines_added",
+                    "lines_deleted",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            FileObservation::new(
+                id,
+                sequence,
+                get_str(object, "path")?.to_owned(),
+                FileAction::parse(get_str(object, "action")?)?,
+                get_opt_u64(object, "lines_added")?,
+                get_opt_u64(object, "lines_deleted")?,
+            )
+            .map(Observation::File)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "native_action" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "action",
+                    "detail",
+                    "diagnostic",
+                    "error_ref",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            NativeActionObservation::new(
+                id,
+                sequence,
+                get_str(object, "action")?.to_owned(),
+                get_opt_str(object, "detail")?.map(str::to_owned),
+                get_bool(object, "diagnostic")?,
+                decode_opt_error_ref(object)?,
+            )
+            .map(Observation::NativeAction)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "plan" => {
+            require_keys(object, &["tag", "id", "sequence", "entries", "turn_id"])?;
+            let (id, sequence) = header(object)?;
+            PlanObservation::new(
+                id,
+                sequence,
+                decode_plan_entries(object)?,
+                get_opt_id(object, "turn_id")?,
+            )
+            .map(Observation::Plan)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "process_diagnostic" => {
+            require_keys(
+                object,
+                &["tag", "id", "sequence", "level", "message", "error_ref"],
+            )?;
+            let (id, sequence) = header(object)?;
+            ProcessDiagnosticObservation::new(
+                id,
+                sequence,
+                DiagnosticLevel::parse(get_str(object, "level")?)?,
+                get_str(object, "message")?.to_owned(),
+                decode_opt_error_ref(object)?,
+            )
+            .map(Observation::ProcessDiagnostic)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "protocol_diagnostic" => {
+            require_keys(object, &["tag", "id", "sequence", "level", "message"])?;
+            let (id, sequence) = header(object)?;
+            ProtocolDiagnosticObservation::new(
+                id,
+                sequence,
+                DiagnosticLevel::parse(get_str(object, "level")?)?,
+                get_str(object, "message")?.to_owned(),
+            )
+            .map(Observation::ProtocolDiagnostic)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "question" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "question_id",
+                    "state",
+                    "text",
+                    "header",
+                    "multi_select",
+                    "options",
+                    "answers",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            let input = QuestionInput {
+                question_id: ObservationId::parse(get_str(object, "question_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                text: get_str(object, "text")?.to_owned(),
+                header: get_opt_str(object, "header")?.map(str::to_owned),
+                multi_select: get_bool(object, "multi_select")?,
+                options: decode_question_options(object)?,
+            };
+            let state = QuestionState::parse(get_str(object, "state")?)?;
+            let answers = get_opt_string_array(object, "answers")?;
+            match (state, answers) {
+                (QuestionState::Requested, None) => {
+                    QuestionObservation::requested(id, sequence, input)
+                }
+                (QuestionState::Resolved, Some(resolved)) => {
+                    QuestionObservation::resolved(id, sequence, input, resolved)
+                }
+                (QuestionState::Requested, Some(_)) => {
+                    Err(ObservationError::UnexpectedField { field: "answers" })
+                }
+                (QuestionState::Resolved, None) => {
+                    Err(ObservationError::MissingField { field: "answers" })
+                }
+            }
+            .map(Observation::Question)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "reasoning_summary_completed" => {
+            require_keys(
+                object,
+                &["tag", "id", "sequence", "item_id", "text", "turn_id"],
+            )?;
+            let (id, sequence) = header(object)?;
+            ReasoningSummaryCompletedObservation::new(
+                id,
+                sequence,
+                ObservationId::parse(get_str(object, "item_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                get_opt_str(object, "text")?.map(str::to_owned),
+                ObservationId::parse(get_str(object, "turn_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+            )
+            .map(Observation::ReasoningSummaryCompleted)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "reasoning_summary_delta" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "item_id",
+                    "summary_index",
+                    "delta",
+                    "thinking_tokens",
+                    "turn_id",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            ReasoningSummaryDeltaObservation::new(
+                id,
+                sequence,
+                ObservationId::parse(get_str(object, "item_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                get_u64(object, "summary_index")?,
+                get_str(object, "delta")?.to_owned(),
+                get_opt_u64(object, "thinking_tokens")?,
+                ObservationId::parse(get_str(object, "turn_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+            )
+            .map(Observation::ReasoningSummaryDelta)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "retry" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "turn_id",
+                    "attempt_state",
+                    "will_retry",
+                    "message",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            RetryObservation::new(
+                id,
+                sequence,
+                ObservationId::parse(get_str(object, "turn_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                RetryAttemptState::parse(get_str(object, "attempt_state")?)?,
+                get_bool(object, "will_retry")?,
+                get_str(object, "message")?.to_owned(),
+            )
+            .map(Observation::Retry)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "run_state" => {
+            require_keys(object, &["tag", "id", "sequence", "state"])?;
+            let (id, sequence) = header(object)?;
+            Ok(Observation::RunState(RunStateObservation::new(
+                id,
+                sequence,
+                RunState::parse(get_str(object, "state")?)?,
+            )))
+        }
+        "run_terminal" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "state",
+                    "error_ref",
+                    "summary_title",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            RunTerminalObservation::new(
+                id,
+                sequence,
+                RunTerminalState::parse(get_str(object, "state")?)?,
+                decode_opt_error_ref(object)?,
+                get_opt_str(object, "summary_title")?.map(str::to_owned),
+            )
+            .map(Observation::RunTerminal)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "search" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "query",
+                    "scope",
+                    "search_id",
+                    "state",
+                    "result_count",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            let scope = match get_opt_str(object, "scope")? {
+                None => None,
+                Some(scope) => Some(SearchScope::parse(scope)?),
+            };
+            SearchObservation::new(
+                id,
+                sequence,
+                get_str(object, "query")?.to_owned(),
+                scope,
+                get_opt_id(object, "search_id")?,
+                SearchState::parse(get_str(object, "state")?)?,
+                get_opt_u64(object, "result_count")?,
+            )
+            .map(Observation::Search)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "subagent" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "agent_native_thread_id",
+                    "parent_native_thread_id",
+                    "state",
+                    "activity",
+                    "agent_path",
+                    "turn_id",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            SubagentObservation::new(
+                id,
+                sequence,
+                SubagentInput {
+                    agent_native_thread_id: ObservationId::parse(
+                        get_str(object, "agent_native_thread_id")?.to_owned(),
+                    )
+                    .map_err(ObservationError::Identifier)?,
+                    parent_native_thread_id: ObservationId::parse(
+                        get_str(object, "parent_native_thread_id")?.to_owned(),
+                    )
+                    .map_err(ObservationError::Identifier)?,
+                    state: SubagentState::parse(get_str(object, "state")?)?,
+                    activity: get_opt_str(object, "activity")?.map(str::to_owned),
+                    agent_path: get_opt_str(object, "agent_path")?.map(str::to_owned),
+                    turn_id: get_opt_id(object, "turn_id")?,
+                },
+            )
+            .map(Observation::Subagent)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "subagent_transcript" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "agent_native_thread_id",
+                    "parent_native_thread_id",
+                    "content",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            let content_object = object
+                .get("content")
+                .and_then(Value::as_object)
+                .ok_or(ObservationCommitError::Malformed)?;
+            Ok(Observation::SubagentTranscript(
+                SubagentTranscriptObservation::new(
+                    id,
+                    sequence,
+                    ObservationId::parse(get_str(object, "agent_native_thread_id")?.to_owned())
+                        .map_err(ObservationError::Identifier)?,
+                    ObservationId::parse(get_str(object, "parent_native_thread_id")?.to_owned())
+                        .map_err(ObservationError::Identifier)?,
+                    decode_transcript_content(content_object)?,
+                ),
+            ))
+        }
+        "terminal_activity" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "activity_id",
+                    "channel",
+                    "command",
+                    "shell",
+                    "output",
+                    "exit_code",
+                    "state",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            let channel = match get_opt_str(object, "channel")? {
+                None => None,
+                Some(channel) => Some(TerminalChannel::parse(channel)?),
+            };
+            TerminalActivityObservation::new(
+                id,
+                sequence,
+                TerminalActivityInput {
+                    activity_id: ObservationId::parse(get_str(object, "activity_id")?.to_owned())
+                        .map_err(ObservationError::Identifier)?,
+                    channel,
+                    command: get_opt_str(object, "command")?.map(str::to_owned),
+                    shell: get_opt_str(object, "shell")?.map(str::to_owned),
+                    output: get_opt_str(object, "output")?.map(str::to_owned),
+                    exit_code: get_opt_i32(object, "exit_code")?,
+                    state: TerminalActivityState::parse(get_str(object, "state")?)?,
+                },
+            )
+            .map(Observation::TerminalActivity)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "tool" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "tool_id",
+                    "tool_name",
+                    "action",
+                    "detail",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            ToolObservation::new(
+                id,
+                sequence,
+                ObservationId::parse(get_str(object, "tool_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                get_str(object, "tool_name")?.to_owned(),
+                ToolAction::parse(get_str(object, "action")?)?,
+                get_opt_str(object, "detail")?.map(str::to_owned),
+            )
+            .map(Observation::Tool)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "turn_state" => {
+            require_keys(object, &["tag", "id", "sequence", "turn_id", "state"])?;
+            let (id, sequence) = header(object)?;
+            Ok(Observation::TurnState(TurnStateObservation::new(
+                id,
+                sequence,
+                ObservationId::parse(get_str(object, "turn_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                TurnState::parse(get_str(object, "state")?)?,
+            )))
+        }
+        "usage" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "basis",
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "context_tokens",
+                    "context_window_tokens",
+                    "cost_usd",
+                    "provider_route_id",
+                    "turn_id",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            UsageObservation::new(
+                id,
+                sequence,
+                UsageInput {
+                    basis: UsageBasis::parse(get_str(object, "basis")?)?,
+                    input_tokens: get_opt_u64(object, "input_tokens")?,
+                    cached_input_tokens: get_opt_u64(object, "cached_input_tokens")?,
+                    output_tokens: get_opt_u64(object, "output_tokens")?,
+                    context_tokens: get_opt_u64(object, "context_tokens")?,
+                    context_window_tokens: get_opt_u64(object, "context_window_tokens")?,
+                    cost_usd: get_opt_f64(object, "cost_usd")?,
+                    provider_route_id: get_opt_id(object, "provider_route_id")?,
+                    turn_id: get_opt_id(object, "turn_id")?,
+                },
+            )
+            .map(Observation::Usage)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        _ => Err(ObservationCommitError::UnknownObservation),
+    }
+}

@@ -344,24 +344,57 @@ fn parse_count(field: &'static str, value: &str) -> Result<CountLimit, EngineCon
 
 impl EngineSettingsDraft {
     /// Builds a draft reflecting an authoritative config.
+    ///
+    /// The manual settings surface stays `OpenCode` 2-shaped in this packet.
+    /// Any other engine contributes its shared profile/model identity and
+    /// its canonical policy when it has one. Hermes carries its own
+    /// profile-owned permission mode instead of a canonical policy, so the
+    /// draft shows the restrictive sentinel there until per-engine
+    /// settings UI lands.
     #[must_use]
     pub fn from_config(config: &EngineRunConfig) -> Self {
-        let selection = config.selection().as_opencode2();
+        let selection = config.selection();
         let runtime = config.runtime();
+        let (model_id, route_id, variant_id) = match selection {
+            EngineSelection::OpenCode2(selection) => (
+                selection.model_id().as_str().to_owned(),
+                selection.route_id().as_str().to_owned(),
+                selection
+                    .variant_id()
+                    .map_or_else(String::new, |id| id.as_str().to_owned()),
+            ),
+            other => (
+                other
+                    .model_id()
+                    .map_or_else(String::new, |id| id.as_str().to_owned()),
+                String::new(),
+                String::new(),
+            ),
+        };
         let permission = selection.permission();
         Self {
             profile_id: selection.profile_id().as_str().to_owned(),
-            model_id: selection.model_id().as_str().to_owned(),
-            route_id: selection.route_id().as_str().to_owned(),
-            variant_id: selection
-                .variant_id()
-                .map_or_else(String::new, |id| id.as_str().to_owned()),
-            permission_id: permission.permission_id().as_str().to_owned(),
-            agent_id: permission.agent_id().as_str().to_owned(),
-            approval: permission.approval().as_str().to_owned(),
-            filesystem: permission.filesystem().as_str().to_owned(),
-            network: permission.network().as_str().to_owned(),
-            web_search: permission.web_search().as_str().to_owned(),
+            model_id,
+            route_id,
+            variant_id,
+            permission_id: permission
+                .map_or("hermes-managed", |policy| policy.permission_id().as_str())
+                .to_owned(),
+            agent_id: permission
+                .map_or("hermes-managed-agent", |policy| policy.agent_id().as_str())
+                .to_owned(),
+            approval: permission
+                .map_or("never", |policy| policy.approval().as_str())
+                .to_owned(),
+            filesystem: permission
+                .map_or("none", |policy| policy.filesystem().as_str())
+                .to_owned(),
+            network: permission
+                .map_or("disabled", |policy| policy.network().as_str())
+                .to_owned(),
+            web_search: permission
+                .map_or("disabled", |policy| policy.web_search().as_str())
+                .to_owned(),
             attempt_budget: runtime.attempt_budget().get().to_string(),
             readiness_budget: runtime.readiness_budget().get().to_string(),
             health_budget: runtime.health_budget().get().to_string(),

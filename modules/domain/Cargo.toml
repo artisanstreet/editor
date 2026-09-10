@@ -13,12 +13,21 @@ name = "assistant_message"
 path = "../../tests/domain/assistant_message.rs"
 
 [[test]]
+name = "observations"
+path = "../../tests/domain/observations.rs"
+
+[[test]]
 name = "engine_profile_id"
 path = "../../tests/domain/engine_profile_id.rs"
 
 [[test]]
+[[test]]
 name = "engine_usage"
 path = "../../tests/domain/engine_usage.rs"
+
+[[test]]
+name = "run_interaction"
+path = "../../tests/domain/run_interaction.rs"
 
 [lints]
 workspace = true

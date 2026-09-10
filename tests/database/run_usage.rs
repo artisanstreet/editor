@@ -5,16 +5,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use artisan_database::entities::{self, AssistantRunLifecycle, EntityLifecycle, OrdinalKind};
 use artisan_database::{
-    CreateThreadInput, QueueFirstMessageInput, RecordRunUsage, RecordRunUsageOutcome, Repository,
-    RunUsageRepositoryError, SetThreadEngineConfigInput, SqliteConfig, connect,
+    CreateThreadInput, QueueFirstMessageInput, QueueMessageInput, RecordRunUsage,
+    RecordRunUsageOutcome, Repository, RunUsageRepositoryError, SetThreadEngineConfigInput,
+    SqliteConfig, connect,
 };
 use artisan_domain::{
-    ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigUpdatePrecondition,
-    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
-    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
-    FiniteMillis, MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PermissionId,
-    ProjectId, RequestId, RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId,
-    ThreadTitle, UnixMillis, WebSearchAccess,
+    ApprovalMode, AuthoredText, ByteLimit, CodexSelection, CountLimit, EngineAgentId,
+    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy,
+    EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, MessageBody,
+    MessageId, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId, QueueMessagePayload,
+    RequestId, RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId, ThreadTitle,
+    UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -73,9 +75,9 @@ async fn open_database(path: Option<&Path>) -> (DatabaseConnection, Repository) 
     (database.clone(), Repository::new(database))
 }
 
-fn config() -> EngineRunConfig {
+fn runtime() -> EngineRuntimeControls {
     let one = FiniteMillis::new(1).expect("one millisecond is valid");
-    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+    EngineRuntimeControls::new(EngineRuntimeControlsInput {
         attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
         readiness_budget: one,
         health_budget: one,
@@ -91,7 +93,10 @@ fn config() -> EngineRunConfig {
         max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
         observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
     })
-    .expect("runtime relationships are valid");
+    .expect("runtime relationships are valid")
+}
+
+fn config() -> EngineRunConfig {
     let permission = EnginePermissionPolicy::new(
         PermissionId::parse("permission-usage").expect("permission id is valid"),
         EngineAgentId::parse("agent-usage").expect("agent id is valid"),
@@ -108,7 +113,32 @@ fn config() -> EngineRunConfig {
             None,
             permission,
         )),
-        runtime,
+        runtime(),
+    )
+}
+
+fn codex_config() -> EngineRunConfig {
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-usage").expect("permission id is valid"),
+        EngineAgentId::parse("agent-usage").expect("agent id is valid"),
+        ApprovalMode::Never,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Disabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::Codex(
+            CodexSelection::new(
+                EngineProfileId::parse("profile-usage").expect("profile id is valid"),
+                Some(EngineModelId::parse("model-usage").expect("model id is valid")),
+                permission,
+                None,
+                None,
+                None,
+            )
+            .expect("codex selection is valid"),
+        ),
+        runtime(),
     )
 }
 
@@ -433,4 +463,128 @@ async fn unknown_run_is_rejected_without_creating_a_usage_row() {
         Err(RunUsageRepositoryError::RunNotFound { .. })
     ));
     drop(database);
+}
+
+#[tokio::test]
+async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
+    let (database, repository, run_id, thread_id) = seeded(None).await;
+    // Promote the thread to a Codex configuration, then snapshot that exact
+    // configuration onto a second run row at insert time the way dispatch
+    // would. Snapshots are write-once, so the row is inserted, never updated.
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("request-config-codex").expect("request id"),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Exact(
+                EngineConfigRevision::new(1).expect("revision is valid"),
+            ),
+            config: codex_config(),
+            accepted_at: UnixMillis::from_millis(4),
+        })
+        .await
+        .expect("codex configuration should persist");
+    // The second run needs its own origin message: each message originates
+    // at most one run, so reusing the seeded message would collide. The
+    // general queue path is used because the thread already has a first
+    // message.
+    repository
+        .queue_message(QueueMessageInput {
+            request_id: RequestId::parse("request-message-codex").expect("request id"),
+            message_id: MessageId::parse("message-codex").expect("message id"),
+            thread_id: thread_id.clone(),
+            payload: QueueMessagePayload::new(
+                Some(AuthoredText::parse("codex").expect("text")),
+                Vec::new(),
+            )
+            .expect("payload"),
+            accepted_at: UnixMillis::from_millis(5),
+        })
+        .await
+        .expect("codex message should queue");
+    let thread = entities::thread::Entity::find_by_id(THREAD_ID)
+        .one(&database)
+        .await
+        .expect("thread should read")
+        .expect("thread should exist");
+    let config_blob = thread
+        .engine_run_config
+        .expect("configured thread has a snapshot")
+        .into_vec();
+    // The second run needs its own turn row: origin_turn_id is unique per
+    // run, so reusing the seeded turn would collide. The turn row belongs
+    // to its ordinal row, so that comes first like in the seed template.
+    entities::conversation_ordinal::ActiveModel {
+        thread_id: Set(THREAD_ID.to_owned()),
+        ordinal: Set(1),
+        kind: Set(OrdinalKind::Turn),
+        entity_id: Set("turn-codex".to_owned()),
+    }
+    .insert(&database)
+    .await
+    .expect("codex turn ordinal should insert");
+    entities::conversation_turn::ActiveModel {
+        turn_id: Set("turn-codex".to_owned()),
+        thread_id: Set(THREAD_ID.to_owned()),
+        ordinal: Set(1),
+        kind: Set(OrdinalKind::Turn),
+        revision: Set(0),
+        lifecycle: Set(EntityLifecycle::Pending),
+        created_at_ms: Set(2),
+        updated_at_ms: Set(2),
+    }
+    .insert(&database)
+    .await
+    .expect("codex turn should insert");
+    entities::assistant_run::ActiveModel {
+        run_id: Set("run-codex".to_owned()),
+        thread_id: Set(THREAD_ID.to_owned()),
+        run_start_key: Set(entities::OpaqueBytes::new(vec![1; 32])),
+        origin_message_id: Set("message-codex".to_owned()),
+        origin_turn_id: Set("turn-codex".to_owned()),
+        lifecycle: Set(AssistantRunLifecycle::Completed),
+        generation: Set(1),
+        owner: Set(None),
+        lease: Set(None),
+        claim_token: Set(None),
+        provider_binding_version: Set(None),
+        provider_binding: Set(None),
+        provider_bound_at_ms: Set(None),
+        error_code: Set(None),
+        error_message: Set(None),
+        created_at_ms: Set(4),
+        updated_at_ms: Set(4),
+        terminal_at_ms: Set(Some(4)),
+        engine_run_config_version: Set(Some(2)),
+        engine_run_config_revision: Set(Some(thread.engine_run_config_revision)),
+        engine_run_config: Set(Some(entities::OpaqueBytes::new(config_blob))),
+    }
+    .insert(&database)
+    .await
+    .expect("codex run should insert");
+    let codex_report = RunUsageReport::new(RunUsageReportInput {
+        run_id: RunId::parse("run-codex").expect("run id"),
+        thread_id: ThreadId::parse(THREAD_ID).expect("thread id"),
+        provider_session_id: "provider-session-usage".to_owned(),
+        source_sequence: 4,
+        model_id: EngineModelId::parse("model-usage").expect("model id"),
+        provider_route_id: EngineRouteId::parse("route-usage").expect("route id"),
+        variant_id: None,
+        basis: RunUsageBasis::Delta,
+        provider_turn_id: Some("assistant-usage".to_owned()),
+        input_tokens: Some(10),
+        cached_input_tokens: Some(2),
+        output_tokens: Some(3),
+        context_tokens: None,
+        context_window_tokens: None,
+        observed_at: UnixMillis::from_millis(10),
+    })
+    .expect("codex usage report should validate");
+    assert!(matches!(
+        repository
+            .record_run_usage(record_command(&codex_report))
+            .await,
+        Err(RunUsageRepositoryError::InvalidRunSnapshot { .. })
+    ));
+    drop(database);
+    drop(run_id);
 }

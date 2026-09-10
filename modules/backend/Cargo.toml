@@ -152,8 +152,13 @@ name = "request_handler"
 path = "../../tests/backend/request_handler.rs"
 
 [[test]]
+[[test]]
 name = "engine_usage"
 path = "../../tests/backend/engine_usage.rs"
+
+[[test]]
+name = "run_interaction"
+path = "../../tests/backend/run_interaction.rs"
 
 [lints]
 workspace = true

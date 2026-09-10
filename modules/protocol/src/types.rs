@@ -14,8 +14,8 @@ use artisan_domain::{
     EngineProfileId, EngineRunConfig, Event, IdentifierError, ImageAttachmentRef, MessageId,
     ModelFavoriteId, ModelFavoritesRevision,
     ModelFavoritesSnapshot as DomainModelFavoritesSnapshot, ModelFavoritesSnapshotError,
-    PatchBatch, ProjectListing, ProjectSummary, Query, ReceiptDisposition, RequestId, RunId,
-    ThreadId, ThreadListing, ThreadSummary, UnixMillis,
+    ObservationId, PatchBatch, ProjectListing, ProjectSummary, Query, ReceiptDisposition,
+    RequestId, RunId, ThreadId, ThreadListing, ThreadSummary, UnixMillis,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -914,6 +914,68 @@ pub struct StopRunReceipt {
     pub disposition: StopRunDisposition,
 }
 
+/// Disposition of one live approval/question response against its target.
+///
+/// These are per-target routing results for a well-formed, authenticated
+/// request, not wire rejections: the request was valid, but its target may
+/// be absent, already settled, or owned by another run.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunInteractionOutcome {
+    /// The decision was recorded and delivered to the owning run.
+    Applied,
+    /// No pending request carries this target id on the live run.
+    UnknownTarget,
+    /// The target was already resolved by an earlier response.
+    AlreadyResolved,
+    /// The named thread/run pair is not the live owning run.
+    WrongRun,
+}
+
+/// Correlated result of one approval response.
+///
+/// The nested request id must equal the enclosing response request id
+/// exactly; the decision echoes so a replay can prove it answers the
+/// identical intent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RespondApprovalReceipt {
+    /// Stable client request identity echoed by the enclosing response.
+    pub request_id: RequestId,
+    /// Thread supplied by the caller.
+    pub thread_id: ThreadId,
+    /// Exact run supplied by the caller.
+    pub run_id: RunId,
+    /// Provider approval identity that was answered.
+    pub approval_id: ObservationId,
+    /// The explicit decision that was recorded.
+    pub approved: bool,
+    /// How the response settled its target.
+    pub outcome: RunInteractionOutcome,
+    /// Accepted now or exact duplicate replay.
+    pub disposition: ReceiptDisposition,
+}
+
+/// Correlated result of one question response.
+///
+/// Same correlation and intent-echo contract as the approval receipt; an
+/// empty answer list echoes an explicitly skipped question.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RespondQuestionReceipt {
+    /// Stable client request identity echoed by the enclosing response.
+    pub request_id: RequestId,
+    /// Thread supplied by the caller.
+    pub thread_id: ThreadId,
+    /// Exact run supplied by the caller.
+    pub run_id: RunId,
+    /// Provider question identity that was answered.
+    pub question_id: ObservationId,
+    /// The explicit answers that were recorded.
+    pub answers: Vec<String>,
+    /// How the response settled its target.
+    pub outcome: RunInteractionOutcome,
+    /// Accepted now or exact duplicate replay.
+    pub disposition: ReceiptDisposition,
+}
+
 /// Authoritative live-run query result for one thread.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ActiveRunResult {
@@ -1063,6 +1125,10 @@ pub enum ResponsePayload {
     MessageImage(MessageImageResult),
     /// Correlated exact-run cancellation signal result.
     RunStopped(StopRunReceipt),
+    /// Correlated approval response result with its target outcome.
+    ApprovalResponse(RespondApprovalReceipt),
+    /// Correlated question response result with its target outcome.
+    QuestionResponse(RespondQuestionReceipt),
     /// Authoritative live-run query result.
     ActiveRun(ActiveRunResult),
     /// Complete bounded conversation projection.
@@ -1124,7 +1190,7 @@ impl fmt::Debug for MessageImageResult {
 }
 
 /// Durable Forge-originated event with its connection replay sequence.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServerEvent {
     /// One-based sequence used to detect duplicate, missing, or regressed events.
     pub cursor: EventCursor,
@@ -1258,7 +1324,7 @@ impl From<DispatchFailure> for ProtocolFailure {
 }
 
 /// Owned application frame body.
-#[derive(Eq, PartialEq)]
+#[derive(PartialEq)]
 pub enum WireEnvelopeBody {
     /// Authenticated client negotiation offer.
     Hello(Hello),
@@ -1277,7 +1343,7 @@ pub enum WireEnvelopeBody {
 }
 
 /// One fully owned application-protocol frame.
-#[derive(Eq, PartialEq)]
+#[derive(PartialEq)]
 pub struct WireEnvelope {
     /// Revision stamped on this frame.
     pub protocol_version: ProtocolVersion,
@@ -1318,6 +1384,18 @@ impl WireEnvelope {
             WireEnvelopeBody::Response(ServerResponse {
                 request_id,
                 payload: ResponsePayload::RunStopped(receipt),
+            }) if request_id != &receipt.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::ApprovalResponse(receipt),
+            }) if request_id != &receipt.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::QuestionResponse(receipt),
             }) if request_id != &receipt.request_id => {
                 Err(ProtocolValueError::ResponseCorrelationMismatch)
             }

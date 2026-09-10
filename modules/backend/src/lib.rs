@@ -42,6 +42,7 @@ pub mod process_custody;
 pub mod product_telemetry_capture_policy;
 pub mod request_handler;
 pub mod run_cancellation;
+pub mod run_interaction;
 pub mod sqlite_write_retry_policy;
 pub mod startup_reconciliation_sweep;
 pub mod storage;
@@ -57,6 +58,10 @@ pub mod wake_lock_policy;
 #[cfg(test)]
 #[path = "../../../tests/backend/native_run_dispatch.rs"]
 mod native_run_dispatch_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/backend/run_interaction_dispatch.rs"]
+mod run_interaction_dispatch_tests;
 
 pub use process_custody::{ForgeProcessCustody, ForgeProcessCustodyError};
 

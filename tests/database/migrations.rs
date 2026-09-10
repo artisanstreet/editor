@@ -14,6 +14,12 @@ const INITIAL_MIGRATION: &str = "m20260824_000001_initial_native_schema";
 const RECEIPTS_MIGRATION: &str = "m20260824_000002_global_command_receipts";
 const EXECUTION_MIGRATION: &str = "m20260824_000003_conversation_execution";
 const ENGINE_CONFIG_MIGRATION: &str = "m20260830_000004_engine_run_config";
+const MULTIMODAL_MIGRATION: &str = "m20260905_000005_multimodal_messages";
+const MODEL_FAVORITES_MIGRATION: &str = "m20260905_000006_model_favorites";
+const RUN_USAGE_MIGRATION: &str = "m20260905_000007_run_usage";
+const WITHDRAWALS_MIGRATION: &str = "m20260905_000008_queued_message_withdrawals";
+const ENGINE_CONFIG_V2_MIGRATION: &str = "m20260906_000009_engine_run_config_v2";
+const RUN_INTERACTIONS_MIGRATION: &str = "m20260908_000010_run_interactions";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -100,7 +106,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        4
+        10
     );
     first
         .execute_unprepared(
@@ -134,7 +140,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        4
+        10
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -192,7 +198,13 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             INITIAL_MIGRATION.to_string(),
             RECEIPTS_MIGRATION.to_string(),
             EXECUTION_MIGRATION.to_string(),
-            ENGINE_CONFIG_MIGRATION.to_string()
+            ENGINE_CONFIG_MIGRATION.to_string(),
+            MULTIMODAL_MIGRATION.to_string(),
+            MODEL_FAVORITES_MIGRATION.to_string(),
+            RUN_USAGE_MIGRATION.to_string(),
+            WITHDRAWALS_MIGRATION.to_string(),
+            ENGINE_CONFIG_V2_MIGRATION.to_string(),
+            RUN_INTERACTIONS_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -525,7 +537,47 @@ async fn engine_config_migration_preserves_legacy_receipts_and_allows_set_histor
         .await?
         .ok_or_else(|| std::io::Error::other("engine receipt index did not survive migration"))?;
     let index_sql: String = index_sql.try_get_by_index(0)?;
-    assert!(index_sql.contains("WHERE command_kind <> 'set_thread_engine_config'"));
+    assert!(index_sql.contains(
+        "WHERE command_kind IN ('attach_project', 'create_thread', 'queue_first_message')"
+    ));
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_interactions_migration_enforces_request_and_receipt_shapes()
+-> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    migrate_to_current(&database).await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO pending_run_interactions (run_id, interaction_id, thread_id, kind, state, request_json, requested_sequence, requested_at_ms, binding_version) VALUES ('run-1', 'approval-1', 'thread-1', 'approval', 'requested', '{\"description\":\"x\"}', 1, 100, 1)",
+        )
+        .await?;
+    // Resolving without the kind-matching decision is rejected.
+    let resolved_without_decision = database
+        .execute_unprepared(
+            "UPDATE pending_run_interactions SET state = 'resolved', resolved_at_ms = 200, resolved_sequence = 2 WHERE run_id = 'run-1'",
+        )
+        .await;
+    assert!(resolved_without_decision.is_err());
+    database
+        .execute_unprepared(
+            "UPDATE pending_run_interactions SET state = 'resolved', approved = 0, resolved_at_ms = 200, resolved_sequence = 2 WHERE run_id = 'run-1'",
+        )
+        .await?;
+    // Receipts echo the decision for approvals and the answers for questions.
+    database
+        .execute_unprepared(
+            "INSERT INTO run_interaction_receipts (request_id, command_kind, thread_id, run_id, interaction_id, outcome, disposition, intent_key, approved, binding_version, responded_at_ms) VALUES ('req-1', 'respond_approval', 'thread-1', 'run-1', 'approval-1', 'applied', 'accepted', 'intent', 0, 1, 200)",
+        )
+        .await?;
+    let question_without_answers = database
+        .execute_unprepared(
+            "INSERT INTO run_interaction_receipts (request_id, command_kind, thread_id, run_id, interaction_id, outcome, disposition, intent_key, binding_version, responded_at_ms) VALUES ('req-2', 'respond_question', 'thread-1', 'run-1', 'q-1', 'applied', 'accepted', 'intent', 1, 200)",
+        )
+        .await;
+    assert!(question_without_answers.is_err());
     database.close().await?;
     Ok(())
 }
@@ -626,5 +678,175 @@ async fn engine_config_migration_enforces_thread_and_run_snapshot_shapes()
         .await;
     assert!(immutable_snapshot_update.is_err());
     database.close().await?;
+    Ok(())
+}
+
+async fn seed_v2_guard_scope(
+    database: &sea_orm_migration::sea_orm::DatabaseConnection,
+) -> Result<(), Box<dyn Error>> {
+    database
+        .execute_unprepared(
+            "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/work/p1', 'Project', 1)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'Thread', 2, 2)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m1', 't1', 0, 'hello', 7)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO conversation_ordinals (thread_id, ordinal, kind, entity_id) VALUES ('t1', 0, 'turn', 'turn1')",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO conversation_turns (turn_id, thread_id, ordinal, kind, revision, lifecycle, created_at_ms, updated_at_ms) VALUES ('turn1', 't1', 0, 'turn', 0, 'pending', 7, 7)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m2', 't1', 1, 'second', 8)",
+        )
+        .await?;
+    Ok(())
+}
+
+async fn assert_v2_shape_guards(
+    database: &sea_orm_migration::sea_orm::DatabaseConnection,
+) -> Result<(), Box<dyn Error>> {
+    // Codec version 2 rows persist on every guarded table.
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v2', 'p1', 'V2 thread', 4, 4, 2, 1, X'00')",
+        )
+        .await?;
+    assert_eq!(
+        scalar_i64(
+            database,
+            "SELECT engine_run_config_version FROM threads WHERE thread_id = 't-v2'",
+        )
+        .await?,
+        2
+    );
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('engine-v2', 'set_thread_engine_config', 't-v2', 5, 2, X'00', 1)",
+        )
+        .await?;
+    // The lane-000005 queue_message arm survives the receipts rebuild with
+    // both body states.
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, body, accepted_at_ms) VALUES ('queue-msg-1', 'queue_message', 't-v2', 'm1', 'hello', 6)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, accepted_at_ms) VALUES ('queue-msg-2', 'queue_message', 't-v2', 'm2', 7)",
+        )
+        .await?;
+    assert_eq!(
+        scalar_i64(
+            database,
+            "SELECT count(*) FROM command_receipts WHERE command_kind = 'queue_message'",
+        )
+        .await?,
+        2
+    );
+    database
+        .execute_unprepared(
+            "INSERT INTO assistant_runs (run_id, thread_id, run_start_key, origin_message_id, origin_turn_id, lifecycle, generation, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('run-v2', 't1', zeroblob(32), 'm1', 'turn1', 'queued', 0, 10, 10, 2, 1, X'00')",
+        )
+        .await?;
+
+    // Version 0 and 3 stay outside every durable guard.
+    for version in [0, 3] {
+        let thread_insert = database
+            .execute_unprepared(&format!(
+                "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v{version}', 'p1', 'Out of range', 4, 4, {version}, 1, X'00')"
+            ))
+            .await;
+        assert!(
+            thread_insert.is_err(),
+            "version {version} thread insert must be rejected"
+        );
+        let receipt_insert = database
+            .execute_unprepared(&format!(
+                "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('engine-v{version}', 'set_thread_engine_config', 't-v2', 5, {version}, X'00', 1)"
+            ))
+            .await;
+        assert!(
+            receipt_insert.is_err(),
+            "version {version} receipt insert must be rejected"
+        );
+        let run_insert = database
+            .execute_unprepared(&format!(
+                "INSERT INTO assistant_runs (run_id, thread_id, run_start_key, origin_message_id, origin_turn_id, lifecycle, generation, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('run-v{version}', 't1', zeroblob(32), 'm1', 'turn1', 'queued', 0, 10, 10, {version}, 1, X'00')"
+            ))
+            .await;
+        assert!(
+            run_insert.is_err(),
+            "version {version} run snapshot must be rejected"
+        );
+    }
+    let thread_update = database
+        .execute_unprepared(
+            "UPDATE threads SET engine_run_config_version = 3 WHERE thread_id = 't-v2'",
+        )
+        .await;
+    assert!(
+        thread_update.is_err(),
+        "version 3 thread update must be rejected"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn engine_config_v2_migration_widens_shape_guards_and_down_restores_them()
+-> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    migrate_to_current(&database).await?;
+    seed_v2_guard_scope(&database).await?;
+    assert_v2_shape_guards(&database).await?;
+    database.close().await?;
+
+    // Downgrade restores the version-1-only guards on a v1-shaped database.
+    let downgraded = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    migrate_to_current(&downgraded).await?;
+    seed_v2_guard_scope(&downgraded).await?;
+    Migrator::down(&downgraded, Some(2)).await?;
+    let v2_after_down = downgraded
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v2-down', 'p1', 'V2 thread', 4, 4, 2, 1, X'00')",
+        )
+        .await;
+    assert!(
+        v2_after_down.is_err(),
+        "downgrade must restore the version-1-only thread guard"
+    );
+    downgraded
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v1-down', 'p1', 'V1 thread', 4, 4, 1, 1, X'00')",
+        )
+        .await?;
+    // The downgrade rebuild keeps the queue_message arm as well.
+    downgraded
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, body, accepted_at_ms) VALUES ('queue-msg-down', 'queue_message', 't-v1-down', 'm1', 'hello', 6)",
+        )
+        .await?;
+    migrate_to_current(&downgraded).await?;
+    downgraded
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v2-again', 'p1', 'V2 thread', 4, 4, 2, 1, X'00')",
+        )
+        .await?;
+    downgraded.close().await?;
     Ok(())
 }

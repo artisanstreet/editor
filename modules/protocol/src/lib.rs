@@ -56,16 +56,17 @@ pub use types::{
     LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, LocalCapabilityError,
     MessageImageResult, ModelFavoritesSnapshot, ProtocolFailure, ProtocolValueError,
     ProtocolVersion, QueueMessageReceipt, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
-    ReconnectCapabilityError, RegisteredEngineProfilesResult, ResponsePayload, ServerEvent,
-    ServerResponse, SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition,
-    StopRunReceipt, ThreadEngineSettingsResult, VersionOffer, VersionOfferError, Welcome,
-    WireEnvelope, WireEnvelopeBody,
+    ReconnectCapabilityError, RegisteredEngineProfilesResult, RespondApprovalReceipt,
+    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, ServerEvent, ServerResponse,
+    SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
+    ThreadEngineSettingsResult, VersionOffer, VersionOfferError, Welcome, WireEnvelope,
+    WireEnvelopeBody,
 };
 
 #[allow(clippy::all)]
 #[allow(clippy::pedantic)]
 #[rustfmt::skip]
 pub mod composer_state_capnp;
+pub mod composer_state;
 #[path = "codec/composer_state.rs"]
 pub(crate) mod composer_state_codec;
-pub mod composer_state;

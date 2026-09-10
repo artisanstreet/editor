@@ -249,7 +249,7 @@ fn mixed_and_image_only_items_roundtrip_without_image_bytes_in_history()
         ResponsePayload::ConversationSnapshot(multimodal_snapshot()),
     );
     let decoded = decode_envelope(&encode_envelope(&value)?)?;
-    assert_eq!(decoded, value);
+    assert!(decoded == value, "wire envelope round-trip mismatch");
 
     let WireEnvelopeBody::Response(response) = decoded.body else {
         panic!("multimodal frame must remain a response");
@@ -295,7 +295,7 @@ fn mixed_and_image_only_queue_payloads_roundtrip_with_ordered_bytes()
     ] {
         let value = queue_request(frame_id, payload);
         let decoded = decode_envelope(&encode_envelope(&value)?)?;
-        assert_eq!(decoded, value);
+        assert!(decoded == value, "wire envelope round-trip mismatch");
         let WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueMessage(command))) =
             decoded.body
         else {

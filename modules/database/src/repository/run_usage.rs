@@ -233,7 +233,7 @@ async fn load_run_authority(
         });
     }
     if run.generation < 0
-        || run.engine_run_config_version != Some(1)
+        || !matches!(run.engine_run_config_version, Some(1) | Some(2))
         || run
             .engine_run_config_revision
             .and_then(|value| u64::try_from(value).ok())
@@ -264,7 +264,14 @@ async fn load_run_authority(
             run_id: run_id.clone(),
         });
     }
-    let selection = config.selection().as_opencode2();
+    // Usage authority is OpenCode2-shaped. A configuration that selects any
+    // other engine cannot authorize usage as OpenCode2; it fails closed as
+    // an invalid snapshot instead of coercing to the wrong engine.
+    let selection = config.selection().as_opencode2().map_err(|_| {
+        RunUsageRepositoryError::InvalidRunSnapshot {
+            run_id: run_id.clone(),
+        }
+    })?;
     Ok(RunUsageAuthority {
         generation: run.generation,
         model_id: selection.model_id().clone(),

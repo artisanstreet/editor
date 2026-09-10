@@ -6,12 +6,15 @@ use artisan_database::{
     connect,
 };
 use artisan_domain::{
-    ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigRevision,
-    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis, NetworkAccess,
-    OpenCode2Selection, PermissionId, ProjectId, ReceiptDisposition, RequestId, ThreadId,
-    ThreadTitle, UnixMillis, WebSearchAccess,
+    ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
+    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier, CountLimit,
+    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed, EngineAgentId,
+    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EngineModelId,
+    EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
+    GrokPermissionMode, GrokReasoningEffort, GrokSelection, HermesPermissionMode,
+    HermesReasoningEffort, HermesSelection, NetworkAccess, OpenCode2Selection, PermissionId,
+    ProjectId, ReceiptDisposition, RequestId, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement, Value};
@@ -489,4 +492,326 @@ async fn unconfigured_read_and_missing_thread_are_explicit() {
         .await
         .expect_err("missing thread must be rejected");
     assert!(matches!(error, RepositoryError::ThreadNotFound { .. }));
+}
+
+fn test_runtime() -> EngineRuntimeControls {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid")
+}
+
+fn writable_permission(label: &str) -> EnginePermissionPolicy {
+    EnginePermissionPolicy::new(
+        PermissionId::parse(format!("permission-{label}")).expect("permission id is valid"),
+        EngineAgentId::parse(format!("agent-{label}")).expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    )
+}
+
+fn codex_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Codex(
+            CodexSelection::new(
+                EngineProfileId::parse("profile-codex").expect("profile id is valid"),
+                Some(EngineModelId::parse("model-codex").expect("model id is valid")),
+                writable_permission("codex"),
+                Some(CodexReasoningEffort::High),
+                Some(CodexServiceTier::Fast),
+                Some(CodexModelContextWindow::new(200_000).expect("window is valid")),
+            )
+            .expect("codex selection is valid"),
+        ),
+        test_runtime(),
+    )
+}
+
+fn claude_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Claude(
+            ClaudeSelection::new(
+                EngineProfileId::parse("profile-claude").expect("profile id is valid"),
+                Some(EngineModelId::parse("model-claude").expect("model id is valid")),
+                writable_permission("claude"),
+                Some(ClaudeEffort::Medium),
+                Some(ClaudePermissionMode::Plan),
+                false,
+                false,
+            )
+            .expect("claude selection is valid"),
+        ),
+        test_runtime(),
+    )
+}
+
+fn grok_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Grok(GrokSelection::new(
+            EngineProfileId::parse("profile-grok").expect("profile id is valid"),
+            Some(EngineModelId::parse("model-grok").expect("model id is valid")),
+            writable_permission("grok"),
+            Some(GrokReasoningEffort::parse("high").expect("effort is valid")),
+            Some(GrokPermissionMode::Auto),
+        )),
+        test_runtime(),
+    )
+}
+
+fn cursor_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Cursor(CursorSelection::new(
+            EngineProfileId::parse("profile-cursor").expect("profile id is valid"),
+            Some(EngineModelId::parse("model-cursor").expect("model id is valid")),
+            writable_permission("cursor"),
+            Some(CursorReasoningEffort::parse("medium").expect("effort is valid")),
+            Some(CursorSpeed::Fast),
+            Some(CursorPermissionMode::Force),
+        )),
+        test_runtime(),
+    )
+}
+
+fn hermes_config() -> EngineRunConfig {
+    EngineRunConfig::new(
+        EngineSelection::Hermes(HermesSelection::new(
+            EngineProfileId::parse("profile-hermes").expect("profile id is valid"),
+            EngineModelId::parse("model-hermes").expect("model id is valid"),
+            EngineRouteId::parse("route-hermes").expect("route id is valid"),
+            HermesPermissionMode::Yolo,
+            Some(HermesReasoningEffort::parse("medium").expect("effort is valid")),
+            true,
+        )),
+        test_runtime(),
+    )
+}
+
+async fn stored_version(
+    database: &sea_orm::DatabaseConnection,
+    thread_id: &ThreadId,
+) -> Option<i64> {
+    entities::thread::Entity::find_by_id(thread_id.as_str())
+        .one(database)
+        .await
+        .expect("thread query should work")
+        .expect("thread should exist")
+        .engine_run_config_version
+}
+
+#[tokio::test]
+async fn every_engine_kind_persists_with_its_codec_version_and_round_trips() {
+    let (database, repository, thread_id) = seeded_repository().await;
+    let cases: Vec<(EngineRunConfig, EngineId, Option<i64>)> = vec![
+        (config("multi", false), EngineId::OpenCode2, Some(1)),
+        (codex_config(), EngineId::Codex, Some(2)),
+        (claude_config(), EngineId::Claude, Some(2)),
+        (grok_config(), EngineId::Grok, Some(2)),
+        (cursor_config(), EngineId::Cursor, Some(2)),
+        (hermes_config(), EngineId::Hermes, Some(2)),
+    ];
+    let mut precondition = EngineConfigUpdatePrecondition::Unconfigured;
+    for (index, (expected, engine, version)) in cases.into_iter().enumerate() {
+        let request_id = format!("request-engine-multi-{index}");
+        let result = repository
+            .set_thread_engine_config(input(
+                &request_id,
+                &thread_id,
+                precondition,
+                expected.clone(),
+                100 + index as i64,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{engine:?} configuration should persist: {error:?}"));
+        assert_eq!(result.revision().get(), index as u64 + 1);
+        assert_eq!(stored_version(&database, &thread_id).await, version);
+        let settings = repository
+            .read_thread_engine_settings(&thread_id)
+            .await
+            .expect("settings read should work")
+            .expect("thread should be configured");
+        assert_eq!(settings.config(), &expected);
+        assert_eq!(settings.config().engine_id(), engine);
+        assert_eq!(
+            settings.config().selection().is_execution_supported(),
+            engine == EngineId::OpenCode2
+        );
+        let stored_receipt = entities::command_receipt::Entity::find_by_id(request_id.as_str())
+            .one(&database)
+            .await
+            .expect("receipt query should work")
+            .expect("receipt should exist");
+        assert_eq!(stored_receipt.engine_run_config_version, version);
+        precondition = EngineConfigUpdatePrecondition::Exact(result.revision());
+    }
+}
+
+#[tokio::test]
+async fn unknown_engine_blob_and_version_column_mismatch_are_corruption() {
+    let (database, repository, thread_id) = seeded_repository().await;
+    repository
+        .set_thread_engine_config(input(
+            "request-engine-tamper-base",
+            &thread_id,
+            EngineConfigUpdatePrecondition::Unconfigured,
+            config("tamper", false),
+            100,
+        ))
+        .await
+        .expect("base configuration should persist");
+    let original = entities::thread::Entity::find_by_id(thread_id.as_str())
+        .one(&database)
+        .await
+        .expect("thread query should work")
+        .expect("thread should exist")
+        .engine_run_config
+        .expect("configured blob should exist")
+        .into_vec();
+    let original_text =
+        String::from_utf8(original.clone()).expect("canonical configuration should be UTF-8");
+
+    // An unknown engine spelling is rejected as corruption, never defaulted.
+    let unknown_engine = original_text
+        .replacen("\"engine\":\"opencode2\"", "\"engine\":\"acp\"", 1)
+        .into_bytes();
+    replace_thread_blob(&database, unknown_engine).await;
+    assert!(matches!(
+        repository.read_thread_engine_settings(&thread_id).await,
+        Err(RepositoryError::CorruptData { .. })
+    ));
+
+    // A version 2 blob under a version 1 column is corruption.
+    replace_thread_blob(&database, original.clone()).await;
+    database
+        .execute_unprepared(
+            "UPDATE threads SET engine_run_config_version = 2 WHERE thread_id = 'thread-engine-config'",
+        )
+        .await
+        .expect("version column tamper should persist");
+    assert!(matches!(
+        repository.read_thread_engine_settings(&thread_id).await,
+        Err(RepositoryError::CorruptData { .. })
+    ));
+
+    // A version 1 blob under a version 2 column is corruption as well.
+    database
+        .execute_unprepared(
+            "UPDATE threads SET engine_run_config_version = 1 WHERE thread_id = 'thread-engine-config'",
+        )
+        .await
+        .expect("version column restore should persist");
+    repository
+        .set_thread_engine_config(input(
+            "request-engine-tamper-codex",
+            &thread_id,
+            EngineConfigUpdatePrecondition::Exact(
+                EngineConfigRevision::new(1).expect("revision is valid"),
+            ),
+            codex_config(),
+            200,
+        ))
+        .await
+        .expect("codex configuration should persist");
+    database
+        .execute_unprepared(
+            "UPDATE threads SET engine_run_config_version = 1 WHERE thread_id = 'thread-engine-config'",
+        )
+        .await
+        .expect("version column tamper should persist");
+    assert!(matches!(
+        repository.read_thread_engine_settings(&thread_id).await,
+        Err(RepositoryError::CorruptData { .. })
+    ));
+}
+
+#[tokio::test]
+async fn receipt_shape_guard_allows_versions_one_and_two_but_rejects_zero_and_three() {
+    let (database, _repository, _thread_id) = seeded_repository().await;
+    // Version 2 receipts persist once the widened CHECK arm is migrated.
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('request-receipt-v2', 'set_thread_engine_config', 'thread-engine-config', 100, 2, X'00', 1)",
+        )
+        .await
+        .expect("version two receipt should persist");
+    assert_eq!(
+        entities::command_receipt::Entity::find_by_id("request-receipt-v2")
+            .one(&database)
+            .await
+            .expect("receipt query should work")
+            .expect("receipt should exist")
+            .engine_run_config_version,
+        Some(2)
+    );
+
+    // Version 0 and 3 stay outside every durable guard.
+    for version in [0, 3] {
+        let rejected = database
+            .execute_unprepared(&format!(
+                "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('request-receipt-v{version}', 'set_thread_engine_config', 'thread-engine-config', 100, {version}, X'00', 1)"
+            ))
+            .await;
+        assert!(
+            rejected.is_err(),
+            "version {version} receipt must be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn thread_shape_trigger_rejects_version_zero_and_three_inserts_and_updates() {
+    let (database, repository, thread_id) = seeded_repository().await;
+    repository
+        .set_thread_engine_config(input(
+            "request-engine-guard-base",
+            &thread_id,
+            EngineConfigUpdatePrecondition::Unconfigured,
+            config("guard", false),
+            100,
+        ))
+        .await
+        .expect("base configuration should persist");
+
+    for version in [0, 3] {
+        let insert = database
+            .execute_unprepared(&format!(
+                "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('thread-guard-v{version}', 'project-config', 'Guard', 1, 1, {version}, 1, X'00')"
+            ))
+            .await;
+        assert!(
+            insert.is_err(),
+            "version {version} thread insert must be rejected"
+        );
+        let update = database
+            .execute_unprepared(&format!(
+                "UPDATE threads SET engine_run_config_version = {version} WHERE thread_id = 'thread-engine-config'"
+            ))
+            .await;
+        assert!(
+            update.is_err(),
+            "version {version} thread update must be rejected"
+        );
+    }
+    // The rejection leaves the configured row untouched.
+    let settings = repository
+        .read_thread_engine_settings(&thread_id)
+        .await
+        .expect("settings read should work")
+        .expect("thread should stay configured");
+    assert_eq!(settings.revision().get(), 1);
 }

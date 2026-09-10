@@ -8,15 +8,17 @@
 
 #![forbid(unsafe_code)]
 
-use artisan_domain::ConversationCursor;
-use artisan_protocol::{ProtocolVersion, WireEnvelope, WireEnvelopeBody};
+use artisan_domain::{ConversationCursor, EngineObservationEvent, Event, Observation, ThreadId};
+use artisan_protocol::{EventCursor, ProtocolVersion, ServerEvent, WireEnvelope, WireEnvelopeBody};
 use artisan_transport::EnvelopeSendError;
 use quinn::{ClosedStream, Connection, SendStream, VarInt};
 use thiserror::Error;
 
 use crate::ServerFrameStamp;
 use crate::activated_conversation_replay::ActivatedConversationReplay;
-use crate::conversation_subscription_registry::ApplyBatchError;
+use crate::conversation_subscription_registry::{
+    ApplyBatchError, ApplyObservationBatchError, SubscriptionLease,
+};
 use crate::request_handler::{
     ActivatedConversationSubscription, ConversationSubscriptionRegistrar,
 };
@@ -68,9 +70,34 @@ pub enum ConversationDeliveryError {
     /// The registrar rejected the sent patch batch.
     #[error("recording the published conversation patch batch failed")]
     Registry(#[from] ApplyBatchError),
+    /// The registrar rejected the sent observation batch.
+    #[error("recording the published observation batch failed")]
+    ObservationRegistry(#[from] ApplyObservationBatchError),
     /// The server-owned stream could not be finished.
     #[error("finishing the conversation delivery stream failed")]
     Finish(#[from] ClosedStream),
+}
+
+/// Result of delivering one committed engine-observation batch.
+#[must_use]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ObservationBatchDelivery {
+    /// Every observation in the batch was already delivered to this
+    /// subscriber; nothing crossed the wire and the registrar is untouched.
+    Current {
+        /// Last observation sequence delivered to the subscriber.
+        observation_cursor: u64,
+    },
+    /// The new observations crossed the wire in durable sequence order and
+    /// the registrar advanced past them.
+    Published {
+        /// One event per newly delivered observation, in send order.
+        delivered: Vec<ServerEvent>,
+        /// Subscriber observation cursor before this batch.
+        from_sequence: u64,
+        /// Maximum observation sequence delivered by this batch.
+        to_sequence: u64,
+    },
 }
 
 /// Serial owner of one server-side conversation delivery stream.
@@ -85,6 +112,11 @@ pub struct ConversationDeliveryWriter {
     registrar: ConversationSubscriptionRegistrar,
     protocol_version: ProtocolVersion,
     stream: Option<DeliveryStream>,
+    /// Next one-based per-connection event cursor minted for an observation
+    /// event. Patch batches never consume this space; observation events
+    /// share the connection's event sequence exactly like other server
+    /// events.
+    next_event_cursor: u64,
 }
 
 impl ConversationDeliveryWriter {
@@ -99,6 +131,7 @@ impl ConversationDeliveryWriter {
             registrar,
             protocol_version,
             stream: None,
+            next_event_cursor: 1,
         }
     }
 
@@ -189,6 +222,112 @@ impl ConversationDeliveryWriter {
                 ))
             }
         }
+    }
+
+    /// Delivers one durably committed engine-observation batch to a single
+    /// thread subscriber in durable sequence order.
+    ///
+    /// The batch must arrive in committed (durable sequence) order; rows at
+    /// or below the subscriber's current observation cursor are skipped as
+    /// already delivered, so replaying a committed batch is idempotent. A
+    /// fully skipped batch returns [`ObservationBatchDelivery::Current`]
+    /// without opening a stream or touching the registrar. Otherwise every
+    /// new row is sent as its own [`Event::EngineObservation`] envelope on
+    /// the lazily opened delivery stream — shared with patch batches —
+    /// before the registrar advances past the batch maximum. Any failure
+    /// consumes the writer; the unfinished stream guard resets its send
+    /// direction when the operation is cancelled, fails, or is dropped.
+    ///
+    /// Approval and question rows carry their provider `approval_id` and
+    /// `question_id` untouched so the later A-approve packet can answer
+    /// them; this method never responds to them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationDeliveryError::Open`] when the lazy stream
+    /// cannot be opened, [`ConversationDeliveryError::Send`] when an
+    /// observation envelope cannot be sent, or
+    /// [`ConversationDeliveryError::ObservationRegistry`] when the registrar
+    /// rejects the sent batch. Every such error consumes the writer.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the private stream invariant is violated between the
+    /// lazy-open branch and a send operation, or if the per-connection
+    /// event cursor wraps, which would require 2^64 delivered events.
+    pub async fn deliver_observation_batch(
+        mut self,
+        lease: &SubscriptionLease,
+        thread_id: ThreadId,
+        batch: Vec<(ServerFrameStamp, Observation)>,
+    ) -> Result<(Self, ObservationBatchDelivery), ConversationDeliveryError> {
+        let from_sequence = self
+            .registrar
+            .subscription_view(&thread_id)
+            .await
+            .map(|view| view.observation_cursor())
+            .unwrap_or(0);
+        let pending: Vec<(ServerFrameStamp, Observation)> = batch
+            .into_iter()
+            .filter(|(_, observation)| observation.sequence().get() > from_sequence)
+            .collect();
+        if pending.is_empty() {
+            return Ok((
+                self,
+                ObservationBatchDelivery::Current {
+                    observation_cursor: from_sequence,
+                },
+            ));
+        }
+
+        if self.stream.is_none() {
+            let send = self.connection.open_uni().await?;
+            // Install before the first write await. If the caller
+            // cancels or the write fails, Drop can reset this exact
+            // stream direction synchronously.
+            self.stream = Some(DeliveryStream::new(send));
+        }
+
+        let mut delivered = Vec::with_capacity(pending.len());
+        let mut to_sequence = from_sequence;
+        for (stamp, observation) in pending {
+            let cursor = EventCursor::new(self.next_event_cursor)
+                .expect("a connection delivers fewer than 2^64 events");
+            to_sequence = observation.sequence().get();
+            let event = ServerEvent {
+                cursor,
+                event: Event::EngineObservation(EngineObservationEvent {
+                    thread_id: thread_id.clone(),
+                    observation,
+                }),
+            };
+            let envelope = WireEnvelope {
+                protocol_version: self.protocol_version,
+                frame_id: stamp.frame_id,
+                sent_at: stamp.sent_at,
+                body: WireEnvelopeBody::Event(event.clone()),
+            };
+            let stream = self
+                .stream
+                .as_mut()
+                .expect("an observation batch always installs a delivery stream");
+            artisan_transport::send_envelope(&mut stream.send, &envelope).await?;
+            self.next_event_cursor = self.next_event_cursor.saturating_add(1);
+            delivered.push(event);
+        }
+
+        let to_sequence = self
+            .registrar
+            .record_published_observation_batch(lease, &thread_id, from_sequence, to_sequence)
+            .await?;
+        Ok((
+            self,
+            ObservationBatchDelivery::Published {
+                delivered,
+                from_sequence,
+                to_sequence,
+            },
+        ))
     }
 
     /// Finishes the one opened stream, if any.

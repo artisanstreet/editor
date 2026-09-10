@@ -126,7 +126,11 @@ impl NativeApplication {
         let Some(config) = self.engine_settings.authoritative_config() else {
             return;
         };
-        let selection = config.selection().as_opencode2();
+        // Usage scope is OpenCode2-shaped; another engine starts no usage
+        // scope instead of attributing usage as OpenCode2.
+        let artisan_domain::EngineSelection::OpenCode2(selection) = config.selection() else {
+            return;
+        };
         self.composer_queue.state.begin_usage_scope(
             thread,
             self.composer_queue.generation,

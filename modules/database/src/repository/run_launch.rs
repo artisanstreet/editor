@@ -749,7 +749,9 @@ async fn insert_launched_run(
         created_at_ms: Set(operated_at_ms),
         updated_at_ms: Set(operated_at_ms),
         terminal_at_ms: Set(None),
-        engine_run_config_version: Set(Some(1)),
+        engine_run_config_version: Set(Some(i64::from(
+            command.engine_settings.config().storage_codec_version(),
+        ))),
         engine_run_config_revision: Set(Some(command.engine_settings.revision().as_i64())),
         engine_run_config: Set(Some(OpaqueBytes::new(
             crate::engine_run_config::encode(command.engine_settings.config()).map_err(
@@ -1021,11 +1023,11 @@ fn validate_engine_snapshot(
     settings: &ThreadEngineSettings,
     message_id: &MessageId,
 ) -> Result<(), RunLaunchError> {
-    if run.engine_run_config_version != Some(1) {
+    if run.engine_run_config_version != Some(i64::from(settings.config().storage_codec_version())) {
         return Err(corrupt_data_launch(
             "assistant_runs",
             "engine_run_config_version",
-            "configured run snapshot must use version one",
+            "configured run snapshot must use its codec version",
         ));
     }
     let revision = run

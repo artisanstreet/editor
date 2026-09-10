@@ -496,6 +496,110 @@ pub(crate) fn spawn_configured_engine(
     EngineChild::spawn(command, true)
 }
 
+/// Spawns the verified Codex app-server child for one turn.
+///
+/// Extends (never forks) the owner custody contract: the executable is the
+/// verified capability path, argv is exactly `app-server --stdio`, the
+/// working directory is the exact project root, and the environment is
+/// cleared then rebuilt from the managed Codex home plus the host essentials
+/// (`PATH` for loader resolution, `SYSTEMROOT` on Windows). Revalidation is
+/// the last authority operation before the child is created.
+pub(crate) fn spawn_codex_engine(
+    launch: &artisan_native_engine::VerifiedCodexLaunch,
+    project_root: &RootPath,
+) -> io::Result<EngineChild> {
+    let mut command = tokio::process::Command::new(launch.executable_path());
+    command
+        .current_dir(Path::new(project_root.as_str()))
+        .args(["app-server", "--stdio"]);
+    command.env_clear();
+    command.env("CODEX_HOME", launch.codex_home());
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    #[cfg(windows)]
+    if let Some(system_root) = std::env::var_os("SYSTEMROOT") {
+        command.env("SYSTEMROOT", system_root);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    launch
+        .revalidate()
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "codex launch rejected"))?;
+    EngineChild::spawn(command, true)
+}
+
+/// Spawns the verified Claude Code CLI child for one turn.
+///
+/// Extends (never forks) the owner custody contract: the executable is the
+/// verified capability path, argv is the exact settings-derived stream-JSON
+/// invocation, the working directory is the exact project root, and the
+/// environment is inherited ambiently. Ambient inheritance is deliberate and
+/// mirrors `modules/engines/src/claude/cli-engine.ts`
+/// (`{ ...process.env, ...override }`): Claude runs as the user's installed
+/// CLI over its subscription session and `CLAUDE_CONFIG_DIR` resolution, not
+/// from a managed home. Revalidation is the last authority operation before
+/// the child is created.
+pub(crate) fn spawn_claude_engine(
+    launch: &artisan_native_engine::VerifiedClaudeLaunch,
+    project_root: &RootPath,
+    args: &[String],
+) -> io::Result<EngineChild> {
+    let mut command = tokio::process::Command::new(launch.executable_path());
+    command.current_dir(Path::new(project_root.as_str()));
+    command.args(args);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    launch
+        .revalidate()
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "claude launch rejected"))?;
+    EngineChild::spawn(command, true)
+}
+
+/// Spawns the verified Hermes private-service child for one turn.
+///
+/// Extends (never forks) the owner custody contract: the executable is the
+/// verified capability path, argv is exactly
+/// `serve --host 127.0.0.1 --port 0`, the working directory is the exact
+/// project root, and the environment is inherited ambiently plus the
+/// dashboard session token and parent PID, mirroring
+/// `modules/engines/src/hermes/service.ts`
+/// (`{ ...process.env, HERMES_DASHBOARD_SESSION_TOKEN, HERMES_PARENT_PID }`).
+/// Hermes runs as the user's installed profile over its own subscription
+/// session, not from a managed home. Revalidation is the last authority
+/// operation before the child is created.
+pub(crate) fn spawn_hermes_engine(
+    launch: &super::hermes::VerifiedHermesLaunch,
+    project_root: &RootPath,
+    session_token: &str,
+) -> io::Result<EngineChild> {
+    let mut command = tokio::process::Command::new(launch.executable_path());
+    command.current_dir(Path::new(project_root.as_str())).args([
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+    ]);
+    command.env("HERMES_DASHBOARD_SESSION_TOKEN", session_token);
+    command.env("HERMES_PARENT_PID", std::process::id().to_string());
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    launch
+        .revalidate()
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "hermes launch rejected"))?;
+    EngineChild::spawn(command, true)
+}
+
 /// The taken sole stdin writer kept open for the whole operation.
 ///
 /// The writer is removed from the [`EngineChild`] immediately after spawn so the

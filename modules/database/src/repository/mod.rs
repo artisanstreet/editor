@@ -9,6 +9,7 @@ mod project_catalog;
 mod project_threads;
 mod queue_message;
 mod run_binding;
+mod run_interaction;
 mod run_launch;
 mod run_observation;
 mod startup_reconciliation;
@@ -28,7 +29,6 @@ use crate::entities;
 pub use conversation_patch_replay::ConversationPatchReplay;
 pub use dispatch_payload::{MessageDispatchPayload, QueueMessageDispatchPayload};
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
-pub use queue_message::{MessageImageRead, QueueMessageInput, QueueMessageResult};
 pub use message_dispatch::{
     ClaimMessageDispatch, ClaimedMessageDispatch, CompleteMessageDispatch, DispatchFailureReason,
     DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch,
@@ -37,8 +37,15 @@ pub use message_dispatch::{
 pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
 };
+pub use queue_message::{MessageImageRead, QueueMessageInput, QueueMessageResult};
 pub use run_binding::{
     BindRunProvider, BindRunProviderOutcome, BoundRunReceipt, ProviderBindingBytes, RunBindingError,
+};
+pub use run_interaction::{
+    AppliedInteraction, ApprovalSnapshot, PendingInteractionView, QuestionSnapshot,
+    RecordApprovalRequest, RecordInteractionOutcome, RecordQuestionRequest,
+    RequestedInteractionSnapshot, ResolveInteractionOutcome, ResolveScope, RunInteractionError,
+    StoredInteractionReceipt,
 };
 pub use run_launch::{
     LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, RunLaunchCredentials,
@@ -51,8 +58,12 @@ pub use run_observation::terminal::{
     TerminalRunReceipt,
 };
 pub use run_observation::{
-    AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome, EngineCheckpoint,
-    RunBatchReceiptInfo, RunBatchScope, RunObservationError,
+    AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome,
+    DecodedObservationBatch, EngineCheckpoint, OBSERVATION_BATCH_MAX_OBSERVATIONS,
+    OBSERVATION_CHECKPOINT_VERSION, OBSERVATION_FORMAT_TAG, ObservationCommitError,
+    RunBatchReceiptInfo, RunBatchScope, RunObservationError, decode_observation_checkpoint,
+    encode_observation_bytes, encode_observation_checkpoint, validate_observation_bind,
+    validate_observation_engine,
 };
 pub use startup_reconciliation::{
     StartupReconciliationCandidate, StartupReconciliationCandidates, StartupReconciliationError,
@@ -244,13 +255,23 @@ fn millis(value: UnixMillis) -> i64 {
 }
 
 mod model_favorites;
-pub use model_favorites::{ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult};
+pub use model_favorites::{
+    ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult,
+};
 
 mod run_usage;
-pub use run_usage::{RecordRunUsage,RecordRunUsageInput,RunUsageWriteReceipt,RecordRunUsageOutcome,RunUsageRepositoryError};
+pub use run_usage::{
+    RecordRunUsage, RecordRunUsageInput, RecordRunUsageOutcome, RunUsageRepositoryError,
+    RunUsageWriteReceipt,
+};
 
 mod queued_message;
-pub use queued_message::{QueuedMessageRepositoryError};
+pub use queued_message::QueuedMessageRepositoryError;
 
 mod session_continuation;
-pub use session_continuation::{PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint, SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup, SessionContinuationQuery, SessionContinuationSequence, SessionContinuationUnavailable, SessionContinuationUnavailableReason};
+pub use session_continuation::{
+    PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint,
+    SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup,
+    SessionContinuationQuery, SessionContinuationSequence, SessionContinuationUnavailable,
+    SessionContinuationUnavailableReason,
+};

@@ -10,8 +10,8 @@ use artisan_domain::{
     PatchSequence, Revision, ThreadId, UnixMillis,
 };
 use conversation_subscription_registry::{
-    ActivateError, ApplyBatchError, ConversationSubscriptionRegistry, RegisterError,
-    SubscriptionState, UnsubscribeOutcome,
+    ActivateError, ApplyBatchError, ApplyObservationBatchError, ConversationSubscriptionRegistry,
+    RegisterError, SubscriptionState, UnsubscribeOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -741,4 +741,235 @@ fn publish_batch_advances_only_after_successful_publication() {
         view_cursor(&registry, &thread("thread-alias")),
         Some(cursor(1))
     );
+}
+
+// ---------------------------------------------------------------------------
+// S1b engine-observation delivery: ordering, cursor dedup, reconnect replay
+// ---------------------------------------------------------------------------
+
+fn view_observation_cursor(
+    registry: &ConversationSubscriptionRegistry,
+    id: &ThreadId,
+) -> Option<u64> {
+    registry.view(id).map(|view| view.observation_cursor())
+}
+
+fn activate_thread(registry: &mut ConversationSubscriptionRegistry, id: &str) -> ThreadId {
+    let thread_id = thread(id);
+    let lease = registry
+        .register_pending(thread_id.clone(), cursor(0))
+        .expect("observation registration should succeed");
+    registry
+        .activate(&lease)
+        .expect("activation should succeed");
+    thread_id
+}
+
+fn observation_lease(
+    registry: &ConversationSubscriptionRegistry,
+    id: &ThreadId,
+) -> conversation_subscription_registry::SubscriptionLease {
+    registry
+        .view(id)
+        .expect("subscription should exist")
+        .lease()
+        .clone()
+}
+
+#[test]
+fn observation_batches_advance_in_sequence_order() {
+    let mut registry = ConversationSubscriptionRegistry::new();
+    let thread_id = activate_thread(&mut registry, "thread-obs-order");
+    let lease = observation_lease(&registry, &thread_id);
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(0));
+
+    let advanced = registry
+        .publish_observation_batch(&lease, &thread_id, 0, 3)
+        .expect("first observation batch should publish");
+    assert_eq!(advanced, 3);
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(3));
+
+    let advanced = registry
+        .publish_observation_batch(&lease, &thread_id, 3, 5)
+        .expect("second observation batch should publish");
+    assert_eq!(advanced, 5);
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(5));
+
+    // Observation delivery never moves the conversation cursor.
+    assert_eq!(
+        view_cursor(&registry, &thread_id),
+        Some(cursor(0)),
+        "observation publication must not advance conversation replay"
+    );
+}
+
+#[test]
+fn observation_duplicate_redelivery_is_a_cursor_mismatch() {
+    let mut registry = ConversationSubscriptionRegistry::new();
+    let thread_id = activate_thread(&mut registry, "thread-obs-duplicate");
+    let lease = observation_lease(&registry, &thread_id);
+    registry
+        .publish_observation_batch(&lease, &thread_id, 0, 3)
+        .expect("first publication should succeed");
+
+    let before = registry.view(&thread_id);
+    // Replaying the already-applied batch (for example after a reconnect
+    // replay) reports the fence instead of duplicating delivery.
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread_id, 0, 3),
+        Err(ApplyObservationBatchError::CursorMismatch {
+            expected: 3,
+            actual: 0,
+        })
+    );
+    assert_eq!(registry.view(&thread_id), before);
+}
+
+#[test]
+fn observation_gap_and_regression_reject_without_mutation() {
+    let mut registry = ConversationSubscriptionRegistry::new();
+    let thread_id = activate_thread(&mut registry, "thread-obs-gap");
+    let lease = observation_lease(&registry, &thread_id);
+    registry
+        .publish_observation_batch(&lease, &thread_id, 0, 3)
+        .expect("first publication should succeed");
+
+    let before = registry.view(&thread_id);
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread_id, 5, 7),
+        Err(ApplyObservationBatchError::CursorMismatch {
+            expected: 3,
+            actual: 5,
+        })
+    );
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread_id, 1, 4),
+        Err(ApplyObservationBatchError::CursorMismatch {
+            expected: 3,
+            actual: 1,
+        })
+    );
+    assert_eq!(registry.view(&thread_id), before);
+}
+
+#[test]
+fn observation_non_advancing_batch_rejects_without_mutation() {
+    let mut registry = ConversationSubscriptionRegistry::new();
+    let thread_id = activate_thread(&mut registry, "thread-obs-advance");
+    let lease = observation_lease(&registry, &thread_id);
+
+    let before = registry.view(&thread_id);
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread_id, 0, 0),
+        Err(ApplyObservationBatchError::NonAdvancing {
+            from_sequence: 0,
+            to_sequence: 0,
+        })
+    );
+    assert_eq!(registry.view(&thread_id), before);
+}
+
+#[test]
+fn observation_publication_requires_an_active_matching_lease() {
+    let mut registry = ConversationSubscriptionRegistry::new();
+    let pending_lease = registry
+        .register_pending(thread("thread-obs-pending"), cursor(0))
+        .expect("pending registration should succeed");
+    let before = registry.view(&thread("thread-obs-pending"));
+    assert_eq!(
+        registry.publish_observation_batch(&pending_lease, &thread("thread-obs-pending"), 0, 1),
+        Err(ApplyObservationBatchError::NotActive)
+    );
+    assert_eq!(registry.view(&thread("thread-obs-pending")), before);
+
+    let thread_id = activate_thread(&mut registry, "thread-obs-lease");
+    let lease = observation_lease(&registry, &thread_id);
+    let before = registry.view(&thread_id);
+    // Batch thread differs from the lease thread.
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread("thread-obs-other"), 0, 1),
+        Err(ApplyObservationBatchError::ThreadMismatch)
+    );
+    assert_eq!(registry.view(&thread_id), before);
+
+    // Replacing the entry stales the old lease for observations too.
+    let replacement = registry
+        .register_pending(thread_id.clone(), cursor(0))
+        .expect("replacement should succeed");
+    assert_ne!(replacement.generation(), lease.generation());
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread_id, 0, 1),
+        Err(ApplyObservationBatchError::StaleLease)
+    );
+    // The replacement is pending, so even its fresh lease cannot publish.
+    assert_eq!(
+        registry.publish_observation_batch(&replacement, &thread_id, 0, 1),
+        Err(ApplyObservationBatchError::NotActive)
+    );
+}
+
+#[test]
+fn observation_cursors_are_independent_per_thread() {
+    let mut registry = ConversationSubscriptionRegistry::new();
+    let thread_a = activate_thread(&mut registry, "thread-obs-a");
+    let thread_b = activate_thread(&mut registry, "thread-obs-b");
+    let lease_a = observation_lease(&registry, &thread_a);
+    let lease_b = observation_lease(&registry, &thread_b);
+
+    registry
+        .publish_observation_batch(&lease_a, &thread_a, 0, 4)
+        .expect("thread a should advance");
+    assert_eq!(view_observation_cursor(&registry, &thread_a), Some(4));
+    assert_eq!(view_observation_cursor(&registry, &thread_b), Some(0));
+
+    registry
+        .publish_observation_batch(&lease_b, &thread_b, 0, 1)
+        .expect("thread b should advance");
+    assert_eq!(view_observation_cursor(&registry, &thread_a), Some(4));
+    assert_eq!(view_observation_cursor(&registry, &thread_b), Some(1));
+}
+
+#[test]
+fn resubscribe_restarts_observation_replay_from_zero() {
+    let mut registry = ConversationSubscriptionRegistry::new();
+    let thread_id = activate_thread(&mut registry, "thread-obs-reconnect");
+    let lease = observation_lease(&registry, &thread_id);
+    registry
+        .publish_observation_batch(&lease, &thread_id, 0, 5)
+        .expect("first connection should deliver");
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(5));
+
+    // A reconnect resubscribe replaces the entry: the old lease is stale
+    // forever and the new entry replays committed observations from the
+    // durable history, so already-delivered rows deduplicate by sequence.
+    let replacement = registry
+        .register_pending(thread_id.clone(), cursor(0))
+        .expect("resubscribe should succeed");
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(0));
+    assert_eq!(
+        registry.publish_observation_batch(&lease, &thread_id, 5, 6),
+        Err(ApplyObservationBatchError::StaleLease)
+    );
+    registry
+        .activate(&replacement)
+        .expect("resubscribed entry should activate");
+    registry
+        .publish_observation_batch(&replacement, &thread_id, 0, 5)
+        .expect("reconnect replay should redeliver from zero");
+    assert_eq!(view_observation_cursor(&registry, &thread_id), Some(5));
+}
+
+#[test]
+fn observation_error_display_reports_sequences_without_payloads() {
+    let mismatch = ApplyObservationBatchError::CursorMismatch {
+        expected: 3,
+        actual: 0,
+    };
+    let rendered = mismatch.to_string();
+    assert_eq!(rendered, "observation batch cursor mismatch");
+    let stalled = ApplyObservationBatchError::NonAdvancing {
+        from_sequence: 4,
+        to_sequence: 4,
+    };
+    assert_eq!(stalled.to_string(), "observation batch does not advance");
 }

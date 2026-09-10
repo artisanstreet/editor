@@ -28,6 +28,27 @@ use crate::engine_owner::catalog::{
 };
 
 const OPENCODE2_ENGINE_ID: &str = "opencode2";
+const CODEX_ENGINE_ID: &str = "codex";
+const CLAUDE_ENGINE_ID: &str = "claude";
+const GROK_ENGINE_ID: &str = "grok";
+const CURSOR_ENGINE_ID: &str = "cursor";
+const HERMES_ENGINE_ID: &str = "hermes";
+
+/// Harness identifiers Forge can execute once their fixture-proven runtimes
+/// are registered in this process.
+///
+/// `runnable` means a supported harness with an in-tree runtime, not an
+/// installed binary. Executable resolution and the readiness handshake stay
+/// the live gate in each per-engine executor and probe path: a missing CLI
+/// still yields unavailable-with-reason at runtime, never a false ready.
+const RUNNABLE_ENGINE_IDS: [&str; 6] = [
+    OPENCODE2_ENGINE_ID,
+    CODEX_ENGINE_ID,
+    CLAUDE_ENGINE_ID,
+    GROK_ENGINE_ID,
+    CURSOR_ENGINE_ID,
+    HERMES_ENGINE_ID,
+];
 
 /// Payload-free failure while combining the typed runtime result with the
 /// shared catalog manifest.
@@ -57,10 +78,10 @@ pub(crate) enum NativeModelCatalogBridgeError {
 /// manifest and owner-authoritative favorites.
 ///
 /// Only the discovered `opencode2` rows are added to the manifest. Static
-/// rows for other harnesses remain readable, but their harnesses are omitted
-/// from `runnable_harness_ids` and therefore remain unavailable to new policy
-/// admission. No thinking, speed, MCP, web-search, permission, or cost value
-/// is inferred when OpenCode2 did not report it.
+/// rows for the other fixture-proven harnesses are readable and runnable
+/// through [`RUNNABLE_ENGINE_IDS`]; Hermes and OpenCode2 rows arrive only
+/// through live discovery. No thinking, speed, MCP, web-search, permission,
+/// or cost value is inferred when OpenCode2 did not report it.
 pub(crate) fn from_catalog_result(
     result: CatalogResult,
     favorites: &ModelFavoritesSnapshot,
@@ -106,7 +127,10 @@ pub(crate) fn from_catalog_result(
 
     let runtime = NativeCatalogRuntime {
         catalog_revision: Some(result.catalog_revision),
-        runnable_harness_ids: vec![OPENCODE2_ENGINE_ID.to_owned()],
+        runnable_harness_ids: RUNNABLE_ENGINE_IDS
+            .iter()
+            .map(|harness| (*harness).to_owned())
+            .collect(),
         routes: result.routes.into_iter().map(convert_route).collect(),
         default_model_id: None,
         favorite_ids: favorites
@@ -370,7 +394,10 @@ mod tests {
             .expect("typed result converts");
 
         assert_eq!(catalog.catalog_revision, result.catalog_revision);
-        assert_eq!(catalog.runnable_harness_ids, vec!["opencode2"]);
+        assert_eq!(
+            catalog.runnable_harness_ids,
+            vec!["opencode2", "codex", "claude", "grok", "cursor", "hermes"]
+        );
         assert_eq!(catalog.favorite_ids, vec![favorite_id.clone()]);
         assert_eq!(
             catalog
@@ -471,10 +498,8 @@ mod tests {
             "codex"
         );
         assert!(
-            catalog
-                .selectability("codex-sol")
-                .unavailable_reason()
-                .is_some()
+            catalog.selectability("codex-sol").is_available(),
+            "fixture-proven codex harness is runnable"
         );
         assert!(
             catalog
@@ -514,6 +539,68 @@ mod tests {
         assert_eq!(
             from_catalog_result(oversized_native_id, &ModelFavoritesSnapshot::empty()),
             Err(NativeModelCatalogBridgeError::InvalidModelIdentity)
+        );
+    }
+
+    #[test]
+    fn runnable_set_admits_all_fixture_proven_engines() {
+        let result = fixture_result();
+        let catalog = from_catalog_result(result, &ModelFavoritesSnapshot::empty())
+            .expect("typed result converts");
+        assert_eq!(
+            catalog.runnable_harness_ids,
+            vec!["opencode2", "codex", "claude", "grok", "cursor", "hermes"]
+        );
+        for model_id in [
+            "codex-sol",
+            "claude-fable",
+            "grok-4-6",
+            "cursor-composer-2-5",
+        ] {
+            assert!(
+                catalog.selectability(model_id).is_available(),
+                "{model_id} is selectable on its fixture-proven harness"
+            );
+            assert!(
+                catalog.policy_for_model(model_id).is_ok(),
+                "{model_id} admits a runnable policy"
+            );
+        }
+    }
+
+    #[test]
+    fn runnable_is_harness_support_not_probe_readiness() {
+        let result = fixture_result();
+        let catalog = from_catalog_result(result, &ModelFavoritesSnapshot::empty())
+            .expect("typed result converts");
+        assert!(
+            catalog.runnable_harness_ids.contains(&"codex".to_owned()),
+            "codex is a supported harness"
+        );
+        assert!(
+            catalog
+                .routes
+                .iter()
+                .all(|route| route.engine_id == "opencode2"),
+            "the bridge manufactures no readiness evidence for other engines"
+        );
+        assert!(
+            catalog
+                .routes
+                .iter()
+                .all(|route| route.engine_id != "codex"),
+            "no codex route is invented without live discovery"
+        );
+        let unknown = catalog.selectability("codex:does-not-exist");
+        assert!(
+            !unknown.is_available(),
+            "an undiscovered engine model stays unavailable"
+        );
+        assert!(
+            unknown
+                .unavailable_reason()
+                .is_some_and(|reason| reason.contains("not in this catalog")),
+            "the unavailable reason stays honest, never a false ready"
         );
     }
 

@@ -56,6 +56,10 @@ exports_files([
     "directory_helper_unit.rs",
     "engine_owner_configuration.rs",
     "engine_owner_configured.rs",
+    "engine_owner_codex.rs",
+    "engine_owner_claude.rs",
+    "engine_owner_grok.rs",
+    "engine_owner_hermes.rs",
     "engine_owner_custody.rs",
     "engine_owner_readiness.rs",
     "engine_owner_streaming.rs",
@@ -65,6 +69,7 @@ exports_files([
     "lifecycle_listener.rs",
     "listener_configuration.rs",
     "native_run_dispatch.rs",
+    "run_interaction_dispatch.rs",
 ])
 
 # TEST-ONLY protocol child fixture: one ordinary main, no libtest harness,
@@ -501,6 +506,23 @@ rust_test(
         "//modules/domain:domain",
         "//modules/protocol:protocol",
         "@crates//:getrandom-0.4.3",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "run_interaction_test",
+    srcs = ["run_interaction.rs"],
+    crate_name = "run_interaction_test",
+    deps = [
+        "//modules/backend:backend",
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/protocol:protocol",
         "@crates//:tokio",
     ],
     edition = "2024",

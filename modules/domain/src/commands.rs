@@ -11,6 +11,7 @@
 use crate::engine_config::{EngineConfigUpdatePrecondition, EngineRunConfig};
 use crate::identifiers::{DirectoryId, MessageId, ProjectId, RequestId, RunId, ThreadId};
 use crate::message::QueueMessagePayload;
+use crate::run_interaction::{RespondApproval, RespondQuestion};
 use crate::{ListQueuedMessages, ReadAccountUsage, ReadRecalledMessage, ReadRunUsage, WithdrawQueuedMessageCommand};
 use crate::text::{MessageBody, ThreadTitle};
 
@@ -221,6 +222,10 @@ pub enum Command {
     /// See [`SetModelFavorite`].
     SetModelFavorite(SetModelFavorite),
     WithdrawQueuedMessage(WithdrawQueuedMessageCommand),
+    /// See [`RespondApproval`].
+    RespondApproval(RespondApproval),
+    /// See [`RespondQuestion`].
+    RespondQuestion(RespondQuestion),
     /// See [`SetThreadEngineConfig`].
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
 }
@@ -237,6 +242,8 @@ impl Command {
             Self::StopRun(command) => &command.request_id,
             Self::SetModelFavorite(command) => command.request_id(),
             Self::WithdrawQueuedMessage(command) => command.request_id(),
+            Self::RespondApproval(command) => command.request_id(),
+            Self::RespondQuestion(command) => command.request_id(),
             Self::SetThreadEngineConfig(command) => command.request_id(),
         }
     }

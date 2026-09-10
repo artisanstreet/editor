@@ -32,16 +32,26 @@ use std::time::{Duration, Instant};
 
 use artisan_database::ThreadEngineSettings;
 use artisan_domain::{QueueMessagePayload, RootPath, RunId, ThreadId};
-use artisan_native_engine::VerifiedOpenCode2ProfileLaunch;
+use artisan_native_engine::{
+    VerifiedClaudeLaunch, VerifiedCodexLaunch, VerifiedOpenCode2ProfileLaunch,
+};
 use artisan_transport::CancelHandle;
 use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
+pub(crate) mod acp;
+pub(crate) mod acp_bridges;
 pub(crate) mod catalog;
+pub(crate) mod claude;
+pub(crate) mod codex;
+pub(crate) mod cursor;
 pub(crate) mod event;
 pub(crate) mod framing;
+pub(crate) mod grok;
+pub(crate) mod hermes;
 pub mod http;
+pub(crate) mod interaction;
 pub(crate) mod observation;
 pub(crate) mod opencode_event;
 pub(crate) mod operation;
@@ -73,6 +83,26 @@ mod engine_owner_configured;
 #[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_preflight.rs"]
 mod engine_owner_preflight;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_codex.rs"]
+mod engine_owner_codex;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_claude.rs"]
+mod engine_owner_claude;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_cursor.rs"]
+mod engine_owner_cursor;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_grok.rs"]
+mod engine_owner_grok;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_hermes.rs"]
+mod engine_owner_hermes;
 
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
@@ -193,11 +223,22 @@ impl std::fmt::Debug for FixtureTurnInput {
 
 /// Private launch for the single internal configured pipeline.
 ///
-/// The `Verified` variant carries the production capability and is present in
-/// all builds; the `Fixture` variant is `#[cfg(test)]` only and never
-/// constructible in non-test builds. Never `Clone`.
+/// The `Verified` variant carries the production OpenCode2 capability, the
+/// `Codex` variant carries the production Codex capability, the `Claude`
+/// variant carries the production Claude capability, the `Grok` variant
+/// carries the probe-certified Grok launch, the `Cursor` variant carries
+/// the finite C1 cursor launch (typed settings, unprobed version sentinel;
+/// not runnable yet), the `Hermes` variant carries the production Hermes
+/// capability, and the `Fixture`
+/// variant is `#[cfg(test)]` only and never constructible in non-test builds.
+/// Never `Clone`.
 pub(crate) enum InternalLaunch {
     Verified(Box<VerifiedOpenCode2ProfileLaunch>),
+    Codex(Box<VerifiedCodexLaunch>),
+    Claude(Box<VerifiedClaudeLaunch>),
+    Grok(Box<grok::GrokLaunch>),
+    Cursor(Box<cursor::CursorLaunch>),
+    Hermes(Box<hermes::VerifiedHermesLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }
@@ -212,6 +253,11 @@ impl InternalLaunch {
     pub(crate) fn profile_id(&self) -> &str {
         match self {
             Self::Verified(verified) => verified.as_ref().profile_id().as_str(),
+            Self::Codex(verified) => verified.as_ref().profile_id().as_str(),
+            Self::Claude(verified) => verified.as_ref().profile_id().as_str(),
+            Self::Grok(launch) => launch.as_ref().profile_id().as_str(),
+            Self::Cursor(launch) => launch.profile_id(),
+            Self::Hermes(verified) => verified.profile_id(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.profile_id.as_str(),
         }
@@ -220,17 +266,165 @@ impl InternalLaunch {
     pub(crate) fn version(&self) -> &str {
         match self {
             Self::Verified(verified) => verified.as_ref().version(),
+            Self::Codex(verified) => verified.as_ref().version(),
+            Self::Claude(verified) => verified.as_ref().version(),
+            Self::Grok(launch) => launch.as_ref().version(),
+            Self::Cursor(launch) => launch.version(),
+            Self::Hermes(verified) => verified.version(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.version,
         }
     }
 }
 
+/// Immutable input handed to the configured `Codex` owner.
+///
+/// The dispatcher constructs this only after reading the durable settings
+/// and resolving the exact Codex launch. The owner never rereads the thread,
+/// registry, or environment while this value is live. Unlike the Claude,
+/// Grok, and Cursor turns, Codex carries the optional provider continuation:
+/// resume reopens the durable provider thread through the X3 gate (same
+/// engine, explicit target model, CLI >= 0.145.0).
+pub(crate) struct EngineCodexTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt: QueueMessagePayload,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: VerifiedCodexLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for EngineCodexTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineCodexTurnInput { <redacted> }")
+    }
+}
+
+/// Immutable input handed to the configured `Claude` owner.
+///
+/// The dispatcher constructs this only after reading the durable settings
+/// and resolving the exact Claude launch. The owner never rereads the thread,
+/// registry, or environment while this value is live. Unlike the Grok and
+/// Cursor turns, Claude carries the optional provider continuation: resume
+/// reopens the durable native session through `--resume` behind the L3 gate
+/// (same engine, explicit target model, CLI >= 2.1.220).
+pub(crate) struct EngineClaudeTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt: QueueMessagePayload,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: VerifiedClaudeLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for EngineClaudeTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineClaudeTurnInput { <redacted> }")
+    }
+}
+
+/// Immutable input handed to the configured `Grok` owner.
+///
+/// The dispatcher constructs this only after reading the durable settings
+/// and resolving the exact probe-certified Grok launch. The owner never
+/// rereads the thread, registry, or environment while this value is live.
+/// Unlike the Cursor turns, Grok carries the optional provider continuation:
+/// resume reopens the durable provider conversation through `session/load`
+/// behind the G3 gate (same engine, explicit target model, recorded CLI
+/// version).
+pub(crate) struct EngineGrokTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt: QueueMessagePayload,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: grok::GrokLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for EngineGrokTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineGrokTurnInput { <redacted> }")
+    }
+}
+
+/// Immutable input handed to the configured `Cursor` owner.
+///
+/// The dispatcher constructs this only after reading the durable settings
+/// and resolving the exact cursor launch. The owner never rereads the thread,
+/// registry, or environment while this value is live. Unlike the Grok turns,
+/// Cursor carries the optional provider continuation: resume reopens the
+/// durable ACP session through `session/load` behind the C3 gate (same
+/// engine, explicit target model, CLI >= 2026.08.11-e8db854).
+pub(crate) struct EngineCursorTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt: QueueMessagePayload,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: cursor::CursorLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for EngineCursorTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineCursorTurnInput { <redacted> }")
+    }
+}
+
+/// Immutable input handed to the configured `Hermes` owner.
+///
+/// The dispatcher constructs this only after reading the durable settings
+/// and resolving the exact Hermes launch. Unlike the Codex and Claude turns,
+/// Hermes carries the optional provider continuation: resume reopens the
+/// durable gateway session with original-model enforcement. The owner never
+/// rereads the thread, registry, or environment while this value is live.
+pub(crate) struct EngineHermesTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt: QueueMessagePayload,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: hermes::VerifiedHermesLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for EngineHermesTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineHermesTurnInput { <redacted> }")
+    }
+}
+
 /// Single internal input for the one configured-turn pipeline.
 ///
-/// Both `EngineTurnInput` (production) and `FixtureTurnInput` (`#[cfg(test)]`)
-/// convert into this at admission, so the queued `Job::Turn` always carries
-/// the same type and exactly one executor proves the lifecycle.
+/// `EngineTurnInput`, `EngineCodexTurnInput`, `EngineClaudeTurnInput`,
+/// `EngineGrokTurnInput`, `EngineCursorTurnInput`, and
+/// `EngineHermesTurnInput` (production) plus `FixtureTurnInput`
+/// (`#[cfg(test)]`) convert into this at admission, so the
+/// queued `Job::Turn` always carries the same type and exactly one executor
+/// per engine proves the lifecycle.
 pub(crate) struct InternalTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) thread_id: Option<ThreadId>,
@@ -781,6 +975,146 @@ impl EngineOwner {
         }
     }
 
+    /// Admits one configured `Codex` turn into the single owner queue.
+    ///
+    /// Mirrors [`Self::admit_turn`] without forking the queue: the same
+    /// `Job::Turn` type carries an [`InternalLaunch::Codex`] capability and
+    /// exactly one executor proves the lifecycle. Codex turns carry the
+    /// optional provider continuation for `thread/resume` behind the X3 gate
+    /// (same engine, explicit target model, CLI >= 0.145.0).
+    pub(crate) fn admit_codex_turn(
+        &self,
+        input: EngineCodexTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            thread_id: Some(input.thread_id),
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt: input.prompt,
+            settings: input.settings,
+            launch: InternalLaunch::Codex(Box::new(input.launch)),
+            continuation: input.continuation,
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    /// Admits one configured `Claude` turn into the single owner queue.
+    ///
+    /// Mirrors [`Self::admit_turn`] without forking the queue: the same
+    /// `Job::Turn` type carries an [`InternalLaunch::Claude`] capability and
+    /// exactly one executor proves the lifecycle. Claude turns carry the
+    /// optional provider continuation for `--resume` behind the L3 gate
+    /// (same engine, explicit target model, CLI >= 2.1.220).
+    pub(crate) fn admit_claude_turn(
+        &self,
+        input: EngineClaudeTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            thread_id: Some(input.thread_id),
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt: input.prompt,
+            settings: input.settings,
+            launch: InternalLaunch::Claude(Box::new(input.launch)),
+            continuation: input.continuation,
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    /// Admits one configured `Grok` turn into the single owner queue.
+    ///
+    /// Mirrors [`Self::admit_turn`] without forking the queue: the same
+    /// `Job::Turn` type carries an [`InternalLaunch::Grok`] capability and
+    /// exactly one executor proves the lifecycle. Grok turns carry the
+    /// optional provider continuation for `session/load` behind the G3 gate
+    /// (same engine, explicit target model, recorded CLI version).
+    pub(crate) fn admit_grok_turn(
+        &self,
+        input: EngineGrokTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            thread_id: Some(input.thread_id),
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt: input.prompt,
+            settings: input.settings,
+            launch: InternalLaunch::Grok(Box::new(input.launch)),
+            continuation: input.continuation,
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    /// Admits one configured `Cursor` turn into the single owner queue.
+    ///
+    /// Mirrors [`Self::admit_turn`] without forking the queue: the same
+    /// `Job::Turn` type carries an [`InternalLaunch::Cursor`] capability and
+    /// exactly one executor proves the lifecycle. Cursor turns carry the
+    /// optional provider continuation for `session/load` behind the C3 gate
+    /// (same engine, explicit target model, CLI >= 2026.08.11-e8db854).
+    pub(crate) fn admit_cursor_turn(
+        &self,
+        input: EngineCursorTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            thread_id: Some(input.thread_id),
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt: input.prompt,
+            settings: input.settings,
+            launch: InternalLaunch::Cursor(Box::new(input.launch)),
+            continuation: input.continuation,
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    /// Admits one configured `Hermes` turn into the single owner queue.
+    ///
+    /// Mirrors [`Self::admit_turn`] without forking the queue: the same
+    /// `Job::Turn` type carries an [`InternalLaunch::Hermes`] capability and
+    /// exactly one executor proves the lifecycle. Hermes turns carry the
+    /// optional provider continuation for gateway resume with original-model
+    /// enforcement.
+    pub(crate) fn admit_hermes_turn(
+        &self,
+        input: EngineHermesTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            thread_id: Some(input.thread_id),
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt: input.prompt,
+            settings: input.settings,
+            launch: InternalLaunch::Hermes(Box::new(input.launch)),
+            continuation: input.continuation,
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
     /// Admits one configured `OpenCode2` turn into the single owner queue.
     ///
     /// The observation channel is created at the persisted capacity carried
@@ -961,6 +1295,7 @@ impl EngineOwner {
         let (authorize, authorize_receiver) = oneshot::channel();
         let (respond, receiver) = oneshot::channel();
         let (observations, observation_receiver) = mpsc::channel(observation_capacity);
+        let run_id = input.run_id.clone();
         let job = Job::Turn {
             input: Box::new(input),
             deadline,
@@ -972,6 +1307,7 @@ impl EngineOwner {
         };
         match self.jobs.try_send(job) {
             Ok(()) => Ok(operation::AcceptedTurn::from_parts(
+                run_id,
                 prepared_receiver,
                 authorize,
                 observation_receiver,

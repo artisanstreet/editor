@@ -22,14 +22,20 @@ use artisan_database::{
     ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome, CompleteRun,
     DispatchFailureReason, DispatchLeaseOwner, FailMessageDispatch, InterruptRun, LaunchClaimedRun,
     LaunchClaimedRunOutcome, LaunchedRunReceipt, ProviderBindingBytes, RecordRunUsage, Repository,
-    RequeueMessageDispatch, RunBatchScope, RunErrorCode, RunErrorMessage, RunLaunchCredentials,
-    RunLaunchError, RunStartKey, SessionContinuationLookup, SessionContinuationQuery,
+    RequeueMessageDispatch, ResolveInteractionOutcome, RunBatchScope, RunErrorCode,
+    RunErrorMessage, RunLaunchCredentials, RunLaunchError, RunStartKey, SessionContinuationLookup,
+    SessionContinuationQuery,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, EngineId, IncrementalText, ItemId, PatchId, Revision,
-    RootPath, RunId, TurnId, UnixMillis,
+    AssistantBody, AssistantMessagePhase, EngineId, EngineSelection, IncrementalText, ItemId,
+    Observation, ObservationId, ObservationSequence, PatchId, RespondApproval, RespondQuestion,
+    Revision, RootPath, RunId, SubagentInput, SubagentObservation, SubagentTranscriptObservation,
+    TurnId, UnixMillis,
 };
-use artisan_native_engine::{NativeOpenCode2Authority, VerifiedOpenCode2ProfileLaunch};
+use artisan_native_engine::{
+    NativeClaudeAuthority, NativeCodexAuthority, NativeOpenCode2Authority, VerifiedClaudeLaunch,
+    VerifiedCodexLaunch, VerifiedOpenCode2ProfileLaunch,
+};
 use artisan_transport::CancelHandle;
 use tokio::{runtime::Handle, task::JoinHandle};
 
@@ -38,14 +44,25 @@ use crate::engine_owner::{FixtureConfiguredLaunch, FixtureTurnInput};
 use crate::{
     CommandOrigin, SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
+    engine_owner::cursor::CursorLaunch,
+    engine_owner::grok::GrokLaunch,
+    engine_owner::interaction::InteractionTarget,
     engine_owner::observation::{
-        EngineObservation, TerminalState, TextDelta, TextSnapshot, UsageObservation,
+        EngineObservation, SubagentLifecycleRow, SubagentTranscriptRow, TerminalState, TextDelta,
+        TextSnapshot, UsageObservation,
     },
     engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
-    engine_owner::{EngineContinuation, EngineTurnInput},
+    engine_owner::{
+        EngineClaudeTurnInput, EngineCodexTurnInput, EngineContinuation, EngineCursorTurnInput,
+        EngineGrokTurnInput, EngineHermesTurnInput, EngineTurnInput,
+        hermes::{VerifiedHermesLaunch, resolve_service_executable},
+    },
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
     run_cancellation::{RunCancellationLease, RunCancellationRegistry},
+    run_interaction::{
+        OwnedInteractionCommand, RunInteractionAck, RunInteractionEnvelope, RunInteractionRegistry,
+    },
     startup_reconciliation_sweep::{
         PatchSourceError, StartupReconciliationPatchSource, StartupReconciliationPatches,
         StartupReconciliationSweepInput,
@@ -55,6 +72,11 @@ use crate::{
 const PROMPT_DELIVERY_MAX_BYTES: usize = 256;
 const PROVIDER_BINDING_VERSION: i64 = 1;
 const PROVIDER_BINDING_ENGINE: &str = "opencode2";
+const PROVIDER_BINDING_ENGINE_CODEX: &str = "codex";
+const PROVIDER_BINDING_ENGINE_CLAUDE: &str = "claude";
+const PROVIDER_BINDING_ENGINE_CURSOR: &str = "cursor";
+const PROVIDER_BINDING_ENGINE_GROK: &str = "grok";
+const PROVIDER_BINDING_ENGINE_HERMES: &str = "hermes";
 const PROVIDER_FAILURE_CODE: &str = "provider_failed";
 const PROVIDER_FAILURE_MESSAGE: &str = "OpenCode2 provider turn failed";
 const INTERRUPTED_CODE: &str = "provider_interrupted";
@@ -436,6 +458,7 @@ pub struct NativeRunDispatcher {
     shutdown_budget: Duration,
     join: Option<JoinHandle<DispatchLoopExit>>,
     observed: Option<NativeRunDispatcherShutdown>,
+    interactions: RunInteractionRegistry,
 }
 
 /// The production dispatcher resolves a certified profile for every claim.
@@ -460,6 +483,11 @@ enum ClaimLaunchAvailability {
 
 enum ResolvedLaunch {
     Configured(Box<VerifiedOpenCode2ProfileLaunch>),
+    Codex(Box<VerifiedCodexLaunch>),
+    Claude(Box<VerifiedClaudeLaunch>),
+    Cursor(Box<CursorLaunch>),
+    Grok(Box<GrokLaunch>),
+    Hermes(Box<VerifiedHermesLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }
@@ -609,6 +637,8 @@ impl NativeRunDispatcher {
         let stop = Arc::new(CancelHandle::new());
         let owner = EngineOwner::start_configured(config.queue_capacity, runtime);
         let catalog_client = owner.catalog_client();
+        let interactions = RunInteractionRegistry::new(config.queue_capacity.get())
+            .expect("dispatcher queue capacity should be nonzero");
         let join = runtime.spawn(dispatch_loop(DispatchLoopContext {
             repository,
             database_path,
@@ -616,6 +646,7 @@ impl NativeRunDispatcher {
             stop: Arc::clone(&stop),
             process_cancel,
             cancellation,
+            interactions: interactions.clone(),
             owner,
             activity,
             launch_mode,
@@ -626,7 +657,14 @@ impl NativeRunDispatcher {
             catalog_client,
             join: Some(join),
             observed: None,
+            interactions,
         }
+    }
+
+    /// Returns the process-owned live-run interaction registry shared with
+    /// authenticated response routes.
+    pub(crate) fn interaction_registry(&self) -> RunInteractionRegistry {
+        self.interactions.clone()
     }
 
     pub(crate) fn catalog_client(&self) -> crate::engine_owner::EngineCatalogClient {
@@ -685,6 +723,7 @@ struct DispatchLoopContext {
     stop: Arc<CancelHandle>,
     process_cancel: Arc<CancelHandle>,
     cancellation: RunCancellationRegistry,
+    interactions: RunInteractionRegistry,
     owner: EngineOwner,
     activity: ActivityGateImpl,
     launch_mode: DispatchLaunchMode,
@@ -802,6 +841,7 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
         stop,
         process_cancel,
         cancellation,
+        interactions,
         mut owner,
         activity,
         mut launch_mode,
@@ -883,6 +923,7 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
                 stop: &stop,
                 process_cancel: &process_cancel,
                 cancellation: &cancellation,
+                interactions: &interactions,
                 owner: &owner,
                 claimed,
             },
@@ -980,6 +1021,7 @@ struct ClaimExecution<'a> {
     stop: &'a CancelHandle,
     process_cancel: &'a CancelHandle,
     cancellation: &'a RunCancellationRegistry,
+    interactions: &'a RunInteractionRegistry,
     owner: &'a EngineOwner,
     claimed: ClaimedMessageDispatch,
 }
@@ -1048,6 +1090,7 @@ struct BoundClaim<'a> {
     receipt: LaunchedRunReceipt,
     bound: artisan_database::BoundRunReceipt,
     bound_at: UnixMillis,
+    engine: EngineId,
     turn: AcceptedTurn,
     cancellation: RunCancellationLease,
 }
@@ -1170,27 +1213,121 @@ async fn load_claim(
             return None;
         }
     };
-    let launch = match launch_mode {
-        ClaimLaunchMode::Configured => {
-            let profile_id = settings.config().selection().as_opencode2().profile_id();
-            let Ok(launch) = context
-                .config
-                .authority
-                .resolve_profile_launch(context.database_path, profile_id)
-            else {
-                context.requeue("engine profile unavailable").await;
-                return None;
-            };
-            ResolvedLaunch::Configured(Box::new(launch))
-        }
-        #[cfg(test)]
-        ClaimLaunchMode::Fixture(fixture) => {
-            let configured_profile = settings.config().selection().as_opencode2().profile_id();
-            if configured_profile.as_str() != fixture.profile_id.as_str() {
-                context.requeue("engine profile unavailable").await;
+    // The settings fence fails closed per engine: OpenCode2 resolves through
+    // the certified profile authority, Codex resolves through the Codex
+    // launch authority with a bounded `--version` probe enforcing the minimum
+    // CLI, Claude resolves through the Claude launch authority with a bounded
+    // `--version` probe enforcing the minimum CLI, Grok resolves through the
+    // existing Grok discovery with a bounded `--version` probe parsed by the
+    // shared ACP row (no minimum CLI in the TypeScript evidence), Cursor has
+    // no launch authority in C1 and requeues, and every other newly
+    // representable engine requeues instead of running as another engine.
+    let launch = match settings.config().selection() {
+        EngineSelection::OpenCode2(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let profile_id = selection.profile_id();
+                let Ok(launch) = context
+                    .config
+                    .authority
+                    .resolve_profile_launch(context.database_path, profile_id)
+                else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Configured(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(fixture) => {
+                let configured_profile = selection.profile_id();
+                if configured_profile.as_str() != fixture.profile_id.as_str() {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                }
+                ResolvedLaunch::Fixture(fixture)
+            }
+        },
+        EngineSelection::Codex(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let Some(launch) =
+                    resolve_codex_launch(context.database_path, selection.profile_id()).await
+                else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Codex(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
                 return None;
             }
-            ResolvedLaunch::Fixture(fixture)
+        },
+        EngineSelection::Claude(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let Some(launch) =
+                    resolve_claude_launch(context.database_path, selection.profile_id()).await
+                else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Claude(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
+        EngineSelection::Grok(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let Some(launch) = resolve_grok_launch(selection.profile_id()).await else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Grok(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
+        EngineSelection::Cursor(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                // C1 owns the definition row but no launch authority yet: the
+                // probe/authority packet resolves this. Requeue without
+                // running as another engine.
+                let Some(launch) =
+                    resolve_cursor_launch(context.database_path, selection.profile_id()).await
+                else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Cursor(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
+        EngineSelection::Hermes(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let Some(launch) = resolve_hermes_launch(selection.profile_id()).await else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Hermes(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
+        _ => {
+            context.requeue("engine unavailable").await;
+            return None;
         }
     };
     Some(LoadedClaim {
@@ -1210,13 +1347,170 @@ async fn resolve_continuation(
     if matches!(&claim.launch, ResolvedLaunch::Fixture(_)) {
         return Ok(None);
     }
-    let profile_id = claim
-        .settings
-        .config()
-        .selection()
-        .as_opencode2()
-        .profile_id()
-        .clone();
+    // Codex resumes its durable provider thread: the lookup is scoped to the
+    // codex engine tag and the selecting profile, and the owner reopens the
+    // same thread through `thread/resume` only after the X3 gate (same
+    // engine, explicit target model, CLI >= 0.145.0). Incompatible bindings
+    // fail closed; a fresh thread starts only with no history.
+    if matches!(&claim.launch, ResolvedLaunch::Codex(_)) {
+        let EngineSelection::Codex(selection) = claim.settings.config().selection() else {
+            return Err("engine unavailable");
+        };
+        let profile_id = selection.profile_id().clone();
+        let lookup = claim
+            .context
+            .repository
+            .read_session_continuation(SessionContinuationQuery {
+                thread_id: claim.payload.thread_id.clone(),
+                engine_id: EngineId::Codex,
+                profile_id,
+                exclude_run_id: Some(ids.run_id.clone()),
+            })
+            .await
+            .map_err(|_| "provider continuation lookup failed")?;
+        return match lookup {
+            SessionContinuationLookup::NoHistory => Ok(None),
+            SessionContinuationLookup::Usable(continuation) => {
+                EngineContinuation::new(continuation.session_id.as_str().to_owned())
+                    .map(Some)
+                    .ok_or("provider continuation corrupt")
+            }
+            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
+            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+        };
+    }
+    // Grok resumes its durable provider conversation: the lookup is scoped
+    // to the grok engine tag and the selecting profile, and the owner
+    // reopens the same conversation through `session/load` only after the
+    // G3 gate (same engine, explicit target model, recorded CLI version).
+    // Incompatible bindings fail closed; a fresh conversation starts only
+    // with no history.
+    if matches!(&claim.launch, ResolvedLaunch::Grok(_)) {
+        let EngineSelection::Grok(selection) = claim.settings.config().selection() else {
+            return Err("engine unavailable");
+        };
+        let profile_id = selection.profile_id().clone();
+        let lookup = claim
+            .context
+            .repository
+            .read_session_continuation(SessionContinuationQuery {
+                thread_id: claim.payload.thread_id.clone(),
+                engine_id: EngineId::Grok,
+                profile_id,
+                exclude_run_id: Some(ids.run_id.clone()),
+            })
+            .await
+            .map_err(|_| "provider continuation lookup failed")?;
+        return match lookup {
+            SessionContinuationLookup::NoHistory => Ok(None),
+            SessionContinuationLookup::Usable(continuation) => {
+                EngineContinuation::new(continuation.session_id.as_str().to_owned())
+                    .map(Some)
+                    .ok_or("provider continuation corrupt")
+            }
+            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
+            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+        };
+    }
+    // Claude resumes its durable native session: the lookup is scoped to the
+    // Claude engine tag and the selecting profile, and the owner reopens the
+    // same session through `--resume` only after the L3 gate (same engine,
+    // explicit target model, CLI >= 2.1.220). Incompatible bindings fail
+    // closed; a fresh session starts only with no history.
+    if matches!(&claim.launch, ResolvedLaunch::Claude(_)) {
+        let EngineSelection::Claude(selection) = claim.settings.config().selection() else {
+            return Err("engine unavailable");
+        };
+        let profile_id = selection.profile_id().clone();
+        let lookup = claim
+            .context
+            .repository
+            .read_session_continuation(SessionContinuationQuery {
+                thread_id: claim.payload.thread_id.clone(),
+                engine_id: EngineId::Claude,
+                profile_id,
+                exclude_run_id: Some(ids.run_id.clone()),
+            })
+            .await
+            .map_err(|_| "provider continuation lookup failed")?;
+        return match lookup {
+            SessionContinuationLookup::NoHistory => Ok(None),
+            SessionContinuationLookup::Usable(continuation) => {
+                EngineContinuation::new(continuation.session_id.as_str().to_owned())
+                    .map(Some)
+                    .ok_or("provider continuation corrupt")
+            }
+            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
+            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+        };
+    }
+    // Cursor resumes its durable ACP session: the lookup is scoped to the
+    // cursor engine tag and the selecting profile, and the owner reopens the
+    // same session through `session/load` only after the C3 gate (same
+    // engine, explicit target model, CLI >= 2026.08.11-e8db854). Incompatible
+    // bindings fail closed; a fresh session starts only with no history.
+    if matches!(&claim.launch, ResolvedLaunch::Cursor(_)) {
+        let EngineSelection::Cursor(selection) = claim.settings.config().selection() else {
+            return Err("engine unavailable");
+        };
+        let profile_id = selection.profile_id().clone();
+        let lookup = claim
+            .context
+            .repository
+            .read_session_continuation(SessionContinuationQuery {
+                thread_id: claim.payload.thread_id.clone(),
+                engine_id: EngineId::Cursor,
+                profile_id,
+                exclude_run_id: Some(ids.run_id.clone()),
+            })
+            .await
+            .map_err(|_| "provider continuation lookup failed")?;
+        return match lookup {
+            SessionContinuationLookup::NoHistory => Ok(None),
+            SessionContinuationLookup::Usable(continuation) => {
+                EngineContinuation::new(continuation.session_id.as_str().to_owned())
+                    .map(Some)
+                    .ok_or("provider continuation corrupt")
+            }
+            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
+            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+        };
+    }
+    // Hermes resumes its durable gateway session: the lookup is scoped to the
+    // Hermes engine tag and the selecting profile, and the owner enforces the
+    // original model selection after `session.resume` (mirroring
+    // `CheckNativeContinuation`: compatible only on identical selection).
+    if matches!(&claim.launch, ResolvedLaunch::Hermes(_)) {
+        let EngineSelection::Hermes(selection) = claim.settings.config().selection() else {
+            return Err("engine unavailable");
+        };
+        let profile_id = selection.profile_id().clone();
+        let lookup = claim
+            .context
+            .repository
+            .read_session_continuation(SessionContinuationQuery {
+                thread_id: claim.payload.thread_id.clone(),
+                engine_id: EngineId::Hermes,
+                profile_id,
+                exclude_run_id: Some(ids.run_id.clone()),
+            })
+            .await
+            .map_err(|_| "provider continuation lookup failed")?;
+        return match lookup {
+            SessionContinuationLookup::NoHistory => Ok(None),
+            SessionContinuationLookup::Usable(continuation) => {
+                EngineContinuation::new(continuation.session_id.as_str().to_owned())
+                    .map(Some)
+                    .ok_or("provider continuation corrupt")
+            }
+            SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
+            SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+        };
+    }
+    let EngineSelection::OpenCode2(selection) = claim.settings.config().selection() else {
+        return Err("engine unavailable");
+    };
+    let profile_id = selection.profile_id().clone();
     let lookup = claim
         .context
         .repository
@@ -1246,7 +1540,12 @@ fn mint_claim_ids(
     launch: &ResolvedLaunch,
 ) -> Result<ClaimIds, &'static str> {
     let (run_id, turn_id, item_id, first_patch_id, second_patch_id) = match launch {
-        ResolvedLaunch::Configured(_) => (
+        ResolvedLaunch::Configured(_)
+        | ResolvedLaunch::Codex(_)
+        | ResolvedLaunch::Claude(_)
+        | ResolvedLaunch::Cursor(_)
+        | ResolvedLaunch::Grok(_)
+        | ResolvedLaunch::Hermes(_) => (
             mint_run_id(origin).ok_or("run identity unavailable")?,
             mint_turn_id(origin).ok_or("run identity unavailable")?,
             mint_item_id(origin).ok_or("run identity unavailable")?,
@@ -1376,6 +1675,86 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
             },
             attempt_budget,
         ),
+        ResolvedLaunch::Codex(launch) => context.owner.admit_codex_turn(
+            EngineCodexTurnInput {
+                run_id: receipt.run_id.clone(),
+                thread_id: payload.thread_id.clone(),
+                project_root,
+                prompt_id,
+                prompt,
+                settings: settings.clone(),
+                launch: *launch,
+                continuation,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
+        ResolvedLaunch::Claude(launch) => context.owner.admit_claude_turn(
+            EngineClaudeTurnInput {
+                run_id: receipt.run_id.clone(),
+                thread_id: payload.thread_id.clone(),
+                project_root,
+                prompt_id,
+                prompt,
+                settings: settings.clone(),
+                launch: *launch,
+                continuation,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
+        ResolvedLaunch::Grok(launch) => context.owner.admit_grok_turn(
+            EngineGrokTurnInput {
+                run_id: receipt.run_id.clone(),
+                thread_id: payload.thread_id.clone(),
+                project_root,
+                prompt_id,
+                prompt,
+                settings: settings.clone(),
+                launch: *launch,
+                continuation,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
+        ResolvedLaunch::Cursor(launch) => context.owner.admit_cursor_turn(
+            EngineCursorTurnInput {
+                run_id: receipt.run_id.clone(),
+                thread_id: payload.thread_id.clone(),
+                project_root,
+                prompt_id,
+                prompt,
+                settings: settings.clone(),
+                launch: *launch,
+                continuation,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
+        ResolvedLaunch::Hermes(launch) => context.owner.admit_hermes_turn(
+            EngineHermesTurnInput {
+                run_id: receipt.run_id.clone(),
+                thread_id: payload.thread_id.clone(),
+                project_root,
+                prompt_id,
+                prompt,
+                settings: settings.clone(),
+                launch: *launch,
+                continuation,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
         #[cfg(test)]
         ResolvedLaunch::Fixture(fixture) => context.owner.admit_fixture_turn(
             FixtureTurnInput {
@@ -1450,15 +1829,78 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
     if run_cancel.is_cancelled() {
         turn.cancel();
     }
-    let Some(binding_bytes) = provider_binding_bytes(
-        settings
-            .config()
-            .selection()
-            .as_opencode2()
-            .profile_id()
-            .as_str(),
+    // Provider binding bytes carry the exact engine tag (`opencode2`,
+    // `codex`, `claude`, `grok`, `cursor`, or `hermes`) with format 1 and the native thread identity from
+    // the app-server contract. A selection for any other engine abandons the
+    // turn here instead of binding as a runnable engine.
+    let (binding_engine, binding_profile) = match settings.config().selection() {
+        EngineSelection::OpenCode2(selection) => (
+            PROVIDER_BINDING_ENGINE,
+            selection.profile_id().as_str().to_owned(),
+        ),
+        EngineSelection::Codex(selection) => (
+            PROVIDER_BINDING_ENGINE_CODEX,
+            selection.profile_id().as_str().to_owned(),
+        ),
+        EngineSelection::Claude(selection) => (
+            PROVIDER_BINDING_ENGINE_CLAUDE,
+            selection.profile_id().as_str().to_owned(),
+        ),
+        EngineSelection::Cursor(selection) => (
+            PROVIDER_BINDING_ENGINE_CURSOR,
+            selection.profile_id().as_str().to_owned(),
+        ),
+        EngineSelection::Grok(selection) => (
+            PROVIDER_BINDING_ENGINE_GROK,
+            selection.profile_id().as_str().to_owned(),
+        ),
+        EngineSelection::Hermes(selection) => (
+            PROVIDER_BINDING_ENGINE_HERMES,
+            selection.profile_id().as_str().to_owned(),
+        ),
+        _ => {
+            let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
+            return (
+                None,
+                if custody {
+                    ClaimCustody::Retained(cancellation)
+                } else {
+                    ClaimCustody::Released
+                },
+            );
+        }
+    };
+    let Some(raw_binding) = binding_bytes_vec(binding_engine, &binding_profile, session.session())
+    else {
+        let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
+        return (
+            None,
+            if custody {
+                ClaimCustody::Retained(cancellation)
+            } else {
+                ClaimCustody::Released
+            },
+        );
+    };
+    // Round-trip the bytes before binding: a tag/format/profile mismatch
+    // requeues through abandonment instead of persisting a corrupt bind.
+    if !binding_matches_bytes(
+        &raw_binding,
+        binding_engine,
+        &binding_profile,
         session.session(),
-    ) else {
+    ) {
+        let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
+        return (
+            None,
+            if custody {
+                ClaimCustody::Retained(cancellation)
+            } else {
+                ClaimCustody::Released
+            },
+        );
+    }
+    let Some(binding_bytes) = ProviderBindingBytes::new(raw_binding).ok() else {
         let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
         return (
             None,
@@ -1553,6 +1995,15 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             receipt,
             bound,
             bound_at,
+            engine: match settings.config().selection() {
+                EngineSelection::OpenCode2(_) => EngineId::OpenCode2,
+                EngineSelection::Codex(_) => EngineId::Codex,
+                EngineSelection::Claude(_) => EngineId::Claude,
+                EngineSelection::Cursor(_) => EngineId::Cursor,
+                EngineSelection::Grok(_) => EngineId::Grok,
+                EngineSelection::Hermes(_) => EngineId::Hermes,
+                _ => EngineId::OpenCode2,
+            },
             turn,
             cancellation,
         }),
@@ -1567,6 +2018,7 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         receipt,
         bound,
         bound_at,
+        engine,
         turn,
         cancellation,
     } = bound;
@@ -1580,6 +2032,17 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         expected_updated_at: bound_at,
     };
     let run_cancel = cancellation.cancel_handle();
+    // Register mid-turn interaction routing for the live run. A registration
+    // failure never kills the run: responses then answer `wrong_run` and the
+    // client retries once registry pressure clears.
+    let (interaction_lease, inbox) = match context
+        .interactions
+        .register(receipt.thread_id.clone(), receipt.run_id.clone())
+    {
+        Ok((lease, receiver)) => (Some(lease), Some(receiver)),
+        Err(_) => (None, None),
+    };
+    let mut inbox = inbox;
     let custody_unresolved = consume_turn(
         context.repository,
         context.config,
@@ -1589,12 +2052,35 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         run_cancel.as_ref(),
         turn,
         scope,
+        engine,
+        inbox.as_mut(),
     )
     .await;
+    if let Some(receiver) = inbox.as_mut() {
+        drain_interactions(receiver);
+    }
+    drop(interaction_lease);
+    // Pending rows are per-run: the settle wipes them so decisions never leak
+    // across runs. Receipts stay: replays must still answer `duplicate`.
+    // Best-effort beside terminal settlement; the delete is idempotent.
+    let _ = context
+        .repository
+        .settle_run_interactions(&receipt.run_id)
+        .await;
     if custody_unresolved {
         ClaimCustody::Retained(cancellation)
     } else {
         ClaimCustody::Released
+    }
+}
+
+/// Replies `wrong_run` to every response still queued for a settled run.
+///
+/// The run is gone, so nothing is stored: the client retries against the
+/// owning run once it is live.
+fn drain_interactions(receiver: &mut tokio::sync::mpsc::Receiver<RunInteractionEnvelope>) {
+    while let Ok(envelope) = receiver.try_recv() {
+        let _ = envelope.respond.send(RunInteractionAck::WrongRun);
     }
 }
 
@@ -1746,14 +2232,209 @@ async fn bind_with_retry(
     Err(last_error.expect("positive retry count always records a result"))
 }
 
-fn provider_binding_bytes(profile_id: &str, session_id: &str) -> Option<ProviderBindingBytes> {
+/// Builds the raw engine-tagged binding document with format 1 and the exact
+/// native thread identity from the app-server contract.
+///
+/// The `engine` tag is `opencode2`, `codex`, `claude`, `grok`, `cursor`, or
+/// `hermes`; the session id is the native thread id returned by
+/// `thread/start` (Codex), `CreateSession` session (OpenCode2), `system/init`
+/// session (Claude), `session/new` session (Grok), the ACP `session/new`
+/// result (Cursor), or the durable stored session (Hermes). Empty identities
+/// reject so a corrupt bind never persists.
+///
+/// Split from the [`ProviderBindingBytes`] wrap so the tag/format/profile
+/// round trip is provable over plain bytes: [`ProviderBindingBytes`]
+/// deliberately exposes no raw-byte accessor.
+pub(crate) fn binding_bytes_vec(
+    engine: &str,
+    profile_id: &str,
+    session_id: &str,
+) -> Option<Vec<u8>> {
+    if engine.is_empty() || profile_id.is_empty() || session_id.is_empty() {
+        return None;
+    }
+    if engine.len() > 32 || profile_id.len() > 256 || session_id.len() > 256 {
+        return None;
+    }
     let value = serde_json::json!({
-        "engine": PROVIDER_BINDING_ENGINE,
+        "engine": engine,
+        "format": 1,
         "profile_id": profile_id,
         "session_id": session_id,
     });
-    let bytes = serde_json::to_vec(&value).ok()?;
-    ProviderBindingBytes::new(bytes).ok()
+    serde_json::to_vec(&value).ok()
+}
+
+/// Round-trips binding bytes and proves the engine tag, format, profile, and
+/// native thread identity match the selection that produced them.
+///
+/// A mismatch requeues through abandonment instead of persisting a corrupt
+/// bind.
+pub(crate) fn binding_matches_bytes(
+    bytes: &[u8],
+    engine: &str,
+    profile_id: &str,
+    session_id: &str,
+) -> bool {
+    let parsed: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let object = match parsed.as_object() {
+        Some(object) => object,
+        None => return false,
+    };
+    object.get("engine").and_then(|value| value.as_str()) == Some(engine)
+        && object.get("format").and_then(|value| value.as_i64()) == Some(1)
+        && object.get("profile_id").and_then(|value| value.as_str()) == Some(profile_id)
+        && object.get("session_id").and_then(|value| value.as_str()) == Some(session_id)
+}
+
+/// Resolves one Codex profile into a verified launch with a bounded
+/// `--version` probe enforcing the minimum CLI at probe time.
+///
+/// Returns `None` when the executable is unavailable, the probe times out or
+/// fails, or the version predates the minimum; the caller requeues the claim.
+async fn resolve_codex_launch(
+    database_path: &Path,
+    profile_id: &artisan_domain::EngineProfileId,
+) -> Option<VerifiedCodexLaunch> {
+    let authority = NativeCodexAuthority::new();
+    let executable = authority.resolve_executable().ok()?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(&executable)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    authority
+        .resolve_launch(database_path, profile_id, &stdout)
+        .ok()
+}
+
+/// Resolves one Claude profile into a verified launch with a bounded
+/// `--version` probe enforcing the minimum CLI at probe time.
+///
+/// Returns `None` when the executable is unavailable, the probe times out or
+/// fails, or the version predates the minimum; the caller requeues the claim.
+async fn resolve_claude_launch(
+    database_path: &Path,
+    profile_id: &artisan_domain::EngineProfileId,
+) -> Option<VerifiedClaudeLaunch> {
+    let authority = NativeClaudeAuthority::new();
+    let executable = authority.resolve_executable().ok()?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(&executable)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    authority
+        .resolve_launch(database_path, profile_id, &stdout)
+        .ok()
+}
+
+/// Resolves one Grok profile into a probe-certified launch with a bounded
+/// `--version` probe parsed by the shared ACP row.
+///
+/// There is no verified-launch authority or minimum CLI for Grok in the
+/// TypeScript evidence: the existing discovery resolves the executable, the
+/// path must still be a regular file, and any parsed version seats the
+/// launch. Returns `None` when the executable is unavailable, the probe
+/// times out or fails, or no version parses; the caller requeues the claim.
+async fn resolve_grok_launch(profile_id: &artisan_domain::EngineProfileId) -> Option<GrokLaunch> {
+    let resolved = artisan_native_engine::grok::resolve_live()?;
+    let executable = resolved.path().to_path_buf();
+    if !executable.is_file() {
+        return None;
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(&executable)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let version = artisan_native_engine::grok::parse_grok_version(&stdout)?;
+    Some(GrokLaunch::new(executable, profile_id.clone(), version))
+}
+/// Resolves one Hermes profile into a verified launch with a bounded
+/// `--version` probe enforcing the minimum gateway at probe time.
+///
+/// Executable resolution follows discovery precedence (`HERMES_EXECUTABLE`,
+/// installed local-app-data, `PATH`); authentication stays owned by the
+/// installed Hermes profile and is never probed here.
+///
+/// Returns `None` when no executable resolves, the probe times out or fails,
+/// or the version predates the minimum; the caller requeues the claim.
+async fn resolve_hermes_launch(
+    profile_id: &artisan_domain::EngineProfileId,
+) -> Option<VerifiedHermesLaunch> {
+    let resolved = resolve_service_executable()?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(&resolved)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let version = artisan_native_engine::hermes::parse_hermes_version(&stdout).ok()?;
+    artisan_native_engine::hermes::check_minimum_version(&version).ok()?;
+    VerifiedHermesLaunch::new(
+        resolved,
+        profile_id.as_str().to_owned(),
+        version.to_string(),
+    )
+}
+
+/// Resolves one Cursor profile into a C1 launch.
+///
+/// C1 owns the definition row but no launch authority yet: the probe and
+/// verified-launch packet resolve this later. Always returns `None` so the
+/// caller requeues the claim instead of running as another engine.
+async fn resolve_cursor_launch(
+    _database_path: &Path,
+    _profile_id: &artisan_domain::EngineProfileId,
+) -> Option<CursorLaunch> {
+    None
 }
 
 async fn abandon_turn(
@@ -1790,6 +2471,7 @@ struct CommitBatchRequest<'a> {
     operated_at: UnixMillis,
     activate_turn_patch_id: Option<&'a PatchId>,
     changes: &'a [AssistantChange<'a>],
+    checkpoint: artisan_database::CheckpointUpdate<'a>,
     retries: std::num::NonZeroUsize,
 }
 
@@ -1802,6 +2484,7 @@ async fn commit_batch_with_retry(request: CommitBatchRequest<'_>) -> bool {
         operated_at,
         activate_turn_patch_id,
         changes,
+        checkpoint,
         retries,
     } = request;
     for _ in 0..retries.get() {
@@ -1820,7 +2503,7 @@ async fn commit_batch_with_retry(request: CommitBatchRequest<'_>) -> bool {
                 operated_at,
                 activate_turn_patch_id,
                 changes,
-                checkpoint: artisan_database::CheckpointUpdate::Keep,
+                checkpoint,
             })
             .await;
         if notify_after_commit(
@@ -1862,6 +2545,7 @@ struct TurnConsumptionContext<'a> {
 
 struct TurnConsumptionState<'a> {
     scope: RunBatchScope<'a>,
+    engine: EngineId,
     assistant_item: Option<ItemId>,
     assistant_revision: Revision,
     assistant_parts: OrderedAssistantText,
@@ -1874,9 +2558,10 @@ struct TurnConsumptionState<'a> {
 }
 
 impl<'a> TurnConsumptionState<'a> {
-    fn new(scope: RunBatchScope<'a>) -> Self {
+    fn new(scope: RunBatchScope<'a>, engine: EngineId) -> Self {
         Self {
             scope,
+            engine,
             assistant_item: None,
             assistant_revision: Revision::new(0),
             assistant_parts: OrderedAssistantText::default(),
@@ -1899,6 +2584,8 @@ async fn consume_turn(
     run_cancel: &CancelHandle,
     mut turn: crate::engine_owner::operation::AcceptedTurn,
     scope: RunBatchScope<'_>,
+    engine: EngineId,
+    inbox: Option<&mut tokio::sync::mpsc::Receiver<RunInteractionEnvelope>>,
 ) -> bool {
     let context = TurnConsumptionContext {
         repository,
@@ -1908,9 +2595,10 @@ async fn consume_turn(
         process_cancel,
         run_cancel,
     };
-    let mut state = TurnConsumptionState::new(scope);
+    let mut state = TurnConsumptionState::new(scope, engine);
 
     let mut cancel_signalled = false;
+    let mut inbox = inbox;
     loop {
         if cancel_signalled {
             // Cancellation was already delivered to the turn: drain the
@@ -1918,7 +2606,12 @@ async fn consume_turn(
             // fired cancel branches stay ready forever once cancelled, so
             // re-selecting them under `biased` would starve
             // `next_observation()` on a held stream that never emits a
-            // terminal event.
+            // terminal event. Queued responses are answered from the durable
+            // fence below: the run is dying, so they settle as `wrong_run`
+            // without storing anything.
+            if let Some(receiver) = inbox.as_mut() {
+                drain_interactions(receiver);
+            }
             let observation = turn.next_observation().await;
             let Some(observation) = observation else {
                 break;
@@ -1941,6 +2634,23 @@ async fn consume_turn(
                     cancel_signalled = true;
                     state.forced_cancelled = true;
                     turn.cancel();
+                }
+                interaction = async {
+                    match inbox.as_mut() {
+                        Some(receiver) => receiver.recv().await,
+                        // No routing registration: never resolve this branch
+                        // so observations keep flowing.
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let Some(envelope) = interaction else {
+                        // The inbox closed while its lease is still held,
+                        // which the registry cannot produce; fuse the branch
+                        // and keep consuming observations.
+                        inbox = None;
+                        continue;
+                    };
+                    handle_interaction(&context, &mut state, &mut turn, envelope).await;
                 }
                 observation = turn.next_observation() => {
                     let Some(observation) = observation else { break; };
@@ -2009,6 +2719,730 @@ async fn handle_observation(
                 turn.cancel();
             }
         }
+        EngineObservation::Subagent(row) => {
+            handle_subagent_lifecycle_row(context, state, turn, row).await;
+        }
+        EngineObservation::SubagentTranscript(row) => {
+            handle_subagent_transcript_row(context, state, turn, row).await;
+        }
+    }
+}
+
+/// Handles one routed mid-turn response: durable resolve, owner delivery,
+/// and resolution-observation commit.
+///
+/// The resolve transaction is authoritative for the acknowledgement: replays
+/// and misses settle from durable state with no second effect. Only an
+/// applied decision reaches the accepted turn ledger and the S1b observation
+/// commit, and neither disturbs control flow: answering never cancels,
+/// interrupts, or steers the run, so a deny lands with no side effect while
+/// the turn continues.
+#[allow(clippy::too_many_lines)]
+async fn handle_interaction(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    envelope: RunInteractionEnvelope,
+) {
+    let RunInteractionEnvelope {
+        thread_id,
+        run_id,
+        command,
+        respond,
+    } = envelope;
+    // The registry routed the exact pair, but the scope owns the fence:
+    // never resolve for a run this turn does not own.
+    if thread_id != state.scope.launched.thread_id || run_id != state.scope.launched.run_id {
+        let _ = respond.send(RunInteractionAck::WrongRun);
+        return;
+    }
+    sync_turn_ledger(context, turn, &run_id).await;
+    let scope = artisan_database::ResolveScope {
+        binding_version: state.scope.bound.binding_version,
+        responded_at: match context.origin.acceptance_instant() {
+            Ok(instant) => instant,
+            Err(_) => {
+                // No timestamp, no settlement: nothing was stored, so the
+                // client retry stays safe.
+                let _ = respond.send(RunInteractionAck::Unavailable);
+                return;
+            }
+        },
+    };
+    let outcome = match &command {
+        OwnedInteractionCommand::RespondApproval {
+            approval_id,
+            approved,
+            ..
+        } => {
+            let approval = RespondApproval::new(
+                command.request_id().clone(),
+                thread_id.clone(),
+                run_id.clone(),
+                approval_id.clone(),
+                *approved,
+            );
+            context
+                .repository
+                .resolve_approval_response(&approval, &scope)
+                .await
+        }
+        OwnedInteractionCommand::RespondQuestion {
+            question_id,
+            answers,
+            ..
+        } => {
+            let question = match RespondQuestion::new(
+                command.request_id().clone(),
+                thread_id.clone(),
+                run_id.clone(),
+                question_id.clone(),
+                answers.clone(),
+            ) {
+                Ok(question) => question,
+                Err(_) => {
+                    let _ = respond.send(RunInteractionAck::Unavailable);
+                    return;
+                }
+            };
+            context
+                .repository
+                .resolve_question_response(&question, &scope)
+                .await
+        }
+    };
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            // A resolve failure leaves durability unknown, so the run fails
+            // safe instead of presenting a stream as durably completed.
+            mark_interrupted(state, turn, true);
+            let _ = respond.send(RunInteractionAck::Unavailable);
+            return;
+        }
+    };
+    match outcome {
+        ResolveInteractionOutcome::WrongRun => {
+            let _ = respond.send(RunInteractionAck::WrongRun);
+        }
+        ResolveInteractionOutcome::Conflict(_) => {
+            let _ = respond.send(RunInteractionAck::Conflict);
+        }
+        ResolveInteractionOutcome::Duplicate(stored)
+        | ResolveInteractionOutcome::UnknownTarget(stored)
+        | ResolveInteractionOutcome::AlreadyResolved(stored) => {
+            let _ = respond.send(RunInteractionAck::Settled(stored));
+        }
+        ResolveInteractionOutcome::Applied(applied) => {
+            deliver_applied_response(context, state, turn, &command, applied, respond).await;
+        }
+    }
+}
+
+/// Seeds the accepted turn ledger from durable pending state.
+///
+/// Runs before the resolve transaction so the later delivery agrees with
+/// what the transaction settles. A seeding failure leaves the ledger as-is:
+/// the resolve transaction stays authoritative, and a delivery that then
+/// disagrees fails the run safe in the caller.
+async fn sync_turn_ledger(
+    context: &TurnConsumptionContext<'_>,
+    turn: &mut AcceptedTurn,
+    run_id: &RunId,
+) {
+    let pending = match context.repository.pending_interactions(run_id).await {
+        Ok(pending) => pending,
+        Err(_) => return,
+    };
+    for view in pending.iter().filter(|view| view.requested) {
+        turn.note_interaction_requested(
+            &view.interaction_id,
+            match view.kind {
+                artisan_domain::InteractionKind::Approval => InteractionTarget::Approval,
+                artisan_domain::InteractionKind::Question => InteractionTarget::Question,
+            },
+        );
+    }
+}
+
+/// Delivers one applied decision to the accepted turn, commits its
+/// resolution observation through the S1b checkpoint path, and acknowledges
+/// the stored receipt.
+///
+/// Ledger disagreement after a committed resolve cannot happen under the
+/// single-owner discipline, but if it does the run fails safe while the
+/// acknowledgement still reports the durable truth.
+async fn deliver_applied_response(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    command: &OwnedInteractionCommand,
+    applied: artisan_database::AppliedInteraction,
+    respond: tokio::sync::oneshot::Sender<RunInteractionAck>,
+) {
+    let (target_id, target, intent) = match command {
+        OwnedInteractionCommand::RespondApproval { approval_id, .. } => (
+            approval_id,
+            InteractionTarget::Approval,
+            command_request_intent(state, command),
+        ),
+        OwnedInteractionCommand::RespondQuestion { question_id, .. } => (
+            question_id,
+            InteractionTarget::Question,
+            command_request_intent(state, command),
+        ),
+    };
+    let Some(intent) = intent else {
+        mark_interrupted(state, turn, true);
+        let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
+        return;
+    };
+    if turn
+        .deliver_interaction_response(
+            applied.receipt.request_id.as_str(),
+            target_id,
+            target,
+            &intent,
+        )
+        .is_err()
+    {
+        mark_interrupted(state, turn, true);
+        let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
+        return;
+    }
+    if !commit_resolution_observation(context, state, turn, &applied).await {
+        mark_interrupted(state, turn, true);
+    }
+    let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
+}
+
+/// Rebuilds the exact intent fingerprint for one delivered envelope command.
+///
+/// Reads nothing but the envelope: the fingerprint must equal the one the
+/// resolve transaction stored.
+fn command_request_intent(
+    state: &TurnConsumptionState<'_>,
+    command: &OwnedInteractionCommand,
+) -> Option<String> {
+    match command {
+        OwnedInteractionCommand::RespondApproval {
+            request_id,
+            approval_id,
+            approved,
+        } => Some(
+            RespondApproval::new(
+                request_id.clone(),
+                state.scope.launched.thread_id.clone(),
+                state.scope.launched.run_id.clone(),
+                approval_id.clone(),
+                *approved,
+            )
+            .intent_key(),
+        ),
+        OwnedInteractionCommand::RespondQuestion {
+            request_id,
+            question_id,
+            answers,
+        } => RespondQuestion::new(
+            request_id.clone(),
+            state.scope.launched.thread_id.clone(),
+            state.scope.launched.run_id.clone(),
+            question_id.clone(),
+            answers.clone(),
+        )
+        .ok()
+        .map(|question| question.intent_key()),
+    }
+}
+
+/// Commits one applied resolution as an S1b observation checkpoint batch.
+///
+/// Encodes the resolved observation under the run's binding with the
+/// previous committed sequence as its base, then commits through the
+/// existing batch path with a content-neutral assistant change: the body is
+/// rewritten verbatim so subscribers receive the wake hint without any
+/// transcript mutation. The batch advances the scope stamps exactly like a
+/// text batch, so later commits keep fencing.
+async fn commit_resolution_observation(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    applied: &artisan_database::AppliedInteraction,
+) -> bool {
+    let base = match context
+        .repository
+        .last_committed_observation_sequence(&state.scope.launched.run_id)
+        .await
+    {
+        Ok(base) => base,
+        Err(_) => return false,
+    };
+    let Ok(observation_id) = context.origin.mint_identity() else {
+        return false;
+    };
+    let Ok(observation_id) = ObservationId::parse(observation_id) else {
+        return false;
+    };
+    let Ok(resolved_sequence) = ObservationSequence::new(applied.resolved_sequence) else {
+        return false;
+    };
+    let resolved = match build_resolved_observation(applied, &observation_id, resolved_sequence) {
+        Some(resolved) => resolved,
+        None => return false,
+    };
+    let checkpoint = match artisan_database::encode_observation_checkpoint(
+        state.engine,
+        state.scope.bound.binding_version,
+        base,
+        &[resolved],
+    ) {
+        Ok(checkpoint) => checkpoint,
+        Err(_) => return false,
+    };
+    if artisan_database::validate_observation_bind(
+        state.scope.bound.binding_version,
+        &state.scope.bound,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let Ok(body) = AssistantBody::parse(state.assistant_body.clone()) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    let Some(patch_id) = mint_patch_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    if let Some(item_id) = state.assistant_item.clone() {
+        commit_resolution_replace(
+            context,
+            state,
+            turn,
+            checkpoint,
+            operated_at,
+            &item_id,
+            &body,
+            &patch_id,
+        )
+        .await
+    } else {
+        commit_resolution_start(
+            context,
+            state,
+            turn,
+            checkpoint,
+            operated_at,
+            &body,
+            &patch_id,
+        )
+        .await
+    }
+}
+
+/// Commits a resolution checkpoint beside a content-neutral body replace.
+///
+/// The body is rewritten verbatim at the next revision so subscribers
+/// receive the wake hint without any transcript mutation.
+async fn commit_resolution_replace(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    checkpoint: artisan_database::EngineCheckpoint,
+    operated_at: UnixMillis,
+    item_id: &ItemId,
+    body: &AssistantBody,
+    patch_id: &PatchId,
+) -> bool {
+    let changes = [AssistantChange::Replace {
+        item_id,
+        expected_revision: state.assistant_revision,
+        body,
+        phase: AssistantMessagePhase::Unspecified,
+        patch_id,
+    }];
+    if !commit_batch_with_retry(CommitBatchRequest {
+        repository: context.repository,
+        notifier: &context.config.notifier,
+        scope: &state.scope,
+        batch_sequence: state.batch_sequence,
+        operated_at,
+        activate_turn_patch_id: None,
+        changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+        retries: context.config.max_command_retries,
+    })
+    .await
+    {
+        return false;
+    }
+    let Ok(next_revision) = state.assistant_revision.checked_next() else {
+        mark_interrupted(state, turn, true);
+        return false;
+    };
+    state.assistant_revision = next_revision;
+    state.scope.expected_updated_at = operated_at;
+    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
+        mark_interrupted(state, turn, true);
+        return false;
+    };
+    state.batch_sequence = next_sequence;
+    true
+}
+
+/// Commits a resolution checkpoint while opening the assistant item.
+///
+/// Used only when the response arrived before any text: the item opens with
+/// the current (possibly empty) body exactly like the text path opens it,
+/// including turn activation.
+async fn commit_resolution_start(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    checkpoint: artisan_database::EngineCheckpoint,
+    operated_at: UnixMillis,
+    body: &AssistantBody,
+    patch_id: &PatchId,
+) -> bool {
+    let Some(item_id) = mint_item_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    let Some(activation_patch_id) = mint_patch_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return false;
+    };
+    let changes = [AssistantChange::Start {
+        item_id: &item_id,
+        phase: AssistantMessagePhase::Unspecified,
+        body,
+        patch_id,
+    }];
+    if !commit_batch_with_retry(CommitBatchRequest {
+        repository: context.repository,
+        notifier: &context.config.notifier,
+        scope: &state.scope,
+        batch_sequence: state.batch_sequence,
+        operated_at,
+        activate_turn_patch_id: Some(&activation_patch_id),
+        changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+        retries: context.config.max_command_retries,
+    })
+    .await
+    {
+        return false;
+    }
+    state.assistant_item = Some(item_id);
+    state.assistant_revision = Revision::new(0);
+    state.scope.expected_updated_at = operated_at;
+    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
+        mark_interrupted(state, turn, true);
+        return false;
+    };
+    state.batch_sequence = next_sequence;
+    true
+}
+
+/// Builds the resolved domain observation for one applied decision.
+///
+/// The observation carries the full stored request, so the checkpoint batch
+/// preserves the complete history even though only the resolution commits.
+fn build_resolved_observation(
+    applied: &artisan_database::AppliedInteraction,
+    observation_id: &ObservationId,
+    sequence: ObservationSequence,
+) -> Option<artisan_domain::Observation> {
+    if let Some(approval) = applied.requested.approval.as_ref() {
+        let approved = applied.receipt.approved?;
+        return artisan_domain::ApprovalObservation::resolved(
+            observation_id.clone(),
+            sequence,
+            approval.approval_id.clone(),
+            approval.description.clone(),
+            approval.request.clone(),
+            approved,
+        )
+        .ok()
+        .map(artisan_domain::Observation::Approval);
+    }
+    if let Some(question) = applied.requested.question.as_ref() {
+        return artisan_domain::QuestionObservation::resolved(
+            observation_id.clone(),
+            sequence,
+            question.input.clone(),
+            applied.receipt.answers.clone(),
+        )
+        .ok()
+        .map(artisan_domain::Observation::Question);
+    }
+    None
+}
+
+/// Mutable S1b cursor for subagent observation commits.
+///
+/// Mirrors the resolution commit shape without disturbing root text: the
+/// run-scoped batch fence plus the content-neutral assistant projection.
+/// Only the commit core mutates the cursor; the dispatch arm copies the
+/// settled cursor back onto the turn state.
+pub(crate) struct SubagentCommitCursor<'a> {
+    pub scope: RunBatchScope<'a>,
+    pub engine: EngineId,
+    pub batch_sequence: i64,
+    pub assistant_item: Option<ItemId>,
+    pub assistant_revision: Revision,
+    pub assistant_body: String,
+}
+
+/// Commits one subagent lifecycle row as an S1b observation checkpoint batch.
+async fn handle_subagent_lifecycle_row(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    row: SubagentLifecycleRow,
+) {
+    handle_subagent_row(
+        context,
+        state,
+        turn,
+        Observation::Subagent(row.into_observation()),
+    )
+    .await;
+}
+
+/// Commits one subagent transcript row as an S1b observation checkpoint batch.
+async fn handle_subagent_transcript_row(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    row: SubagentTranscriptRow,
+) {
+    handle_subagent_row(
+        context,
+        state,
+        turn,
+        Observation::SubagentTranscript(row.into_observation()),
+    )
+    .await;
+}
+
+/// Commits one subagent row through the shared S1b checkpoint batch path.
+///
+/// The row is re-sequenced onto the durable chain freshly read for this
+/// batch, encoded under the run bind, and committed with a content-neutral
+/// assistant change so the body is rewritten verbatim: subscribers receive
+/// the wake hint without any transcript mutation. Sequencing, stamps, and
+/// the assistant projection advance exactly like a text batch, so later
+/// commits keep fencing. Any failure marks the turn interrupted with
+/// uncertain progress: a valid stream must not present as durably completed
+/// when its subagent rows did not persist.
+async fn handle_subagent_row(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    observation: Observation,
+) {
+    let mut cursor = SubagentCommitCursor {
+        scope: copy_scope(&state.scope),
+        engine: state.engine,
+        batch_sequence: state.batch_sequence,
+        assistant_item: state.assistant_item.clone(),
+        assistant_revision: state.assistant_revision,
+        assistant_body: state.assistant_body.clone(),
+    };
+    if !commit_subagent_observation(
+        context.repository,
+        context.config,
+        context.origin,
+        &mut cursor,
+        observation,
+    )
+    .await
+    {
+        mark_interrupted(state, turn, true);
+        return;
+    }
+    let updated_at = cursor.scope.expected_updated_at;
+    let revision = cursor.assistant_revision;
+    let sequence = cursor.batch_sequence;
+    let item = cursor.assistant_item.clone();
+    let body = cursor.assistant_body.clone();
+    state.scope.expected_updated_at = updated_at;
+    state.assistant_revision = revision;
+    state.batch_sequence = sequence;
+    state.assistant_item = item;
+    state.assistant_body = body;
+}
+
+/// Commits one re-sequenced subagent observation through the S1b batch path.
+///
+/// Reads the durable base fresh for this batch and assigns base-plus-one, so
+/// rows stay strictly increasing across batches regardless of owner stream
+/// numbering. Returns whether the batch committed; the dispatch arm maps
+/// failure onto run custody. Fixture coverage drives this same commit against
+/// a real repository.
+pub(crate) async fn commit_subagent_observation(
+    repository: &Repository,
+    config: &NativeRunDispatcherConfig,
+    origin: &SystemCommandOrigin,
+    cursor: &mut SubagentCommitCursor<'_>,
+    observation: Observation,
+) -> bool {
+    let base = match repository
+        .last_committed_observation_sequence(&cursor.scope.launched.run_id)
+        .await
+    {
+        Ok(base) => base,
+        Err(_) => return false,
+    };
+    let sequence_value = match base {
+        None => 1,
+        Some(maximum) => maximum.saturating_add(1),
+    };
+    let Ok(sequence) = ObservationSequence::new(sequence_value) else {
+        return false;
+    };
+    let Ok(identity) = origin.mint_identity() else {
+        return false;
+    };
+    let Ok(observation_id) = ObservationId::parse(identity) else {
+        return false;
+    };
+    let Some(resequenced) =
+        resequence_subagent_observation(&observation, &observation_id, sequence)
+    else {
+        return false;
+    };
+    let Ok(checkpoint) = artisan_database::encode_observation_checkpoint(
+        cursor.engine,
+        cursor.scope.bound.binding_version,
+        base,
+        &[resequenced],
+    ) else {
+        return false;
+    };
+    if artisan_database::validate_observation_bind(
+        cursor.scope.bound.binding_version,
+        cursor.scope.bound,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let Ok(body) = AssistantBody::parse(cursor.assistant_body.clone()) else {
+        return false;
+    };
+    let Some(patch_id) = mint_patch_id(origin) else {
+        return false;
+    };
+    let Some(operated_at) = at_or_after(origin, cursor.scope.expected_updated_at) else {
+        return false;
+    };
+    if let Some(item_id) = cursor.assistant_item.clone() {
+        let changes = [AssistantChange::Replace {
+            item_id: &item_id,
+            expected_revision: cursor.assistant_revision,
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            patch_id: &patch_id,
+        }];
+        if !commit_batch_with_retry(CommitBatchRequest {
+            repository,
+            notifier: &config.notifier,
+            scope: &cursor.scope,
+            batch_sequence: cursor.batch_sequence,
+            operated_at,
+            activate_turn_patch_id: None,
+            changes: &changes,
+            checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+            retries: config.max_command_retries,
+        })
+        .await
+        {
+            return false;
+        }
+        let Ok(next_revision) = cursor.assistant_revision.checked_next() else {
+            return false;
+        };
+        cursor.assistant_revision = next_revision;
+    } else {
+        let Some(item_id) = mint_item_id(origin) else {
+            return false;
+        };
+        let Some(activation_patch_id) = mint_patch_id(origin) else {
+            return false;
+        };
+        let changes = [AssistantChange::Start {
+            item_id: &item_id,
+            phase: AssistantMessagePhase::Unspecified,
+            body: &body,
+            patch_id: &patch_id,
+        }];
+        if !commit_batch_with_retry(CommitBatchRequest {
+            repository,
+            notifier: &config.notifier,
+            scope: &cursor.scope,
+            batch_sequence: cursor.batch_sequence,
+            operated_at,
+            activate_turn_patch_id: Some(&activation_patch_id),
+            changes: &changes,
+            checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+            retries: config.max_command_retries,
+        })
+        .await
+        {
+            return false;
+        }
+        cursor.assistant_item = Some(item_id);
+        cursor.assistant_revision = Revision::new(0);
+    }
+    let Some(next_sequence) = cursor.batch_sequence.checked_add(1) else {
+        return false;
+    };
+    cursor.batch_sequence = next_sequence;
+    cursor.scope.expected_updated_at = operated_at;
+    true
+}
+
+/// Rebuilds one subagent row onto a dispatcher-assigned identity.
+///
+/// Provider stream numbering never crosses into durable history. Only
+/// lifecycle and transcript rows rebuild here; any other row rejects.
+fn resequence_subagent_observation(
+    observation: &Observation,
+    observation_id: &ObservationId,
+    sequence: ObservationSequence,
+) -> Option<Observation> {
+    match observation {
+        Observation::Subagent(row) => SubagentObservation::new(
+            observation_id.clone(),
+            sequence,
+            SubagentInput {
+                agent_native_thread_id: row.agent_native_thread_id().clone(),
+                parent_native_thread_id: row.parent_native_thread_id().clone(),
+                state: row.state(),
+                activity: row.activity().map(str::to_owned),
+                agent_path: row.agent_path().map(str::to_owned),
+                turn_id: row.turn_id().cloned(),
+            },
+        )
+        .ok()
+        .map(Observation::Subagent),
+        Observation::SubagentTranscript(row) => Some(Observation::SubagentTranscript(
+            SubagentTranscriptObservation::new(
+                observation_id.clone(),
+                sequence,
+                row.agent_native_thread_id().clone(),
+                row.parent_native_thread_id().clone(),
+                row.content().clone(),
+            ),
+        )),
+        _ => None,
     }
 }
 
@@ -2137,6 +3571,7 @@ async fn replace_assistant_body(
         operated_at,
         activate_turn_patch_id: None,
         changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
     })
     .await
@@ -2192,6 +3627,7 @@ async fn start_assistant_item(
         operated_at,
         activate_turn_patch_id: Some(&activation_patch_id),
         changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
     })
     .await
@@ -2245,6 +3681,7 @@ async fn append_assistant_delta(
         operated_at,
         activate_turn_patch_id: None,
         changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
     })
     .await
@@ -2338,6 +3775,7 @@ async fn ensure_assistant_item(
         operated_at,
         activate_turn_patch_id: Some(&activation_patch_id),
         changes: &changes,
+        checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
     })
     .await
@@ -2368,6 +3806,12 @@ async fn settle_terminal(
     state: TurnConsumptionState<'_>,
     terminal: TerminalState,
 ) {
+    // Pending rows are per-run: wipe them at settle so decisions never leak
+    // across runs. Best-effort beside terminal settlement; idempotent.
+    let _ = context
+        .repository
+        .settle_run_interactions(&state.scope.launched.run_id)
+        .await;
     let TurnConsumptionState {
         scope,
         assistant_item: Some(item_id),

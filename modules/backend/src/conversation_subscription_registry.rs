@@ -73,6 +73,7 @@ pub struct SubscriptionView {
     lease: SubscriptionLease,
     state: SubscriptionState,
     cursor: ConversationCursor,
+    observation_cursor: u64,
 }
 
 impl SubscriptionView {
@@ -92,6 +93,13 @@ impl SubscriptionView {
     #[must_use]
     pub fn cursor(&self) -> ConversationCursor {
         self.cursor
+    }
+
+    /// Returns the last delivered engine-observation sequence for this
+    /// entry, or zero when no observation has been delivered yet.
+    #[must_use]
+    pub const fn observation_cursor(&self) -> u64 {
+        self.observation_cursor
     }
 }
 
@@ -157,6 +165,52 @@ pub enum UnsubscribeOutcome {
     Absent,
 }
 
+/// Failure while recording a durably committed engine-observation batch
+/// through an active lease.
+///
+/// Observation sequences live in plain `u64` space here: range validation
+/// belongs to the domain and codec boundaries, while this table only tracks
+/// per-subscriber delivery positions. A sequence of zero means no
+/// observation has been delivered to the entry yet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum ApplyObservationBatchError {
+    /// The supplied lease does not match the current entry's generation, or
+    /// the thread has no entry at all.
+    #[error("subscription lease is stale")]
+    StaleLease,
+    /// The batch's thread differs from the lease's thread.
+    #[error("observation batch thread mismatch")]
+    ThreadMismatch,
+    /// The entry is still pending; activation is required before publication.
+    #[error("subscription is pending; activation required")]
+    NotActive,
+    /// The batch's `from_sequence` does not equal the registry's current
+    /// observation cursor.
+    ///
+    /// This covers duplicate, regression, and gap cases, including the
+    /// redelivery of an already-applied batch after a reconnect replay. The
+    /// contained values are the expected current cursor and the batch's
+    /// `from_sequence`.
+    #[error("observation batch cursor mismatch")]
+    CursorMismatch {
+        /// Observation sequence the registry currently holds.
+        expected: u64,
+        /// Sequence the batch claims to follow.
+        actual: u64,
+    },
+    /// The batch does not advance past `from_sequence`.
+    ///
+    /// Committed batches are non-empty with strictly increasing sequences,
+    /// so the maximum sequence must exceed the cursor the batch follows.
+    #[error("observation batch does not advance")]
+    NonAdvancing {
+        /// Sequence the batch claims to follow.
+        from_sequence: u64,
+        /// Maximum sequence the batch claims to deliver.
+        to_sequence: u64,
+    },
+}
+
 /// Failure while applying a durable [`PatchBatch`] through an active lease.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum ApplyBatchError {
@@ -192,6 +246,7 @@ struct Entry {
     generation: NonZeroU64,
     state: SubscriptionState,
     cursor: ConversationCursor,
+    observation_cursor: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +315,7 @@ impl ConversationSubscriptionRegistry {
             },
             state: entry.state,
             cursor: entry.cursor,
+            observation_cursor: entry.observation_cursor,
         })
     }
 
@@ -269,6 +325,12 @@ impl ConversationSubscriptionRegistry {
     /// with the new pending entry and a strictly newer lease. The old lease
     /// is immediately stale. Generation allocation is strictly monotonic and
     /// never reuses zero; exhaustion fails without mutating the registry.
+    ///
+    /// The engine-observation cursor always restarts at zero: a fresh or
+    /// resumed registration redelivers committed observations from the
+    /// durable history on reconnect replay. Retaining the previous
+    /// observation position across a resubscribe belongs to the later
+    /// observation replay-read packet, not to this table.
     ///
     /// # Errors
     ///
@@ -294,6 +356,7 @@ impl ConversationSubscriptionRegistry {
             generation,
             state: SubscriptionState::Pending,
             cursor,
+            observation_cursor: 0,
         };
 
         self.entries.insert(thread_id, entry);
@@ -398,5 +461,60 @@ impl ConversationSubscriptionRegistry {
         }
         entry.cursor = batch.to_cursor();
         Ok(entry.cursor)
+    }
+
+    /// Records one durably committed engine-observation batch through its
+    /// matching active lease.
+    ///
+    /// Requires exact thread equality and
+    /// `from_sequence == current observation cursor`; on success advances
+    /// the entry to exactly `to_sequence`. A pending entry, stale lease,
+    /// thread mismatch, duplicate, regression, gap, or non-advancing batch
+    /// is a typed failure that leaves all state unchanged. Like
+    /// [`ConversationSubscriptionRegistry::publish_batch`], the accepted
+    /// batch's internal non-empty and strictly increasing guarantees are
+    /// trusted; this method enforces only the per-subscriber position.
+    ///
+    /// The cursor advances only after the later writer reports successful
+    /// publication of every observation in the batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`ApplyObservationBatchError`] without mutating state
+    /// for any precondition violation.
+    pub fn publish_observation_batch(
+        &mut self,
+        lease: &SubscriptionLease,
+        thread_id: &ThreadId,
+        from_sequence: u64,
+        to_sequence: u64,
+    ) -> Result<u64, ApplyObservationBatchError> {
+        let Some(entry) = self.entries.get_mut(&lease.thread_id) else {
+            return Err(ApplyObservationBatchError::StaleLease);
+        };
+        if entry.generation != lease.generation {
+            return Err(ApplyObservationBatchError::StaleLease);
+        }
+        if thread_id != &lease.thread_id {
+            return Err(ApplyObservationBatchError::ThreadMismatch);
+        }
+        match entry.state {
+            SubscriptionState::Pending => return Err(ApplyObservationBatchError::NotActive),
+            SubscriptionState::Active => {}
+        }
+        if from_sequence != entry.observation_cursor {
+            return Err(ApplyObservationBatchError::CursorMismatch {
+                expected: entry.observation_cursor,
+                actual: from_sequence,
+            });
+        }
+        if to_sequence <= from_sequence {
+            return Err(ApplyObservationBatchError::NonAdvancing {
+                from_sequence,
+                to_sequence,
+            });
+        }
+        entry.observation_cursor = to_sequence;
+        Ok(entry.observation_cursor)
     }
 }
