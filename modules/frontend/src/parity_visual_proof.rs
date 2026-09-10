@@ -28,8 +28,9 @@
 //! - captures exactly one selected state at one baseline viewport per
 //!   process (1024x720 or 1536x900 logical), hidden (`show: false`, never
 //!   presented, no OS screen capture, no Win32 control). Selection is an
-//!   explicit CLI pair and anything else fails closed, so root runs the
-//!   7 × 2 matrix as sequential processes with GPU/RAM reclaimed between.
+//!   explicit CLI pair and anything else fails closed. Nine cases
+//!   (seven baseline plus two reference-complaint reproductions) run as
+//!   sequential processes with GPU/RAM reclaimed between.
 //!
 //! Capture assumes `Window::render_to_image` is enabled (root enables the
 //! `test-support` feature; the shipping-wgpu readback itself is owned by the
@@ -101,6 +102,10 @@ pub enum ProofSceneCase {
     Error,
     /// Settled exchange carrying long markdown plus one image attachment.
     Longform,
+    /// Settled user complaint exchange with a run-attributed work session.
+    ReferenceSettled,
+    /// Live thinking summary with markdown fragments, run-attributed.
+    ReferenceThinking,
 }
 
 impl ProofSceneCase {
@@ -115,6 +120,8 @@ impl ProofSceneCase {
             Self::Completed => "completed",
             Self::Error => "error",
             Self::Longform => "longform",
+            Self::ReferenceSettled => "reference-settled",
+            Self::ReferenceThinking => "reference-thinking",
         }
     }
 
@@ -129,13 +136,15 @@ impl ProofSceneCase {
             "completed" => Some(Self::Completed),
             "error" => Some(Self::Error),
             "longform" => Some(Self::Longform),
+            "reference-settled" => Some(Self::ReferenceSettled),
+            "reference-thinking" => Some(Self::ReferenceThinking),
             _ => None,
         }
     }
 
     /// Every case in matrix order (root runs each as its own process).
     #[must_use]
-    pub fn all() -> [Self; 7] {
+    pub fn all() -> [Self; 9] {
         [
             Self::Empty,
             Self::Thinking,
@@ -144,6 +153,8 @@ impl ProofSceneCase {
             Self::Completed,
             Self::Error,
             Self::Longform,
+            Self::ReferenceSettled,
+            Self::ReferenceThinking,
         ]
     }
 }
@@ -240,11 +251,24 @@ fn make_multimodal(
     })
 }
 
+fn proof_run_id() -> RunId {
+    RunId::parse("parity-proof-run").expect("fixture run id is valid")
+}
+
+/// Run identity shared by one reference exchange's assistant reply and its
+/// session facts, so single-run session grouping engages exactly as the
+/// reference single session does. Deterministic synthetic routing evidence
+/// only, never a lease or credential.
+fn reference_run_id() -> RunId {
+    RunId::parse("parity-proof-reference").expect("fixture run id is valid")
+}
+
 fn make_assistant(
     ordinal: u64,
     body: &str,
     phase: AssistantMessagePhase,
     lifecycle: ConversationLifecycle,
+    run_id: RunId,
     created_at: UnixMillis,
     updated_at: UnixMillis,
 ) -> ConversationItem {
@@ -252,7 +276,7 @@ fn make_assistant(
         item_id: ItemId::parse(format!("parity-proof-assistant-{ordinal}"))
             .expect("fixture item id is valid"),
         turn_id: proof_turn_id(),
-        run_id: RunId::parse("parity-proof-run").expect("fixture run id is valid"),
+        run_id,
         ordinal: ItemOrdinal::new(ordinal),
         revision: Revision::new(0),
         lifecycle,
@@ -307,6 +331,7 @@ fn case_snapshot(
                     "fixture reply: shell, transcript, and composer match.",
                     AssistantMessagePhase::Final,
                     ConversationLifecycle::Completed,
+                    proof_run_id(),
                     ago(110_000),
                     ago(5_000),
                 ),
@@ -343,6 +368,7 @@ fn case_snapshot(
                     "fixture partial: rendering the",
                     AssistantMessagePhase::Final,
                     ConversationLifecycle::Streaming,
+                    proof_run_id(),
                     ago(30_000),
                     now,
                 ),
@@ -374,10 +400,45 @@ fn case_snapshot(
                     LONGFORM_ASSISTANT_BODY,
                     AssistantMessagePhase::Final,
                     ConversationLifecycle::Completed,
+                    proof_run_id(),
                     ago(170_000),
                     ago(5_000),
                 ),
             ],
+        )?,
+        // User complaint reproduction: user "Whoopty", settled reply with
+        // native emoji, run-attributed reasoning summary plus session
+        // marker sharing the reply's run so single-run session grouping
+        // engages; the 6s terminal span settles ThoughtFor{6000}.
+        ProofSceneCase::ReferenceSettled => build(
+            vec![make_turn(
+                ConversationLifecycle::Completed,
+                ago(6_000),
+                now,
+            )],
+            vec![
+                make_user(1, "Whoopty", ago(5_500), now),
+                make_assistant(
+                    2,
+                    "Whoopty! \u{1F604} Whats up?",
+                    AssistantMessagePhase::Final,
+                    ConversationLifecycle::Completed,
+                    reference_run_id(),
+                    ago(5_000),
+                    now,
+                ),
+            ],
+        )?,
+        // Live counterpart: active turn, same user prompt, markdown-rich
+        // reasoning summary (inline code, strong, italic) attributed to the
+        // run, so the live thinking summary line renders from provenance.
+        ProofSceneCase::ReferenceThinking => build(
+            vec![make_turn(
+                ConversationLifecycle::Active,
+                ago(65_000),
+                now,
+            )],
+            vec![make_user(1, "Whoopty", ago(60_000), now)],
         )?,
     };
     Ok(Some(snapshot))
@@ -394,6 +455,19 @@ fn case_facts(case: ProofSceneCase) -> Result<Vec<SceneFact>, String> {
             100,
             kind,
         )
+        .map_err(|error| format!("fixture fact invalid: {error:?}"))
+    };
+    // Run-attributed facts carry ordinals past the durable items and share
+    // the reply's run, which is what single-run session grouping reads.
+    // Attribution comes from retained observation identity, never text.
+    let attributed_fact = |name: &str, ordinal: u64, kind: SceneFactKind| {
+        SceneFact::new(
+            SceneId::parse(format!("parity-proof-{name}")).expect("fixture fact id is valid"),
+            proof_turn_id(),
+            ordinal,
+            kind,
+        )
+        .map(|fact| fact.with_run_id(reference_run_id()))
         .map_err(|error| format!("fixture fact invalid: {error:?}"))
     };
     match case {
@@ -413,6 +487,29 @@ fn case_facts(case: ProofSceneCase) -> Result<Vec<SceneFact>, String> {
             "error-fact",
             SceneFactKind::Error {
                 message: "fixture failure: transport refused".to_owned(),
+            },
+        )?]),
+        ProofSceneCase::ReferenceSettled => Ok(vec![
+            attributed_fact(
+                "reference-reasoning",
+                100,
+                SceneFactKind::Reasoning {
+                    body: "Planning a playful response.".to_owned(),
+                },
+            )?,
+            attributed_fact(
+                "reference-session",
+                101,
+                SceneFactKind::WorkSession {
+                    title: "Playful greeting".to_owned(),
+                },
+            )?,
+        ]),
+        ProofSceneCase::ReferenceThinking => Ok(vec![attributed_fact(
+            "reference-thinking",
+            100,
+            SceneFactKind::Reasoning {
+                body: "Checking `mood` for **playful** *tone* before replying.".to_owned(),
             },
         )?]),
         _ => Ok(Vec::new()),
@@ -650,7 +747,7 @@ impl ProofCapture {
 /// and RAM between captures; root orchestrates the 7 × 2 matrix as
 /// sequential processes. Unknown or missing arguments fail closed: usage on
 /// stderr and no windows opened.
-const PROOF_USAGE: &str = "usage: parity-proof --case <empty|thinking|working|streaming|completed|error|longform> --viewport <narrow|wide>";
+const PROOF_USAGE: &str = "usage: parity-proof --case <empty|thinking|working|streaming|completed|error|longform|reference-settled|reference-thinking> --viewport <narrow|wide>";
 
 /// Parses one explicit selection; anything else is a hard error.
 fn parse_selection(args: &[String]) -> Result<ProofCapture, String> {
@@ -941,8 +1038,15 @@ pub fn run() -> ExitCode {
 mod tests {
     use super::{
         NARROW_LOGICAL_WIDTH, ProofSceneCase, case_facts, case_snapshot, parse_selection,
+        reference_run_id,
     };
-    use crate::conversation_state_machine::SceneFactKind;
+    use crate::conversation_delivery_machine::ConversationDeliveryEvent;
+    use crate::conversation_scene::{
+        ConversationScene, TurnBlock, TurnNarration, WorkGroupBlock, WorkGroupLabel,
+    };
+    use crate::conversation_state_machine::{
+        ConversationStateController, ConversationStateEvent, SceneFactCommand, SceneFactKind,
+    };
     use artisan_domain::{ThreadId, UnixMillis};
 
     fn thread() -> ThreadId {
@@ -951,6 +1055,52 @@ mod tests {
 
     fn now() -> UnixMillis {
         UnixMillis::from_millis(1_700_000_000_000)
+    }
+
+    /// Drives one case through the real aggregate exactly as the runner's
+    /// `seed_case` does, minus the GPUI surface: snapshot then facts through
+    /// the delivery-owned path, then the projected scene.
+    fn project(case: ProofSceneCase) -> ConversationScene {
+        let thread = thread();
+        let mut controller = ConversationStateController::new(thread.clone());
+        let snapshot = case_snapshot(case, &thread, now())
+            .expect("snapshot builds")
+            .expect("case carries a snapshot");
+        controller
+            .dispatch(ConversationStateEvent::Delivery(
+                ConversationDeliveryEvent::SnapshotReceived(snapshot),
+            ))
+            .expect("snapshot accepted");
+        for fact in case_facts(case).expect("facts build") {
+            controller
+                .dispatch(ConversationStateEvent::Fact(SceneFactCommand::Register(fact)))
+                .expect("fact accepted");
+        }
+        controller.scene().expect("scene projects")
+    }
+
+    /// Returns the run-attributed session group of a single-turn scene.
+    fn session_group(scene: &ConversationScene) -> &WorkGroupBlock {
+        let turn = scene.turn_scenes().first().expect("one turn");
+        turn.blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::WorkGroup(group) if group.session_run.is_some() => Some(group),
+                _ => None,
+            })
+            .expect("one run-attributed session group")
+    }
+
+    /// Returns the turn status narration of a single-turn scene.
+    fn status_narration(scene: &ConversationScene) -> TurnNarration {
+        let turn = scene.turn_scenes().first().expect("one turn");
+        turn.blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::TurnStatus(status) => Some(status.narration),
+                _ => None,
+            })
+            .expect("one status row")
     }
 
     #[test]
@@ -1071,6 +1221,77 @@ mod tests {
             assert_eq!(ProofSceneCase::parse(case.slug()), Some(case));
         }
         assert_eq!(ProofSceneCase::parse("bogus"), None);
+    }
+
+    #[test]
+    fn reference_settled_projects_session_with_thought_for_six_seconds() {
+        let scene = project(ProofSceneCase::ReferenceSettled);
+        let group = session_group(&scene);
+        assert!(
+            matches!(&group.session_run, Some(run) if *run == reference_run_id()),
+            "session group carries the attributed run"
+        );
+        assert!(group.session.is_some(), "session carries its anchor");
+        assert!(
+            matches!(
+                group.label,
+                Some(WorkGroupLabel::ThoughtFor { millis: 6_000 })
+            ),
+            "settled span is six seconds"
+        );
+        assert!(
+            group.reasoning_summary.is_none(),
+            "settled rows carry no live summary line"
+        );
+        assert_eq!(
+            status_narration(&scene),
+            TurnNarration::ThoughtFor { millis: 6_000 }
+        );
+        let reply = scene
+            .turn_scenes()
+            .first()
+            .expect("one turn")
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::AssistantMessage(message) => Some(message.body.clone()),
+                _ => None,
+            });
+        assert_eq!(reply.as_deref(), Some("Whoopty! \u{1F604} Whats up?"));
+    }
+
+    #[test]
+    fn reference_thinking_projects_live_markdown_summary() {
+        let scene = project(ProofSceneCase::ReferenceThinking);
+        let group = session_group(&scene);
+        assert!(
+            matches!(&group.session_run, Some(run) if *run == reference_run_id()),
+            "session group carries the attributed run"
+        );
+        assert_eq!(
+            group.reasoning_summary.as_deref(),
+            Some("Checking `mood` for **playful** *tone* before replying.")
+        );
+        assert_eq!(status_narration(&scene), TurnNarration::Thinking);
+    }
+
+    #[test]
+    fn reference_cases_share_one_attributed_run() {
+        for case in [
+            ProofSceneCase::ReferenceSettled,
+            ProofSceneCase::ReferenceThinking,
+        ] {
+            assert!(
+                case_snapshot(case, &thread(), now())
+                    .expect("snapshot builds")
+                    .is_some()
+            );
+            assert!(
+                !case_facts(case).expect("facts build").is_empty(),
+                "case {} must attribute its session facts",
+                case.slug()
+            );
+        }
     }
 
     #[test]

@@ -51,11 +51,12 @@ conversation column are.
 1. Root registers the module (`mod parity_visual_proof;`, feature gate at
    root discretion) and enables `test-support` on the workspace
    `gpui_platform` dependency plus binary/export and Bazel wiring.
-2. Root runs one process per capture (7 states × narrow/wide = 14
-   sequential invocations; GPU/RAM reclaimed between — the all-14-at-once
+2. Root runs one process per capture (9 states × narrow/wide = 18
+   sequential invocations; GPU/RAM reclaimed between — the all-at-once
    shape exhausted RAM and is gone):
    `parity-proof --case <slug> --viewport <narrow|wide>`.
-   Slugs: `empty thinking working streaming completed error longform`.
+   Slugs: `empty thinking working streaming completed error longform
+   reference-settled reference-thinking`.
    Anything else (missing, reordered, extra, unknown slug/viewport) fails
    closed with usage on stderr and opens no windows.
 3. Each process: shipping boot parity (`.with_assets(CatalogAssetSource)`
@@ -85,7 +86,31 @@ conversation column are.
    the capture outright: no image is accepted from dimensions alone.
    Requested is never labeled actual.
 
-## Seeding path (production, projection contract `fd6f3aa0`)
+## Reference complaint cases (user report, local only)
+
+Reference (separate checkout, read-only):
+`modules/frontend/src/routes/components/conversation-work-session.svelte`
+(session item with `reasoning_summary`, settled durations, engine
+attribution), `conversation-message.svelte` (no emoji pipeline — unicode
+passes through as plain text), `lib/conversation/store.ts` +
+`activity-status.ts` (session derivation, thinking words, settlement).
+
+- `reference-settled`: user `Whoopty`; settled reply
+  `Whoopty! 😄 Whats up?` (Final, Completed, attributed run);
+  Reasoning fact `Planning a playful response.` plus `WorkSession`
+  marker `Playful greeting`, both run-attributed; Completed turn with a
+  6s own span. Exercises single-run session grouping, the session signal,
+  and `ThoughtFor{6000}` settlement. Tests assert the session group, its
+  run, the 6s label/narration, and the byte-exact emoji reply.
+- `reference-thinking`: user `Whoopty`; Active turn; Reasoning fact
+  ``Checking `mood` for **playful** *tone* before replying.`` with the
+  run. Exercises the live thinking summary line with inline code,
+  strong, and italic fragments. Tests assert the session run, the exact
+  summary body, and `Thinking` narration.
+
+Generic unattributed facts cannot trigger session grouping (runs are
+never parsed or defaulted: zero or several content runs keep the legacy
+layout), which is why these cases carry explicit run provenance.
 
 Manual `RegisterTurn`/`Turn` driving is gone. Each case dispatches a domain
 `SnapshotReceived` and, where the state needs one, directly registers
