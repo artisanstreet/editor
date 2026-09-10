@@ -1539,7 +1539,7 @@ async fn two_runs_resetting_run_sequence_lose_no_attributed_events() {
     let second = assert_observation_frame(
         receive_envelope(&mut incoming).await,
         &thread_id,
-        "frame-twouns-2",
+        "frame-tworuns-2",
         5_102,
         2,
         2,
