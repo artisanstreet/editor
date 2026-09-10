@@ -98,6 +98,7 @@ use crate::onboarding_harness_presentation::{
     HarnessCatalog, HarnessSetupAction, HarnessSetupState,
 };
 use crate::onboarding_screen::{OnboardingHarnessEntry, OnboardingScreen};
+use crate::thread_environment_presentation::{HostIdentitySnapshot, ThreadEnvironmentInput};
 use crate::thread_screen::{ThreadScreen, ThreadScreenGate};
 use crate::usage_meter::usage_segment_fraction;
 use crate::workspace_tab_state::EditorViewState;
@@ -3061,6 +3062,25 @@ impl NativeApplication {
         } else {
             None
         };
+        // A queued row with no active run and no persisted engine
+        // configuration is the dispatcher's `engine unconfigured` requeue
+        // loop made visible: name the missing configuration next to the
+        // count instead of leaving a bare number that reads as progress.
+        if !snapshot.run_active
+            && self.engine_settings.authoritative_config().is_none()
+            && matches!(queue.status(), crate::composer_queue_state::QueueStatus::Idle)
+            && (queue.total_count() > 0 || !queue.entries().is_empty())
+        {
+            snapshot.queue_status = Some(
+                match crate::native_composer_queue::queue_count_label(queue) {
+                    Some(count) => format!("{count} · engine not configured — select a model to start"),
+                    None => {
+                        "Queued message cannot start: engine not configured — select a model to start"
+                            .to_owned()
+                    }
+                },
+            );
+        }
 
         snapshot.new_thread_ready =
             snapshot.run_active && snapshot.send_ready && self.add_project_action_is_admissible();
@@ -3137,6 +3157,56 @@ impl NativeApplication {
                 cx.notify();
                 return;
             }
+        }
+        // First-send admission: when the thread has no persisted engine
+        // configuration yet, persist the currently displayed model policy
+        // through the existing typed save command and block this send until
+        // its authoritative acknowledgment arrives. Without this, an
+        // unconfigured first send queues a message the dispatcher can only
+        // requeue as `engine unconfigured`. When nothing is displayed (no
+        // selector policy), legacy admission applies so offline and
+        // policy-free surfaces keep their existing behavior.
+        if self.engine_settings.authoritative_config().is_none() {
+            if self.engine_settings.pending_save_request_id().is_some() {
+                self.composer_model_run_error = Some(
+                    "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
+                );
+                self.sync_composer_controls(cx);
+                cx.notify();
+                return;
+            }
+            let displayed = self.model_selector.read(cx).state().policy().cloned();
+            if let Some(policy) = displayed {
+                let catalog = self.model_selector.read(cx).state().snapshot().clone();
+                match crate::composer_model_config::config_for_policy(
+                    &catalog,
+                    &policy,
+                    self.engine_settings.authoritative_config(),
+                ) {
+                    Ok(config) => {
+                        *self.engine_settings.draft_mut() =
+                            crate::engine_settings::EngineSettingsDraft::from_config(&config);
+                        if self.engine_settings.can_save() {
+                            self.save_engine_settings(cx);
+                            self.sync_composer_model_policy(cx);
+                        }
+                        self.composer_model_run_error = Some(
+                            "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
+                        );
+                        self.sync_composer_controls(cx);
+                        cx.notify();
+                        return;
+                    }
+                    Err(message) => {
+                        self.composer_model_run_error = Some(message);
+                        self.sync_composer_controls(cx);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        } else {
+            self.composer_model_run_error = None;
         }
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
@@ -6932,6 +7002,15 @@ impl NativeApplication {
             NativeRoute::Thread { thread, .. } => {
                 let key = Some((thread.clone(), self.conversation_host.is_some()));
                 if self.thread_screen_key != key || self.thread_screen.is_none() {
+                    // The environment card must never infer a disconnect from
+                    // its empty default: feed the readily existing profile
+                    // hostname (the same authoritative identity behind the
+                    // sidebar) so Machine names this computer instead of
+                    // reporting `Not connected` while connected.
+                    let environment = ThreadEnvironmentInput {
+                        identity: self.profile_hostname.clone().map(HostIdentitySnapshot::new),
+                        ..ThreadEnvironmentInput::default()
+                    };
                     let mounted = match self.conversation_host.clone() {
                         Some(host) => {
                             let composer = self.composer.clone();
@@ -6940,6 +7019,7 @@ impl NativeApplication {
                             });
                             screen.update(cx, |screen, _| {
                                 screen.set_gate(ThreadScreenGate::Open);
+                                screen.set_environment(environment.clone());
                             });
                             // Typed text reaches the composer only while it
                             // holds window focus (the platform registers its
@@ -6952,7 +7032,14 @@ impl NativeApplication {
                             window.focus(&focus, cx);
                             Some(screen)
                         }
-                        None => ThreadScreen::mount(thread.clone(), ThemeMode::Dark, cx).ok(),
+                        None => ThreadScreen::mount(thread.clone(), ThemeMode::Dark, cx)
+                            .ok()
+                            .map(|screen| {
+                                screen.update(cx, |screen, _| {
+                                    screen.set_environment(environment);
+                                });
+                                screen
+                            }),
                     };
                     self.thread_screen = mounted;
                     self.thread_screen_key = key;
@@ -7837,6 +7924,43 @@ mod tests {
         application.sync_composer_availability(cx);
     }
 
+    /// Drives the engine-settings controller to a persisted configuration
+    /// built from the offline `codex-sol` policy, so send-admission tests
+    /// exercise the configured first-send flow instead of the unconfigured
+    /// block. Uses only controller-local transitions; no transport.
+    fn install_configured_engine_settings(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+    ) {
+        let thread_id = application
+            .selected_thread
+            .clone()
+            .expect("selected settings thread");
+        let catalog = application.model_selector.read(cx).state().snapshot().clone();
+        let mut policy = catalog
+            .selection_policy_for_model("codex-sol")
+            .expect("default selection policy");
+        policy.profile_id = Some("default".to_owned());
+        let config =
+            crate::composer_model_config::config_for_policy(&catalog, &policy, None)
+                .expect("default policy builds a run configuration");
+        application.engine_settings.select_thread(Some(&thread_id));
+        let generation = application
+            .engine_settings
+            .prepare_settings_load()
+            .expect("settings load generation");
+        assert!(application.engine_settings.mark_settings_load_admitted(&thread_id, generation));
+        application.engine_settings.on_settings_loaded(
+            generation,
+            artisan_protocol::ThreadEngineSettingsResult::Configured {
+                thread_id,
+                revision: artisan_domain::EngineConfigRevision::new(1).expect("first revision"),
+                config: Box::new(config),
+            },
+        );
+        assert!(application.engine_settings.authoritative_config().is_some());
+    }
+
     fn answer_thread() -> ThreadId {
         ThreadId::parse("thread-answer").expect("answer thread")
     }
@@ -8060,6 +8184,109 @@ mod tests {
                 application.sync_composer_model_policy(cx);
                 assert!(application.composer_model_choice.is_none());
                 assert!(application.composer_model_run_error.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn unconfigured_first_send_with_displayed_policy_blocks_and_preserves_draft(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    ThreadId::parse("first-send-task").unwrap(),
+                    "keep my draft",
+                    sink,
+                );
+                assert!(application.engine_settings.authoritative_config().is_none());
+                // The picker always displays its default policy, exactly the
+                // production first-send shape: a visible model with no
+                // persisted thread configuration and no explicit choice.
+                assert!(application.composer_model_choice.is_none());
+                assert!(application.model_selector.read(cx).state().policy().is_some());
+                application.begin_message_submission(cx);
+                // Blocked until the authoritative save acknowledgment
+                // arrives: no transport command, no flight, draft preserved,
+                // and an actionable error names the pending save.
+                assert!(commands.borrow().is_empty());
+                assert!(application.message_flight.is_none());
+                assert!(!application.composer.read(cx).is_submitting());
+                assert_eq!(application.composer.read(cx).draft(), "keep my draft");
+                let error = application
+                    .composer_model_run_error
+                    .expect("first-send configuration error");
+                assert!(error.contains("saved yet"), "unexpected error: {error}");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn queued_row_without_engine_config_names_the_missing_configuration(
+        cx: &mut TestAppContext,
+    ) {
+        let thread_id = ThreadId::parse("queued-unconfigured-task").expect("thread");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "draft",
+                    sink,
+                );
+                assert!(application.engine_settings.authoritative_config().is_none());
+                // Seed one authoritative queued row, the never-claimed
+                // projection the dispatcher still retries.
+                application
+                    .composer_queue
+                    .state
+                    .set_scope(Some(thread_id.clone()), 1);
+                // The install already forced one listing; retire its refresh
+                // so this test owns the next exact refresh token.
+                application.composer_queue.state.cancel_queue_refresh();
+                let token = application
+                    .composer_queue
+                    .state
+                    .begin_queue_refresh(true, true, false, false, true)
+                    .expect("forced queue refresh");
+                let listing = artisan_domain::QueuedMessageListing::new(
+                    thread_id.clone(),
+                    artisan_domain::QueuedMessageListOrder::OldestFirst,
+                    1,
+                    1,
+                    vec![artisan_domain::QueuedMessageSummary {
+                        message_id: artisan_domain::MessageId::parse("message-a")
+                            .expect("message"),
+                        thread_id: thread_id.clone(),
+                        original_request_id: artisan_domain::RequestId::parse("command-a")
+                            .expect("request"),
+                        text: Some(
+                            artisan_domain::AuthoredText::parse("queued text").expect("text"),
+                        ),
+                        attachments: Vec::new(),
+                        accepted_at: artisan_domain::UnixMillis::EPOCH,
+                    }],
+                )
+                .expect("queued page");
+                application
+                    .composer_queue
+                    .state
+                    .apply_queue_listing(&token, listing)
+                    .expect("queue page");
+                application.sync_composer_controls(cx);
+                let snapshot = application.composer_controls.read(cx).snapshot().clone();
+                assert!(!snapshot.run_active);
+                let status = snapshot.queue_status.expect("queue status");
+                assert!(status.contains("1 queued"), "unexpected status: {status}");
+                assert!(status.contains("engine not configured"), "unexpected status: {status}");
             });
         });
     }
@@ -10544,6 +10771,7 @@ mod tests {
                     "  exact retry body\n😀  ",
                     sink,
                 );
+                install_configured_engine_settings(application, application_cx);
                 application.begin_message_submission(application_cx);
                 let flight = application
                     .message_flight
@@ -10863,6 +11091,7 @@ mod tests {
                     "original retry body",
                     sink,
                 );
+                install_configured_engine_settings(application, application_cx);
                 admit_message_flight(application, application_cx, "retry-edited-request");
                 fail_active_message(application, application_cx);
             });

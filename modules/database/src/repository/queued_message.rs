@@ -43,7 +43,6 @@ WHERE m.thread_id = ?
   AND r.thread_id = m.thread_id
   AND r.message_id = m.message_id
   AND d.state = 'queued'
-  AND d.attempt_count = 0
   AND d.lease_owner IS NULL
   AND d.lease_expires_at_ms IS NULL
   AND NOT EXISTS (
@@ -73,7 +72,6 @@ WHERE m.thread_id = ?
   AND r.thread_id = m.thread_id
   AND r.message_id = m.message_id
   AND d.state = 'queued'
-  AND d.attempt_count = 0
   AND d.lease_owner IS NULL
   AND d.lease_expires_at_ms IS NULL
   AND NOT EXISTS (
@@ -105,7 +103,6 @@ WHERE m.thread_id = ?
   AND r.thread_id = m.thread_id
   AND r.message_id = m.message_id
   AND d.state = 'queued'
-  AND d.attempt_count = 0
   AND d.lease_owner IS NULL
   AND d.lease_expires_at_ms IS NULL
   AND NOT EXISTS (
@@ -270,8 +267,12 @@ impl Repository {
     ///
     /// Rows are ordered by `(queued_at_ms, message_id)` in the requested
     /// direction. Only `queue_message` receipts paired with a `queued`
-    /// dispatch whose attempt count is zero are eligible; leased, running,
-    /// completed, failed, requeued, and withdrawn rows are excluded. The
+    /// dispatch are eligible; leased, running, completed, failed, and
+    /// withdrawn rows are excluded. A dispatcher requeue returns its claim
+    /// to `queued` with a future availability and a persisted `last_error`,
+    /// so retrying rows stay eligible here until they are claimed,
+    /// completed, failed, or withdrawn — the composer lip never loses a
+    /// message that the dispatcher still retries. The
     /// result contains authored text and byte-free image references, never
     /// image bytes. `total_count` and `has_more` are derived from the same
     /// eligibility predicate as the page query in one read transaction.

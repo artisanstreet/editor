@@ -4039,3 +4039,16 @@ mod text_projection_tests {
         assert_eq!(parts.body(), "A-1A-2B-corrected");
     }
 }
+
+#[cfg(test)]
+mod settings_decision_tests {
+    use super::{SettingsLoadDecision, classify_settings_load};
+
+    #[test]
+    fn missing_thread_configuration_requeues_with_the_actionable_reason() {
+        assert_eq!(
+            classify_settings_load(Ok(None)),
+            SettingsLoadDecision::Requeue("engine unconfigured")
+        );
+    }
+}

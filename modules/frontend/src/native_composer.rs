@@ -1075,6 +1075,36 @@ impl NativeComposer {
         self.state.is_submitting()
     }
 
+    /// Returns the caret quad for the focused, collapsed selection.
+    ///
+    /// `None` when blurred, when a non-empty selection owns the highlight,
+    /// or without laid-out text geometry. The origin reuses the stored text
+    /// layout exactly like the IME `bounds_for_range` seam; an empty draft
+    /// falls back to the padded text origin so the caret shows before any
+    /// typing. The offset itself comes from [`caret_offset_for_paint`].
+    pub(crate) fn caret_quad(&self, window: &Window) -> Option<gpui::PaintQuad> {
+        if !self.focus_handle.is_focused(window) {
+            return None;
+        }
+        let offset = caret_offset_for_paint(true, &self.selection, self.state.draft())?;
+        let layout = self.layout.as_ref()?;
+        let line_height = layout.line_height();
+        let origin = match layout.position_for_index(offset) {
+            Some(origin) => origin,
+            None => {
+                let bounds = self.painted_bounds.as_ref()?;
+                point(bounds.left() + px(12.0), bounds.top() + px(8.0))
+            }
+        };
+        if !valid_point(origin) || line_height <= Pixels::ZERO {
+            return None;
+        }
+        Some(gpui::fill(
+            Bounds::new(origin, size(px(2.0), line_height)),
+            DesktopTheme::neutral_dark().foreground,
+        ))
+    }
+
     pub(crate) fn begin_submission(
         &mut self,
     ) -> Result<(artisan_domain::MessageBody, SubmissionToken), SubmissionBlocked> {
@@ -2595,6 +2625,9 @@ impl Element for NativeComposerInputElement {
             }
         });
         self.child.paint(window, cx);
+        if let Some(caret) = self.view.read(cx).caret_quad(window) {
+            window.paint_quad(caret);
+        }
         self.view.update(cx, |composer, _| {
             composer.painted_bounds = valid_bounds(&bounds).then_some(bounds);
         });
@@ -2732,6 +2765,31 @@ fn valid_bounds(bounds: &Bounds<Pixels>) -> bool {
 
 fn valid_point(point: Point<Pixels>) -> bool {
     valid_pixels(point.x) && valid_pixels(point.y)
+}
+
+/// Returns the draft byte offset where the native caret paints, or `None`
+/// when no caret may paint.
+///
+/// The caret is a focused, collapsed-selection affordance: blur hides it, a
+/// non-empty selection hides it in favor of the highlight, and a stale or
+/// non-boundary offset hides it rather than misplacing it. The returned
+/// offset is a UTF-8 byte index into the draft, matching
+/// `TextLayout::position_for_index` exactly (the IME seam converts to UTF-16
+/// separately), so multibyte text positions the caret after whole characters
+/// and movement/typing follows the stored selection.
+fn caret_offset_for_paint(
+    focused: bool,
+    selection: &Range<usize>,
+    draft: &str,
+) -> Option<usize> {
+    if !focused || !selection.is_empty() {
+        return None;
+    }
+    let offset = selection.end;
+    if offset > draft.len() || !draft.is_char_boundary(offset) {
+        return None;
+    }
+    Some(offset)
 }
 
 #[cfg(test)]
@@ -2915,7 +2973,7 @@ mod tests {
         NativeComposerEvent, SelectDocumentEnd, SelectDocumentHome, SelectEnd, SelectHome,
         localize_painted_point, logical_vertical_target, offset_layout_bounds,
         replace_text_preserving_raw, utf8_offset_to_utf16, utf16_offset_to_utf8,
-        utf16_range_to_utf8,
+        utf16_range_to_utf8, caret_offset_for_paint,
     };
     use crate::composer::DraftDisposition;
     use crate::image_policy::{ImageDimensions, ImageMediaType};
@@ -3022,6 +3080,27 @@ mod tests {
                 assert_eq!(composer.is_submitting(), submitting);
             });
         });
+    }
+
+    #[test]
+    fn caret_paints_focused_collapsed_only_at_valid_boundaries() {
+        // Empty field, focused: visible at the origin.
+        assert_eq!(caret_offset_for_paint(true, &(0..0), ""), Some(0));
+        // Collapsed selection follows movement through multibyte text.
+        let draft = "a😀b";
+        assert_eq!(caret_offset_for_paint(true, &(1..1), draft), Some(1));
+        assert_eq!(caret_offset_for_paint(true, &(5..5), draft), Some(5));
+        assert_eq!(caret_offset_for_paint(true, &(6..6), draft), Some(6));
+        // Mid-character offsets never place the caret inside a character.
+        assert_eq!(caret_offset_for_paint(true, &(2..2), draft), None);
+        // A selection hides the caret in favor of the highlight.
+        assert_eq!(caret_offset_for_paint(true, &(0..1), draft), None);
+        assert_eq!(caret_offset_for_paint(true, &(1..5), draft), None);
+        // Blur hides the caret even for a collapsed selection.
+        assert_eq!(caret_offset_for_paint(false, &(0..0), ""), None);
+        assert_eq!(caret_offset_for_paint(false, &(1..1), draft), None);
+        // Stale offsets past the draft hide rather than misplace.
+        assert_eq!(caret_offset_for_paint(true, &(7..7), draft), None);
     }
 
     fn bind_actions(cx: &mut VisualTestContext) {
