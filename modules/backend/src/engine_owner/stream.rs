@@ -469,6 +469,10 @@ async fn deliver_events(
             EngineObservation::TextDelta(_)
             | EngineObservation::TextSnapshot(_)
             | EngineObservation::Usage(_)
+            // Activity rows are progress observations committed by the
+            // dispatcher in a separate packet; they never settle the stream
+            // receipt here, exactly like subagent rows below.
+            | EngineObservation::Activity(_)
             // Subagent rows are progress observations, never terminal
             // receipt state; they travel the Claude owner channel only.
             | EngineObservation::Subagent(_)

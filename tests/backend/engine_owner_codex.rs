@@ -2306,3 +2306,653 @@ async fn codex_live_owner_completes_real_turn_within_budget() {
     .await
     .expect("live turn completes inside 60s");
 }
+
+// ---------------------------------------------------------------------------
+// Rich activity normalization (Codex visual parity)
+//
+// Decoder, normalizer, and authority proofs for the activity subset the Rust
+// owner previously discarded. Every emission is asserted as
+// `EngineObservation::Activity` carrying one validated domain observation
+// with the provider item/turn identities preserved verbatim, a stable
+// generated observation id, and the source-local frame sequence. The
+// dispatcher `Activity` arm arrives in a separate packet; these tests prove
+// the owner channel side only.
+// ---------------------------------------------------------------------------
+
+/// Applies one event and drains exactly the emitted activity rows.
+///
+/// Panics when the activity path emits anything but `Activity` rows: the
+/// plain delta, usage, and terminal shapes keep their own channels.
+async fn apply_activity(
+    event: CodexEvent,
+    run: &RunId,
+    tracker: &mut CodexPendingTracker,
+    active: &mut Option<String>,
+    sequence: u64,
+) -> (Option<TerminalState>, Vec<artisan_domain::Observation>) {
+    let (sender, mut receiver) = mpsc::channel(64);
+    let terminal = apply_event(event, run, tracker, active, &sender, sequence, None).await;
+    drop(sender);
+    let mut rows = Vec::new();
+    while let Ok(observation) = receiver.try_recv() {
+        let EngineObservation::Activity(row) = observation else {
+            panic!("activity path must emit only Activity rows");
+        };
+        rows.push(row);
+    }
+    (terminal, rows)
+}
+
+#[test]
+fn reasoning_summary_delta_and_boundary_decode_with_scope() {
+    let event = parse_frame(
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"thinking aloud","itemId":"item-r1","summaryIndex":2,"threadId":"t-1","turnId":"turn-1"}}"#,
+        7,
+    )
+    .expect("summary delta decodes");
+    let CodexEvent::ReasoningSummaryDelta {
+        turn_id,
+        item_id,
+        summary_index,
+        delta,
+        ..
+    } = event
+    else {
+        panic!("expected reasoning summary delta");
+    };
+    assert_eq!(turn_id, "turn-1");
+    assert_eq!(item_id, "item-r1");
+    assert_eq!(summary_index, 2);
+    assert_eq!(delta, "thinking aloud");
+
+    // A nonzero section opener is a structural boundary, never silent.
+    let boundary = parse_frame(
+        r#"{"method":"item/reasoning/summaryPartAdded","params":{"itemId":"item-r1","summaryIndex":1,"threadId":"t-1","turnId":"turn-1"}}"#,
+        8,
+    )
+    .expect("boundary decodes");
+    assert!(matches!(
+        boundary,
+        CodexEvent::ReasoningSummaryBoundary { summary_index: 1, .. }
+    ));
+
+    // The section-zero opener and private reasoning content stay silent.
+    let zero = parse_frame(
+        r#"{"method":"item/reasoning/summaryPartAdded","params":{"itemId":"item-r1","summaryIndex":0,"threadId":"t-1","turnId":"turn-1"}}"#,
+        9,
+    )
+    .expect("section-zero decodes");
+    assert!(matches!(zero, CodexEvent::ActivitySilent));
+    let private = parse_frame(
+        r#"{"method":"item/reasoning/textDelta","params":{"contentIndex":0,"delta":"hidden","itemId":"item-r1","threadId":"t-1","turnId":"turn-1"}}"#,
+        10,
+    )
+    .expect("private reasoning decodes");
+    assert!(matches!(private, CodexEvent::ActivitySilent));
+
+    // Empty deltas and missing scope never become typed activity.
+    for line in [
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"","itemId":"item-r1","summaryIndex":0,"threadId":"t-1","turnId":"turn-1"}}"#,
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"x","itemId":"item-r1","summaryIndex":0,"threadId":"t-1"}}"#,
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"x","itemId":"","summaryIndex":0,"threadId":"t-1","turnId":"turn-1"}}"#,
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"x","itemId":"item-r1","summaryIndex":-1,"threadId":"t-1","turnId":"turn-1"}}"#,
+    ] {
+        assert!(
+            matches!(parse_frame(line, 11).expect("frame parses"), CodexEvent::UnknownMethod),
+            "malformed summary frame stays observable: {line}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reasoning_summary_emits_published_text_only() {
+    let run = run_id();
+    let mut tracker = CodexPendingTracker::new();
+    let mut active = None;
+
+    let event = parse_frame(
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"thinking aloud","itemId":"item-r1","summaryIndex":2,"threadId":"t-1","turnId":"turn-1"}}"#,
+        7,
+    )
+    .expect("summary delta decodes");
+    let (terminal, rows) = apply_activity(event, &run, &mut tracker, &mut active, 7).await;
+    assert_eq!(terminal, None, "activity never settles the turn");
+    assert_eq!(active.as_deref(), Some("turn-1"), "turn adopted like deltas");
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::ReasoningSummaryDelta(row) = &rows[0] else {
+        panic!("expected a reasoning summary delta");
+    };
+    assert_eq!(row.item_id().as_str(), "item-r1");
+    assert_eq!(row.turn_id().as_str(), "turn-1");
+    assert_eq!(row.summary_index(), 2);
+    assert_eq!(row.delta(), "thinking aloud");
+    assert_eq!(row.sequence().get(), 7, "source-local ordering preserved");
+    assert_eq!(
+        row.id().as_str(),
+        "codex-run-1:codex:7:rsum:item-r1:2:0",
+        "stable generated observation id"
+    );
+
+    // The nonzero section boundary emits the readable paragraph separator.
+    let boundary = parse_frame(
+        r#"{"method":"item/reasoning/summaryPartAdded","params":{"itemId":"item-r1","summaryIndex":1,"threadId":"t-1","turnId":"turn-1"}}"#,
+        8,
+    )
+    .expect("boundary decodes");
+    let (terminal, rows) = apply_activity(boundary, &run, &mut tracker, &mut active, 8).await;
+    assert_eq!(terminal, None);
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::ReasoningSummaryDelta(row) = &rows[0] else {
+        panic!("expected a boundary delta");
+    };
+    assert_eq!(row.delta(), "\n\n");
+    assert_eq!(row.summary_index(), 1);
+
+    // Silent shapes emit nothing and never adopt or disturb the turn.
+    let mut silent_active = None;
+    for line in [
+        r#"{"method":"item/reasoning/summaryPartAdded","params":{"itemId":"item-r1","summaryIndex":0,"threadId":"t-1","turnId":"turn-1"}}"#,
+        r#"{"method":"item/reasoning/textDelta","params":{"contentIndex":0,"delta":"hidden chain","itemId":"item-r1","threadId":"t-1","turnId":"turn-1"}}"#,
+    ] {
+        let event = parse_frame(line, 9).expect("silent shape decodes");
+        let (terminal, rows) =
+            apply_activity(event, &run, &mut tracker, &mut silent_active, 9).await;
+        assert_eq!(terminal, None);
+        assert!(rows.is_empty(), "private reasoning never surfaces: {line}");
+    }
+    assert_eq!(silent_active, None, "silent frames adopt no turn");
+}
+
+#[tokio::test]
+async fn reasoning_settled_joins_authoritative_summary() {
+    let run = run_id();
+    let mut tracker = CodexPendingTracker::new();
+    let mut active = Some("turn-1".to_owned());
+
+    let event = parse_frame(
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"item-r1","summary":["first point","second point"],"type":"reasoning"}}}"#,
+        12,
+    )
+    .expect("reasoning completion decodes");
+    let (terminal, rows) = apply_activity(event, &run, &mut tracker, &mut active, 12).await;
+    assert_eq!(terminal, None);
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::ReasoningSummaryCompleted(row) = &rows[0] else {
+        panic!("expected a settled reasoning phase");
+    };
+    assert_eq!(row.item_id().as_str(), "item-r1");
+    assert_eq!(row.turn_id().as_str(), "turn-1");
+    assert_eq!(row.text(), Some("first point\n\nsecond point"));
+
+    // An empty published summary still settles the phase, with no text.
+    let empty = parse_frame(
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"item-r1","summary":[],"type":"reasoning"}}}"#,
+        13,
+    )
+    .expect("empty summary decodes");
+    let (_, rows) = apply_activity(empty, &run, &mut tracker, &mut active, 13).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::ReasoningSummaryCompleted(row) = &rows[0] else {
+        panic!("expected a settled reasoning phase");
+    };
+    assert_eq!(row.text(), None);
+
+    // A started reasoning item and a summary-free envelope stay non-activity.
+    let started = parse_frame(
+        r#"{"method":"item/started","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"item-r1","summary":[],"type":"reasoning"}}}"#,
+        14,
+    )
+    .expect("started reasoning decodes");
+    assert!(matches!(started, CodexEvent::ActivitySilent));
+    let missing = parse_frame(
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"item-r1","type":"reasoning"}}}"#,
+        15,
+    )
+    .expect("summary-free envelope parses");
+    assert!(matches!(missing, CodexEvent::UnknownMethod));
+}
+
+#[tokio::test]
+async fn tool_begin_progress_complete_normalize() {
+    let run = run_id();
+    let mut tracker = CodexPendingTracker::new();
+    let mut active = Some("turn-1".to_owned());
+
+    let started = parse_frame(
+        r#"{"method":"item/started","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"tool-1","server":"srv","tool":"read","status":"inProgress","type":"mcpToolCall"}}}"#,
+        20,
+    )
+    .expect("tool start decodes");
+    let (_, rows) = apply_activity(started, &run, &mut tracker, &mut active, 20).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::Tool(row) = &rows[0] else {
+        panic!("expected a tool observation");
+    };
+    assert_eq!(row.tool_id().as_str(), "tool-1");
+    assert_eq!(row.tool_name(), "srv/read");
+    assert_eq!(row.action(), artisan_domain::ToolAction::Started);
+    assert_eq!(row.detail(), None);
+
+    let progress = parse_frame(
+        r#"{"method":"item/mcpToolCall/progress","params":{"itemId":"tool-1","message":"reading files","threadId":"t-1","turnId":"turn-1"}}"#,
+        21,
+    )
+    .expect("tool progress decodes");
+    let (_, rows) = apply_activity(progress, &run, &mut tracker, &mut active, 21).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::Tool(row) = &rows[0] else {
+        panic!("expected a tool observation");
+    };
+    assert_eq!(row.action(), artisan_domain::ToolAction::Progress);
+    assert_eq!(row.detail(), Some("reading files"));
+
+    let failed = parse_frame(
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"tool-1","server":"srv","tool":"read","status":"failed","type":"mcpToolCall"}}}"#,
+        22,
+    )
+    .expect("tool failure decodes");
+    let (_, rows) = apply_activity(failed, &run, &mut tracker, &mut active, 22).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::Tool(row) = &rows[0] else {
+        panic!("expected a tool observation");
+    };
+    assert_eq!(row.action(), artisan_domain::ToolAction::Failed);
+
+    // A dynamic tool without a namespace keeps the TypeScript fallback name.
+    let dynamic = parse_frame(
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"tool-9","tool":"fetch","status":"completed","type":"dynamicToolCall"}}}"#,
+        23,
+    )
+    .expect("dynamic tool decodes");
+    let (_, rows) = apply_activity(dynamic, &run, &mut tracker, &mut active, 23).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::Tool(row) = &rows[0] else {
+        panic!("expected a tool observation");
+    };
+    assert_eq!(row.tool_name(), "dynamic/fetch");
+    assert_eq!(row.action(), artisan_domain::ToolAction::Completed);
+
+    // A tool name the durable vocabulary cannot hold fails closed as a unit.
+    let huge = parse_frame(
+        &format!(
+            r#"{{"method":"item/completed","params":{{"threadId":"t-1","turnId":"turn-1","item":{{"id":"tool-9","server":"{}","tool":"{}","status":"completed","type":"mcpToolCall"}}}}}}"#,
+            "s".repeat(200),
+            "t".repeat(200),
+        ),
+        24,
+    )
+    .expect("oversize tool name parses");
+    let (_, rows) = apply_activity(huge, &run, &mut tracker, &mut active, 24).await;
+    assert!(rows.is_empty(), "oversize tool names never persist");
+
+    // An oversize progress message is omitted while the step is preserved.
+    let loud = parse_frame(
+        &format!(
+            r#"{{"method":"item/mcpToolCall/progress","params":{{"itemId":"tool-1","message":"{}","threadId":"t-1","turnId":"turn-1"}}}}"#,
+            "m".repeat(5_000),
+        ),
+        25,
+    )
+    .expect("oversize progress parses");
+    let (_, rows) = apply_activity(loud, &run, &mut tracker, &mut active, 25).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::Tool(row) = &rows[0] else {
+        panic!("expected a tool observation");
+    };
+    assert_eq!(row.action(), artisan_domain::ToolAction::Progress);
+    assert_eq!(row.detail(), None, "oversize detail omitted, not truncated");
+}
+
+#[tokio::test]
+async fn foreign_child_and_malformed_frames_never_reach_root() {
+    let run = run_id();
+    let mut tracker = CodexPendingTracker::new();
+    let mut active = Some("turn-1".to_owned());
+
+    // A foreign turn claims no authority over the current turn.
+    let foreign = parse_frame(
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"elsewhere","itemId":"item-r9","summaryIndex":0,"threadId":"t-1","turnId":"turn-foreign"}}"#,
+        30,
+    )
+    .expect("foreign turn frame parses");
+    let (terminal, rows) = apply_activity(foreign, &run, &mut tracker, &mut active, 30).await;
+    assert_eq!(terminal, None);
+    assert!(rows.is_empty(), "foreign turn activity never emits");
+    assert_eq!(active.as_deref(), Some("turn-1"), "foreign turn never adopts");
+
+    // Child-thread activity is never coerced into the root channel.
+    tracker.note_subagent("child-9", "t-1");
+    assert!(tracker.is_known_child_thread("child-9"));
+    assert!(!tracker.is_known_child_thread("t-1"), "root thread is not a child");
+    let child = parse_frame(
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"child text","itemId":"item-c1","summaryIndex":0,"threadId":"child-9","turnId":"turn-1"}}"#,
+        31,
+    )
+    .expect("child frame parses");
+    let (_, rows) = apply_activity(child, &run, &mut tracker, &mut active, 31).await;
+    assert!(rows.is_empty(), "child activity never becomes root activity");
+
+    // A provider identity outside the wire identifier rule fails closed.
+    let spaced = parse_frame(
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"hi","itemId":"has space","summaryIndex":0,"threadId":"t-1","turnId":"turn-1"}}"#,
+        32,
+    )
+    .expect("spaced item id parses");
+    let (_, rows) = apply_activity(spaced, &run, &mut tracker, &mut active, 32).await;
+    assert!(rows.is_empty(), "unidentifiable items never persist");
+
+    // A sequence past the finite range emits nothing instead of wrapping.
+    let delta = parse_frame(
+        r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"hi","itemId":"item-r1","summaryIndex":0,"threadId":"t-1","turnId":"turn-1"}}"#,
+        u64::MAX,
+    )
+    .expect("delta parses");
+    let (_, rows) = apply_activity(delta, &run, &mut tracker, &mut active, u64::MAX).await;
+    assert!(rows.is_empty(), "overflowing sequences never persist");
+}
+
+#[tokio::test]
+async fn activity_ids_are_stable_and_fragments_are_bounded() {
+    let run = run_id();
+    let mut tracker = CodexPendingTracker::new();
+    let mut active = Some("turn-1".to_owned());
+
+    // A 5,000-byte delta fragments losslessly at the domain delta ceiling.
+    let big = "x".repeat(5_000);
+    let event = parse_frame(
+        &format!(
+            r#"{{"method":"item/reasoning/summaryTextDelta","params":{{"delta":"{big}","itemId":"item-r1","summaryIndex":0,"threadId":"t-1","turnId":"turn-1"}}}}"#
+        ),
+        40,
+    )
+    .expect("large delta parses");
+    let (_, rows) = apply_activity(event, &run, &mut tracker, &mut active, 40).await;
+    assert_eq!(rows.len(), 2, "5000 bytes split into 4096 + 904");
+    let mut joined = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        let artisan_domain::Observation::ReasoningSummaryDelta(delta) = row else {
+            panic!("expected delta fragments");
+        };
+        joined.push_str(delta.delta());
+        assert_eq!(
+            delta.id().as_str(),
+            format!("codex-run-1:codex:40:rsum:item-r1:0:{index}"),
+            "fragment suffix disambiguates without collision"
+        );
+    }
+    assert_eq!(joined, big, "fragments reassemble exactly");
+
+    // Replaying the same frame reproduces identical ids: no duplication.
+    let replay = parse_frame(
+        &format!(
+            r#"{{"method":"item/reasoning/summaryTextDelta","params":{{"delta":"{big}","itemId":"item-r1","summaryIndex":0,"threadId":"t-1","turnId":"turn-1"}}}}"#
+        ),
+        40,
+    )
+    .expect("replay parses");
+    let (_, replayed) = apply_activity(replay, &run, &mut tracker, &mut active, 40).await;
+    assert_eq!(replayed, rows, "replay reproduces identical observations");
+
+    // Multi-byte text fragments on UTF-8 boundaries without corruption.
+    let wide = "é".repeat(3_000);
+    let event = parse_frame(
+        &format!(
+            r#"{{"method":"item/commandExecution/outputDelta","params":{{"delta":"{wide}","itemId":"cmd-1","threadId":"t-1","turnId":"turn-1"}}}}"#
+        ),
+        41,
+    )
+    .expect("wide output parses");
+    let (_, rows) = apply_activity(event, &run, &mut tracker, &mut active, 41).await;
+    assert_eq!(rows.len(), 2, "6000 bytes split at the 8192-byte output ceiling");
+    let mut joined = String::new();
+    for row in &rows {
+        let artisan_domain::Observation::TerminalActivity(activity) = row else {
+            panic!("expected terminal output rows");
+        };
+        assert_eq!(activity.state(), artisan_domain::TerminalActivityState::Output);
+        joined.push_str(activity.output().expect("output chunk present"));
+    }
+    assert_eq!(joined, wide, "wide fragments reassemble exactly");
+
+    // An oversize authoritative summary still settles its phase, textless.
+    let huge = "s".repeat(70_000);
+    let event = parse_frame(
+        &format!(
+            r#"{{"method":"item/completed","params":{{"threadId":"t-1","turnId":"turn-1","item":{{"id":"item-r1","summary":["{huge}"],"type":"reasoning"}}}}}}"#
+        ),
+        42,
+    )
+    .expect("huge summary parses");
+    let (_, rows) = apply_activity(event, &run, &mut tracker, &mut active, 42).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::ReasoningSummaryCompleted(row) = &rows[0] else {
+        panic!("expected a settled phase");
+    };
+    assert_eq!(row.text(), None, "oversize text omitted, never truncated");
+}
+
+#[tokio::test]
+async fn command_search_plan_and_file_frames_normalize() {
+    let run = run_id();
+    let mut tracker = CodexPendingTracker::new();
+    let mut active = Some("turn-1".to_owned());
+
+    // Command start, output, and completion preserve provider evidence.
+    let started = parse_frame(
+        r#"{"method":"item/started","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"cmd-1","command":"echo hi","status":"inProgress","type":"commandExecution"}}}"#,
+        50,
+    )
+    .expect("command start decodes");
+    let (_, rows) = apply_activity(started, &run, &mut tracker, &mut active, 50).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::TerminalActivity(row) = &rows[0] else {
+        panic!("expected terminal activity");
+    };
+    assert_eq!(row.activity_id().as_str(), "cmd-1");
+    assert_eq!(row.command(), Some("echo hi"));
+    assert_eq!(row.state(), artisan_domain::TerminalActivityState::Started);
+
+    let output = parse_frame(
+        r#"{"method":"item/commandExecution/outputDelta","params":{"delta":"hi\n","itemId":"cmd-1","threadId":"t-1","turnId":"turn-1"}}"#,
+        51,
+    )
+    .expect("command output decodes");
+    let (_, rows) = apply_activity(output, &run, &mut tracker, &mut active, 51).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::TerminalActivity(row) = &rows[0] else {
+        panic!("expected terminal output");
+    };
+    assert_eq!(row.output(), Some("hi\n"));
+
+    let completed = parse_frame(
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"aggregatedOutput":"hi\n","command":"echo hi","exitCode":3,"id":"cmd-1","status":"completed","type":"commandExecution"}}}"#,
+        52,
+    )
+    .expect("command completion decodes");
+    let (_, rows) = apply_activity(completed, &run, &mut tracker, &mut active, 52).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::TerminalActivity(row) = &rows[0] else {
+        panic!("expected terminal completion");
+    };
+    assert_eq!(row.state(), artisan_domain::TerminalActivityState::Completed);
+    assert_eq!(row.exit_code(), Some(3));
+    assert_eq!(row.output(), Some("hi\n"));
+
+    // A declined command reports failure, exactly like the TS vocabulary.
+    let declined = parse_frame(
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"command":"rm -rf /","id":"cmd-2","status":"declined","type":"commandExecution"}}}"#,
+        53,
+    )
+    .expect("declined command decodes");
+    let (_, rows) = apply_activity(declined, &run, &mut tracker, &mut active, 53).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::TerminalActivity(row) = &rows[0] else {
+        panic!("expected terminal failure");
+    };
+    assert_eq!(row.state(), artisan_domain::TerminalActivityState::Failed);
+    assert_eq!(row.exit_code(), None);
+
+    // Web search start and completion carry the web scope and search id.
+    for (method, sequence, state) in [
+        ("item/started", 54, artisan_domain::SearchState::Started),
+        ("item/completed", 55, artisan_domain::SearchState::Completed),
+    ] {
+        let event = parse_frame(
+            &format!(
+                r#"{{"method":"{method}","params":{{"threadId":"t-1","turnId":"turn-1","item":{{"id":"search-1","query":"rust async","type":"webSearch"}}}}}}"#
+            ),
+            sequence,
+        )
+        .expect("search frame decodes");
+        let (_, rows) = apply_activity(event, &run, &mut tracker, &mut active, sequence).await;
+        assert_eq!(rows.len(), 1);
+        let artisan_domain::Observation::Search(row) = &rows[0] else {
+            panic!("expected a search observation");
+        };
+        assert_eq!(row.query(), "rust async");
+        assert_eq!(row.scope(), Some(artisan_domain::SearchScope::Web));
+        assert_eq!(row.search_id().expect("search id").as_str(), "search-1");
+        assert_eq!(row.state(), state);
+    }
+
+    // Plan updates preserve provider steps with native entry identities.
+    let plan = parse_frame(
+        r#"{"method":"turn/plan/updated","params":{"explanation":null,"plan":[{"status":"completed","step":"survey"},{"status":"inProgress","step":"implement"},{"status":"pending","step":"verify"}],"threadId":"t-1","turnId":"turn-1"}}"#,
+        56,
+    )
+    .expect("plan update decodes");
+    let (_, rows) = apply_activity(plan, &run, &mut tracker, &mut active, 56).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::Plan(row) = &rows[0] else {
+        panic!("expected a plan observation");
+    };
+    assert_eq!(row.turn_id().expect("plan turn").as_str(), "turn-1");
+    let entries = row.entries();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].id().as_str(), "turn-1:plan:0");
+    assert_eq!(entries[1].status(), artisan_domain::PlanEntryStatus::InProgress);
+    assert_eq!(entries[2].text(), "verify");
+
+    // A plan the durable vocabulary cannot hold fails closed as a unit.
+    let mut steps = String::new();
+    for index in 0..65 {
+        if index > 0 {
+            steps.push(',');
+        }
+        steps.push_str(&format!(r#"{{"status":"pending","step":"step {index}"}}"#));
+    }
+    let oversize = parse_frame(
+        &format!(
+            r#"{{"method":"turn/plan/updated","params":{{"explanation":null,"plan":[{steps}],"threadId":"t-1","turnId":"turn-1"}}}}"#
+        ),
+        57,
+    )
+    .expect("oversize plan parses");
+    let (_, rows) = apply_activity(oversize, &run, &mut tracker, &mut active, 57).await;
+    assert!(rows.is_empty(), "65-entry plans never persist partially");
+
+    // A single plan item normalizes with its own provider identity.
+    let item_plan = parse_frame(
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"plan-item-1","text":"migrate schema","type":"plan"}}}"#,
+        58,
+    )
+    .expect("plan item decodes");
+    let (_, rows) = apply_activity(item_plan, &run, &mut tracker, &mut active, 58).await;
+    assert_eq!(rows.len(), 1);
+    let artisan_domain::Observation::Plan(row) = &rows[0] else {
+        panic!("expected a plan observation");
+    };
+    assert_eq!(row.entries()[0].id().as_str(), "plan-item-1");
+
+    // File changes count exactly like the TypeScript vocabulary.
+    let files = parse_frame(
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"changes":[{"diff":"--- a/new.txt\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+line1\n+line2\n","kind":{"type":"add"},"path":"new.txt"},{"diff":"gone\nstill here\n","kind":{"type":"delete"},"path":"old.txt"},{"diff":"whole new content\n","kind":{"type":"update"},"path":"edited.txt"}],"id":"file-1","status":"completed","type":"fileChange"}}}"#,
+        59,
+    )
+    .expect("file change decodes");
+    let (_, rows) = apply_activity(files, &run, &mut tracker, &mut active, 59).await;
+    assert_eq!(rows.len(), 3);
+    let artisan_domain::Observation::File(created) = &rows[0] else {
+        panic!("expected the created file");
+    };
+    assert_eq!(created.path(), "new.txt");
+    assert_eq!(created.action(), artisan_domain::FileAction::Created);
+    assert_eq!((created.lines_added(), created.lines_deleted()), (Some(2), Some(0)));
+    let artisan_domain::Observation::File(deleted) = &rows[1] else {
+        panic!("expected the deleted file");
+    };
+    assert_eq!(deleted.action(), artisan_domain::FileAction::Deleted);
+    assert_eq!((deleted.lines_added(), deleted.lines_deleted()), (Some(0), Some(2)));
+    let artisan_domain::Observation::File(modified) = &rows[2] else {
+        panic!("expected the modified file");
+    };
+    assert_eq!(modified.action(), artisan_domain::FileAction::Modified);
+    assert_eq!(
+        (modified.lines_added(), modified.lines_deleted()),
+        (None, None),
+        "modified content without a diff stays uncounted, never zero"
+    );
+
+    // Started and unfinished file changes have no completed observation.
+    for line in [
+        r#"{"method":"item/started","params":{"threadId":"t-1","turnId":"turn-1","item":{"changes":[],"id":"file-1","status":"inProgress","type":"fileChange"}}}"#,
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"changes":[],"id":"file-1","status":"failed","type":"fileChange"}}}"#,
+        r#"{"method":"item/fileChange/outputDelta","params":{"delta":"stale","itemId":"file-1","threadId":"t-1","turnId":"turn-1"}}"#,
+    ] {
+        assert!(
+            matches!(parse_frame(line, 60).expect("frame parses"), CodexEvent::UnknownMethod),
+            "unfinished file frames stay observable: {line}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn plain_message_and_terminal_paths_stay_unchanged() {
+    let run = run_id();
+    let mut tracker = CodexPendingTracker::new();
+    let mut active = None;
+
+    // Agent-message item envelopes never enter the activity vocabulary: the
+    // plain delta path is the only reply-text channel, without any inferred
+    // classification.
+    for line in [
+        r#"{"method":"item/started","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"msg-1","phase":"commentary","text":"","type":"agentMessage"}}}"#,
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"msg-1","phase":"final","text":"done","type":"agentMessage"}}}"#,
+        r#"{"method":"item/started","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"u-1","type":"userMessage"}}}"#,
+        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"c-1","type":"contextCompaction"}}}"#,
+    ] {
+        let event = parse_frame(line, 70).expect("envelope parses");
+        assert!(
+            matches!(event, CodexEvent::UnknownMethod),
+            "non-activity envelope stays observable: {line}"
+        );
+        let (sender, mut receiver) = mpsc::channel(8);
+        let terminal = apply_event(event, &run, &mut tracker, &mut active, &sender, 70, None).await;
+        assert_eq!(terminal, None);
+        assert!(receiver.try_recv().is_err(), "no observation for non-activity envelopes");
+    }
+
+    // The plain delta and terminal shapes behave exactly as before.
+    let delta = parse_frame(
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"hello","itemId":"item-1","threadId":"t-1","turnId":"turn-1"}}"#,
+        71,
+    )
+    .expect("delta decodes");
+    let (sender, mut receiver) = mpsc::channel(8);
+    let terminal = apply_event(delta, &run, &mut tracker, &mut active, &sender, 71, None).await;
+    assert_eq!(terminal, None);
+    let EngineObservation::TextDelta(chunk) = receiver.try_recv().expect("delta observed") else {
+        panic!("plain deltas keep the text channel");
+    };
+    assert_eq!(chunk.delta(), "hello");
+
+    let completed = parse_frame(
+        r#"{"method":"turn/completed","params":{"threadId":"t-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+        72,
+    )
+    .expect("turn completion decodes");
+    let (sender, _) = mpsc::channel(8);
+    let terminal = apply_event(completed, &run, &mut tracker, &mut active, &sender, 72, None).await;
+    assert_eq!(terminal, Some(TerminalState::Completed));
+}
+

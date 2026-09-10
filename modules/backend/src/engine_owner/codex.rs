@@ -6,7 +6,11 @@
 //! (or reopens the stored provider thread through the X3 continuation gate),
 //! starts exactly one turn, normalizes streaming frames onto the shared S1a
 //! observation vocabulary (`TextDelta` / `Terminal` plus cumulative token
-//! usage), and supports steer/follow-up, interrupt/cancel, and
+//! usage) and the rich activity vocabulary (`Activity` carrying one validated
+//! domain observation per reasoning-summary, tool, terminal-activity, file,
+//! search, or plan frame, mirroring
+//! `modules/engines/src/codex/normalizer.ts`), and supports steer/follow-up,
+//! interrupt/cancel, and
 //! close with exit classification. An inactivity deadline stalls a silent
 //! turn; child-custody teardown reuses the owner `process` contract and
 //! quarantines on unobserved reaps.
@@ -38,9 +42,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use artisan_domain::{
-    ApprovalMode, ApprovalRequest, CodexSelection, EngineModelId, EngineRouteId, FilesystemAccess,
-    NetworkAccess, ObservationId, QuestionInput, RootPath, RunId, RunUsageBasis, RunUsageReport,
-    RunUsageReportInput, ThreadId, UnixMillis,
+    ApprovalMode, ApprovalRequest, CodexSelection, EngineModelId, EngineRouteId, FileAction,
+    FileObservation, FilesystemAccess, NetworkAccess, Observation as DomainObservation,
+    ObservationId, ObservationSequence, PlanEntry, PlanEntryStatus, PlanObservation, QuestionInput,
+    ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation, RootPath, RunId,
+    RunUsageBasis, RunUsageReport, RunUsageReportInput, SearchObservation, SearchScope, SearchState,
+    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction,
+    ToolObservation, UnixMillis, OBSERVATION_COMMAND_MAX_BYTES, OBSERVATION_DELTA_MAX_BYTES,
+    OBSERVATION_MESSAGE_MAX_BYTES, OBSERVATION_OUTPUT_MAX_BYTES, OBSERVATION_PLAN_MAX_ENTRIES,
+    OBSERVATION_TEXT_MAX_BYTES,
 };
 use artisan_native_engine::CODEX_OPT_OUT_NOTIFICATION_METHODS;
 use serde_json::Value;
@@ -365,6 +375,91 @@ pub(crate) enum CodexEvent {
         agent_thread_id: String,
         parent_thread_id: String,
     },
+    /// One published reasoning-summary fragment (`summaryTextDelta`).
+    ///
+    /// Carries only public summary text, never private reasoning content:
+    /// `item/reasoning/textDelta` stays [`CodexEvent::ActivitySilent`].
+    ReasoningSummaryDelta {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        summary_index: u64,
+        delta: String,
+    },
+    /// One structural separator between public reasoning-summary sections
+    /// (`summaryPartAdded` with a nonzero index, mirroring the TypeScript
+    /// `"\n\n"` boundary).
+    ReasoningSummaryBoundary {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        summary_index: u64,
+    },
+    /// One settled public reasoning phase (`item/completed` on a reasoning
+    /// item). `text` is the joined authoritative summary, or [`None`] when
+    /// the provider supplied no summary text at all.
+    ReasoningSettled {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        text: Option<String>,
+    },
+    /// One tool lifecycle step (`mcpToolCall` / `dynamicToolCall` started,
+    /// progress, or completion). `detail` carries only the provider progress
+    /// message, when disclosed and bounded.
+    ToolLifecycle {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        tool_name: String,
+        action: CodexToolAction,
+        detail: Option<String>,
+    },
+    /// One terminal output chunk (`commandExecution/outputDelta`).
+    TerminalOutput {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        delta: String,
+    },
+    /// One command lifecycle step (`item/started` / `item/completed` on a
+    /// `commandExecution` item).
+    TerminalLifecycle {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        command: Option<String>,
+        output: Option<String>,
+        exit_code: Option<i32>,
+        state: CodexTerminalLifecycle,
+    },
+    /// One completed `fileChange` item with its per-file payloads.
+    FileCompleted {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        changes: Vec<CodexFileChange>,
+    },
+    /// One search lifecycle step (`item/started` / `item/completed` on a
+    /// `webSearch` item).
+    SearchLifecycle {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        query: String,
+        state: CodexSearchLifecycle,
+    },
+    /// One provider-neutral plan update (`turn/plan/updated` or an
+    /// `item/started` / `item/completed` plan item).
+    PlanUpdated {
+        thread_id: String,
+        turn_id: String,
+        entries: Vec<CodexPlanEntry>,
+    },
+    /// A decoded-known frame that intentionally emits no observation: started
+    /// reasoning items, the section-zero `summaryPartAdded` opener, and
+    /// private `item/reasoning/textDelta` content (never surfaced).
+    ActivitySilent,
     ThreadClosed,
     OptedOut,
     UnknownMethod,
@@ -377,6 +472,62 @@ pub(crate) enum CodexTurnState {
     Completed,
     Failed,
     Cancelled,
+}
+
+/// Lifecycle action of one normalized Codex tool step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CodexToolAction {
+    Started,
+    Progress,
+    Completed,
+    Failed,
+}
+
+/// Lifecycle state of one normalized Codex command step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CodexTerminalLifecycle {
+    Started,
+    Completed,
+    Failed,
+}
+
+/// Lifecycle state of one normalized Codex search step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CodexSearchLifecycle {
+    Started,
+    Completed,
+}
+
+/// One file payload inside a completed `fileChange` item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodexFileChange {
+    path: String,
+    kind: CodexFileKind,
+    diff: String,
+}
+
+/// Provider-disclosed mutation kind of one file payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CodexFileKind {
+    Add,
+    Delete,
+    Update,
+}
+
+/// One plan step inside a `turn/plan/updated` frame or plan item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodexPlanEntry {
+    id: String,
+    status: CodexPlanStatus,
+    text: String,
+}
+
+/// Provider-disclosed status of one plan step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CodexPlanStatus {
+    Pending,
+    InProgress,
+    Completed,
 }
 
 /// Failure decoding one bounded JSONL frame.
@@ -430,6 +581,22 @@ pub(crate) fn parse_frame(line: &str, frame_sequence: u64) -> Result<CodexEvent,
     }
     let params = object.get("params").cloned().unwrap_or(Value::Null);
     Ok(decode_method(method, &envelope, &params))
+}
+
+/// Extracts the exact claimed `(threadId, turnId)` scope of one activity
+/// frame. Both identities must be present and non-empty: activity never
+/// invents scope, and scope-free frames stay [`CodexEvent::UnknownMethod`].
+fn claimed_scope(params: &Value) -> Option<(String, String)> {
+    Some((raw_text(params, "threadId")?, raw_text(params, "turnId")?))
+}
+
+/// Extracts one bounded non-empty provider string from a nested item object.
+fn nested_text(item: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
+    let text = item.get(field)?.as_str()?;
+    if text.is_empty() || text.len() > CODEX_MAX_TEXT_FIELD_BYTES {
+        return None;
+    }
+    Some(text.to_owned())
 }
 
 fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
@@ -566,12 +733,357 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
             }
         }
         "thread/closed" => CodexEvent::ThreadClosed,
+        "item/reasoning/summaryTextDelta" => {
+            let Some((thread_id, turn_id)) = claimed_scope(params) else {
+                return CodexEvent::UnknownMethod;
+            };
+            let item_id = raw_text(params, "itemId").unwrap_or_default();
+            let delta = params
+                .get("delta")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let summary_index = params.get("summaryIndex").and_then(Value::as_u64);
+            match (item_id.is_empty(), delta.is_empty(), summary_index) {
+                (false, false, Some(summary_index)) => CodexEvent::ReasoningSummaryDelta {
+                    thread_id,
+                    turn_id,
+                    item_id,
+                    summary_index,
+                    delta,
+                },
+                _ => CodexEvent::UnknownMethod,
+            }
+        }
+        "item/reasoning/summaryPartAdded" => {
+            let Some((thread_id, turn_id)) = claimed_scope(params) else {
+                return CodexEvent::UnknownMethod;
+            };
+            let item_id = raw_text(params, "itemId").unwrap_or_default();
+            let summary_index = params.get("summaryIndex").and_then(Value::as_u64);
+            match (item_id.is_empty(), summary_index) {
+                // The section-zero opener precedes the first public text and
+                // carries no text of its own.
+                (false, Some(0)) => CodexEvent::ActivitySilent,
+                (false, Some(summary_index)) => CodexEvent::ReasoningSummaryBoundary {
+                    thread_id,
+                    turn_id,
+                    item_id,
+                    summary_index,
+                },
+                _ => CodexEvent::UnknownMethod,
+            }
+        }
+        // Private reasoning content is never surfaced or durably projected:
+        // only the published summary text normalizes onto the activity
+        // vocabulary. The frame stays decoded-known so it never disturbs the
+        // turn.
+        "item/reasoning/textDelta" => CodexEvent::ActivitySilent,
+        "turn/plan/updated" => {
+            let Some((thread_id, turn_id)) = claimed_scope(params) else {
+                return CodexEvent::UnknownMethod;
+            };
+            let steps = params
+                .get("plan")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            let step = item.get("step")?.as_str()?;
+                            if step.is_empty() {
+                                return None;
+                            }
+                            let status = match item.get("status")?.as_str()? {
+                                "pending" => CodexPlanStatus::Pending,
+                                "inProgress" => CodexPlanStatus::InProgress,
+                                "completed" => CodexPlanStatus::Completed,
+                                _ => return None,
+                            };
+                            Some((status, step.to_owned()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if steps.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            CodexEvent::PlanUpdated {
+                thread_id,
+                turn_id,
+                entries: steps
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (status, text))| CodexPlanEntry {
+                        id: format!("{turn_id}:plan:{index}"),
+                        status,
+                        text,
+                    })
+                    .collect(),
+            }
+        }
+        "item/commandExecution/outputDelta" => {
+            let Some((thread_id, turn_id)) = claimed_scope(params) else {
+                return CodexEvent::UnknownMethod;
+            };
+            let item_id = raw_text(params, "itemId").unwrap_or_default();
+            let delta = params
+                .get("delta")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if item_id.is_empty() || delta.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            CodexEvent::TerminalOutput {
+                thread_id,
+                turn_id,
+                item_id,
+                delta,
+            }
+        }
+        "item/mcpToolCall/progress" => {
+            let Some((thread_id, turn_id)) = claimed_scope(params) else {
+                return CodexEvent::UnknownMethod;
+            };
+            let item_id = raw_text(params, "itemId").unwrap_or_default();
+            let message = params
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if item_id.is_empty() || message.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            CodexEvent::ToolLifecycle {
+                thread_id,
+                turn_id,
+                item_id,
+                tool_name: "mcp".to_owned(),
+                action: CodexToolAction::Progress,
+                detail: Some(message),
+            }
+        }
+        "item/started" | "item/completed" => decode_item_envelope(method == "item/started", params),
         _ => {
             if CODEX_OPT_OUT_NOTIFICATION_METHODS.contains(&method) {
                 return CodexEvent::OptedOut;
             }
             CodexEvent::UnknownMethod
         }
+    }
+}
+
+/// Decodes one `item/started` / `item/completed` envelope into a typed
+/// activity event, mirroring the TypeScript item union.
+///
+/// Only item types with a valid existing domain observation normalize:
+/// reasoning (published summary only), tool (`mcpToolCall` /
+/// `dynamicToolCall`), `commandExecution`, `fileChange`, `webSearch`, and
+/// plan. Agent-message items stay on the plain delta path, user-message and
+/// subagent items stay on the tracker path, and compaction items have no
+/// owner channel, so all of those remain [`CodexEvent::UnknownMethod`]
+/// without disturbing the turn.
+fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
+    let Some((thread_id, turn_id)) = claimed_scope(params) else {
+        return CodexEvent::UnknownMethod;
+    };
+    let item = match params.get("item").and_then(Value::as_object) {
+        Some(item) => item,
+        None => return CodexEvent::UnknownMethod,
+    };
+    let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+    let item_id = nested_text(item, "id").unwrap_or_default();
+    match item_type {
+        "reasoning" => {
+            if item_id.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            if started {
+                return CodexEvent::ActivitySilent;
+            }
+            let summary = match item.get("summary").and_then(Value::as_array) {
+                Some(summary) => summary,
+                None => return CodexEvent::UnknownMethod,
+            };
+            let text = summary
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            CodexEvent::ReasoningSettled {
+                thread_id,
+                turn_id,
+                item_id,
+                text: if text.is_empty() { None } else { Some(text) },
+            }
+        }
+        "commandExecution" => {
+            if item_id.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            let status = match item.get("status").and_then(Value::as_str) {
+                Some(status) => status,
+                None => return CodexEvent::UnknownMethod,
+            };
+            let state = if started {
+                CodexTerminalLifecycle::Started
+            } else if status == "failed" || status == "declined" {
+                CodexTerminalLifecycle::Failed
+            } else {
+                CodexTerminalLifecycle::Completed
+            };
+            CodexEvent::TerminalLifecycle {
+                thread_id,
+                turn_id,
+                item_id,
+                command: item
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                output: item
+                    .get("aggregatedOutput")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                exit_code: item
+                    .get("exitCode")
+                    .and_then(Value::as_i64)
+                    .and_then(|code| i32::try_from(code).ok()),
+                state,
+            }
+        }
+        "mcpToolCall" | "dynamicToolCall" => {
+            if item_id.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            let status = match item.get("status").and_then(Value::as_str) {
+                Some(status) => status,
+                None => return CodexEvent::UnknownMethod,
+            };
+            let tool = match nested_text(item, "tool") {
+                Some(tool) => tool,
+                None => return CodexEvent::UnknownMethod,
+            };
+            let tool_name = if item_type == "mcpToolCall" {
+                let server = match nested_text(item, "server") {
+                    Some(server) => server,
+                    None => return CodexEvent::UnknownMethod,
+                };
+                format!("{server}/{tool}")
+            } else {
+                let namespace = item
+                    .get("namespace")
+                    .and_then(Value::as_str)
+                    .unwrap_or("dynamic");
+                format!("{namespace}/{tool}")
+            };
+            let action = if started {
+                CodexToolAction::Started
+            } else if status == "failed" {
+                CodexToolAction::Failed
+            } else {
+                CodexToolAction::Completed
+            };
+            CodexEvent::ToolLifecycle {
+                thread_id,
+                turn_id,
+                item_id,
+                tool_name,
+                action,
+                detail: None,
+            }
+        }
+        "fileChange" => {
+            if item_id.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            let status = match item.get("status").and_then(Value::as_str) {
+                Some(status) => status,
+                None => return CodexEvent::UnknownMethod,
+            };
+            if started || status != "completed" {
+                return CodexEvent::UnknownMethod;
+            }
+            let changes = match item.get("changes").and_then(Value::as_array) {
+                Some(changes) => changes,
+                None => return CodexEvent::UnknownMethod,
+            };
+            CodexEvent::FileCompleted {
+                thread_id,
+                turn_id,
+                item_id,
+                changes: changes
+                    .iter()
+                    .filter_map(|change| {
+                        let object = change.as_object()?;
+                        let path = nested_text(object, "path")?;
+                        let kind = match object
+                            .get("kind")
+                            .and_then(Value::as_object)
+                            .and_then(|kind| kind.get("type"))
+                            .and_then(Value::as_str)?
+                        {
+                            "add" => CodexFileKind::Add,
+                            "delete" => CodexFileKind::Delete,
+                            "update" => CodexFileKind::Update,
+                            _ => return None,
+                        };
+                        Some(CodexFileChange {
+                            path,
+                            kind,
+                            diff: object
+                                .get("diff")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned(),
+                        })
+                    })
+                    .collect(),
+            }
+        }
+        "webSearch" => {
+            if item_id.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            let query = match nested_text(item, "query") {
+                Some(query) => query,
+                None => return CodexEvent::UnknownMethod,
+            };
+            CodexEvent::SearchLifecycle {
+                thread_id,
+                turn_id,
+                item_id,
+                query,
+                state: if started {
+                    CodexSearchLifecycle::Started
+                } else {
+                    CodexSearchLifecycle::Completed
+                },
+            }
+        }
+        "plan" => {
+            if item_id.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            let text = match nested_text(item, "text") {
+                Some(text) => text,
+                None => return CodexEvent::UnknownMethod,
+            };
+            CodexEvent::PlanUpdated {
+                thread_id,
+                turn_id,
+                entries: vec![CodexPlanEntry {
+                    id: item_id,
+                    status: if started {
+                        CodexPlanStatus::InProgress
+                    } else {
+                        CodexPlanStatus::Completed
+                    },
+                    text,
+                }],
+            }
+        }
+        _ => CodexEvent::UnknownMethod,
     }
 }
 /// In-memory pending interaction tracker for one live Codex turn.
@@ -632,6 +1144,16 @@ impl CodexPendingTracker {
     pub(crate) fn note_subagent(&mut self, agent_thread_id: &str, parent_thread_id: &str) {
         self.subagents
             .push((agent_thread_id.to_owned(), parent_thread_id.to_owned()));
+    }
+
+    /// Returns whether a native thread identity belongs to a discovered
+    /// child agent. Activity frames claiming a child thread never reach the
+    /// root channel: child content travels the transcript projection, never
+    /// as root activity.
+    pub(crate) fn is_known_child_thread(&self, thread_id: &str) -> bool {
+        self.subagents
+            .iter()
+            .any(|(agent_thread_id, _)| agent_thread_id == thread_id)
     }
 
     /// Resolves one approval; returns whether it was pending.
@@ -1188,6 +1710,548 @@ pub(crate) fn codex_rate_limits_read_line(id: u64) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Rich activity normalization (Codex visual parity)
+//
+// Mirrors `normalise_codex_notification` in
+// `modules/engines/src/codex/normalizer.ts` for the supported subset:
+// published reasoning-summary text (never hidden reasoning), tool lifecycle,
+// command lifecycle plus output, file changes, web search, and plan updates.
+// Each emitted [`DomainObservation`] preserves the provider item and turn
+// identities verbatim inside its typed payload; the generated observation id
+// is deterministic in `(run, frame sequence, emission slug)` so replays
+// produce identical ids without collisions, and the sequence is the
+// source-local frame order (the dispatcher remints the durable
+// thread-scoped sequence and identity in a separate packet). No wall clocks
+// are minted: none of the target observation types carry timestamps.
+// ---------------------------------------------------------------------------
+
+/// Returns whether one activity frame may emit onto the root channel.
+///
+/// Turn-scoped frames must claim exactly the current turn: a foreign turn is
+/// dropped without touching root state, while an unestablished turn is
+/// adopted exactly like the plain delta path. Frames claiming a discovered
+/// child thread are never coerced into the root channel.
+fn activity_frame_authorized(
+    thread_id: &str,
+    turn_id: &str,
+    tracker: &CodexPendingTracker,
+    active_turn: &mut Option<String>,
+) -> bool {
+    if tracker.is_known_child_thread(thread_id) {
+        return false;
+    }
+    match active_turn {
+        Some(active) if active == turn_id => true,
+        Some(_) => false,
+        None => {
+            *active_turn = Some(turn_id.to_owned());
+            true
+        }
+    }
+}
+
+/// Builds the stable generated observation id for one activity emission.
+///
+/// Deterministic in `(run, frame sequence, slug)`: the wire supplies item
+/// and turn identities but no observation identity. Returns [`None`] when a
+/// provider identity violates the shared wire identifier rule or the composed
+/// id exceeds its ceiling; the caller then drops the emission fail-closed
+/// instead of minting an ambiguous identity.
+fn activity_observation_id(
+    run_id: &RunId,
+    frame_sequence: u64,
+    slug: &str,
+) -> Option<ObservationId> {
+    ObservationId::parse(format!(
+        "{}:codex:{frame_sequence}:{slug}",
+        run_id.as_str()
+    ))
+    .ok()
+}
+
+/// Reads the source-local frame sequence as a domain sequence.
+///
+/// The owner channel carries source order only; the dispatcher remints the
+/// durable thread-scoped sequence before persistence. Returns [`None`] past
+/// the finite range so the emission drops instead of wrapping.
+fn activity_sequence(frame_sequence: u64) -> Option<ObservationSequence> {
+    ObservationSequence::new(frame_sequence).ok()
+}
+
+/// Splits text into lossless UTF-8-boundary fragments of at most
+/// `max_bytes` bytes.
+///
+/// Concatenating the fragments reproduces `text` exactly. Empty text yields
+/// no fragments. Mirrors the [`chunk_text`] approach for the domain delta and
+/// output ceilings.
+fn fragment_text(text: &str, max_bytes: usize) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let bound = max_bytes.max(1);
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut len = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_len = ch.len_utf8();
+        if len + ch_len > bound {
+            out.push(text[start..byte_idx].to_owned());
+            start = byte_idx;
+            len = 0;
+        }
+        len += ch_len;
+    }
+    if start < text.len() {
+        out.push(text[start..].to_owned());
+    }
+    out
+}
+
+/// Returns whether `payload` is a unified diff at all, decided by a hunk
+/// header: the only marker a diff cannot omit. Mirrors `IsUnifiedDiff` in
+/// `modules/engines/src/patch/unified-diff.ts`.
+fn is_unified_diff(payload: &str) -> bool {
+    payload.lines().any(|line| line.starts_with("@@ "))
+}
+
+/// Counts the body lines a unified diff adds and removes.
+///
+/// File headers carry the same marker characters as content, so they are
+/// skipped by their trailing space only outside a hunk; inside one the first
+/// character is the marker. Mirrors `CountUnifiedDiffLines`.
+fn count_unified_diff_lines(diff: &str) -> (u64, u64) {
+    let mut added = 0u64;
+    let mut deleted = 0u64;
+    let mut in_hunk = false;
+    for line in diff.split('\n') {
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk
+            && (line.starts_with("--- ")
+                || line.starts_with("+++ ")
+                || line.starts_with("diff ")
+                || line.starts_with("index "))
+        {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            deleted += 1;
+        }
+    }
+    (added, deleted)
+}
+
+/// Counts the lines of a whole-file write. Mirrors `CountWrittenLines`.
+fn count_written_lines(text: &str) -> u64 {
+    if text.is_empty() {
+        0
+    } else {
+        text.split('\n').count() as u64
+    }
+}
+
+/// Counts one reported file change whose payload may be either a unified
+/// diff or the file's own content.
+///
+/// Returns `(None, None)` when the payload is content but the operation
+/// modified an existing file: the text says what the file now holds and
+/// nothing about what it replaced, so any count would be invented. Absent
+/// stays absent rather than becoming zero. Mirrors `CountFileChangeLines`.
+fn count_file_change_lines(action: FileAction, payload: &str) -> (Option<u64>, Option<u64>) {
+    if is_unified_diff(payload) {
+        let (added, deleted) = count_unified_diff_lines(payload);
+        return (Some(added), Some(deleted));
+    }
+    match action {
+        FileAction::Created => (Some(count_written_lines(payload)), Some(0)),
+        FileAction::Deleted => (Some(0), Some(count_written_lines(payload))),
+        _ => (None, None),
+    }
+}
+
+fn reasoning_delta_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    item_id: &str,
+    turn_id: &str,
+    summary_index: u64,
+    delta: &str,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    fragment_text(delta, OBSERVATION_DELTA_MAX_BYTES)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, part)| {
+            let id = activity_observation_id(
+                run_id,
+                frame_sequence,
+                &format!("rsum:{item_id}:{summary_index}:{index}"),
+            )?;
+            let item = ObservationId::parse(item_id.to_owned()).ok()?;
+            let turn = ObservationId::parse(turn_id.to_owned()).ok()?;
+            ReasoningSummaryDeltaObservation::new(
+                id, sequence, item, summary_index, part, None, turn,
+            )
+            .ok()
+            .map(DomainObservation::ReasoningSummaryDelta)
+        })
+        .collect()
+}
+
+fn reasoning_boundary_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    item_id: &str,
+    turn_id: &str,
+    summary_index: u64,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    let id = match activity_observation_id(
+        run_id,
+        frame_sequence,
+        &format!("rsum:{item_id}:{summary_index}:sep"),
+    ) {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    let (Some(item), Some(turn)) = (
+        ObservationId::parse(item_id.to_owned()).ok(),
+        ObservationId::parse(turn_id.to_owned()).ok(),
+    ) else {
+        return Vec::new();
+    };
+    ReasoningSummaryDeltaObservation::new(
+        id,
+        sequence,
+        item,
+        summary_index,
+        "\n\n".to_owned(),
+        None,
+        turn,
+    )
+    .ok()
+    .map(DomainObservation::ReasoningSummaryDelta)
+    .into_iter()
+    .collect()
+}
+
+fn reasoning_settled_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    item_id: &str,
+    turn_id: &str,
+    text: Option<&str>,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    // An oversize authoritative summary still settles its phase, but without
+    // invented truncation: the text is omitted rather than cut.
+    let text = text
+        .filter(|text| !text.is_empty() && text.len() <= OBSERVATION_MESSAGE_MAX_BYTES)
+        .map(str::to_owned);
+    let id = match activity_observation_id(run_id, frame_sequence, &format!("rsc:{item_id}")) {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    let (Some(item), Some(turn)) = (
+        ObservationId::parse(item_id.to_owned()).ok(),
+        ObservationId::parse(turn_id.to_owned()).ok(),
+    ) else {
+        return Vec::new();
+    };
+    ReasoningSummaryCompletedObservation::new(id, sequence, item, text, turn)
+        .ok()
+        .map(DomainObservation::ReasoningSummaryCompleted)
+        .into_iter()
+        .collect()
+}
+
+fn tool_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    item_id: &str,
+    tool_name: &str,
+    action: CodexToolAction,
+    detail: Option<&str>,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    let action = match action {
+        CodexToolAction::Started => ToolAction::Started,
+        CodexToolAction::Progress => ToolAction::Progress,
+        CodexToolAction::Completed => ToolAction::Completed,
+        CodexToolAction::Failed => ToolAction::Failed,
+    };
+    // An oversize progress message is omitted while the lifecycle step is
+    // preserved; the detail is optional evidence, never the step itself.
+    let detail = detail
+        .filter(|detail| !detail.is_empty() && detail.len() <= OBSERVATION_TEXT_MAX_BYTES)
+        .map(str::to_owned);
+    let id = match activity_observation_id(
+        run_id,
+        frame_sequence,
+        &format!("tool:{item_id}:{}", action.as_str()),
+    ) {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    let Some(tool_id) = ObservationId::parse(item_id.to_owned()).ok() else {
+        return Vec::new();
+    };
+    ToolObservation::new(id, sequence, tool_id, tool_name.to_owned(), action, detail)
+        .ok()
+        .map(DomainObservation::Tool)
+        .into_iter()
+        .collect()
+}
+
+fn terminal_output_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    item_id: &str,
+    _turn_id: &str,
+    delta: &str,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    fragment_text(delta, OBSERVATION_OUTPUT_MAX_BYTES)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, output)| {
+            let id = activity_observation_id(
+                run_id,
+                frame_sequence,
+                &format!("term:{item_id}:out:{index}"),
+            )?;
+            let activity_id = ObservationId::parse(item_id.to_owned()).ok()?;
+            TerminalActivityObservation::new(
+                id,
+                sequence,
+                TerminalActivityInput {
+                    activity_id,
+                    channel: None,
+                    command: None,
+                    shell: None,
+                    output: Some(output),
+                    exit_code: None,
+                    state: TerminalActivityState::Output,
+                },
+            )
+            .ok()
+            .map(DomainObservation::TerminalActivity)
+        })
+        .collect()
+}
+
+fn terminal_lifecycle_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    item_id: &str,
+    command: Option<&str>,
+    output: Option<&str>,
+    exit_code: Option<i32>,
+    state: CodexTerminalLifecycle,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    let state = match state {
+        CodexTerminalLifecycle::Started => TerminalActivityState::Started,
+        CodexTerminalLifecycle::Completed => TerminalActivityState::Completed,
+        CodexTerminalLifecycle::Failed => TerminalActivityState::Failed,
+    };
+    // Oversize command or aggregated output is omitted while the lifecycle
+    // step is preserved; neither bound is stretched by truncation.
+    let command = command
+        .filter(|command| !command.is_empty() && command.len() <= OBSERVATION_COMMAND_MAX_BYTES)
+        .map(str::to_owned);
+    let output = output
+        .filter(|output| !output.is_empty() && output.len() <= OBSERVATION_OUTPUT_MAX_BYTES)
+        .map(str::to_owned);
+    let id = match activity_observation_id(
+        run_id,
+        frame_sequence,
+        &format!("term:{item_id}:{}", state.as_str()),
+    ) {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    let Some(activity_id) = ObservationId::parse(item_id.to_owned()).ok() else {
+        return Vec::new();
+    };
+    TerminalActivityObservation::new(
+        id,
+        sequence,
+        TerminalActivityInput {
+            activity_id,
+            channel: None,
+            command,
+            shell: None,
+            output,
+            exit_code,
+            state,
+        },
+    )
+    .ok()
+    .map(DomainObservation::TerminalActivity)
+    .into_iter()
+    .collect()
+}
+
+fn file_completed_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    item_id: &str,
+    changes: &[CodexFileChange],
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    changes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, change)| {
+            let action = match change.kind {
+                CodexFileKind::Add => FileAction::Created,
+                CodexFileKind::Delete => FileAction::Deleted,
+                CodexFileKind::Update => FileAction::Modified,
+            };
+            let (lines_added, lines_deleted) = count_file_change_lines(action, &change.diff);
+            let id = activity_observation_id(
+                run_id,
+                frame_sequence,
+                &format!("file:{item_id}:{index}"),
+            )?;
+            FileObservation::new(
+                id,
+                sequence,
+                change.path.clone(),
+                action,
+                lines_added,
+                lines_deleted,
+            )
+            .ok()
+            .map(DomainObservation::File)
+        })
+        .collect()
+}
+
+fn search_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    item_id: &str,
+    query: &str,
+    state: CodexSearchLifecycle,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    let state = match state {
+        CodexSearchLifecycle::Started => SearchState::Started,
+        CodexSearchLifecycle::Completed => SearchState::Completed,
+    };
+    let id = match activity_observation_id(
+        run_id,
+        frame_sequence,
+        &format!("search:{item_id}:{}", state.as_str()),
+    ) {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    let Some(search_id) = ObservationId::parse(item_id.to_owned()).ok() else {
+        return Vec::new();
+    };
+    SearchObservation::new(
+        id,
+        sequence,
+        query.to_owned(),
+        Some(SearchScope::Web),
+        Some(search_id),
+        state,
+        None,
+    )
+    .ok()
+    .map(DomainObservation::Search)
+    .into_iter()
+    .collect()
+}
+
+fn plan_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    turn_id: &str,
+    entries: &[CodexPlanEntry],
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    let Some(turn) = ObservationId::parse(turn_id.to_owned()).ok() else {
+        return Vec::new();
+    };
+    // An entry list the durable plan cannot hold fails closed as a unit
+    // rather than persisting a truncated plan as the whole.
+    if entries.is_empty() || entries.len() > OBSERVATION_PLAN_MAX_ENTRIES {
+        return Vec::new();
+    }
+    let mut built = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let id = match ObservationId::parse(entry.id.clone()) {
+            Ok(id) => id,
+            Err(_) => return Vec::new(),
+        };
+        let status = match entry.status {
+            CodexPlanStatus::Pending => PlanEntryStatus::Pending,
+            CodexPlanStatus::InProgress => PlanEntryStatus::InProgress,
+            CodexPlanStatus::Completed => PlanEntryStatus::Completed,
+        };
+        match PlanEntry::new(id, status, entry.text.clone()) {
+            Ok(entry) => built.push(entry),
+            Err(_) => return Vec::new(),
+        }
+    }
+    let id = match activity_observation_id(run_id, frame_sequence, "plan") {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    PlanObservation::new(id, sequence, built, Some(turn))
+        .ok()
+        .map(DomainObservation::Plan)
+        .into_iter()
+        .collect()
+}
+
+/// Sends validated activity rows through the bounded observation channel.
+///
+/// Backpressure semantics match the plain delta path: a closed sink ends the
+/// turn as interrupted.
+async fn emit_activity(
+    observations: &mpsc::Sender<EngineObservation>,
+    rows: Vec<DomainObservation>,
+) -> Option<TerminalState> {
+    for row in rows {
+        if observations
+            .send(EngineObservation::Activity(row))
+            .await
+            .is_err()
+        {
+            return Some(TerminalState::Interrupted);
+        }
+    }
+    None
+}
+
 /// Applies one typed event; returns the terminal state when the turn ends.
 ///
 /// Token-usage frames project best-effort onto the shared usage vocabulary
@@ -1283,6 +2347,151 @@ pub(crate) async fn apply_event(
             tracker.note_subagent(&agent_thread_id, &parent_thread_id);
             None
         }
+        CodexEvent::ReasoningSummaryDelta {
+            thread_id,
+            turn_id,
+            item_id,
+            summary_index,
+            delta,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows = reasoning_delta_rows(
+                run_id,
+                frame_sequence,
+                &item_id,
+                &turn_id,
+                summary_index,
+                &delta,
+            );
+            emit_activity(observations, rows).await
+        }
+        CodexEvent::ReasoningSummaryBoundary {
+            thread_id,
+            turn_id,
+            item_id,
+            summary_index,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows =
+                reasoning_boundary_rows(run_id, frame_sequence, &item_id, &turn_id, summary_index);
+            emit_activity(observations, rows).await
+        }
+        CodexEvent::ReasoningSettled {
+            thread_id,
+            turn_id,
+            item_id,
+            text,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows = reasoning_settled_rows(
+                run_id,
+                frame_sequence,
+                &item_id,
+                &turn_id,
+                text.as_deref(),
+            );
+            emit_activity(observations, rows).await
+        }
+        CodexEvent::ToolLifecycle {
+            thread_id,
+            turn_id,
+            item_id,
+            tool_name,
+            action,
+            detail,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows = tool_rows(
+                run_id,
+                frame_sequence,
+                &item_id,
+                &tool_name,
+                action,
+                detail.as_deref(),
+            );
+            emit_activity(observations, rows).await
+        }
+        CodexEvent::TerminalOutput {
+            thread_id,
+            turn_id,
+            item_id,
+            delta,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows =
+                terminal_output_rows(run_id, frame_sequence, &item_id, &turn_id, &delta);
+            emit_activity(observations, rows).await
+        }
+        CodexEvent::TerminalLifecycle {
+            thread_id,
+            turn_id,
+            item_id,
+            command,
+            output,
+            exit_code,
+            state,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows = terminal_lifecycle_rows(
+                run_id,
+                frame_sequence,
+                &item_id,
+                command.as_deref(),
+                output.as_deref(),
+                exit_code,
+                state,
+            );
+            emit_activity(observations, rows).await
+        }
+        CodexEvent::FileCompleted {
+            thread_id,
+            turn_id,
+            item_id,
+            changes,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows = file_completed_rows(run_id, frame_sequence, &item_id, &changes);
+            emit_activity(observations, rows).await
+        }
+        CodexEvent::SearchLifecycle {
+            thread_id,
+            turn_id,
+            item_id,
+            query,
+            state,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows = search_rows(run_id, frame_sequence, &item_id, &query, state);
+            emit_activity(observations, rows).await
+        }
+        CodexEvent::PlanUpdated {
+            thread_id,
+            turn_id,
+            entries,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows = plan_rows(run_id, frame_sequence, &turn_id, &entries);
+            emit_activity(observations, rows).await
+        }
+        CodexEvent::ActivitySilent => None,
         CodexEvent::ThreadClosed | CodexEvent::OptedOut | CodexEvent::UnknownMethod => None,
     }
 }

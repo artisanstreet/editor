@@ -321,9 +321,13 @@ impl SubagentTranscriptRow {
 ///
 /// Subagent rows ride beside text deltas: lifecycle reports and transcript
 /// rows carry validated domain content with their own identities and never
-/// adopt the root turn. `Eq` is deliberately absent: transcript content has
-/// no total-equality bound, and channel delivery plus matching need only
-/// [`PartialEq`].
+/// adopt the root turn. `Activity` carries one validated provider-neutral
+/// domain observation (reasoning summary, tool, terminal activity, file,
+/// search, or plan) decoded from rich engine frames; its sequence is the
+/// source-local frame order and the dispatcher remints the durable
+/// thread-scoped sequence and identity before persistence. `Eq` is
+/// deliberately absent: transcript content has no total-equality bound, and
+/// channel delivery plus matching need only [`PartialEq`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum EngineObservation {
     TextDelta(TextDelta),
@@ -332,6 +336,7 @@ pub(crate) enum EngineObservation {
     Terminal(TerminalObservation),
     Subagent(SubagentLifecycleRow),
     SubagentTranscript(SubagentTranscriptRow),
+    Activity(artisan_domain::Observation),
 }
 
 /// Payload-free error for one bounded observation delivery.
