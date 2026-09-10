@@ -52,8 +52,8 @@ use artisan_domain::{
 };
 use artisan_ui::theme::DesktopTheme;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, div,
+    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, div,
     prelude::{IntoElement, Render},
     px, size,
 };
@@ -475,9 +475,9 @@ fn print_case_manifest(screen: &Entity<ThreadScreen>, case: ProofSceneCase, cx: 
 }
 
 /// Settles the single capture slot: records failure, marks settled, and
-/// quits. Every terminal path (seed refusal, open/update failure, capture
-/// success/failure, watchdog) ends here or quits directly, so one process
-/// can neither hang nor outlive its capture.
+/// quits. Every terminal path (seed refusal, open failure, capture
+/// success/failure, resize exhaustion) ends here or quits directly, so one
+/// process can neither hang nor outlive its capture.
 fn settle_slot(
     settled: &Rc<Cell<bool>>,
     failed_flag: &Rc<Cell<bool>>,
@@ -491,12 +491,19 @@ fn settle_slot(
     cx.quit();
 }
 
-/// Publishes the shell geometry bound to one capture: actual window width
-/// minus the resolved (expanded) sidebar reservation, plus the titlebar
-/// reservation. Both baseline viewports pin the inspector expanded, so the
-/// narrower capture must still reserve it; responsive hiding is a separate
-/// lane and is not what these pixels claim.
-fn print_capture_geometry(slug: &str, width: f32, scale: f32, content_width: f32) {
+/// Publishes the shell geometry bound to one capture: requested viewport
+/// versus actual window bounds, the content width from actual bounds minus
+/// the resolved rail, and the resulting inspector fit. Requested is never
+/// labeled actual.
+fn print_capture_geometry(
+    slug: &str,
+    requested_width: f32,
+    requested_height: f32,
+    actual_width: f32,
+    actual_height: f32,
+    scale: f32,
+    content_width: f32,
+) {
     let style = DesktopShellStyle::resolve(false, scale);
     let sidebar_matches = style.sidebar_width == px(DESKTOP_SIDEBAR_WIDTH_PX);
     let titlebar_matches = style.titlebar_height == px(DESKTOP_TITLEBAR_HEIGHT_PX);
@@ -506,12 +513,31 @@ fn print_capture_geometry(slug: &str, width: f32, scale: f32, content_width: f32
         "hidden"
     };
     println!(
-        "parity-proof geometry {slug}: window={width} scale={scale} \
+        "parity-proof geometry {slug}: requested={requested_width}x{requested_height} \
+         actual={actual_width}x{actual_height} scale={scale} \
          sidebar={} titlebar={} content={content_width} inspector={state} \
          title=\"Parity proof thread\"",
         DESKTOP_SIDEBAR_WIDTH_PX, DESKTOP_TITLEBAR_HEIGHT_PX,
     );
     debug_assert!(sidebar_matches && titlebar_matches);
+}
+
+/// Bounds tolerance for the resize settle loop, logical pixels.
+const BOUNDS_SETTLE_PX: f32 = 0.5;
+
+/// Settle polls between resize requests, in milliseconds.
+const RESIZE_POLL_MILLIS: u64 = 100;
+
+/// Maximum resize settle polls before the capture fails (~5s, well under
+/// root's external 45s guard).
+const RESIZE_MAX_POLLS: u32 = 50;
+
+/// One resize-settle poll outcome.
+enum ResizePoll {
+    /// Platform bounds have not reached the requested size yet.
+    Waiting,
+    /// Capture ran; the payload says whether it failed.
+    Done(bool),
 }
 
 /// Fixture root: production thread screen inside the production desktop
@@ -627,16 +653,18 @@ fn parse_selection(args: &[String]) -> Result<ProofCapture, String> {
     })
 }
 
-/// Opens the one selected hidden window, draws it synchronously with no
-/// present, saves the PNG, and maps success onto the exit code.
+/// Opens the one selected hidden window, drives it to the requested size,
+/// draws it synchronously with no present, saves the PNG, and maps success
+/// onto the exit code.
 ///
 /// Capture lifecycle: mount + seed through the controller, open hidden and
-/// unfocused, publish the live content width, `Window::draw` (produces
-/// `rendered_frame` without presenting — hidden windows receive no frames
-/// on their own, which is why waiting on `on_next_frame` timed out), then
-/// `Window::render_to_image` (shipping wgpu draw of that scene, per the
-/// capture lane), `ArenaClearNeeded::clear` on the same context, save,
-/// quit. Requires `Window::render_to_image` (root-owned `test-support`
+/// unfocused, then poll — `Window::resize` (the `show: false` open stores
+/// bounds without applying them, leaving CW_USEDEFAULT) until platform
+/// bounds match, syncing gpui-side scale/viewport via `bounds_changed` —
+/// publish the live content width, `Window::draw` (produces
+/// `rendered_frame` without presenting), `Window::render_to_image` of that
+/// scene, `ArenaClearNeeded::clear` on the same context, save, quit.
+/// Requires `Window::render_to_image` (root-owned `test-support`
 /// enablement) and the capture lane's shipping-wgpu readback.
 #[must_use]
 pub fn run() -> ExitCode {
@@ -663,25 +691,10 @@ pub fn run() -> ExitCode {
             eprintln!("bundled font registration failed, using system faces: {error}");
         }
 
-        // Bounded watchdog: mount, open, or the synchronous draw itself
-        // may hang. One slot only, so quit unconditionally on timeout.
-        {
-            let settled_flag = Rc::clone(&settled);
-            let failed_flag = Rc::clone(&failed);
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_secs(30))
-                    .await;
-                let _ = cx.update(|cx| {
-                    if !settled_flag.get() {
-                        eprintln!("parity-proof watchdog: capture unsettled; quitting");
-                        failed_flag.set(true);
-                        cx.quit();
-                    }
-                });
-            })
-            .detach();
-        }
+        // No internal watchdog: an in-process timer cannot interrupt a
+        // blocked UI thread, so root's external 45s guard owns the timeout.
+        // The resize loop below is bounded (50 × 100ms) for the settling
+        // path itself.
 
         let stem = capture.file_stem();
         let thread_id = ThreadId::parse(format!(
@@ -731,36 +744,69 @@ pub fn run() -> ExitCode {
             match opened {
                 Ok(handle) => {
                     launch_flag.set(true);
+                    // `show: false` stores the requested bounds but never
+                    // applies them (CW_USEDEFAULT remains), so drive the
+                    // hidden window to the requested size explicitly and poll
+                    // until the platform bounds settle. `resize` queues
+                    // SetWindowPos on the foreground executor; each poll
+                    // re-reads the platform bounds, syncs gpui-side scale
+                    // and viewport, and only draws once the size is valid.
+                    // Bounded: 50 × 100ms, far under root's external guard.
+                    let any_handle = AnyWindowHandle::from(handle);
                     let settled_flag = Rc::clone(&settled);
                     let failed_flag = Rc::clone(&failed);
-                    let updated = cx.update_window(handle.into(), |_, window, cx| {
-                        // Publish the actual window width (never the
-                        // requested size or a scaled reading) minus the live
-                        // rail, then notify only on change — the route
-                        // integrator's contract.
-                        let scale = window.scale_factor();
-                        let style = DesktopShellStyle::resolve(false, scale);
-                        let content_width = window.bounds().size.width.as_f32()
-                            - style.sidebar_width.as_f32();
-                        screen.update(cx, |screen, screen_cx| {
-                            if screen.set_content_width(content_width) {
-                                screen_cx.notify();
-                            }
-                        });
-                        print_capture_geometry(&stem, capture.width, scale, content_width);
-                        // Synchronous frame with no present: `draw` produces
-                        // `rendered_frame` (hidden windows receive no frames
-                        // on their own, which is why `on_next_frame` never
-                        // fired), `render_to_image` reads that scene through
-                        // the shipping wgpu draw, and `clear` releases the
-                        // App arena against the same context.
-                        let arena = window.draw(cx);
-                        let capture_result = window.render_to_image();
-                        arena.clear(cx);
-                        let expected_width = (capture.width * scale).round() as u32;
-                        let expected_height = (capture.height * scale).round() as u32;
-                        let mut failed = false;
-                        match capture_result {
+                    cx.spawn(async move |cx| {
+                        let clock = cx.background_executor().clone();
+                        for _ in 0..RESIZE_MAX_POLLS {
+                            let outcome = cx.update(|cx| {
+                                cx.update_window(any_handle, |_, window, cx| {
+                                    window.bounds_changed(cx);
+                                    let scale = window.scale_factor();
+                                    let style =
+                                        DesktopShellStyle::resolve(false, scale);
+                                    let actual_width =
+                                        window.bounds().size.width.as_f32();
+                                    let actual_height =
+                                        window.bounds().size.height.as_f32();
+                                    if (actual_width - capture.width).abs() > BOUNDS_SETTLE_PX
+                                        || (actual_height - capture.height).abs()
+                                            > BOUNDS_SETTLE_PX
+                                    {
+                                        window.resize(size(
+                                            px(capture.width),
+                                            px(capture.height),
+                                        ));
+                                        return ResizePoll::Waiting;
+                                    }
+                                    let content_width = actual_width
+                                        - style.sidebar_width.as_f32();
+                                    screen.update(cx, |screen, screen_cx| {
+                                        if screen.set_content_width(content_width) {
+                                            screen_cx.notify();
+                                        }
+                                    });
+                                    print_capture_geometry(
+                                        &stem,
+                                        capture.width,
+                                        capture.height,
+                                        actual_width,
+                                        actual_height,
+                                        scale,
+                                        content_width,
+                                    );
+                                    // Synchronous frame with no present, then
+                                    // the shipping wgpu readback of that
+                                    // scene, then the arena release on the
+                                    // same context.
+                                    let arena = window.draw(cx);
+                                    let capture_result = window.render_to_image();
+                                    arena.clear(cx);
+                                    let expected_width =
+                                        (capture.width * scale).round() as u32;
+                                    let expected_height =
+                                        (capture.height * scale).round() as u32;
+                                    let mut failed = false;
+                                    match capture_result {
                             Ok(image) => {
                                 let actual = (image.width(), image.height());
                                 let path = format!(
@@ -798,14 +844,38 @@ pub fn run() -> ExitCode {
                                 failed = true;
                             }
                         }
-                        settle_slot(&settled_flag, &failed_flag, failed, cx);
-                    });
-                    if updated.is_err() {
-                        eprintln!("parity-proof update failed for {caption}");
-                        failed.set(true);
-                        settled.set(true);
-                        cx.quit();
+                        ResizePoll::Done(failed)
+                    })
+                };
+                match outcome {
+                    Ok(ResizePoll::Done(failed)) => {
+                        cx.update(|cx| settle_slot(&settled_flag, &failed_flag, failed, cx));
+                        return;
                     }
+                    Ok(ResizePoll::Waiting) => {
+                        clock
+                            .timer(Duration::from_millis(RESIZE_POLL_MILLIS))
+                            .await;
+                    }
+                    Err(error) => {
+                        eprintln!("parity-proof update failed for {caption}: {error:?}");
+                        cx.update(|cx| {
+                            failed_flag.set(true);
+                            settled_flag.set(true);
+                            cx.quit();
+                        });
+                        return;
+                    }
+                }
+            }
+            eprintln!("parity-proof resize never settled for {caption}");
+            cx.update(|cx| {
+                failed_flag.set(true);
+                settled_flag.set(true);
+                cx.quit();
+            });
+        })
+        .detach();
                 }
                 Err(error) => {
                     eprintln!("parity-proof could not open its window: {error:?}");

@@ -60,16 +60,18 @@ conversation column are.
    closed with usage on stderr and opens no windows.
 3. Each process: shipping boot parity (`.with_assets(CatalogAssetSource)`
    + `register_bundled_fonts`), mount + seed through the controller, open
-   one hidden unfocused window with the shipping transparent caption,
-   publish the live content width, draw synchronously with public
-   `Window::draw` (no present — hidden windows receive no frames, which is
-   why the earlier `on_next_frame` wait timed out at the watchdog),
-   `Window::render_to_image` of that scene, `ArenaClearNeeded::clear` on
-   the same context, save
+   one hidden unfocused window with the shipping transparent caption, then
+   poll up to 50 × 100ms: `Window::resize` to the requested size (the
+   `show: false` open leaves CW_USEDEFAULT), re-read platform bounds,
+   `bounds_changed` to sync scale/viewport, and only after the size is
+   valid publish the live content width, `Window::draw` (no present),
+   `Window::render_to_image`, `ArenaClearNeeded::clear` on the same
+   context, save
    `parity-proof-{case}-{viewport}-{logical}-scale{measured}-{WxH}.png`,
-   quit. Terminal paths: seed/open/update failure quits immediately;
-   capture ok/error settles and quits; a 30s watchdog bounds mount, open,
-   or draw hangs.
+   quit. Terminal paths: seed/open failure quits immediately; capture
+   ok/error settles and quits; resize exhaustion fails loudly. No
+   internal timer (it cannot interrupt a blocked UI thread); root's
+   external 45s guard owns the timeout.
 4. Expected physical sizes at the 125% reference scale: narrow 1280x900,
    wide 1920x1125. The fixture asserts `logical * measured scale` from
    `window.scale_factor()` and fails loudly on mismatch instead of claiming.
@@ -111,13 +113,16 @@ paints a hand-built scene.
 
 ## Known limits (no pixel claims from source alone)
 
-- Nothing here renders until root registers, enables, and runs: no PNG
-  exists, and the full reference comparison remains outstanding.
+- Nothing here renders until root registers, enables, and runs: the full
+  reference comparison remains outstanding, and no PNG is claimed from
+  source alone.
 - Active states depend on the projection lane's delivery-owned sync being
   integrated alongside this fixture; before that they project Quiet and the
   runner records (not hides) the shortfall per case.
-- Hidden-window next-frame delivery is unverified from source alone; the
-  120s watchdog bounds that risk instead of assuming it away.
+- Requested window bounds are not applied by a `show: false` open
+  (CW_USEDEFAULT); the fixture drives `resize` + bounded settle and fails
+  when the size never lands. Actual image dimensions must equal
+  requested × measured scale — mismatch stays FAIL, never rescaled.
 
 ## Electron isolated render without user data / new dependencies
 
