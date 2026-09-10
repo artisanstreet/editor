@@ -757,8 +757,9 @@ pub fn run() -> ExitCode {
                     let failed_flag = Rc::clone(&failed);
                     cx.spawn(async move |cx| {
                         let clock = cx.background_executor().clone();
+                        let mut cx = cx;
                         for _ in 0..RESIZE_MAX_POLLS {
-                            let outcome = cx.update(|cx| {
+                            let outcome =
                                 cx.update_window(any_handle, |_, window, cx| {
                                     window.bounds_changed(cx);
                                     let scale = window.scale_factor();
@@ -845,9 +846,8 @@ pub fn run() -> ExitCode {
                             }
                         }
                         ResizePoll::Done(failed)
-                    })
-                };
-                match outcome {
+                    });
+                    match outcome {
                     Ok(ResizePoll::Done(failed)) => {
                         cx.update(|cx| settle_slot(&settled_flag, &failed_flag, failed, cx));
                         return;
