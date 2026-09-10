@@ -6272,6 +6272,24 @@ impl NativeApplication {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
+        // A saved native configuration owns the independent probed/static
+        // path: never request managed OpenCode discovery or favorites for
+        // it. Clear an obsolete managed scope if one is selected, then
+        // restore the saved-policy projection and status after the reset;
+        // static admission comes from the probed usage verdict alone.
+        if let Some(config) = self.engine_settings.authoritative_config() {
+            if !matches!(
+                config.selection(),
+                artisan_domain::EngineSelection::OpenCode2(_)
+            ) {
+                if self.catalog_controller.scope().is_some() {
+                    self.reset_composer_catalog(cx);
+                }
+                self.sync_composer_model_policy(cx);
+                self.ensure_profile_usage(false, None, cx);
+                return;
+            }
+        }
         let profile = self.engine_settings.authoritative_config()
             .map(|config| config.selection().profile_id().clone())
             .or_else(|| match self.engine_settings.registry_view() {
@@ -9414,6 +9432,17 @@ mod tests {
                 assert!(snapshot.models.iter().any(|row| row.id == "codex-sol" && row.saved));
             });
         });
+        // A saved native configuration restores from the independent
+        // probed/static path: the reload must never request managed
+        // OpenCode catalog discovery or favorites.
+        assert!(
+            commands.borrow().iter().all(|command| !matches!(
+                command,
+                NativeTransportCommand::ReadComposerCatalog { .. }
+                    | NativeTransportCommand::ReadModelFavorites { .. }
+            )),
+            "native reload must not request managed catalog discovery"
+        );
     }
 
     #[gpui::test]
