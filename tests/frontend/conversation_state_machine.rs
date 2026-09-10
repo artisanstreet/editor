@@ -1542,3 +1542,142 @@ fn interrupted_turn_resumes_through_delivery_without_basis_reset() {
     assert_eq!(resumed, SceneTurnNarration::Working);
     assert_eq!(turn_status_basis(&controller, TURN_A), Some(100));
 }
+
+#[test]
+fn history_settlement_uses_the_turn_span_not_the_window_age() {
+    // An old turn first seen under a much newer window must keep its own
+    // span: created 0, updated 1000 settles as one second, not one day.
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        1,
+        86400000,
+        vec![make_turn_full(
+            TURN_A,
+            0,
+            0,
+            ConversationLifecycle::Completed,
+            0,
+            1000,
+        )],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hi"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                2,
+                "done",
+                AssistantMessagePhase::Final,
+                ConversationLifecycle::Completed,
+            ),
+        ],
+    );
+    let (settled, _) = scene_status(&controller, TURN_A);
+    assert_eq!(settled, SceneTurnNarration::ThoughtFor { millis: 1000 });
+    assert_eq!(
+        turn_footer_settlement(&controller, TURN_A),
+        Some(("done".to_owned(), 1000))
+    );
+}
+
+#[test]
+fn accepted_fact_updates_active_status_without_followup_delivery() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        1,
+        120,
+        vec![make_turn_full(
+            TURN_A,
+            0,
+            1,
+            ConversationLifecycle::Active,
+            90,
+            115,
+        )],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    let (waiting, _) = scene_status(&controller, TURN_A);
+    assert_eq!(waiting, SceneTurnNarration::ProviderWait);
+
+    // No further delivery: the accepted fact alone must move the status.
+    controller
+        .register_fact(activity_fact("live_fact", TURN_A, 100, "tool"))
+        .expect("activity fact registers");
+    let _ = controller.drain_effects();
+    let (working, _) = scene_status(&controller, TURN_A);
+    assert_eq!(working, SceneTurnNarration::Working);
+    assert_eq!(turn_status_basis(&controller, TURN_A), Some(90));
+}
+
+#[test]
+fn first_snapshot_streaming_yields_suppressed_status_and_creation_basis() {
+    // A history controller takes StreamingReply straight from idle: the chart
+    // accepts it from Pending, so no refusal is swallowed here.
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        1,
+        140,
+        vec![make_turn_full(
+            TURN_A,
+            0,
+            0,
+            ConversationLifecycle::Active,
+            100,
+            135,
+        )],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hi"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                2,
+                "draft",
+                AssistantMessagePhase::Unspecified,
+                ConversationLifecycle::Streaming,
+            ),
+        ],
+    );
+    let scene = controller.scene().expect("scene builds");
+    let turn_scene = scene.turn_scene(&turn_id(TURN_A)).expect("turn present");
+    assert!(
+        turn_scene
+            .blocks
+            .iter()
+            .all(|block| !matches!(block, TurnBlock::TurnStatus(_))),
+        "first-snapshot streaming suppresses the status row"
+    );
+
+    // Settling proves the creation basis planted during suppression: the
+    // terminal span counts from 100, not from settlement.
+    delivered_snapshot(
+        &mut controller,
+        2,
+        500,
+        vec![make_turn_full(
+            TURN_A,
+            0,
+            1,
+            ConversationLifecycle::Completed,
+            100,
+            500,
+        )],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hi"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                2,
+                "done",
+                AssistantMessagePhase::Final,
+                ConversationLifecycle::Completed,
+            ),
+        ],
+    );
+    let (settled, _) = scene_status(&controller, TURN_A);
+    assert_eq!(settled, SceneTurnNarration::ThoughtFor { millis: 400 });
+}

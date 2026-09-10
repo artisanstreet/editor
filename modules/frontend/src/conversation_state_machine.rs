@@ -1404,9 +1404,6 @@ impl ConversationStateController {
         let Some(snapshot) = self.delivery.snapshot() else {
             return;
         };
-        if self.effects.len().saturating_add(1) > MAX_PENDING_EFFECTS {
-            return;
-        }
         synchronize_turns(
             &mut self.turns,
             &self.explicit_turns,
@@ -1521,7 +1518,7 @@ impl ConversationStateController {
 
     fn dispatch_fact(&mut self, command: SceneFactCommand) -> Result<(), ConversationStateError> {
         match command {
-            SceneFactCommand::Register(fact) => self.register_fact_inner(fact),
+            SceneFactCommand::Register(fact) => self.register_fact_inner(fact)?,
             SceneFactCommand::Remove { id } => {
                 if !self.facts.contains_key(&id) {
                     return Err(ConversationStateError::UnknownFact { id });
@@ -1529,9 +1526,23 @@ impl ConversationStateController {
                 self.ensure_effect_capacity(1)?;
                 self.facts.remove(&id);
                 self.push_effect(ConversationStateEffect::SceneInvalidated);
-                Ok(())
             }
         }
+        // Facts feed the turn chart (work/thought evidence), so an accepted
+        // fact mutation re-derives delivery-owned turns immediately instead
+        // of waiting for the next delivery event.
+        if !self.delivery.is_closed()
+            && let Some(snapshot) = self.delivery.snapshot()
+        {
+            synchronize_turns(
+                &mut self.turns,
+                &self.explicit_turns,
+                &self.facts,
+                snapshot,
+                &mut self.effects,
+            );
+        }
+        Ok(())
     }
 
     fn register_fact_inner(&mut self, fact: SceneFact) -> Result<(), ConversationStateError> {
@@ -1943,6 +1954,11 @@ fn synchronize_turns(
     snapshot: &ConversationSnapshot,
     effects: &mut Vec<ConversationStateEffect>,
 ) {
+    // Without effect room the accepted mutation still stands and status
+    // catches up on a later event.
+    if effects.len().saturating_add(1) > MAX_PENDING_EFFECTS {
+        return;
+    }
     let mut items_by_turn: BTreeMap<&TurnId, Vec<&ConversationItem>> = BTreeMap::new();
     for item in snapshot.items() {
         items_by_turn.entry(item.turn_id()).or_default().push(item);
@@ -1951,7 +1967,7 @@ fn synchronize_turns(
     let mut thought_by_turn: BTreeSet<&TurnId> = BTreeSet::new();
     for fact in facts.values() {
         match &fact.kind {
-            SceneFactKind::Activity | SceneFactKind::ChangedFiles { .. } => {
+            SceneFactKind::Activity { .. } | SceneFactKind::ChangedFiles { .. } => {
                 work_by_turn.insert(&fact.turn_id);
             }
             SceneFactKind::Reasoning { .. } => {
@@ -1969,7 +1985,6 @@ fn synchronize_turns(
         }
     }
 
-    let watermark_ms = snapshot.updated_at().as_millis();
     let mut changed = false;
     for turn in snapshot.turns() {
         if explicit_turns.contains(&turn.turn_id) {
@@ -1993,7 +2008,6 @@ fn synchronize_turns(
             items,
             work_by_turn.contains(&turn.turn_id),
             thought_by_turn.contains(&turn.turn_id),
-            watermark_ms,
             controller,
         ) {
             // Best-effort: a sealed, stale, or regressed derivation only means
@@ -2019,28 +2033,33 @@ fn synchronize_turns(
 ///   text streams, else work/thought evidence, else provider wait;
 /// - `Pending` derives nothing: a queued turn renders quiet.
 ///
-/// Timestamps are authoritative Forge times: first activation counts from the
-/// turn's own creation (send time), so the live elapsed basis matches the
-/// reference and never resets; later drives ride the monotonic window
-/// watermark and terminal events take the later of the turn update and the
-/// watermark, so redelivery can neither regress the chart clock nor move a
-/// frozen settlement. Revisions ride the controller's own monotonic lane
-/// (`revision + 1/2`): durable per-entity revisions are incomparable across a
-/// turn and never enter the chart.
+/// Timestamps are authoritative Forge times from the turn's own entities:
+/// first activation counts from the turn's own creation (send time), so the
+/// live elapsed basis matches the reference and never resets; later drives
+/// reuse the turn's own update time, which the projection guarantees is
+/// non-decreasing per turn, and terminal events additionally respect the
+/// controller's last observed time — only ever as a floor against impossible
+/// input, never as inflation. In particular the window watermark is never
+/// used: an old historical turn settling under a newer window must keep its
+/// own span, not the window's age. Revisions ride the controller's own
+/// monotonic lane (`revision + 1/2`): durable per-entity revisions are
+/// incomparable across a turn and never enter the chart.
 fn derive_turn_events(
     turn: &ConversationTurn,
     items: &[&ConversationItem],
     work_evidence: bool,
     thought_evidence: bool,
-    watermark_ms: i64,
     controller: &ConversationTurnController,
 ) -> Vec<TurnEvent> {
+    // Floor against impossible input only: durable per-turn times never move
+    // backward across accepted frames, so this clamp is normally identity.
+    let last_time = controller.phase_started_at().unwrap_or(i64::MIN);
     let activate_at = if controller.started_at().is_none() {
         turn.created_at.as_millis()
     } else {
-        watermark_ms
+        turn.updated_at.as_millis().max(last_time)
     };
-    let settle_at = turn.updated_at.as_millis().max(watermark_ms);
+    let settle_at = turn.updated_at.as_millis().max(last_time);
     let first_revision = controller.revision().saturating_add(1);
     let second_revision = controller.revision().saturating_add(2);
 

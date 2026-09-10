@@ -93,18 +93,29 @@ Bounded interface (all inside `conversation_state_machine.rs`; renderer
   Reasoning facts → Thinking, else WaitingForProvider; Pending derives nothing.
   Never text content, never speculation.
 - Clocks: first activation uses `turn.created_at` (send-time basis, reference
-  parity, never resets); later drives use the window watermark (monotonic);
-  terminal events use `max(turn.updated_at, watermark)` so redelivery freezes
-  the first settlement. Revisions ride the controller lane (`rev + 1/2`).
+  parity, never resets); later drives reuse the turn's own `updated_at`, which
+  the projection guarantees is non-decreasing per turn; terminal events use
+  `max(turn.updated_at, controller last time)` — the clamp only ever fires on
+  impossible input. The window watermark is NEVER used: an old historical turn
+  settling under a newer window keeps its own span (regression: created 0,
+  updated 1000 under watermark 86400000 settles `ThoughtFor { 1000 }`, not a
+  day). Revisions ride the controller lane (`rev + 1/2`).
+- Facts feed the chart: accepted fact Register/Remove re-runs the same
+  synchronization immediately (shared effect-room guard, change-gated single
+  invalidation), so active status updates with no follow-up delivery.
 - Best-effort: sealed/stale/regressed derivations are swallowed (already
-  covered). At most one `SceneInvalidated` per delivery event, only on real
-  leaf-state change. Registry-full or effect-full skips sync; accepted delivery
-  always stands (idempotence/replay/backpressure preserved).
+  covered). At most one `SceneInvalidated` per mutation, only on real
+  leaf-state change. Registry-full or effect-full skips sync; accepted
+  mutations always stand (idempotence/replay/backpressure preserved).
 
 ## Needed contract extensions (reported, not implemented here)
 
 1. Renderer lane: hover/focus-only footer visual + navigator label visibility +
    active-elapsed ticking + separation between adjacent assistant blocks.
+2. Visual-proof fixtures: derive proof scenes from the actual snapshot/fact
+   path (delivery + `SceneFact`), not manual `RegisterTurn`/`on_turn` drive —
+   manual drive bypasses the delivery-owned sync the real app relies on, so a
+   proof built on it cannot show the production status behavior.
 2. Domain lane (if ever needed): surface steering fragment boundaries (Electron
    keys post-steer placement on `steering_fragment_boundaries`). Not required
    for the joining fix below.
