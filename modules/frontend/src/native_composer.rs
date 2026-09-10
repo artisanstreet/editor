@@ -1079,8 +1079,8 @@ impl NativeComposer {
     ///
     /// `None` when blurred, when a non-empty selection owns the highlight,
     /// or without laid-out text geometry. The origin reuses the stored text
-    /// layout exactly like the IME `bounds_for_range` seam; an empty draft
-    /// falls back to the padded text origin so the caret shows before any
+    /// layout exactly like the IME `bounds_for_range` seam, falling back to
+    /// the layout origin so the caret shows on an empty field before any
     /// typing. The offset itself comes from [`caret_offset_for_paint`].
     pub(crate) fn caret_quad(&self, window: &Window) -> Option<gpui::PaintQuad> {
         if !self.focus_handle.is_focused(window) {
@@ -1089,13 +1089,9 @@ impl NativeComposer {
         let offset = caret_offset_for_paint(true, &self.selection, self.state.draft())?;
         let layout = self.layout.as_ref()?;
         let line_height = layout.line_height();
-        let origin = match layout.position_for_index(offset) {
-            Some(origin) => origin,
-            None => {
-                let bounds = self.painted_bounds.as_ref()?;
-                point(bounds.left() + px(12.0), bounds.top() + px(8.0))
-            }
-        };
+        let origin = layout
+            .position_for_index(offset)
+            .unwrap_or_else(|| layout.bounds().origin);
         if !valid_point(origin) || line_height <= Pixels::ZERO {
             return None;
         }
@@ -2968,12 +2964,12 @@ mod tests {
     use super::native_composer_attachments::ComposerAttachment;
     use super::{
         DocumentEnd, DocumentHome, NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR,
-        NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR, NATIVE_COMPOSER_PLACEHOLDER,
-        NATIVE_COMPOSER_PLACEHOLDER_SELECTOR, NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer,
-        NativeComposerEvent, SelectDocumentEnd, SelectDocumentHome, SelectEnd, SelectHome,
-        localize_painted_point, logical_vertical_target, offset_layout_bounds,
-        replace_text_preserving_raw, utf8_offset_to_utf16, utf16_offset_to_utf8,
-        utf16_range_to_utf8, caret_offset_for_paint,
+        NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR, NATIVE_COMPOSER_EDITOR_SELECTOR,
+        NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
+        NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer, NativeComposerEvent, SelectDocumentEnd,
+        SelectDocumentHome, SelectEnd, SelectHome, localize_painted_point, logical_vertical_target,
+        offset_layout_bounds, replace_text_preserving_raw, utf8_offset_to_utf16,
+        utf16_offset_to_utf8, utf16_range_to_utf8, caret_offset_for_paint,
     };
     use crate::composer::DraftDisposition;
     use crate::image_policy::{ImageDimensions, ImageMediaType};
@@ -3105,6 +3101,68 @@ mod tests {
 
     fn bind_actions(cx: &mut VisualTestContext) {
         cx.update(|_, app| NativeComposer::bind_actions(app));
+    }
+
+    #[gpui::test]
+    fn mounted_caret_paints_focused_geometry_and_hides_on_blur_or_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        cx.simulate_resize(size(px(900.0), px(600.0)));
+        focus_editor(cx, &view);
+        // Focused empty field: the caret paints at the text origin.
+        set_draft(cx, &view, "");
+        let empty = cx.update(|window, app| {
+            view.read(app)
+                .caret_quad(window)
+                .expect("focused empty caret")
+        });
+        assert_eq!(empty.size, size(px(2.0), px(22.0)));
+        let editor = cx
+            .debug_bounds(NATIVE_COMPOSER_EDITOR_SELECTOR)
+            .expect("editor bounds");
+        assert!(editor.contains(&empty.origin));
+        // A collapsed multibyte selection follows typing.
+        set_draft(cx, &view, "a😀b");
+        let end = cx.update(|window, app| {
+            view.read(app)
+                .caret_quad(window)
+                .expect("focused end caret")
+        });
+        assert_eq!(end.size, size(px(2.0), px(22.0)));
+        assert!(
+            end.origin.x > empty.origin.x,
+            "caret must advance past typed text"
+        );
+        assert!(editor.contains(&end.origin));
+        // A selection hides the caret in favor of the highlight.
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.selection = 0..1;
+                composer.selection_reversed = false;
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, app| view.read(app).caret_quad(window))
+                .is_none()
+        );
+        // Blur hides the caret even for a collapsed selection.
+        cx.update(|window, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.selection = 6..6;
+                composer.selection_reversed = false;
+                composer_cx.notify();
+            });
+            let send = view.read(app).send_focus_handle.clone();
+            window.focus(&send, app);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, app| view.read(app).caret_quad(window))
+                .is_none()
+        );
     }
 
     fn focus_editor(cx: &mut VisualTestContext, view: &Entity<NativeComposer>) {

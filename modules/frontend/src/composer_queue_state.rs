@@ -82,6 +82,7 @@ pub(crate) struct ComposerQueueEntry {
     text: Option<AuthoredText>,
     attachments: Vec<ImageAttachmentRef>,
     accepted_at: UnixMillis,
+    last_error: Option<artisan_domain::DispatchError>,
 }
 
 impl ComposerQueueEntry {
@@ -121,6 +122,7 @@ impl ComposerQueueEntry {
             text: summary.text.clone(),
             attachments: summary.attachments.clone(),
             accepted_at: summary.accepted_at,
+            last_error: summary.last_error.clone(),
         })
     }
 
@@ -164,6 +166,13 @@ impl ComposerQueueEntry {
     #[must_use]
     pub(crate) const fn accepted_at(&self) -> UnixMillis {
         self.accepted_at
+    }
+
+    /// Returns the latest dispatcher diagnostic for this row, if the
+    /// dispatcher has claimed and requeued it at least once.
+    #[must_use]
+    pub(crate) fn dispatch_error(&self) -> Option<&str> {
+        self.last_error.as_ref().map(artisan_domain::DispatchError::as_str)
     }
 
     /// Returns the exact text sent to the existing lip renderer.
@@ -1486,6 +1495,7 @@ mod tests {
             text: text.map(|value| AuthoredText::parse(value).expect("text")),
             attachments: Vec::new(),
             accepted_at: UnixMillis::EPOCH,
+            last_error: None,
         }
     }
 

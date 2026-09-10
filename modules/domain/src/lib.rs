@@ -147,9 +147,10 @@ pub use run_usage::{
 
 mod queued_message;
 pub use queued_message::{
-    ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListError, QueuedMessageListOrder,
-    QueuedMessageListing, QueuedMessageListingError, QueuedMessageSummary,
-    QueuedMessageWithdrawalOutcome, WithdrawQueuedMessage, WithdrawQueuedMessageResult,
+    DispatchError, DispatchErrorParseError, ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX,
+    QueuedMessageListError, QueuedMessageListOrder, QueuedMessageListing, QueuedMessageListingError,
+    QueuedMessageSummary, QueuedMessageWithdrawalOutcome, WithdrawQueuedMessage,
+    WithdrawQueuedMessageResult,
 };
 mod run_interaction;
 pub use run_interaction::{

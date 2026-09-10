@@ -7,10 +7,11 @@ use artisan_domain::composer_state::{
     validate_payload_bounds,
 };
 use artisan_domain::{
-    AuthoredText, CommandReceipt, EngineModelId, EngineRouteId, EngineVariantId, ImageAttachment,
-    ImageAttachmentRef, ListQueuedMessages, MessageId, QueueMessagePayload, QueuedMessageListOrder,
-    QueuedMessageListing, QueuedMessageSummary, QueuedMessageWithdrawalOutcome, ReceiptDisposition,
-    RequestId, RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId, UnixMillis,
+    AuthoredText, CommandReceipt, DispatchError, EngineModelId, EngineRouteId, EngineVariantId,
+    ImageAttachment, ImageAttachmentRef, ListQueuedMessages, MessageId, QueueMessagePayload,
+    QueuedMessageListOrder, QueuedMessageListing, QueuedMessageSummary,
+    QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId, RunId, RunUsageBasis,
+    RunUsageReport, RunUsageReportInput, ThreadId, UnixMillis,
 };
 use artisan_protocol::composer_state::{
     ComposerStateCodecError, decode_list_queued_messages_request, decode_queued_message_listing,
@@ -175,6 +176,9 @@ fn queued_listing_round_trips_ordered_metadata_and_count_state() {
             .expect("reference"),
         ],
         accepted_at: UnixMillis::from_millis(-7),
+        last_error: Some(
+            DispatchError::parse("engine unconfigured".to_owned()).expect("diagnostic"),
+        ),
     };
     let original = QueuedMessageListing::new(
         thread_id,
@@ -186,6 +190,14 @@ fn queued_listing_round_trips_ordered_metadata_and_count_state() {
     .expect("listing");
     assert!(round_trip_listing(&original).has_more());
     assert_eq!(round_trip_listing(&original), original);
+    assert_eq!(
+        round_trip_listing(&original).messages()[0]
+            .last_error
+            .as_ref()
+            .expect("diagnostic survives the wire")
+            .as_str(),
+        "engine unconfigured"
+    );
 }
 
 #[test]

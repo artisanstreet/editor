@@ -6,8 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use artisan_database::entities::{self, DispatchState};
 use artisan_database::{
-    AttachProjectInput, ClaimMessageDispatch, CreateThreadInput, DispatchLeaseOwner,
-    QueueMessageInput, QueuedMessageRepositoryError, Repository, SqliteConfig, connect,
+    AttachProjectInput, ClaimMessageDispatch, CreateThreadInput, DispatchFailureReason,
+    DispatchLeaseOwner, QueueMessageInput, QueuedMessageRepositoryError, Repository,
+    RequeueMessageDispatch, SqliteConfig, connect,
 };
 use artisan_domain::{
     AuthoredText, DirectoryId, DisplayName, ImageAttachment, ListQueuedMessages, MessageId,
@@ -453,6 +454,139 @@ async fn leased_and_started_messages_are_too_late_and_left_untouched() {
         QueuedMessageWithdrawalOutcome::TooLate
     );
     assert_eq!(dispatch(&database, "message-running").await, running_before);
+}
+
+async fn claim_and_requeue_unconfigured(
+    repository: &Repository,
+    message_value: &str,
+    owner_byte: u8,
+    claimed_at_ms: i64,
+    lease_expires_at_ms: i64,
+    operated_at_ms: i64,
+    available_at_ms: i64,
+) {
+    let claimed = repository
+        .claim_next_message_dispatch(claim(owner_byte, claimed_at_ms, lease_expires_at_ms))
+        .await
+        .expect("claim should work")
+        .expect("dispatch should be claimed");
+    assert_eq!(claimed.message_id, message_id(message_value));
+    let owner = claimed.owner;
+    repository
+        .requeue_message_dispatch(RequeueMessageDispatch {
+            message_id: message_id(message_value),
+            owner,
+            operated_at: UnixMillis::from_millis(operated_at_ms),
+            available_at: UnixMillis::from_millis(available_at_ms),
+            reason: DispatchFailureReason::parse("engine unconfigured")
+                .expect("requeue reason should be bounded"),
+        })
+        .await
+        .expect("requeue should commit");
+}
+
+async fn queued_listing(
+    repository: &Repository,
+    thread_value: &str,
+) -> artisan_domain::QueuedMessageListing {
+    repository
+        .read_queued_messages(
+            ListQueuedMessages::new(
+                thread_id(thread_value),
+                QueuedMessageListOrder::OldestFirst,
+                QUEUED_MESSAGE_LIST_MAX,
+            )
+            .expect("bounded list query should build"),
+        )
+        .await
+        .expect("queued listing should read")
+}
+
+#[tokio::test]
+async fn requeued_dispatch_stays_listed_with_its_last_error() {
+    let (database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue(
+        &repository,
+        "queue-retry-visible",
+        "message-retry-visible",
+        "thread-1",
+        text_payload("still waiting"),
+        300,
+    )
+    .await;
+
+    // A never-attempted row carries no diagnostic.
+    let fresh = queued_listing(&repository, "thread-1").await;
+    assert_eq!(fresh.total_count(), 1);
+    assert_eq!(fresh.messages()[0].last_error, None);
+
+    // One dispatcher claim plus a requeue with the production reason.
+    claim_and_requeue_unconfigured(&repository, "message-retry-visible", 0x55, 400, 500, 410, 460)
+        .await;
+
+    // The retrying row stays in the composer projection with its error.
+    let listed = queued_listing(&repository, "thread-1").await;
+    assert_eq!(listed.total_count(), 1);
+    assert_eq!(
+        listed.messages()[0].message_id,
+        message_id("message-retry-visible")
+    );
+    assert_eq!(
+        listed.messages()[0]
+            .last_error
+            .as_ref()
+            .expect("dispatch diagnostic should project")
+            .as_str(),
+        "engine unconfigured"
+    );
+    assert_eq!(
+        dispatch(&database, "message-retry-visible").await.last_error.as_deref(),
+        Some("engine unconfigured")
+    );
+}
+
+#[tokio::test]
+async fn requeued_dispatch_withdrawal_is_too_late_but_claimable_after_backoff() {
+    let (database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue(
+        &repository,
+        "queue-retry-visible",
+        "message-retry-visible",
+        "thread-1",
+        text_payload("still waiting"),
+        300,
+    )
+    .await;
+    claim_and_requeue_unconfigured(&repository, "message-retry-visible", 0x55, 400, 500, 410, 460)
+        .await;
+
+    // Withdrawal stays honest for claimed rows: too late, dispatch untouched.
+    let late = repository
+        .withdraw_queued_message(withdrawal(
+            "thread-1",
+            "message-retry-visible",
+            "queue-retry-visible",
+            "withdraw-retry-visible",
+            411,
+        ))
+        .await
+        .expect("claimed withdrawal should produce an outcome");
+    assert_eq!(late.outcome, QueuedMessageWithdrawalOutcome::TooLate);
+    assert_eq!(
+        dispatch(&database, "message-retry-visible").await.state,
+        DispatchState::Queued
+    );
+
+    // The dispatcher can claim the retry once its backoff elapses.
+    let retry = repository
+        .claim_next_message_dispatch(claim(0x56, 500, 600))
+        .await
+        .expect("retry claim should work")
+        .expect("requeued dispatch should be claimable after backoff");
+    assert_eq!(retry.message_id, message_id("message-retry-visible"));
+    assert_eq!(retry.attempt_count, 2);
 }
 
 #[tokio::test]

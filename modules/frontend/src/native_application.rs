@@ -323,6 +323,31 @@ struct NativeMessageFlight {
     token: SubmissionToken,
 }
 
+/// A first send held while its engine-configuration save is admitted.
+///
+/// The composer flight is already begun (so the draft is reserved and later
+/// sends are fenced), but no transport command is issued until the
+/// authoritative save acknowledgment arrives. The pending send is scoped to
+/// its thread and exact payload: a thread switch, a draft change, or a save
+/// failure suppresses it without queueing anything. This type owns message
+/// text and therefore implements neither `Debug` nor `Display`.
+struct PendingFirstSend {
+    thread_id: ThreadId,
+    payload: QueueMessagePayload,
+    token: SubmissionToken,
+}
+
+/// Outcome of first-send admission for a thread without a persisted engine
+/// configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FirstSendAdmission {
+    /// The thread is already configured; continue the send.
+    Proceed,
+    /// The send was held for a save, adopted, blocked, or suppressed; the
+    /// gate already synced and notified.
+    Held,
+}
+
 /// Application-owned identity for one explicitly retryable message
 /// queue. This type owns message text and therefore implements neither
 /// `Debug` nor `Display`.
@@ -404,6 +429,7 @@ pub struct NativeApplication {
         crate::native_model_catalog::NativeModelPolicy,
     )>,
     composer_model_run_error: Option<&'static str>,
+    pending_first_send: Option<PendingFirstSend>,
     catalog_controller: NativeCatalogController,
     _composer_controls_subscription: Subscription,
     _composer_model_subscription: Subscription,
@@ -640,6 +666,7 @@ impl NativeApplication {
             model_selector,
             composer_model_choice: None,
             composer_model_run_error: None,
+            pending_first_send: None,
             catalog_controller: NativeCatalogController::new(),
             _composer_controls_subscription: composer_controls_subscription,
             _composer_model_subscription: composer_model_subscription,
@@ -3062,24 +3089,23 @@ impl NativeApplication {
         } else {
             None
         };
-        // A queued row with no active run and no persisted engine
-        // configuration is the dispatcher's `engine unconfigured` requeue
-        // loop made visible: name the missing configuration next to the
-        // count instead of leaving a bare number that reads as progress.
+        // Surface the dispatcher's actual diagnostic for the oldest waiting
+        // row next to the count. This is the persisted `last_error` the
+        // dispatcher stored on requeue — never an inference from absent
+        // frontend data.
         if !snapshot.run_active
-            && self.engine_settings.authoritative_config().is_none()
             && matches!(queue.status(), crate::composer_queue_state::QueueStatus::Idle)
             && (queue.total_count() > 0 || !queue.entries().is_empty())
         {
-            snapshot.queue_status = Some(
-                match crate::native_composer_queue::queue_count_label(queue) {
-                    Some(count) => format!("{count} · engine not configured — select a model to start"),
-                    None => {
-                        "Queued message cannot start: engine not configured — select a model to start"
-                            .to_owned()
-                    }
-                },
-            );
+            let error = queue.entries().iter().find_map(|entry| entry.dispatch_error());
+            if let Some(error) = error {
+                snapshot.queue_status = Some(
+                    match crate::native_composer_queue::queue_count_label(queue) {
+                        Some(count) => format!("{count} · {error}"),
+                        None => error.to_owned(),
+                    },
+                );
+            }
         }
 
         snapshot.new_thread_ready =
@@ -3139,6 +3165,106 @@ impl NativeApplication {
         self.schedule_composer_queue(false, cx);
     }
 
+    /// Resolves the displayed model policy to its durable engine
+    /// configuration for a first send: either the explicit choice for this
+    /// thread or the selector's current policy.
+    ///
+    /// Returns the static blocking message when no policy is displayed or
+    /// the displayed policy cannot become a run configuration.
+    fn first_send_config(&self, cx: &App) -> Result<artisan_domain::EngineRunConfig, &'static str> {
+        let displayed = match &self.composer_model_choice {
+            Some((thread, policy)) if thread == &self.selected_thread => Some(policy.clone()),
+            _ => self.model_selector.read(cx).state().policy().cloned(),
+        };
+        let Some(policy) = displayed else {
+            return Err("Select a model before sending. Your draft is preserved.");
+        };
+        let catalog = self.model_selector.read(cx).state().snapshot().clone();
+        crate::composer_model_config::config_for_policy(
+            &catalog,
+            &policy,
+            self.engine_settings.authoritative_config(),
+        )
+    }
+
+    /// Admits a first send on a thread without a persisted engine
+    /// configuration by persisting the displayed model policy and holding
+    /// the send for its authoritative acknowledgment (continued by
+    /// [`Self::continue_pending_first_send`]).
+    fn admit_first_send(&mut self, cx: &mut Context<Self>) -> FirstSendAdmission {
+        if self.engine_settings.authoritative_config().is_some() {
+            self.suppress_stale_pending_first_send(cx);
+            self.composer_model_run_error = None;
+            return FirstSendAdmission::Proceed;
+        }
+        self.suppress_stale_pending_first_send(cx);
+        if self.pending_first_send.is_some() {
+            // A held send without a live save means its save died without
+            // an acknowledgment: release the held flight and re-evaluate so
+            // this send re-saves instead of stranding on a stale "saving"
+            // message.
+            if self.engine_settings.pending_save_request_id().is_none() {
+                if let Some(pending) = self.pending_first_send.take() {
+                    self.finish_composer_submission(pending.token, DraftDisposition::Retained, cx);
+                }
+            } else {
+                self.composer_model_run_error = Some(
+                    "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
+                );
+                self.sync_composer_controls(cx);
+                cx.notify();
+                return FirstSendAdmission::Held;
+            }
+        }
+        let expected = match self.first_send_config(cx) {
+            Ok(config) => config,
+            Err(message) => {
+                self.composer_model_run_error = Some(message);
+                self.sync_composer_controls(cx);
+                cx.notify();
+                return FirstSendAdmission::Held;
+            }
+        };
+        // Adopt a matching in-flight save (for example the auto-save the
+        // policy selection just issued) instead of issuing a duplicate.
+        if let Some((pending_thread, retained)) = self
+            .engine_settings
+            .pending_save()
+            .map(|(thread, config)| (thread.clone(), config.clone()))
+            && self.selected_thread.as_ref() == Some(&pending_thread)
+            && retained == expected
+        {
+            self.begin_pending_first_send(cx);
+            return FirstSendAdmission::Held;
+        }
+        if self.engine_settings.pending_save_request_id().is_some() {
+            self.composer_model_run_error = Some(
+                "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
+            );
+            self.sync_composer_controls(cx);
+            cx.notify();
+            return FirstSendAdmission::Held;
+        }
+        // The settings draft stays `OpenCode` 2-shaped until per-engine
+        // settings UI lands, so native selections cannot travel through it:
+        // save the validated configuration directly with an `Unconfigured`
+        // precondition instead.
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return FirstSendAdmission::Held;
+        };
+        if !self.submit_first_send_save(thread_id, expected) {
+            self.composer_model_run_error = Some(
+                "Engine settings could not be saved. Your draft is preserved; retry the model selection.",
+            );
+            self.sync_composer_controls(cx);
+            cx.notify();
+            return FirstSendAdmission::Held;
+        }
+        self.sync_composer_model_policy(cx);
+        self.begin_pending_first_send(cx);
+        FirstSendAdmission::Held
+    }
+
     fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
         if !self.message_submission_is_admissible(cx) || self.message_flight.is_some() {
             return;
@@ -3158,55 +3284,11 @@ impl NativeApplication {
                 return;
             }
         }
-        // First-send admission: when the thread has no persisted engine
-        // configuration yet, persist the currently displayed model policy
-        // through the existing typed save command and block this send until
-        // its authoritative acknowledgment arrives. Without this, an
-        // unconfigured first send queues a message the dispatcher can only
-        // requeue as `engine unconfigured`. When nothing is displayed (no
-        // selector policy), legacy admission applies so offline and
-        // policy-free surfaces keep their existing behavior.
-        if self.engine_settings.authoritative_config().is_none() {
-            if self.engine_settings.pending_save_request_id().is_some() {
-                self.composer_model_run_error = Some(
-                    "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
-                );
-                self.sync_composer_controls(cx);
-                cx.notify();
-                return;
-            }
-            let displayed = self.model_selector.read(cx).state().policy().cloned();
-            if let Some(policy) = displayed {
-                let catalog = self.model_selector.read(cx).state().snapshot().clone();
-                match crate::composer_model_config::config_for_policy(
-                    &catalog,
-                    &policy,
-                    self.engine_settings.authoritative_config(),
-                ) {
-                    Ok(config) => {
-                        *self.engine_settings.draft_mut() =
-                            crate::engine_settings::EngineSettingsDraft::from_config(&config);
-                        if self.engine_settings.can_save() {
-                            self.save_engine_settings(cx);
-                            self.sync_composer_model_policy(cx);
-                        }
-                        self.composer_model_run_error = Some(
-                            "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
-                        );
-                        self.sync_composer_controls(cx);
-                        cx.notify();
-                        return;
-                    }
-                    Err(message) => {
-                        self.composer_model_run_error = Some(message);
-                        self.sync_composer_controls(cx);
-                        cx.notify();
-                        return;
-                    }
-                }
-            }
-        } else {
-            self.composer_model_run_error = None;
+        // First-send admission is owned by `admit_first_send`: on an
+        // unconfigured thread it persists the displayed model policy and
+        // holds this send for the authoritative save acknowledgment.
+        if !matches!(self.admit_first_send(cx), FirstSendAdmission::Proceed) {
+            return;
         }
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
@@ -3253,6 +3335,129 @@ impl NativeApplication {
                 self.reject_message_submission(token, command_failure(error), cx);
             }
         }
+        self.sync_composer_availability(cx);
+        cx.notify();
+    }
+
+    /// Begins the composer flight for a first send whose save is admitted
+    /// and holds it as the pending first send. The transport command is
+    /// issued only by [`Self::continue_pending_first_send`] once the
+    /// authoritative save acknowledgment arrives.
+    fn begin_pending_first_send(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        self.clear_message_retry();
+        let (body, token) = match self
+            .composer
+            .update(cx, |composer, _| composer.begin_payload_submission())
+        {
+            Ok(submission) => submission,
+            Err(blocked) => {
+                if let Some(failure) = submission_blocked_failure(blocked) {
+                    self.message_failure = Some(NativeMessageFailure::new(failure));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        self.message_receipt = None;
+        self.message_failure = None;
+        self.pending_first_send = Some(PendingFirstSend {
+            thread_id,
+            payload: body,
+            token,
+        });
+        self.composer_model_run_error = Some(
+            "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
+        );
+        self.sync_composer_availability(cx);
+        cx.notify();
+    }
+
+    /// Suppresses a pending first send whose thread no longer owns the
+    /// composer, retaining its draft. Returns whether one was suppressed.
+    fn suppress_stale_pending_first_send(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(pending) = self.pending_first_send.as_ref() else {
+            return false;
+        };
+        if self.selected_thread.as_ref() == Some(&pending.thread_id) {
+            return false;
+        }
+        let pending = self.pending_first_send.take().expect("pending checked above");
+        self.finish_composer_submission(pending.token, DraftDisposition::Retained, cx);
+        self.composer_model_run_error = None;
+        self.sync_composer_availability(cx);
+        true
+    }
+
+    /// Continues a pending first send after its save was acknowledged.
+    ///
+    /// The queued command carries the exact payload captured at send time
+    /// only while the same thread is still selected and the draft still
+    /// matches it; any thread switch or draft change suppresses the send and
+    /// retains the current draft instead of queueing stale text.
+    fn continue_pending_first_send(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_first_send.take() else {
+            return;
+        };
+        let sendable = self.selected_thread.as_ref() == Some(&pending.thread_id)
+            && self.message_flight.is_none()
+            && self
+                .composer
+                .read(cx)
+                .draft_matches_payload(&pending.payload);
+        if !sendable {
+            self.finish_composer_submission(pending.token, DraftDisposition::Retained, cx);
+            self.composer_model_run_error = None;
+            self.sync_composer_availability(cx);
+            cx.notify();
+            return;
+        }
+        self.message_receipt = None;
+        self.message_failure = None;
+        self.composer_model_run_error = None;
+        let request_id = match create_message_request_id() {
+            Ok(request_id) => request_id,
+            Err(failure) => {
+                self.reject_message_submission(pending.token, failure, cx);
+                return;
+            }
+        };
+        let command =
+            NativeTransportCommand::QueueMessage(Box::new(artisan_domain::QueueMessage {
+                request_id: request_id.clone(),
+                thread_id: pending.thread_id.clone(),
+                payload: pending.payload.clone(),
+            }));
+        match self.submit_command(command) {
+            Ok(()) => {
+                self.message_flight = Some(NativeMessageFlight {
+                    thread_id: pending.thread_id,
+                    request_id,
+                    payload: pending.payload,
+                    token: pending.token,
+                });
+            }
+            Err(error) => {
+                self.reject_message_submission(pending.token, command_failure(error), cx);
+                return;
+            }
+        }
+        self.sync_composer_availability(cx);
+        cx.notify();
+    }
+
+    /// Suppresses a pending first send after its save failed, retaining its
+    /// draft and naming the failed save.
+    fn fail_pending_first_send(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_first_send.take() else {
+            return;
+        };
+        self.finish_composer_submission(pending.token, DraftDisposition::Retained, cx);
+        self.composer_model_run_error = Some(
+            "Engine settings could not be saved. Your draft is preserved; retry the model selection.",
+        );
         self.sync_composer_availability(cx);
         cx.notify();
     }
@@ -3404,6 +3609,9 @@ impl NativeApplication {
     fn retain_message_flight(&mut self, cx: &mut Context<Self>) {
         if let Some(flight) = self.message_flight.take() {
             self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
+        }
+        if let Some(pending) = self.pending_first_send.take() {
+            self.finish_composer_submission(pending.token, DraftDisposition::Retained, cx);
         }
         self.clear_message_retry();
         self.sync_composer_availability(cx);
@@ -6474,6 +6682,7 @@ impl NativeApplication {
         self.sync_composer_model_policy(cx);
         if accepted {
             self.discover_composer_catalog_for_settings(cx);
+            self.continue_pending_first_send(cx);
         }
         cx.notify();
     }
@@ -6487,6 +6696,9 @@ impl NativeApplication {
         let accepted = self.engine_settings.selected_thread() == Some(&thread_id)
             && self.engine_settings.pending_save_request_id() == Some(request_id);
         self.engine_settings.on_conflict(thread_id, request_id);
+        if accepted {
+            self.fail_pending_first_send(cx);
+        }
         if accepted && self.engine_settings.pending_reload_thread().is_some() {
             self.reset_composer_catalog(cx);
         }
@@ -6504,8 +6716,13 @@ impl NativeApplication {
         failure: ServiceFailure,
         cx: &mut Context<Self>,
     ) {
+        let accepted = self.engine_settings.selected_thread() == Some(thread_id)
+            && self.engine_settings.pending_save_request_id() == Some(request_id);
         self.engine_settings
             .on_save_failed(thread_id, request_id, failure);
+        if accepted {
+            self.fail_pending_first_send(cx);
+        }
         self.sync_composer_model_policy(cx);
         cx.notify();
     }
@@ -6580,6 +6797,58 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         self.save_engine_settings(cx);
+    }
+
+    /// Submits a first-send configuration save carrying a validated engine
+    /// configuration directly. The settings draft stays `OpenCode` 2-shaped
+    /// until per-engine settings UI lands, so native selections bypass it
+    /// and travel with an `Unconfigured` precondition instead. Returns
+    /// whether the save is now tracked for its authoritative acknowledgment,
+    /// which continues the pending first send.
+    fn submit_first_send_save(
+        &mut self,
+        thread_id: ThreadId,
+        config: artisan_domain::EngineRunConfig,
+    ) -> bool {
+        // The controller selection follows the mounted thread; selecting
+        // again is a no-op when it already does.
+        self.engine_settings.select_thread(Some(&thread_id));
+        let request_id = match create_save_request_id() {
+            Ok(id) => id,
+            Err(failure) => {
+                self.engine_settings.on_save_admission_failed(failure);
+                return false;
+            }
+        };
+        if !self.engine_settings.begin_direct_save(
+            thread_id.clone(),
+            request_id.clone(),
+            config.clone(),
+        ) {
+            return false;
+        }
+        let command = artisan_domain::SetThreadEngineConfig::new(
+            request_id,
+            thread_id,
+            artisan_domain::EngineConfigUpdatePrecondition::Unconfigured,
+            config,
+        );
+        let Some(service) = self.service.clone() else {
+            self.engine_settings
+                .on_save_admission_failed(ServiceFailure {
+                    stage: ServiceFailureStage::EventBridge,
+                    category: ServiceFailureCategory::ChannelClosed,
+                });
+            return false;
+        };
+        match service.submit(NativeTransportCommand::SetThreadEngineConfig(Box::new(command))) {
+            Ok(()) => true,
+            Err(error) => {
+                self.engine_settings
+                    .on_save_admission_failed(command_failure(error));
+                false
+            }
+        }
     }
 
     fn handle_cancel_engine_settings(
@@ -7961,6 +8230,41 @@ mod tests {
         assert!(application.engine_settings.authoritative_config().is_some());
     }
 
+    /// Installs a held first send whose configuration save is admitted but
+    /// not yet acknowledged, exercising the real save leg without transport:
+    /// the controller tracks the save, the composer holds the flight, and the
+    /// application owns the pending send. Returns the retained configuration
+    /// so tests can acknowledge exactly it.
+    fn install_admitted_first_send(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+        thread_id: ThreadId,
+        draft: &str,
+        sink: NativeTestCommandSink,
+    ) -> artisan_domain::EngineRunConfig {
+        install_ready_message_surface(application, cx, thread_id.clone(), draft, sink);
+        application.engine_settings.select_thread(Some(&thread_id));
+        let catalog = application.model_selector.read(cx).state().snapshot().clone();
+        let mut policy = catalog
+            .selection_policy_for_model("codex-sol")
+            .expect("default selection policy");
+        policy.profile_id = Some("default".to_owned());
+        let config =
+            crate::composer_model_config::config_for_policy(&catalog, &policy, None)
+                .expect("default policy builds a run configuration");
+        // Native selections bypass the `OpenCode` 2-shaped draft through the
+        // same direct-save tracking production uses for first sends.
+        assert!(application.engine_settings.begin_direct_save(
+            thread_id,
+            request("engine-save-1"),
+            config.clone()
+        ));
+        application.begin_pending_first_send(cx);
+        assert!(application.pending_first_send.is_some());
+        assert!(application.composer.read(cx).is_submitting());
+        config
+    }
+
     fn answer_thread() -> ThreadId {
         ThreadId::parse("thread-answer").expect("answer thread")
     }
@@ -8210,9 +8514,9 @@ mod tests {
                 assert!(application.composer_model_choice.is_none());
                 assert!(application.model_selector.read(cx).state().policy().is_some());
                 application.begin_message_submission(cx);
-                // Blocked until the authoritative save acknowledgment
-                // arrives: no transport command, no flight, draft preserved,
-                // and an actionable error names the pending save.
+                // Blocked with the real cause: the offline default policy
+                // names no engine profile, so no save can be issued. No
+                // transport command, no flight, draft preserved.
                 assert!(commands.borrow().is_empty());
                 assert!(application.message_flight.is_none());
                 assert!(!application.composer.read(cx).is_submitting());
@@ -8220,13 +8524,13 @@ mod tests {
                 let error = application
                     .composer_model_run_error
                     .expect("first-send configuration error");
-                assert!(error.contains("saved yet"), "unexpected error: {error}");
+                assert!(error.contains("engine profile"), "unexpected error: {error}");
             });
         });
     }
 
     #[gpui::test]
-    fn queued_row_without_engine_config_names_the_missing_configuration(
+    fn queued_row_dispatch_error_is_shown_next_to_the_count(
         cx: &mut TestAppContext,
     ) {
         let thread_id = ThreadId::parse("queued-unconfigured-task").expect("thread");
@@ -8273,6 +8577,10 @@ mod tests {
                         ),
                         attachments: Vec::new(),
                         accepted_at: artisan_domain::UnixMillis::EPOCH,
+                        last_error: Some(
+                            artisan_domain::DispatchError::parse("engine unconfigured".to_owned())
+                                .expect("dispatcher diagnostic"),
+                        ),
                     }],
                 )
                 .expect("queued page");
@@ -8286,7 +8594,170 @@ mod tests {
                 assert!(!snapshot.run_active);
                 let status = snapshot.queue_status.expect("queue status");
                 assert!(status.contains("1 queued"), "unexpected status: {status}");
-                assert!(status.contains("engine not configured"), "unexpected status: {status}");
+                assert!(status.contains("engine unconfigured"), "unexpected status: {status}");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn save_ack_continues_the_pending_first_send(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("first-send-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        let retained = cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_admitted_first_send(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "keep my draft",
+                    sink,
+                )
+            })
+        });
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                application.handle_engine_config_set(
+                    &artisan_protocol::SetThreadEngineConfigResult {
+                        request_id: request("engine-save-1"),
+                        thread_id: thread_id.clone(),
+                        revision: artisan_domain::EngineConfigRevision::new(1)
+                            .expect("revision"),
+                        disposition: artisan_domain::ReceiptDisposition::Accepted,
+                    },
+                    retained,
+                    cx,
+                );
+                let flight = application
+                    .message_flight
+                    .as_ref()
+                    .expect("continued flight");
+                assert_eq!(flight.thread_id, thread_id);
+                assert_eq!(
+                    flight.payload.text().expect("text payload").as_str(),
+                    "keep my draft"
+                );
+                assert!(application.pending_first_send.is_none());
+                assert!(application.composer_model_run_error.is_none());
+                assert_eq!(application.composer.read(cx).draft(), "keep my draft");
+            });
+        });
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 1);
+        let NativeTransportCommand::QueueMessage(command) = &commands[0] else {
+            panic!("acknowledged first send must queue its message")
+        };
+        assert_eq!(command.thread_id, thread_id);
+        assert_eq!(
+            command.payload.text().expect("text payload").as_str(),
+            "keep my draft"
+        );
+    }
+
+    #[gpui::test]
+    fn edited_draft_suppresses_the_pending_first_send(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("first-send-edited-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        let retained = cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_admitted_first_send(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "original send draft",
+                    sink,
+                )
+            })
+        });
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                application.composer.update(cx, |composer, composer_cx| {
+                    composer.set_draft("edited before ack");
+                    composer_cx.notify();
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                application.handle_engine_config_set(
+                    &artisan_protocol::SetThreadEngineConfigResult {
+                        request_id: request("engine-save-1"),
+                        thread_id: thread_id.clone(),
+                        revision: artisan_domain::EngineConfigRevision::new(1)
+                            .expect("revision"),
+                        disposition: artisan_domain::ReceiptDisposition::Accepted,
+                    },
+                    retained,
+                    cx,
+                );
+                assert!(application.message_flight.is_none());
+                assert!(application.pending_first_send.is_none());
+                assert!(!application.composer.read(cx).is_submitting());
+                assert_eq!(
+                    application.composer.read(cx).draft(),
+                    "edited before ack"
+                );
+                assert!(application.composer_model_run_error.is_none());
+            });
+        });
+        assert!(commands.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn save_failure_suppresses_the_pending_first_send(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("first-send-failed-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_admitted_first_send(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "keep my draft",
+                    sink,
+                );
+                application.handle_engine_config_failed(
+                    &thread_id,
+                    &request("engine-save-1"),
+                    message_failure(),
+                    cx,
+                );
+                assert!(application.message_flight.is_none());
+                assert!(application.pending_first_send.is_none());
+                assert!(!application.composer.read(cx).is_submitting());
+                assert_eq!(application.composer.read(cx).draft(), "keep my draft");
+                let error = application
+                    .composer_model_run_error
+                    .expect("save failure error");
+                assert!(error.contains("preserved"), "unexpected error: {error}");
+            });
+        });
+        assert!(commands.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn thread_switch_suppresses_the_pending_first_send(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("first-send-switch-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_admitted_first_send(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "keep my draft",
+                    sink,
+                );
+                application.selected_thread =
+                    Some(ThreadId::parse("other-task").expect("other thread"));
+                assert!(application.suppress_stale_pending_first_send(cx));
+                assert!(application.pending_first_send.is_none());
+                assert!(!application.composer.read(cx).is_submitting());
+                assert_eq!(application.composer.read(cx).draft(), "keep my draft");
             });
         });
     }

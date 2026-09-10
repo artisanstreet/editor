@@ -14,11 +14,11 @@ use artisan_domain::composer_state::{
     validate_payload_bounds,
 };
 use artisan_domain::{
-    AuthoredText, AuthoredTextError, CommandReceipt, EngineModelId, EngineRouteId, EngineVariantId,
-    IdentifierError, ImageAttachment, ImageAttachmentRef, ListQueuedMessages, MessageId,
-    QUEUED_MESSAGE_LIST_MAX, QueueMessagePayload, QueueMessagePayloadError, QueuedMessageListOrder,
-    QueuedMessageListing, QueuedMessageSummary, ReceiptDisposition, RequestId, RunId,
-    RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId, UnixMillis,
+    AuthoredText, AuthoredTextError, CommandReceipt, DispatchError, EngineModelId, EngineRouteId,
+    EngineVariantId, IdentifierError, ImageAttachment, ImageAttachmentRef, ListQueuedMessages,
+    MessageId, QUEUED_MESSAGE_LIST_MAX, QueueMessagePayload, QueueMessagePayloadError,
+    QueuedMessageListOrder, QueuedMessageListing, QueuedMessageSummary, ReceiptDisposition,
+    RequestId, RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId, UnixMillis,
 };
 use thiserror::Error;
 
@@ -714,6 +714,9 @@ fn encode_queued_message_summary(
         );
     }
     builder.set_accepted_at_millis(value.accepted_at.as_millis());
+    if let Some(error) = value.last_error.as_ref() {
+        builder.set_last_error(error.as_str());
+    }
     Ok(())
 }
 
@@ -779,6 +782,19 @@ fn decode_queued_message_summary(
             })?,
         )?);
     }
+    let last_error = if value.has_last_error() {
+        Some(
+            DispatchError::parse(read_text(
+                value.get_last_error(),
+                "response.queuedMessages.messages.lastError",
+            )?)
+            .map_err(|_| ComposerStateCodecError::Listing {
+                field: "response.queuedMessages.messages.lastError",
+            })?,
+        )
+    } else {
+        None
+    };
     Ok(QueuedMessageSummary {
         message_id,
         thread_id,
@@ -786,6 +802,7 @@ fn decode_queued_message_summary(
         text,
         attachments,
         accepted_at: UnixMillis::from_millis(value.get_accepted_at_millis()),
+        last_error,
     })
 }
 

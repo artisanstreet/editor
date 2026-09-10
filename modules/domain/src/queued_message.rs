@@ -104,6 +104,81 @@ pub struct QueuedMessageSummary {
     pub attachments: Vec<ImageAttachmentRef>,
     /// Original queue acceptance instant.
     pub accepted_at: UnixMillis,
+    /// Latest dispatcher diagnostic persisted with the dispatch, if the
+    /// dispatcher has claimed and requeued this message at least once. A
+    /// never-attempted row carries no diagnostic.
+    pub last_error: Option<DispatchError>,
+}
+
+/// Bounded dispatcher diagnostic persisted with one queued dispatch.
+///
+/// The value carries only the operator-facing reason the dispatcher stored
+/// verbatim on its last requeue (for example `engine unconfigured`). Its
+/// contents stay out of error and log rendering; [`Debug`] reports only the
+/// byte length and callers must opt into [`Self::as_str`].
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct DispatchError(String);
+
+impl DispatchError {
+    /// Maximum UTF-8 byte length accepted for one dispatch diagnostic.
+    ///
+    /// This matches the dispatcher failure-reason ceiling so a persisted
+    /// `last_error` always round-trips through this type.
+    pub const MAX_BYTES: usize = 4096;
+
+    /// Creates the diagnostic after validating the persisted text without
+    /// any truncation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DispatchErrorParseError::Empty`] for empty text or
+    /// [`DispatchErrorParseError::TooLong`] carrying only the offending
+    /// length when the text exceeds `MAX_BYTES` UTF-8 bytes.
+    pub fn parse(value: String) -> Result<Self, DispatchErrorParseError> {
+        if value.is_empty() {
+            return Err(DispatchErrorParseError::Empty);
+        }
+        let length = value.len();
+        if length > Self::MAX_BYTES {
+            return Err(DispatchErrorParseError::TooLong {
+                length,
+                maximum: Self::MAX_BYTES,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated diagnostic exactly as persisted.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for DispatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DispatchError")
+            .field("length_bytes", &self.0.len())
+            .finish()
+    }
+}
+
+/// Failure to accept one dispatch diagnostic.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum DispatchErrorParseError {
+    /// The supplied diagnostic was empty.
+    #[error("dispatch diagnostic must not be empty")]
+    Empty,
+
+    /// The supplied diagnostic exceeded its UTF-8 byte ceiling.
+    #[error("dispatch diagnostic is {length} UTF-8 bytes; the maximum is {maximum}")]
+    TooLong {
+        /// Offending length in UTF-8 bytes.
+        length: usize,
+        /// The documented ceiling ([`DispatchError::MAX_BYTES`]).
+        maximum: usize,
+    },
 }
 
 /// A bounded, truthfully countable queued-message page.

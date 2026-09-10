@@ -21,12 +21,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use artisan_domain::{
-    AuthoredText, CommandReceipt, ImageAttachment, ImageAttachmentRef, ListQueuedMessages,
-    MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES, MessageId,
-    QUEUED_MESSAGE_LIST_MAX, QueueMessagePayload, QueuedMessageListError, QueuedMessageListOrder,
-    QueuedMessageListing, QueuedMessageListingError, QueuedMessageSummary,
-    QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId, ThreadId, UnixMillis,
-    WithdrawQueuedMessage, WithdrawQueuedMessageResult,
+    AuthoredText, CommandReceipt, DispatchError, ImageAttachment, ImageAttachmentRef,
+    ListQueuedMessages, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
+    MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES, MessageId, QUEUED_MESSAGE_LIST_MAX,
+    QueueMessagePayload, QueuedMessageListError, QueuedMessageListOrder, QueuedMessageListing,
+    QueuedMessageListingError, QueuedMessageSummary, QueuedMessageWithdrawalOutcome,
+    ReceiptDisposition, RequestId, ThreadId, UnixMillis, WithdrawQueuedMessage,
+    WithdrawQueuedMessageResult,
 };
 
 use crate::entities::{self, CommandKind, DispatchState};
@@ -63,7 +64,8 @@ SELECT m.message_id,
        r.body,
        m.accepted_at_ms,
        d.queued_at_ms,
-       r.accepted_at_ms
+       r.accepted_at_ms,
+       d.last_error
 FROM messages AS m
 JOIN message_dispatches AS d ON d.message_id = m.message_id
 JOIN command_receipts AS r ON r.request_id = d.correlation_id
@@ -94,7 +96,8 @@ SELECT m.message_id,
        r.body,
        m.accepted_at_ms,
        d.queued_at_ms,
-       r.accepted_at_ms
+       r.accepted_at_ms,
+       d.last_error
 FROM messages AS m
 JOIN message_dispatches AS d ON d.message_id = m.message_id
 JOIN command_receipts AS r ON r.request_id = d.correlation_id
@@ -881,6 +884,10 @@ async fn summary_from_row(
             "message, dispatch, and receipt acceptance times disagree",
         ));
     }
+    let last_error = row_value::<Option<String>>(row, 8, "last_error", "message_dispatches")?
+        .map(DispatchError::parse)
+        .transpose()
+        .map_err(|error| corrupt_data("message_dispatches", "last_error", error))?;
 
     let attachments = read_image_refs(database, &message_id, &thread_id).await?;
     if text.as_ref().is_none_or(AuthoredText::is_blank) && attachments.is_empty() {
@@ -898,6 +905,7 @@ async fn summary_from_row(
         text,
         attachments,
         accepted_at: UnixMillis::from_millis(accepted_at_ms),
+        last_error,
     })
 }
 

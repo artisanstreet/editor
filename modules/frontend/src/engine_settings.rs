@@ -634,6 +634,15 @@ impl EngineSettingsController {
             .map(|pending| &pending.request_id)
     }
 
+    /// Returns the thread and retained configuration of the in-flight save,
+    /// so a send can adopt a matching save instead of issuing a duplicate.
+    #[must_use]
+    pub fn pending_save(&self) -> Option<(&ThreadId, &artisan_domain::EngineRunConfig)> {
+        self.pending_save
+            .as_ref()
+            .map(|pending| (&pending.thread_id, &pending.retained))
+    }
+
     /// Returns the operation represented by the visible redacted failure.
     #[must_use]
     pub fn failure_operation(&self) -> Option<EngineSettingsFailureOperation> {
@@ -926,6 +935,31 @@ impl EngineSettingsController {
             }
         }
         self.settings = Some(result);
+    }
+
+    /// Marks a first-send save in flight carrying a validated configuration
+    /// directly. The settings draft stays `OpenCode` 2-shaped until
+    /// per-engine settings UI lands, so native selections cannot travel
+    /// through [`Self::can_save`]; the retained configuration converges the
+    /// draft on [`Self::on_save_succeeded`] instead.
+    #[must_use]
+    pub fn begin_direct_save(
+        &mut self,
+        thread_id: ThreadId,
+        request_id: artisan_domain::RequestId,
+        retained: EngineRunConfig,
+    ) -> bool {
+        if self.selected_thread.as_ref() != Some(&thread_id) || self.pending_save.is_some() {
+            return false;
+        }
+        self.pending_save = Some(PendingSave {
+            thread_id,
+            request_id,
+            retained,
+        });
+        self.save_failure = None;
+        self.input_error = None;
+        true
     }
 
     /// Marks a save in flight only after the exact command was admitted.

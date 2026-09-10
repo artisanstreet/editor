@@ -86,6 +86,10 @@ struct QueuedMessageSummary {
   text @3 :Text;
   attachments @4 :List(ImageAttachmentRef);
   acceptedAtMillis @5 :Int64;
+  # Latest dispatcher diagnostic, when the dispatcher has claimed and
+  # requeued this message at least once. A null Text pointer means no
+  # diagnostic; a never-attempted row carries no error.
+  lastError @6 :Text;
 }
 
 struct QueuedMessageListing {

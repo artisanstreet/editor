@@ -280,6 +280,10 @@ mod tests {
                     text: Some(AuthoredText::parse("first").expect("text")),
                     attachments: Vec::new(),
                     accepted_at: UnixMillis::EPOCH,
+                    last_error: Some(
+                        artisan_domain::DispatchError::parse("engine unconfigured".to_owned())
+                            .expect("dispatcher diagnostic"),
+                    ),
                 },
                 QueuedMessageSummary {
                     message_id: MessageId::parse("message-b").expect("message"),
@@ -288,6 +292,7 @@ mod tests {
                     text: Some(AuthoredText::parse("second").expect("text")),
                     attachments: Vec::new(),
                     accepted_at: UnixMillis::EPOCH,
+                    last_error: None,
                 },
             ],
         )
@@ -320,6 +325,11 @@ mod tests {
         project_controls_snapshot(&state, &mut snapshot);
         assert_eq!(snapshot.pending_steering.len(), 2);
         assert_eq!(snapshot.pending_steering[1].text, "second");
+        assert_eq!(
+            state.entries()[0].dispatch_error(),
+            Some("engine unconfigured")
+        );
+        assert_eq!(state.entries()[1].dispatch_error(), None);
     }
 
     #[test]
