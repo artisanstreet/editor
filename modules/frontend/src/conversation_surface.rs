@@ -5573,6 +5573,17 @@ mod tests {
         });
         assert_eq!(copied, Some(BODY.to_owned()));
         cx.update(|_, app| {
+            surface.update(app, |surface, _| {
+                for action in surface.take_actions() {
+                    assert!(
+                        matches!(
+                            action,
+                            ConversationSurfaceAction::ViewportObserved(_)
+                        ),
+                        "only legitimate viewport observations may precede assertions, got {action:?}"
+                    );
+                }
+            });
             assert!(surface.read(app).pending_actions().is_empty());
         });
     }
