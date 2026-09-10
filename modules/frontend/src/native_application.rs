@@ -3180,6 +3180,11 @@ impl NativeApplication {
             return Err("Select a model before sending. Your draft is preserved.");
         };
         let catalog = self.model_selector.read(cx).state().snapshot().clone();
+        // The harness must be runnable before anything is persisted: an
+        // unrunnable engine would only requeue after the save lands.
+        catalog.admit_policy(&policy).map_err(|_| {
+            "Connect and configure this model's engine before running. Your draft is preserved."
+        })?;
         crate::composer_model_config::config_for_policy(
             &catalog,
             &policy,
@@ -3209,7 +3214,7 @@ impl NativeApplication {
                 }
             } else {
                 self.composer_model_run_error = Some(
-                    "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
+                    "Saving this model's settings, then sending. Your draft is preserved.",
                 );
                 self.sync_composer_controls(cx);
                 cx.notify();
@@ -3269,7 +3274,12 @@ impl NativeApplication {
         if !self.message_submission_is_admissible(cx) || self.message_flight.is_some() {
             return;
         }
-        if let Some((thread, policy)) = &self.composer_model_choice
+        // The choice-versus-saved check is only meaningful once a thread
+        // carries a persisted configuration. On an unconfigured thread it
+        // would always fail and strand explicit selections before the
+        // first-send save flow below; that flow owns unconfigured sends.
+        if self.engine_settings.authoritative_config().is_some()
+            && let Some((thread, policy)) = &self.composer_model_choice
             && thread == &self.selected_thread
         {
             self.composer_model_run_error = crate::composer_model_config::validate_run_choice(
@@ -3369,7 +3379,7 @@ impl NativeApplication {
             token,
         });
         self.composer_model_run_error = Some(
-            "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
+            "Saving this model's settings, then sending. Your draft is preserved.",
         );
         self.sync_composer_availability(cx);
         cx.notify();
@@ -8514,9 +8524,9 @@ mod tests {
                 assert!(application.composer_model_choice.is_none());
                 assert!(application.model_selector.read(cx).state().policy().is_some());
                 application.begin_message_submission(cx);
-                // Blocked with the real cause: the offline default policy
-                // names no engine profile, so no save can be issued. No
-                // transport command, no flight, draft preserved.
+                // Blocked with the real cause: the offline default policy is
+                // not admitted by any runnable engine, so no save can be
+                // issued. No transport command, no flight, draft preserved.
                 assert!(commands.borrow().is_empty());
                 assert!(application.message_flight.is_none());
                 assert!(!application.composer.read(cx).is_submitting());
@@ -8524,9 +8534,125 @@ mod tests {
                 let error = application
                     .composer_model_run_error
                     .expect("first-send configuration error");
-                assert!(error.contains("engine profile"), "unexpected error: {error}");
+                assert!(
+                    error.contains("Connect and configure"),
+                    "unexpected error: {error}"
+                );
             });
         });
+    }
+
+    #[gpui::test]
+    fn explicit_policy_selection_reaches_save_and_sends_on_ack(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("explicit-first-send-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "explicit pick draft",
+                    sink,
+                );
+                // The offline catalog admits nothing; seat the codex harness
+                // runnable so the explicit choice can reach the typed save.
+                let mut catalog = application
+                    .model_selector
+                    .read(cx)
+                    .state()
+                    .snapshot()
+                    .clone();
+                catalog.runnable_harness_ids.push("codex".to_owned());
+                application.model_selector.update(cx, |selector, selector_cx| {
+                    selector.set_snapshot(catalog, selector_cx);
+                });
+                // The real selection event: no validate-run gate may strand
+                // this explicit choice before the first-send save flow.
+                let mut policy = application
+                    .model_selector
+                    .read(cx)
+                    .state()
+                    .snapshot()
+                    .selection_policy_for_model("codex-sol")
+                    .expect("codex policy");
+                policy.profile_id = Some("default".to_owned());
+                application.handle_composer_model_event(
+                    &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(
+                        policy.clone(),
+                    ),
+                    cx,
+                );
+                assert!(application.engine_settings.authoritative_config().is_none());
+                application.begin_message_submission(cx);
+                // No service is connected, so the typed save cannot be
+                // admitted — but reaching it is the regression signal the
+                // old validate-first ordering never produced.
+                assert_eq!(
+                    application.engine_settings.failure_operation(),
+                    Some(crate::engine_settings::EngineSettingsFailureOperation::Save)
+                );
+                let error = application
+                    .composer_model_run_error
+                    .expect("save failure error");
+                assert!(error.contains("could not be saved"), "unexpected error: {error}");
+                assert!(commands.borrow().is_empty());
+                assert!(application.message_flight.is_none());
+                assert!(!application.composer.read(cx).is_submitting());
+                assert_eq!(application.composer.read(cx).draft(), "explicit pick draft");
+                // Complete the flow the send started: admit the same save
+                // the gate built, hold the send, and acknowledge it.
+                let catalog = application
+                    .model_selector
+                    .read(cx)
+                    .state()
+                    .snapshot()
+                    .clone();
+                let expected =
+                    crate::composer_model_config::config_for_policy(&catalog, &policy, None)
+                        .expect("choice builds a run configuration");
+                assert!(application.engine_settings.begin_direct_save(
+                    thread_id.clone(),
+                    request("engine-save-2"),
+                    expected.clone()
+                ));
+                application.begin_pending_first_send(cx);
+                assert!(application.pending_first_send.is_some());
+                application.handle_engine_config_set(
+                    &artisan_protocol::SetThreadEngineConfigResult {
+                        request_id: request("engine-save-2"),
+                        thread_id: thread_id.clone(),
+                        revision: artisan_domain::EngineConfigRevision::new(1)
+                            .expect("revision"),
+                        disposition: artisan_domain::ReceiptDisposition::Accepted,
+                    },
+                    expected,
+                    cx,
+                );
+                let flight = application
+                    .message_flight
+                    .as_ref()
+                    .expect("continued flight");
+                assert_eq!(flight.thread_id, thread_id);
+                assert_eq!(
+                    flight.payload.text().expect("text payload").as_str(),
+                    "explicit pick draft"
+                );
+                assert!(application.pending_first_send.is_none());
+                assert!(application.composer_model_run_error.is_none());
+            });
+        });
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 1);
+        let NativeTransportCommand::QueueMessage(command) = &commands[0] else {
+            panic!("acknowledged explicit send must queue its message")
+        };
+        assert_eq!(command.thread_id, thread_id);
+        assert_eq!(
+            command.payload.text().expect("text payload").as_str(),
+            "explicit pick draft"
+        );
     }
 
     #[gpui::test]
