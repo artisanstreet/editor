@@ -655,7 +655,10 @@ fn attributed_observation_roundtrips_with_thread_scoped_cursor() -> Result<(), B
     assert_eq!(attribution.turn_id.as_str(), "turn-attributed-1");
     assert_eq!(attribution.committed_at, UnixMillis::from_millis(6_001));
     assert_eq!(attribution.delivery_sequence, 17);
-    assert_eq!(decoded, value, "attributed envelope must survive field-for-field");
+    assert!(
+        decoded == value,
+        "attributed envelope must survive field-for-field"
+    );
     Ok(())
 }
 

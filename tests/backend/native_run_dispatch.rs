@@ -3612,14 +3612,67 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
 
     // First run: text first (production order), then one activity row whose
     // source-local sequence (41) must never cross into durable history.
-    let (claimed1, launched1, key1, creds1) = queue_claim_launch(
-        &repository,
-        "thread-activity-history",
-        "message-activity-1",
-        "run-activity-1",
-        "turn-activity-1",
-    )
-    .await;
+    // The claim lease is wall-clock wide: activity commits stamp wall-clock
+    // `operated_at` through `SystemCommandOrigin`, so the shared helper's
+    // 600 ms lease would expire immediately.
+    let config = config_for_fixture_dispatch(ConversationCommitNotifier::new()).expect("config");
+    let origin = SystemCommandOrigin;
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("req-message-activity-1").expect("req"),
+            message_id: MessageId::parse("message-activity-1").expect("mid"),
+            thread_id: thread.clone(),
+            body: MessageBody::parse("hello").expect("body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("first message should queue");
+    let wall1_ms = origin
+        .acceptance_instant()
+        .expect("clock should succeed")
+        .as_millis();
+    let claimed1 = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: artisan_database::DispatchLeaseOwner::new([DISPATCH_OWNER_BYTE; 32]),
+            claimed_at: UnixMillis::from_millis(100),
+            lease_expires_at: UnixMillis::from_millis(wall1_ms.saturating_add(3_600_000)),
+        })
+        .await
+        .expect("claim")
+        .expect("first dispatch claimed");
+    let mut start_bytes1 = [0u8; 32];
+    for (idx, byte) in "run-activity-1".bytes().cycle().take(32).enumerate() {
+        start_bytes1[idx] = byte ^ 0x5a;
+    }
+    start_bytes1[0] = start_bytes1[0].wrapping_add(14);
+    let key1 = RunStartKey::new(start_bytes1);
+    let creds1 = RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES);
+    let engine_settings = repository
+        .read_thread_engine_settings(&thread)
+        .await
+        .expect("engine settings read")
+        .expect("engine settings present");
+    let launched1 = match repository
+        .launch_claimed_run(artisan_database::LaunchClaimedRun {
+            claimed: &claimed1,
+            run_id: &RunId::parse("run-activity-1").expect("run"),
+            turn_id: &TurnId::parse("turn-activity-1").expect("turn"),
+            item_id: &ItemId::parse("item-run-activity-1").expect("item"),
+            first_patch_id: &PatchId::parse("patch-run-activity-1-a").expect("patch"),
+            second_patch_id: &PatchId::parse("patch-run-activity-1-b").expect("patch"),
+            operated_at: UnixMillis::from_millis(150),
+            run_start_key: &key1,
+            credentials: &creds1,
+            engine_settings: &engine_settings,
+        })
+        .await
+        .expect("first run should launch")
+    {
+        artisan_database::LaunchClaimedRunOutcome::Started(receipt) => receipt,
+        artisan_database::LaunchClaimedRunOutcome::AlreadyStarted(_) => {
+            panic!("first launch should be fresh")
+        }
+    };
     let bound1 = bind_running(&repository, &claimed1, &launched1, &key1, &creds1).await;
     let item1 = ItemId::parse("assistant-activity-1").expect("item");
     commit_running_item(
@@ -3636,8 +3689,6 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
         },
     )
     .await;
-    let config = config_for_fixture_dispatch(ConversationCommitNotifier::new()).expect("config");
-    let origin = SystemCommandOrigin;
     let mut cursor1 = SubagentCommitCursor {
         scope: artisan_database::RunBatchScope {
             claimed: &claimed1,
@@ -3671,9 +3722,53 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
     );
     assert_eq!(cursor1.batch_sequence, 3);
 
-    // Second run on the same thread through the production follow-up seam.
-    // Its source row restarts at run-local sequence 1, exactly like a fresh
-    // owner stream would number it.
+    // Settle the first run through the real terminal path before the
+    // follow-up: the second claim observes a settled turn, and the first row
+    // stays replayable as settled history. Stamps derive from the wall clock
+    // past the activity commit so fencing and chronology observe production
+    // order.
+    let settled_revision = cursor1.assistant_revision;
+    let settled_updated = cursor1.scope.expected_updated_at;
+    let settle_ms = origin
+        .acceptance_instant()
+        .expect("clock should succeed")
+        .as_millis()
+        .max(settled_updated.as_millis().saturating_add(1));
+    let _settled = repository
+        .complete_run(artisan_database::CompleteRun {
+            scope: artisan_database::RunBatchScope {
+                claimed: &claimed1,
+                launched: &launched1,
+                bound: &bound1,
+                run_start_key: &key1,
+                credentials: &creds1,
+                expected_launch_at: UnixMillis::from_millis(150),
+                expected_updated_at: settled_updated,
+            },
+            operated_at: UnixMillis::from_millis(settle_ms),
+            item_id: &ItemId::parse("assistant-activity-1").expect("item"),
+            expected_revision: settled_revision,
+            body: &AssistantBody::parse("hello assistant").expect("body"),
+            phase: AssistantMessagePhase::Final,
+            item_patch_id: &PatchId::parse("patch-activity-1-settle-item").expect("patch"),
+            turn_patch_id: &PatchId::parse("patch-activity-1-settle-turn").expect("patch"),
+        })
+        .await
+        .expect("first run should settle");
+
+    // Second run on the same thread through the production follow-up seam,
+    // after the first turn settled. Its source row restarts at run-local
+    // sequence 1, exactly like a fresh owner stream would number it. The
+    // start key and credentials are unique per run; stamps derive from the
+    // wall clock past the settlement.
+    let base_ms = origin
+        .acceptance_instant()
+        .expect("clock should succeed")
+        .as_millis()
+        .max(settle_ms.saturating_add(1));
+    let launch2_ms = base_ms;
+    let bound2_ms = base_ms.saturating_add(50);
+    let assistant2_ms = base_ms.saturating_add(100);
     repository
         .queue_message(artisan_database::QueueMessageInput {
             request_id: RequestId::parse("req-activity-followup").expect("req"),
@@ -3681,21 +3776,28 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
             thread_id: thread.clone(),
             payload: artisan_domain::QueueMessagePayload::text_only("follow-up activity")
                 .expect("payload"),
-            accepted_at: UnixMillis::from_millis(950),
+            accepted_at: UnixMillis::from_millis(base_ms),
         })
         .await
         .expect("follow-up message should queue");
     let claimed2 = repository
         .claim_next_message_dispatch(artisan_database::ClaimMessageDispatch {
             owner: artisan_database::DispatchLeaseOwner::new([DISPATCH_OWNER_BYTE; 32]),
-            claimed_at: UnixMillis::from_millis(1_000),
-            lease_expires_at: UnixMillis::from_millis(2_000),
+            claimed_at: UnixMillis::from_millis(base_ms),
+            lease_expires_at: UnixMillis::from_millis(base_ms.saturating_add(3_600_000)),
         })
         .await
         .expect("claim")
         .expect("follow-up claimed");
     let run2 = RunId::parse("run-activity-2").expect("run");
     let turn2 = TurnId::parse("turn-activity-2").expect("turn");
+    let mut start_bytes2 = [0u8; 32];
+    for (idx, byte) in "run-activity-2".bytes().cycle().take(32).enumerate() {
+        start_bytes2[idx] = byte ^ 0x5a;
+    }
+    start_bytes2[0] = start_bytes2[0].wrapping_add(14);
+    let key2 = RunStartKey::new(start_bytes2);
+    let creds2 = RunLaunchCredentials::new([0xa2; 32], [0xb3; 32], [0xc4; 32]);
     let engine_settings = repository
         .read_thread_engine_settings(&thread)
         .await
@@ -3709,9 +3811,9 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
             item_id: &ItemId::parse("item-run-activity-2").expect("item"),
             first_patch_id: &PatchId::parse("patch-run-activity-2-a").expect("patch"),
             second_patch_id: &PatchId::parse("patch-run-activity-2-b").expect("patch"),
-            operated_at: UnixMillis::from_millis(1_100),
-            run_start_key: &key1,
-            credentials: &creds1,
+            operated_at: UnixMillis::from_millis(launch2_ms),
+            run_start_key: &key2,
+            credentials: &creds2,
             engine_settings: &engine_settings,
         })
         .await
@@ -3726,10 +3828,10 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
         .bind_run_provider(BindRunProvider {
             claimed: &claimed2,
             receipt: &launched2,
-            run_start_key: &key1,
-            credentials: &creds1,
-            expected_launch_at: UnixMillis::from_millis(1_100),
-            bound_at: UnixMillis::from_millis(1_200),
+            run_start_key: &key2,
+            credentials: &creds2,
+            expected_launch_at: UnixMillis::from_millis(launch2_ms),
+            bound_at: UnixMillis::from_millis(bound2_ms),
             binding_version: 2,
             binding_bytes: &ProviderBindingBytes::new(vec![0xab; 16]).expect("binding"),
         })
@@ -3747,13 +3849,13 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
                 claimed: &claimed2,
                 launched: &launched2,
                 bound: &bound2,
-                run_start_key: &key1,
-                credentials: &creds1,
-                expected_launch_at: UnixMillis::from_millis(1_100),
-                expected_updated_at: UnixMillis::from_millis(1_200),
+                run_start_key: &key2,
+                credentials: &creds2,
+                expected_launch_at: UnixMillis::from_millis(launch2_ms),
+                expected_updated_at: UnixMillis::from_millis(bound2_ms),
             },
             batch_sequence: 1,
-            operated_at: UnixMillis::from_millis(1_300),
+            operated_at: UnixMillis::from_millis(assistant2_ms),
             activate_turn_patch_id: Some(&PatchId::parse("patch-activity-2-turn").expect("patch")),
             changes: &[AssistantChange::Start {
                 item_id: &item2,
@@ -3770,10 +3872,10 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
             claimed: &claimed2,
             launched: &launched2,
             bound: &bound2,
-            run_start_key: &key1,
-            credentials: &creds1,
-            expected_launch_at: UnixMillis::from_millis(1_100),
-            expected_updated_at: UnixMillis::from_millis(1_300),
+            run_start_key: &key2,
+            credentials: &creds2,
+            expected_launch_at: UnixMillis::from_millis(launch2_ms),
+            expected_updated_at: UnixMillis::from_millis(assistant2_ms),
         },
         engine: EngineId::OpenCode2,
         batch_sequence: 2,
