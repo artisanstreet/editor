@@ -3584,6 +3584,269 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
     );
 }
 
+/// Live activity proof through the configured dispatcher (ignored).
+///
+/// Scratch DB/project only; never touches the live user DB. Exact
+/// `gpt-5.6-luna` at medium effort with the minimum permission that allows a
+/// harmless shell command in the scratch folder only (`Never` approval,
+/// `Workspace` filesystem sandbox rooted at the scratch project, no network,
+/// no web search). A single turn asks the model to run
+/// `Write-Output ARTISAN_ACTIVITY_PROBE_OK` and then answer
+/// `ACTIVITY_PROBE_DONE`. The run must settle `Completed` and the durable S1b
+/// ledger must contain at least one real command/tool activity row carrying
+/// the command marker with Forge-persisted run/thread/turn attribution and a
+/// strictly increasing positive delivery sequence.
+///
+/// Root runs this explicitly after the build gate; it performs real provider
+/// inference against the installed authenticated codex CLI.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live activity proof through the configured dispatcher; requires installed authenticated codex CLI and performs real inference"]
+async fn dispatch_codex_live_activity_proof_persists_command_history() {
+    use artisan_domain::Observation;
+
+    const COMMAND_MARKER: &str = "ARTISAN_ACTIVITY_PROBE_OK";
+    const ANSWER_MARKER: &str = "ACTIVITY_PROBE_DONE";
+
+    let profile_id = std::env::var("ARTISAN_CODEX_LIVE_PROFILE_ID")
+        .unwrap_or_else(|_| "codex-live-probe".to_owned());
+    // Minimum permission for one harmless shell command in the scratch
+    // folder only: never ask, workspace sandbox (project root), no network
+    // or web search. `Host` (danger-full-access) would exceed the minimum
+    // and `Always` fails the launch fence closed.
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-codex-activity").expect("permission id"),
+        EngineAgentId::parse("agent-codex-activity").expect("agent id"),
+        CodexProofApprovalMode::Never,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Disabled,
+        WebSearchAccess::Disabled,
+    );
+    let selection = CodexProofSelection::new(
+        CodexProofProfile::parse(profile_id.as_str()).expect("profile id"),
+        Some(CodexProofModel::parse("gpt-5.6-luna").expect("model id")),
+        permission,
+        Some(CodexProofEffort::Medium),
+        None,
+        None,
+    )
+    .expect("exact live activity selection must stay valid");
+
+    let (database, repository, temp) = temp_repository("dispatch-codex-activity").await;
+    let project_root = temp
+        .path()
+        .parent()
+        .expect("scratch dir")
+        .to_str()
+        .expect("scratch dir utf8")
+        .to_owned();
+    let thread_id = ThreadId::parse("thread-codex-activity-proof").expect("tid");
+    {
+        let project = entities::attached_project::ActiveModel {
+            project_id: Set("project-1".to_owned()),
+            root_path: Set(project_root.clone()),
+            display_name: Set("Artisan".to_owned()),
+            attached_at_ms: Set(1),
+        };
+        let _ = entities::attached_project::Entity::insert(project)
+            .exec(&database)
+            .await;
+        repository
+            .create_thread(CreateThreadInput {
+                request_id: RequestId::parse("req-live-activity-thread").expect("req"),
+                thread_id: thread_id.clone(),
+                project_id: ProjectId::parse("project-1").expect("pid"),
+                title: artisan_domain::ThreadTitle::parse("Live activity proof")
+                    .expect("title"),
+                created_at: UnixMillis::from_millis(10),
+                updated_at: UnixMillis::from_millis(10),
+            })
+            .await
+            .expect("create scratch thread");
+        let budget = |ms: u64| FiniteMillis::new(ms).expect("finite millis valid");
+        let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+            attempt_budget: budget(180_000),
+            readiness_budget: budget(10_000),
+            health_budget: budget(10_000),
+            prompt_budget: budget(30_000),
+            stream_budget: budget(90_000),
+            close_budget: budget(10_000),
+            max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit"),
+            max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit"),
+            max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit"),
+            max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness limit"),
+            max_header_count: CountLimit::new(32).expect("header count"),
+            max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer"),
+            max_stderr_bytes: ByteLimit::new(4_096).expect("stderr"),
+            observation_capacity: CountLimit::new(16).expect("observation cap"),
+        })
+        .expect("runtime valid");
+        repository
+            .set_thread_engine_config(SetThreadEngineConfigInput {
+                request_id: RequestId::parse("engine-live-activity-thread")
+                    .expect("request id"),
+                thread_id: thread_id.clone(),
+                precondition: EngineConfigUpdatePrecondition::Unconfigured,
+                config: EngineRunConfig::new(EngineSelection::Codex(selection), runtime),
+                accepted_at: UnixMillis::from_millis(10),
+            })
+            .await
+            .expect("scratch engine configuration should create");
+    }
+
+    let first_message = MessageId::parse("msg-live-activity-first").expect("mid");
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("req-live-activity-first").expect("request id"),
+            message_id: first_message.clone(),
+            thread_id: thread_id.clone(),
+            body: MessageBody::parse(format!(
+                "Run the shell command Write-Output {COMMAND_MARKER} in the workspace, then answer with exactly {ANSWER_MARKER} and nothing else."
+            ))
+            .expect("message body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("activity scratch message should queue");
+
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_for_live_send_proof(notifier).expect("live dispatch policy");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        temp.path().to_owned(),
+        config,
+        Arc::clone(&process_cancel),
+        ActivityGateImpl::new(),
+        &tokio::runtime::Handle::current(),
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let dispatch = entities::message_dispatch::Entity::find_by_id("msg-live-activity-first")
+            .one(&database)
+            .await
+            .expect("dispatch query")
+            .expect("dispatch row");
+        if dispatch.state == DispatchState::Completed {
+            break;
+        }
+        if dispatch.state == DispatchState::Failed {
+            panic!(
+                "live activity dispatch failed: {}",
+                live_dispatch_snapshot(&database, "msg-live-activity-first").await
+            );
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "live activity dispatch timed out: {}",
+                live_dispatch_snapshot(&database, "msg-live-activity-first").await
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+
+    let after = fetch_all(&database).await;
+    let run = after
+        .runs
+        .iter()
+        .find(|r| r.origin_message_id == "msg-live-activity-first")
+        .expect("activity run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Completed);
+    let assistant: Vec<_> = after
+        .items
+        .iter()
+        .filter(|i| {
+            i.item_kind == ConversationItemKind::AssistantMessage
+                && i.run_id.as_deref() == Some(run.run_id.as_str())
+        })
+        .collect();
+    assert_eq!(assistant.len(), 1, "activity turn persists one assistant message");
+    assert_eq!(
+        assistant[0].body.trim(),
+        ANSWER_MARKER,
+        "activity turn answers the exact marker"
+    );
+
+    // The durable S1b ledger must hold at least one real command/tool
+    // activity row with the executed command marker, Forge-attributed to
+    // this run, thread, and canonical turn on a strictly increasing
+    // positive delivery sequence.
+    let history = repository
+        .read_observation_history(&thread_id, 0, 128)
+        .await
+        .expect("activity ledger should read");
+    assert!(
+        !history.is_empty(),
+        "live turn must persist activity rows"
+    );
+    let mut last_delivery = 0u64;
+    let mut kinds = Vec::new();
+    let mut marker_hits = 0usize;
+    for event in &history {
+        assert_eq!(event.thread_id, thread_id, "ledger row thread scope");
+        let attribution = event
+            .attribution
+            .as_ref()
+            .expect("live rows carry attribution");
+        assert_eq!(
+            attribution.run_id.as_str(),
+            run.run_id.as_str(),
+            "ledger row run scope"
+        );
+        assert_eq!(
+            attribution.turn_id.as_str(),
+            run.origin_turn_id.as_str(),
+            "ledger row canonical turn"
+        );
+        assert!(
+            attribution.committed_at.as_millis() > 0,
+            "ledger row commit time"
+        );
+        assert!(
+            attribution.delivery_sequence > last_delivery,
+            "delivery sequence strictly increases"
+        );
+        last_delivery = attribution.delivery_sequence;
+        kinds.push(event.observation.tag());
+        let hit = match &event.observation {
+            Observation::Tool(row) => {
+                row.tool_name().contains(COMMAND_MARKER)
+                    || row
+                        .detail()
+                        .is_some_and(|detail| detail.contains(COMMAND_MARKER))
+            }
+            Observation::TerminalActivity(row) => {
+                row.command()
+                    .is_some_and(|command| command.contains(COMMAND_MARKER))
+                    || row
+                        .output()
+                        .is_some_and(|output| output.contains(COMMAND_MARKER))
+            }
+            _ => false,
+        };
+        marker_hits += usize::from(hit);
+    }
+    assert!(
+        marker_hits >= 1,
+        "ledger must contain the executed command marker"
+    );
+    println!(
+        "activity proof: model=gpt-5.6-luna observations={} kinds={:?} delivery_sequences=1..={} marker_hits={} run={} turn={}",
+        history.len(),
+        kinds,
+        last_delivery,
+        marker_hits,
+        run.run_id,
+        run.origin_turn_id,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Persisted activity history across runs (S1b ledger behavioral proof)
 // ---------------------------------------------------------------------------
