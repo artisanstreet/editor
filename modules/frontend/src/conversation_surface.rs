@@ -2550,7 +2550,7 @@ impl ConversationSurface {
                         .font_weight(ProseTypography::BODY_WEIGHT)
                         .letter_spacing(px(ProseTypography::body_tracking_px(14.0)))
                         .text_color(theme.colors.foreground.to_paint())
-                        .child(body.clone())
+                        .child(body.to_string())
                         .into_any_element(),
                     // Session titles render muted at base size (reference
                     // header tone); counting lives in the group header and
@@ -2563,7 +2563,7 @@ impl ConversationSurface {
                         .font_weight(ProseTypography::BODY_WEIGHT)
                         .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
                         .text_color(theme.colors.muted_foreground.to_paint())
-                        .child(title.to_owned())
+                        .child(title.to_string())
                         .into_any_element(),
                     DetailRow::Compaction { .. } | DetailRow::NativeFact { .. } => {
                         unreachable!("card rows render above")
