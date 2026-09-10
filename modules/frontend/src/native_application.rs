@@ -13340,7 +13340,7 @@ mod tests {
                 .map(|flight| &flight.phase),
             Some(ThreadSwitchPhase::AwaitingUnsubscribeStop { request_id: None })
         ));
-        let protocol = switch_protocol_commands(commands);
+        let protocol = switch_protocol_commands(&commands);
         assert_eq!(protocol.len(), 1);
         assert!(matches!(
             &protocol[0],

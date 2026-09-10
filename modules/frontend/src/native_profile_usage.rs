@@ -525,16 +525,24 @@ pub fn narrowed_report_position(engine_ids: &[&str], requested_engine_id: &str) 
 
 /// Roster engines whose adapters expose a real account-usage surface.
 ///
-/// Only these engines get a usage verdict that can admit static models:
-/// `codex` reads `account/rateLimits/read`, `claude` parses `claude -p
-/// /usage`, and `cursor` posts its dashboard endpoint. This mirrors the
-/// backend roster contract in `modules/backend/src/account_usage_service.rs`:
-/// `grok`, `hermes`, and `opencode2` expose no account-usage surface, so the
-/// overlay below preserves whatever runnable marking the snapshot carried
-/// for them (managed `OpenCode` discovery for `opencode2`, harness support
-/// plus dispatch-time executable probes for `grok`/`hermes`) and never
-/// invents or clears it from usage state.
+/// These engines get a usage verdict for account state: `codex` reads
+/// `account/rateLimits/read`, `claude` parses `claude -p /usage`, and
+/// `cursor` posts its dashboard endpoint. This mirrors the backend roster
+/// contract in `modules/backend/src/account_usage_service.rs`: `grok`,
+/// `hermes`, and `opencode2` expose no account-usage surface. Admission to
+/// run is narrower (see [`CLI_PROBED_ENGINES`]): the dashboard read proves
+/// a Cursor account, never a local CLI installation.
 pub const ACCOUNT_GATED_ENGINES: [&str; 3] = ["codex", "claude", "cursor"];
+
+/// Roster engines whose usage read proves a responding local CLI.
+///
+/// Only `codex` (`account/rateLimits/read`) and `claude` (`claude -p
+/// /usage`) probe an installed executable, so only their authenticated
+/// usage admits static models to run. `cursor` posts an HTTP dashboard
+/// endpoint: its account verdict stays visible, but dashboard auth never
+/// proves a local CLI installation, so Cursor runtime admission follows
+/// the backend catalog marking instead of the usage overlay.
+pub const CLI_PROBED_ENGINES: [&str; 2] = ["codex", "claude"];
 
 /// Backend-probed account readiness for one native engine.
 ///
@@ -635,18 +643,20 @@ pub fn engine_refresh_failure(
         .or_else(|| entry.failure.clone())
 }
 
-/// Returns whether one account-gated engine's static catalog models may run.
+/// Returns whether one CLI-probed engine's static catalog models may run.
 ///
-/// Only a fresh backend-authenticated usage report admits them. Engines
-/// without an account surface (`grok`, `hermes`, `opencode2`) never qualify
-/// here; the overlay preserves their snapshot marking instead.
+/// Only a fresh backend-authenticated usage report admits them, and only
+/// for the CLI-probed subset ([`CLI_PROBED_ENGINES`]): a dashboard read
+/// (Cursor) never proves a local installation. Engines without an account
+/// surface (`grok`, `hermes`, `opencode2`) never qualify here either; the
+/// overlay preserves their snapshot marking instead.
 #[must_use]
 pub fn engine_static_models_admittable(
     state: &NativeProfileUsageState,
     engine_id: &str,
     now_ms: i64,
 ) -> bool {
-    ACCOUNT_GATED_ENGINES.contains(&engine_id)
+    CLI_PROBED_ENGINES.contains(&engine_id)
         && matches!(
             engine_readiness(state, engine_id, now_ms),
             EngineReadiness::Ready
@@ -655,16 +665,18 @@ pub fn engine_static_models_admittable(
 
 /// Overlays backend-probed readiness onto a catalog snapshot.
 ///
-/// The account-gated native subset ([`ACCOUNT_GATED_ENGINES`]) is recomputed
-/// from scratch on every overlay: a freshly authenticated engine joins
+/// The CLI-probed native subset ([`CLI_PROBED_ENGINES`]) is recomputed from
+/// scratch on every overlay: a freshly authenticated engine joins
 /// `runnable_harness_ids` once, and an engine whose latest verdict is
 /// anything else leaves it — so a previously admitted engine never survives
 /// a later signed-out, failed, or stale report when overlaid on the current
-/// snapshot. Every other runnable id (genuine managed `OpenCode` readiness
-/// from backend discovery, harness support for surfaceless engines) is
-/// preserved verbatim. The shared admission policy (`admit_policy`,
-/// `validate_policy`) then treats the probed static models as runnable
-/// without inventing routes, versions, or account facts.
+/// snapshot. Every other runnable id is preserved verbatim: genuine managed
+/// `OpenCode` readiness from backend discovery, harness support for
+/// surfaceless engines, and the backend catalog marking for the
+/// dashboard-read `cursor` engine (whose usage auth never proves a local
+/// CLI). The shared admission policy (`admit_policy`, `validate_policy`)
+/// then treats the probed static models as runnable without inventing
+/// routes, versions, or account facts.
 #[must_use]
 pub fn catalog_with_usage_readiness(
     catalog: crate::native_model_catalog::NativeModelCatalog,
@@ -675,10 +687,10 @@ pub fn catalog_with_usage_readiness(
     let mut runnable: Vec<String> = catalog
         .runnable_harness_ids
         .iter()
-        .filter(|id| !ACCOUNT_GATED_ENGINES.contains(&id.as_str()))
+        .filter(|id| !CLI_PROBED_ENGINES.contains(&id.as_str()))
         .cloned()
         .collect();
-    for engine_id in ACCOUNT_GATED_ENGINES {
+    for engine_id in CLI_PROBED_ENGINES {
         if engine_static_models_admittable(usage, engine_id, now_ms)
             && !runnable.iter().any(|ready| ready == engine_id)
         {
@@ -1534,5 +1546,39 @@ mod tests {
             vec!["opencode2".to_owned(), "grok".to_owned()]
         );
         assert!(!recomputed.selectability("codex-sol").is_available());
+    }
+
+    #[test]
+    fn dashboard_auth_never_admits_cursor_models_to_run() {
+        use crate::native_model_catalog::NativeModelCatalog;
+
+        let mut usage = NativeProfileUsageState::default();
+        usage.accept(readiness_entry(
+            "cursor",
+            NativeUsageAuthentication::Authenticated,
+            None,
+        ));
+        // Account state is kept: the dashboard verdict stays visible...
+        assert_eq!(
+            engine_readiness(&usage, "cursor", READINESS_NOW_MS),
+            EngineReadiness::Ready
+        );
+        // ...but dashboard auth never proves a local CLI installation.
+        assert!(!engine_static_models_admittable(
+            &usage,
+            "cursor",
+            READINESS_NOW_MS
+        ));
+
+        // The overlay preserves the backend catalog marking for cursor
+        // verbatim instead of admitting it from usage.
+        let mut catalog = NativeModelCatalog::offline().expect("bundled catalog");
+        catalog.runnable_harness_ids = vec!["cursor".to_owned()];
+        let overlaid = catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
+        assert_eq!(overlaid.runnable_harness_ids, vec!["cursor".to_owned()]);
+
+        let bare = NativeModelCatalog::offline().expect("bundled catalog");
+        let overlaid = catalog_with_usage_readiness(bare, &usage, READINESS_NOW_MS);
+        assert!(overlaid.runnable_harness_ids.is_empty());
     }
 }

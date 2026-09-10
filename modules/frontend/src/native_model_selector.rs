@@ -810,6 +810,13 @@ fn rebase_selection_policy(
             rebased.permission = candidate.permission;
         }
     }
+    // An explicit native profile is owner-authoritative durability (the
+    // saved thread configuration), not scope state: keep it so a reloaded
+    // thread displays its saved profile. Managed `OpenCode` policies stay
+    // scope-fenced, as does any policy without an explicit profile.
+    if policy.engine_id != "opencode2" && policy.profile_id.is_some() {
+        rebased.profile_id = policy.profile_id.clone();
+    }
     Some(rebased)
 }
 
@@ -3706,6 +3713,25 @@ mod tests {
     fn xhigh_thinking_value_uses_source_label() {
         let wire_id = "xhigh";
         assert_eq!(humanize_variant(wire_id), "Extra High");
+    }
+
+    #[test]
+    fn rebase_keeps_explicit_native_profile_for_saved_policies() {
+        let snapshot = NativeModelCatalog::offline().expect("real catalog");
+        let mut policy = snapshot
+            .selection_policy_for_model("codex-sol")
+            .expect("codex policy");
+        policy.profile_id = Some("default".to_owned());
+        let rebased = rebase_selection_policy(&snapshot, &policy).expect("rebased");
+        assert_eq!(rebased.model_id, "codex-sol");
+        assert_eq!(rebased.profile_id.as_deref(), Some("default"));
+
+        let mut state = NativeModelSelectorState::new(snapshot, None);
+        assert!(state.set_policy(Some(policy)));
+        assert_eq!(
+            state.policy().and_then(|set| set.profile_id.as_deref()),
+            Some("default")
+        );
     }
 
     #[test]

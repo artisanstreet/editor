@@ -849,7 +849,19 @@ impl NativeModelCatalog {
         let harness = self.manifest.harness(&model.harness)?;
         let rebased = NativeModelPolicy {
             catalog_revision: self.catalog_revision.clone(),
-            profile_id: self.scope.as_ref().map(|scope| scope.profile_id.clone()),
+            // An explicit native profile is owner-authoritative durability
+            // (the saved thread configuration), not scope state: keep it so
+            // a reloaded thread displays its saved profile. Managed
+            // `OpenCode` policies stay scope-fenced and fall back to the
+            // discovery scope, as does any policy without an explicit one.
+            profile_id: if policy.engine_id == "opencode2" {
+                self.scope.as_ref().map(|scope| scope.profile_id.clone())
+            } else {
+                policy
+                    .profile_id
+                    .clone()
+                    .or_else(|| self.scope.as_ref().map(|scope| scope.profile_id.clone()))
+            },
             engine_id: model.harness.clone(),
             model_id: model.id.clone(),
             native_model_id: model.native_model_id.clone(),
@@ -2040,5 +2052,20 @@ mod tests {
             catalog.selectability("codex-routed").unavailable_reason(),
             Some("Provider credentials are missing.")
         );
+    }
+
+    #[test]
+    fn rebase_preserves_explicit_native_profile_with_scope_fallback() {
+        let catalog = offline();
+        let mut policy = catalog.selection_policy_for_model("codex-sol").unwrap();
+        policy.profile_id = Some("default".to_owned());
+        let rebased = catalog.rebase_policy(&policy).expect("rebased policy");
+        assert_eq!(rebased.model_id, "codex-sol");
+        assert_eq!(rebased.profile_id.as_deref(), Some("default"));
+
+        let mut scoped = policy.clone();
+        scoped.profile_id = None;
+        let rebased = catalog.rebase_policy(&scoped).expect("rebased policy");
+        assert_eq!(rebased.profile_id, None);
     }
 }

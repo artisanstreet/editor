@@ -1034,8 +1034,16 @@ pub struct SettingsEngineSnapshot {
 
 impl SettingsEngineSnapshot {
     /// Returns the availability badge for the probed account verdict.
+    ///
+    /// A dashboard-authenticated Cursor is "Signed in", never "Available":
+    /// dashboard auth proves the account, not a runnable local CLI.
     #[must_use]
-    pub const fn availability_badge(&self) -> &'static str {
+    pub fn availability_badge(&self) -> &'static str {
+        if self.engine_id == "cursor"
+            && self.readiness == crate::native_profile_usage::EngineReadiness::Ready
+        {
+            return "Signed in";
+        }
         match self.readiness {
             crate::native_profile_usage::EngineReadiness::Ready => "Available",
             crate::native_profile_usage::EngineReadiness::NeedsSignIn => "Sign-in required",
@@ -1047,10 +1055,32 @@ impl SettingsEngineSnapshot {
     /// Returns the installation state copy for the probed verdict.
     ///
     /// Only a responding executable proves installation: an authenticated
-    /// or login-gated answer means the binary runs, anything else is a
-    /// check status, never an install claim.
+    /// or login-gated answer from a CLI probe means the binary runs,
+    /// anything else is a check status, never an install claim. The
+    /// dashboard-read Cursor states its unverified CLI explicitly:
+    /// account verdicts never promote it to Installed.
     #[must_use]
     pub fn installation_state(&self) -> String {
+        if self.engine_id == "cursor" {
+            match self.readiness {
+                crate::native_profile_usage::EngineReadiness::Ready => match &self.account_email
+                {
+                    Some(email) => {
+                        return format!(
+                            "Signed in as {email}. Cursor CLI installation is unverified."
+                        );
+                    }
+                    None => {
+                        return "Signed in. Cursor CLI installation is unverified.".to_owned();
+                    }
+                },
+                crate::native_profile_usage::EngineReadiness::NeedsSignIn => {
+                    return "Cursor CLI installation is unverified. Account sign-in is required."
+                        .to_owned();
+                }
+                _ => {}
+            }
+        }
         match self.readiness {
             crate::native_profile_usage::EngineReadiness::Ready => match &self.account_email {
                 Some(email) => format!("Installed and responding as {email}."),
@@ -3512,5 +3542,31 @@ mod settings_screen_tests {
         };
         assert!(failed.installation_state().contains("provider usage read timed out"));
         assert!(failed.account_state().contains("provider usage read timed out"));
+    }
+
+    #[test]
+    fn dashboard_cursor_states_never_claim_a_local_installation() {
+        use crate::native_profile_usage::EngineReadiness;
+
+        // Dashboard auth proves the account, never a runnable local CLI.
+        let ready = SettingsEngineSnapshot {
+            engine_id: "cursor".to_owned(),
+            account_email: Some("owner@example.test".to_owned()),
+            ..live_snapshot(EngineReadiness::Ready)
+        };
+        assert_eq!(ready.availability_badge(), "Signed in");
+        assert!(ready.installation_state().contains("unverified"));
+        assert!(!ready.installation_state().contains("Installed"));
+        assert!(ready.installation_state().contains("owner@example.test"));
+        assert!(ready.account_state().contains("owner@example.test"));
+
+        let signin = SettingsEngineSnapshot {
+            engine_id: "cursor".to_owned(),
+            ..live_snapshot(EngineReadiness::NeedsSignIn)
+        };
+        assert_eq!(signin.availability_badge(), "Sign-in required");
+        assert!(signin.installation_state().contains("unverified"));
+        assert!(!signin.installation_state().contains("Installed"));
+        assert!(signin.account_state().contains("No account"));
     }
 }
