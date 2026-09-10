@@ -68,6 +68,39 @@ signature changes. Existing exhaustive matches keep compiling.
      and take over on settlement. Millis formatting stays whole-second floor,
      matching `FormatElapsed`.
 
+## Delivery→turn ownership wire (this packet, projection lane owns)
+
+Production gap fixed: `NativeApplication` only delivers Snapshot/Batch through
+`ConversationHost`, and turn controllers previously existed only via explicit
+`register_turn` (tests), so the real app always fell back to `Quiet` and the
+active-elapsed basis never fired outside manual drive.
+
+Bounded interface (all inside `conversation_state_machine.rs`; renderer
+`active_started_at_ms` contract unchanged):
+
+- After every accepted delivery event, `synchronize_turn_controllers` drives
+  each durable turn that has NO explicitly registered controller: auto-create
+  (skipped at `MAX_TURN_CONTROLLERS`) + dispatch events derived from canonical
+  lifecycle/item/fact evidence. No host or delivery-machine change was needed.
+- Explicit `register_turn` REPLACES any delivery-derived controller with a
+  fresh one and marks the turn explicitly owned; sync skips explicit turns
+  forever after. Duplicate/explicit semantics and manual-drive tests are
+  unchanged by construction.
+- Derivation (`derive_turn_events`, pure): terminal lifecycles settle
+  (Completed/Failed/Cancelled/Interrupted) via a work/thought pre-step so the
+  settled kind stays truthful; active lifecycles report streaming reply (live
+  non-commentary reply text), else Activity/ChangedFiles facts → Working,
+  Reasoning facts → Thinking, else WaitingForProvider; Pending derives nothing.
+  Never text content, never speculation.
+- Clocks: first activation uses `turn.created_at` (send-time basis, reference
+  parity, never resets); later drives use the window watermark (monotonic);
+  terminal events use `max(turn.updated_at, watermark)` so redelivery freezes
+  the first settlement. Revisions ride the controller lane (`rev + 1/2`).
+- Best-effort: sealed/stale/regressed derivations are swallowed (already
+  covered). At most one `SceneInvalidated` per delivery event, only on real
+  leaf-state change. Registry-full or effect-full skips sync; accepted delivery
+  always stands (idempotence/replay/backpressure preserved).
+
 ## Needed contract extensions (reported, not implemented here)
 
 1. Renderer lane: hover/focus-only footer visual + navigator label visibility +
