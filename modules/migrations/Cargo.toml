@@ -10,6 +10,7 @@ sea-orm-migration.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+artisan-domain = { path = "../domain" }
 artisan-database = { path = "../database" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
