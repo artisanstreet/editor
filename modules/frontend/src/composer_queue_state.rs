@@ -2184,14 +2184,13 @@ mod tests {
         let token = state
             .begin_failed_refresh(true, true, false, true)
             .expect("failed refresh");
+        let mut first = failed_summary(&thread_id, "one");
+        let mut second = failed_summary(&thread_id, "two");
+        second.message_id = message("two");
+        second.original_request_id = first.original_request_id.clone();
+        first.message_id = message("one");
         assert_eq!(
-            state.apply_failed_listing(
-                &token,
-                failed_listing(&thread_id, vec![
-                    failed_summary(&thread_id, "one"),
-                    failed_summary(&thread_id, "one"),
-                ])
-            ),
+            state.apply_failed_listing(&token, failed_listing(&thread_id, vec![first, second])),
             Err(FailedListingRejection::DuplicateCommandId)
         );
     }

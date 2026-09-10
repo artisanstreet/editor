@@ -6229,17 +6229,9 @@ impl NativeApplication {
                     ConversationHostEffect::Controller(ConversationStateEffect::Delivery(
                         ConversationDeliveryEffect::RequestSnapshot { thread_id, .. },
                     )) => {
-                        let Some(service) = self.service.clone() else {
-                            self.set_failure(
-                                ServiceFailure {
-                                    stage: ServiceFailureStage::EventBridge,
-                                    category: ServiceFailureCategory::ChannelClosed,
-                                },
-                                cx,
-                            );
-                            return;
-                        };
-                        match service.submit(NativeTransportCommand::RequestSnapshot(thread_id)) {
+                        match self.submit_command(NativeTransportCommand::RequestSnapshot(
+                            thread_id,
+                        )) {
                             Ok(()) => {
                                 self.conversation_effects.remove(0);
                             }
@@ -14146,9 +14138,14 @@ mod tests {
         let old_thread = ThreadId::parse("forge-t1").expect("old thread");
         cx.update(|app| {
             view.update(app, |application, application_cx| {
-                application.test_command_sink = Some(sink);
                 application.selected_project = Some(project_id.clone());
-                application.selected_thread = Some(old_thread.clone());
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    old_thread.clone(),
+                    "",
+                    sink,
+                );
                 application.composer.update(application_cx, |composer, composer_cx| {
                     composer.switch_thread(
                         old_thread.as_str().to_owned(),
@@ -14197,11 +14194,14 @@ mod tests {
         let policy = failed_policy();
         cx.update(|app| {
             view.update(app, |application, application_cx| {
-                application.test_command_sink = Some(sink);
                 application.selected_project = Some(project_id.clone());
-                application.selected_thread = Some(old_thread.clone());
-                application.composer_model_choice =
-                    Some((Some(old_thread.clone()), policy.clone()));
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    old_thread.clone(),
+                    "",
+                    sink,
+                );
                 application.composer.update(application_cx, |composer, composer_cx| {
                     composer.switch_thread(
                         old_thread.as_str().to_owned(),
@@ -14209,6 +14209,8 @@ mod tests {
                         composer_cx,
                     );
                 });
+                application.composer_model_choice =
+                    Some((Some(old_thread.clone()), policy.clone()));
                 seed_failed_entry(application, &old_thread, 5);
                 application.sync_composer_controls(application_cx);
                 application.begin_failed_prompt_recovery("queue-1", 5, application_cx);
@@ -14241,6 +14243,19 @@ mod tests {
                     application.composer_model_choice,
                     Some((Some(new_thread.clone()), policy.clone())),
                     "the old thread policy seeds the new thread"
+                );
+                let host = application
+                    .conversation_host
+                    .clone()
+                    .expect("new thread host");
+                application.dispatch_snapshot(
+                    &host,
+                    snapshot_for(&new_thread, 0),
+                    application_cx,
+                );
+                assert!(
+                    matches!(application.state, NativeViewState::Ready),
+                    "the real snapshot event readies the new thread before restore"
                 );
 
                 let recorded = commands.borrow();
@@ -14294,9 +14309,14 @@ mod tests {
         let old_thread = ThreadId::parse("forge-t1").expect("old thread");
         cx.update(|app| {
             view.update(app, |application, application_cx| {
-                application.test_command_sink = Some(sink);
                 application.selected_project = Some(project_id.clone());
-                application.selected_thread = Some(old_thread.clone());
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    old_thread.clone(),
+                    "",
+                    sink,
+                );
                 application.composer.update(application_cx, |composer, composer_cx| {
                     composer.switch_thread(
                         old_thread.as_str().to_owned(),
@@ -14369,10 +14389,15 @@ mod tests {
         let old_thread = ThreadId::parse("forge-t1").expect("old thread");
         cx.update(|app| {
             view.update(app, |application, application_cx| {
-                application.test_command_sink = Some(sink);
                 application.selected_project =
                     Some(ProjectId::parse("forge-p1").expect("project"));
-                application.selected_thread = Some(old_thread.clone());
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    old_thread.clone(),
+                    "",
+                    sink,
+                );
                 application.composer.update(application_cx, |composer, composer_cx| {
                     composer.switch_thread(
                         old_thread.as_str().to_owned(),
