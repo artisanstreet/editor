@@ -975,18 +975,20 @@ fn make_assistant_settled(
     body: &str,
     phase: AssistantMessagePhase,
     lifecycle: ConversationLifecycle,
+    revision: u64,
+    updated_millis: i64,
 ) -> ConversationItem {
     ConversationItem::AssistantMessage(AssistantMessageItem {
         item_id: item_id(id),
         turn_id: turn_id(turn),
         run_id: RunId::parse("run_controller").expect("valid run id"),
         ordinal: ItemOrdinal::new(ordinal),
-        revision: Revision::new(0),
+        revision: Revision::new(revision),
         lifecycle,
         body: AssistantBody::parse(body.to_owned()).expect("valid assistant body"),
         phase,
         created_at: stamp(2),
-        updated_at: stamp(10),
+        updated_at: stamp(updated_millis),
     })
 }
 
@@ -1065,6 +1067,8 @@ fn completed_turn_with_settled_final_reply_exposes_footer_settlement() {
                 "hello back",
                 AssistantMessagePhase::Final,
                 ConversationLifecycle::Completed,
+                0,
+                10,
             ),
         ],
         stamp(50),
@@ -1118,6 +1122,8 @@ fn unsettled_turns_keep_unsettled_footers() {
                 "hello back",
                 AssistantMessagePhase::Final,
                 ConversationLifecycle::Completed,
+                0,
+                10,
             ),
         ],
         stamp(50),
@@ -1345,6 +1351,8 @@ fn delivery_drives_pending_waiting_work_stream_and_completed_without_manual_driv
                 "draft",
                 AssistantMessagePhase::Unspecified,
                 ConversationLifecycle::Streaming,
+                0,
+                10,
             ),
         }],
     )
@@ -1386,6 +1394,8 @@ fn delivery_drives_pending_waiting_work_stream_and_completed_without_manual_driv
                     "done",
                     AssistantMessagePhase::Final,
                     ConversationLifecycle::Completed,
+                    1,
+                    150,
                 ),
             },
             ConversationPatch::TurnLifecycle {
@@ -1403,6 +1413,12 @@ fn delivery_drives_pending_waiting_work_stream_and_completed_without_manual_driv
         .on_delivery(ConversationDeliveryEvent::BatchReceived(settle))
         .expect("settle batch applies");
     let _ = controller.drain_effects();
+    // The settle frame must advance the projection cursor: a refusal would
+    // keep the last-good streaming scene and fail below without context.
+    assert_eq!(
+        controller.delivery_view().cursor,
+        Some(ConversationCursor::new(6))
+    );
     let (settled, _) = scene_status(&controller, TURN_A);
     assert_eq!(settled, SceneTurnNarration::WorkedFor { millis: 65 });
     assert_eq!(turn_status_basis(&controller, TURN_A), None);
@@ -1437,6 +1453,8 @@ fn delivery_derived_terminal_state_freezes_first_settlement() {
                 "done",
                 AssistantMessagePhase::Final,
                 ConversationLifecycle::Completed,
+                0,
+                10,
             ),
         ],
     );
@@ -1470,6 +1488,8 @@ fn delivery_derived_terminal_state_freezes_first_settlement() {
                 "done",
                 AssistantMessagePhase::Final,
                 ConversationLifecycle::Completed,
+                0,
+                10,
             ),
         ],
     );
@@ -1570,6 +1590,8 @@ fn history_settlement_uses_the_turn_span_not_the_window_age() {
                 "done",
                 AssistantMessagePhase::Final,
                 ConversationLifecycle::Completed,
+                0,
+                10,
             ),
         ],
     );
@@ -1639,6 +1661,8 @@ fn first_snapshot_streaming_yields_suppressed_status_and_creation_basis() {
                 "draft",
                 AssistantMessagePhase::Unspecified,
                 ConversationLifecycle::Streaming,
+                0,
+                10,
             ),
         ],
     );
@@ -1675,6 +1699,8 @@ fn first_snapshot_streaming_yields_suppressed_status_and_creation_basis() {
                 "done",
                 AssistantMessagePhase::Final,
                 ConversationLifecycle::Completed,
+                1,
+                450,
             ),
         ],
     );
