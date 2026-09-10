@@ -2430,7 +2430,8 @@ impl ConversationSurface {
                         header_text,
                         transition.clone(),
                         theme,
-                    ),
+                    )
+                    .into_any_element(),
                     None => div()
                         .id(format!("{selector}-work-trigger"))
                         .flex()
@@ -2562,7 +2563,7 @@ impl ConversationSurface {
                         .font_weight(ProseTypography::BODY_WEIGHT)
                         .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
                         .text_color(theme.colors.muted_foreground.to_paint())
-                        .child(title.clone())
+                        .child(title.to_owned())
                         .into_any_element(),
                     DetailRow::Compaction { .. } | DetailRow::NativeFact { .. } => {
                         unreachable!("card rows render above")
