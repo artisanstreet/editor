@@ -808,18 +808,19 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
             if steps.is_empty() {
                 return CodexEvent::UnknownMethod;
             }
+            let entries = steps
+                .into_iter()
+                .enumerate()
+                .map(|(index, (status, text))| CodexPlanEntry {
+                    id: format!("{turn_id}:plan:{index}"),
+                    status,
+                    text,
+                })
+                .collect();
             CodexEvent::PlanUpdated {
                 thread_id,
                 turn_id,
-                entries: steps
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (status, text))| CodexPlanEntry {
-                        id: format!("{turn_id}:plan:{index}"),
-                        status,
-                        text,
-                    })
-                    .collect(),
+                entries,
             }
         }
         "item/commandExecution/outputDelta" => {
