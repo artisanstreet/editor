@@ -18,7 +18,8 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use artisan_assets::AssetId;
 use artisan_ui::{
@@ -28,13 +29,14 @@ use artisan_ui::{
 };
 use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
 use gpui::{
-    App, Context, Div, ElementId, FocusHandle, Focusable, IntoElement, Render, Stateful, Window,
-    div, px,
+    Animation, AnimationExt as _, App, Context, Div, ElementId, FocusHandle, Focusable,
+    IntoElement, Render, Stateful, Task, Window, div, px,
 };
 
 use crate::composer_action_failure::ComposerActionFailure;
 use crate::native_composer_visuals::{
-    QueuedSteerRow, START_NEW_THREAD_PROMPT_LABEL, SendButtonStill,
+    COMPOSER_LIP_MOTION_MS, QueuedSteerRow, START_NEW_THREAD_PROMPT_LABEL, SendButtonStill,
+    composer_smooth_out,
 };
 use crate::native_context_usage::NativeContextUsage;
 
@@ -340,6 +342,17 @@ pub struct NativeComposerControls {
     failure_dismiss_focus: FocusHandle,
     steering_focus: HashMap<SteeringFocusKey, FocusHandle>,
     failed_focus: HashMap<QueuedSteeringIdentity, FocusHandle>,
+    /// Presentation-only lip motion state.
+    ///
+    /// `lip_row_nonces` gives each newly arrived steer a fresh entrance
+    /// animation identity; `closing_lip_rows` keeps the last rows mounted
+    /// for the collapse fade until the generation-fenced settle timer
+    /// unmounts them. No queue identity or withdrawal route lives here.
+    lip_row_nonces: HashMap<QueuedSteeringIdentity, u64>,
+    lip_nonce_counter: u64,
+    closing_lip_rows: Vec<PendingSteeringRow>,
+    closing_lip_generation: u64,
+    lip_settle_task: Option<Task<()>>,
 }
 
 impl gpui::EventEmitter<NativeComposerControlsEvent> for NativeComposerControls {}
@@ -365,6 +378,11 @@ impl NativeComposerControls {
             failure_dismiss_focus: cx.focus_handle().tab_index(11).tab_stop(false),
             steering_focus: HashMap::new(),
             failed_focus: HashMap::new(),
+            lip_row_nonces: HashMap::new(),
+            lip_nonce_counter: 0,
+            closing_lip_rows: Vec::new(),
+            closing_lip_generation: 0,
+            lip_settle_task: None,
         }
     }
 
@@ -387,6 +405,8 @@ impl NativeComposerControls {
         if self.snapshot == snapshot {
             return;
         }
+        let previous_rows = self.snapshot.pending_steering.clone();
+        self.update_lip_motion(&previous_rows, &snapshot, cx);
         self.snapshot = snapshot;
         let pending = self.snapshot.pending_steering.clone();
         self.steering_focus.retain(|key, _| {
@@ -403,6 +423,62 @@ impl NativeComposerControls {
         self.failed_focus
             .retain(|identity, _| failed.contains(identity));
         cx.notify();
+    }
+
+    /// Advances the presentation-only lip motion from the previous rows to
+    /// the incoming snapshot.
+    ///
+    /// Newly arrived steers receive fresh entrance nonces so their mount
+    /// fade replays; a lip that empties keeps its last rows for the
+    /// collapse fade until a generation-fenced settle timer unmounts them.
+    /// The timer mirrors the polished picker settle pattern and never
+    /// touches queue identity: emission stays fenced on the snapshot.
+    fn update_lip_motion(
+        &mut self,
+        previous_rows: &[PendingSteeringRow],
+        snapshot: &NativeComposerControlsSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let was_open = !previous_rows.is_empty();
+        let is_open = !snapshot.pending_steering.is_empty();
+        if is_open {
+            self.closing_lip_rows.clear();
+            self.lip_settle_task = None;
+            let present = snapshot
+                .pending_steering
+                .iter()
+                .map(|row| &row.identity)
+                .collect::<HashSet<_>>();
+            self.lip_row_nonces
+                .retain(|identity, _| present.contains(identity));
+            for row in &snapshot.pending_steering {
+                if !self.lip_row_nonces.contains_key(&row.identity) {
+                    self.lip_nonce_counter = self.lip_nonce_counter.wrapping_add(1);
+                    self.lip_row_nonces
+                        .insert(row.identity.clone(), self.lip_nonce_counter);
+                }
+            }
+        } else if was_open {
+            self.closing_lip_rows = previous_rows.to_vec();
+            self.closing_lip_generation = self.closing_lip_generation.wrapping_add(1);
+            self.lip_row_nonces.clear();
+            let generation = self.closing_lip_generation;
+            self.lip_settle_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(COMPOSER_LIP_MOTION_MS))
+                    .await;
+                let _ = this.update(cx, |controls, controls_cx| {
+                    if controls.closing_lip_generation == generation {
+                        controls.closing_lip_rows.clear();
+                        controls.lip_settle_task = None;
+                        controls_cx.notify();
+                    }
+                });
+            }));
+        } else {
+            self.closing_lip_rows.clear();
+            self.lip_settle_task = None;
+        }
     }
 
     /// Computes the current primary event without emitting it.
@@ -441,6 +517,42 @@ impl NativeComposerControls {
             .map(|run_id| NativeComposerControlsEvent::StartNewThreadWithPrompt { run_id })
     }
 
+    /// Builds one static lip row without actions or motion.
+    ///
+    /// Reference (`steering-lip.svelte:28-32`): `flex items-center gap-3
+    /// py-2 pr-2 pl-5 text-base`, single-line truncated label. Both the live
+    /// rows and the inert collapse-fade rows share this geometry.
+    fn lip_row_base(
+        row_element_id: ElementId,
+        row_selector: String,
+        label: String,
+        desktop_theme: DesktopTheme,
+    ) -> Div {
+        div()
+            .id(row_element_id)
+            .debug_selector(move || row_selector.clone())
+            .w_full()
+            .min_w(px(0.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .pl(px(20.0))
+            .pr(px(8.0))
+            .py(px(8.0))
+            .text_size(px(16.0))
+            .line_height(px(24.0))
+            .text_color(desktop_theme.secondary)
+            .bg(desktop_theme.sidebar)
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .truncate()
+                    .child(label),
+            )
+    }
+
     /// Renders the pending steering lip above the parent-owned editor.
     #[must_use]
     pub fn render_lip(
@@ -448,7 +560,10 @@ impl NativeComposerControls {
         theme: ArtisanTheme,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        if self.snapshot.pending_steering.is_empty() && self.snapshot.queue_status.is_none() {
+        if self.snapshot.pending_steering.is_empty()
+            && self.snapshot.queue_status.is_none()
+            && self.closing_lip_rows.is_empty()
+        {
             return None;
         }
 
@@ -474,31 +589,8 @@ impl NativeComposerControls {
             let identity = row.identity.clone();
             let row_selector = row_selector(&identity);
             let row_element_id = ElementId::Name(row_selector.clone().into());
-            let mut row_view = div()
-                .id(row_element_id)
-                .debug_selector({
-                    let row_selector = row_selector.clone();
-                    move || row_selector.clone()
-                })
-                .w_full()
-                .min_w(px(0.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .px(px(20.0))
-                .py(px(8.0))
-                .text_size(theme.typography.control_text)
-                .text_color(desktop_theme.secondary)
-                .bg(desktop_theme.sidebar)
-                .child(
-                    div()
-                        .size(px(6.0))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .bg(desktop_theme.secondary),
-                )
-                .child(div().min_w(px(0.0)).flex_1().truncate().child(still.label));
+            let mut row_view =
+                Self::lip_row_base(row_element_id, row_selector, still.label, desktop_theme);
 
             if row.editable {
                 let edit_key = SteeringFocusKey {
@@ -591,7 +683,61 @@ impl NativeComposerControls {
                 );
             }
 
+            // Reference mount motion (`utilities.css:522-531`,
+            // `lip-row-grow` on `--acc-expand`): the row grows its grid
+            // track so the lip height tweens. GPUI has no grid-track or
+            // auto-height interpolation (see the lane report), so only the
+            // opacity half is reproduced, on the exact 250ms clock. Each
+            // newly arrived steer carries a fresh nonce, so its entrance
+            // replays without replaying the rows already on screen.
+            let nonce = self.lip_row_nonces.get(&identity).copied().unwrap_or(0);
+            if !cx.reduce_motion() {
+                row_view = row_view.opacity(0.0).with_animation(
+                    ElementId::Name(
+                        format!(
+                            "artisan-native-composer-steering-row-entrance-{}-{}-{nonce}",
+                            identity.command_id, identity.generation
+                        )
+                        .into(),
+                    ),
+                    Animation::new(Duration::from_millis(COMPOSER_LIP_MOTION_MS))
+                        .with_easing(composer_smooth_out),
+                    move |row, progress| row.opacity(progress.clamp(0.0, 1.0)),
+                );
+            }
+
             lip = lip.child(row_view);
+        }
+
+        // A lip that just emptied keeps its last rows for the collapse fade.
+        // The retained rows carry no actions: without a snapshot identity the
+        // emission fence already refuses them, and no focus handle is
+        // installed, so the fade-out is pointer- and keyboard-inert.
+        if !self.closing_lip_rows.is_empty() {
+            let mut closing = div().w_full().flex().flex_col();
+            for row in self.closing_lip_rows.clone() {
+                let still = QueuedSteerRow::new(row.generation(), &row.text, false);
+                let selector = row_selector(&row.identity);
+                let element_id = ElementId::Name(selector.clone().into());
+                closing = closing.child(Self::lip_row_base(
+                    element_id,
+                    selector,
+                    still.label,
+                    desktop_theme,
+                ));
+            }
+            if !cx.reduce_motion() {
+                let generation = self.closing_lip_generation;
+                closing = closing.opacity(1.0).with_animation(
+                    ElementId::Name(
+                        format!("artisan-native-composer-steering-lip-close-{generation}").into(),
+                    ),
+                    Animation::new(Duration::from_millis(COMPOSER_LIP_MOTION_MS))
+                        .with_easing(composer_smooth_out),
+                    move |lip, progress| lip.opacity((1.0 - progress).clamp(0.0, 1.0)),
+                );
+            }
+            lip = lip.child(closing);
         }
 
         if let Some(status) = self.snapshot.queue_status.clone() {
@@ -701,7 +847,10 @@ impl NativeComposerControls {
                 .flex_row()
                 .items_start()
                 .gap(px(12.0))
-                .rounded(px(12.0))
+                // Reference (`action-failure.svelte:31`): `rounded-xl`
+                // (14px), `border-destructive/40`, `px-4 py-3`, title and
+                // description both `text-sm` (14px).
+                .rounded(px(14.0))
                 .border_1()
                 .border_color(theme.colors.destructive.with_alpha(0.4).to_paint())
                 .bg(desktop_theme.field)
@@ -722,7 +871,7 @@ impl NativeComposerControls {
                         )
                         .child(
                             div()
-                                .text_size(theme.typography.label_text)
+                                .text_size(theme.typography.control_text)
                                 .text_color(desktop_theme.secondary)
                                 .child(failure.failure.description),
                         ),
@@ -815,14 +964,14 @@ impl NativeComposerControls {
                 )
                 .child(
                     div()
-                        .text_size(theme.typography.label_text)
+                        .text_size(theme.typography.control_text)
                         .text_color(desktop_theme.secondary)
                         .child(row.reason.clone()),
                 );
             if !row.text.is_empty() {
                 body = body.child(
                     div()
-                        .text_size(theme.typography.label_text)
+                        .text_size(theme.typography.control_text)
                         .text_color(desktop_theme.secondary)
                         .child(row.text.clone()),
                 );
@@ -850,7 +999,7 @@ impl NativeComposerControls {
                     .flex_row()
                     .items_start()
                     .gap(px(12.0))
-                    .rounded(px(12.0))
+                    .rounded(px(14.0))
                     .border_1()
                     .border_color(theme.colors.destructive.with_alpha(0.4).to_paint())
                     .bg(desktop_theme.field)
@@ -982,6 +1131,9 @@ impl NativeComposerControls {
             self.context_focus = self.context_focus.clone().tab_stop(false);
         }
 
+        // Reference (`controls.svelte:116-143`): the right cluster holds
+        // only the escape action and the send button; a 4px separation
+        // (`mr-1` on the escape action) with zero gap otherwise.
         let mut right = div().flex().flex_row().items_center().gap(px(4.0));
 
         if let Some(event) = new_thread_event {

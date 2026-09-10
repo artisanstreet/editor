@@ -19,17 +19,18 @@ use artisan_ui::{
 use gpui::ColorExt;
 use gpui::StyledImage;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, DispatchPhase, Element, ElementId,
-    ElementInputHandler, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
-    GlobalElementId, HighlightStyle, ImageFormat, ImageSource, InspectorElementId, IntoElement,
-    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    Pixels, Point, Render, RenderImage, SharedString, StyledText, Subscription, Task,
-    UTF16Selection, Window, actions, div, img, point,
+    Animation, AnimationExt as _, AnyElement, App, Bounds, ClipboardItem, Context, DispatchPhase,
+    Div, Element, ElementId, ElementInputHandler, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, GlobalElementId, HighlightStyle, ImageFormat, ImageSource,
+    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, Point, Render, RenderImage, SharedString,
+    StyledText, Subscription, Task, UTF16Selection, Window, actions, div, img, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
     px, size,
 };
+use std::time::Duration;
 
 use crate::composer::{ComposerState, DraftDisposition, SubmissionBlocked, SubmissionToken};
 use crate::composer_draft_session_policy::{
@@ -37,8 +38,11 @@ use crate::composer_draft_session_policy::{
 };
 use crate::native_composer_controls::NativeComposerControls;
 use crate::native_composer_material::{
-    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
     glass_highlight_layer, glass_material_layer,
+};
+use crate::native_composer_visuals::{
+    COMPOSER_TRAY_MOTION_MS, composer_placeholder_phrase, composer_smooth_out,
 };
 use crate::native_model_selector::NativeModelSelector;
 
@@ -87,7 +91,6 @@ actions!(
 );
 
 const NATIVE_COMPOSER_KEY_CONTEXT: &str = "artisan-native-composer";
-const NATIVE_COMPOSER_PLACEHOLDER: &str = "Do anything";
 const NATIVE_COMPOSER_PLACEHOLDER_SELECTOR: &str = "artisan-native-composer-placeholder";
 pub(crate) const NATIVE_COMPOSER_EDITOR_SELECTOR: &str = "artisan-native-composer-editor";
 const NATIVE_COMPOSER_SEND_SELECTOR: &str = "artisan-native-composer-send";
@@ -223,6 +226,18 @@ pub(crate) struct NativeComposer {
     marked_range: Option<Range<usize>>,
     layout: Option<gpui::TextLayout>,
     painted_bounds: Option<Bounds<Pixels>>,
+    /// Presentation-only placeholder reveal state.
+    ///
+    /// This mirrors `composer-placeholder.ts:21-25` without touching draft
+    /// content: `placeholder_generation` walks the reference vocabulary and
+    /// `placeholder_was_visible` detects each fresh reveal in render.
+    placeholder_generation: u64,
+    placeholder_was_visible: bool,
+    /// Presentation-only tray entrance state. The generation gives each
+    /// hidden-to-shown mount a fresh animation identity; close unmounts
+    /// immediately (see the tray motion note in `render`).
+    tray_entrance_generation: u64,
+    tray_was_open: bool,
 }
 
 impl EventEmitter<NativeComposerEvent> for NativeComposer {}
@@ -276,6 +291,10 @@ impl NativeComposer {
             marked_range: None,
             layout: None,
             painted_bounds: None,
+            placeholder_generation: 0,
+            placeholder_was_visible: true,
+            tray_entrance_generation: 0,
+            tray_was_open: false,
         }
     }
 
@@ -1960,29 +1979,42 @@ impl NativeComposer {
         self.replace_range(range, "", None, cx);
     }
 
-    fn attachment_tray(&self, entity: Entity<Self>, theme: DesktopTheme) -> impl IntoElement {
+    fn attachment_tray(
+        &self,
+        entity: Entity<Self>,
+        theme: ArtisanTheme,
+        desktop_theme: DesktopTheme,
+    ) -> Div {
+        // Reference (`attachment-tray.svelte:28-30`): the open row carries
+        // `px-1 pt-1 pb-2`. The tray only mounts while attachments exist,
+        // which is exactly the reference open state.
         let mut row = div()
             .id("artisan-native-composer-attachment-tray-row")
             .w_full()
             .flex()
             .items_center()
             .gap(px(8.0))
+            .px(px(4.0))
+            .pt(px(4.0))
+            .pb(px(8.0))
             .overflow_x_scroll();
 
         for (position, attachment) in self.attachments.iter().enumerate() {
             let attachment_id = attachment.id.clone();
             let name = attachment.name.clone();
             let view_entity = entity.clone();
+            // Reference (`attachment-tray.svelte:32`): `card relative size-18
+            // overflow-hidden rounded-xl`. The tile is a regular card, not a
+            // card-glass surface.
             let mut tile = div()
                 .id(format!("artisan-native-composer-attachment-{position}"))
                 .relative()
                 .size(px(NATIVE_COMPOSER_ATTACHMENT_SIZE))
                 .flex_none()
                 .overflow_hidden()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme.line)
-                .bg(theme.field)
+                .rounded(px(14.0))
+                .shadow(card_shadows(theme))
+                .bg(desktop_theme.field)
                 .cursor_pointer()
                 .role(gpui::Role::Button)
                 .aria_label(format!("View {name}"))
@@ -2007,7 +2039,7 @@ impl NativeComposer {
                         .items_center()
                         .justify_center()
                         .px(px(5.0))
-                        .text_color(theme.secondary)
+                        .text_color(desktop_theme.secondary)
                         .text_size(px(11.0))
                         .child("Preparing…"),
                 );
@@ -2018,20 +2050,23 @@ impl NativeComposer {
             let remove_click_entity = entity.clone();
             let remove_key_entity = entity.clone();
             let remove_label = format!("Remove {name}");
+            // Reference (`attachment-tray.svelte:41-49`): `absolute
+            // top/right 0.2rem`, `size-5.5`, secondary icon button, `X
+            // size-3.5`.
             let remove = div()
                 .id(format!(
                     "artisan-native-composer-attachment-remove-{position}"
                 ))
                 .absolute()
-                .top(px(3.0))
-                .right(px(3.0))
-                .size(px(20.0))
+                .top(px(3.2))
+                .right(px(3.2))
+                .size(px(22.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(theme.chrome.opacity(0.9))
-                .text_color(theme.foreground)
+                .bg(desktop_theme.chrome.opacity(0.9))
+                .text_color(desktop_theme.foreground)
                 .cursor_pointer()
                 .tab_index(0)
                 .role(gpui::Role::Button)
@@ -2051,7 +2086,7 @@ impl NativeComposer {
                         });
                     }
                 })
-                .child(asset_glyph(AssetId::TABLER_X).size(px(12.0)));
+                .child(asset_glyph(AssetId::TABLER_X).size(px(14.0)));
             tile = tile.child(remove);
             row = row.child(tile);
         }
@@ -2068,7 +2103,7 @@ impl NativeComposer {
         if let Some(error) = self.attachment_error.clone() {
             tray = tray.child(
                 div()
-                    .text_color(theme.secondary)
+                    .text_color(desktop_theme.secondary)
                     .text_size(px(12.0))
                     .child(error),
             );
@@ -2076,7 +2111,7 @@ impl NativeComposer {
         tray.child(
             div()
                 .id(NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR)
-                .text_color(theme.secondary)
+                .text_color(desktop_theme.secondary)
                 .text_size(px(12.0))
                 .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR.to_owned())
                 .child(if self.attachment_delivery_enabled {
@@ -2084,6 +2119,26 @@ impl NativeComposer {
                 } else {
                     "Images stay attached until image delivery is available."
                 }),
+        )
+    }
+
+    /// Fades a newly mounted tray in on the reference open clock.
+    ///
+    /// Each hidden-to-shown mount carries a fresh animation identity from
+    /// `tray_entrance_generation`, so the entrance replays every time the
+    /// tray opens. Reduced motion paints the settled tray immediately.
+    fn animate_tray_entrance(&self, tray: Div, cx: &mut Context<Self>) -> Div {
+        if cx.reduce_motion() {
+            return tray;
+        }
+        let generation = self.tray_entrance_generation;
+        tray.opacity(0.0).with_animation(
+            ElementId::Name(
+                format!("artisan-native-composer-tray-entrance-{generation}").into(),
+            ),
+            Animation::new(Duration::from_millis(COMPOSER_TRAY_MOTION_MS))
+                .with_easing(composer_smooth_out),
+            move |tray, progress| tray.opacity(progress.clamp(0.0, 1.0)),
         )
     }
 
@@ -2283,6 +2338,14 @@ impl Render for NativeComposer {
         self.layout = Some(styled_text.layout().clone());
 
         let focus = self.focus_handle.clone();
+        // Reference (`thread-composer.svelte:571-587`): `min-h-16 px-3 py-2
+        // text-base`, no radius. The reference editor is uncapped because
+        // its frame is an absolute overlay above the transcript; the native
+        // dock is static in-flow (`thread_screen.rs` composer dock, shell
+        // lane), so an uncapped editor would squeeze the transcript to zero
+        // and swallow the window. The 240px bound plus internal scroll is
+        // the pre-existing transcript protection and stays until the shell
+        // lane owns an overlay dock or a viewport-relative cap.
         let mut editor = div()
             .id("artisan-native-composer-editor")
             .debug_selector(|| NATIVE_COMPOSER_EDITOR_SELECTOR.to_string())
@@ -2294,27 +2357,39 @@ impl Render for NativeComposer {
             .max_h(px(240.0))
             .px(px(12.0))
             .py(px(8.0))
-            .rounded(px(6.0))
             .text_color(desktop_theme.foreground)
-            .text_size(px(15.0))
-            .line_height(px(22.0))
+            .text_size(px(16.0))
+            .line_height(px(24.0))
             .whitespace_normal()
             .overflow_y_scroll()
             .track_focus(&focus)
             .child(styled_text);
 
-        if self.state.draft().is_empty() {
+        // Reference visibility (`thread-composer.svelte:180-187,559`): the
+        // placeholder shows only while the composed value is empty, where an
+        // attachment counts as content. Each fresh reveal walks the reference
+        // vocabulary (`composer-placeholder.ts:54-67`). The per-character
+        // `placeholder-reveal-in` keyframes are dead in the reference CSS (no
+        // rule applies them), so the phrase paints statically.
+        let placeholder_visible =
+            self.state.draft().is_empty() && self.attachments.is_empty();
+        if placeholder_visible && !self.placeholder_was_visible {
+            self.placeholder_generation = self.placeholder_generation.wrapping_add(1);
+        }
+        self.placeholder_was_visible = placeholder_visible;
+        if placeholder_visible {
+            let phrase = composer_placeholder_phrase(self.placeholder_generation);
             editor = editor.child(
                 div()
                     .absolute()
-                    .top(px(10.0))
+                    .top(px(8.0))
                     .left(px(12.0))
                     .text_color(desktop_theme.secondary)
-                    .text_size(px(15.0))
-                    .line_height(px(22.0))
+                    .text_size(px(16.0))
+                    .line_height(px(24.0))
                     .whitespace_normal()
                     .debug_selector(|| NATIVE_COMPOSER_PLACEHOLDER_SELECTOR.to_string())
-                    .child(NATIVE_COMPOSER_PLACEHOLDER),
+                    .child(phrase),
             );
         }
 
@@ -2449,15 +2524,17 @@ impl Render for NativeComposer {
         };
 
         let drop_entity = entity.clone();
+        // Reference (`thread-composer.svelte:553`): `flex min-h-32 flex-col
+        // p-2`. No gaps: the tray carries its own open padding, the editor
+        // its own py, and the control row sits directly below.
         let mut root = div()
             .id("artisan-native-composer")
             .debug_selector(|| "artisan-native-composer".to_owned())
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(8.0))
             .min_h(px(128.0))
-            .p(px(5.0))
+            .p(px(8.0))
             .rounded(px(18.0))
             .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
             .bg(glass_foreground_base(theme))
@@ -2473,25 +2550,31 @@ impl Render for NativeComposer {
             });
 
         if !self.attachments.is_empty() {
-            root = root.child(self.attachment_tray(entity.clone(), desktop_theme));
-        } else if let Some(error) = self.attachment_error.clone() {
-            root = root.child(
-                div()
-                    .id(NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR)
-                    .text_color(desktop_theme.secondary)
-                    .text_size(px(12.0))
-                    .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR.to_owned())
-                    .child(error),
-            );
-        }
-        if let Some(lip) = controls_lip {
-            root = root.child(lip);
-        }
-        if let Some(failure) = controls_failure {
-            root = root.child(failure);
-        }
-        if let Some(failed) = controls_failed {
-            root = root.child(failed);
+            // Reference open motion (`attachment-tray.svelte:25`): the tray
+            // fades in on `--composer-resize-dur` (300ms). The grid-track
+            // height tween has no GPUI primitive (see the lane report), so
+            // only the opacity half is reproduced. Close unmounts
+            // immediately; a fade-out would need a retained tile snapshot
+            // plus a settle timer for zero visual gain on a surface the user
+            // just dismissed.
+            if !self.tray_was_open {
+                self.tray_entrance_generation = self.tray_entrance_generation.wrapping_add(1);
+            }
+            self.tray_was_open = true;
+            let tray = self.attachment_tray(entity.clone(), theme, desktop_theme);
+            root = root.child(self.animate_tray_entrance(tray, cx));
+        } else {
+            self.tray_was_open = false;
+            if let Some(error) = self.attachment_error.clone() {
+                root = root.child(
+                    div()
+                        .id(NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR)
+                        .text_color(desktop_theme.secondary)
+                        .text_size(px(12.0))
+                        .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR.to_owned())
+                        .child(error),
+                );
+            }
         }
         root = root.child(editor);
         if let Some(controls_row) = controls_row {
@@ -2502,9 +2585,21 @@ impl Render for NativeComposer {
         if let Some(viewer) = self.attachment_viewer(entity, desktop_theme) {
             root = root.child(viewer);
         }
+        // Reference (`thread-composer.svelte:526-543`): jump, failure, and
+        // the queued lip are siblings above the composer card, spaced by the
+        // frame's `gap-2`. The card holds only tray, editor, and controls.
         let mut shell = div().w_full().flex().flex_col().gap(px(8.0));
         if let Some(jump_to_latest) = jump_to_latest {
             shell = shell.child(jump_to_latest);
+        }
+        if let Some(failure) = controls_failure {
+            shell = shell.child(failure);
+        }
+        if let Some(failed) = controls_failed {
+            shell = shell.child(failed);
+        }
+        if let Some(lip) = controls_lip {
+            shell = shell.child(lip);
         }
         shell.child(root)
     }
@@ -2972,12 +3067,13 @@ mod tests {
     use super::{
         DocumentEnd, DocumentHome, NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR,
         NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR, NATIVE_COMPOSER_EDITOR_SELECTOR,
-        NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
+        NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
         NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer, NativeComposerEvent, SelectDocumentEnd,
         SelectDocumentHome, SelectEnd, SelectHome, localize_painted_point, logical_vertical_target,
         offset_layout_bounds, replace_text_preserving_raw, utf8_offset_to_utf16,
         utf16_offset_to_utf8, utf16_range_to_utf8, caret_offset_for_paint,
     };
+    use crate::native_composer_visuals::composer_placeholder_phrase;
     use crate::composer::DraftDisposition;
     use crate::image_policy::{ImageDimensions, ImageMediaType};
     use artisan_domain::{AuthoredText, ImageAttachment, QueueMessagePayload};
@@ -3992,7 +4088,7 @@ mod tests {
 
     #[gpui::test]
     fn empty_composer_paints_exact_placeholder_selector_and_phrase(cx: &mut TestAppContext) {
-        assert_eq!(NATIVE_COMPOSER_PLACEHOLDER, "Do anything");
+        assert_eq!(composer_placeholder_phrase(0), "Do anything");
         assert_eq!(
             NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
             "artisan-native-composer-placeholder"

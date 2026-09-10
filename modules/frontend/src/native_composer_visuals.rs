@@ -34,7 +34,7 @@ use artisan_assets::AssetId;
 use artisan_ui::{
     button::{AccessibleLabel, ButtonContent, ButtonSize, ButtonStyle, ButtonVariant},
     icon::{IconSize, IconStyle, IconTint},
-    motion::MotionPolicy,
+    motion::{MotionCurve, MotionPolicy},
     progress::{ProgressFraction, ProgressStyle},
     theme::{ArtisanTheme, ThemeMode},
 };
@@ -47,6 +47,143 @@ use crate::{
 /// Accessible name of the attachment tray
 /// (`attachment-tray.svelte:26`).
 pub const ATTACHMENT_TRAY_LABEL: &str = "Attached images";
+
+/// Placeholder vocabulary in reference order
+/// (`modules/data/composer/placeholders.json`). The first entry is the
+/// fallback the reference uses when the JSON fails to decode
+/// (`composer-placeholder.ts:5`).
+pub const COMPOSER_PLACEHOLDER_VOCABULARY: [&str; 100] = [
+    "Do anything",
+    "Ask about anything",
+    "Make anything",
+    "Start anywhere",
+    "Start somewhere",
+    "Try something",
+    "Explore an idea",
+    "Follow a thought",
+    "Pull on a thread",
+    "Think out loud",
+    "See where this goes",
+    "Take it further",
+    "Look at it differently",
+    "Find another way",
+    "Make it clearer",
+    "Untangle something",
+    "Poke at the weird part",
+    "Go off-script",
+    "Wander a little",
+    "Surprise yourself",
+    "Begin with a question",
+    "Begin with a hunch",
+    "Bring a half-idea",
+    "Bring the messy version",
+    "Say what's on your mind",
+    "Turn it over",
+    "Keep going",
+    "Go deeper",
+    "Zoom out",
+    "Look closer",
+    "Change the angle",
+    "Try the other way",
+    "Find the shape of it",
+    "Make sense of it",
+    "See what happens",
+    "Follow your curiosity",
+    "Chase a possibility",
+    "Open a door",
+    "Leave room for surprise",
+    "Start before you're ready",
+    "Take the scenic route",
+    "Question the obvious",
+    "Rethink the familiar",
+    "Push it a little",
+    "Let the idea breathe",
+    "See what's hiding",
+    "Find the interesting part",
+    "Follow the energy",
+    "Stay with the question",
+    "Make a first move",
+    "Take another pass",
+    "Start with the strange part",
+    "Bring a loose end",
+    "Connect a few dots",
+    "Shake it loose",
+    "Turn the lights on",
+    "Look under the surface",
+    "Find a better question",
+    "Try a fresh direction",
+    "Take the long view",
+    "Take the short view",
+    "Hold it up to the light",
+    "See it from here",
+    "See it from there",
+    "Make room for another thought",
+    "Follow the smallest clue",
+    "Follow the biggest question",
+    "Find the quiet part",
+    "Find the loud part",
+    "Start in the middle",
+    "Begin at the edge",
+    "Work with what you have",
+    "Make the vague less vague",
+    "Give it another look",
+    "Ask what if",
+    "Ask why not",
+    "See what fits",
+    "See what changes",
+    "Try the simple version",
+    "Try the bold version",
+    "Keep it open",
+    "Make it yours",
+    "Move it forward",
+    "Let it unfold",
+    "Turn curiosity loose",
+    "Find the next step",
+    "Find a new starting point",
+    "Come at it sideways",
+    "Take a different path",
+    "Stay curious",
+    "Start a conversation",
+    "Make a little room",
+    "Follow the detour",
+    "Try without knowing",
+    "See what sticks",
+    "Put the pieces together",
+    "Take it apart",
+    "Find the thread",
+    "Open it up",
+    "Let the question lead",
+];
+
+/// Returns the placeholder phrase for one reveal generation.
+///
+/// The reference picks randomly excluding the previous phrase
+/// (`composer-placeholder.ts:34-44`); the native renderer walks the same
+/// vocabulary sequentially, which never repeats consecutively for a
+/// vocabulary longer than one entry and needs no randomness in render.
+#[allow(clippy::cast_possible_truncation)]
+#[must_use]
+pub fn composer_placeholder_phrase(generation: u64) -> &'static str {
+    COMPOSER_PLACEHOLDER_VOCABULARY
+        [(generation as usize) % COMPOSER_PLACEHOLDER_VOCABULARY.len()]
+}
+
+/// Lip-row entrance/fade duration: `--acc-expand: 250ms`
+/// (`theme.css:123`), the exact clock `lip-row-grow` runs on.
+pub const COMPOSER_LIP_MOTION_MS: u64 = 250;
+/// Attachment-tray open duration: `--composer-resize-dur`, which aliases
+/// `--resize-dur: 300ms` (`theme.css:235`, `thread-composer.svelte:550`).
+pub const COMPOSER_TRAY_MOTION_MS: u64 = 300;
+
+/// GPUI easing callback sampling the shared smooth-out curve
+/// (`--acc-ease` / `--resize-ease`, both `cubic-bezier(0.22, 1, 0.36, 1)`
+/// per `theme.css:95,126,236`). Installed in `Animation::with_easing`,
+/// mirroring the polished picker surface.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+#[must_use]
+pub fn composer_smooth_out(progress: f32) -> f32 {
+    MotionCurve::SmoothOut.sample(f64::from(progress)) as f32
+}
 
 /// Fallback steer label when the queued text trims to nothing
 /// (`thread-composer.svelte:619`).
@@ -700,12 +837,14 @@ mod tests {
     use super::{
         ATTACHMENT_THUMBNAIL_EDGE_STEPS, ATTACHMENT_TRAY_GAP_STEPS, ATTACHMENT_TRAY_LABEL,
         AttachmentFact, AttachmentThumbnail, AttachmentTrayStill, ButtonContent, ButtonSize,
-        ButtonVariant, DISCARD_QUEUED_MESSAGE_LABEL, EDIT_QUEUED_MESSAGE_LABEL,
+        ButtonVariant, COMPOSER_LIP_MOTION_MS, COMPOSER_PLACEHOLDER_VOCABULARY, COMPOSER_TRAY_MOTION_MS,
+        DISCARD_QUEUED_MESSAGE_LABEL, EDIT_QUEUED_MESSAGE_LABEL,
         FORGE_OFFLINE_REASON, IconSize, LIP_ROW_GROW, MotionPolicy, NEW_THREAD_FAILURE_TITLE,
         PREPARING_TO_SEND_REASON, QUEUED_STEER_EMPTY_TEXT, QUEUED_STEER_ROLE, QueuedSteerRow,
         RECALL_UNAVAILABLE_MESSAGE, SEND_BUTTON_TEXT, SEND_FAILURE_TITLE, SEND_MESSAGE_LABEL,
         SENDING_BUTTON_TEXT, START_NEW_THREAD_PROMPT_LABEL, STOP_RUN_LABEL, SendButtonStill,
-        SendGate, StatusDot, TrayAxis, fixture_attachment_tray, fixture_queued_steers,
+        SendGate, StatusDot, TrayAxis, composer_placeholder_phrase, composer_smooth_out,
+        fixture_attachment_tray, fixture_queued_steers,
         fixture_send_buttons, fixture_theme, preview_only_blocked_reason, queued_steer_label,
     };
     use artisan_assets::AssetId;
@@ -914,8 +1053,66 @@ mod tests {
     }
 
     #[test]
-    fn fixtures_hold_together_for_screenshots() {
-        let tray = fixture_attachment_tray();
+    fn placeholder_vocabulary_matches_the_reference_data() {
+        assert!(!COMPOSER_PLACEHOLDER_VOCABULARY.is_empty());
+        assert_eq!(COMPOSER_PLACEHOLDER_VOCABULARY[0], "Do anything");
+        for phrase in COMPOSER_PLACEHOLDER_VOCABULARY {
+            assert!(!phrase.trim().is_empty());
+        }
+        let mut unique = COMPOSER_PLACEHOLDER_VOCABULARY.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), COMPOSER_PLACEHOLDER_VOCABULARY.len());
+    }
+
+    #[test]
+    fn placeholder_rotation_walks_the_vocabulary_without_repeating() {
+        assert_eq!(composer_placeholder_phrase(0), "Do anything");
+        assert_eq!(
+            composer_placeholder_phrase(1),
+            COMPOSER_PLACEHOLDER_VOCABULARY[1]
+        );
+        let len = COMPOSER_PLACEHOLDER_VOCABULARY.len() as u64;
+        assert_eq!(composer_placeholder_phrase(len), "Do anything");
+        for generation in 0..len {
+            assert_ne!(
+                composer_placeholder_phrase(generation),
+                composer_placeholder_phrase(generation + 1)
+            );
+        }
+    }
+
+    #[test]
+    fn composer_motion_clocks_match_the_reference_duration_tokens() {
+        use artisan_ui::motion::{MotionPlan, MotionRecipe};
+        use std::time::Duration;
+
+        assert_eq!(COMPOSER_LIP_MOTION_MS, 250);
+        assert_eq!(COMPOSER_TRAY_MOTION_MS, 300);
+        let accordion = MotionPolicy::Full
+            .resolve(MotionRecipe::AccordionExpand)
+            .animation()
+            .expect("full motion animates the lip recipe");
+        assert_eq!(
+            accordion.duration(),
+            Duration::from_millis(COMPOSER_LIP_MOTION_MS)
+        );
+        assert!(matches!(
+            MotionPolicy::Reduced.resolve(MotionRecipe::AccordionExpand),
+            MotionPlan::Immediate
+        ));
+    }
+
+    #[test]
+    fn composer_easing_samples_the_shared_smooth_out_endpoints() {
+        assert_eq!(composer_smooth_out(0.0), 0.0);
+        assert_eq!(composer_smooth_out(1.0), 1.0);
+        let mid = composer_smooth_out(0.5);
+        assert!(mid > 0.5, "smooth-out leads linear, got {mid}");
+    }
+
+    #[test]
+    fn fixtures_hold_together_for_screenshots() {        let tray = fixture_attachment_tray();
         assert_eq!(tray.len(), 2);
         assert!(tray.is_visible());
         let rows = tray.rows_or_nothing().expect("fixture tray paints");
