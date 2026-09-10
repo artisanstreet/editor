@@ -3504,7 +3504,7 @@ fn decode_response(
         response::Which::RunUsage(value) => ResponsePayload::RunUsage(
             crate::composer_state_codec::decode_run_usage_result(value?)?,
         ),
-        response::Which::AccountUsage(value) => decode_engine_usage_snapshot(value?),
+        response::Which::AccountUsage(value) => decode_engine_usage_snapshot(value?)?,
         response::Which::ComposerCatalog(result) => decode_composer_catalog(result?)?,
         response::Which::ModelFavorites(snapshot) => ResponsePayload::ModelFavorites(
             decode_model_favorites_snapshot(snapshot?, "response.modelFavorites.modelIds")?,
