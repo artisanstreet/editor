@@ -23,7 +23,7 @@
 
 use artisan_domain::{
     AuthoredText, ConversationCursor, ItemId, MessageId, PatchId,
-    QueueMessagePayload, RunId, ThreadId, TurnId, UnixMillis,
+    QueueMessagePayload, RequestId, RunId, ThreadId, TurnId, UnixMillis,
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait,
@@ -469,11 +469,21 @@ async fn load_accepted_message(
     Ok(AcceptedMessageContext { thread_id, payload })
 }
 
-/// Confirms the owning thread exists and predates the launch operation.
+/// Confirms the owning thread exists and predates the launch operation,
+/// then matches the supplied settings against the accepted receipt
+/// snapshot for this message.
+///
+/// The snapshot recorded at accept is authoritative: a selection change
+/// between accept and launch must NOT fail the launch, and the launch
+/// runs the captured configuration. Rows accepted before snapshots
+/// existed keep the legacy fence against current thread settings.
+/// Thread existence and chronology always apply; run replay snapshot
+/// validation elsewhere is untouched.
 async fn ensure_thread_admits_launch(
     transaction: &sea_orm::DatabaseTransaction,
     thread_id: &ThreadId,
     message_id: &MessageId,
+    correlation_id: &RequestId,
     operated_at_ms: i64,
     engine_settings: &ThreadEngineSettings,
 ) -> Result<(), RunLaunchError> {
@@ -496,11 +506,22 @@ async fn ensure_thread_admits_launch(
             },
         ));
     }
-    let actual = thread_engine_config::settings_from_thread(thread)?;
-    if actual.as_ref() != Some(engine_settings) {
-        return Err(RunLaunchError::SnapshotMismatch {
-            message_id: message_id.clone(),
-        });
+    match thread_engine_config::read_receipt_settings_in(transaction, correlation_id).await? {
+        Some(snapshot) => {
+            if snapshot != *engine_settings {
+                return Err(RunLaunchError::SnapshotMismatch {
+                    message_id: message_id.clone(),
+                });
+            }
+        }
+        None => {
+            let actual = thread_engine_config::settings_from_thread(thread)?;
+            if actual.as_ref() != Some(engine_settings) {
+                return Err(RunLaunchError::SnapshotMismatch {
+                    message_id: message_id.clone(),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -567,6 +588,7 @@ async fn build_launched_graph(
         transaction,
         &thread_id,
         &claimed.message_id,
+        &claimed.correlation_id,
         operated_at_ms,
         command.engine_settings,
     )

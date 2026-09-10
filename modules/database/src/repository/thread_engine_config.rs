@@ -421,9 +421,24 @@ impl Repository {
         &self,
         request_id: &RequestId,
     ) -> Result<Option<ThreadEngineSettings>, RepositoryError> {
-        let Some(row) = receipt_row_by_id(&self.database, request_id).await? else {
-            return Ok(None);
-        };
+        read_receipt_settings_in(&self.database, request_id).await
+    }
+}
+
+/// Reads the engine settings snapshot captured with one accepted
+/// queue-message receipt, if the receipt carries one.
+///
+/// Transaction-scoped twin of
+/// [`Repository::read_receipt_engine_settings`] for callers already
+/// inside a write transaction (launch validation); same authoritative
+/// replay semantics, same legacy-`None` fallback contract.
+pub(super) async fn read_receipt_settings_in(
+    database: &impl ConnectionTrait,
+    request_id: &RequestId,
+) -> Result<Option<ThreadEngineSettings>, RepositoryError> {
+    let Some(row) = receipt_row_by_id(database, request_id).await? else {
+        return Ok(None);
+    };
         let (Some(version), Some(blob)) = (
             row.engine_run_config_version,
             row.engine_run_config.as_ref(),

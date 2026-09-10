@@ -7,9 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use artisan_database::entities::{self, DispatchState};
 use artisan_database::{
     AttachProjectInput, ClaimMessageDispatch, CreateThreadInput, DispatchFailureReason,
-    DispatchLeaseOwner, FailMessageDispatch, QueueMessageInput,
+    DispatchLeaseOwner, FailMessageDispatch, LaunchClaimedRun, QueueMessageInput,
     QueuedMessageRepositoryError, Repository, RepositoryError, RequeueMessageDispatch,
-    SetThreadEngineConfigInput, SqliteConfig, connect,
+    RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig, connect,
 };
 use artisan_domain::{
     ApprovalMode, AuthoredText, ByteLimit, CountLimit, DirectoryId, DisplayName, EngineAgentId,
@@ -19,7 +19,7 @@ use artisan_domain::{
     ListQueuedMessages, MessageId, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId,
     QUEUED_MESSAGE_LIST_MAX, QueueMessagePayload, QueuedMessageListError, QueuedMessageListOrder,
     QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId, RootPath, RunId, ThreadId,
-    ThreadTitle, UnixMillis, WebSearchAccess, WithdrawQueuedMessage,
+    ThreadTitle, TurnId, ItemId, PatchId, UnixMillis, WebSearchAccess, WithdrawQueuedMessage,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
@@ -1515,6 +1515,163 @@ async fn retry_after_selection_change_replays_stored_snapshot() {    let (_datab
         after.config().selection().profile_id().as_str(),
         before.config().selection().profile_id().as_str(),
         "retry must replay the stored snapshot, never the current settings"
+    );
+}
+
+fn launch_ids(tag: &str) -> (RunId, TurnId, ItemId, PatchId, PatchId) {
+    (
+        RunId::parse(format!("run-launch-{tag}")).expect("run id"),
+        TurnId::parse(format!("turn-launch-{tag}")).expect("turn id"),
+        ItemId::parse(format!("item-launch-{tag}")).expect("item id"),
+        PatchId::parse(format!("patch-launch-{tag}-a")).expect("patch id"),
+        PatchId::parse(format!("patch-launch-{tag}-b")).expect("patch id"),
+    )
+}
+
+#[tokio::test]
+async fn launch_uses_captured_snapshot_across_selection_change() {
+    let (database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue_named(
+        &repository,
+        "queue-launch-a",
+        "message-launch-a",
+        "thread-1",
+        text_payload("launch under A"),
+        None,
+        300,
+    )
+    .await;
+    let revision = repository
+        .read_thread_engine_settings(&thread_id("thread-1"))
+        .await
+        .expect("settings should read")
+        .expect("settings should exist")
+        .revision();
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: request("queue-launch-config-b"),
+            thread_id: thread_id("thread-1"),
+            precondition: EngineConfigUpdatePrecondition::Exact(revision),
+            config: second_fixture_engine_config(),
+            accepted_at: UnixMillis::from_millis(310),
+        })
+        .await
+        .expect("selection change should persist");
+    let claimed = repository
+        .claim_next_message_dispatch(claim(0x61, 400, 900))
+        .await
+        .expect("claim should work")
+        .expect("dispatch should be claimed");
+    assert_eq!(claimed.message_id, message_id("message-launch-a"));
+    let captured = repository
+        .read_receipt_engine_settings(&request("queue-launch-a"))
+        .await
+        .expect("snapshot should load")
+        .expect("snapshot should exist");
+    let (run_id, turn_id, item_id, first_patch, second_patch) = launch_ids("a");
+    let outcome = repository
+        .launch_claimed_run(LaunchClaimedRun {
+            claimed: &claimed,
+            run_id: &run_id,
+            turn_id: &turn_id,
+            item_id: &item_id,
+            first_patch_id: &first_patch,
+            second_patch_id: &second_patch,
+            operated_at: UnixMillis::from_millis(500),
+            run_start_key: &RunStartKey::new([0x61; 32]),
+            credentials: &RunLaunchCredentials::new([0x62; 32], [0x63; 32], [0x64; 32]),
+            engine_settings: &captured,
+        })
+        .await
+        .expect("launch with captured settings must succeed");
+    assert!(
+        matches!(
+            outcome,
+            artisan_database::LaunchClaimedRunOutcome::Started(_)
+        ),
+        "captured launch must start"
+    );
+    let run = entities::assistant_run::Entity::find_by_id(run_id.as_str())
+        .one(&database)
+        .await;
+    let run = run
+        .expect("launched run row should read")
+        .expect("launched run row should exist");
+    let receipt = entities::command_receipt::Entity::find_by_id("queue-launch-a")
+        .one(&database)
+        .await
+        .expect("accept receipt should read")
+        .expect("accept receipt should exist");
+    assert_eq!(
+        run.engine_run_config.as_ref().map(|bytes| bytes.as_slice()),
+        receipt.engine_run_config.as_ref().map(|bytes| bytes.as_slice()),
+        "launched run must store the captured snapshot, not current settings"
+    );
+}
+
+#[tokio::test]
+async fn launch_with_supplied_settings_mismatching_snapshot_fails() {
+    let (_database, repository) = memory_repository().await;
+    setup_thread(&repository).await;
+    queue_named(
+        &repository,
+        "queue-launch-b",
+        "message-launch-b",
+        "thread-1",
+        text_payload("launch under B"),
+        None,
+        300,
+    )
+    .await;
+    let revision = repository
+        .read_thread_engine_settings(&thread_id("thread-1"))
+        .await
+        .expect("settings should read")
+        .expect("settings should exist")
+        .revision();
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: request("queue-launch-config-b"),
+            thread_id: thread_id("thread-1"),
+            precondition: EngineConfigUpdatePrecondition::Exact(revision),
+            config: second_fixture_engine_config(),
+            accepted_at: UnixMillis::from_millis(310),
+        })
+        .await
+        .expect("selection change should persist");
+    let claimed = repository
+        .claim_next_message_dispatch(claim(0x62, 400, 900))
+        .await
+        .expect("claim should work")
+        .expect("dispatch should be claimed");
+    let supplied = repository
+        .read_thread_engine_settings(&thread_id("thread-1"))
+        .await
+        .expect("supplied settings should read")
+        .expect("supplied settings should exist");
+    let (run_id, turn_id, item_id, first_patch, second_patch) = launch_ids("b");
+    let error = repository
+        .launch_claimed_run(LaunchClaimedRun {
+            claimed: &claimed,
+            run_id: &run_id,
+            turn_id: &turn_id,
+            item_id: &item_id,
+            first_patch_id: &first_patch,
+            second_patch_id: &second_patch,
+            operated_at: UnixMillis::from_millis(500),
+            run_start_key: &RunStartKey::new([0x65; 32]),
+            credentials: &RunLaunchCredentials::new([0x66; 32], [0x67; 32], [0x68; 32]),
+            engine_settings: &supplied,
+        })
+        .await
+        .expect_err("supplied settings mismatching the snapshot must fail");
+    assert!(
+        matches!(
+            error,
+            artisan_database::RunLaunchError::SnapshotMismatch { .. }
+        ),
+        "mismatch must fail closed, got {error:?}"
     );
 }
 
