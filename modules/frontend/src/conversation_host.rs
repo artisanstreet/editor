@@ -13,7 +13,7 @@
 
 #![forbid(unsafe_code)]
 
-use artisan_domain::{IdentifierError, ThreadId, TurnId};
+use artisan_domain::{IdentifierError, ThreadId, TurnId, account_usage::iso_millis};
 use artisan_ui::theme::ThemeMode;
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, Render, Subscription,
@@ -127,54 +127,6 @@ pub fn host_now_millis() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
-/// Formats Unix millis as a canonical UTC ISO-8601 instant for the relative
-/// age adapter and the footer's machine-readable timestamp.
-///
-/// Negative inputs clamp to the epoch; output always carries millisecond
-/// precision with a `Z` suffix, matching the forms
-/// [`format_relative_age`] parses.
-#[must_use]
-pub fn format_settled_iso(millis: i64) -> String {
-    let clamped = millis.max(0);
-    let days = clamped.div_euclid(86_400_000);
-    let remainder = clamped.rem_euclid(86_400_000);
-    let (year, month, day) = civil_from_days(days);
-    let hour = remainder / 3_600_000;
-    let minute = (remainder % 3_600_000) / 60_000;
-    let second = (remainder % 60_000) / 1_000;
-    let millisecond = remainder % 1_000;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z")
-}
-
-/// Converts days since 1970-01-01 into a civil date (Howard Hinnant's
-/// civil-from-days algorithm).
-fn civil_from_days(days: i64) -> (i64, u8, u8) {
-    let shifted = days + 719_468;
-    let era = if shifted >= 0 {
-        shifted
-    } else {
-        shifted - 146_096
-    } / 146_097;
-    let day_of_era = shifted - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = if month_prime < 10 {
-        month_prime + 3
-    } else {
-        month_prime - 9
-    };
-    let full_year = year + i64::from(month <= 2);
-    (
-        full_year,
-        u8::try_from(month).unwrap_or(1),
-        u8::try_from(day).unwrap_or(1),
-    )
-}
-
 /// Returns whether the accepted scene carries authoritative active work.
 ///
 /// The scene is the authority: a ticking clock exists only while a status
@@ -191,19 +143,36 @@ pub fn scene_has_active_work(scene: &ConversationScene) -> bool {
 /// Returns the settled footer's machine-readable timestamp and exact response
 /// bytes for one turn, if that turn paints a footer.
 ///
-/// The scene settlement is authoritative; the action echo is never used.
+/// The timestamp uses the shared [`iso_millis`] formatter so the machine
+/// fact and the relative-age adapter input are one value. The scene
+/// settlement is authoritative; the action echo is never used.
 #[must_use]
 pub fn settled_footer_for(scene: &ConversationScene, turn_id: &TurnId) -> Option<(String, String)> {
     let turn = scene.turn_scene(turn_id)?;
     turn.blocks().iter().find_map(|block| match block {
         TurnBlock::TurnFooter(footer) => footer.settlement.as_ref().map(|settlement| {
             (
-                format_settled_iso(settlement.settled_at_ms()),
+                iso_millis(settlement.settled_at_ms()),
                 settlement.response_text().to_owned(),
             )
         }),
         _ => None,
     })
+}
+
+/// Returns whether a cached footer policy still matches the canonical
+/// settlement facts.
+///
+/// A revised settlement (new response bytes or timestamp after an accepted
+/// revision) retires the cached policy so a later reveal or copy can never
+/// serve stale bytes.
+#[must_use]
+pub fn footer_policy_is_stale(
+    policy: &ConversationTurnFooterPolicy,
+    settled_at: &str,
+    response_text: &str,
+) -> bool {
+    policy.settled_at() != settled_at || policy.response_text() != response_text
 }
 
 /// The native host for one fixed conversation thread.
@@ -619,6 +588,29 @@ impl ConversationHost {
         true
     }
 
+    /// Returns the live policy for one turn, retiring a cached policy whose
+    /// facts no longer match the canonical settlement.
+    ///
+    /// A replacement clears transient view state: the relative age recomputes
+    /// on the next reveal, and a stale copy notice must not survive revised
+    /// facts.
+    fn sync_footer_policy(
+        &mut self,
+        turn: &TurnId,
+        settled_at: String,
+        response_text: String,
+    ) -> &mut ConversationTurnFooterPolicy {
+        let stale = self.footer_policies.get(turn).is_some_and(|policy| {
+            footer_policy_is_stale(policy, &settled_at, &response_text)
+        });
+        if stale {
+            self.footer_policies.remove(turn);
+        }
+        self.footer_policies.entry(turn.clone()).or_insert_with(|| {
+            ConversationTurnFooterPolicy::new(settled_at, response_text, String::new())
+        })
+    }
+
     /// Serves one footer reveal through the existing footer policy.
     ///
     /// The scene settlement supplies the timestamp and response bytes; the
@@ -636,12 +628,7 @@ impl ConversationHost {
         let Some((settled_at, response_text)) = staged else {
             return SurfaceRouteDecision::Accepted;
         };
-        let policy = self
-            .footer_policies
-            .entry(turn.clone())
-            .or_insert_with(|| {
-                ConversationTurnFooterPolicy::new(settled_at.clone(), response_text, String::new())
-            });
+        let policy = self.sync_footer_policy(&turn, settled_at.clone(), response_text);
         if policy.observe(TurnFooterInput::Hover) == TurnFooterAction::RequestClockSample {
             let age = format_relative_age(host_now_millis(), &settled_at);
             policy.set_relative_age(age.clone());
@@ -654,6 +641,10 @@ impl ConversationHost {
 
     /// Serves one footer copy through the existing footer policy and the
     /// platform clipboard, mirroring the actual outcome into the surface.
+    ///
+    /// The platform write is a void API with no failure signal, so success is
+    /// settled unconditionally and honestly: no speculative failure path is
+    /// claimed. The scene settlement supplies the bytes, never the action.
     fn route_footer_copy(
         &mut self,
         turn: TurnId,
@@ -665,12 +656,7 @@ impl ConversationHost {
         let Some((settled_at, response_text)) = staged else {
             return SurfaceRouteDecision::Accepted;
         };
-        let policy = self
-            .footer_policies
-            .entry(turn.clone())
-            .or_insert_with(|| {
-                ConversationTurnFooterPolicy::new(settled_at, response_text, String::new())
-            });
+        let policy = self.sync_footer_policy(&turn, settled_at, response_text);
         if let TurnFooterAction::CopyResponse { text } = policy.start_copy() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             policy.settle_copy(CopyOutcome::Succeeded);
@@ -774,7 +760,10 @@ impl Render for ConversationHost {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_settled_iso, host_now_millis, scene_has_active_work, settled_footer_for};
+    use super::{
+        footer_policy_is_stale, host_now_millis, iso_millis, scene_has_active_work,
+        settled_footer_for,
+    };
     use crate::conversation_relative_age::format_relative_age;
     use crate::conversation_scene::{
         ConversationScene, SceneTurn, TurnFooterSettlement, TurnNarration, TurnNarrationEntry,
@@ -803,25 +792,16 @@ mod tests {
     }
 
     #[test]
-    fn settled_iso_vectors() {
-        assert_eq!(format_settled_iso(0), "1970-01-01T00:00:00.000Z");
-        assert_eq!(format_settled_iso(1), "1970-01-01T00:00:00.001Z");
-        assert_eq!(format_settled_iso(1_000), "1970-01-01T00:00:01.000Z");
-        assert_eq!(format_settled_iso(60_000), "1970-01-01T00:01:00.000Z");
-        assert_eq!(format_settled_iso(3_600_000), "1970-01-01T01:00:00.000Z");
-        assert_eq!(format_settled_iso(86_400_000), "1970-01-02T00:00:00.000Z");
-        assert_eq!(
-            format_settled_iso(1_704_067_200_000),
-            "2024-01-01T00:00:00.000Z"
-        );
-        assert_eq!(
-            format_settled_iso(1_709_164_800_000),
-            "2024-02-29T00:00:00.000Z"
-        );
-        assert_eq!(
-            format_settled_iso(-5_000),
-            "1970-01-01T00:00:00.000Z"
-        );
+    fn settled_iso_vectors_share_the_domain_formatter() {
+        assert_eq!(iso_millis(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_millis(1), "1970-01-01T00:00:00.001Z");
+        assert_eq!(iso_millis(1_000), "1970-01-01T00:00:01Z");
+        assert_eq!(iso_millis(60_000), "1970-01-01T00:01:00Z");
+        assert_eq!(iso_millis(3_600_000), "1970-01-01T01:00:00Z");
+        assert_eq!(iso_millis(86_400_000), "1970-01-02T00:00:00Z");
+        assert_eq!(iso_millis(1_704_067_200_000), "2024-01-01T00:00:00Z");
+        assert_eq!(iso_millis(1_709_164_800_000), "2024-02-29T00:00:00Z");
+        assert_eq!(iso_millis(1_709_164_800_123), "2024-02-29T00:00:00.123Z");
     }
 
     #[test]
@@ -888,11 +868,32 @@ mod tests {
         assert!(scene.set_turn_footer_settlement(&turn_id("turn_a"), settlement));
         assert_eq!(
             settled_footer_for(&scene, &turn_id("turn_a")),
-            Some((
-                "2024-01-01T00:00:00.000Z".to_owned(),
-                "hello".to_owned()
-            ))
+            Some(("2024-01-01T00:00:00Z".to_owned(), "hello".to_owned()))
         );
+    }
+
+    #[test]
+    fn stale_policy_facts_retire_on_revision() {
+        let policy = ConversationTurnFooterPolicy::new(
+            "2024-01-01T00:00:00Z",
+            "hello",
+            String::new(),
+        );
+        assert!(!footer_policy_is_stale(
+            &policy,
+            "2024-01-01T00:00:00Z",
+            "hello"
+        ));
+        assert!(footer_policy_is_stale(
+            &policy,
+            "2024-01-01T00:00:00Z",
+            "revised reply"
+        ));
+        assert!(footer_policy_is_stale(
+            &policy,
+            "2024-01-01T00:01:00Z",
+            "hello"
+        ));
     }
 
     #[test]
