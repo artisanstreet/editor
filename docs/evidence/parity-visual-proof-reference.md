@@ -78,10 +78,12 @@ conversation column are.
 5. Each capture publishes `geometry … requested=… actual=… scale=…
    sidebar=218 titlebar=48 content={actual window - rail}
    inspector={shown|hidden} title="Parity proof thread"`, a `manifest …`
-   line (published title, composer draft + attachment count read back from
-   the live entities, projected block order), and a `paint … quads=N`
-   line. Zero painted quads fails the capture outright: no image is
-   accepted from dimensions alone. Requested is never labeled actual.
+   line (published title, composer attachment count read back from the
+   live entity, projected block order — draft content has no
+   production-visible accessor outside tests, so it is omitted rather
+   than faked), and a `paint … quads=N` line. Zero painted quads fails
+   the capture outright: no image is accepted from dimensions alone.
+   Requested is never labeled actual.
 
 ## Seeding path (production, projection contract `fd6f3aa0`)
 

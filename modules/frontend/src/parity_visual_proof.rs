@@ -457,18 +457,18 @@ fn seed_case(
 }
 
 /// Prints the text manifest bound to one capture: the published thread
-/// title plus the composer draft and attachment count read back from the
-/// live entities. These are inputs and projection output, honestly labeled:
-/// pixel presence stays root's comparison, but a capture is rejected when
-/// its manifest or painted-quad count is wrong before pixels matter.
+/// title plus the composer attachment count read back from the live
+/// entity. Draft content has no production-visible accessor outside tests
+/// (`draft()` is `cfg(test)`), so the manifest omits it rather than faking
+/// a check. Pixel presence stays root's comparison, but a capture is
+/// rejected when its manifest or painted-quad count is wrong before pixels
+/// matter.
 fn print_proof_manifest(screen: &Entity<ThreadScreen>, stem: &str, cx: &mut App) {
     let composer = screen.read(cx).composer().clone();
-    let state = composer.read(cx);
+    let attachments = composer.read(cx).attachment_count();
     println!(
         "parity-proof manifest {stem}: title={PROOF_THREAD_TITLE:?} \
-         composer_draft={:?} composer_attachments={}",
-        state.draft(),
-        state.attachment_count(),
+         composer_attachments={attachments}"
     );
 }
 
@@ -680,9 +680,10 @@ fn parse_selection(args: &[String]) -> Result<ProofCapture, String> {
 /// unfocused, then poll — `Window::resize` (the `show: false` open stores
 /// bounds without applying them, leaving CW_USEDEFAULT) until platform
 /// bounds match, syncing gpui-side scale/viewport via `bounds_changed` —
-/// publish the live content width, `Window::draw` (produces
-/// `rendered_frame` without presenting), `Window::render_to_image` of that
-/// scene, `ArenaClearNeeded::clear` on the same context, save, quit.
+/// publish the live content width, then settle the frame with bounded
+/// refreshed redraws and yields: `Window::draw` (no present),
+/// `Window::render_to_image` of the final refreshed frame,
+/// `ArenaClearNeeded::clear` on the same context, save, quit.
 /// Requires `Window::render_to_image` (root-owned `test-support`
 /// enablement) and the capture lane's shipping-wgpu readback.
 #[must_use]
@@ -811,10 +812,11 @@ pub fn run() -> ExitCode {
                                     // reuse incomplete cached paint while the
                                     // async asset/text pipeline lands (seen as
                                     // missing title/composer glyphs with
-                                    // shapes intact). Refresh plus bounded
-                                    // redraws with yields between, then the
-                                    // capture draw — all through the
-                                    // production renderer, no present.
+                                    // shapes intact). Every pass refreshes and
+                                    // redraws with yields between; the capture
+                                    // reads the final refreshed frame
+                                    // directly — no second draw without a
+                                    // refresh in between.
                                     window.refresh();
                                     let arena = window.draw(cx);
                                     arena.clear(cx);
@@ -832,14 +834,10 @@ pub fn run() -> ExitCode {
                                         content_width,
                                     );
                                     print_proof_manifest(&screen, &stem, cx);
-                                    // Synchronous frame with no present, then
-                                    // the shipping wgpu readback of that
-                                    // scene, then the arena release on the
-                                    // same context.
-                                    let arena = window.draw(cx);
+                                    // The shipping wgpu readback of the final
+                                    // refreshed frame above, then save.
                                     let quads = window.painted_quads().len();
                                     let capture_result = window.render_to_image();
-                                    arena.clear(cx);
                                     println!(
                                         "parity-proof paint {stem}: quads={quads}"
                                     );
