@@ -12,9 +12,11 @@ use artisan_ui::selectable_text::{
 };
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    Context, FocusHandle, HighlightStyle, IntoElement, Modifiers, Render, TestAppContext, Window,
-    div, px,
+    Context, FocusHandle, FontStyle, FontWeight, HighlightStyle, IntoElement, Modifiers, Pixels,
+    Point, Render, TestAppContext, VisualTestContext, Window, div, point, px,
 };
+use std::cell::Cell;
+use std::rc::Rc;
 
 const BODY: &str = "hello world";
 const EMOJI_BODY: &str = "a💡b";
@@ -170,8 +172,7 @@ fn merge_passes_plain_ranges_through_and_selection_wins_overlaps() {
 }
 
 #[test]
-fn keystroke_predicates_match_copy_and_select_all_only() {
-    assert!(is_copy_keystroke("c", &modifiers(true, false, false, false)));
+fn keystroke_predicates_match_copy_and_select_all_only() {    assert!(is_copy_keystroke("c", &modifiers(true, false, false, false)));
     assert!(is_copy_keystroke("C", &modifiers(false, true, false, false)));
     assert!(is_select_all_keystroke("a", &modifiers(true, false, false, false)));
     assert!(is_select_all_keystroke("A", &modifiers(false, true, false, false)));
@@ -183,6 +184,78 @@ fn keystroke_predicates_match_copy_and_select_all_only() {
     assert!(!is_select_all_keystroke("a", &modifiers(false, false, false, false)));
     assert!(!is_select_all_keystroke("a", &modifiers(true, false, true, false)));
     assert!(!is_select_all_keystroke("c", &modifiers(true, false, false, false)));
+}
+
+#[test]
+fn merge_overlays_wash_preserving_nested_weight_and_style() {
+    let theme = ArtisanTheme::for_mode(ThemeMode::Light);
+    let wash = selection_style_for_theme(theme);
+    let bold = HighlightStyle {
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    let italic = HighlightStyle {
+        font_style: Some(FontStyle::Italic),
+        ..Default::default()
+    };
+    let bold_wash = HighlightStyle {
+        color: wash.color,
+        background_color: wash.background_color,
+        ..bold
+    };
+    let italic_wash = HighlightStyle {
+        color: wash.color,
+        background_color: wash.background_color,
+        ..italic
+    };
+
+    let text = "01234567890";
+    let base = vec![(0..11, bold), (4..7, italic)];
+    let merged = merge_selection_highlight(text, base, Some(2..9), &wash);
+
+    assert_eq!(
+        merged,
+        vec![
+            (0..2, bold),
+            (2..4, bold_wash),
+            (4..7, italic_wash),
+            (7..9, bold_wash),
+            (9..11, bold),
+        ]
+    );
+}
+
+#[test]
+fn same_length_replacement_clears_selection() {
+    let state = SelectableTextState::new();
+    state.validate_for_text("abc");
+    state.select_all();
+    assert_eq!(state.selection_range(), Some(0..3));
+
+    // Same byte count, different content: the old range must not survive.
+    state.validate_for_text("abd");
+    assert!(!state.has_selection());
+    assert_eq!(state.selection_range(), None);
+    assert_eq!(state.selected_text("abd"), "");
+}
+
+#[test]
+fn live_selection_tracks_drag_head_before_release() {
+    let state = SelectableTextState::new();
+    state.validate_for_text(BODY);
+
+    state.begin_drag(2);
+    assert_eq!(state.selection_range(), None);
+
+    state.update_drag(8);
+    assert!(state.is_dragging());
+    assert_eq!(state.selection_range(), Some(2..8));
+    assert_eq!(state.selected_text(BODY), "llo wo");
+    assert!(state.suppresses_click());
+    assert_eq!(state.copy_text(BODY), Some("llo wo".to_owned()));
+
+    assert!(state.end_drag(BODY));
+    assert_eq!(state.selection_range(), Some(2..8));
 }
 
 struct SelectionProbe {
@@ -284,4 +357,186 @@ fn unfocused_copy_shortcut_leaves_clipboard_alone(cx: &mut TestAppContext) {
             .and_then(gpui::ClipboardItem::text)
     });
     assert_eq!(copied, None);
+}
+
+struct RetainedProbe {
+    text: String,
+    with_link: bool,
+    fired: Rc<Cell<(u32, usize)>>,
+}
+
+impl RetainedProbe {
+    fn new(_cx: &mut Context<Self>, text: &str, with_link: bool) -> Self {
+        Self {
+            text: text.to_owned(),
+            with_link,
+            fired: Rc::new(Cell::new((0, 0))),
+        }
+    }
+}
+
+impl Render for RetainedProbe {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let element = SelectableText::retained(
+            "retained-text",
+            self.text.clone(),
+            ArtisanTheme::for_mode(ThemeMode::Light),
+            Vec::new(),
+        );
+        let element = if self.with_link {
+            let fired = self.fired.clone();
+            let range = 0..self.text.len();
+            element.links(vec![range], move |range_index, _, _| {
+                let (count, _) = fired.get();
+                fired.set((count + 1, range_index));
+            })
+        } else {
+            element
+        };
+        div()
+            .w(px(400.0))
+            .debug_selector(|| "retained-wrap".to_owned())
+            .child(element)
+    }
+}
+
+/// Resolves drag points inside the painted text line: just inside the left
+/// edge, just inside the right wrapper edge (past the line end, so the head
+/// clamps to the text end regardless of font metrics), and mid-line.
+fn retained_points(cx: &mut VisualTestContext) -> (Point<Pixels>, Point<Pixels>, Point<Pixels>) {
+    let bounds = cx
+        .debug_bounds("retained-wrap")
+        .expect("retained wrap must paint");
+    let left = point(bounds.origin.x + px(1.0), bounds.origin.y + px(10.0));
+    let right = point(
+        bounds.origin.x + px(399.0),
+        bounds.origin.y + px(10.0),
+    );
+    let inside = point(
+        bounds.origin.x + px(10.0),
+        bounds.origin.y + px(10.0),
+    );
+    (left, right, inside)
+}
+
+fn read_clipboard(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|_, app| {
+        app.read_from_clipboard()
+            .as_ref()
+            .and_then(gpui::ClipboardItem::text)
+    })
+}
+
+#[gpui::test]
+fn retained_drag_selects_live_range_before_mouse_up(cx: &mut TestAppContext) {
+    let (_view, cx) = cx.add_window_view(|_, cx| RetainedProbe::new(cx, BODY, false));
+    cx.run_until_parked();
+    let (left, right, _) = retained_points(cx);
+
+    cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(right, gpui::MouseButton::Left, Modifiers::default());
+    // No mouse-up yet: copying must serve the live drag range.
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+
+    assert_eq!(read_clipboard(cx), Some(BODY.to_owned()));
+
+    cx.simulate_mouse_up(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn retained_drag_finalizes_on_release_then_copies(cx: &mut TestAppContext) {
+    let (_view, cx) = cx.add_window_view(|_, cx| RetainedProbe::new(cx, BODY, false));
+    cx.run_until_parked();
+    let (left, right, _) = retained_points(cx);
+
+    cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+
+    assert_eq!(read_clipboard(cx), Some(BODY.to_owned()));
+}
+
+#[gpui::test]
+fn retained_streaming_text_change_resets_selection(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| RetainedProbe::new(cx, BODY, false));
+    cx.run_until_parked();
+    let (left, right, _) = retained_points(cx);
+
+    cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+
+    cx.update(|_, app| {
+        view.update(app, |probe, _| {
+            probe.text = "revised".to_owned();
+        });
+    });
+    cx.run_until_parked();
+
+    // The press focused the retained handle, so this copy would serve the
+    // old bytes if the fingerprint reset had not cleared them.
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+    assert_eq!(read_clipboard(cx), None);
+
+    // The element stays healthy: select-all copies the revised text.
+    cx.simulate_keystrokes("ctrl-a");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+    assert_eq!(read_clipboard(cx), Some("revised".to_owned()));
+}
+
+#[gpui::test]
+fn retained_link_click_fires_on_clean_press(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| RetainedProbe::new(cx, BODY, true));
+    cx.run_until_parked();
+    let (_, _, inside) = retained_points(cx);
+
+    cx.simulate_mouse_down(inside, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(inside, gpui::MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+
+    cx.update(|_, app| {
+        assert_eq!(view.read(app).fired.get(), (1, 0));
+    });
+}
+
+#[gpui::test]
+fn retained_link_drag_suppresses_activation(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| RetainedProbe::new(cx, BODY, true));
+    cx.run_until_parked();
+    let (left, right, _) = retained_points(cx);
+
+    cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(right, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+
+    cx.update(|_, app| {
+        assert_eq!(view.read(app).fired.get(), (0, 0));
+    });
+    assert_eq!(read_clipboard(cx), Some(BODY.to_owned()));
+}
+
+#[gpui::test]
+fn retained_click_focuses_then_keyboard_selects_all(cx: &mut TestAppContext) {
+    let (_view, cx) = cx.add_window_view(|_, cx| RetainedProbe::new(cx, BODY, false));
+    cx.run_until_parked();
+    let (_, _, inside) = retained_points(cx);
+
+    cx.simulate_mouse_down(inside, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(inside, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_keystrokes("ctrl-a");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-c");
+    cx.run_until_parked();
+
+    assert_eq!(read_clipboard(cx), Some(BODY.to_owned()));
 }
