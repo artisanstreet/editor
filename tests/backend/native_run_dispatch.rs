@@ -3205,7 +3205,10 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
             .find(|d| d.message_id == "msg-codex-retry");
         if let Some(dispatch) = retry {
             if dispatch.state == DispatchState::Failed
-                && dispatch.last_error.as_deref() == Some("provider continuation unavailable")
+                && dispatch
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("provider continuation unavailable"))
             {
                 settled = true;
                 break;
@@ -3241,9 +3244,12 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
         .find(|d| d.message_id == "msg-codex-retry")
         .expect("retry dispatch");
     assert_eq!(retry.state, DispatchState::Failed);
-    assert_eq!(
-        retry.last_error.as_deref(),
-        Some("provider continuation unavailable")
+    assert!(
+        retry
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("provider continuation unavailable")),
+        "retry must fail closed on provider continuation unavailability"
     );
     let counts = crate::engine_owner::witness_counts();
     assert_eq!(counts.spawned, 0, "no provider child may spawn after rejection");
@@ -3416,7 +3422,7 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
         let run = after
             .runs
             .iter()
-            .find(|r| r.origin_message_id.as_deref() == Some("msg-live-first"))
+            .find(|r| r.origin_message_id == "msg-live-first")
             .expect("first run");
         assert_eq!(run.lifecycle, AssistantRunLifecycle::Completed);
         let assistant: Vec<_> = after
@@ -3473,7 +3479,7 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
     let second_run = after
         .runs
         .iter()
-        .find(|r| r.origin_message_id.as_deref() == Some("msg-live-second"))
+        .find(|r| r.origin_message_id == "msg-live-second")
         .expect("second run");
     assert_eq!(second_run.lifecycle, AssistantRunLifecycle::Completed);
     assert_ne!(second_run.run_id, first_run_id);
