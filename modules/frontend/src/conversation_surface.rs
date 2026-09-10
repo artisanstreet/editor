@@ -766,13 +766,6 @@ pub struct ConversationSurface {
     /// the tick column paints, so full message texts never float beside the
     /// transcript.
     navigator_expanded: bool,
-    /// Transcript end-space height in px, measured live from prepaint.
-    ///
-    /// Starts at the reference base and converges through
-    /// [`end_space_height`] as frames measure the last turn against the
-    /// viewport. The change guard in the observer is what keeps this from
-    /// looping: equal values never notify.
-    end_space_px: f32,
     /// Host-mirrored frame time in millis for live Thinking/Working elapsed.
     ///
     /// This is a paint-time mirror only: the surface never reads a clock and
@@ -1133,7 +1126,6 @@ impl ConversationSurface {
             scroll_anchor_paint_token: None,
             navigator_focus: HashMap::new(),
             navigator_expanded: false,
-            end_space_px: TRANSCRIPT_END_SPACE_PX,
             active_now_ms: None,
             status_motion: MotionPolicy::Full,
             footer_mirrors: HashMap::new(),
@@ -1762,49 +1754,35 @@ impl ConversationSurface {
         true
     }
 
-    /// Observes live end-space geometry from the prepaint boundary.
+    /// Measures end-space height from live prepaint geometry, if measurable.
     ///
-    /// `children_bounds` holds every transcript child in order with the
-    /// spacer last, so all but the last entry are turns and the last entry
-    /// is the spacer itself. The last turn anchors the formula; an empty
-    /// transcript resets to the base. Origins cancel the element offset by
-    /// subtraction, exactly like the painted scroll-offset path, so window
-    /// and content spaces agree. Non-finite measurements are ignored, and an
-    /// unchanged value never notifies, so this converges instead of looping.
-    fn observe_end_space_geometry(
-        &mut self,
+    /// Pure over its inputs: `children_bounds` holds every transcript child
+    /// in order with the spacer last, so all but the last entry are turns
+    /// and the last entry is the spacer itself. The last turn anchors the
+    /// formula; an empty transcript yields `None` and the caller keeps
+    /// whatever its window state holds. Origins cancel the element offset
+    /// by subtraction, exactly like the painted scroll-offset path, so
+    /// window and content spaces agree.
+    fn measured_end_space_height(
         children_bounds: &[gpui::Bounds<gpui::Pixels>],
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        let viewport_height = f64::from(self.scroll_handle.bounds().size.height);
-        let offset = f64::from(window.element_offset().y);
-        let base = f64::from(TRANSCRIPT_END_SPACE_PX);
-        let measured = match children_bounds.split_last() {
-            Some((_, [])) | None => base,
-            Some((_, turns)) => {
-                let Some(last) = turns.last() else {
-                    return;
-                };
-                let item_top = f64::from(last.origin.y) - offset;
-                let end_space_top = f64::from(
-                    children_bounds
-                        .last()
-                        .expect("split yielded a last child")
-                        .origin
-                        .y,
-                ) - offset;
-                end_space_height(viewport_height, item_top, end_space_top)
-            }
-        };
+        viewport_height: f64,
+        element_offset_y: f64,
+    ) -> Option<f32> {
+        let (_, turns) = children_bounds.split_last()?;
+        let last = turns.last()?;
+        let item_top = f64::from(last.origin.y) - element_offset_y;
+        let end_space_top = f64::from(
+            children_bounds
+                .last()
+                .expect("split yielded a last child")
+                .origin
+                .y,
+        ) - element_offset_y;
+        let measured = end_space_height(viewport_height, item_top, end_space_top);
         if !measured.is_finite() {
-            return;
+            return None;
         }
-        let measured = measured as f32;
-        if self.end_space_px != measured {
-            self.end_space_px = measured;
-            cx.notify();
-        }
+        Some(measured as f32)
     }
 
     /// Releases render-only scroll custody when the owning host retires.
@@ -4114,6 +4092,11 @@ impl Render for ConversationSurface {
         // Pure read of the live reduced-motion signal: no state writes, so
         // no notification can loop out of render.
         let status_motion = effective_status_motion(self.status_motion, cx.reduce_motion());
+        // End-space height lives in framework window-local state, not on the
+        // entity: two windows showing one surface measure different
+        // viewports, and a shared scalar could never converge for both.
+        let end_space = window.use_state(cx, |_, _| TRANSCRIPT_END_SPACE_PX);
+        let end_space_px = *end_space.read(cx);
         // Reference rhythm keeps 32 px (`gap-8`) between turn groups; the
         // settled footer's absolute reveal lives inside that room instead of
         // overlapping the next turn. No per-turn pad is added, so unsettled
@@ -4152,7 +4135,7 @@ impl Render for ConversationSurface {
             transcript = transcript.child(
                 div()
                     .w_full()
-                    .h(px(self.end_space_px))
+                    .h(px(end_space_px))
                     .debug_selector(|| TRANSCRIPT_END_SPACE_SELECTOR.to_owned()),
             );
         }
@@ -4172,19 +4155,43 @@ impl Render for ConversationSurface {
         let paint_token = Rc::new(());
         self.scroll_anchor_paint_token = Some(paint_token.clone());
         let surface = entity.downgrade();
+        let end_space_state = end_space.clone();
         // Painted custody comes from the real prepaint boundary. GPUI writes
         // each retained anchor origin during Div prepaint, and this listener
         // runs after the transcript children are prepainted. A defer marker
         // is not paint evidence and must never mint painted custody.
         transcript = transcript.on_children_prepainted(move |children_bounds, window, app| {
             let _ = surface.update(app, |surface, cx| {
-                surface.observe_end_space_geometry(&children_bounds, window, cx);
                 let current = surface
                     .scroll_anchor_paint_token
                     .as_ref()
                     .is_some_and(|current| Rc::ptr_eq(current, &paint_token));
                 if !current {
                     return;
+                }
+
+                // End-space measurement is window-local state, written only
+                // by the current frame: two windows sharing one surface
+                // converge independently, and an unchanged value never
+                // notifies, so neither window can loop the other.
+                let viewport_height =
+                    f64::from(surface.scroll_handle.bounds().size.height);
+                let offset = f64::from(window.element_offset().y);
+                if let Some(measured) =
+                    ConversationSurface::measured_end_space_height(
+                        &children_bounds,
+                        viewport_height,
+                        offset,
+                    )
+                {
+                    let changed = end_space_state.update(cx, |value, _| {
+                        let changed = *value != measured;
+                        *value = measured;
+                        changed
+                    });
+                    if changed {
+                        cx.notify();
+                    }
                 }
 
                 let mut newly_painted = false;
