@@ -89,6 +89,12 @@ pub struct SceneFact {
     /// It orders activity without fabricating time; elapsed evidence still
     /// derives from the canonical turn's own creation/update times.
     pub observed_at_ms: Option<i64>,
+    /// Whether this fact is derived from retained engine observations.
+    ///
+    /// Derived activity facts are rebased atomically when canonical delivery
+    /// growth reuses their ordinal; manually registered facts keep
+    /// conflict-on-collision semantics.
+    pub derived: bool,
 }
 
 impl fmt::Debug for SceneFact {
@@ -100,6 +106,7 @@ impl fmt::Debug for SceneFact {
             .field("ordinal", &self.ordinal)
             .field("kind", &self.kind)
             .field("observed_at_ms", &self.observed_at_ms)
+            .field("derived", &self.derived)
             .finish()
     }
 }
@@ -124,6 +131,7 @@ impl SceneFact {
             ordinal,
             kind,
             observed_at_ms: None,
+            derived: false,
         };
         fact.as_scene_item(None)?;
         Ok(fact)
@@ -145,6 +153,25 @@ impl SceneFact {
     #[must_use]
     pub const fn observed_at_ms(&self) -> Option<i64> {
         self.observed_at_ms
+    }
+
+    /// Marks this fact as derived from retained engine observations.
+    ///
+    /// Derived activity facts are rebased atomically when canonical delivery
+    /// growth reuses their ordinal. It does not change the fact identity,
+    /// owning turn, ordinal, kind, or timing.
+    #[must_use]
+    pub fn with_derived(self) -> Self {
+        Self {
+            derived: true,
+            ..self
+        }
+    }
+
+    /// Returns whether this fact is derived from retained engine observations.
+    #[must_use]
+    pub const fn derived(&self) -> bool {
+        self.derived
     }
 
     fn as_scene_item(
@@ -1186,9 +1213,7 @@ impl ConversationStateController {
     /// reassignment, conflicting fact identity, invalid scene data, or
     /// exhausted capacity.
     pub fn upsert_fact(&mut self, fact: SceneFact) -> Result<(), ConversationStateError> {
-        self.dispatch(ConversationStateEvent::Fact(SceneFactCommand::Upsert(
-            fact,
-        )))
+        self.dispatch(ConversationStateEvent::Fact(SceneFactCommand::Upsert(fact)))
     }
 
     /// Closes delivery and the sole viewport owner. The close operation is
@@ -1424,29 +1449,190 @@ impl ConversationStateController {
         &mut self,
         event: &ConversationDeliveryEvent,
     ) -> Result<(), ConversationStateError> {
-        match event {
+        // Derived activity facts own ordinals above the durable watermark at
+        // project time, but later canonical growth can reuse those ordinals.
+        // Rebase colliding derived facts atomically with acceptance: plan
+        // without mutating, reserve ALL effect room (rebase invalidation plus
+        // the delivery child's worst case) before touching the registry, then
+        // validate with rollback. Every refusal below — validation, capacity,
+        // or a refused delivery dispatch — leaves ordinals and effects
+        // untouched. Stable ids, turns, and timing never move, and manually
+        // registered facts keep conflict-on-collision semantics.
+        let rebase = self.plan_derived_rebase(event)?;
+        let rebase_effects = usize::from(!rebase.is_empty());
+        self.ensure_effect_capacity(rebase_effects.saturating_add(MAX_DELIVERY_EFFECTS_PER_EVENT))?;
+        let saved: Vec<(SceneId, u64)> = rebase
+            .iter()
+            .filter_map(|(id, _)| self.facts.get(id).map(|fact| (id.clone(), fact.ordinal)))
+            .collect();
+        for (id, ordinal) in &rebase {
+            if let Some(fact) = self.facts.get_mut(id) {
+                fact.ordinal = *ordinal;
+            }
+        }
+        if let Err(error) = match event {
             ConversationDeliveryEvent::SnapshotReceived(snapshot) => {
-                self.validate_snapshot_for_scene(snapshot)?;
+                self.validate_snapshot_for_scene(snapshot)
             }
-            ConversationDeliveryEvent::BatchReceived(batch) => {
-                self.validate_batch_for_scene(batch)?;
-            }
+            ConversationDeliveryEvent::BatchReceived(batch) => self.validate_batch_for_scene(batch),
             ConversationDeliveryEvent::SubscriptionResumed { .. }
             | ConversationDeliveryEvent::RetryRequested
-            | ConversationDeliveryEvent::Closed => {}
+            | ConversationDeliveryEvent::Closed => Ok(()),
+        } {
+            self.restore_fact_ordinals(&saved);
+            return Err(error);
         }
-        self.ensure_effect_capacity(MAX_DELIVERY_EFFECTS_PER_EVENT)?;
+        let rebase_effect_index = if rebase.is_empty() {
+            None
+        } else {
+            let index = self.effects.len();
+            self.push_effect(ConversationStateEffect::SceneInvalidated);
+            Some(index)
+        };
+        // The delivery child reports projection refusals (stale cursor,
+        // rejected snapshot, thread mismatch) as `Ok` plus a `ReportRefusal`
+        // effect, so dispatch success alone does not prove acceptance. Only
+        // an advanced canonical snapshot keeps the speculative ordinals.
+        let before = if rebase.is_empty() {
+            None
+        } else {
+            self.delivery.snapshot().cloned()
+        };
         match self.delivery.dispatch(event) {
             Ok(()) => {
                 self.push_delivery_effects();
-                self.synchronize_turn_controllers();
+                if !rebase.is_empty() && self.delivery.snapshot() != before.as_ref() {
+                    self.restore_fact_ordinals(&saved);
+                    if let Some(index) = rebase_effect_index {
+                        self.effects.remove(index);
+                    }
+                } else {
+                    self.synchronize_turn_controllers();
+                }
                 Ok(())
             }
             Err(error) => {
+                self.restore_fact_ordinals(&saved);
+                if let Some(index) = rebase_effect_index {
+                    self.effects.remove(index);
+                }
                 self.push_delivery_effects();
                 Err(ConversationStateError::Delivery(error))
             }
         }
+    }
+
+    /// Restores fact ordinals saved before a speculative rebase.
+    ///
+    /// Only ordinals move, so replaying the saved values returns the
+    /// registry to its exact pre-delivery shape after any refusal.
+    fn restore_fact_ordinals(&mut self, saved: &[(SceneId, u64)]) {
+        for (id, ordinal) in saved {
+            if let Some(fact) = self.facts.get_mut(id) {
+                fact.ordinal = *ordinal;
+            }
+        }
+    }
+
+    /// Plans new ordinals for derived facts colliding with incoming delivery.
+    ///
+    /// Returns `(fact id, new ordinal)` pairs in deterministic scene-id
+    /// order. Only derived facts whose ordinal canonical growth reuses are
+    /// listed; ids, turns, kinds, and timing are never replanned. Targets sit
+    /// above the current snapshot durable maximum, the incoming watermark,
+    /// and every retained fact ordinal, so one pass cannot collide with
+    /// durable state or with another fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError::CapacityExhausted`] when ordinal
+    /// assignment overflows, so no two facts can share `u64::MAX`.
+    fn plan_derived_rebase(
+        &self,
+        event: &ConversationDeliveryEvent,
+    ) -> Result<Vec<(SceneId, u64)>, ConversationStateError> {
+        let incoming_ordinals: BTreeSet<u64> = match event {
+            ConversationDeliveryEvent::SnapshotReceived(snapshot) => {
+                if snapshot.thread_id() != self.thread_id() {
+                    return Ok(Vec::new());
+                }
+                snapshot
+                    .turns()
+                    .iter()
+                    .map(|turn| turn.ordinal.get())
+                    .chain(snapshot.items().iter().map(|item| item.ordinal().get()))
+                    .collect()
+            }
+            ConversationDeliveryEvent::BatchReceived(batch) => {
+                if batch.thread_id() != self.thread_id() {
+                    return Ok(Vec::new());
+                }
+                batch
+                    .patches()
+                    .iter()
+                    .filter_map(|patch| match patch {
+                        ConversationPatch::TurnUpsert { turn, .. } => Some(turn.ordinal.get()),
+                        ConversationPatch::ItemUpsert { item, .. } => Some(item.ordinal().get()),
+                        ConversationPatch::ItemAppend { .. }
+                        | ConversationPatch::ItemLifecycle { .. }
+                        | ConversationPatch::TurnLifecycle { .. } => None,
+                    })
+                    .collect()
+            }
+            ConversationDeliveryEvent::SubscriptionResumed { .. }
+            | ConversationDeliveryEvent::RetryRequested
+            | ConversationDeliveryEvent::Closed => return Ok(Vec::new()),
+        };
+        if incoming_ordinals.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut colliding: Vec<&SceneId> = self
+            .facts
+            .values()
+            .filter(|fact| fact.derived && incoming_ordinals.contains(&fact.ordinal))
+            .map(|fact| &fact.id)
+            .collect();
+        if colliding.is_empty() {
+            return Ok(Vec::new());
+        }
+        colliding.sort();
+        let current_durable_max: u64 = self
+            .delivery
+            .snapshot()
+            .map(|snapshot| {
+                snapshot
+                    .turns()
+                    .iter()
+                    .map(|turn| turn.ordinal.get())
+                    .chain(snapshot.items().iter().map(|item| item.ordinal().get()))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let ceiling = incoming_ordinals
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .max(current_durable_max)
+            .max(
+                self.facts
+                    .values()
+                    .map(|fact| fact.ordinal)
+                    .max()
+                    .unwrap_or(0),
+            );
+        let overflow = || ConversationStateError::CapacityExhausted {
+            resource: CapacityResource::SceneFacts,
+            count: MAX_SCENE_FACTS.saturating_add(1),
+            maximum: MAX_SCENE_FACTS,
+        };
+        let mut next = ceiling.checked_add(1).ok_or_else(overflow)?;
+        let mut plan = Vec::with_capacity(colliding.len());
+        for id in colliding {
+            plan.push(((*id).clone(), next));
+            next = next.checked_add(1).ok_or_else(overflow)?;
+        }
+        Ok(plan)
     }
 
     /// Synchronizes delivery-owned turn controllers with the last-good snapshot.
@@ -1701,6 +1887,7 @@ impl ConversationStateController {
                 ordinal: existing.ordinal,
                 kind: fact.kind.clone(),
                 observed_at_ms: fact.observed_at_ms,
+                derived: fact.derived,
             };
             kept.as_scene_item(None)
                 .map_err(ConversationStateError::Scene)?;
@@ -1719,14 +1906,18 @@ impl ConversationStateController {
                 });
             }
             if snapshot_uses_ordinal(snapshot, kept.ordinal) {
-                return Err(ConversationStateError::SceneConflict { id: kept.id.clone() });
+                return Err(ConversationStateError::SceneConflict {
+                    id: kept.id.clone(),
+                });
             }
             if snapshot
                 .items()
                 .iter()
                 .any(|durable| durable.item_id().as_str() == kept.id.as_str())
             {
-                return Err(ConversationStateError::SceneConflict { id: kept.id.clone() });
+                return Err(ConversationStateError::SceneConflict {
+                    id: kept.id.clone(),
+                });
             }
             self.ensure_effect_capacity(1)?;
             self.facts.insert(kept.id.clone(), kept);

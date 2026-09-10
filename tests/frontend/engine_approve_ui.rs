@@ -47,6 +47,7 @@ fn event(observation: Observation) -> EngineObservationEvent {
     EngineObservationEvent {
         thread_id: thread_id(),
         observation,
+        attribution: None,
     }
 }
 

@@ -13,7 +13,9 @@
 
 #![forbid(unsafe_code)]
 
-use artisan_domain::{ConversationSnapshot, IdentifierError, ThreadId, TurnId, account_usage::iso_millis};
+use artisan_domain::{
+    ConversationSnapshot, IdentifierError, ThreadId, TurnId, account_usage::iso_millis,
+};
 use artisan_ui::theme::ThemeMode;
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, Render, Subscription,

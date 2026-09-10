@@ -50,6 +50,7 @@ fn event(observation: Observation) -> EngineObservationEvent {
     EngineObservationEvent {
         thread_id: thread_id(),
         observation,
+        attribution: None,
     }
 }
 
@@ -572,6 +573,7 @@ fn reconnect_replay_applies_in_cursor_order_with_dedup() {
             EngineObservationEvent {
                 thread_id: other_thread_id(),
                 observation: approval_requested(),
+                attribution: None,
             },
         ),
         (0_u64, event(approval_requested())),
@@ -588,6 +590,7 @@ fn stale_threads_and_zero_cursors_change_nothing() {
     let foreign = EngineObservationEvent {
         thread_id: other_thread_id(),
         observation: approval_requested(),
+        attribution: None,
     };
     assert!(matches!(
         presentation.apply(1, &foreign),
@@ -854,6 +857,7 @@ fn uni_delivery_accepts_engine_observation_events() {
             event: Event::EngineObservation(EngineObservationEvent {
                 thread_id: thread_id(),
                 observation: approval_requested(),
+                attribution: None,
             }),
         }),
     };

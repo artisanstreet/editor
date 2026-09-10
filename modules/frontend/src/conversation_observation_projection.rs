@@ -101,7 +101,10 @@ pub fn stable_timeline_fact_id(
     tag: &str,
     delivery_sequence: u64,
 ) -> Option<SceneId> {
-    let text = format!("obs-{}-{tag}-{sequence}-{delivery_sequence}", run_id.as_str());
+    let text = format!(
+        "obs-{}-{tag}-{sequence}-{delivery_sequence}",
+        run_id.as_str()
+    );
     if text.len() > SCENE_ID_MAX_BYTES {
         return None;
     }
@@ -222,19 +225,16 @@ pub fn project_activities(
             rejected += 1;
             continue;
         };
-        let mut body = format!("tool {} {}", row.tool_name(), row.action().as_str());
-        if let Some(detail) = row.detail() {
-            body.push_str(": ");
-            body.push_str(detail);
-        }
+        let body = match row.detail() {
+            Some(detail) => truncate_bounded(detail, MAX_ACTIVITY_BODY_BYTES),
+            None => truncate_bounded(row.tool_name(), MAX_ACTIVITY_BODY_BYTES),
+        };
         candidates.push(Candidate {
             id,
             turn: turn.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
-            kind: CandidateKind::Activity {
-                body: truncate_bounded(&body, MAX_ACTIVITY_BODY_BYTES),
-            },
+            kind: CandidateKind::Activity { body },
         });
     }
 
@@ -261,16 +261,10 @@ pub fn project_activities(
         };
         let kind = match row.state() {
             artisan_domain::TerminalActivityState::Failed => CandidateKind::Error {
-                message: truncate_bounded(
-                    &terminal_summary(row.command(), row.exit_code()),
-                    MAX_ACTIVITY_BODY_BYTES,
-                ),
+                message: terminal_body(row),
             },
             _ => CandidateKind::Activity {
-                body: truncate_bounded(
-                    &terminal_summary(row.command(), row.exit_code()),
-                    MAX_ACTIVITY_BODY_BYTES,
-                ),
+                body: terminal_body(row),
             },
         };
         candidates.push(Candidate {
@@ -364,9 +358,7 @@ pub fn project_activities(
             continue;
         }
         let sequence = row.sequence().unwrap_or(delivery_sequence);
-        let Some(id) =
-            stable_timeline_fact_id(run, sequence, row.tag(), delivery_sequence)
-        else {
+        let Some(id) = stable_timeline_fact_id(run, sequence, row.tag(), delivery_sequence) else {
             rejected += 1;
             continue;
         };
@@ -404,7 +396,10 @@ pub fn project_activities(
             rejected += 1;
             continue;
         };
-        facts.push(fact.with_observed_at_ms(candidate.committed_at_ms));
+        facts.push(
+            fact.with_observed_at_ms(candidate.committed_at_ms)
+                .with_derived(),
+        );
     }
 
     ActivityProjection {
@@ -427,11 +422,24 @@ fn is_foreign_run(
 
 fn terminal_summary(command: Option<&str>, exit_code: Option<i32>) -> String {
     match (command, exit_code) {
-        (Some(command), Some(code)) => format!("terminal {command} (exit {code})"),
-        (Some(command), None) => format!("terminal {command}"),
-        (None, Some(code)) => format!("terminal (exit {code})"),
-        (None, None) => String::from("terminal activity"),
+        (Some(command), Some(code)) => format!("{command} (exit {code})"),
+        (Some(command), None) => command.to_owned(),
+        (None, Some(code)) => format!("activity (exit {code})"),
+        (None, None) => String::from("activity"),
     }
+}
+
+/// Returns the meaningful terminal detail: accumulated output when the
+/// provider emitted any, else the command summary. Raw machine prefixes
+/// never reach the displayed body.
+fn terminal_body(row: &crate::engine_observation_state::TerminalRow) -> String {
+    if row.output().is_empty() {
+        return truncate_bounded(
+            &terminal_summary(row.command(), row.exit_code()),
+            MAX_ACTIVITY_BODY_BYTES,
+        );
+    }
+    truncate_bounded(row.output(), MAX_ACTIVITY_BODY_BYTES)
 }
 
 fn timeline_kind(row: &TimelineRow) -> Option<CandidateKind> {
@@ -447,11 +455,9 @@ fn timeline_kind(row: &TimelineRow) -> Option<CandidateKind> {
         "compaction" => Some(CandidateKind::Compaction {
             summary: truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES),
         }),
-        "process_diagnostic" | "protocol_diagnostic" | "retry" => {
-            Some(CandidateKind::Error {
-                message: truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES),
-            })
-        }
+        "process_diagnostic" | "protocol_diagnostic" | "retry" => Some(CandidateKind::Error {
+            message: truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES),
+        }),
         _ => None,
     }
 }

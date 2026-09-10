@@ -8,19 +8,26 @@
 
 use artisan_domain::{
     AgentMessageCompletedObservation, AssistantBody, AssistantMessageItem, AssistantMessagePhase,
-    ConversationCursor, ConversationItem, ConversationLifecycle, ConversationSnapshot,
-    ConversationTurn, EngineObservationAttribution, EngineObservationEvent, ItemId, ItemOrdinal,
-    MessageBody, MessagePhase, Observation, ObservationId, ObservationSequence,
-    ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation, Revision, RunId,
-    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction,
-    ToolObservation, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
+    ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
+    ConversationSnapshot, ConversationTurn, EngineObservationAttribution, EngineObservationEvent,
+    ItemId, ItemOrdinal, MessageBody, MessagePhase, Observation, ObservationId,
+    ObservationSequence, PatchBatch, PatchId, PatchSequence, ReasoningSummaryCompletedObservation,
+    ReasoningSummaryDeltaObservation, Revision, RunId, TerminalActivityInput,
+    TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction, ToolObservation,
+    TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
-use artisan_frontend::conversation_delivery_machine::ConversationDeliveryEvent;
+use artisan_frontend::conversation_delivery_machine::{
+    ConversationDeliveryEffect, ConversationDeliveryEvent,
+};
 use artisan_frontend::conversation_observation_projection::project_activities;
-use artisan_frontend::conversation_scene::{SceneId, TurnBlock, TurnNarration as SceneTurnNarration};
-use artisan_frontend::conversation_state_machine::{
-    ConversationStateController, SceneFact, SceneFactKind,
+use artisan_frontend::conversation_scene::{
+    SceneId, TurnBlock, TurnNarration as SceneTurnNarration,
 };
+use artisan_frontend::conversation_state_machine::{
+    ConversationStateController, ConversationStateError, MAX_PENDING_EFFECTS, SceneFact,
+    SceneFactKind,
+};
+use artisan_frontend::conversation_turn_machine::TurnEvent;
 use artisan_frontend::engine_observation_state::{ApplyOutcome, EngineObservationState};
 
 const THREAD: &str = "thread-activity";
@@ -53,7 +60,12 @@ fn stamp(millis: i64) -> UnixMillis {
     UnixMillis::from_millis(millis)
 }
 
-fn attribution(run: &str, turn: &str, committed_at: i64, delivery_sequence: u64) -> EngineObservationAttribution {
+fn attribution(
+    run: &str,
+    turn: &str,
+    committed_at: i64,
+    delivery_sequence: u64,
+) -> EngineObservationAttribution {
     EngineObservationAttribution {
         run_id: run_id(run),
         turn_id: turn_id(turn),
@@ -188,18 +200,14 @@ fn controller_with_snapshot(snapshot: ConversationSnapshot) -> ConversationState
 
 fn upsert_all(controller: &mut ConversationStateController, facts: Vec<SceneFact>) {
     for fact in facts {
-        controller
-            .upsert_fact(fact)
-            .expect("activity fact upserts");
+        controller.upsert_fact(fact).expect("activity fact upserts");
     }
     let _ = controller.drain_effects();
 }
 
 fn work_bodies(controller: &ConversationStateController, turn: &str) -> Vec<String> {
     let scene = controller.scene().expect("scene builds");
-    let turn_scene = scene
-        .turn_scene(&turn_id(turn))
-        .expect("turn scene exists");
+    let turn_scene = scene.turn_scene(&turn_id(turn)).expect("turn scene exists");
     let mut bodies = Vec::new();
     for block in turn_scene.blocks() {
         if let TurnBlock::WorkGroup(group) = block {
@@ -209,7 +217,9 @@ fn work_bodies(controller: &ConversationStateController, turn: &str) -> Vec<Stri
                     | artisan_frontend::conversation_scene::WorkItem::Reasoning { body, .. } => {
                         bodies.push(body.clone());
                     }
-                    artisan_frontend::conversation_scene::WorkItem::WorkSession { title, .. } => {
+                    artisan_frontend::conversation_scene::WorkItem::WorkSession {
+                        title, ..
+                    } => {
                         bodies.push(title.clone());
                     }
                 }
@@ -234,9 +244,10 @@ fn attributed_tool_event_projects_stable_fact_into_scene() {
     );
     assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
 
-    let snapshot = snapshot(vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)], vec![
-        make_user("user_a", TURN_A, 1),
-    ]);
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
     let projection = project_activities(&state, &snapshot);
     assert_eq!(projection.facts.len(), 1);
     assert_eq!(projection.pending, 0);
@@ -249,8 +260,42 @@ fn attributed_tool_event_projects_stable_fact_into_scene() {
     let mut controller = controller_with_snapshot(snapshot);
     upsert_all(&mut controller, projection.facts);
     let bodies = work_bodies(&controller, TURN_A);
-    assert_eq!(bodies.len(), 1);
-    assert!(bodies[0].contains("read"), "unexpected body {}", bodies[0]);
+    assert_eq!(bodies, vec![String::from("read")]);
+}
+
+#[test]
+fn tool_detail_is_the_displayed_body_without_machine_prefix() {
+    let mut state = EngineObservationState::new(thread_id());
+    state.apply(
+        1,
+        &attributed_event(
+            Observation::Tool(
+                ToolObservation::new(
+                    observation_id("obs-tool-detail"),
+                    sequence(1),
+                    observation_id("tool-1"),
+                    String::from("read"),
+                    ToolAction::Completed,
+                    Some(String::from("read 42 lines")),
+                )
+                .expect("valid tool observation"),
+            ),
+            RUN_A,
+            TURN_A,
+            2_000,
+            10,
+        ),
+    );
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
+    let projection = project_activities(&state, &snapshot);
+    assert_eq!(projection.facts.len(), 1);
+    assert!(
+        matches!(&projection.facts[0].kind, SceneFactKind::Activity { body } if body == "read 42 lines"),
+        "the meaningful detail replaces the raw tool prefix"
+    );
 }
 
 #[test]
@@ -315,14 +360,23 @@ fn legacy_events_pair_but_never_project() {
     let mut state = EngineObservationState::new(thread_id());
     state.apply(
         1,
-        &legacy_event(tool_observation("obs-legacy", 1, "tool-1", ToolAction::Started)),
+        &legacy_event(tool_observation(
+            "obs-legacy",
+            1,
+            "tool-1",
+            ToolAction::Started,
+        )),
     );
     assert!(state.tool("tool-1").is_some(), "typed payload is retained");
-    let snapshot = snapshot(vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)], vec![
-        make_user("user_a", TURN_A, 1),
-    ]);
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
     let projection = project_activities(&state, &snapshot);
-    assert!(projection.facts.is_empty(), "legacy rows must not fabricate facts");
+    assert!(
+        projection.facts.is_empty(),
+        "legacy rows must not fabricate facts"
+    );
 }
 
 #[test]
@@ -404,11 +458,16 @@ fn duplicate_reasoning_deltas_upsert_one_cumulative_card() {
             11,
         ),
     );
-    let snapshot = snapshot(vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)], vec![
-        make_user("user_a", TURN_A, 1),
-    ]);
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
     let projection = project_activities(&state, &snapshot);
-    assert_eq!(projection.facts.len(), 1, "deltas must not repeat as new cards");
+    assert_eq!(
+        projection.facts.len(),
+        1,
+        "deltas must not repeat as new cards"
+    );
     assert!(
         matches!(&projection.facts[0].kind, SceneFactKind::Reasoning { body } if body == "thinking deeply."),
         "unexpected cumulative body"
@@ -444,9 +503,10 @@ fn duplicate_reasoning_deltas_upsert_one_cumulative_card() {
 }
 
 fn snapshot_for_repeat() -> ConversationSnapshot {
-    snapshot(vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)], vec![
-        make_user("user_a", TURN_A, 1),
-    ])
+    snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    )
 }
 
 #[test]
@@ -468,9 +528,10 @@ fn events_before_snapshot_replay_once_canonical_turn_exists() {
     assert!(early.facts.is_empty());
     assert_eq!(early.pending, 1);
 
-    let mounted = snapshot(vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)], vec![
-        make_user("user_a", TURN_A, 1),
-    ]);
+    let mounted = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
     let late = project_activities(&state, &mounted);
     assert_eq!(late.facts.len(), 1);
     let mut controller = controller_with_snapshot(mounted);
@@ -566,8 +627,7 @@ fn successive_tool_progress_updates_keep_card_and_settle_elapsed() {
     upsert_all(&mut controller, projection.facts);
 
     let bodies = work_bodies(&controller, TURN_A);
-    assert_eq!(bodies.len(), 1);
-    assert!(bodies[0].contains("completed"), "unexpected body {}", bodies[0]);
+    assert_eq!(bodies, vec![String::from("read")]);
 
     // Settled elapsed derives from canonical turn times, not the sequence.
     let scene = controller.scene().expect("scene builds");
@@ -658,9 +718,10 @@ fn plain_reply_projects_nothing_and_stays_provider_wait() {
             10,
         ),
     );
-    let snapshot = snapshot(vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)], vec![
-        make_user("user_a", TURN_A, 1),
-    ]);
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
     let projection = project_activities(&state, &snapshot);
     assert!(
         projection.facts.is_empty(),
@@ -684,9 +745,10 @@ fn plain_reply_projects_nothing_and_stays_provider_wait() {
 
 #[test]
 fn upsert_refuses_cross_turn_reassignment() {
-    let snapshot = snapshot(vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)], vec![
-        make_user("user_a", TURN_A, 1),
-    ]);
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
     let mut controller = controller_with_snapshot(snapshot);
     let fact = SceneFact::new(
         SceneId::parse("activity-fact").expect("valid scene id"),
@@ -734,9 +796,10 @@ fn reasoning_completion_without_delta_still_settles_public_summary() {
             10,
         ),
     );
-    let snapshot = snapshot(vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)], vec![
-        make_user("user_a", TURN_A, 1),
-    ]);
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
     let projection = project_activities(&state, &snapshot);
     assert_eq!(projection.facts.len(), 1);
     assert!(
@@ -772,13 +835,264 @@ fn failed_terminal_projects_error_card() {
             10,
         ),
     );
-    let snapshot = snapshot(vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)], vec![
-        make_user("user_a", TURN_A, 1),
-    ]);
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
     let projection = project_activities(&state, &snapshot);
     assert_eq!(projection.facts.len(), 1);
     assert!(
-        matches!(&projection.facts[0].kind, SceneFactKind::Error { .. }),
-        "failed terminals surface as error cards"
+        matches!(&projection.facts[0].kind, SceneFactKind::Error { message } if message.contains("cargo test") && !message.contains("terminal ")),
+        "failed terminals surface as error cards with meaningful detail"
     );
+}
+
+fn patch_id(value: &str) -> PatchId {
+    PatchId::parse(value).expect("valid patch id")
+}
+
+fn patch_sequence(value: u64) -> PatchSequence {
+    PatchSequence::new(value).expect("valid patch sequence")
+}
+
+/// Canonical growth that reuses the projected activity ordinal: the settled
+/// assistant takes ordinal 2 while the derived fact still owns it, and the
+/// next turn/user pair grows the window to ordinals 3 and 4.
+fn growth_batch() -> PatchBatch {
+    PatchBatch::new(
+        thread_id(),
+        ConversationCursor::new(9),
+        ConversationCursor::new(12),
+        vec![
+            ConversationPatch::ItemUpsert {
+                patch_id: patch_id("patch-assistant"),
+                sequence: patch_sequence(10),
+                item: make_assistant("assistant_a", TURN_A, 2, RUN_A),
+            },
+            ConversationPatch::TurnUpsert {
+                patch_id: patch_id("patch-turn-b"),
+                sequence: patch_sequence(11),
+                turn: make_turn(TURN_B, 3, ConversationLifecycle::Active),
+            },
+            ConversationPatch::ItemUpsert {
+                patch_id: patch_id("patch-user-b"),
+                sequence: patch_sequence(12),
+                item: make_user("user_b", TURN_B, 4),
+            },
+        ],
+    )
+    .expect("valid growth batch envelope")
+}
+
+fn snapshot_for_growth() -> ConversationSnapshot {
+    snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    )
+}
+
+/// Starts turn one with one retained attributed tool row projected and
+/// upserted, returning the observation state and the stable fact id. The
+/// derived fact owns ordinal 2.
+fn activity_setup() -> (EngineObservationState, SceneId) {
+    let mut state = EngineObservationState::new(thread_id());
+    state.apply(
+        1,
+        &attributed_event(
+            tool_observation("obs-tool-1", 1, "tool-1", ToolAction::Started),
+            RUN_A,
+            TURN_A,
+            2_000,
+            10,
+        ),
+    );
+    let base = snapshot_for_growth();
+    let projection = project_activities(&state, &base);
+    assert_eq!(projection.facts.len(), 1);
+    assert_eq!(projection.facts[0].ordinal, 2);
+    let fact_id = projection.facts[0].id.clone();
+    let mut controller = controller_with_snapshot(base.clone());
+    upsert_all(&mut controller, projection.facts);
+    assert_eq!(controller.view().scene_fact_count, 1);
+    (state, fact_id)
+}
+
+#[test]
+fn canonical_growth_rebases_derived_activity_without_conflict() {
+    let (state, fact_id) = activity_setup();
+    let mut controller = controller_with_snapshot(snapshot_for_growth());
+    let projection = project_activities(&state, &snapshot_for_growth());
+    upsert_all(&mut controller, projection.facts);
+
+    // Canonical growth reuses ordinal 2 for the settled assistant. Acceptance
+    // rebases the derived fact above the new watermark instead of refusing.
+    controller
+        .on_delivery(ConversationDeliveryEvent::BatchReceived(growth_batch()))
+        .expect("growth accepts with atomic rebase");
+    let _ = controller.drain_effects();
+    assert_eq!(controller.view().scene_fact_count, 1);
+
+    // Replaying the identical retained activity is conflict-free: the stable
+    // id upserts as a no-op with no duplicate effects, rows stay retained,
+    // and ordinals stay unique (the scene build proves the last point).
+    let grown = controller.snapshot().cloned().expect("snapshot accepted");
+    let repeat = project_activities(&state, &grown);
+    assert_eq!(repeat.facts.len(), 1);
+    assert_eq!(repeat.facts[0].id, fact_id);
+    controller
+        .upsert_fact(repeat.facts[0].clone())
+        .expect("identical replay upserts");
+    assert!(
+        controller.drain_effects().is_empty(),
+        "identical replays must be effect-quiet"
+    );
+    let scene = controller
+        .scene()
+        .expect("scene builds with unique ordinals");
+    assert_eq!(controller.view().scene_fact_count, 1);
+    assert_eq!(work_bodies(&controller, TURN_A).len(), 1);
+    assert!(
+        scene
+            .turn_scene(&turn_id(TURN_A))
+            .expect("turn scene exists")
+            .blocks()
+            .iter()
+            .any(|block| matches!(block, TurnBlock::WorkGroup(_))),
+        "the rebased card is retained through growth and replay"
+    );
+}
+
+#[test]
+fn stale_batch_with_colliding_ordinal_rolls_back_without_side_effects() {
+    let (state, fact_id) = activity_setup();
+    let mut controller = controller_with_snapshot(snapshot_for_growth());
+    let projection = project_activities(&state, &snapshot_for_growth());
+    upsert_all(&mut controller, projection.facts);
+    let scene_before = controller.scene().expect("scene builds");
+
+    // A stale batch (cursor 5 names a superseded tail) reuses ordinal 2.
+    // Delivery reports refusal as `Ok` plus `ReportRefusal`; the speculative
+    // rebase must roll back with no invented invalidation.
+    let stale = PatchBatch::new(
+        thread_id(),
+        ConversationCursor::new(5),
+        ConversationCursor::new(6),
+        vec![ConversationPatch::ItemUpsert {
+            patch_id: patch_id("patch-stale"),
+            sequence: patch_sequence(6),
+            item: make_assistant("assistant_a", TURN_A, 2, RUN_A),
+        }],
+    )
+    .expect("valid stale batch envelope");
+    controller
+        .on_delivery(ConversationDeliveryEvent::BatchReceived(stale))
+        .expect("stale delivery stays Ok with ReportRefusal");
+    let effects = controller.drain_effects();
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                artisan_frontend::conversation_state_machine::ConversationStateEffect::Delivery(
+                    ConversationDeliveryEffect::ReportRefusal { .. }
+                )
+            ))
+            .count(),
+        1,
+        "the actual child refusal surfaces, got {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            artisan_frontend::conversation_state_machine::ConversationStateEffect::SceneInvalidated
+        )),
+        "no invented rebase invalidation escapes a refusal, got {effects:?}"
+    );
+    assert_eq!(
+        controller.scene().expect("scene builds"),
+        scene_before,
+        "refused delivery leaves the scene untouched"
+    );
+    assert_eq!(controller.view().scene_fact_count, 1);
+
+    // Ordinal probes prove the rollback: the stable id is still registered
+    // and ordinal 2 is still owned by the derived fact.
+    controller
+        .upsert_fact(
+            SceneFact::new(
+                fact_id.clone(),
+                turn_id(TURN_A),
+                99,
+                SceneFactKind::Activity {
+                    body: String::from("read"),
+                },
+            )
+            .expect("valid fact")
+            .with_observed_at_ms(2_000),
+        )
+        .expect("same-id upsert still resolves");
+    assert!(
+        controller.drain_effects().is_empty(),
+        "identical same-id upserts stay effect-quiet after refusal"
+    );
+    let conflict = SceneFact::new(
+        SceneId::parse("probe-fact").expect("valid scene id"),
+        turn_id(TURN_A),
+        2,
+        SceneFactKind::Activity {
+            body: String::from("probe"),
+        },
+    )
+    .expect("valid fact");
+    assert!(
+        matches!(
+            controller.upsert_fact(conflict),
+            Err(ConversationStateError::SceneConflict { .. })
+                | Err(ConversationStateError::DuplicateFact { .. })
+        ),
+        "ordinal 2 is still owned after rollback"
+    );
+}
+
+#[test]
+fn capacity_blocked_delivery_mutates_neither_ordinals_nor_effects() {
+    let (state, _) = activity_setup();
+    let mut controller = controller_with_snapshot(snapshot_for_growth());
+    let projection = project_activities(&state, &snapshot_for_growth());
+    upsert_all(&mut controller, projection.facts);
+
+    // Fill the bounded outbox through ordinary turn events (one invalidation
+    // each) so the delivery reservation fails before any registry mutation.
+    let mut revision = 1_u64;
+    loop {
+        let event = TurnEvent::Working {
+            at: 6_000 + revision as i64,
+            revision,
+        };
+        if controller.on_turn(turn_id(TURN_A), event).is_err() {
+            break;
+        }
+        revision += 1;
+    }
+    assert_eq!(controller.pending_effect_count(), MAX_PENDING_EFFECTS);
+    let scene_before = controller.scene().expect("scene builds");
+
+    let error = controller
+        .on_delivery(ConversationDeliveryEvent::BatchReceived(growth_batch()))
+        .expect_err("full outbox refuses the delivery");
+    assert!(
+        matches!(error, ConversationStateError::CapacityExhausted { .. }),
+        "unexpected error {error:?}"
+    );
+    assert_eq!(
+        controller.pending_effect_count(),
+        MAX_PENDING_EFFECTS,
+        "reservation happens before mutation"
+    );
+    assert_eq!(
+        controller.scene().expect("scene builds"),
+        scene_before,
+        "blocked delivery leaves ordinals untouched"
+    );
+    assert_eq!(controller.view().scene_fact_count, 1);
 }

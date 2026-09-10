@@ -4834,9 +4834,7 @@ impl NativeApplication {
                         | crate::conversation_state_machine::ConversationStateError::FactTurnMismatch { .. }
                         | crate::conversation_state_machine::ConversationStateError::Scene { .. },
                     ),
-                ) => {
-                    continue;
-                }
+                ) => continue,
                 Err(_) => break,
             }
         }

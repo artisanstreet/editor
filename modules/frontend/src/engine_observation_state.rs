@@ -1090,7 +1090,9 @@ impl EngineObservationState {
         let effective = attribution.or(event.attribution.as_ref());
         if let Some(attr) = effective {
             let observation_id = event.observation.observation_id().as_str().to_owned();
-            if self.seen_delivery_sequences.contains(&attr.delivery_sequence)
+            if self
+                .seen_delivery_sequences
+                .contains(&attr.delivery_sequence)
                 || !self.seen_ids.insert(observation_id)
             {
                 return ApplyOutcome::Duplicate;
@@ -1159,7 +1161,11 @@ impl EngineObservationState {
     #[must_use]
     pub fn apply_attributed_replay(
         &mut self,
-        mut batch: Vec<(u64, EngineObservationEvent, Option<EngineObservationAttribution>)>,
+        mut batch: Vec<(
+            u64,
+            EngineObservationEvent,
+            Option<EngineObservationAttribution>,
+        )>,
     ) -> ReplaySummary {
         batch.sort_by(|left, right| {
             let left_key = attributed_replay_order_key(&left.1, left.0, left.2.as_ref());
@@ -1249,18 +1255,20 @@ impl EngineObservationState {
             Observation::Plan(value) => {
                 self.push_plan(cursor, sequence, observation.tag(), value, attribution)
             }
-            Observation::ProcessDiagnostic(value) => {
-                self.push_process_diagnostic(cursor, sequence, observation.tag(), value, attribution)
-            }
-            Observation::ProtocolDiagnostic(value) => {
-                self.push_protocol_diagnostic(
-                    cursor,
-                    sequence,
-                    observation.tag(),
-                    value,
-                    attribution,
-                )
-            }
+            Observation::ProcessDiagnostic(value) => self.push_process_diagnostic(
+                cursor,
+                sequence,
+                observation.tag(),
+                value,
+                attribution,
+            ),
+            Observation::ProtocolDiagnostic(value) => self.push_protocol_diagnostic(
+                cursor,
+                sequence,
+                observation.tag(),
+                value,
+                attribution,
+            ),
             Observation::Question(value) => {
                 let settled = self.pair_question(cursor, sequence, value, attribution);
                 (observation.tag(), settled)
@@ -1289,9 +1297,13 @@ impl EngineObservationState {
             Observation::Subagent(value) => {
                 self.push_subagent(cursor, sequence, observation.tag(), value, attribution)
             }
-            Observation::SubagentTranscript(value) => {
-                self.push_subagent_transcript(cursor, sequence, observation.tag(), value, attribution)
-            }
+            Observation::SubagentTranscript(value) => self.push_subagent_transcript(
+                cursor,
+                sequence,
+                observation.tag(),
+                value,
+                attribution,
+            ),
             Observation::TerminalActivity(value) => {
                 self.pair_terminal(cursor, sequence, value, attribution);
                 (observation.tag(), false)
