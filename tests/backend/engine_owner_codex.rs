@@ -2903,7 +2903,11 @@ async fn command_search_plan_and_file_frames_normalize() {
         panic!("expected the deleted file");
     };
     assert_eq!(deleted.action(), artisan_domain::FileAction::Deleted);
-    assert_eq!((deleted.lines_added(), deleted.lines_deleted()), (Some(0), Some(2)));
+    // Source parity: TypeScript CountWrittenLines counts split("\n")
+    // segments, so "gone\nstill here\n" is ["gone", "still here", ""] with
+    // length 3 — the trailing newline contributes a trailing empty segment
+    // rather than vanishing, and the Rust port counts identically.
+    assert_eq!((deleted.lines_added(), deleted.lines_deleted()), (Some(0), Some(3)));
     let artisan_domain::Observation::File(modified) = &rows[2] else {
         panic!("expected the modified file");
     };
@@ -3180,5 +3184,43 @@ fn malformed_lifecycle_status_never_fabricates_success() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn file_line_counts_follow_split_segment_semantics() {
+    let run = run_id();
+    let mut tracker = bound_activity_tracker();
+    let mut active = Some("turn-1".to_owned());
+
+    // Each case is (wire kind, diff payload with JSON escapes, expected
+    // (added, deleted)). Both TypeScript CountWrittenLines and the Rust port
+    // count split("\n") segments, so a trailing newline contributes one
+    // trailing empty segment; modified content without a diff stays
+    // uncounted rather than zero.
+    let cases: &[(u64, &str, &str, (Option<u64>, Option<u64>))] = &[
+        (110, "add", r#"a\nb"#, (Some(2), Some(0))),
+        (111, "add", r#"a\n"#, (Some(2), Some(0))),
+        (112, "delete", r#"gone\nstill here\n"#, (Some(0), Some(3))),
+        (113, "delete", r#""#, (Some(0), Some(0))),
+        (114, "update", r#"whole content\n"#, (None, None)),
+    ];
+    for (sequence, kind, diff, expected) in cases {
+        let line = format!(
+            r#"{{"method":"item/completed","params":{{"threadId":"t-1","turnId":"turn-1","item":{{"changes":[{{"diff":"{diff}","kind":{{"type":"{kind}"}},"path":"edge.txt"}}],"id":"file-edge","status":"completed","type":"fileChange"}}}}}}"#
+        );
+        let event = parse_frame(&line, *sequence).expect("edge frame parses");
+        let (terminal, rows) =
+            apply_activity(event, &run, &mut tracker, &mut active, *sequence).await;
+        assert_eq!(terminal, None);
+        assert_eq!(rows.len(), 1, "edge case {kind}/{diff:?} emits one row");
+        let artisan_domain::Observation::File(row) = &rows[0] else {
+            panic!("expected a file observation for {kind}/{diff:?}");
+        };
+        assert_eq!(
+            (row.lines_added(), row.lines_deleted()),
+            *expected,
+            "segment semantics for {kind}/{diff:?}"
+        );
+    }
 }
 
