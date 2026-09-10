@@ -627,17 +627,17 @@ fn parse_selection(args: &[String]) -> Result<ProofCapture, String> {
     })
 }
 
-/// Opens the one selected hidden window, captures it on its next frame
-/// through the production shell pixels, saves the PNG, and maps success
-/// onto the exit code.
+/// Opens the one selected hidden window, draws it synchronously with no
+/// present, saves the PNG, and maps success onto the exit code.
 ///
 /// Capture lifecycle: mount + seed through the controller, open hidden and
-/// unfocused, publish the live content width, `refresh`, then
-/// `on_next_frame` → `Window::render_to_image` (which drives the shipping
-/// wgpu draw synchronously from the freshly painted scene, per the capture
-/// lane) → save → quit. A 30s watchdog bounds a hidden window that never
-/// delivers a frame. Requires `Window::render_to_image` (root-owned
-/// `test-support` enablement) and the capture lane's shipping-wgpu readback.
+/// unfocused, publish the live content width, `Window::draw` (produces
+/// `rendered_frame` without presenting — hidden windows receive no frames
+/// on their own, which is why waiting on `on_next_frame` timed out), then
+/// `Window::render_to_image` (shipping wgpu draw of that scene, per the
+/// capture lane), `ArenaClearNeeded::clear` on the same context, save,
+/// quit. Requires `Window::render_to_image` (root-owned `test-support`
+/// enablement) and the capture lane's shipping-wgpu readback.
 #[must_use]
 pub fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -663,9 +663,8 @@ pub fn run() -> ExitCode {
             eprintln!("bundled font registration failed, using system faces: {error}");
         }
 
-        // Bounded watchdog: a hidden window may never deliver a next frame
-        // (vendor frame scheduling for never-shown windows is unverified
-        // from source alone). One slot only, so quit unconditionally.
+        // Bounded watchdog: mount, open, or the synchronous draw itself
+        // may hang. One slot only, so quit unconditionally on timeout.
         {
             let settled_flag = Rc::clone(&settled);
             let failed_flag = Rc::clone(&failed);
@@ -748,53 +747,58 @@ pub fn run() -> ExitCode {
                                 screen_cx.notify();
                             }
                         });
-                        window.refresh();
-                        window.on_next_frame(move |window, cx| {
-                            let scale = window.scale_factor();
-                            print_capture_geometry(&stem, capture.width, scale, content_width);
-                            let expected_width = (capture.width * scale).round() as u32;
-                            let expected_height = (capture.height * scale).round() as u32;
-                            let mut failed = false;
-                            match window.render_to_image() {
-                                Ok(image) => {
-                                    let actual = (image.width(), image.height());
-                                    let path = format!(
-                                        "{stem}-scale{scale}-{}x{}.png",
-                                        actual.0, actual.1
-                                    );
-                                    if actual != (expected_width, expected_height) {
-                                        eprintln!(
-                                            "parity-proof dimension mismatch for {stem}: \
-                                             logical {}x{} at scale {scale} (reference \
-                                             {REFERENCE_SCALE}) produced {}x{}, expected \
-                                             {expected_width}x{expected_height}",
-                                            capture.width,
-                                            capture.height,
-                                            actual.0,
-                                            actual.1,
-                                        );
-                                        failed = true;
-                                    }
-                                    if let Err(error) =
-                                        image::DynamicImage::ImageRgba8(image).save(&path)
-                                    {
-                                        eprintln!(
-                                            "parity-proof could not save {path}: {error:?}"
-                                        );
-                                        failed = true;
-                                    } else {
-                                        println!("parity-proof saved {path}");
-                                    }
-                                }
-                                Err(error) => {
+                        print_capture_geometry(&stem, capture.width, scale, content_width);
+                        // Synchronous frame with no present: `draw` produces
+                        // `rendered_frame` (hidden windows receive no frames
+                        // on their own, which is why `on_next_frame` never
+                        // fired), `render_to_image` reads that scene through
+                        // the shipping wgpu draw, and `clear` releases the
+                        // App arena against the same context.
+                        let arena = window.draw(cx);
+                        let capture_result = window.render_to_image();
+                        arena.clear(cx);
+                        let expected_width = (capture.width * scale).round() as u32;
+                        let expected_height = (capture.height * scale).round() as u32;
+                        let mut failed = false;
+                        match capture_result {
+                            Ok(image) => {
+                                let actual = (image.width(), image.height());
+                                let path = format!(
+                                    "{stem}-scale{scale}-{}x{}.png",
+                                    actual.0, actual.1
+                                );
+                                if actual != (expected_width, expected_height) {
                                     eprintln!(
-                                        "parity-proof capture failed for {stem}: {error:?}"
+                                        "parity-proof dimension mismatch for {stem}: \
+                                         logical {}x{} at scale {scale} (reference \
+                                         {REFERENCE_SCALE}) produced {}x{}, expected \
+                                         {expected_width}x{expected_height}",
+                                        capture.width,
+                                        capture.height,
+                                        actual.0,
+                                        actual.1,
                                     );
                                     failed = true;
                                 }
+                                if let Err(error) =
+                                    image::DynamicImage::ImageRgba8(image).save(&path)
+                                {
+                                    eprintln!(
+                                        "parity-proof could not save {path}: {error:?}"
+                                    );
+                                    failed = true;
+                                } else {
+                                    println!("parity-proof saved {path}");
+                                }
                             }
-                            settle_slot(&settled_flag, &failed_flag, failed, cx);
-                        });
+                            Err(error) => {
+                                eprintln!(
+                                    "parity-proof capture failed for {stem}: {error:?}"
+                                );
+                                failed = true;
+                            }
+                        }
+                        settle_slot(&settled_flag, &failed_flag, failed, cx);
                     });
                     if updated.is_err() {
                         eprintln!("parity-proof update failed for {caption}");

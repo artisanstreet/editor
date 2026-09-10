@@ -61,14 +61,15 @@ conversation column are.
 3. Each process: shipping boot parity (`.with_assets(CatalogAssetSource)`
    + `register_bundled_fonts`), mount + seed through the controller, open
    one hidden unfocused window with the shipping transparent caption,
-   publish the live content width, `refresh`, capture on next frame via
-   `Window::render_to_image` (which drives the shipping wgpu draw
-   synchronously from the freshly painted scene, per capture lane
-   `7aaf67d755`), save
+   publish the live content width, draw synchronously with public
+   `Window::draw` (no present — hidden windows receive no frames, which is
+   why the earlier `on_next_frame` wait timed out at the watchdog),
+   `Window::render_to_image` of that scene, `ArenaClearNeeded::clear` on
+   the same context, save
    `parity-proof-{case}-{viewport}-{logical}-scale{measured}-{WxH}.png`,
    quit. Terminal paths: seed/open/update failure quits immediately;
-   capture ok/error settles and quits; a 30s watchdog bounds a hidden
-   window that never delivers a frame.
+   capture ok/error settles and quits; a 30s watchdog bounds mount, open,
+   or draw hangs.
 4. Expected physical sizes at the 125% reference scale: narrow 1280x900,
    wide 1920x1125. The fixture asserts `logical * measured scale` from
    `window.scale_factor()` and fails loudly on mismatch instead of claiming.
