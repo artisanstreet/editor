@@ -1073,10 +1073,41 @@ impl RequestHandler {
                     .active_run(read.thread_id())
                     .map_err(|error| run_cancellation_failure(error, request_id))?;
                 let result = match result {
-                    Some(run_id) => ActiveRunResult::Active {
-                        thread_id: read.thread_id().clone(),
-                        run_id,
-                    },
+                    Some(run_id) => {
+                        match self
+                            .repository
+                            .read_assistant_run_status(read.thread_id(), &run_id)
+                            .await
+                        {
+                            Ok(Some((lifecycle, engine_id))) => {
+                                match run_live_status(&lifecycle) {
+                                    Some(status) => ActiveRunResult::Active {
+                                        thread_id: read.thread_id().clone(),
+                                        run_id,
+                                        status,
+                                        engine_id,
+                                    },
+                                    // Settled lifecycles are not live, however
+                                    // the registry entry reads.
+                                    None => ActiveRunResult::NoActive {
+                                        thread_id: read.thread_id().clone(),
+                                    },
+                                }
+                            }
+                            // Missing or thread-mismatched rows are not live.
+                            Ok(None) => ActiveRunResult::NoActive {
+                                thread_id: read.thread_id().clone(),
+                            },
+                            Err(_) => {
+                                return Err(typed_failure(
+                                    ErrorCode::Internal,
+                                    "active run status is unavailable",
+                                    true,
+                                    request_id,
+                                ));
+                            }
+                        }
+                    }
                     None => ActiveRunResult::NoActive {
                         thread_id: read.thread_id().clone(),
                     },
@@ -1431,6 +1462,77 @@ impl RequestHandler {
                 true,
                 request_id,
             )),
+            // Steer acks never arrive here: request-time routing only
+            // carries approval/question envelopes, and only the
+            // dispatch-side steer arm produces Steer outcomes.
+            Ok(RunInteractionAck::Steered) | Ok(RunInteractionAck::Refused { .. }) => {
+                Err(typed_failure(
+                    ErrorCode::Internal,
+                    "live run interaction answered out of contract",
+                    false,
+                    request_id,
+                ))
+            }
+        }
+    }
+
+    /// Routes one named steer into its owning live run and awaits the
+    /// owning loop's acknowledgement.
+    ///
+    /// Unlike [`Self::route_interaction`] there is no receipt table: the
+    /// outbox row accepted by the caller is the durable record, and the
+    /// envelope carries the ORIGINAL client request identity so ledger
+    /// redelivery dedup applies end to end.
+    async fn route_steer(
+        &self,
+        request_id: &RequestId,
+        thread_id: &ThreadId,
+        run_id: &artisan_domain::RunId,
+        command: &OwnedInteractionCommand,
+    ) -> Result<RunInteractionAck, ProtocolFailure> {
+        let Some(registry) = self.run_interaction.as_ref() else {
+            return Err(typed_failure(
+                ErrorCode::UnsupportedFeature,
+                RUN_INTERACTION_UNAVAILABLE_DETAIL,
+                false,
+                request_id,
+            ));
+        };
+        let Some(inbox) = registry
+            .route(thread_id, run_id)
+            .map_err(|error| run_interaction_failure(error, request_id))?
+        else {
+            return Ok(RunInteractionAck::WrongRun);
+        };
+        let (respond, acknowledged) = tokio::sync::oneshot::channel();
+        let envelope = RunInteractionEnvelope {
+            thread_id: thread_id.clone(),
+            run_id: run_id.clone(),
+            command: command.clone(),
+            respond,
+        };
+        match inbox.try_send(envelope) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                return Err(typed_failure(
+                    ErrorCode::Internal,
+                    RUN_INTERACTION_INBOX_BUSY_DETAIL,
+                    true,
+                    request_id,
+                ));
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                return Ok(RunInteractionAck::WrongRun);
+            }
+        }
+        match acknowledged.await {
+            Ok(ack) => Ok(ack),
+            Err(_) => Err(typed_failure(
+                ErrorCode::Internal,
+                "live run interaction ended before settling the steer",
+                true,
+                request_id,
+            )),
         }
     }
 
@@ -1567,19 +1669,16 @@ impl RequestHandler {
     ) -> Result<ServerResponse, ProtocolFailure> {
         if let Some(replay) = self
             .repository
-            .lookup_queue_message(&queue.request_id, &queue.thread_id, &queue.payload)
+            .lookup_queue_message(
+                &queue.request_id,
+                &queue.thread_id,
+                &queue.payload,
+                queue.steer_target.as_ref().map(|target| target.run_id()),
+            )
             .await
             .map_err(|error| repository_failure(&error, request_id))?
         {
-            return Ok(outcome(
-                request_id,
-                ResponsePayload::MessageQueued(QueueMessageReceipt {
-                    request_id: replay.receipt.request_id,
-                    message_id: replay.message_id,
-                    thread_id: replay.thread_id,
-                    disposition: replay.receipt.disposition,
-                }),
-            ));
+            return self.settle_replayed_steer(request_id, queue, &replay).await;
         }
         let identity = self
             .origin
@@ -1598,19 +1697,235 @@ impl RequestHandler {
                 message_id,
                 thread_id: queue.thread_id.clone(),
                 payload: queue.payload.clone(),
+                steer_run_id: queue
+                    .steer_target
+                    .as_ref()
+                    .map(|target| target.run_id().clone()),
                 accepted_at,
             })
             .await
             .map_err(|error| repository_failure(&error, request_id))?;
-        Ok(outcome(
+        let receipt = QueueMessageReceipt {
+            request_id: result.receipt.request_id,
+            message_id: result.message_id.clone(),
+            thread_id: result.thread_id.clone(),
+            disposition: result.receipt.disposition,
+        };
+        if result.receipt.disposition != artisan_domain::ReceiptDisposition::Accepted {
+            return Ok(outcome(request_id, ResponsePayload::MessageQueued(receipt)));
+        }
+        self.deliver_accepted_steer(request_id, queue, &result.message_id, receipt)
+            .await
+    }
+
+    /// Delivers a freshly accepted named steer into its owning live run.
+    ///
+    /// Called only for first-time acceptances carrying a steer target;
+    /// idempotent replays return the stored receipt without re-routing,
+    /// so a retried request can never steer twice. On success the
+    /// original receipt stands; on terminal refusal the dispatch row is
+    /// failed with the mapped reason and the payload stays preserved
+    /// for user recovery. Never a silent fresh run.
+    async fn deliver_accepted_steer(
+        &self,
+        request_id: &RequestId,
+        queue: &QueueMessage,
+        message_id: &MessageId,
+        receipt: QueueMessageReceipt,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        let Some(target) = queue.steer_target.as_ref() else {
+            return Ok(outcome(
+                request_id,
+                ResponsePayload::MessageQueued(receipt),
+            ));
+        };
+        let text = queue
+            .payload
+            .text()
+            .map_or_else(String::new, |text| text.as_str().to_owned());
+        let has_attachments = !queue.payload.attachments().is_empty();
+        self.settle_named_steer(
             request_id,
-            ResponsePayload::MessageQueued(QueueMessageReceipt {
-                request_id: result.receipt.request_id,
-                message_id: result.message_id,
-                thread_id: result.thread_id,
-                disposition: result.receipt.disposition,
-            }),
-        ))
+            &queue.thread_id,
+            target.run_id(),
+            message_id,
+            text,
+            has_attachments,
+            receipt,
+        )
+        .await
+    }
+
+    /// Settles a replayed named steer against its durable delivery state.
+    ///
+    /// A first acceptance always routes; a replay consults the stored
+    /// dispatch row instead of delivering blind: completed returns the
+    /// stored receipt, failed reproduces the stored typed refusal, and
+    /// only an open row safely reroutes the same original
+    /// request/message/target. Unnamed replays return the stored receipt
+    /// untouched, exactly as before.
+    async fn settle_replayed_steer(
+        &self,
+        request_id: &RequestId,
+        queue: &QueueMessage,
+        replay: &artisan_database::QueueMessageResult,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        let receipt = QueueMessageReceipt {
+            request_id: replay.receipt.request_id.clone(),
+            message_id: replay.message_id.clone(),
+            thread_id: replay.thread_id.clone(),
+            disposition: replay.receipt.disposition.clone(),
+        };
+        let Some(target) = queue.steer_target.as_ref() else {
+            return Ok(outcome(
+                request_id,
+                ResponsePayload::MessageQueued(receipt),
+            ));
+        };
+        let (state, reason, _) = self
+            .repository
+            .read_steered_dispatch_state(&replay.message_id)
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?;
+        match state {
+            artisan_database::entities::DispatchState::Completed => Ok(outcome(
+                request_id,
+                ResponsePayload::MessageQueued(receipt),
+            )),
+            artisan_database::entities::DispatchState::Failed => Err(typed_failure(
+                ErrorCode::InvalidInput,
+                reason.unwrap_or_else(|| "steered send failed".to_owned()),
+                false,
+                request_id,
+            )),
+            artisan_database::entities::DispatchState::Queued => {
+                let text = replay
+                    .payload
+                    .text()
+                    .map_or_else(String::new, |text| text.as_str().to_owned());
+                let has_attachments = !replay.payload.attachments().is_empty();
+                self.settle_named_steer(
+                    request_id,
+                    &replay.thread_id,
+                    target.run_id(),
+                    &replay.message_id,
+                    text,
+                    has_attachments,
+                    receipt,
+                )
+                .await
+            }
+            artisan_database::entities::DispatchState::Leased
+            | artisan_database::entities::DispatchState::Running => Err(typed_failure(
+                ErrorCode::Internal,
+                "steered dispatch left its queued state",
+                false,
+                request_id,
+            )),
+        }
+    }
+
+    /// Settles one named steer: attachments gate, live route, ack mapping.
+    ///
+    /// Shared by first acceptances and open-row replays so both funnel
+    /// through identical gating. Image attachments are refused BEFORE any
+    /// provider contact — provider steer verbs carry text only — with the
+    /// row failed typed and the original payload preserved for recovery
+    /// as a fresh send. Text subsets or blank image-only sends never
+    /// succeed here.
+    #[allow(clippy::too_many_arguments)]
+    async fn settle_named_steer(
+        &self,
+        request_id: &RequestId,
+        thread_id: &ThreadId,
+        target_run_id: &artisan_domain::RunId,
+        message_id: &MessageId,
+        text: String,
+        has_attachments: bool,
+        receipt: QueueMessageReceipt,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        if has_attachments {
+            self.fail_refused_steer_dispatch(
+                message_id,
+                "steer does not support image attachments",
+                request_id,
+            )
+            .await?;
+            return Err(typed_failure(
+                ErrorCode::UnsupportedFeature,
+                "steer does not support image attachments; resend without images or as a fresh message",
+                false,
+                request_id,
+            ));
+        }
+        let command = OwnedInteractionCommand::Steer {
+            request_id: request_id.clone(),
+            message_id: message_id.clone(),
+            text,
+        };
+        match self
+            .route_steer(request_id, thread_id, target_run_id, &command)
+            .await?
+        {
+            RunInteractionAck::Steered => Ok(outcome(
+                request_id,
+                ResponsePayload::MessageQueued(receipt),
+            )),
+            RunInteractionAck::Refused { reason } => {
+                self.fail_refused_steer_dispatch(message_id, reason, request_id)
+                    .await?;
+                Err(typed_failure(
+                    ErrorCode::InvalidInput,
+                    reason,
+                    false,
+                    request_id,
+                ))
+            }
+            RunInteractionAck::WrongRun => {
+                self.fail_refused_steer_dispatch(
+                    message_id,
+                    "steer target run is no longer live",
+                    request_id,
+                )
+                .await?;
+                Err(typed_failure(
+                    ErrorCode::InvalidInput,
+                    "steer target run is no longer live",
+                    false,
+                    request_id,
+                ))
+            }
+            RunInteractionAck::Unavailable => Err(typed_failure(
+                ErrorCode::Internal,
+                "live run interaction is temporarily unavailable",
+                true,
+                request_id,
+            )),
+            RunInteractionAck::Settled(_) | RunInteractionAck::Conflict => Err(typed_failure(
+                ErrorCode::IdempotencyConflict,
+                format!("request `{request_id}` was already accepted for a different response"),
+                false,
+                request_id,
+            )),
+        }
+    }
+
+    /// Fails one steered dispatch row after a terminal steer refusal.
+    async fn fail_refused_steer_dispatch(
+        &self,
+        message_id: &MessageId,
+        reason: &'static str,
+        request_id: &RequestId,
+    ) -> Result<(), ProtocolFailure> {
+        let operated_at = self
+            .origin
+            .acceptance_instant()
+            .map_err(|error| origin_clock_failure(error, request_id))?;
+        self.repository
+            .fail_steered_dispatch(message_id, reason, operated_at)
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?;
+        Ok(())
     }
 
     /// Answers a durable thread engine-configuration mutation. Receipt
@@ -1768,6 +2083,7 @@ fn repository_failure(error: &RepositoryError, request_id: &RequestId) -> Protoc
     let (code, retryable) = match error {
         Failure::ProjectNotFound { .. } => (ErrorCode::ProjectUnknown, false),
         Failure::ThreadNotFound { .. } => (ErrorCode::ThreadUnknown, false),
+        Failure::ThreadEngineNotConfigured { .. } => (ErrorCode::InvalidInput, false),
         Failure::EngineConfigRevisionConflict { .. } => (ErrorCode::EngineConfigConflict, false),
         Failure::IdempotencyConflict { .. } => (ErrorCode::IdempotencyConflict, false),
         Failure::FirstMessageAlreadyExists { .. } => (ErrorCode::InvalidInput, false),
@@ -1866,6 +2182,23 @@ fn run_interaction_failure(
         false,
         request_id,
     )
+}
+
+/// Maps a durable run lifecycle to the live status the composer
+/// starting-guard reads. Settled lifecycles map to `None`: they are not
+/// live, however any registry entry reads.
+fn run_live_status(
+    lifecycle: &artisan_database::entities::AssistantRunLifecycle,
+) -> Option<RunLiveStatus> {
+    use artisan_database::entities::AssistantRunLifecycle as Lifecycle;
+    match lifecycle {
+        Lifecycle::Queued | Lifecycle::Launching => Some(RunLiveStatus::Queued),
+        Lifecycle::Running => Some(RunLiveStatus::Running),
+        Lifecycle::Waiting | Lifecycle::CancelRequested => Some(RunLiveStatus::Waiting),
+        Lifecycle::Interrupted | Lifecycle::Completed | Lifecycle::Failed | Lifecycle::Cancelled => {
+            None
+        }
+    }
 }
 
 /// Maps interaction repository failures without leaking stored decisions.
@@ -1998,6 +2331,9 @@ fn interaction_intent_matches(
             == match command {
                 OwnedInteractionCommand::RespondApproval { approval_id, .. } => approval_id.clone(),
                 OwnedInteractionCommand::RespondQuestion { question_id, .. } => question_id.clone(),
+                // Steers carry no receipt-table row: this match only
+                // typechecks the resolve path, which never routes them.
+                OwnedInteractionCommand::Steer { .. } => String::new(),
             }
 }
 

@@ -1058,6 +1058,7 @@ async fn seed_followup_run(
             message_id: MessageId::parse("delivery-message-2")?,
             thread_id: thread_id.clone(),
             payload: artisan_domain::QueueMessagePayload::text_only("delivery follow-up body")?,
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(950),
         })
         .await?;

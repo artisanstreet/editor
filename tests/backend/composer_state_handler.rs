@@ -132,6 +132,7 @@ async fn seed_message(
             message_id: message_id.clone(),
             thread_id: thread_id.clone(),
             payload,
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(300),
         })
         .await
@@ -641,6 +642,7 @@ async fn seed_bound_run(repository: &Repository, label: &str) -> (ThreadId, RunI
             message_id,
             thread_id: thread_id.clone(),
             payload,
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(300),
         })
         .await

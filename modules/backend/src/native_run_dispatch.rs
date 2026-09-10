@@ -3103,42 +3103,106 @@ where
     }
 }
 
-/// Maps one ledger-duplicate steer redelivery to its durable delivery
-/// state: the actual ack state, never pre-ack intent.
+/// Reproduces the stored typed refusal for one failed steered dispatch.
 ///
-/// `Completed` replays success without provider contact (an acked
-/// projection retry never resends); `Failed` reproduces the stored typed
-/// refusal without provider contact; any open or unreadable state answers
-/// transiently so the sender retries against the live loop instead of
-/// recording a false terminal refusal. The serialized turn loop already
-/// prevents competing steer handling, so an open row here means the first
-/// delivery is still driving its provider ack (or was interrupted before
-/// recording anything) — never a second concurrent send.
-pub(crate) fn steer_duplicate_ack(
-    state: artisan_database::entities::DispatchState,
-    reason: Option<&str>,
-) -> RunInteractionAck {
-    use artisan_database::entities::DispatchState as Row;
-    match state {
-        Row::Completed => RunInteractionAck::Steered,
-        Row::Failed => RunInteractionAck::Refused {
-            reason: match reason {
-                Some("steer message identity invalid") => "steer message identity invalid",
-                Some("steer target engine changed") => "steer target engine changed",
-                Some("steer is not supported on this engine path") => {
-                    "steer is not supported on this engine path"
-                }
-                Some("steer target already resolved") => "steer target already resolved",
-                Some("steered projection failed") => "steered projection failed",
-                Some("steer write to the provider failed") => "steer write to the provider failed",
-                Some("steer target run is no longer live") => "steer target run is no longer live",
-                Some("steer does not support image attachments") => {
-                    "steer does not support image attachments"
-                }
-                _ => "steered send failed",
-            },
+/// Maps the persisted `last_error` back to its bounded refusal literal so
+/// a redelivery reproduces the original typed refusal without provider
+/// contact and without re-failing the row. Unknown spellings fall back to
+/// a generic static; the payload stays preserved for user recovery in
+/// every case.
+pub(crate) fn steer_stored_refusal(reason: Option<&str>) -> RunInteractionAck {
+    RunInteractionAck::Refused {
+        reason: match reason {
+            Some("steer message identity invalid") => "steer message identity invalid",
+            Some("steer target engine changed") => "steer target engine changed",
+            Some("steer is not supported on this engine path") => {
+                "steer is not supported on this engine path"
+            }
+            Some("steer target already resolved") => "steer target already resolved",
+            Some("steered projection failed") => "steered projection failed",
+            Some("steer write to the provider failed") => "steer write to the provider failed",
+            Some("steer target run is no longer live") => "steer target run is no longer live",
+            Some("steer does not support image attachments") => {
+                "steer does not support image attachments"
+            }
+            _ => "steered send failed",
         },
-        Row::Queued | Row::Leased | Row::Running => RunInteractionAck::Unavailable,
+    }
+}
+
+/// Projects one provider-acked steer without provider contact.
+///
+/// Shared by the fresh-ack path and the known-acked duplicate path. The
+/// ledger `Duplicate` now proves the actual ack already happened
+/// (resolutions are recorded only post-ack), so an open durable row means
+/// only the projection is missing — e.g. a transient database failure
+/// that answered `Unavailable` — and retrying the idempotent projection
+/// eventually completes without ever resending to the provider. Completed
+/// rows never reach here (they answer `Steered` from durable state) and
+/// failed rows never reach here (they reproduce their stored refusal).
+/// A transient mint/clock/database miss answers `Unavailable` with the
+/// row left open; any other projection miss fails the row typed with the
+/// payload preserved.
+async fn project_known_acked_steer(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    thread_id: &ThreadId,
+    message_id: &MessageId,
+    text: &str,
+    respond: tokio::sync::oneshot::Sender<RunInteractionAck>,
+) {
+    let item_id = match mint_item_id(context.origin) {
+        Some(item_id) => item_id,
+        None => {
+            let _ = respond.send(RunInteractionAck::Unavailable);
+            return;
+        }
+    };
+    let patch_id = match mint_patch_id(context.origin) {
+        Some(patch_id) => patch_id,
+        None => {
+            let _ = respond.send(RunInteractionAck::Unavailable);
+            return;
+        }
+    };
+    let operated_at = match context.origin.acceptance_instant() {
+        Ok(instant) => instant,
+        Err(_) => {
+            let _ = respond.send(RunInteractionAck::Unavailable);
+            return;
+        }
+    };
+    match context
+        .repository
+        .project_steered_message(ProjectSteeredMessage {
+            message_id,
+            thread_id,
+            turn_id: &state.scope.launched.turn_id,
+            item_id: &item_id,
+            patch_id: &patch_id,
+            body: text,
+            operated_at,
+        })
+        .await
+    {
+        Ok(
+            ProjectSteeredMessageOutcome::Projected(_)
+            | ProjectSteeredMessageOutcome::AlreadyProjected(_),
+        ) => {
+            let _ = context.config.notifier.publish(thread_id);
+            let _ = respond.send(RunInteractionAck::Steered);
+        }
+        Err(RunLaunchError::Repository(
+            artisan_database::RepositoryError::Database { .. },
+        )) => {
+            let _ = respond.send(RunInteractionAck::Unavailable);
+        }
+        Err(_) => {
+            fail_steered_row(context, message_id, "steered projection failed").await;
+            let _ = respond.send(RunInteractionAck::Refused {
+                reason: "steered projection failed",
+            });
+        }
     }
 }
 
@@ -3257,15 +3321,46 @@ async fn handle_steer(
     ) {
         Ok(TurnInteractionOutcome::Applied) => {}
         Ok(TurnInteractionOutcome::Duplicate) => {
-            let ack = match context
+            // Ledger Duplicate now proves the actual ack already happened
+            // (resolutions are recorded only post-ack): consult durable
+            // state. Completed replays success; Failed reproduces the
+            // stored typed refusal; an open row means only the projection
+            // is missing, so retry the idempotent projection without
+            // provider contact. Anything unreadable answers transiently.
+            // Never a pre-ack false completion: an interruption before the
+            // ack never wrote anything, so it preflights eligible, never
+            // Duplicate.
+            match context
                 .repository
                 .read_steered_dispatch_state(&message_id)
                 .await
             {
-                Ok((state, reason, _)) => steer_duplicate_ack(state, reason.as_deref()),
-                Err(_) => RunInteractionAck::Unavailable,
-            };
-            let _ = respond.send(ack);
+                Ok((dispatch_state, reason, _)) => {
+                    use artisan_database::entities::DispatchState as Row;
+                    match dispatch_state {
+                        Row::Completed => {
+                            let _ = respond.send(RunInteractionAck::Steered);
+                        }
+                        Row::Failed => {
+                            let _ = respond.send(steer_stored_refusal(reason.as_deref()));
+                        }
+                        Row::Queued | Row::Leased | Row::Running => {
+                            project_known_acked_steer(
+                                context,
+                                state,
+                                &thread_id,
+                                &message_id,
+                                text.as_str(),
+                                respond,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(_) => {
+                    let _ = respond.send(RunInteractionAck::Unavailable);
+                }
+            }
             return;
         }
         Err(_) => {
@@ -3306,59 +3401,15 @@ async fn handle_steer(
                 });
                 return;
             }
-            let item_id = match mint_item_id(context.origin) {
-                Some(item_id) => item_id,
-                None => {
-                    let _ = respond.send(RunInteractionAck::Unavailable);
-                    return;
-                }
-            };
-            let patch_id = match mint_patch_id(context.origin) {
-                Some(patch_id) => patch_id,
-                None => {
-                    let _ = respond.send(RunInteractionAck::Unavailable);
-                    return;
-                }
-            };
-            let operated_at = match context.origin.acceptance_instant() {
-                Ok(instant) => instant,
-                Err(_) => {
-                    let _ = respond.send(RunInteractionAck::Unavailable);
-                    return;
-                }
-            };
-            match context
-                .repository
-                .project_steered_message(ProjectSteeredMessage {
-                    message_id: &message_id,
-                    thread_id: &thread_id,
-                    turn_id: &state.scope.launched.turn_id,
-                    item_id: &item_id,
-                    patch_id: &patch_id,
-                    body: text.as_str(),
-                    operated_at,
-                })
-                .await
-            {
-                Ok(
-                    ProjectSteeredMessageOutcome::Projected(_)
-                    | ProjectSteeredMessageOutcome::AlreadyProjected(_),
-                ) => {
-                    let _ = context.config.notifier.publish(&thread_id);
-                    let _ = respond.send(RunInteractionAck::Steered);
-                }
-                Err(RunLaunchError::Repository(
-                    artisan_database::RepositoryError::Database { .. },
-                )) => {
-                    let _ = respond.send(RunInteractionAck::Unavailable);
-                }
-                Err(_) => {
-                    fail_steered_row(context, &message_id, "steered projection failed").await;
-                    let _ = respond.send(RunInteractionAck::Refused {
-                        reason: "steered projection failed",
-                    });
-                }
-            }
+            project_known_acked_steer(
+                context,
+                state,
+                &thread_id,
+                &message_id,
+                text.as_str(),
+                respond,
+            )
+            .await;
         }
         SteerDriveOutcome::Acked(Err(SteerError::Unsupported)) => {
             fail_steered_row(

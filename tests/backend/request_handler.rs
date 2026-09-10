@@ -3883,6 +3883,16 @@ async fn read_active_run_reports_authoritative_singleton_and_empty_state() {
     let lease = registry
         .register(thread_id.clone(), run_id.clone())
         .expect("active run should register");
+    // A registry entry without a durable run row is not live.
+    let rowless = handler
+        .respond(&request("frame-active-rowless"), &query)
+        .await
+        .expect("rowless active-run query should succeed");
+    assert!(matches!(
+        rowless.payload,
+        ResponsePayload::ActiveRun(artisan_protocol::ActiveRunResult::NoActive { .. })
+    ));
+    seed_conversation(storage.repository(), "thread-active", "active").await;
     let active = handler
         .respond(&request("frame-active-one"), &query)
         .await
@@ -3892,6 +3902,8 @@ async fn read_active_run_reports_authoritative_singleton_and_empty_state() {
         ResponsePayload::ActiveRun(artisan_protocol::ActiveRunResult::Active {
             thread_id: id,
             run_id: active_id,
+            status: artisan_protocol::RunLiveStatus::Queued,
+            engine_id: artisan_domain::EngineId::OpenCode2,
         }) if id == thread_id && active_id == run_id
     ));
     let second_lease = registry

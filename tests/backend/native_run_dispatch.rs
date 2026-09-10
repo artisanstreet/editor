@@ -3254,6 +3254,7 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
                 "retry after interrupted Codex run",
             )
             .expect("payload"),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(700),
         })
         .await
@@ -3543,6 +3544,7 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
                 "Return FOLLOWUP_PROBE_OK only. Do not use tools and do not read files.",
             )
             .expect("payload"),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(600),
         })
         .await
@@ -4039,6 +4041,7 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
             thread_id: thread.clone(),
             payload: artisan_domain::QueueMessagePayload::text_only("follow-up activity")
                 .expect("payload"),
+            steer_run_id: None,
             accepted_at: UnixMillis::from_millis(base_ms),
         })
         .await
