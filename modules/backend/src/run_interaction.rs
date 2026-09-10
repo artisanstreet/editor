@@ -25,7 +25,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use artisan_domain::{ObservationId, RequestId, RunId, ThreadId};
+use artisan_domain::{MessageId, ObservationId, RequestId, RunId, ThreadId};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
@@ -103,6 +103,21 @@ pub enum OwnedInteractionCommand {
         /// The explicit answers, possibly empty for a skipped question.
         answers: Vec<String>,
     },
+    /// Follow-up text steered into the owning live run.
+    ///
+    /// Carried from the durable outbox row (never a receipt table): the
+    /// `request_id` is the ORIGINAL client request identity for ledger
+    /// redelivery dedup, and `message_id` names the persisted steered
+    /// message for echo projection. Handled only by the dispatch-side
+    /// steer arm; request-time routing never produces this variant.
+    Steer {
+        /// Original client request identity (ledger dedup key).
+        request_id: RequestId,
+        /// Persisted steered message identity (echo projection key).
+        message_id: MessageId,
+        /// Validated follow-up text for the live provider session.
+        text: String,
+    },
 }
 
 impl OwnedInteractionCommand {
@@ -110,9 +125,9 @@ impl OwnedInteractionCommand {
     #[must_use]
     pub const fn request_id(&self) -> &RequestId {
         match self {
-            Self::RespondApproval { request_id, .. } | Self::RespondQuestion { request_id, .. } => {
-                request_id
-            }
+            Self::RespondApproval { request_id, .. }
+            | Self::RespondQuestion { request_id, .. }
+            | Self::Steer { request_id, .. } => request_id,
         }
     }
 }
@@ -123,6 +138,20 @@ pub enum RunInteractionAck {
     /// The loop settled the response; the receipt is the stored durable
     /// outcome with its accepted-or-duplicate disposition.
     Settled(artisan_database::StoredInteractionReceipt),
+    /// The loop applied a steered follow-up to its live turn. There is no
+    /// stored interaction receipt: durability is the outbox row itself,
+    /// projected and completed by the steering flow under the original
+    /// request id.
+    Steered,
+    /// The loop refused a steered follow-up terminally (stale target,
+    /// engine mismatch, unsupported engine, or provider write failure).
+    /// The bounded reason is persisted as the dispatch `last_error`;
+    /// the payload stays preserved for user recovery. Never a silent
+    /// fresh run, and never a claim success on channel enqueue.
+    Refused {
+        /// Bounded refusal reason for the dispatch diagnostic.
+        reason: &'static str,
+    },
     /// The request id was already accepted for a different intent. The
     /// originally accepted outcome stands.
     Conflict,

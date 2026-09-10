@@ -31,6 +31,10 @@ pub enum InteractionTarget {
     Approval,
     /// A pending question.
     Question,
+    /// A steered follow-up text for the live turn. Noted by the dispatch
+    /// steer arm (never seeded from durable state); redelivery under the
+    /// same command id answers Duplicate with no second provider write.
+    Steer,
 }
 
 impl InteractionTarget {
@@ -40,6 +44,7 @@ impl InteractionTarget {
         match self {
             Self::Approval => "approval",
             Self::Question => "question",
+            Self::Steer => "steer",
         }
     }
 }
@@ -253,6 +258,26 @@ impl TurnInteractionLedger {
         }
     }
 
+    /// Nonmutating eligibility of one delivery, sharing [`Self::deliver`]
+    /// validation without recording anything.
+    ///
+    /// Returns `Ok(Applied)` when the command would record now,
+    /// `Ok(Duplicate)` when the identical command already recorded, or the
+    /// same typed error `deliver` would return. The steer arm preflights
+    /// here before any provider contact and records via `deliver` only
+    /// after the actual provider ack, so an interruption before the ack
+    /// never writes a resolution the durable row cannot see, while a
+    /// projection retry observes `Duplicate` (known acked).
+    pub fn preflight(
+        &self,
+        command_id: &str,
+        target_id: &ObservationId,
+        target: InteractionTarget,
+        intent: &str,
+    ) -> Result<TurnInteractionOutcome, InteractionDeliveryError> {
+        self.validate(command_id, target_id, target, intent)
+    }
+
     /// Delivers one validated response onto the turn.
     ///
     /// A seen command id with the identical intent answers `Duplicate` with
@@ -261,6 +286,9 @@ impl TurnInteractionLedger {
     /// typed error on unknown or already-resolved ids. Delivery never
     /// disturbs control flow: resolving records the decision only.
     ///
+    /// Validation is shared with [`Self::preflight`]: approval and question
+    /// paths keep calling this unchanged.
+    ///
     /// # Errors
     ///
     /// Returns [`InteractionDeliveryError::Target`] for unknown or resolved
@@ -268,6 +296,26 @@ impl TurnInteractionLedger {
     /// command id with a changed intent.
     pub fn deliver(
         &mut self,
+        command_id: &str,
+        target_id: &ObservationId,
+        target: InteractionTarget,
+        intent: &str,
+    ) -> Result<TurnInteractionOutcome, InteractionDeliveryError> {
+        let outcome = self.validate(command_id, target_id, target, intent)?;
+        if outcome == TurnInteractionOutcome::Applied {
+            self.pending.remove(target_id.as_str());
+            self.resolved.insert(target_id.as_str().to_owned());
+            self.seen_commands
+                .insert(command_id.to_owned(), intent.to_owned());
+        }
+        Ok(outcome)
+    }
+
+    /// Shared validation for [`Self::preflight`] and [`Self::deliver`].
+    /// Reads `seen_commands`, `resolved`, then `pending` in that order and
+    /// mutates nothing.
+    fn validate(
+        &self,
         command_id: &str,
         target_id: &ObservationId,
         target: InteractionTarget,
@@ -289,13 +337,7 @@ impl TurnInteractionLedger {
             .into());
         }
         match self.pending.get(target_id.as_str()) {
-            Some(known) if *known == target => {
-                self.pending.remove(target_id.as_str());
-                self.resolved.insert(target_id.as_str().to_owned());
-                self.seen_commands
-                    .insert(command_id.to_owned(), intent.to_owned());
-                Ok(TurnInteractionOutcome::Applied)
-            }
+            Some(known) if *known == target => Ok(TurnInteractionOutcome::Applied),
             _ => Err(CommandTargetError::unknown(
                 self.run_id.clone(),
                 command_id.to_owned(),

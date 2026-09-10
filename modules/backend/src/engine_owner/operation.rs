@@ -700,6 +700,24 @@ impl AcceptedTurn {
             .deliver(command_id, target_id, target, intent)
     }
 
+    /// Nonmutating delivery preflight for one mid-turn response.
+    ///
+    /// Shares the ledger validation with
+    /// [`Self::deliver_interaction_response`] without recording anything,
+    /// so the steer arm can prove eligibility before provider contact and
+    /// record only after the actual provider ack. Approval and question
+    /// paths keep calling `deliver_interaction_response` unchanged.
+    pub(crate) fn preflight_interaction_response(
+        &self,
+        command_id: &str,
+        target_id: &ObservationId,
+        target: InteractionTarget,
+        intent: &str,
+    ) -> Result<TurnInteractionOutcome, InteractionDeliveryError> {
+        self.interactions
+            .preflight(command_id, target_id, target, intent)
+    }
+
     pub(crate) async fn finish(mut self) -> TurnResult {
         let Some(receiver) = self.receiver.take() else {
             return Err(EngineOperationError::ReapUnresolved);
