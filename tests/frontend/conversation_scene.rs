@@ -1379,7 +1379,10 @@ fn session_groups_late_reasoning_before_final_reply() {
     // Settled rows never carry the live summary, and reasoning never becomes
     // a visible work item even though it arrived late.
     assert_eq!(group.reasoning_summary, None);
-    assert!(!group.superseded);
+    // Reference store.ts:785 marks the group superseded whenever it is not
+    // the last content block; the final reply follows here, so true is the
+    // exact value (settled turns show no live line either way).
+    assert!(group.superseded);
     assert!(matches!(
         group.label,
         Some(WorkGroupLabel::ThoughtFor { millis: 6_000 })
@@ -1549,10 +1552,16 @@ fn newer_work_returns_prose_to_session_details() {
     assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::AssistantMessage(_))));
     let group = session_group(blocks);
     assert_eq!(group.progress, ProgressPhase::Work);
-    assert_eq!(group.session_details.len(), 1);
+    // The one ordered detail list carries both, prose first in ordinal
+    // order — never two sources.
+    assert_eq!(group.session_details.len(), 2);
     assert!(matches!(
         &group.session_details[0],
         conversation_scene::SessionDetail::Assistant { .. }
+    ));
+    assert!(matches!(
+        &group.session_details[1],
+        conversation_scene::SessionDetail::Activity { .. }
     ));
 }
 
