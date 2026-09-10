@@ -29,8 +29,8 @@ use artisan_ui::{
 };
 use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
 use gpui::{
-    Animation, AnimationExt as _, App, Context, Div, ElementId, FocusHandle, Focusable,
-    IntoElement, Render, Stateful, Task, Window, div, px,
+    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, FocusHandle,
+    Focusable, IntoElement, Render, Stateful, Task, Window, div, px,
 };
 
 use crate::composer_action_failure::ComposerActionFailure;
@@ -521,13 +521,14 @@ impl NativeComposerControls {
     ///
     /// Reference (`steering-lip.svelte:28-32`): `flex items-center gap-3
     /// py-2 pr-2 pl-5 text-base`, single-line truncated label. Both the live
-    /// rows and the inert collapse-fade rows share this geometry.
+    /// rows and the inert collapse-fade rows share this geometry. The `id`
+    /// makes the row `Stateful`; animation converts to `AnyElement` later.
     fn lip_row_base(
         row_element_id: ElementId,
         row_selector: String,
         label: String,
         desktop_theme: DesktopTheme,
-    ) -> Div {
+    ) -> Stateful<Div> {
         div()
             .id(row_element_id)
             .debug_selector(move || row_selector.clone())
@@ -689,22 +690,29 @@ impl NativeComposerControls {
             // auto-height interpolation (see the lane report), so only the
             // opacity half is reproduced, on the exact 250ms clock. Each
             // newly arrived steer carries a fresh nonce, so its entrance
-            // replays without replaying the rows already on screen.
+            // replays without replaying the rows already on screen. Styling
+            // finishes first; the animated and plain branches converge to
+            // `AnyElement` without dropping the animation.
             let nonce = self.lip_row_nonces.get(&identity).copied().unwrap_or(0);
-            if !cx.reduce_motion() {
-                row_view = row_view.opacity(0.0).with_animation(
-                    ElementId::Name(
-                        format!(
-                            "artisan-native-composer-steering-row-entrance-{}-{}-{nonce}",
-                            identity.command_id, identity.generation
-                        )
-                        .into(),
-                    ),
-                    Animation::new(Duration::from_millis(COMPOSER_LIP_MOTION_MS))
-                        .with_easing(composer_smooth_out),
-                    move |row, progress| row.opacity(progress.clamp(0.0, 1.0)),
-                );
-            }
+            let row_view: AnyElement = if cx.reduce_motion() {
+                row_view.into_any_element()
+            } else {
+                row_view
+                    .opacity(0.0)
+                    .with_animation(
+                        ElementId::Name(
+                            format!(
+                                "artisan-native-composer-steering-row-entrance-{}-{}-{nonce}",
+                                identity.command_id, identity.generation
+                            )
+                            .into(),
+                        ),
+                        Animation::new(Duration::from_millis(COMPOSER_LIP_MOTION_MS))
+                            .with_easing(composer_smooth_out),
+                        move |row, progress| row.opacity(progress.clamp(0.0, 1.0)),
+                    )
+                    .into_any_element()
+            };
 
             lip = lip.child(row_view);
         }
@@ -714,29 +722,35 @@ impl NativeComposerControls {
         // emission fence already refuses them, and no focus handle is
         // installed, so the fade-out is pointer- and keyboard-inert.
         if !self.closing_lip_rows.is_empty() {
-            let mut closing = div().w_full().flex().flex_col();
+            let mut closing_body = div().w_full().flex().flex_col();
             for row in self.closing_lip_rows.clone() {
                 let still = QueuedSteerRow::new(row.generation(), &row.text, false);
                 let selector = row_selector(&row.identity);
                 let element_id = ElementId::Name(selector.clone().into());
-                closing = closing.child(Self::lip_row_base(
+                closing_body = closing_body.child(Self::lip_row_base(
                     element_id,
                     selector,
                     still.label,
                     desktop_theme,
                 ));
             }
-            if !cx.reduce_motion() {
+            let closing: AnyElement = if cx.reduce_motion() {
+                closing_body.into_any_element()
+            } else {
                 let generation = self.closing_lip_generation;
-                closing = closing.opacity(1.0).with_animation(
-                    ElementId::Name(
-                        format!("artisan-native-composer-steering-lip-close-{generation}").into(),
-                    ),
-                    Animation::new(Duration::from_millis(COMPOSER_LIP_MOTION_MS))
-                        .with_easing(composer_smooth_out),
-                    move |lip, progress| lip.opacity((1.0 - progress).clamp(0.0, 1.0)),
-                );
-            }
+                closing_body
+                    .opacity(1.0)
+                    .with_animation(
+                        ElementId::Name(
+                            format!("artisan-native-composer-steering-lip-close-{generation}")
+                                .into(),
+                        ),
+                        Animation::new(Duration::from_millis(COMPOSER_LIP_MOTION_MS))
+                            .with_easing(composer_smooth_out),
+                        move |lip, progress| lip.opacity((1.0 - progress).clamp(0.0, 1.0)),
+                    )
+                    .into_any_element()
+            };
             lip = lip.child(closing);
         }
 

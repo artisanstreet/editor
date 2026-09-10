@@ -24,7 +24,7 @@ use gpui::{
     FocusHandle, Focusable, GlobalElementId, HighlightStyle, ImageFormat, ImageSource,
     InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, Point, Render, RenderImage, SharedString,
-    StyledText, Subscription, Task, UTF16Selection, Window, actions, div, img, point,
+    Stateful, StyledText, Subscription, Task, UTF16Selection, Window, actions, div, img, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -1984,7 +1984,7 @@ impl NativeComposer {
         entity: Entity<Self>,
         theme: ArtisanTheme,
         desktop_theme: DesktopTheme,
-    ) -> Div {
+    ) -> Stateful<Div> {
         // Reference (`attachment-tray.svelte:28-30`): the open row carries
         // `px-1 pt-1 pb-2`. The tray only mounts while attachments exist,
         // which is exactly the reference open state.
@@ -2127,19 +2127,27 @@ impl NativeComposer {
     /// Each hidden-to-shown mount carries a fresh animation identity from
     /// `tray_entrance_generation`, so the entrance replays every time the
     /// tray opens. Reduced motion paints the settled tray immediately.
-    fn animate_tray_entrance(&self, tray: Div, cx: &mut Context<Self>) -> Div {
+    /// Styling finishes first as `Stateful<Div>`; the animated and plain
+    /// branches converge here to `AnyElement` for the card boundary.
+    fn animate_tray_entrance(
+        &self,
+        tray: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if cx.reduce_motion() {
-            return tray;
+            return tray.into_any_element();
         }
         let generation = self.tray_entrance_generation;
-        tray.opacity(0.0).with_animation(
-            ElementId::Name(
-                format!("artisan-native-composer-tray-entrance-{generation}").into(),
-            ),
-            Animation::new(Duration::from_millis(COMPOSER_TRAY_MOTION_MS))
-                .with_easing(composer_smooth_out),
-            move |tray, progress| tray.opacity(progress.clamp(0.0, 1.0)),
-        )
+        tray.opacity(0.0)
+            .with_animation(
+                ElementId::Name(
+                    format!("artisan-native-composer-tray-entrance-{generation}").into(),
+                ),
+                Animation::new(Duration::from_millis(COMPOSER_TRAY_MOTION_MS))
+                    .with_easing(composer_smooth_out),
+                move |tray, progress| tray.opacity(progress.clamp(0.0, 1.0)),
+            )
+            .into_any_element()
     }
 
     fn attachment_viewer(

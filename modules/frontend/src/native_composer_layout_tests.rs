@@ -16,14 +16,14 @@ use crate::{
     native_model_selector::{NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR, NativeModelSelector},
 };
 
-fn mount_composer(
-    cx: &mut TestAppContext,
+fn mount_composer<'a>(
+    cx: &'a mut TestAppContext,
     snapshot: NativeComposerControlsSnapshot,
 ) -> (
     gpui::Entity<NativeComposer>,
-    gpui::VisualTestContext,
+    &'a mut gpui::VisualTestContext,
 ) {
-    let (view, cx) = cx.add_window_view(|_, cx| {
+    let (view, window_cx) = cx.add_window_view(|_, cx| {
         let controls = cx.new(|cx| NativeComposerControls::new(snapshot, cx));
         let picker = cx.new(|cx| {
             NativeModelSelector::new(
@@ -37,12 +37,12 @@ fn mount_composer(
         composer.set_components(controls, picker, cx);
         composer
     });
-    (view, cx)
+    (view, window_cx)
 }
 
 #[gpui::test]
 fn composer_controls_keep_equal_edge_insets_as_the_draft_grows(cx: &mut TestAppContext) {
-    let (view, cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
+    let (view, mut cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
     cx.simulate_resize(size(px(900.0), px(600.0)));
     for draft in [
         "",
@@ -90,7 +90,7 @@ fn composer_controls_keep_equal_edge_insets_as_the_draft_grows(cx: &mut TestAppC
 /// minimum. 8 + 64 + 32 + 8 = 112, so the minimum owns the final 16px.
 #[gpui::test]
 fn composer_empty_card_matches_the_reference_128px_box(cx: &mut TestAppContext) {
-    let (_view, cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
+    let (_view, mut cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
     cx.simulate_resize(size(px(900.0), px(600.0)));
     cx.run_until_parked();
 
@@ -122,7 +122,7 @@ fn composer_empty_card_matches_the_reference_128px_box(cx: &mut TestAppContext) 
 /// A typed draft hides the placeholder; the editor keeps its box.
 #[gpui::test]
 fn composer_hides_the_placeholder_once_drafted(cx: &mut TestAppContext) {
-    let (view, cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
+    let (view, mut cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
     cx.simulate_resize(size(px(900.0), px(600.0)));
     cx.update(|_, app| {
         view.update(app, |composer, cx| {
@@ -144,7 +144,7 @@ fn composer_hides_the_placeholder_once_drafted(cx: &mut TestAppContext) {
 /// static dock cannot (see the render comment and lane report).
 #[gpui::test]
 fn composer_bounds_long_drafts_at_the_240px_editor_cap(cx: &mut TestAppContext) {
-    let (view, cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
+    let (view, mut cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
     cx.simulate_resize(size(px(900.0), px(600.0)));
     let draft = (1..=12)
         .map(|line| format!("Line {line}"))
@@ -179,7 +179,7 @@ fn composer_lip_row_matches_reference_geometry(cx: &mut TestAppContext) {
         pending_steering: vec![PendingSteeringRow::new("cmd-1", 7, "  Keep this  ", true)],
         ..NativeComposerControlsSnapshot::default()
     };
-    let (_view, cx) = mount_composer(cx, snapshot);
+    let (_view, mut cx) = mount_composer(cx, snapshot);
     cx.simulate_resize(size(px(900.0), px(600.0)));
     cx.run_until_parked();
 
