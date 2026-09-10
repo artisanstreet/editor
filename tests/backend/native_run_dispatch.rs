@@ -260,12 +260,19 @@ struct TempDatabase {
 impl TempDatabase {
     fn new(label: &str) -> Self {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!(
-            "artisan-dispatch-{}-{}-{}",
-            label,
-            std::process::id(),
-            seq
+            "artisan-dispatch-{label}-{pid}-{nanos}-{seq}",
+            pid = std::process::id(),
         ));
+        // A reused OS pid plus a leftover scratch dir from a crashed run
+        // would otherwise replay an already-migrated database and fail on
+        // existing triggers. The time nonce makes collisions impractical;
+        // the removal makes a collision harmless.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let file = dir.join("test.db");
         Self { dir, file }
@@ -826,13 +833,27 @@ async fn dispatch_unexpired_candidate_remains_byte_stable_until_expiry() {
     assert_eq!(before.dispatches, mid.dispatches);
     assert_eq!(before.runs, mid.runs);
     assert_eq!(before.patches, mid.patches);
-    assert_eq!(
-        activity
+    // The claim loop acquires the activity lease before each SQLite claim
+    // round-trip and drops it when the unexpired candidate proves
+    // unclaimable, so a single snapshot may catch a transient hold.
+    // Quiescence (an observed zero) within a bounded poll proves no claim
+    // is retained, while the byte-stability asserts above prove no durable
+    // effect.
+    let quiesce_until = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let active = activity
             .snapshot()
             .expect("no-claim activity should remain readable")
-            .active_work_count(),
-        0
-    );
+            .active_work_count();
+        if active == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < quiesce_until,
+            "unexpired candidate must not retain activity custody, observed {active}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let dispatch_row2 = entities::message_dispatch::Entity::find_by_id("msg-unexp")
         .one(&database)
@@ -1098,6 +1119,7 @@ fn assert_fixture_run(after: &AllRows) {
         binding,
         serde_json::json!({
             "engine": "opencode2",
+            "format": 1,
             "profile_id": "fixture-test",
             "session_id": "test-session",
         })
@@ -2596,6 +2618,7 @@ fn assert_midturn_hold_state(held: &AllRows, message_id: &MessageId) -> u64 {
         held_binding,
         serde_json::json!({
             "engine": "opencode2",
+            "format": 1,
             "profile_id": "fixture-test",
             "session_id": "test-session",
         })
@@ -2764,6 +2787,7 @@ fn assert_midturn_interrupted_dispatch_run(after: &AllRows, message_id: &Message
         binding,
         serde_json::json!({
             "engine": "opencode2",
+            "format": 1,
             "profile_id": "fixture-test",
             "session_id": "test-session",
         })
