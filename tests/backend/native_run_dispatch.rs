@@ -271,9 +271,9 @@ impl TempDatabase {
         // A reused OS pid plus a leftover scratch dir from a crashed run
         // would otherwise replay an already-migrated database and fail on
         // existing triggers. The time nonce makes collisions impractical;
-        // the removal makes a collision harmless.
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
+        // creation fails loudly on a collision instead of deleting a
+        // pre-existing path.
+        std::fs::create_dir(&dir).expect("create temp dir");
         let file = dir.join("test.db");
         Self { dir, file }
     }
