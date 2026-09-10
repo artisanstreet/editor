@@ -25,10 +25,11 @@
 //!   delivery-owned turn sync — no manual `RegisterTurn`). Timestamps are
 //!   current-relative so the timed host clock renders live spans, and the
 //!   fixture prints the projected block order per case;
-//! - captures all seven states (empty / thinking / working / streaming /
-//!   completed / error / longform) at two baseline viewports, 1024x720 and 1536x900
-//!   logical, hidden (`show: false`, never presented, no OS screen capture,
-//!   no Win32 control).
+//! - captures exactly one selected state at one baseline viewport per
+//!   process (1024x720 or 1536x900 logical), hidden (`show: false`, never
+//!   presented, no OS screen capture, no Win32 control). Selection is an
+//!   explicit CLI pair and anything else fails closed, so root runs the
+//!   7 × 2 matrix as sequential processes with GPU/RAM reclaimed between.
 //!
 //! Capture assumes `Window::render_to_image` is enabled (root enables the
 //! `test-support` feature; the shipping-wgpu readback itself is owned by the
@@ -117,7 +118,22 @@ impl ProofSceneCase {
         }
     }
 
-    /// Every case in matrix order.
+    /// Parses an exact case slug; anything else is `None` (fail closed).
+    #[must_use]
+    pub fn parse(slug: &str) -> Option<Self> {
+        match slug {
+            "empty" => Some(Self::Empty),
+            "thinking" => Some(Self::Thinking),
+            "working" => Some(Self::Working),
+            "streaming" => Some(Self::Streaming),
+            "completed" => Some(Self::Completed),
+            "error" => Some(Self::Error),
+            "longform" => Some(Self::Longform),
+            _ => None,
+        }
+    }
+
+    /// Every case in matrix order (root runs each as its own process).
     #[must_use]
     pub fn all() -> [Self; 7] {
         [
@@ -458,19 +474,21 @@ fn print_case_manifest(screen: &Entity<ThreadScreen>, case: ProofSceneCase, cx: 
     }
 }
 
-/// Settles one capture slot: records failure, decrements the outstanding
-/// count, and quits the application when nothing remains. Every terminal
-/// path (seed refusal, window-open failure, update failure, capture
-/// success/failure, watchdog) runs through here, so the runner can neither
-/// hang nor quit early with captures outstanding.
-fn settle(pending: &Rc<Cell<usize>>, failed_flag: &Rc<Cell<bool>>, failed: bool, cx: &mut App) {
+/// Settles the single capture slot: records failure, marks settled, and
+/// quits. Every terminal path (seed refusal, open/update failure, capture
+/// success/failure, watchdog) ends here or quits directly, so one process
+/// can neither hang nor outlive its capture.
+fn settle_slot(
+    settled: &Rc<Cell<bool>>,
+    failed_flag: &Rc<Cell<bool>>,
+    failed: bool,
+    cx: &mut App,
+) {
     if failed {
         failed_flag.set(true);
     }
-    pending.set(pending.get().saturating_sub(1));
-    if pending.get() == 0 {
-        cx.quit();
-    }
+    settled.set(true);
+    cx.quit();
 }
 
 /// Publishes the shell geometry bound to one capture: actual window width
@@ -582,36 +600,57 @@ impl ProofCapture {
     }
 }
 
-/// Opens one hidden window per case and viewport, captures each on its next
-/// frame through the production shell pixels, saves the PNGs, and maps
-/// success onto the exit code.
+/// Exact invocation: `--case <slug> --viewport <narrow|wide>` and nothing
+/// else. Exactly one hidden window opens per process so the OS reclaims GPU
+/// and RAM between captures; root orchestrates the 7 × 2 matrix as
+/// sequential processes. Unknown or missing arguments fail closed: usage on
+/// stderr and no windows opened.
+const PROOF_USAGE: &str = "usage: parity-proof --case <empty|thinking|working|streaming|completed|error|longform> --viewport <narrow|wide>";
+
+/// Parses one explicit selection; anything else is a hard error.
+fn parse_selection(args: &[String]) -> Result<ProofCapture, String> {
+    if args.len() != 4 || args[0] != "--case" || args[2] != "--viewport" {
+        return Err(String::from("expected exactly --case <slug> --viewport <name>"));
+    }
+    let case = ProofSceneCase::parse(&args[1])
+        .ok_or_else(|| format!("unknown case {:?}", args[1]))?;
+    let (viewport_slug, width, height) = match args[3].as_str() {
+        "narrow" => ("narrow", NARROW_LOGICAL_WIDTH, NARROW_LOGICAL_HEIGHT),
+        "wide" => ("wide", WIDE_LOGICAL_WIDTH, WIDE_LOGICAL_HEIGHT),
+        _ => return Err(format!("unknown viewport {:?}", args[3])),
+    };
+    Ok(ProofCapture {
+        case,
+        viewport_slug,
+        width,
+        height,
+    })
+}
+
+/// Opens the one selected hidden window, captures it on its next frame
+/// through the production shell pixels, saves the PNG, and maps success
+/// onto the exit code.
 ///
-/// Requires `Window::render_to_image` (root-owned `test-support`
-/// enablement) and the capture lane's shipping-wgpu readback.
+/// Capture lifecycle: mount + seed through the controller, open hidden and
+/// unfocused, publish the live content width, `refresh`, then
+/// `on_next_frame` → `Window::render_to_image` (which drives the shipping
+/// wgpu draw synchronously from the freshly painted scene, per the capture
+/// lane) → save → quit. A 30s watchdog bounds a hidden window that never
+/// delivers a frame. Requires `Window::render_to_image` (root-owned
+/// `test-support` enablement) and the capture lane's shipping-wgpu readback.
 #[must_use]
 pub fn run() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let capture = match parse_selection(&args) {
+        Ok(capture) => capture,
+        Err(error) => {
+            eprintln!("parity-proof: {error}\n{PROOF_USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
     let launched = Rc::new(Cell::new(false));
     let launch_flag = Rc::clone(&launched);
-    let captures: Vec<ProofCapture> = ProofSceneCase::all()
-        .into_iter()
-        .flat_map(|case| {
-            [
-                ProofCapture {
-                    case,
-                    viewport_slug: "narrow",
-                    width: NARROW_LOGICAL_WIDTH,
-                    height: NARROW_LOGICAL_HEIGHT,
-                },
-                ProofCapture {
-                    case,
-                    viewport_slug: "wide",
-                    width: WIDE_LOGICAL_WIDTH,
-                    height: WIDE_LOGICAL_HEIGHT,
-                },
-            ]
-        })
-        .collect();
-    let remaining = Rc::new(Cell::new(captures.len()));
+    let settled = Rc::new(Cell::new(false));
     let failed = Rc::new(Cell::new(false));
     let failed_after_run = Rc::clone(&failed);
 
@@ -624,23 +663,19 @@ pub fn run() -> ExitCode {
             eprintln!("bundled font registration failed, using system faces: {error}");
         }
 
-        // Bounded watchdog: hidden windows may never deliver a next frame
+        // Bounded watchdog: a hidden window may never deliver a next frame
         // (vendor frame scheduling for never-shown windows is unverified
-        // from source alone). If anything is still outstanding after the
-        // budget, record the failure and quit instead of hanging.
+        // from source alone). One slot only, so quit unconditionally.
         {
-            let pending = Rc::clone(&remaining);
+            let settled_flag = Rc::clone(&settled);
             let failed_flag = Rc::clone(&failed);
             cx.spawn(async move |cx| {
                 cx.background_executor()
-                    .timer(Duration::from_secs(120))
+                    .timer(Duration::from_secs(30))
                     .await;
                 let _ = cx.update(|cx| {
-                    if pending.get() > 0 {
-                        eprintln!(
-                            "parity-proof watchdog: {} captures unsettled; quitting",
-                            pending.get()
-                        );
+                    if !settled_flag.get() {
+                        eprintln!("parity-proof watchdog: capture unsettled; quitting");
                         failed_flag.set(true);
                         cx.quit();
                     }
@@ -649,29 +684,29 @@ pub fn run() -> ExitCode {
             .detach();
         }
 
-        for capture in captures {
-            let stem = capture.file_stem();
-            let thread_id = ThreadId::parse(format!(
-                "parity-proof-{}-{}",
-                capture.case.slug(),
-                capture.viewport_slug
-            ))
-            .expect("fixture thread id is valid");
-            let shell = match ParityProofShell::mount(
-                thread_id,
-                String::from("Parity proof thread"),
-                capture.width - DESKTOP_SIDEBAR_WIDTH_PX,
-                capture.case,
-                cx,
-            ) {
-                Ok(shell) => shell,
-                Err(error) => {
-                    eprintln!("parity-proof seed failed for {stem}: {error}");
-                    settle(&remaining, &failed, true, cx);
-                    continue;
-                }
-            };
-            let screen = shell.read(cx).screen().clone();
+        let stem = capture.file_stem();
+        let thread_id = ThreadId::parse(format!(
+            "parity-proof-{}-{}",
+            capture.case.slug(),
+            capture.viewport_slug
+        ))
+        .expect("fixture thread id is valid");
+        let shell = match ParityProofShell::mount(
+            thread_id,
+            String::from("Parity proof thread"),
+            capture.width - DESKTOP_SIDEBAR_WIDTH_PX,
+            capture.case,
+            cx,
+        ) {
+            Ok(shell) => shell,
+            Err(error) => {
+                eprintln!("parity-proof seed failed for {stem}: {error}");
+                failed.set(true);
+                cx.quit();
+                return;
+            }
+        };
+        let screen = shell.read(cx).screen().clone();
             let bounds = Bounds::centered(
                 None,
                 size(px(capture.width), px(capture.height)),
@@ -697,7 +732,7 @@ pub fn run() -> ExitCode {
             match opened {
                 Ok(handle) => {
                     launch_flag.set(true);
-                    let pending = Rc::clone(&remaining);
+                    let settled_flag = Rc::clone(&settled);
                     let failed_flag = Rc::clone(&failed);
                     let updated = cx.update_window(handle.into(), |_, window, cx| {
                         // Publish the actual window width (never the
@@ -758,23 +793,22 @@ pub fn run() -> ExitCode {
                                     failed = true;
                                 }
                             }
-                            settle(&pending, &failed_flag, failed, cx);
+                            settle_slot(&settled_flag, &failed_flag, failed, cx);
                         });
                     });
                     if updated.is_err() {
                         eprintln!("parity-proof update failed for {caption}");
-                        settle(&remaining, &failed, true, cx);
+                        failed.set(true);
+                        settled.set(true);
+                        cx.quit();
                     }
                 }
                 Err(error) => {
                     eprintln!("parity-proof could not open its window: {error:?}");
-                    settle(&remaining, &failed, true, cx);
+                    failed.set(true);
+                    cx.quit();
                 }
             }
-        }
-        if remaining.get() == 0 {
-            cx.quit();
-        }
     });
 
     if launched.get() && !failed_after_run.get() {
@@ -786,7 +820,9 @@ pub fn run() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProofSceneCase, case_facts, case_snapshot};
+    use super::{
+        NARROW_LOGICAL_WIDTH, ProofSceneCase, case_facts, case_snapshot, parse_selection,
+    };
     use crate::conversation_state_machine::SceneFactKind;
     use artisan_domain::{ThreadId, UnixMillis};
 
@@ -855,6 +891,67 @@ mod tests {
         let facts = case_facts(ProofSceneCase::Error).expect("error facts");
         assert_eq!(facts.len(), 1);
         assert!(matches!(facts[0].kind, SceneFactKind::Error { .. }));
+    }
+
+    #[test]
+    fn selection_parses_the_exact_cli_pair() {
+        let selection = parse_selection(&[
+            String::from("--case"),
+            String::from("thinking"),
+            String::from("--viewport"),
+            String::from("narrow"),
+        ])
+        .expect("exact pair parses");
+        assert_eq!(selection.case, ProofSceneCase::Thinking);
+        assert_eq!(selection.viewport_slug, "narrow");
+        assert_eq!(selection.width, NARROW_LOGICAL_WIDTH);
+    }
+
+    #[test]
+    fn selection_fails_closed_on_anything_else() {
+        let bad = [
+            vec![],
+            vec![String::from("--case")],
+            vec![
+                String::from("--case"),
+                String::from("thinking"),
+                String::from("--viewport"),
+                String::from("narrow"),
+                String::from("extra"),
+            ],
+            vec![
+                String::from("--case"),
+                String::from("nope"),
+                String::from("--viewport"),
+                String::from("narrow"),
+            ],
+            vec![
+                String::from("--case"),
+                String::from("thinking"),
+                String::from("--viewport"),
+                String::from("huge"),
+            ],
+            vec![
+                String::from("--viewport"),
+                String::from("narrow"),
+                String::from("--case"),
+                String::from("thinking"),
+            ],
+        ];
+        for args in bad {
+            assert!(
+                parse_selection(&args).is_err(),
+                "must fail closed, got {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_slug_round_trips_through_parse() {
+        for case in ProofSceneCase::all() {
+            assert_eq!(ProofSceneCase::parse(case.slug()), Some(case));
+        }
+        assert_eq!(ProofSceneCase::parse("bogus"), None);
     }
 
     #[test]

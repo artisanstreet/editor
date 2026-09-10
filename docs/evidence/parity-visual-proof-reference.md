@@ -51,17 +51,25 @@ conversation column are.
 1. Root registers the module (`mod parity_visual_proof;`, feature gate at
    root discretion) and enables `test-support` on the workspace
    `gpui_platform` dependency plus binary/export and Bazel wiring.
-2. Root runs the fixture binary/harness on Windows with shipping boot
-   parity (`.with_assets(CatalogAssetSource)` +
-   `register_bundled_fonts`, mirroring `native_application::run`); it
-   opens hidden windows (`show: false, focus: false`) for 7 states ×
-   narrow/wide (14 captures), mounts shell + screen + gate-Open +
-   deterministic title, seeds through the controller, captures on next
-   frame, and saves
-   `parity-proof-{case}-{viewport}-{logical}-scale{measured}-{WxH}.png`.
-3. Every terminal path (seed refusal, open/update failure, capture
-   ok/error, 120s watchdog) settles one slot and quits at zero — no hang.
-   Expected physical sizes at the 125% reference scale: narrow 1280x900,
+2. Root runs one process per capture (7 states × narrow/wide = 14
+   sequential invocations; GPU/RAM reclaimed between — the all-14-at-once
+   shape exhausted RAM and is gone):
+   `parity-proof --case <slug> --viewport <narrow|wide>`.
+   Slugs: `empty thinking working streaming completed error longform`.
+   Anything else (missing, reordered, extra, unknown slug/viewport) fails
+   closed with usage on stderr and opens no windows.
+3. Each process: shipping boot parity (`.with_assets(CatalogAssetSource)`
+   + `register_bundled_fonts`), mount + seed through the controller, open
+   one hidden unfocused window with the shipping transparent caption,
+   publish the live content width, `refresh`, capture on next frame via
+   `Window::render_to_image` (which drives the shipping wgpu draw
+   synchronously from the freshly painted scene, per capture lane
+   `7aaf67d755`), save
+   `parity-proof-{case}-{viewport}-{logical}-scale{measured}-{WxH}.png`,
+   quit. Terminal paths: seed/open/update failure quits immediately;
+   capture ok/error settles and quits; a 30s watchdog bounds a hidden
+   window that never delivers a frame.
+4. Expected physical sizes at the 125% reference scale: narrow 1280x900,
    wide 1920x1125. The fixture asserts `logical * measured scale` from
    `window.scale_factor()` and fails loudly on mismatch instead of claiming.
 4. Each capture publishes `geometry … window=… scale=… sidebar=218
