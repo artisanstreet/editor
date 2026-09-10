@@ -1132,7 +1132,7 @@ impl ConversationSurface {
         let stale_keys: Vec<String> = self
             .footer_focus
             .keys()
-            .filter(|key| !live_keys.iter().any(|live| live == key))
+            .filter(|key| !live_keys.iter().any(|live| live == *key))
             .cloned()
             .collect();
         for key in stale_keys {
@@ -2742,6 +2742,8 @@ impl ConversationSurface {
 
         let hover_surface = entity.downgrade();
         let reveal_turn = turn_id.clone();
+        let message_selector = format!("{selector}-copy-message");
+        let time_selector = format!("{selector}-time-{}", settlement.settled_at_ms());
         let mut footer = div()
             .id(format!("{selector}-footer"))
             .absolute()
@@ -2773,7 +2775,6 @@ impl ConversationSurface {
             })
             .child(copy_button);
         if !copy_message.is_empty() {
-            let message_selector = format!("{selector}-copy-message");
             footer = footer.child(
                 div()
                     .text_color(theme.colors.destructive.to_paint())
@@ -2782,7 +2783,6 @@ impl ConversationSurface {
             );
         }
         if !relative_age.is_empty() {
-            let time_selector = format!("{selector}-time-{}", settlement.settled_at_ms());
             footer = footer.child(
                 div()
                     .debug_selector(move || time_selector.clone())
