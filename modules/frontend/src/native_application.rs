@@ -6949,7 +6949,7 @@ impl NativeApplication {
                             // thread is immediately typeable; later renders
                             // must not steal focus back.
                             let focus = self.composer.read(cx).focus_handle(cx);
-                            window.focus(&focus);
+                            window.focus(&focus, cx);
                             Some(screen)
                         }
                         None => ThreadScreen::mount(thread.clone(), ThemeMode::Dark, cx).ok(),
@@ -8403,6 +8403,62 @@ mod tests {
         // itself, because typed text only reaches the surface holding
         // window focus. This is the reported production path with zero
         // admission bypasses: no set_disabled call anywhere.
+        cx.simulate_input("hello");
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "hello"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn thread_composer_click_focuses_for_typing_after_other_control(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let project = ProjectId::parse("thread-click-project").expect("fixture project");
+        let thread = ThreadId::parse("thread-click-thread").expect("fixture thread");
+        let host = cx.update(|_, app| {
+            ConversationHost::mount(thread.clone(), ThemeMode::Dark, app).expect("host")
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.project_options = vec![ProjectOption {
+                    id: project.clone(),
+                    name: "click".to_owned().into(),
+                }];
+                application.selected_project = Some(project.clone());
+                application.conversation_host = Some(host.clone());
+                application.navigate(
+                    NativeRoute::Thread {
+                        project: project.clone(),
+                        thread: thread.clone(),
+                    },
+                    application_cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        // Deliberately park focus on another real control first, so this
+        // exercises the pointer path rather than any prior focus state. No
+        // direct focus call or handler invocation on the composer itself.
+        cx.update(|window, app| {
+            view.update(app, |application, cx| {
+                window.focus(&application.profile_focus, cx)
+            });
+        });
+        cx.run_until_parked();
+        let editor = cx
+            .debug_bounds(crate::native_composer::NATIVE_COMPOSER_EDITOR_SELECTOR)
+            .expect("composer editor paints");
+        cx.simulate_click(editor.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
         cx.simulate_input("hello");
         cx.update(|_, app| {
             view.update(app, |application, application_cx| {

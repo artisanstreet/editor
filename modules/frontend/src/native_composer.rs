@@ -89,6 +89,7 @@ actions!(
 const NATIVE_COMPOSER_KEY_CONTEXT: &str = "artisan-native-composer";
 const NATIVE_COMPOSER_PLACEHOLDER: &str = "Do anything";
 const NATIVE_COMPOSER_PLACEHOLDER_SELECTOR: &str = "artisan-native-composer-placeholder";
+pub(crate) const NATIVE_COMPOSER_EDITOR_SELECTOR: &str = "artisan-native-composer-editor";
 const NATIVE_COMPOSER_SEND_SELECTOR: &str = "artisan-native-composer-send";
 pub(crate) const NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR: &str =
     "artisan-native-composer-attachment-tray";
@@ -2258,6 +2259,7 @@ impl Render for NativeComposer {
         let focus = self.focus_handle.clone();
         let mut editor = div()
             .id("artisan-native-composer-editor")
+            .debug_selector(|| NATIVE_COMPOSER_EDITOR_SELECTOR.to_string())
             .key_context(NATIVE_COMPOSER_KEY_CONTEXT)
             .w_full()
             .flex_1()
