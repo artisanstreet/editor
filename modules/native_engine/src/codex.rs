@@ -132,11 +132,12 @@ impl VerifiedCodexLaunch {
         &self.version
     }
 
-    /// Returns the private Codex home derived from the database parent.
+    /// Returns the legacy private Codex home derived from the database parent.
     ///
-    /// Codex itself owns `CODEX_HOME`; Artisan seats the managed launch at
-    /// `<database-parent>/toolchain/codex/home` so the ambient user home is
-    /// never mutated by a managed turn.
+    /// Retained for tooling display only. Dispatch and usage probes run with
+    /// the inherited ambient/explicit `CODEX_HOME` account and never seat a
+    /// managed home: the directory below does not necessarily exist and must
+    /// not be used as a child environment.
     #[must_use]
     pub fn codex_home(&self) -> PathBuf {
         codex_home_for_database(&self.database_path)

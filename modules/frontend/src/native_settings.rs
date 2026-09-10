@@ -782,9 +782,9 @@ use artisan_ui::native_select::{NativeSelect, NativeSelectOption};
 use artisan_ui::switch::Switch;
 use artisan_ui::toggle_group::ToggleGroup;
 use gpui::{
-    AnyElement, Context, Div, FocusHandle, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, px,
+    AnyElement, Context, Div, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px,
 };
 
 use crate::native_route::SettingsRoute;
@@ -942,6 +942,223 @@ pub const fn settings_section_for_route(route: SettingsRoute) -> SettingsSection
     }
 }
 
+/// Catalog state behind one live engine page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettingsEngineCatalogState {
+    /// No catalog read has settled yet.
+    Loading,
+    /// A catalog snapshot is loaded.
+    Ready,
+    /// The catalog read failed; retry from the composer or the engine page.
+    Failed,
+}
+
+/// Registry state behind one live engine page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SettingsEngineRegistryState {
+    /// No registry read has settled yet.
+    Loading,
+    /// No registry file exists (managed profiles are not set up).
+    Missing,
+    /// The registry exists but holds no profiles.
+    Empty,
+    /// The registry holds profiles.
+    Present,
+}
+
+/// One catalog model row behind a live engine page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsEngineModel {
+    /// Stable catalog model id.
+    pub id: String,
+    /// Whether this row is the thread's saved model.
+    pub saved: bool,
+    /// Whether this row is the currently displayed choice.
+    pub displayed: bool,
+    /// Live unavailability reason, when the catalog disabled the row.
+    pub disabled_reason: Option<String>,
+}
+
+/// Live facts behind one engine settings page, projected by the
+/// orchestrator from the actual catalog, account usage, registry, and
+/// thread configuration.
+///
+/// Every state the page paints — loaded, loading, unavailable, sign-in
+/// required, save pending, save failed — comes from this snapshot. The page
+/// never invents installation facts: availability and installation read out
+/// the backend-probed account verdict, and controls without a durable API
+/// stay visibly inert with an explicit unavailable note.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingsEngineSnapshot {
+    /// Engine id this snapshot was built for.
+    pub engine_id: String,
+    /// Backend-probed account verdict for the engine.
+    pub readiness: crate::native_profile_usage::EngineReadiness,
+    /// Provider-disclosed account email, when one was reported.
+    pub account_email: Option<String>,
+    /// Actionable refresh failure, when the latest check failed.
+    pub refresh_failure: Option<String>,
+    /// Whether an account read is currently admitted.
+    pub refreshing: bool,
+    /// Runtime catalog state.
+    pub catalog: SettingsEngineCatalogState,
+    /// Catalog failure copy, when the read failed.
+    pub catalog_error: Option<String>,
+    /// Managed profile registry state.
+    pub registry: SettingsEngineRegistryState,
+    /// Selected thread this engine configuration would save to, if any.
+    /// Engine model configuration is thread-specific; global pages name
+    /// that explicitly instead of pretending to save.
+    pub selected_thread: Option<String>,
+    /// Saved model id for the selected thread, when configured.
+    pub saved_model: Option<String>,
+    /// Saved profile id for the selected thread, when configured.
+    pub saved_profile: Option<String>,
+    /// Currently displayed model choice, when one is selected.
+    pub displayed_model: Option<String>,
+    /// Whether the displayed choice equals the saved configuration.
+    pub displayed_authoritative: bool,
+    /// Whether the displayed choice can be saved to the selected thread.
+    pub can_save_displayed: bool,
+    /// Unsaved-choice notice for the models section, when a choice is held
+    /// without a save (no thread selected, or the engine cannot admit it).
+    /// Saved, saving, and failed states read out their own rows instead.
+    pub choice_notice: Option<String>,
+    /// Whether a configuration save is in flight.
+    pub pending_save: bool,
+    /// Whether the latest save failed.
+    pub save_failed: bool,
+    /// Catalog model rows for this engine, in catalog order.
+    pub models: Vec<SettingsEngineModel>,
+}
+
+impl SettingsEngineSnapshot {
+    /// Returns the availability badge for the probed account verdict.
+    #[must_use]
+    pub const fn availability_badge(&self) -> &'static str {
+        match self.readiness {
+            crate::native_profile_usage::EngineReadiness::Ready => "Available",
+            crate::native_profile_usage::EngineReadiness::NeedsSignIn => "Sign-in required",
+            crate::native_profile_usage::EngineReadiness::Checking => "Checking",
+            crate::native_profile_usage::EngineReadiness::NotReady => "Unavailable",
+        }
+    }
+
+    /// Returns the installation state copy for the probed verdict.
+    ///
+    /// Only a responding executable proves installation: an authenticated
+    /// or login-gated answer means the binary runs, anything else is a
+    /// check status, never an install claim.
+    #[must_use]
+    pub fn installation_state(&self) -> String {
+        match self.readiness {
+            crate::native_profile_usage::EngineReadiness::Ready => match &self.account_email {
+                Some(email) => format!("Installed and responding as {email}."),
+                None => "Installed and responding.".to_owned(),
+            },
+            crate::native_profile_usage::EngineReadiness::NeedsSignIn => {
+                "Installed. Account sign-in is required.".to_owned()
+            }
+            crate::native_profile_usage::EngineReadiness::Checking => {
+                "Checking installation and account status.".to_owned()
+            }
+            crate::native_profile_usage::EngineReadiness::NotReady => match &self.refresh_failure
+            {
+                Some(failure) => format!("Status check failed: {failure}."),
+                None => "Installation and account status have not been checked yet.".to_owned(),
+            },
+        }
+    }
+
+    /// Returns the account state copy for the probed verdict.
+    #[must_use]
+    pub fn account_state(&self) -> String {
+        match self.readiness {
+            crate::native_profile_usage::EngineReadiness::Ready => match &self.account_email {
+                Some(email) => format!("Signed in as {email}."),
+                None => "Signed in.".to_owned(),
+            },
+            crate::native_profile_usage::EngineReadiness::NeedsSignIn => {
+                "No account is signed in.".to_owned()
+            }
+            crate::native_profile_usage::EngineReadiness::Checking => {
+                "Reading account status.".to_owned()
+            }
+            crate::native_profile_usage::EngineReadiness::NotReady => match &self.refresh_failure
+            {
+                Some(failure) => format!("Account status unavailable: {failure}."),
+                None => "Sign-in status unknown.".to_owned(),
+            },
+        }
+    }
+}
+
+/// One real catalog engine behind the settings nav rail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsEngineNavEntry {
+    /// Stable catalog engine id.
+    pub id: String,
+    /// Provider-owned display label.
+    pub label: String,
+}
+
+/// Actions a mounted [`SettingsScreen`] emits for its orchestrator.
+///
+/// The screen owns no transport or navigation: every live control emits one
+/// of these and the application performs the command.
+#[derive(Clone, Debug)]
+pub enum SettingsScreenEvent {
+    /// Navigate to a settings section, preserving the engine id when one is
+    /// mounted.
+    Navigate {
+        /// Section to mount.
+        section: SettingsRoute,
+        /// Engine id to keep mounted, if the target is the engine page.
+        engine: Option<String>,
+    },
+    /// Force a provider-account refresh for one engine.
+    RefreshEngine {
+        /// Engine id to refresh.
+        engine_id: String,
+    },
+    /// Save the currently displayed model choice for one engine to the
+    /// selected thread through the shared direct typed-save path.
+    SaveDisplayedModel {
+        /// Engine id whose displayed choice is saved.
+        engine_id: String,
+    },
+    /// Choose one catalog model for one engine from the Settings page.
+    ///
+    /// The orchestrator serves this through the existing `SelectPolicy`
+    /// plus shared typed-save flow — the same path as the composer picker —
+    /// so a Settings choice saves, acknowledges, and reloads exactly like
+    /// one made in the composer.
+    SelectEngineModel {
+        /// Engine id whose model is chosen.
+        engine_id: String,
+        /// Stable catalog model id that is chosen.
+        model_id: String,
+    },
+}
+
+impl EventEmitter<SettingsScreenEvent> for SettingsScreen {}
+
+/// Maps a static [`SettingsSection`] back to its mounted [`SettingsRoute`].
+///
+/// Inverse of [`settings_section_for_route`], used by the live nav rail to
+/// emit navigation for the painted row.
+#[must_use]
+pub const fn section_route(section: SettingsSection) -> SettingsRoute {
+    match section {
+        SettingsSection::Models => SettingsRoute::Models,
+        SettingsSection::Appearance => SettingsRoute::Appearance,
+        SettingsSection::Engines => SettingsRoute::Engines,
+        SettingsSection::Notifications => SettingsRoute::Notifications,
+        SettingsSection::Privacy => SettingsRoute::Privacy,
+        SettingsSection::Threads => SettingsRoute::Threads,
+    }
+}
+
 /// Returns the stable root selector for one mounted section.
 ///
 /// The value matches
@@ -1068,6 +1285,8 @@ pub struct SettingsScreen {
     text_font: String,
     code_font: String,
     agent_dataset: String,
+    engine_snapshot: Option<SettingsEngineSnapshot>,
+    engines: Vec<SettingsEngineNavEntry>,
 }
 
 impl SettingsScreen {
@@ -1114,7 +1333,52 @@ impl SettingsScreen {
             text_font: APPEARANCE_DEFAULT_TEXT_FONT.to_owned(),
             code_font: APPEARANCE_DEFAULT_CODE_FONT.to_owned(),
             agent_dataset: AGENT_NAME_DATASET_DEFAULT.to_owned(),
+            engine_snapshot: None,
+            engines: Vec::new(),
         }
+    }
+
+    /// Replaces the live engine snapshot for the mounted engine page.
+    ///
+    /// The snapshot is ignored unless it names the mounted engine id, so a
+    /// stale reply for a previous engine can never paint this page.
+    pub fn set_engine_snapshot(
+        &mut self,
+        snapshot: SettingsEngineSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if self.engine_id.as_deref() == Some(snapshot.engine_id.as_str()) {
+            self.engine_snapshot = Some(snapshot);
+            cx.notify();
+        }
+    }
+
+    /// Returns the live engine snapshot, when one names the mounted engine.
+    #[must_use]
+    pub fn engine_snapshot(&self) -> Option<&SettingsEngineSnapshot> {
+        self.engine_snapshot.as_ref().filter(|snapshot| {
+            self.engine_id.as_deref() == Some(snapshot.engine_id.as_str())
+        })
+    }
+
+    /// Replaces the real catalog engines behind the nav rail.
+    ///
+    /// The orchestrator feeds the manifest harness identities, so the rail
+    /// enumerates actual engines and never fixture identities. An empty list
+    /// keeps the legacy single engine row.
+    pub fn set_engines(
+        &mut self,
+        engines: Vec<SettingsEngineNavEntry>,
+        cx: &mut Context<Self>,
+    ) {
+        self.engines = engines;
+        cx.notify();
+    }
+
+    /// Returns the rail engine entries.
+    #[must_use]
+    pub fn engines(&self) -> &[SettingsEngineNavEntry] {
+        &self.engines
     }
 
     /// Returns the mounted section.
@@ -1449,13 +1713,10 @@ fn nav_group_label(theme: artisan_ui::theme::ArtisanTheme, label: &'static str) 
 ///
 /// The active row wears the opaque well: legacy paints the same surface
 /// gradient as cards, approximated here with the flat muted fill. Icons are
-/// omitted: no tabler-icon component exists in the native port yet.
-fn nav_link(
-    theme: artisan_ui::theme::ArtisanTheme,
-    label: String,
-    active: bool,
-    selector: String,
-) -> Div {
+/// omitted: no tabler-icon component exists in the native port yet. The
+/// caller attaches the debug selector and the navigation click, so the rail
+/// stays live without styling knowledge leaking into event wiring.
+fn nav_link(theme: artisan_ui::theme::ArtisanTheme, label: String, active: bool) -> Div {
     let row = div()
         .flex()
         .flex_row()
@@ -1464,8 +1725,7 @@ fn nav_link(
         .px(px(8.0))
         .rounded(px(6.0))
         .gap(px(8.0))
-        .text_sm()
-        .debug_selector(move || selector.clone());
+        .text_sm();
     if active {
         row.bg(theme.colors.muted.to_paint())
             .text_color(theme.colors.foreground.to_paint())
@@ -1578,7 +1838,11 @@ impl SettingsScreen {
     }
 
     /// Renders the nav rail for the mounted section.
-    fn render_nav(&self, theme: artisan_ui::theme::ArtisanTheme) -> Div {
+    ///
+    /// Every row navigates through [`SettingsScreenEvent::Navigate`]: the
+    /// rail is live chrome, not a static fixture. The engine row keeps the
+    /// mounted engine id so engine pages switch sections without losing it.
+    fn render_nav(&self, theme: artisan_ui::theme::ArtisanTheme, cx: &mut Context<Self>) -> Div {
         let active = settings_section_for_route(self.section);
         let mut rail = div()
             .flex()
@@ -1597,12 +1861,18 @@ impl SettingsScreen {
             SettingsSection::Privacy,
         ] {
             let selector = format!("settings-nav-{}", section.label().to_lowercase());
-            rail = rail.child(nav_link(
-                theme,
-                section.label().to_owned(),
-                active == section,
-                selector,
-            ));
+            let target = section_route(section);
+            rail = rail.child(
+                nav_link(theme, section.label().to_owned(), active == section)
+                    .id(selector.clone())
+                    .debug_selector(move || selector.clone())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SettingsScreenEvent::Navigate {
+                            section: target,
+                            engine: None,
+                        });
+                    })),
+            );
             if active == section {
                 rail = rail.child(anchor_list(
                     theme,
@@ -1611,22 +1881,51 @@ impl SettingsScreen {
             }
         }
         rail = rail.child(nav_group_label(theme, "ENGINES"));
-        let engine_active = active == SettingsSection::Engines;
-        let engine_selector = format!(
-            "settings-nav-engines-{}",
-            self.engine_id.as_deref().unwrap_or(FIXTURE_ENGINE_ID)
-        );
-        rail = rail.child(nav_link(
-            theme,
-            self.engine_label(),
-            engine_active,
-            engine_selector,
-        ));
-        if engine_active {
-            rail = rail.child(anchor_list(
-                theme,
-                visible_anchors(SettingsSection::Engines, self.engine_enabled),
-            ));
+        if self.engines.is_empty() {
+            let engine_active = active == SettingsSection::Engines;
+            let engine_selector = format!(
+                "settings-nav-engines-{}",
+                self.engine_id.as_deref().unwrap_or(FIXTURE_ENGINE_ID)
+            );
+            let engine_id = self.engine_id.clone();
+            rail = rail.child(
+                nav_link(theme, self.engine_label(), engine_active)
+                    .id(engine_selector.clone())
+                    .debug_selector(move || engine_selector.clone())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SettingsScreenEvent::Navigate {
+                            section: SettingsRoute::Engines,
+                            engine: engine_id.clone(),
+                        });
+                    })),
+            );
+            if engine_active {
+                rail = rail.child(anchor_list(
+                    theme,
+                    visible_anchors(SettingsSection::Engines, self.engine_enabled),
+                ));
+            }
+            return rail;
+        }
+        for entry in self.engines.clone() {
+            let row_active =
+                active == SettingsSection::Engines && self.engine_id.as_deref() == Some(entry.id.as_str());
+            let selector = format!("settings-nav-engines-{}", entry.id);
+            let target = entry.id.clone();
+            rail = rail.child(
+                nav_link(theme, entry.label.clone(), row_active)
+                    .id(selector.clone())
+                    .debug_selector(move || selector.clone())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SettingsScreenEvent::Navigate {
+                            section: SettingsRoute::Engines,
+                            engine: Some(target.clone()),
+                        });
+                    })),
+            );
+            if row_active {
+                rail = rail.child(anchor_list(theme, SettingsSection::Engines.anchors()));
+            }
         }
         rail
     }
@@ -1687,7 +1986,7 @@ impl SettingsScreen {
                 theme,
                 "compaction",
                 "Compaction",
-                None,
+                Some("Compaction choices are not yet configurable in the native app."),
                 None,
                 compaction,
             ))
@@ -1755,7 +2054,7 @@ impl SettingsScreen {
                 theme,
                 "typography",
                 "Typography",
-                None,
+                Some("Font choices are not yet configurable in the native app."),
                 Some(restore),
                 typography,
             ))
@@ -1977,15 +2276,15 @@ impl SettingsScreen {
                 theme,
                 "formatting",
                 "Formatting",
-                None,
+                Some("Time and path display choices are not yet configurable in the native app."),
                 None,
                 formatting,
             ))
             .child(settings_section_shell(
-                theme, "glass", "Glass", None, None, glass,
+                theme, "glass", "Glass", Some("The shader choice is not yet configurable in the native app."), None, glass,
             ))
             .child(settings_section_shell(
-                theme, "reading", "Reading", None, None, reading,
+                theme, "reading", "Reading", Some("The prose-width choice is not yet configurable in the native app."), None, reading,
             ))
     }
 
@@ -2005,11 +2304,16 @@ impl SettingsScreen {
 
     /// Renders the engines page (`engine.svelte`).
     ///
-    /// Installation, account, and model rows need the installations, usage,
-    /// and session-defaults controllers; they paint fixture copy with every
-    /// action disabled. The switched-off branch hides account and models
-    /// exactly like legacy.
-    fn render_engine(&self, theme: artisan_ui::theme::ArtisanTheme) -> Div {
+    /// With a live [`SettingsEngineSnapshot`] the page paints the actual
+    /// catalog, account, registry, and thread configuration with working
+    /// refresh and model-choice actions; without one it keeps the static
+    /// fixture copy with every action disabled. The switched-off branch of
+    /// the fixture hides account and models exactly like legacy.
+    fn render_engine(
+        &self,
+        theme: artisan_ui::theme::ArtisanTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let engine_id = self.engine_id.as_deref().unwrap_or(FIXTURE_ENGINE_ID);
         if !self.engine_known {
             return div().flex().flex_col().child(settings_header(
@@ -2017,6 +2321,9 @@ impl SettingsScreen {
                 SETTINGS_UNKNOWN_ENGINE_TITLE.to_owned(),
                 &unknown_engine_description(engine_id),
             ));
+        }
+        if let Some(snapshot) = self.engine_snapshot() {
+            return self.render_live_engine(theme, snapshot, cx);
         }
         let label = self.engine_label();
         let description = format!(
@@ -2068,6 +2375,349 @@ impl SettingsScreen {
             );
         }
         page
+    }
+
+    /// Renders one live engine page from its orchestrator snapshot.
+    ///
+    /// Availability reads out the probed account verdict with a state badge
+    /// instead of the fixture switch: native engines follow their installed
+    /// CLI and account state and expose no separate enable control.
+    /// Installation, account, and models paint the live check state with
+    /// working refresh and model-choice actions; model configuration stays
+    /// explicitly thread-scoped.
+    fn render_live_engine(
+        &self,
+        theme: artisan_ui::theme::ArtisanTheme,
+        snapshot: &SettingsEngineSnapshot,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let label = self.engine_label();
+        let description = format!(
+            "Choose where {label} appears, manage its installation, and inspect its account and models."
+        );
+        let availability = settings_card(
+            theme,
+            vec![settings_row(
+                theme,
+                "Availability",
+                "Whether this engine can run models. Native engines follow their installed CLI and account state; there is no separate switch.",
+                Some(
+                    div()
+                        .flex_shrink_0()
+                        .child(outline_badge(
+                            BadgeStyle::resolve(theme),
+                            snapshot.availability_badge(),
+                        ))
+                        .into_any_element(),
+                ),
+            )],
+        );
+        div()
+            .flex()
+            .flex_col()
+            .child(settings_header(theme, label, &description))
+            .child(settings_section_shell(
+                theme,
+                "availability",
+                "Availability",
+                None,
+                None,
+                availability,
+            ))
+            .child(self.render_live_engine_installation(theme, snapshot, cx))
+            .child(self.render_live_engine_account(theme, snapshot, cx))
+            .child(self.render_live_engine_models(theme, snapshot, cx))
+    }
+
+    /// Builds one live ghost-style action trigger emitting a screen event.
+    fn live_action(
+        selector: String,
+        label: &'static str,
+        event: SettingsScreenEvent,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(selector.clone())
+            .debug_selector(move || selector.clone())
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(event.clone());
+            }))
+            .p(px(4.0))
+            .text_sm()
+            .child(label.to_owned())
+            .into_any_element()
+    }
+
+    /// Builds the engine refresh trigger for one live section.
+    fn refresh_action(
+        snapshot: &SettingsEngineSnapshot,
+        selector: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let engine_id = snapshot.engine_id.clone();
+        Self::live_action(
+            selector.to_owned(),
+            if snapshot.refreshing {
+                "Checking…"
+            } else {
+                "Refresh"
+            },
+            SettingsScreenEvent::RefreshEngine { engine_id },
+            cx,
+        )
+    }
+
+    /// Renders the live installation section from the probed verdict.
+    fn render_live_engine_installation(
+        &self,
+        theme: artisan_ui::theme::ArtisanTheme,
+        snapshot: &SettingsEngineSnapshot,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let body = settings_card(
+            theme,
+            vec![
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .py(px(20.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.colors.foreground.to_paint())
+                            .child(snapshot.installation_state()),
+                    ),
+            ],
+        );
+        settings_section_shell(
+            theme,
+            "installation",
+            "Installation",
+            None,
+            Some(Self::refresh_action(snapshot, "settings-installation-refresh", cx)),
+            body,
+        )
+    }
+
+    /// Renders the live account section from the probed verdict.
+    fn render_live_engine_account(
+        &self,
+        theme: artisan_ui::theme::ArtisanTheme,
+        snapshot: &SettingsEngineSnapshot,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let body = settings_card(
+            theme,
+            vec![
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .py(px(20.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.colors.foreground.to_paint())
+                            .child(snapshot.account_state()),
+                    ),
+            ],
+        );
+        settings_section_shell(
+            theme,
+            "account",
+            "Account",
+            None,
+            Some(Self::refresh_action(snapshot, "settings-usage-refresh", cx)),
+            body,
+        )
+    }
+
+    /// Renders the live model rows with working choice actions.
+    ///
+    /// Every supported row chooses its model through
+    /// [`SettingsScreenEvent::SelectEngineModel`], which the orchestrator
+    /// serves through the existing `SelectPolicy` plus shared typed-save
+    /// flow — the same path as the composer picker, with the same
+    /// compare-and-swap save and acknowledgment. Catalog-disabled rows stay
+    /// unclickable with their honest reason. Model configuration is
+    /// thread-scoped: without a selected thread the rows name that instead
+    /// of pretending to save.
+    fn render_live_engine_models(
+        &self,
+        theme: artisan_ui::theme::ArtisanTheme,
+        snapshot: &SettingsEngineSnapshot,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let label = self.engine_label();
+        let mut blocks = Vec::new();
+        if let Some(notice) = snapshot.choice_notice.as_deref() {
+            blocks.push(
+                div()
+                    .w_full()
+                    .py(px(12.0))
+                    .text_sm()
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child(notice.to_owned()),
+            );
+        }
+        if snapshot.save_failed {
+            blocks.push(
+                div()
+                    .w_full()
+                    .py(px(12.0))
+                    .text_sm()
+                    .text_color(theme.colors.destructive.to_paint())
+                    .child(
+                        "The model configuration was not saved. Retry the choice or the save action.",
+                    ),
+            );
+        }
+        if snapshot.models.is_empty() {
+            blocks.push(
+                div()
+                    .w_full()
+                    .py(px(20.0))
+                    .text_sm()
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child(format!("No models are listed for {label} yet.")),
+            );
+        }
+        for model in &snapshot.models {
+            blocks.push(self.live_engine_model_row(theme, snapshot, model, cx));
+        }
+        if snapshot.selected_thread.is_none() {
+            blocks.push(
+                div()
+                    .w_full()
+                    .py(px(12.0))
+                    .text_xs()
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child(format!(
+                        "Engine models save to the selected thread. Select a thread to configure {label}."
+                    )),
+            );
+        } else if let (Some(saved), Some(profile)) =
+            (snapshot.saved_model.as_deref(), snapshot.saved_profile.as_deref())
+        {
+            blocks.push(
+                div()
+                    .w_full()
+                    .py(px(12.0))
+                    .text_xs()
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child(format!("Saved for this thread: {saved} on profile {profile}.")),
+            );
+        }
+        let action = if snapshot.pending_save {
+            Some(
+                div()
+                    .p(px(4.0))
+                    .text_sm()
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child("Saving…")
+                    .into_any_element(),
+            )
+        } else if snapshot.can_save_displayed {
+            let engine_id = snapshot.engine_id.clone();
+            Some(Self::live_action(
+                "settings-engine-save-model".to_owned(),
+                "Save",
+                SettingsScreenEvent::SaveDisplayedModel { engine_id },
+                cx,
+            ))
+        } else {
+            None
+        };
+        settings_section_shell(theme, "models", "Models", None, action, settings_card(theme, blocks))
+    }
+
+    /// Paints one live engine model row with its state badges.
+    ///
+    /// Selectable rows (supported model, thread selected) emit
+    /// [`SettingsScreenEvent::SelectEngineModel`] on activation; disabled
+    /// rows and thread-less pages paint without an action.
+    fn live_engine_model_row(
+        &self,
+        theme: artisan_ui::theme::ArtisanTheme,
+        snapshot: &SettingsEngineSnapshot,
+        model: &SettingsEngineModel,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut row = div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(16.0))
+            .py(px(10.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.colors.foreground.to_paint())
+                            .child(model.id.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.colors.muted_foreground.to_paint())
+                            .child(self.engine_label()),
+                    ),
+            );
+        if model.saved {
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .child(outline_badge(BadgeStyle::resolve(theme), "Saved")),
+            );
+        } else if model.displayed {
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .child(outline_badge(BadgeStyle::resolve(theme), "Selected")),
+            );
+        }
+        if let Some(reason) = model.disabled_reason.as_deref() {
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_shrink_0()
+                    .items_end()
+                    .child(outline_badge(BadgeStyle::resolve(theme), "Disabled"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.colors.muted_foreground.to_paint())
+                            .child(reason.to_owned()),
+                    ),
+            );
+            return row;
+        }
+        if snapshot.selected_thread.is_some() {
+            let engine_id = snapshot.engine_id.clone();
+            let model_id = model.id.clone();
+            let selector = format!("settings-engine-model-{model_id}");
+            row = row
+                .id(selector.clone())
+                .debug_selector(move || selector.clone())
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(SettingsScreenEvent::SelectEngineModel {
+                        engine_id: engine_id.clone(),
+                        model_id: model_id.clone(),
+                    });
+                }));
+        }
+        row
     }
 
     /// Renders the engine installation section with fixture status copy.
@@ -2286,7 +2936,7 @@ impl SettingsScreen {
                 theme,
                 "system",
                 "System",
-                None,
+                Some("Notification controls are not yet connected in the native app."),
                 None,
                 settings_card(theme, blocks),
             ))
@@ -2334,7 +2984,7 @@ impl SettingsScreen {
                 theme,
                 "telemetry",
                 "Observability",
-                None,
+                Some("Telemetry choices are not yet configurable in the native app."),
                 None,
                 telemetry,
             ))
@@ -2410,7 +3060,7 @@ impl SettingsScreen {
             theme,
             "retention",
             "Retention",
-            None,
+            Some("Retention controls are not yet connected in the native app."),
             None,
             self.retention_body(theme),
         ))
@@ -2544,7 +3194,7 @@ impl SettingsScreen {
             theme,
             "thread-titles",
             "Titles",
-            None,
+            Some("Title choices are not yet configurable in the native app."),
             None,
             settings_card(theme, blocks),
         )
@@ -2580,7 +3230,7 @@ impl SettingsScreen {
             theme,
             "usage-recovery",
             "Usage recovery",
-            None,
+            Some("Usage-recovery choices are not yet configurable in the native app."),
             None,
             settings_card(theme, blocks),
         )
@@ -2625,18 +3275,18 @@ impl SettingsScreen {
             theme,
             "agents",
             "Agents",
-            Some("Names apply only to new agents; existing identities keep their name."),
+            Some("The name set is not yet configurable in the native app."),
             None,
             body,
         )
     }
 
     /// Renders the scrollable content column for the mounted section.
-    fn render_main(&self, theme: artisan_ui::theme::ArtisanTheme) -> Div {
+    fn render_main(&self, theme: artisan_ui::theme::ArtisanTheme, cx: &mut Context<Self>) -> Div {
         let section = match self.section {
             SettingsRoute::Models => self.render_models(theme),
             SettingsRoute::Appearance => self.render_appearance(theme),
-            SettingsRoute::Engines => self.render_engine(theme),
+            SettingsRoute::Engines => self.render_engine(theme, cx),
             SettingsRoute::Notifications => self.render_notifications(theme),
             SettingsRoute::Privacy => self.render_privacy(theme),
             SettingsRoute::Threads => self.render_threads(theme),
@@ -2652,11 +3302,11 @@ impl Render for SettingsScreen {
     /// `md:w-44` aside, growing `main`. The native window is always wide, so
     /// only the desktop arrangement is painted; the mobile top-bar variant
     /// and the hash-scroll effect are orchestrator gaps.
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let selector = settings_screen_selector(self.section);
-        let nav = self.render_nav(theme);
-        let main = self.render_main(theme);
+        let nav = self.render_nav(theme, cx);
+        let main = self.render_main(theme, cx);
         div()
             .id("settings-screen")
             .track_focus(&self.focus.root)
@@ -2740,8 +3390,7 @@ mod settings_screen_tests {
     }
 
     #[test]
-    fn engine_label_prefers_explicit_then_id_then_fixture() {
-        assert_eq!(
+    fn engine_label_prefers_explicit_then_id_then_fixture() {        assert_eq!(
             resolve_engine_label(Some("Custom"), Some("codex")),
             "Custom"
         );
@@ -2768,8 +3417,7 @@ mod settings_screen_tests {
     }
 
     #[test]
-    fn gap_notices_match_legacy_desktop_copy() {
-        assert!(notification_gap_notice(SystemNotificationGap::None).is_none());
+    fn gap_notices_match_legacy_desktop_copy() {        assert!(notification_gap_notice(SystemNotificationGap::None).is_none());
         assert!(notification_gap_notice(SystemNotificationGap::Unsupported).is_none());
         let (blocked_title, _) =
             notification_gap_notice(SystemNotificationGap::Blocked).expect("blocked notice");
@@ -2804,5 +3452,65 @@ mod settings_screen_tests {
             telemetry_choice_caption(TelemetryPreference::Disabled),
             "Off"
         );
+    }
+
+    fn live_snapshot(
+        readiness: crate::native_profile_usage::EngineReadiness,
+    ) -> SettingsEngineSnapshot {
+        SettingsEngineSnapshot {
+            engine_id: "codex".to_owned(),
+            readiness,
+            account_email: None,
+            refresh_failure: None,
+            refreshing: false,
+            catalog: SettingsEngineCatalogState::Loading,
+            catalog_error: None,
+            registry: SettingsEngineRegistryState::Missing,
+            selected_thread: None,
+            saved_model: None,
+            saved_profile: None,
+            displayed_model: None,
+            displayed_authoritative: false,
+            can_save_displayed: false,
+            pending_save: false,
+            save_failed: false,
+            choice_notice: None,
+            models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn live_engine_states_name_the_probed_verdict() {
+        use crate::native_profile_usage::EngineReadiness;
+
+        let ready = SettingsEngineSnapshot {
+            account_email: Some("owner@example.test".to_owned()),
+            ..live_snapshot(EngineReadiness::Ready)
+        };
+        assert_eq!(ready.availability_badge(), "Available");
+        assert!(ready.installation_state().contains("owner@example.test"));
+        assert!(ready.account_state().contains("owner@example.test"));
+
+        let signin = live_snapshot(EngineReadiness::NeedsSignIn);
+        assert_eq!(signin.availability_badge(), "Sign-in required");
+        // A responding executable proves installation even without sign-in.
+        assert!(signin.installation_state().contains("Installed"));
+        assert!(signin.account_state().contains("No account"));
+
+        let checking = live_snapshot(EngineReadiness::Checking);
+        assert_eq!(checking.availability_badge(), "Checking");
+
+        // An unchecked engine never claims a missing installation.
+        let unknown = live_snapshot(EngineReadiness::NotReady);
+        assert_eq!(unknown.availability_badge(), "Unavailable");
+        assert!(!unknown.installation_state().contains("install"));
+        assert!(!unknown.installation_state().contains("repair"));
+
+        let failed = SettingsEngineSnapshot {
+            refresh_failure: Some("provider usage read timed out".to_owned()),
+            ..live_snapshot(EngineReadiness::NotReady)
+        };
+        assert!(failed.installation_state().contains("provider usage read timed out"));
+        assert!(failed.account_state().contains("provider usage read timed out"));
     }
 }

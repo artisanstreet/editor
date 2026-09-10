@@ -1,6 +1,41 @@
 //! Converts a validated picker choice into the existing durable engine configuration.
-use artisan_catalog::{NativeModelCatalog, NativeModelPolicy, NativePermissionOption};
+use artisan_catalog::{
+    NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeOptionValue,
+    NativePermissionOption,
+};
 use artisan_domain::*;
+
+/// Default profile identity persisted for native engine selections that
+/// carry no explicit profile.
+///
+/// The Codex/Claude/Grok/Cursor/Hermes launch authorities resolve their
+/// installed executables without consulting the managed `OpenCode` profile
+/// registry, so an unconfigured thread persists a native selection under
+/// this supported default instead of blocking on registry state. `OpenCode`
+/// 2 selections keep requiring an explicit managed profile.
+pub(crate) const NATIVE_DEFAULT_PROFILE_ID: &str = "default";
+
+/// Engines whose selections may use [`NATIVE_DEFAULT_PROFILE_ID`].
+const NATIVE_DEFAULT_PROFILE_ENGINES: [&str; 5] =
+    ["codex", "claude", "grok", "cursor", "hermes"];
+
+/// Attaches the default profile to a native choice without one.
+///
+/// Policies that already name a profile and every `OpenCode` 2 policy are
+/// returned unchanged.
+pub(crate) fn with_default_native_profile(
+    policy: &NativeModelPolicy,
+) -> NativeModelPolicy {
+    if policy.profile_id.is_some() {
+        return policy.clone();
+    }
+    if !NATIVE_DEFAULT_PROFILE_ENGINES.contains(&policy.engine_id.as_str()) {
+        return policy.clone();
+    }
+    let mut policy = policy.clone();
+    policy.profile_id = Some(NATIVE_DEFAULT_PROFILE_ID.to_owned());
+    policy
+}
 
 /// A displayed choice must never silently run the previous saved model.
 pub(crate) fn validate_run_choice(
@@ -9,7 +44,7 @@ pub(crate) fn validate_run_choice(
     saved: Option<&EngineRunConfig>,
 ) -> Result<(), &'static str> {
     catalog.admit_policy(policy).map_err(
-        |_| "Connect and configure this model's engine before running. Your draft is preserved.",
+        |_| "This model is unavailable in the runtime catalog right now. Your draft is preserved; open Settings → Engines to review it, or retry.",
     )?;
     let expected = config_for_policy(catalog, policy, saved)?;
     if saved != Some(&expected) {
@@ -225,6 +260,430 @@ fn native_selection_config(
     }
 }
 
+/// Projects a saved native engine selection back onto a displayable catalog
+/// policy.
+///
+/// This is the reverse of [`config_for_policy`] for the five native engines:
+/// given the durable selection inside a saved [`EngineRunConfig`], it
+/// recovers the exact catalog model plus the reasoning/speed/context/
+/// permission option values that rebuild it, so a configured thread restored
+/// from storage (reload, switch-back) displays and validates its saved
+/// Codex/Claude/Grok/Cursor/Hermes model instead of drifting to no
+/// selection. Every axis is recovered from live catalog options by native
+/// value; the candidate is then verified by rebuilding through
+/// [`config_for_policy`] against the saved configuration, so only an exact
+/// round-trip is returned — never a silent downgrade. `OpenCode` 2 keeps its
+/// existing registry-shaped projection outside this function.
+///
+/// # Errors
+///
+/// Returns a static reason when the selection names no model, no catalog
+/// model still carries it, a saved axis value has no catalog option, or the
+/// rebuilt configuration differs from the saved one (for example after a
+/// manifest change removed the original option).
+pub(crate) fn policy_for_selection(
+    catalog: &NativeModelCatalog,
+    saved: &EngineRunConfig,
+) -> Result<NativeModelPolicy, &'static str> {
+    match saved.selection() {
+        EngineSelection::OpenCode2(_) => {
+            Err("OpenCode selections keep their registry projection")
+        }
+        EngineSelection::Codex(selection) => policy_for_codex(catalog, saved, selection),
+        EngineSelection::Claude(selection) => policy_for_claude(catalog, saved, selection),
+        EngineSelection::Grok(selection) => policy_for_grok(catalog, saved, selection),
+        EngineSelection::Cursor(selection) => policy_for_cursor(catalog, saved, selection),
+        EngineSelection::Hermes(selection) => policy_for_hermes(catalog, saved, selection),
+    }
+}
+
+/// Verifies one projected policy rebuilds exactly the saved configuration.
+///
+/// The saved configuration travels as the previous run config so runtime
+/// budgets and inherited network/web grants match the original save; only a
+/// byte-identical rebuild is accepted.
+fn verified_policy(
+    catalog: &NativeModelCatalog,
+    policy: &NativeModelPolicy,
+    saved: &EngineRunConfig,
+) -> Result<NativeModelPolicy, &'static str> {
+    config_for_policy(catalog, policy, Some(saved))
+        .ok()
+        .filter(|rebuilt| rebuilt == saved)
+        .map(|_| policy.clone())
+        .ok_or("Saved model configuration is no longer available")
+}
+
+/// Finds one thinking option by its native value.
+fn thinking_option(
+    model: &NativeModelDefinition,
+    native_value: &str,
+) -> Option<NativeOptionValue> {
+    match &model.capabilities.thinking {
+        artisan_catalog::NativeThinkingCapability::Supported { options, .. } => options
+            .iter()
+            .find(|option| option.native_value == native_value)
+            .map(|option| NativeOptionValue {
+                id: option.id.clone(),
+                native_value: option.native_value.clone(),
+            }),
+        _ => None,
+    }
+}
+
+/// Finds one enabled speed option by its native value.
+fn speed_option(model: &NativeModelDefinition, native_value: &str) -> Option<NativeOptionValue> {
+    model
+        .capabilities
+        .speed_options
+        .iter()
+        .find(|option| option.native_value == native_value && option.disabled.is_none())
+        .map(|option| NativeOptionValue {
+            id: option.id.clone(),
+            native_value: option.native_value.clone(),
+        })
+}
+
+/// Finds one context option carrying an exact native window value.
+fn window_option(
+    model: &NativeModelDefinition,
+    model_context_window: u64,
+) -> Option<artisan_catalog::NativeContextSelection> {
+    model
+        .capabilities
+        .context_window
+        .as_ref()
+        .and_then(|capability| {
+            capability
+                .options
+                .iter()
+                .find(|option| {
+                    option.native_config.as_ref().is_some_and(|config| {
+                        config.model_context_window == model_context_window
+                    })
+                })
+        })
+        .map(|option| artisan_catalog::NativeContextSelection {
+            id: option.id.clone(),
+            native_suffix: option.native_suffix.clone(),
+            native_config: option.native_config.clone(),
+        })
+}
+
+/// Recovers the permission option by exact rebuild.
+///
+/// The durable selection carries only canonical traits plus an inherited
+/// grant, never the catalog option identity — so every harness option is
+/// tried and the first one whose rebuilt configuration equals the saved one
+/// wins. A manifest change that removed the original option is an honest
+/// error, never a neighboring permission.
+fn permission_by_rebuild(
+    catalog: &NativeModelCatalog,
+    engine_id: &str,
+    policy: &mut NativeModelPolicy,
+    saved: &EngineRunConfig,
+) -> Result<NativeModelPolicy, &'static str> {
+    let harness = catalog
+        .manifest
+        .harness(engine_id)
+        .ok_or("Saved model configuration is no longer available")?;
+    let options = harness.permissions.options.clone();
+    for option in &options {
+        policy.permission = Some(NativeOptionValue {
+            id: option.id.clone(),
+            native_value: option.native_value.clone(),
+        });
+        if let Ok(verified) = verified_policy(catalog, policy, saved) {
+            return Ok(verified);
+        }
+    }
+    Err("Saved permission is no longer available")
+}
+
+/// Projects a saved Codex selection onto its catalog policy.
+fn policy_for_codex(
+    catalog: &NativeModelCatalog,
+    saved: &EngineRunConfig,
+    selection: &CodexSelection,
+) -> Result<NativeModelPolicy, &'static str> {
+    let wanted = selection
+        .model_id()
+        .map(|model| model.as_str().to_owned())
+        .ok_or("Saved Codex selection names no model")?;
+    let effort = selection
+        .reasoning_effort()
+        .map(|effort| effort.as_str().to_owned());
+    let speed = selection
+        .service_tier()
+        .map(|tier| tier.as_str().to_owned());
+    let window = selection.model_context_window().map(|window| window.get());
+    let profile = selection.profile_id().as_str().to_owned();
+    for model in catalog
+        .manifest
+        .models
+        .iter()
+        .filter(|model| model.harness == "codex" && model.native_model_id == wanted)
+    {
+        let Ok(mut policy) = catalog.preview_policy_for_model(&model.id) else {
+            continue;
+        };
+        policy.profile_id = Some(profile.clone());
+        policy.reasoning_effort = match effort.as_deref() {
+            None => None,
+            Some(wanted) => match thinking_option(model, wanted) {
+                Some(option) => Some(option),
+                None => continue,
+            },
+        };
+        policy.speed = match speed.as_deref() {
+            None => None,
+            Some(wanted) => match speed_option(model, wanted) {
+                Some(option) => Some(option),
+                None => continue,
+            },
+        };
+        policy.context_window = match window {
+            None => None,
+            Some(wanted) => match window_option(model, wanted) {
+                Some(option) => Some(option),
+                None => continue,
+            },
+        };
+        if let Ok(verified) = permission_by_rebuild(catalog, "codex", &mut policy, saved) {
+            return Ok(verified);
+        }
+    }
+    Err("Saved Codex model is no longer available")
+}
+
+/// Projects a saved Claude selection onto its catalog policy.
+///
+/// The durable Claude model composes the base id with its context suffix
+/// (`ComposeNativeModelId`), so the manifest row is found by splitting the
+/// saved id back into its base plus a config-less option suffix.
+fn policy_for_claude(
+    catalog: &NativeModelCatalog,
+    saved: &EngineRunConfig,
+    selection: &ClaudeSelection,
+) -> Result<NativeModelPolicy, &'static str> {
+    let wanted = selection
+        .model_id()
+        .map(|model| model.as_str().to_owned())
+        .ok_or("Saved Claude selection names no model")?;
+    let effort = selection
+        .effort()
+        .map(|effort| effort.as_str().to_owned());
+    let profile = selection.profile_id().as_str().to_owned();
+    for model in catalog
+        .manifest
+        .models
+        .iter()
+        .filter(|model| model.harness == "claude")
+    {
+        let Some(context_window) = claude_context_for_model(model, &wanted) else {
+            continue;
+        };
+        let Ok(mut policy) = catalog.preview_policy_for_model(&model.id) else {
+            continue;
+        };
+        policy.profile_id = Some(profile.clone());
+        policy.reasoning_effort = match effort.as_deref() {
+            None => None,
+            Some(wanted) => match thinking_option(model, wanted) {
+                Some(option) => Some(option),
+                None => continue,
+            },
+        };
+        // The resolver carries no Claude speed axis: an absent or neutral
+        // choice rebuilds identically, so the projection stays canonical.
+        policy.speed = None;
+        policy.context_window = context_window;
+        if let Ok(verified) = permission_by_rebuild(catalog, "claude", &mut policy, saved) {
+            return Ok(verified);
+        }
+    }
+    Err("Saved Claude model is no longer available")
+}
+
+/// Splits a saved Claude model id into its manifest row plus context option.
+///
+/// An exact base match prefers the empty-suffix config-less option and falls
+/// back to no selection (both rebuild to the bare id); otherwise the id must
+/// end in a real config-less option suffix. A missing row or suffix is
+/// `None` so the caller keeps scanning later rows.
+fn claude_context_for_model(
+    model: &NativeModelDefinition,
+    wanted: &str,
+) -> Option<Option<artisan_catalog::NativeContextSelection>> {
+    let capability = model.capabilities.context_window.as_ref()?;
+    if wanted == model.native_model_id {
+        return Some(
+            capability
+                .options
+                .iter()
+                .find(|option| {
+                    option.native_suffix.is_empty() && option.native_config.is_none()
+                })
+                .map(|option| artisan_catalog::NativeContextSelection {
+                    id: option.id.clone(),
+                    native_suffix: option.native_suffix.clone(),
+                    native_config: option.native_config.clone(),
+                }),
+        );
+    }
+    let suffix = wanted.strip_prefix(model.native_model_id.as_str())?;
+    if suffix.is_empty() {
+        return None;
+    }
+    capability
+        .options
+        .iter()
+        .find(|option| option.native_suffix == suffix && option.native_config.is_none())
+        .map(|option| {
+            Some(artisan_catalog::NativeContextSelection {
+                id: option.id.clone(),
+                native_suffix: option.native_suffix.clone(),
+                native_config: option.native_config.clone(),
+            })
+        })
+}
+
+/// Projects a saved Grok selection onto its catalog policy.
+fn policy_for_grok(
+    catalog: &NativeModelCatalog,
+    saved: &EngineRunConfig,
+    selection: &GrokSelection,
+) -> Result<NativeModelPolicy, &'static str> {
+    let wanted = selection
+        .model_id()
+        .map(|model| model.as_str().to_owned())
+        .ok_or("Saved Grok selection names no model")?;
+    let effort = selection
+        .reasoning_effort()
+        .map(|effort| effort.as_str().to_owned());
+    let profile = selection.profile_id().as_str().to_owned();
+    for model in catalog
+        .manifest
+        .models
+        .iter()
+        .filter(|model| model.harness == "grok" && model.native_model_id == wanted)
+    {
+        let Ok(mut policy) = catalog.preview_policy_for_model(&model.id) else {
+            continue;
+        };
+        policy.profile_id = Some(profile.clone());
+        policy.reasoning_effort = match effort.as_deref() {
+            None => None,
+            Some(wanted) => match thinking_option(model, wanted) {
+                Some(option) => Some(option),
+                None => continue,
+            },
+        };
+        // The resolver sends no Grok speed or context axis: the preview
+        // values display while the rebuild ignores them.
+        if let Ok(verified) = permission_by_rebuild(catalog, "grok", &mut policy, saved) {
+            return Ok(verified);
+        }
+    }
+    Err("Saved Grok model is no longer available")
+}
+
+/// Projects a saved Cursor selection onto its catalog policy.
+fn policy_for_cursor(
+    catalog: &NativeModelCatalog,
+    saved: &EngineRunConfig,
+    selection: &CursorSelection,
+) -> Result<NativeModelPolicy, &'static str> {
+    let wanted = selection
+        .model_id()
+        .map(|model| model.as_str().to_owned())
+        .ok_or("Saved Cursor selection names no model")?;
+    let effort = selection
+        .reasoning_effort()
+        .map(|effort| effort.as_str().to_owned());
+    let speed = selection.speed().map(|speed| speed.as_str().to_owned());
+    let profile = selection.profile_id().as_str().to_owned();
+    for model in catalog
+        .manifest
+        .models
+        .iter()
+        .filter(|model| model.harness == "cursor" && model.native_model_id == wanted)
+    {
+        let Ok(mut policy) = catalog.preview_policy_for_model(&model.id) else {
+            continue;
+        };
+        policy.profile_id = Some(profile.clone());
+        policy.reasoning_effort = match effort.as_deref() {
+            None => None,
+            Some(wanted) => match thinking_option(model, wanted) {
+                Some(option) => Some(option),
+                None => continue,
+            },
+        };
+        policy.speed = match speed.as_deref() {
+            None => None,
+            Some(wanted) => match speed_option(model, wanted) {
+                Some(option) => Some(option),
+                None => continue,
+            },
+        };
+        // The resolver carries no Cursor context axis: the preview value
+        // displays while the rebuild ignores it.
+        if let Ok(verified) = permission_by_rebuild(catalog, "cursor", &mut policy, saved) {
+            return Ok(verified);
+        }
+    }
+    Err("Saved Cursor model is no longer available")
+}
+
+/// Projects a saved Hermes selection onto its catalog policy.
+fn policy_for_hermes(
+    catalog: &NativeModelCatalog,
+    saved: &EngineRunConfig,
+    selection: &HermesSelection,
+) -> Result<NativeModelPolicy, &'static str> {
+    let wanted_model = selection.model_id().as_str().to_owned();
+    let wanted_route = selection.route_id().as_str().to_owned();
+    let effort = selection
+        .reasoning_effort()
+        .map(|effort| effort.as_str().to_owned());
+    let fast = selection.fast();
+    let profile = selection.profile_id().as_str().to_owned();
+    for model in catalog.manifest.models.iter().filter(|model| {
+        model.harness == "hermes"
+            && model.native_selection.as_ref().is_some_and(|native| {
+                native.model_id == wanted_model
+                    && native.provider_route_id == wanted_route
+                    && native.variant_id.is_none()
+            })
+    }) {
+        let Ok(mut policy) = catalog.preview_policy_for_model(&model.id) else {
+            continue;
+        };
+        policy.profile_id = Some(profile.clone());
+        policy.reasoning_effort = match effort.as_deref() {
+            None => None,
+            Some(wanted) => match thinking_option(model, wanted) {
+                Some(option) => Some(option),
+                None => continue,
+            },
+        };
+        policy.speed = if fast {
+            match speed_option(model, "fast") {
+                Some(option) => Some(option),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        // The resolver carries no Hermes context axis: the preview value
+        // displays while the rebuild ignores it.
+        if let Ok(verified) = permission_by_rebuild(catalog, "hermes", &mut policy, saved) {
+            return Ok(verified);
+        }
+    }
+    Err("Saved Hermes model is no longer available")
+}
 /// Builds the durable selection for the incumbent `OpenCode` 2 engine.
 ///
 /// This is the original `config_for_policy` body, unchanged apart from
@@ -953,6 +1412,170 @@ mod tests {
         assert_eq!(
             config_for_policy(&catalog, &policy, None).unwrap_err(),
             "This engine is not available in the native app yet"
+        );
+    }
+
+    #[test]
+    fn native_choices_without_a_profile_fall_back_to_default() {
+        let catalog = runnable_catalog();
+        for (engine_id, model_id) in [
+            ("codex", "codex-sol"),
+            ("claude", "claude-fable"),
+            ("grok", "grok-4-6"),
+            ("cursor", "cursor-composer-2-5"),
+        ] {
+            let policy = catalog.selection_policy_for_model(model_id).unwrap();
+            assert_eq!(policy.engine_id, engine_id);
+            assert_eq!(policy.profile_id, None);
+            let defaulted = with_default_native_profile(&policy);
+            assert_eq!(defaulted.profile_id.as_deref(), Some("default"));
+            // The defaulted choice builds the same runnable selection the
+            // explicit profile spelling produces.
+            let mut explicit = policy.clone();
+            explicit.profile_id = Some("default".to_owned());
+            assert_eq!(
+                config_for_policy(&catalog, &defaulted, None).unwrap(),
+                config_for_policy(&catalog, &explicit, None).unwrap()
+            );
+        }
+        let routed = catalog_with_hermes_models();
+        let mut hermes = hermes_policy(&routed, "hermes-test-route");
+        hermes.profile_id = None;
+        assert_eq!(
+            with_default_native_profile(&hermes)
+                .profile_id
+                .as_deref(),
+            Some("default")
+        );
+    }
+
+    #[test]
+    fn default_profile_leaves_managed_and_explicit_profiles_alone() {
+        let catalog = runnable_catalog();
+        let policy = catalog.selection_policy_for_model("codex-sol").unwrap();
+        let mut managed = policy.clone();
+        managed.engine_id = "opencode2".to_owned();
+        assert_eq!(with_default_native_profile(&managed).profile_id, None);
+        let mut explicit = with_default_native_profile(&policy);
+        explicit.profile_id = Some("work".to_owned());
+        assert_eq!(
+            with_default_native_profile(&explicit).profile_id.as_deref(),
+            Some("work")
+        );
+    }
+
+    /// Projects one default choice back and requires the exact durable
+    /// round-trip: the projected policy must rebuild byte-identically and
+    /// keep the displayed model/profile identity.
+    fn assert_selection_round_trip(catalog: &NativeModelCatalog, model_id: &str) {
+        let policy = profiled_policy(catalog, model_id);
+        let config = config_for_policy(catalog, &policy, None).unwrap();
+        let projected = policy_for_selection(&catalog, &config).unwrap();
+        assert_eq!(
+            config_for_policy(&catalog, &projected, Some(&config)).unwrap(),
+            config,
+            "{model_id} projection must rebuild its saved configuration"
+        );
+        assert_eq!(projected.engine_id, policy.engine_id);
+        assert_eq!(projected.model_id, policy.model_id);
+        assert_eq!(projected.native_model_id, policy.native_model_id);
+        assert_eq!(projected.native_selection, policy.native_selection);
+        assert_eq!(projected.profile_id, policy.profile_id);
+        assert!(validate_run_choice(&catalog, &projected, Some(&config)).is_ok());
+    }
+
+    #[test]
+    fn saved_codex_selection_projects_back_exactly() {
+        let catalog = runnable_catalog();
+        assert_selection_round_trip(&catalog, "codex-sol");
+        let policy = profiled_policy(&catalog, "codex-sol");
+        let config = config_for_policy(&catalog, &policy, None).unwrap();
+        let projected = policy_for_selection(&catalog, &config).unwrap();
+        // Default Codex axes survive with their exact option identities.
+        assert_eq!(projected.reasoning_effort, policy.reasoning_effort);
+        assert_eq!(projected.speed, policy.speed);
+        assert_eq!(projected.context_window, policy.context_window);
+        assert_eq!(projected.permission, policy.permission);
+    }
+
+    #[test]
+    fn saved_claude_selection_recovers_its_window_suffix() {
+        let catalog = runnable_catalog();
+        assert_selection_round_trip(&catalog, "claude-fable");
+        let policy = profiled_policy(&catalog, "claude-fable");
+        let config = config_for_policy(&catalog, &policy, None).unwrap();
+        let EngineSelection::Claude(selection) = config.selection() else {
+            panic!("expected a Claude selection");
+        };
+        // The durable id composes the base with the extended suffix.
+        assert_eq!(
+            selection.model_id().unwrap().as_str(),
+            "claude-fable-5[1m]"
+        );
+        let projected = policy_for_selection(&catalog, &config).unwrap();
+        assert_eq!(projected.context_window, policy.context_window);
+        assert_eq!(projected.permission, policy.permission);
+    }
+
+    #[test]
+    fn saved_grok_and_cursor_selections_project_back_exactly() {
+        let catalog = runnable_catalog();
+        assert_selection_round_trip(&catalog, "grok-4-6");
+        assert_selection_round_trip(&catalog, "cursor-composer-2-5");
+    }
+
+    #[test]
+    fn saved_hermes_selection_projects_back_exactly() {
+        let catalog = catalog_with_hermes_models();
+        let policy = hermes_policy(&catalog, "hermes-test-route");
+        let config = config_for_policy(&catalog, &policy, None).unwrap();
+        let projected = policy_for_selection(&catalog, &config).unwrap();
+        assert_eq!(
+            config_for_policy(&catalog, &projected, Some(&config)).unwrap(),
+            config
+        );
+        assert_eq!(projected.model_id, "hermes-test-route");
+        assert_eq!(projected.profile_id, Some("default".to_owned()));
+    }
+
+    #[test]
+    fn projection_rejects_unknown_models_and_keeps_opencode2_outside() {
+        let catalog = runnable_catalog();
+        let policy = profiled_policy(&catalog, "codex-sol");
+        let config = config_for_policy(&catalog, &policy, None).unwrap();
+        // A manifest that lost the saved row cannot project it.
+        let mut without_row = catalog.clone();
+        without_row
+            .manifest
+            .models
+            .retain(|model| model.id != "codex-sol");
+        assert_eq!(
+            policy_for_selection(&without_row, &config).unwrap_err(),
+            "Saved Codex model is no longer available"
+        );
+        // `OpenCode` selections keep their registry projection outside this
+        // boundary.
+        let managed = EngineRunConfig::new(
+            EngineSelection::OpenCode2(OpenCode2Selection::new(
+                EngineProfileId::parse("default").expect("profile"),
+                EngineModelId::parse("model-test").expect("model"),
+                EngineRouteId::parse("route-test").expect("route"),
+                None,
+                EnginePermissionPolicy::new(
+                    PermissionId::parse("autonomous").expect("permission"),
+                    EngineAgentId::parse("artisan-v1-autonomous-offline-no-web")
+                        .expect("agent"),
+                    ApprovalMode::OnRequest,
+                    FilesystemAccess::Workspace,
+                    NetworkAccess::Disabled,
+                    WebSearchAccess::Disabled,
+                ),
+            )),
+            default_runtime().expect("runtime"),
+        );
+        assert_eq!(
+            policy_for_selection(&catalog, &managed).unwrap_err(),
+            "OpenCode selections keep their registry projection"
         );
     }
 }

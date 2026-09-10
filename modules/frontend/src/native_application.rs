@@ -79,12 +79,17 @@ use crate::native_model_selector::{
     engine_accent, engine_asset, render_picker_hover_pill,
 };
 use crate::native_profile_usage::{
-    NativeProfileUsageState, NativeUsageEntry, NativeUsageWindow, ProfileUsageGeneration,
-    account_usage_response_current, checked_label, group_usage_windows, plan_profile_usage_loads,
-    profile_usage_display_name, reset_duration, tip_run_up_from, usage_remaining_percent,
+    EngineReadiness, NativeProfileUsageState, NativeUsageEntry, NativeUsageWindow,
+    ProfileUsageGeneration, account_usage_response_current, catalog_with_usage_readiness,
+    checked_label, engine_readiness, engine_refresh_failure, group_usage_windows,
+    plan_profile_usage_loads, profile_usage_display_name, reset_duration, tip_run_up_from,
+    usage_remaining_percent,
 };
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
-use crate::native_settings::SettingsScreen;
+use crate::native_settings::{
+    SettingsEngineCatalogState, SettingsEngineModel, SettingsEngineNavEntry,
+    SettingsEngineRegistryState, SettingsEngineSnapshot, SettingsScreen, SettingsScreenEvent,
+};
 use crate::native_transport::{
     CatalogLoadGeneration, CatalogScopeError, NativeCatalogController, NativeCatalogPhase,
     NativeCatalogScope,
@@ -428,7 +433,7 @@ pub struct NativeApplication {
         Option<ThreadId>,
         crate::native_model_catalog::NativeModelPolicy,
     )>,
-    composer_model_run_error: Option<&'static str>,
+    composer_model_run_error: Option<String>,
     pending_first_send: Option<PendingFirstSend>,
     catalog_controller: NativeCatalogController,
     _composer_controls_subscription: Subscription,
@@ -529,6 +534,7 @@ pub struct NativeApplication {
     editor_screen_key: Option<(ProjectId, ThreadId, Option<String>)>,
     settings_screen: Option<Entity<SettingsScreen>>,
     settings_screen_key: Option<(SettingsRoute, Option<String>)>,
+    settings_screen_subscription: Option<Subscription>,
     intake_stage: Option<NativeProjectIntakeStage>,
     intake_failure_operation: Option<NativeProjectIntakeOperation>,
     intake_retry_available: bool,
@@ -746,6 +752,7 @@ impl NativeApplication {
             editor_screen_key: None,
             settings_screen: None,
             settings_screen_key: None,
+            settings_screen_subscription: None,
             intake_stage: None,
             intake_failure_operation: None,
             intake_retry_available: false,
@@ -830,7 +837,14 @@ impl NativeApplication {
     }
 
     /// Navigates to `route`, retaining history, and rerenders.
+    ///
+    /// Entering Settings also requests fresh provider-account reads, so the
+    /// engine pages observe true readiness instead of a stale row; the
+    /// profile popover keeps its own open-time refresh.
     pub fn navigate(&mut self, route: NativeRoute, cx: &mut Context<Self>) {
+        if matches!(route, NativeRoute::Settings { .. }) {
+            self.ensure_profile_usage(false, None, cx);
+        }
         self.route_history.navigate(route);
         self.sync_composer_availability(cx);
         cx.notify();
@@ -3121,7 +3135,7 @@ impl NativeApplication {
                     && self.command_submission_is_available(),
             )
         });
-        if let Some(message) = self.composer_model_run_error {
+        if let Some(message) = self.composer_model_run_error.clone() {
             snapshot.failure = Some(crate::native_composer_controls::NativeComposerFailure::new(
                 0,
                 "Could not start with this model",
@@ -3169,27 +3183,33 @@ impl NativeApplication {
     /// configuration for a first send: either the explicit choice for this
     /// thread or the selector's current policy.
     ///
+    /// Native choices without an explicit profile persist under the supported
+    /// default profile, and admission runs against the readiness-overlaid
+    /// catalog so a probed ambient account needs no managed registry.
     /// Returns the static blocking message when no policy is displayed or
     /// the displayed policy cannot become a run configuration.
-    fn first_send_config(&self, cx: &App) -> Result<artisan_domain::EngineRunConfig, &'static str> {
+    fn first_send_config(&self, cx: &App) -> Result<artisan_domain::EngineRunConfig, String> {
         let displayed = match &self.composer_model_choice {
             Some((thread, policy)) if thread == &self.selected_thread => Some(policy.clone()),
             _ => self.model_selector.read(cx).state().policy().cloned(),
         };
-        let Some(policy) = displayed else {
-            return Err("Select a model before sending. Your draft is preserved.");
+        let Some(raw_policy) = displayed else {
+            return Err("Select a model before sending. Your draft is preserved.".to_owned());
         };
-        let catalog = self.model_selector.read(cx).state().snapshot().clone();
         // The harness must be runnable before anything is persisted: an
-        // unrunnable engine would only requeue after the save lands.
-        catalog.admit_policy(&policy).map_err(|_| {
-            "Connect and configure this model's engine before running. Your draft is preserved."
-        })?;
+        // unrunnable engine would only requeue after the save lands. The
+        // reason names the probed account state instead of a catch-all.
+        let policy = crate::composer_model_config::with_default_native_profile(&raw_policy);
+        let catalog = self.effective_catalog_snapshot(cx);
+        catalog
+            .admit_policy(&policy)
+            .map_err(|_| self.readiness_block_reason(&policy.engine_id))?;
         crate::composer_model_config::config_for_policy(
             &catalog,
             &policy,
             self.engine_settings.authoritative_config(),
         )
+        .map_err(|reason| reason.to_owned())
     }
 
     /// Admits a first send on a thread without a persisted engine
@@ -3214,7 +3234,8 @@ impl NativeApplication {
                 }
             } else {
                 self.composer_model_run_error = Some(
-                    "Saving this model's settings, then sending. Your draft is preserved.",
+                    "Saving this model's settings, then sending. Your draft is preserved."
+                        .to_owned(),
                 );
                 self.sync_composer_controls(cx);
                 cx.notify();
@@ -3244,11 +3265,30 @@ impl NativeApplication {
         }
         if self.engine_settings.pending_save_request_id().is_some() {
             self.composer_model_run_error = Some(
-                "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
+                "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes."
+                    .to_owned(),
             );
             self.sync_composer_controls(cx);
             cx.notify();
             return FirstSendAdmission::Held;
+        }
+        // Admission rests on the backend-probed account verdict: request a
+        // fresh read for the displayed engine before evaluating it, so the
+        // first send at startup, on selection, and from Settings observes
+        // true readiness instead of an empty row.
+        let displayed_engine = match &self.composer_model_choice {
+            Some((thread, policy)) if thread == &self.selected_thread => {
+                Some(policy.engine_id.clone())
+            }
+            _ => self
+                .model_selector
+                .read(cx)
+                .state()
+                .policy()
+                .map(|policy| policy.engine_id.clone()),
+        };
+        if let Some(engine_id) = displayed_engine.as_deref() {
+            self.ensure_profile_usage(false, Some(engine_id), cx);
         }
         // The settings draft stays `OpenCode` 2-shaped until per-engine
         // settings UI lands, so native selections cannot travel through it:
@@ -3259,7 +3299,8 @@ impl NativeApplication {
         };
         if !self.submit_first_send_save(thread_id, expected) {
             self.composer_model_run_error = Some(
-                "Engine settings could not be saved. Your draft is preserved; retry the model selection.",
+                "Engine settings could not be saved. Your draft is preserved; retry the model selection."
+                    .to_owned(),
             );
             self.sync_composer_controls(cx);
             cx.notify();
@@ -3283,11 +3324,12 @@ impl NativeApplication {
             && thread == &self.selected_thread
         {
             self.composer_model_run_error = crate::composer_model_config::validate_run_choice(
-                self.model_selector.read(cx).state().snapshot(),
+                &self.effective_catalog_snapshot(cx),
                 policy,
                 self.engine_settings.authoritative_config(),
             )
-            .err();
+            .err()
+            .map(|reason| reason.to_owned());
             if self.composer_model_run_error.is_some() {
                 self.sync_composer_controls(cx);
                 cx.notify();
@@ -3379,7 +3421,7 @@ impl NativeApplication {
             token,
         });
         self.composer_model_run_error = Some(
-            "Saving this model's settings, then sending. Your draft is preserved.",
+            "Saving this model's settings, then sending. Your draft is preserved.".to_owned(),
         );
         self.sync_composer_availability(cx);
         cx.notify();
@@ -3466,7 +3508,8 @@ impl NativeApplication {
         };
         self.finish_composer_submission(pending.token, DraftDisposition::Retained, cx);
         self.composer_model_run_error = Some(
-            "Engine settings could not be saved. Your draft is preserved; retry the model selection.",
+            "Engine settings could not be saved. Your draft is preserved; retry the model selection."
+                .to_owned(),
         );
         self.sync_composer_availability(cx);
         cx.notify();
@@ -6039,6 +6082,57 @@ impl NativeApplication {
         });
     }
 
+    /// Returns the selector snapshot overlaid with backend-probed account
+    /// readiness.
+    ///
+    /// Static native models whose engine carries a fresh authenticated usage
+    /// report are admittable without any managed `OpenCode` profile or
+    /// registry; the overlay recomputes that gated subset on every call so a
+    /// signed-out, failed, or stale engine never inherits a previous
+    /// admission from the stored snapshot.
+    fn effective_catalog_snapshot(&self, cx: &App) -> NativeModelCatalog {
+        let snapshot = self.model_selector.read(cx).state().snapshot().clone();
+        catalog_with_usage_readiness(snapshot, &self.profile_usage, profile_usage_now_ms())
+    }
+
+    /// Returns the actionable reason a displayed policy's engine cannot run.
+    ///
+    /// The verdict comes from the backend-probed usage row, never from a
+    /// catch-all, and the wording is shared across engines: a signed-out
+    /// engine names sign-in, a pending read says a check is running, and any
+    /// other unavailable state reports the check status plus the actual
+    /// probed failure when one exists. Nothing here claims a missing
+    /// installation or broken binary without executable evidence — a stale,
+    /// failed, or never-probed check reads as a status problem with a
+    /// refresh recovery, since the installed authenticated account is the
+    /// established baseline. Every message preserves the draft and points
+    /// at the working recovery (the model retry that refreshes account
+    /// status, or Settings → Engines). A `Ready` engine that the catalog
+    /// still rejects is a catalog-side unavailability, not an account
+    /// problem.
+    fn readiness_block_reason(&self, engine_id: &str) -> String {
+        let label = profile_usage_display_name(engine_id);
+        match engine_readiness(&self.profile_usage, engine_id, profile_usage_now_ms()) {
+            EngineReadiness::Ready => "This model is unavailable in the runtime catalog right now. Your draft is preserved; retry or pick another model.".to_owned(),
+            EngineReadiness::NeedsSignIn => format!(
+                "{label} account sign-in is required. Your draft is preserved; open Settings → Engines → {label} to review it, or retry to refresh."
+            ),
+            EngineReadiness::Checking => format!(
+                "Checking the {label} account status. Your draft is preserved; retry in a moment."
+            ),
+            EngineReadiness::NotReady => {
+                match engine_refresh_failure(&self.profile_usage, engine_id) {
+                    Some(failure) => format!(
+                        "{label} account status is unavailable: {failure}. Your draft is preserved; retry to refresh, or open Settings → Engines → {label}."
+                    ),
+                    None => format!(
+                        "{label} account status is unavailable right now. Your draft is preserved; retry to refresh its status, or open Settings → Engines → {label}."
+                    ),
+                }
+            }
+        }
+    }
+
     fn reset_composer_catalog(&mut self, cx: &mut Context<Self>) {
         self.catalog_controller.clear_scope();
         self.reset_model_selector_offline(cx);
@@ -6188,6 +6282,10 @@ impl NativeApplication {
             });
         let Some(profile_id) = profile else {
             self.reset_composer_catalog(cx);
+            // Unconfigured threads without a registry profile still need the
+            // probed account verdict: static native models admit from usage
+            // readiness alone, without any backend catalog read.
+            self.ensure_profile_usage(false, None, cx);
             return;
         };
         self.discover_composer_catalog(thread_id, profile_id, cx);
@@ -6274,6 +6372,7 @@ impl NativeApplication {
         });
         self.sync_composer_model_policy(cx);
         self.sync_composer_catalog_status(cx);
+        self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }
 
@@ -6288,6 +6387,7 @@ impl NativeApplication {
         let scope = NativeCatalogScope::new(thread_id, profile_id, generation);
         if self.catalog_controller.on_catalog_failed(&scope, failure) {
             self.sync_composer_catalog_status(cx);
+            self.refresh_settings_engine_snapshot(cx);
             cx.notify();
         }
     }
@@ -6520,6 +6620,7 @@ impl NativeApplication {
             return;
         }
         self.profile_usage.try_accept(entry, request_seq);
+        self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }
 
@@ -6559,6 +6660,7 @@ impl NativeApplication {
             None,
             request_seq,
         );
+        self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }
 
@@ -6566,6 +6668,11 @@ impl NativeApplication {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
+        // Thread selection owns the readiness refresh alongside the settings
+        // and registry reads: the composer gate below evaluates the probed
+        // verdict, so selection must request it rather than inheriting
+        // whatever the profile popover last loaded.
+        self.ensure_profile_usage(false, None, cx);
         if self.engine_settings.needs_registry_load() {
             self.submit_registry_load();
         }
@@ -6574,6 +6681,7 @@ impl NativeApplication {
         {
             self.submit_settings_load(thread_id);
         }
+        self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }
 
@@ -6657,6 +6765,7 @@ impl NativeApplication {
         if accepted {
             self.discover_composer_catalog_for_settings(cx);
         }
+        self.refresh_settings_engine_snapshot(cx);
         self.sync_composer_availability(cx);
         cx.notify();
     }
@@ -6694,6 +6803,7 @@ impl NativeApplication {
             self.discover_composer_catalog_for_settings(cx);
             self.continue_pending_first_send(cx);
         }
+        self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }
 
@@ -6715,6 +6825,7 @@ impl NativeApplication {
         if self.engine_settings.pending_reload_thread().is_some() {
             self.request_engine_settings_for_selected(cx);
         } else {
+            self.refresh_settings_engine_snapshot(cx);
             cx.notify();
         }
     }
@@ -6734,6 +6845,7 @@ impl NativeApplication {
             self.fail_pending_first_send(cx);
         }
         self.sync_composer_model_policy(cx);
+        self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }
 
@@ -6751,7 +6863,330 @@ impl NativeApplication {
         if accepted {
             self.reset_composer_catalog(cx);
         }
+        self.refresh_settings_engine_snapshot(cx);
         cx.notify();
+    }
+
+    /// Returns the displayed model policy for one engine, if the composer
+    /// choice or the selector policy names it.
+    ///
+    /// The explicit choice wins over the selector default; the returned
+    /// policy carries the default native profile so Settings saves observe
+    /// the same durable identity as composer saves.
+    fn displayed_policy_for_engine(
+        &self,
+        engine_id: &str,
+        cx: &App,
+    ) -> Option<crate::native_model_selector::SelectPolicy> {
+        if let Some((thread, choice)) = self.composer_model_choice.as_ref()
+            && thread == &self.selected_thread
+            && choice.engine_id == engine_id
+        {
+            return Some(choice.clone());
+        }
+        let policy = self.model_selector.read(cx).state().policy().cloned()?;
+        (policy.engine_id == engine_id).then_some(
+            crate::composer_model_config::with_default_native_profile(&policy),
+        )
+    }
+
+    /// Builds the live engine snapshot for one engine settings page.
+    ///
+    /// Every row is projected from current application state — the
+    /// readiness-overlaid catalog, the probed usage rows, the managed
+    /// registry view, and the thread configuration — so the page paints
+    /// loaded, loading, unavailable, and sign-in states without inventing
+    /// installation facts.
+    fn settings_engine_snapshot(
+        &self,
+        engine_id: &str,
+        cx: &App,
+    ) -> SettingsEngineSnapshot {
+        let now_ms = profile_usage_now_ms();
+        let readiness = engine_readiness(&self.profile_usage, engine_id, now_ms);
+        let entry = self.profile_usage.entry(engine_id);
+        let account_email = entry
+            .as_ref()
+            .and_then(|entry| {
+                entry
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.account_email.clone())
+            });
+        let refresh_failure = engine_refresh_failure(&self.profile_usage, engine_id);
+        let refreshing = self
+            .profile_usage
+            .refreshing_engine_ids
+            .iter()
+            .any(|refreshing| refreshing == engine_id);
+        let phase = self.catalog_controller.catalog_phase();
+        let catalog = match phase {
+            NativeCatalogPhase::Ready => SettingsEngineCatalogState::Ready,
+            NativeCatalogPhase::Failed => SettingsEngineCatalogState::Failed,
+            NativeCatalogPhase::Loading | NativeCatalogPhase::Offline => {
+                SettingsEngineCatalogState::Loading
+            }
+        };
+        let catalog_error = if phase == NativeCatalogPhase::Failed {
+            Some("Runtime model catalog is unavailable. Retry model loading.".to_owned())
+        } else if self.catalog_controller.favorites_failure().is_some() {
+            Some(
+                "Model favorites could not be synchronized. Retry the favorite action."
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        let registry = match self.engine_settings.registry_view() {
+            RegistryView::Loading => SettingsEngineRegistryState::Loading,
+            RegistryView::Missing => SettingsEngineRegistryState::Missing,
+            RegistryView::PresentEmpty => SettingsEngineRegistryState::Empty,
+            RegistryView::Present(_) => SettingsEngineRegistryState::Present,
+        };
+        let selected_thread = self
+            .selected_thread
+            .as_ref()
+            .map(|thread| thread.as_str().to_owned());
+        let authoritative = self.engine_settings.authoritative_config();
+        let effective = self.effective_catalog_snapshot(cx);
+        let saved_policy = authoritative.and_then(|config| {
+            if config.selection().engine_id().as_str() != engine_id {
+                return None;
+            }
+            crate::composer_model_config::policy_for_selection(&effective, config).ok()
+        });
+        let saved_model = saved_policy
+            .as_ref()
+            .map(|policy| policy.model_id.clone())
+            .or_else(|| {
+                authoritative.and_then(|config| {
+                    (config.selection().engine_id().as_str() == engine_id)
+                        .then(|| {
+                            config
+                                .selection()
+                                .model_id()
+                                .map(|model| model.as_str().to_owned())
+                        })
+                        .flatten()
+                })
+            });
+        let saved_profile = authoritative.and_then(|config| {
+            (config.selection().engine_id().as_str() == engine_id)
+                .then(|| config.selection().profile_id().as_str().to_owned())
+        });
+        let displayed = self.displayed_policy_for_engine(engine_id, cx);
+        let displayed_model = displayed.as_ref().map(|policy| policy.model_id.clone());
+        let displayed_authoritative = match (&displayed, authoritative) {
+            (Some(displayed), Some(saved)) => {
+                crate::composer_model_config::config_for_policy(&effective, displayed, Some(saved))
+                    .ok()
+                    .as_ref()
+                    == Some(saved)
+            }
+            _ => false,
+        };
+        let pending_save = self.engine_settings.pending_save_request_id().is_some();
+        let save_failed = self.engine_settings.failure_operation()
+            == Some(EngineSettingsFailureOperation::Save);
+        let can_save_displayed = selected_thread.is_some()
+            && !pending_save
+            && !displayed_authoritative
+            && displayed.as_ref().is_some_and(|policy| {
+                crate::composer_model_config::config_for_policy(
+                    &effective,
+                    policy,
+                    authoritative,
+                )
+                .ok()
+                .is_some_and(|config| Some(&config) != authoritative)
+            });
+        // An explicit choice held without a save names its honest blocker:
+        // no thread, or the live admission reason. Saved, saving, and
+        // failed states read out their own rows instead.
+        let choice_notice = match (&displayed, &selected_thread) {
+            (Some(policy), None)
+                if self.composer_model_choice.as_ref().is_some_and(
+                    |(thread, choice)| {
+                        thread == &self.selected_thread && choice.engine_id == engine_id
+                    },
+                ) =>
+            {
+                Some(format!(
+                    "“{}” is selected. Select a thread to save it.",
+                    policy.model_id
+                ))
+            }
+            (Some(policy), Some(_))
+                if !pending_save
+                    && !save_failed
+                    && !displayed_authoritative
+                    && self.composer_model_choice.as_ref().is_some_and(
+                        |(thread, choice)| {
+                            thread == &self.selected_thread && choice.engine_id == engine_id
+                        },
+                    )
+                    && effective.admit_policy(policy).is_err() =>
+            {
+                Some(self.readiness_block_reason(&policy.engine_id))
+            }
+            _ => None,
+        };
+        let saved_id = saved_policy.as_ref().map(|policy| policy.model_id.clone());
+        let models = effective
+            .manifest
+            .models
+            .iter()
+            .filter(|model| model.harness == engine_id)
+            .map(|model| SettingsEngineModel {
+                id: model.id.clone(),
+                saved: saved_id.as_deref() == Some(model.id.as_str()),
+                displayed: displayed_model.as_deref() == Some(model.id.as_str()),
+                disabled_reason: model
+                    .disabled
+                    .as_ref()
+                    .map(|disabled| disabled.reason.clone()),
+            })
+            .collect();
+        SettingsEngineSnapshot {
+            engine_id: engine_id.to_owned(),
+            readiness,
+            account_email,
+            refresh_failure,
+            refreshing,
+            catalog,
+            catalog_error,
+            registry,
+            selected_thread,
+            saved_model,
+            saved_profile,
+            displayed_model,
+            displayed_authoritative,
+            can_save_displayed,
+            pending_save,
+            save_failed,
+            choice_notice,
+            models,
+        }
+    }
+
+    /// Rebuilds the mounted engine snapshot, if an engine page is mounted.
+    ///
+    /// Called from transport and settings event handlers — never from
+    /// render-synced projections — so the page follows acknowledgments,
+    /// conflicts, failures, catalog reads, and usage replies.
+    fn refresh_settings_engine_snapshot(&mut self, cx: &mut Context<Self>) {
+        let (Some(screen), Some((SettingsRoute::Engines, Some(engine_id)))) =
+            (self.settings_screen.clone(), self.settings_screen_key.clone())
+        else {
+            return;
+        };
+        if engine_id == crate::native_settings::FIXTURE_ENGINE_ID {
+            return;
+        }
+        let snapshot = self.settings_engine_snapshot(&engine_id, cx);
+        screen.update(cx, |screen, screen_cx| {
+            screen.set_engine_snapshot(snapshot, screen_cx);
+        });
+    }
+
+    /// Serves one Settings model choice through the shared picker flow.
+    ///
+    /// The catalog model becomes a `SelectPolicy` on the effective catalog
+    /// and travels the existing composer selection path — same admission,
+    /// same direct typed save with compare-and-swap, same acknowledgment —
+    /// so a Settings choice is durable exactly like a composer one. An
+    /// engine mismatch or unknown model is ignored; an unrunnable choice is
+    /// stored with the live admission reason.
+    fn choose_settings_engine_model(
+        &mut self,
+        engine_id: &str,
+        model_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let catalog = self.effective_catalog_snapshot(cx);
+        let Ok(raw) = catalog.selection_policy_for_model(model_id) else {
+            return;
+        };
+        if raw.engine_id != engine_id {
+            return;
+        }
+        let policy = crate::composer_model_config::with_default_native_profile(&raw);
+        if catalog.admit_policy(&policy).is_err() {
+            self.composer_model_run_error = Some(self.readiness_block_reason(&policy.engine_id));
+        }
+        self.handle_composer_model_event(
+            &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(policy),
+            cx,
+        );
+        self.refresh_settings_engine_snapshot(cx);
+    }
+
+    /// Saves the Settings-displayed model through the shared direct save.
+    fn save_settings_displayed_model(&mut self, engine_id: &str, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        if self.engine_settings.pending_save_request_id().is_some() {
+            return;
+        }
+        let Some(policy) = self.displayed_policy_for_engine(engine_id, cx) else {
+            return;
+        };
+        let catalog = self.effective_catalog_snapshot(cx);
+        let Ok(config) = crate::composer_model_config::config_for_policy(
+            &catalog,
+            &policy,
+            self.engine_settings.authoritative_config(),
+        ) else {
+            self.composer_model_run_error = Some(self.readiness_block_reason(&policy.engine_id));
+            self.sync_composer_controls(cx);
+            return;
+        };
+        if Some(&config) == self.engine_settings.authoritative_config() {
+            return;
+        }
+        if !self.submit_direct_save(thread_id, config) {
+            self.composer_model_run_error = Some(
+                "Engine settings could not be saved. Your draft is preserved; retry the model selection."
+                    .to_owned(),
+            );
+        }
+        self.sync_composer_model_policy(cx);
+        cx.notify();
+    }
+
+    /// Serves one mounted Settings screen action.
+    fn handle_settings_screen_event(
+        &mut self,
+        _screen: Entity<SettingsScreen>,
+        event: &SettingsScreenEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SettingsScreenEvent::Navigate { section, engine } => {
+                self.navigate(
+                    NativeRoute::Settings {
+                        section: *section,
+                        engine: engine.clone(),
+                    },
+                    cx,
+                );
+            }
+            SettingsScreenEvent::RefreshEngine { engine_id } => {
+                self.ensure_profile_usage(true, Some(engine_id), cx);
+                self.refresh_settings_engine_snapshot(cx);
+            }
+            SettingsScreenEvent::SaveDisplayedModel { engine_id } => {
+                self.save_settings_displayed_model(engine_id, cx);
+                self.refresh_settings_engine_snapshot(cx);
+            }
+            SettingsScreenEvent::SelectEngineModel {
+                engine_id,
+                model_id,
+            } => {
+                self.choose_settings_engine_model(engine_id, model_id, cx);
+            }
+        }
     }
 
     fn select_engine_profile(&mut self, profile_id: &EngineProfileId, cx: &mut Context<Self>) {
@@ -6810,12 +7245,32 @@ impl NativeApplication {
     }
 
     /// Submits a first-send configuration save carrying a validated engine
-    /// configuration directly. The settings draft stays `OpenCode` 2-shaped
-    /// until per-engine settings UI lands, so native selections bypass it
-    /// and travel with an `Unconfigured` precondition instead. Returns
-    /// whether the save is now tracked for its authoritative acknowledgment,
-    /// which continues the pending first send.
+    /// configuration directly. This shares [`Self::submit_direct_save`] with
+    /// every native model/effort/profile selection: the settings draft stays
+    /// `OpenCode` 2-shaped until per-engine settings UI lands, so native
+    /// selections bypass it and travel with the controller-derived
+    /// compare-and-swap precondition (`Unconfigured` on an unconfigured
+    /// thread) instead. Returns whether the save is now tracked for its
+    /// authoritative acknowledgment, which continues the pending first send.
     fn submit_first_send_save(
+        &mut self,
+        thread_id: ThreadId,
+        config: artisan_domain::EngineRunConfig,
+    ) -> bool {
+        self.submit_direct_save(thread_id, config)
+    }
+
+    /// Submits a validated engine configuration through the shared direct
+    /// typed-save path, bypassing the `OpenCode` 2-shaped draft.
+    ///
+    /// The compare-and-swap precondition comes from the controller:
+    /// `Unconfigured` for a first send, `Exact` on the authoritative
+    /// revision for a later model/effort/profile change, so a concurrent
+    /// writer conflicts instead of being silently overwritten. Pending-send
+    /// safety is unchanged: the save is tracked for its real acknowledgment,
+    /// which continues or fails the held send. Returns whether the save is
+    /// now tracked for its authoritative acknowledgment.
+    fn submit_direct_save(
         &mut self,
         thread_id: ThreadId,
         config: artisan_domain::EngineRunConfig,
@@ -6830,28 +7285,21 @@ impl NativeApplication {
                 return false;
             }
         };
-        if !self.engine_settings.begin_direct_save(
-            thread_id.clone(),
-            request_id.clone(),
-            config.clone(),
-        ) {
-            return false;
-        }
-        let command = artisan_domain::SetThreadEngineConfig::new(
-            request_id,
-            thread_id,
-            artisan_domain::EngineConfigUpdatePrecondition::Unconfigured,
-            config,
-        );
-        let Some(service) = self.service.clone() else {
-            self.engine_settings
-                .on_save_admission_failed(ServiceFailure {
-                    stage: ServiceFailureStage::EventBridge,
-                    category: ServiceFailureCategory::ChannelClosed,
-                });
+        let Some(command) = self
+            .engine_settings
+            .build_direct_save_command(request_id.clone(), config.clone())
+        else {
             return false;
         };
-        match service.submit(NativeTransportCommand::SetThreadEngineConfig(Box::new(command))) {
+        if !self
+            .engine_settings
+            .begin_direct_save(thread_id, request_id, config)
+        {
+            return false;
+        }
+        match self.submit_command(NativeTransportCommand::SetThreadEngineConfig(Box::new(
+            command,
+        ))) {
             Ok(()) => true,
             Err(error) => {
                 self.engine_settings
@@ -7364,8 +7812,63 @@ impl NativeApplication {
                 let key = Some((section, engine.clone()));
                 if self.settings_screen_key != key || self.settings_screen.is_none() {
                     let screen = cx.new(|screen_cx| {
-                        SettingsScreen::new(section, engine, ThemeMode::Dark, screen_cx)
+                        SettingsScreen::new(section, engine.clone(), ThemeMode::Dark, screen_cx)
                     });
+                    // The rail enumerates the manifest harness identities so
+                    // every real catalog engine is reachable from the normal
+                    // Models entry point; fixture identities never enter
+                    // production navigation.
+                    let entries = self
+                        .model_selector
+                        .read(cx)
+                        .state()
+                        .snapshot()
+                        .manifest
+                        .harnesses
+                        .iter()
+                        .map(|harness| SettingsEngineNavEntry {
+                            id: harness.id.clone(),
+                            label: harness.label.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    screen.update(cx, |screen, screen_cx| {
+                        screen.set_engines(entries, screen_cx);
+                    });
+                    // A real catalog engine mounts its live page; anything
+                    // else keeps the legacy surface (including the fixture
+                    // route, which stays out of the rail above).
+                    if section == SettingsRoute::Engines
+                        && let Some(engine_id) = engine.clone()
+                        && engine_id != crate::native_settings::FIXTURE_ENGINE_ID
+                    {
+                        let snapshot = self.settings_engine_snapshot(&engine_id, cx);
+                        let known = self
+                            .model_selector
+                            .read(cx)
+                            .state()
+                            .snapshot()
+                            .manifest
+                            .harness(&engine_id)
+                            .is_some();
+                        let label = self
+                            .model_selector
+                            .read(cx)
+                            .state()
+                            .snapshot()
+                            .manifest
+                            .harness(&engine_id)
+                            .map(|harness| harness.label.clone());
+                        screen.update(cx, |screen, screen_cx| {
+                            screen.set_engine_known(known, screen_cx);
+                            screen.set_engine_label(label, screen_cx);
+                            if known {
+                                screen.set_engine_snapshot(snapshot, screen_cx);
+                            }
+                        });
+                    }
+                    let subscription =
+                        cx.subscribe(&screen, Self::handle_settings_screen_event);
+                    self.settings_screen_subscription = Some(subscription);
                     self.settings_screen = Some(screen);
                     self.settings_screen_key = key;
                 }
@@ -8100,13 +8603,27 @@ mod tests {
         display_name: &str,
         windows: Vec<NativeUsageWindow>,
     ) -> NativeUsageEntry {
+        reported_usage_entry_with_auth(
+            engine_id,
+            display_name,
+            NativeUsageAuthentication::Authenticated,
+            windows,
+        )
+    }
+
+    fn reported_usage_entry_with_auth(
+        engine_id: &str,
+        display_name: &str,
+        authentication: NativeUsageAuthentication,
+        windows: Vec<NativeUsageWindow>,
+    ) -> NativeUsageEntry {
         NativeUsageEntry {
             engine_id: engine_id.to_owned(),
             display_name: display_name.to_owned(),
             report: Some(NativeUsageReport {
                 engine_id: engine_id.to_owned(),
                 display_name: display_name.to_owned(),
-                authentication: NativeUsageAuthentication::Authenticated,
+                authentication,
                 account_email: None,
                 quota_surface: NativeUsageQuotaSurface::Supported,
                 windows,
@@ -8240,11 +8757,48 @@ mod tests {
         assert!(application.engine_settings.authoritative_config().is_some());
     }
 
-    /// Installs a held first send whose configuration save is admitted but
-    /// not yet acknowledged, exercising the real save leg without transport:
-    /// the controller tracks the save, the composer holds the flight, and the
-    /// application owns the pending send. Returns the retained configuration
-    /// so tests can acknowledge exactly it.
+    /// Admits a fresh authenticated Codex usage reply through the real
+    /// request and response handlers.
+    ///
+    /// Admission observes probed readiness exactly like production instead
+    /// of a manually seated runnable flag: the usage read is dispatched
+    /// through the freshness planner and the reply settles through the
+    /// generation/sequence pairing.
+    fn admit_probed_codex_usage(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+    ) {
+        application.ensure_profile_usage(false, Some("codex"), cx);
+        let generation = application.profile_usage_generation;
+        let request_seq = application
+            .profile_usage
+            .pending_seq("codex")
+            .expect("codex usage read admitted");
+        application.handle_account_usage(
+            "codex".to_owned(),
+            generation,
+            request_seq,
+            reported_usage_entry("codex", "Codex", Vec::new()),
+            cx,
+        );
+    }
+
+    /// Returns the request identity of the currently tracked save.
+    fn admitted_save_request(application: &NativeApplication) -> RequestId {
+        application
+            .engine_settings
+            .pending_save_request_id()
+            .cloned()
+            .expect("admitted save")
+    }
+
+    /// Drives the real first-send admission leg without transport: the real
+    /// selection event saves the displayed Codex policy through the shared
+    /// direct typed save, and the real send admission holds the flight for
+    /// its authoritative acknowledgment. Readiness comes from a usage reply
+    /// through the real handler — never from a manually seated runnable
+    /// flag or a manually held save. Returns the retained configuration so
+    /// tests can acknowledge exactly it.
     fn install_admitted_first_send(
         application: &mut NativeApplication,
         cx: &mut Context<NativeApplication>,
@@ -8253,26 +8807,30 @@ mod tests {
         sink: NativeTestCommandSink,
     ) -> artisan_domain::EngineRunConfig {
         install_ready_message_surface(application, cx, thread_id.clone(), draft, sink);
-        application.engine_settings.select_thread(Some(&thread_id));
-        let catalog = application.model_selector.read(cx).state().snapshot().clone();
-        let mut policy = catalog
+        admit_probed_codex_usage(application, cx);
+        let policy = application
+            .model_selector
+            .read(cx)
+            .state()
+            .snapshot()
             .selection_policy_for_model("codex-sol")
-            .expect("default selection policy");
-        policy.profile_id = Some("default".to_owned());
-        let config =
-            crate::composer_model_config::config_for_policy(&catalog, &policy, None)
-                .expect("default policy builds a run configuration");
-        // Native selections bypass the `OpenCode` 2-shaped draft through the
-        // same direct-save tracking production uses for first sends.
-        assert!(application.engine_settings.begin_direct_save(
-            thread_id,
-            request("engine-save-1"),
-            config.clone()
-        ));
-        application.begin_pending_first_send(cx);
+            .expect("codex policy");
+        application.handle_composer_model_event(
+            &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(policy),
+            cx,
+        );
+        // The selection auto-saves through the shared direct typed-save
+        // path; the sink records the exact command production would send.
+        let (pending_thread, retained) = application
+            .engine_settings
+            .pending_save()
+            .map(|(thread, config)| (thread.clone(), config.clone()))
+            .expect("selection save admitted");
+        assert_eq!(pending_thread, thread_id);
+        application.begin_message_submission(cx);
         assert!(application.pending_first_send.is_some());
         assert!(application.composer.read(cx).is_submitting());
-        config
+        retained
     }
 
     fn answer_thread() -> ThreadId {
@@ -8524,18 +9082,26 @@ mod tests {
                 assert!(application.composer_model_choice.is_none());
                 assert!(application.model_selector.read(cx).state().policy().is_some());
                 application.begin_message_submission(cx);
-                // Blocked with the real cause: the offline default policy is
-                // not admitted by any runnable engine, so no save can be
-                // issued. No transport command, no flight, draft preserved.
-                assert!(commands.borrow().is_empty());
+                // Blocked with the live verdict: admission requests the
+                // backend-probed account check first, so the first send
+                // observes a pending check rather than a catch-all. The
+                // only commands are those account reads; no save, no
+                // flight, draft preserved.
+                let recorded = commands.borrow();
+                assert_eq!(recorded.len(), 6);
+                assert!(recorded.iter().all(|command| matches!(
+                    command,
+                    NativeTransportCommand::ReadAccountUsage { .. }
+                )));
                 assert!(application.message_flight.is_none());
                 assert!(!application.composer.read(cx).is_submitting());
                 assert_eq!(application.composer.read(cx).draft(), "keep my draft");
                 let error = application
                     .composer_model_run_error
+                    .clone()
                     .expect("first-send configuration error");
                 assert!(
-                    error.contains("Connect and configure"),
+                    error.contains("account status") && error.contains("Your draft is preserved"),
                     "unexpected error: {error}"
                 );
             });
@@ -8556,78 +9122,49 @@ mod tests {
                     "explicit pick draft",
                     sink,
                 );
-                // The offline catalog admits nothing; seat the codex harness
-                // runnable so the explicit choice can reach the typed save.
-                let mut catalog = application
-                    .model_selector
-                    .read(cx)
-                    .state()
-                    .snapshot()
-                    .clone();
-                catalog.runnable_harness_ids.push("codex".to_owned());
-                application.model_selector.update(cx, |selector, selector_cx| {
-                    selector.set_snapshot(catalog, selector_cx);
-                });
-                // The real selection event: no validate-run gate may strand
-                // this explicit choice before the first-send save flow.
-                let mut policy = application
+                // Readiness arrives as a probed usage reply through the real
+                // handler — never as a manually seated runnable flag — so
+                // the explicit choice below travels the production path.
+                admit_probed_codex_usage(application, cx);
+                // The real selection event with the picker's own policy
+                // shape: no validate-run gate may strand this explicit
+                // choice before the first-send save flow, and no manual
+                // profile is needed for the native default.
+                let policy = application
                     .model_selector
                     .read(cx)
                     .state()
                     .snapshot()
                     .selection_policy_for_model("codex-sol")
                     .expect("codex policy");
-                policy.profile_id = Some("default".to_owned());
                 application.handle_composer_model_event(
                     &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(
-                        policy.clone(),
+                        policy,
                     ),
                     cx,
                 );
                 assert!(application.engine_settings.authoritative_config().is_none());
+                // The selection auto-saved through the shared direct typed
+                // save; the send adopts that in-flight save and holds for
+                // its acknowledgment.
+                let save_request = admitted_save_request(application);
+                let retained = application
+                    .engine_settings
+                    .pending_save()
+                    .map(|(_, config)| config.clone())
+                    .expect("selection save tracked");
                 application.begin_message_submission(cx);
-                // No service is connected, so the typed save cannot be
-                // admitted — but reaching it is the regression signal the
-                // old validate-first ordering never produced.
-                assert_eq!(
-                    application.engine_settings.failure_operation(),
-                    Some(crate::engine_settings::EngineSettingsFailureOperation::Save)
-                );
-                let error = application
-                    .composer_model_run_error
-                    .expect("save failure error");
-                assert!(error.contains("could not be saved"), "unexpected error: {error}");
-                assert!(commands.borrow().is_empty());
-                assert!(application.message_flight.is_none());
-                assert!(!application.composer.read(cx).is_submitting());
-                assert_eq!(application.composer.read(cx).draft(), "explicit pick draft");
-                // Complete the flow the send started: admit the same save
-                // the gate built, hold the send, and acknowledge it.
-                let catalog = application
-                    .model_selector
-                    .read(cx)
-                    .state()
-                    .snapshot()
-                    .clone();
-                let expected =
-                    crate::composer_model_config::config_for_policy(&catalog, &policy, None)
-                        .expect("choice builds a run configuration");
-                assert!(application.engine_settings.begin_direct_save(
-                    thread_id.clone(),
-                    request("engine-save-2"),
-                    expected.clone()
-                ));
-                application.begin_pending_first_send(cx);
                 assert!(application.pending_first_send.is_some());
+                assert!(application.composer_model_run_error.is_some());
                 application.handle_engine_config_set(
                     &artisan_protocol::SetThreadEngineConfigResult {
-                        request_id: request("engine-save-2"),
+                        request_id: save_request,
                         thread_id: thread_id.clone(),
                         revision: artisan_domain::EngineConfigRevision::new(1)
                             .expect("revision"),
                         disposition: artisan_domain::ReceiptDisposition::Accepted,
                     },
-                    expected,
+                    retained,
                     cx,
                 );
                 let flight = application
@@ -8644,15 +9181,329 @@ mod tests {
             });
         });
         let commands = commands.borrow();
-        assert_eq!(commands.len(), 1);
-        let NativeTransportCommand::QueueMessage(command) = &commands[0] else {
-            panic!("acknowledged explicit send must queue its message")
-        };
-        assert_eq!(command.thread_id, thread_id);
+        // The production-shaped command sequence: the probed account read,
+        // the typed selection save with its `Unconfigured` precondition,
+        // then the continued queue after the authoritative acknowledgment.
+        // Nothing here seats readiness or holds the save by hand.
+        let save = commands
+            .iter()
+            .find_map(|command| match command {
+                NativeTransportCommand::SetThreadEngineConfig(command) => Some(command),
+                _ => None,
+            })
+            .expect("typed selection save");
+        assert_eq!(save.thread_id(), &thread_id);
         assert_eq!(
-            command.payload.text().expect("text payload").as_str(),
+            save.precondition(),
+            artisan_domain::EngineConfigUpdatePrecondition::Unconfigured
+        );
+        let queued = commands
+            .iter()
+            .find_map(|command| match command {
+                NativeTransportCommand::QueueMessage(command) => Some(command),
+                _ => None,
+            })
+            .expect("acknowledged explicit send must queue its message");
+        assert_eq!(queued.thread_id, thread_id);
+        assert_eq!(
+            queued.payload.text().expect("text payload").as_str(),
             "explicit pick draft"
         );
+    }
+
+    /// Navigates to one engine Settings page.
+    fn mount_settings_engine(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+        engine_id: &str,
+    ) {
+        application.navigate(
+            NativeRoute::Settings {
+                section: SettingsRoute::Engines,
+                engine: Some(engine_id.to_owned()),
+            },
+            cx,
+        );
+    }
+
+    #[gpui::test]
+    fn settings_rail_lists_real_engines_without_a_thread(cx: &mut TestAppContext) {        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                application.test_command_sink = Some(sink);
+                // The normal entry point from the profile menu: the Models
+                // section with no engine and no selected thread.
+                application.navigate(
+                    NativeRoute::Settings {
+                        section: SettingsRoute::Models,
+                        engine: None,
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let screen = application
+                    .settings_screen
+                    .clone()
+                    .expect("settings screen mounted");
+                let ids: Vec<String> = screen
+                    .read(cx)
+                    .engines()
+                    .iter()
+                    .map(|entry| entry.id.clone())
+                    .collect();
+                // Every real catalog engine is reachable; the mock fixture
+                // identity never enters production navigation.
+                for expected in ["codex", "claude", "cursor", "grok", "hermes", "opencode2"] {
+                    assert!(
+                        ids.iter().any(|id| id == expected),
+                        "rail must enumerate {expected}: {ids:?}"
+                    );
+                }
+                assert!(
+                    !ids.iter().any(|id| id == "fixture-engine"),
+                    "rail must not list fixture identities: {ids:?}"
+                );
+                // Entering Settings requested the global readiness refresh
+                // even with no thread selected.
+                assert!(
+                    commands.borrow().iter().any(|command| matches!(
+                        command,
+                        NativeTransportCommand::ReadAccountUsage { .. }
+                    )),
+                    "settings entry must refresh account readiness"
+                );
+            });
+        });
+        // The real engine nav button routes through its click handler to
+        // the live engine page, not a directly invoked navigate call.
+        let engine_nav = cx
+            .debug_bounds("settings-nav-engines-codex")
+            .expect("engine nav mounted");
+        cx.simulate_click(engine_nav.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                assert!(matches!(
+                    application.route(),
+                    NativeRoute::Settings {
+                        section: SettingsRoute::Engines,
+                        engine: Some(engine),
+                    } if engine == "codex"
+                ));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn settings_model_choice_saves_acknowledges_and_reloads(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("settings-choice-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "settings draft",
+                    sink,
+                );
+                admit_probed_codex_usage(application, cx);
+                mount_settings_engine(application, cx, "codex");
+            });
+        });
+        cx.run_until_parked();
+        // The mounted choice travels the shared SelectPolicy plus
+        // typed-save flow through the real model-row button handler, not
+        // a Settings-only bypass or a directly emitted screen event.
+        // Delivery is deferred through the effect queue, so the save is
+        // asserted after the click and a parked flush.
+        let model_row = cx
+            .debug_bounds("settings-engine-model-codex-sol")
+            .expect("settings model row mounted");
+        cx.simulate_click(model_row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let save_request = admitted_save_request(application);
+                let retained = application
+                    .engine_settings
+                    .pending_save()
+                    .map(|(_, config)| config.clone())
+                    .expect("settings choice save tracked");
+                application.handle_engine_config_set(
+                    &artisan_protocol::SetThreadEngineConfigResult {
+                        request_id: save_request,
+                        thread_id: thread_id.clone(),
+                        revision: artisan_domain::EngineConfigRevision::new(1)
+                            .expect("revision"),
+                        disposition: artisan_domain::ReceiptDisposition::Accepted,
+                    },
+                    retained.clone(),
+                    cx,
+                );
+                assert!(application.engine_settings.authoritative_config().is_some());
+            });
+        });
+        // The typed save went out with the first-send precondition…
+        let save = commands
+            .borrow()
+            .iter()
+            .find_map(|command| match command {
+                NativeTransportCommand::SetThreadEngineConfig(command) => Some(command.clone()),
+                _ => None,
+            })
+            .expect("settings choice save");
+        assert_eq!(
+            save.precondition(),
+            artisan_domain::EngineConfigUpdatePrecondition::Unconfigured
+        );
+        // …and reopening the thread restores the saved Codex model from
+        // durable storage instead of the cleared in-memory choice.
+        // `select_thread(None)` clears the authoritative config, so the
+        // saved config is preserved first for the reload reply.
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let saved = application
+                    .engine_settings
+                    .authoritative_config()
+                    .cloned()
+                    .expect("saved configuration");
+                application.composer_model_choice = None;
+                application.engine_settings.select_thread(None);
+                application.engine_settings.select_thread(Some(&thread_id));
+                application.submit_settings_load(thread_id.clone());
+                let generation = application
+                    .engine_settings
+                    .active_settings_generation()
+                    .expect("settings load admitted");
+                application.handle_engine_settings(
+                    generation,
+                    artisan_protocol::ThreadEngineSettingsResult::Configured {
+                        thread_id: thread_id.clone(),
+                        revision: artisan_domain::EngineConfigRevision::new(1)
+                            .expect("revision"),
+                        config: Box::new(saved),
+                    },
+                    cx,
+                );
+                let policy = application
+                    .model_selector
+                    .read(cx)
+                    .state()
+                    .policy()
+                    .cloned()
+                    .expect("reloaded policy");
+                assert_eq!(policy.model_id, "codex-sol");
+                assert_eq!(policy.profile_id.as_deref(), Some("default"));
+                assert!(
+                    application.model_selector.read(cx).state().status().authoritative
+                );
+                let screen = application
+                    .settings_screen
+                    .clone()
+                    .expect("settings screen mounted");
+                let snapshot = screen
+                    .read(cx)
+                    .engine_snapshot()
+                    .cloned()
+                    .expect("engine snapshot");
+                assert_eq!(snapshot.saved_model.as_deref(), Some("codex-sol"));
+                assert!(snapshot.models.iter().any(|row| row.id == "codex-sol" && row.saved));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn signed_out_refresh_removes_admission_and_updates_settings(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("settings-signout-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "draft",
+                    sink,
+                );
+                admit_probed_codex_usage(application, cx);
+                assert!(
+                    application
+                        .effective_catalog_snapshot(cx)
+                        .selectability("codex-sol")
+                        .is_available()
+                );
+                mount_settings_engine(application, cx, "codex");
+            });
+        });
+        cx.run_until_parked();
+        // The mounted Settings refresh button forces a probed re-read
+        // through the real transport command; the reply is fed after the
+        // click delivery flushes.
+        let refresh = cx
+            .debug_bounds("settings-installation-refresh")
+            .expect("settings refresh mounted");
+        cx.simulate_click(refresh.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let forced = commands.borrow();
+                assert!(
+                    forced.iter().any(|command| matches!(
+                        command,
+                        NativeTransportCommand::ReadAccountUsage { force: true, .. }
+                    )),
+                    "refresh action must force an account re-read"
+                );
+                drop(forced);
+                // The signed-out reply removes the admission and updates the
+                // mounted page through the real response handler.
+                let generation = application.profile_usage_generation;
+                let request_seq = application
+                    .profile_usage
+                    .pending_seq("codex")
+                    .expect("forced codex re-read admitted");
+                application.handle_account_usage(
+                    "codex".to_owned(),
+                    generation,
+                    request_seq,
+                    reported_usage_entry_with_auth(
+                        "codex",
+                        "Codex",
+                        NativeUsageAuthentication::Unauthenticated,
+                        Vec::new(),
+                    ),
+                    cx,
+                );
+                assert!(
+                    !application
+                        .effective_catalog_snapshot(cx)
+                        .selectability("codex-sol")
+                        .is_available()
+                );
+                let screen = application
+                    .settings_screen
+                    .clone()
+                    .expect("settings screen mounted");
+                let snapshot = screen
+                    .read(cx)
+                    .engine_snapshot()
+                    .cloned()
+                    .expect("engine snapshot");
+                assert_eq!(
+                    snapshot.readiness,
+                    crate::native_profile_usage::EngineReadiness::NeedsSignIn
+                );
+                assert_ne!(snapshot.saved_model.as_deref(), Some("codex-sol"));
+            });
+        });
     }
 
     #[gpui::test]
@@ -8730,22 +9581,24 @@ mod tests {
         let thread_id = ThreadId::parse("first-send-task").expect("thread");
         let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
         let (sink, commands) = command_sink([Ok(())]);
-        let retained = cx.update(|_, app| {
+        let (retained, save_request) = cx.update(|_, app| {
             view.update(app, |application, cx| {
-                install_admitted_first_send(
+                let retained = install_admitted_first_send(
                     application,
                     cx,
                     thread_id.clone(),
                     "keep my draft",
                     sink,
-                )
+                );
+                let save_request = admitted_save_request(application);
+                (retained, save_request)
             })
         });
         cx.update(|_, app| {
             view.update(app, |application, cx| {
                 application.handle_engine_config_set(
                     &artisan_protocol::SetThreadEngineConfigResult {
-                        request_id: request("engine-save-1"),
+                        request_id: save_request,
                         thread_id: thread_id.clone(),
                         revision: artisan_domain::EngineConfigRevision::new(1)
                             .expect("revision"),
@@ -8769,13 +9622,31 @@ mod tests {
             });
         });
         let commands = commands.borrow();
-        assert_eq!(commands.len(), 1);
-        let NativeTransportCommand::QueueMessage(command) = &commands[0] else {
-            panic!("acknowledged first send must queue its message")
-        };
-        assert_eq!(command.thread_id, thread_id);
+        // The production-shaped command sequence: the probed account read,
+        // the typed first-send save with its `Unconfigured` precondition,
+        // then the continued queue after the authoritative acknowledgment.
+        let save = commands
+            .iter()
+            .find_map(|command| match command {
+                NativeTransportCommand::SetThreadEngineConfig(command) => Some(command),
+                _ => None,
+            })
+            .expect("typed first-send save");
+        assert_eq!(save.thread_id(), &thread_id);
         assert_eq!(
-            command.payload.text().expect("text payload").as_str(),
+            save.precondition(),
+            artisan_domain::EngineConfigUpdatePrecondition::Unconfigured
+        );
+        let queued = commands
+            .iter()
+            .find_map(|command| match command {
+                NativeTransportCommand::QueueMessage(command) => Some(command),
+                _ => None,
+            })
+            .expect("acknowledged first send must queue its message");
+        assert_eq!(queued.thread_id, thread_id);
+        assert_eq!(
+            queued.payload.text().expect("text payload").as_str(),
             "keep my draft"
         );
     }
@@ -8785,15 +9656,17 @@ mod tests {
         let thread_id = ThreadId::parse("first-send-edited-task").expect("thread");
         let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
         let (sink, commands) = command_sink([Ok(())]);
-        let retained = cx.update(|_, app| {
+        let (retained, save_request) = cx.update(|_, app| {
             view.update(app, |application, cx| {
-                install_admitted_first_send(
+                let retained = install_admitted_first_send(
                     application,
                     cx,
                     thread_id.clone(),
                     "original send draft",
                     sink,
-                )
+                );
+                let save_request = admitted_save_request(application);
+                (retained, save_request)
             })
         });
         cx.update(|_, app| {
@@ -8809,7 +9682,7 @@ mod tests {
             view.update(app, |application, cx| {
                 application.handle_engine_config_set(
                     &artisan_protocol::SetThreadEngineConfigResult {
-                        request_id: request("engine-save-1"),
+                        request_id: save_request,
                         thread_id: thread_id.clone(),
                         revision: artisan_domain::EngineConfigRevision::new(1)
                             .expect("revision"),
@@ -8845,9 +9718,10 @@ mod tests {
                     "keep my draft",
                     sink,
                 );
+                let save_request = admitted_save_request(application);
                 application.handle_engine_config_failed(
                     &thread_id,
-                    &request("engine-save-1"),
+                    &save_request,
                     message_failure(),
                     cx,
                 );
@@ -8857,6 +9731,7 @@ mod tests {
                 assert_eq!(application.composer.read(cx).draft(), "keep my draft");
                 let error = application
                     .composer_model_run_error
+                    .clone()
                     .expect("save failure error");
                 assert!(error.contains("preserved"), "unexpected error: {error}");
             });

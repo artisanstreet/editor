@@ -523,6 +523,172 @@ pub fn narrowed_report_position(engine_ids: &[&str], requested_engine_id: &str) 
     (engine_ids[0] == requested_engine_id).then_some(0)
 }
 
+/// Roster engines whose adapters expose a real account-usage surface.
+///
+/// Only these engines get a usage verdict that can admit static models:
+/// `codex` reads `account/rateLimits/read`, `claude` parses `claude -p
+/// /usage`, and `cursor` posts its dashboard endpoint. This mirrors the
+/// backend roster contract in `modules/backend/src/account_usage_service.rs`:
+/// `grok`, `hermes`, and `opencode2` expose no account-usage surface, so the
+/// overlay below preserves whatever runnable marking the snapshot carried
+/// for them (managed `OpenCode` discovery for `opencode2`, harness support
+/// plus dispatch-time executable probes for `grok`/`hermes`) and never
+/// invents or clears it from usage state.
+pub const ACCOUNT_GATED_ENGINES: [&str; 3] = ["codex", "claude", "cursor"];
+
+/// Backend-probed account readiness for one native engine.
+///
+/// Derived only from the provider-owned usage rows the backend probed with
+/// real non-billable reads. A fresh `Authenticated` report proves the
+/// installed executable and the shared ambient account at once, so the
+/// static catalog models for that engine are admittable without any managed
+/// `OpenCode` profile or registry. Anything else stays unrunnable with an
+/// honest reason; readiness is never synthesized from a missing row, and a
+/// stale last-good report never counts as fresh readiness indefinitely.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum EngineReadiness {
+    /// The provider authenticated this account inside the freshness window;
+    /// static models may run.
+    Ready,
+    /// The provider reports no signed-in account.
+    NeedsSignIn,
+    /// The provider is unreachable, failing, stale, or has no account data yet.
+    NotReady,
+    /// A usage read is in flight; the verdict is pending.
+    Checking,
+}
+
+/// Derives one engine's account readiness from its probed usage row.
+///
+/// `now_ms` bounds last-good optimism with the same 180-second freshness
+/// window both layers share ([`profile_usage_is_fresh`]): an authenticated
+/// report older than that is `NotReady` (or `Checking` while its refresh is
+/// admitted), never `Ready`, so a signed-out or uninstalled engine cannot
+/// ride a stale report indefinitely. A fresh authenticated report with a
+/// refresh failure alongside stays `Ready` — the backend deliberately serves
+/// last-good on transient refresh failures — while the failure itself stays
+/// visible through [`engine_refresh_failure`] for actionable Settings
+/// status. Unknown engine ids and rows without a usable report are never
+/// ready: a missing row settles to `Checking` only while its refresh is
+/// admitted, otherwise `NotReady`, so the composer cannot mistake an
+/// unprobed engine for a runnable one.
+#[must_use]
+pub fn engine_readiness(
+    state: &NativeProfileUsageState,
+    engine_id: &str,
+    now_ms: i64,
+) -> EngineReadiness {
+    let refreshing = state
+        .refreshing_engine_ids
+        .iter()
+        .any(|current| current == engine_id);
+    match state.entry(engine_id) {
+        Some(entry) => match entry
+            .report
+            .as_ref()
+            .map(|report| report.authentication)
+        {
+            Some(NativeUsageAuthentication::Authenticated) => {
+                if profile_usage_is_fresh(entry.fetched_at_ms, now_ms) {
+                    EngineReadiness::Ready
+                } else if refreshing {
+                    EngineReadiness::Checking
+                } else {
+                    EngineReadiness::NotReady
+                }
+            }
+            Some(NativeUsageAuthentication::Unauthenticated) => EngineReadiness::NeedsSignIn,
+            _ => {
+                if entry.failure.is_some() || !refreshing {
+                    EngineReadiness::NotReady
+                } else {
+                    EngineReadiness::Checking
+                }
+            }
+        },
+        None => {
+            if refreshing {
+                EngineReadiness::Checking
+            } else {
+                EngineReadiness::NotReady
+            }
+        }
+    }
+}
+
+/// Returns the actionable refresh failure for one engine, if any.
+///
+/// This is the report-level provider failure (for example a timed-out
+/// refresh served over last-good meters) or the transport failure recorded
+/// when no report arrived. Callers paint it next to the last-good state with
+/// a retry action; it never clears the stored account verdict on its own.
+#[must_use]
+pub fn engine_refresh_failure(
+    state: &NativeProfileUsageState,
+    engine_id: &str,
+) -> Option<String> {
+    let entry = state.entry(engine_id)?;
+    entry
+        .report
+        .as_ref()
+        .and_then(|report| report.failure.clone())
+        .or_else(|| entry.failure.clone())
+}
+
+/// Returns whether one account-gated engine's static catalog models may run.
+///
+/// Only a fresh backend-authenticated usage report admits them. Engines
+/// without an account surface (`grok`, `hermes`, `opencode2`) never qualify
+/// here; the overlay preserves their snapshot marking instead.
+#[must_use]
+pub fn engine_static_models_admittable(
+    state: &NativeProfileUsageState,
+    engine_id: &str,
+    now_ms: i64,
+) -> bool {
+    ACCOUNT_GATED_ENGINES.contains(&engine_id)
+        && matches!(
+            engine_readiness(state, engine_id, now_ms),
+            EngineReadiness::Ready
+        )
+}
+
+/// Overlays backend-probed readiness onto a catalog snapshot.
+///
+/// The account-gated native subset ([`ACCOUNT_GATED_ENGINES`]) is recomputed
+/// from scratch on every overlay: a freshly authenticated engine joins
+/// `runnable_harness_ids` once, and an engine whose latest verdict is
+/// anything else leaves it — so a previously admitted engine never survives
+/// a later signed-out, failed, or stale report when overlaid on the current
+/// snapshot. Every other runnable id (genuine managed `OpenCode` readiness
+/// from backend discovery, harness support for surfaceless engines) is
+/// preserved verbatim. The shared admission policy (`admit_policy`,
+/// `validate_policy`) then treats the probed static models as runnable
+/// without inventing routes, versions, or account facts.
+#[must_use]
+pub fn catalog_with_usage_readiness(
+    catalog: crate::native_model_catalog::NativeModelCatalog,
+    usage: &NativeProfileUsageState,
+    now_ms: i64,
+) -> crate::native_model_catalog::NativeModelCatalog {
+    let mut catalog = catalog;
+    let mut runnable: Vec<String> = catalog
+        .runnable_harness_ids
+        .iter()
+        .filter(|id| !ACCOUNT_GATED_ENGINES.contains(&id.as_str()))
+        .cloned()
+        .collect();
+    for engine_id in ACCOUNT_GATED_ENGINES {
+        if engine_static_models_admittable(usage, engine_id, now_ms)
+            && !runnable.iter().any(|ready| ready == engine_id)
+        {
+            runnable.push(engine_id.to_owned());
+        }
+    }
+    catalog.runnable_harness_ids = runnable;
+    catalog
+}
+
 /// One cadence group in Electron's display order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeUsageWindowGroup {
@@ -1133,5 +1299,240 @@ mod tests {
         assert!(state.entries.is_empty());
         assert!(state.refreshing_engine_ids.is_empty());
         assert_eq!(state.pending_seq("claude"), None);
+    }
+
+    /// Fixed test clock: `readiness_entry` stamps rows 10 seconds old unless
+    /// the caller moves the stamp, so freshness assertions stay exact.
+    const READINESS_NOW_MS: i64 = 1_789_000_000_000;
+
+    fn readiness_entry(
+        engine_id: &str,
+        authentication: NativeUsageAuthentication,
+        failure: Option<&str>,
+    ) -> NativeUsageEntry {
+        let mut entry = NativeUsageEntry::pending(engine_id, engine_id);
+        entry.report = Some(NativeUsageReport {
+            engine_id: engine_id.to_owned(),
+            display_name: profile_usage_display_name(engine_id).to_owned(),
+            authentication,
+            account_email: None,
+            quota_surface: NativeUsageQuotaSurface::Supported,
+            windows: Vec::new(),
+            failure: failure.map(str::to_owned),
+        });
+        entry.fetched_at_ms = Some(READINESS_NOW_MS - 10_000);
+        entry
+    }
+
+    #[test]
+    fn readiness_follows_only_probed_authentication() {
+        let mut state = NativeProfileUsageState::default();
+        // No row and no admitted refresh is never ready and never checking:
+        // the composer must not mistake an unprobed engine for a runnable one.
+        assert_eq!(
+            engine_readiness(&state, "codex", READINESS_NOW_MS),
+            EngineReadiness::NotReady
+        );
+        assert!(!engine_static_models_admittable(
+            &state,
+            "codex",
+            READINESS_NOW_MS
+        ));
+
+        state.begin_refresh_seq("codex", 1);
+        assert_eq!(
+            engine_readiness(&state, "codex", READINESS_NOW_MS),
+            EngineReadiness::Checking
+        );
+
+        state.accept(readiness_entry(
+            "codex",
+            NativeUsageAuthentication::Authenticated,
+            None,
+        ));
+        assert_eq!(
+            engine_readiness(&state, "codex", READINESS_NOW_MS),
+            EngineReadiness::Ready
+        );
+        assert!(engine_static_models_admittable(
+            &state,
+            "codex",
+            READINESS_NOW_MS
+        ));
+
+        // A later refresh failure keeps the last-good authenticated verdict:
+        // a stale reply without an observation time never replaces the
+        // newer reading, exactly like the production controller.
+        state.begin_refresh_seq("codex", 2);
+        let mut stale = readiness_entry(
+            "codex",
+            NativeUsageAuthentication::Unknown,
+            Some("provider usage read timed out"),
+        );
+        stale.fetched_at_ms = None;
+        state.accept(stale);
+        assert_eq!(
+            engine_readiness(&state, "codex", READINESS_NOW_MS),
+            EngineReadiness::Ready
+        );
+
+        state.accept(readiness_entry(
+            "claude",
+            NativeUsageAuthentication::Unauthenticated,
+            None,
+        ));
+        assert_eq!(
+            engine_readiness(&state, "claude", READINESS_NOW_MS),
+            EngineReadiness::NeedsSignIn
+        );
+        assert!(!engine_static_models_admittable(
+            &state,
+            "claude",
+            READINESS_NOW_MS
+        ));
+
+        // Unknown engine ids never qualify.
+        assert_eq!(
+            engine_readiness(&state, "unknown-engine", READINESS_NOW_MS),
+            EngineReadiness::NotReady
+        );
+        assert!(!engine_static_models_admittable(
+            &state,
+            "unknown-engine",
+            READINESS_NOW_MS
+        ));
+    }
+
+    #[test]
+    fn stale_last_good_is_not_fresh_readiness() {
+        let mut state = NativeProfileUsageState::default();
+        let mut old = readiness_entry(
+            "codex",
+            NativeUsageAuthentication::Authenticated,
+            None,
+        );
+        // Just past the shared 180-second freshness window.
+        old.fetched_at_ms = Some(READINESS_NOW_MS - 181_000);
+        state.accept(old);
+        // Stale last-good never counts as fresh readiness indefinitely: the
+        // composer must re-probe instead of sending on an aged verdict.
+        assert_eq!(
+            engine_readiness(&state, "codex", READINESS_NOW_MS),
+            EngineReadiness::NotReady
+        );
+        assert!(!engine_static_models_admittable(
+            &state,
+            "codex",
+            READINESS_NOW_MS
+        ));
+        // While the re-probe is admitted the verdict is honestly pending.
+        state.begin_refresh_seq("codex", 1);
+        assert_eq!(
+            engine_readiness(&state, "codex", READINESS_NOW_MS),
+            EngineReadiness::Checking
+        );
+        // A fresh re-probe restores readiness.
+        state.accept(readiness_entry(
+            "codex",
+            NativeUsageAuthentication::Authenticated,
+            None,
+        ));
+        assert_eq!(
+            engine_readiness(&state, "codex", READINESS_NOW_MS),
+            EngineReadiness::Ready
+        );
+    }
+
+    #[test]
+    fn fresh_last_good_with_refresh_failure_stays_ready_but_visible() {
+        let mut state = NativeProfileUsageState::default();
+        // A forced refresh that fails over fresh last-good meters keeps the
+        // backend's optimistic verdict, while the failure stays actionable.
+        state.accept(readiness_entry(
+            "codex",
+            NativeUsageAuthentication::Authenticated,
+            Some("provider usage read timed out"),
+        ));
+        assert_eq!(
+            engine_readiness(&state, "codex", READINESS_NOW_MS),
+            EngineReadiness::Ready
+        );
+        assert_eq!(
+            engine_refresh_failure(&state, "codex").as_deref(),
+            Some("provider usage read timed out")
+        );
+        assert_eq!(engine_refresh_failure(&state, "claude"), None);
+    }
+
+    #[test]
+    fn readiness_overlay_recomputes_the_gated_subset() {
+        use crate::native_model_catalog::NativeModelCatalog;
+
+        let catalog = NativeModelCatalog::offline().expect("bundled catalog");
+        assert!(catalog.runnable_harness_ids.is_empty());
+
+        let mut usage = NativeProfileUsageState::default();
+        usage.accept(readiness_entry(
+            "codex",
+            NativeUsageAuthentication::Authenticated,
+            None,
+        ));
+        usage.accept(readiness_entry(
+            "claude",
+            NativeUsageAuthentication::Unauthenticated,
+            None,
+        ));
+        let admitted =
+            catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
+        assert_eq!(admitted.runnable_harness_ids, vec!["codex".to_owned()]);
+        assert!(admitted.selectability("codex-sol").is_available());
+        assert!(!admitted.selectability("claude-fable").is_available());
+
+        // Re-overlaying never duplicates the runnable entry.
+        let again = catalog_with_usage_readiness(admitted, &usage, READINESS_NOW_MS);
+        assert_eq!(again.runnable_harness_ids, vec!["codex".to_owned()]);
+    }
+
+    #[test]
+    fn signed_out_report_removes_a_previously_admitted_engine() {
+        use crate::native_model_catalog::NativeModelCatalog;
+
+        // A snapshot carrying genuine managed `OpenCode` readiness plus a
+        // previously admitted Codex, as backend discovery plus an earlier
+        // overlay produce in production.
+        let mut catalog = NativeModelCatalog::offline().expect("bundled catalog");
+        catalog.runnable_harness_ids = vec![
+            "opencode2".to_owned(),
+            "codex".to_owned(),
+            "grok".to_owned(),
+        ];
+        let mut usage = NativeProfileUsageState::default();
+        usage.accept(readiness_entry(
+            "codex",
+            NativeUsageAuthentication::Authenticated,
+            None,
+        ));
+        let admitted =
+            catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
+        assert_eq!(
+            admitted.runnable_harness_ids,
+            vec!["opencode2".to_owned(), "grok".to_owned(), "codex".to_owned()]
+        );
+
+        // The account signs out later: the recomputed overlay drops Codex
+        // while genuine managed `OpenCode` readiness and the surfaceless
+        // `grok` harness marking survive verbatim.
+        usage.accept(readiness_entry(
+            "codex",
+            NativeUsageAuthentication::Unauthenticated,
+            None,
+        ));
+        let recomputed =
+            catalog_with_usage_readiness(admitted, &usage, READINESS_NOW_MS);
+        assert_eq!(
+            recomputed.runnable_harness_ids,
+            vec!["opencode2".to_owned(), "grok".to_owned()]
+        );
+        assert!(!recomputed.selectability("codex-sol").is_available());
     }
 }

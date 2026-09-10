@@ -1207,6 +1207,42 @@ impl EngineSettingsController {
             config,
         ))
     }
+
+    /// Builds a pending `SetThreadEngineConfig` for an already validated
+    /// engine configuration, bypassing the `OpenCode` 2-shaped draft.
+    ///
+    /// Caller must supply a fresh `RequestId` minted for this save and a
+    /// configuration built by [`crate::composer_model_config::config_for_policy`].
+    /// The compare-and-swap precondition is shared with
+    /// [`Self::build_save_command`]: `Unconfigured` while no authoritative
+    /// revision exists (first send), otherwise `Exact` on the authoritative
+    /// revision so a concurrent writer conflicts instead of being silently
+    /// overwritten. Returns [`None`] while no thread is selected, a save is
+    /// already in flight, or a conflict refresh is outstanding.
+    #[must_use]
+    pub fn build_direct_save_command(
+        &self,
+        request_id: artisan_domain::RequestId,
+        config: artisan_domain::EngineRunConfig,
+    ) -> Option<artisan_domain::SetThreadEngineConfig> {
+        if self.selected_thread.is_none()
+            || self.pending_save.is_some()
+            || self.settings_load.conflict_refreshing
+        {
+            return None;
+        }
+        let thread_id = self.selected_thread.clone()?;
+        let precondition = self.authoritative_revision.map_or_else(
+            || artisan_domain::EngineConfigUpdatePrecondition::Unconfigured,
+            artisan_domain::EngineConfigUpdatePrecondition::Exact,
+        );
+        Some(artisan_domain::SetThreadEngineConfig::new(
+            request_id,
+            thread_id,
+            precondition,
+            config,
+        ))
+    }
 }
 
 impl Default for EngineSettingsController {
@@ -1388,6 +1424,62 @@ mod tests {
             stage: ServiceFailureStage::EventBridge,
             category: ServiceFailureCategory::ChannelClosed,
         }
+    }
+
+    #[test]
+    fn direct_save_uses_unconfigured_precondition_before_first_save() {
+        let mut controller = EngineSettingsController::new();
+        let tid = thread_id("thread-a");
+        controller.select_thread(Some(&tid));
+        controller.on_registry_loaded(registered_present(&["default"]));
+        load_unconfigured(&mut controller, &tid);
+        let config = sample_config("default");
+        let command = controller
+            .build_direct_save_command(request_id("save-1"), config.clone())
+            .expect("direct save builds without a draft");
+        assert_eq!(command.thread_id(), &tid);
+        assert_eq!(command.config(), &config);
+        assert_eq!(
+            command.precondition(),
+            artisan_domain::EngineConfigUpdatePrecondition::Unconfigured
+        );
+    }
+
+    #[test]
+    fn direct_save_uses_exact_revision_after_configuration() {
+        let (mut controller, thread, config) = ready_controller();
+        let next = sample_config("default");
+        let command = controller
+            .build_direct_save_command(request_id("save-2"), next.clone())
+            .expect("direct save builds on a configured thread");
+        assert_eq!(command.thread_id(), &thread);
+        assert_eq!(command.config(), &next);
+        assert_eq!(
+            command.precondition(),
+            artisan_domain::EngineConfigUpdatePrecondition::Exact(revision(7))
+        );
+        assert_eq!(&config, controller.authoritative_config().expect("authoritative"));
+    }
+
+    #[test]
+    fn direct_save_refuses_without_thread_or_during_flight() {
+        let controller = EngineSettingsController::new();
+        assert!(
+            controller
+                .build_direct_save_command(request_id("save-x"), sample_config("default"))
+                .is_none()
+        );
+        let (mut controller, thread, config) = ready_controller();
+        assert!(controller.begin_direct_save(
+            thread,
+            request_id("save-flight"),
+            config
+        ));
+        assert!(
+            controller
+                .build_direct_save_command(request_id("save-y"), sample_config("default"))
+                .is_none()
+        );
     }
 
     #[test]

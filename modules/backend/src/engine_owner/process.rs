@@ -499,37 +499,54 @@ pub(crate) fn spawn_configured_engine(
 /// Spawns the verified Codex app-server child for one turn.
 ///
 /// Extends (never forks) the owner custody contract: the executable is the
-/// verified capability path, argv is exactly `app-server --stdio`, the
-/// working directory is the exact project root, and the environment is
-/// cleared then rebuilt from the managed Codex home plus the host essentials
-/// (`PATH` for loader resolution, `SYSTEMROOT` on Windows). Revalidation is
-/// the last authority operation before the child is created.
+/// verified capability path, argv is exactly `app-server --stdio`, and the
+/// working directory is the exact project root. The environment is inherited
+/// ambiently so the child runs as the same authenticated Codex account the
+/// backend usage probes observe: an explicit ambient `CODEX_HOME` selects
+/// that account, otherwise Codex resolves its default user home. No managed
+/// private home is ever seated here; the previous managed-home override
+/// pointed at a directory that does not exist and broke dispatch for the
+/// ambient authenticated account. This mirrors the established Claude/Hermes
+/// and usage-probe convention (`{ ...process.env }` plus explicit overrides
+/// only). Executable/version certification stays on the capability and
+/// revalidation remains the last authority operation before the child is
+/// created. Per-thread isolation is the separate child plus its project-root
+/// working directory, not a separate account home.
 pub(crate) fn spawn_codex_engine(
     launch: &artisan_native_engine::VerifiedCodexLaunch,
     project_root: &RootPath,
 ) -> io::Result<EngineChild> {
-    let mut command = tokio::process::Command::new(launch.executable_path());
-    command
-        .current_dir(Path::new(project_root.as_str()))
-        .args(["app-server", "--stdio"]);
-    command.env_clear();
-    command.env("CODEX_HOME", launch.codex_home());
-    if let Some(path) = std::env::var_os("PATH") {
-        command.env("PATH", path);
-    }
-    #[cfg(windows)]
-    if let Some(system_root) = std::env::var_os("SYSTEMROOT") {
-        command.env("SYSTEMROOT", system_root);
-    }
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut command = codex_engine_command(launch.executable_path(), project_root);
 
     launch
         .revalidate()
         .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "codex launch rejected"))?;
     EngineChild::spawn(command, true)
+}
+
+/// Builds the Codex app-server command with the ambient account environment.
+///
+/// The command carries the verified executable, exactly
+/// `app-server --stdio`, the project-root working directory, and piped
+/// stdio. The environment is deliberately left inherited: the child observes
+/// the same ambient/explicit `CODEX_HOME` account as the backend usage
+/// probes, and loader essentials (`PATH`, `SYSTEMROOT`) travel untouched.
+/// No `CODEX_HOME` override is ever inserted here; inserting one would seat
+/// dispatch at a managed home that does not exist instead of the
+/// authenticated ambient account.
+fn codex_engine_command(
+    executable: &Path,
+    project_root: &RootPath,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .current_dir(Path::new(project_root.as_str()))
+        .args(["app-server", "--stdio"]);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
 }
 
 /// Spawns the verified Claude Code CLI child for one turn.
@@ -1304,6 +1321,34 @@ mod tests {
         assert_profile_rejected(
             ConfiguredProfileEnvironment::prepare(file.path()),
             file.path(),
+        );
+    }
+
+    #[test]
+    fn codex_engine_command_inherits_ambient_account_environment() {
+        let root = artisan_domain::RootPath::parse(
+            std::env::temp_dir().to_string_lossy().into_owned(),
+        )
+        .expect("temp dir is a valid root");
+        let command = codex_engine_command(Path::new("codex-probe-exe"), &root);
+        let std_command = command.as_std();
+        // The child must observe the ambient/explicit CODEX_HOME account
+        // exactly like the usage probes: no managed override is ever
+        // inserted, and the environment is never cleared.
+        let explicit: BTreeMap<&std::ffi::OsStr, Option<&std::ffi::OsStr>> =
+            std_command.get_envs().collect();
+        assert!(
+            !explicit.keys().any(|key| *key == OsStr::new("CODEX_HOME")),
+            "dispatch must not seat a managed Codex home"
+        );
+        let args: Vec<String> = std_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["app-server".to_owned(), "--stdio".to_owned()]);
+        assert_eq!(
+            std_command.get_current_dir(),
+            Some(Path::new(root.as_str()))
         );
     }
 }
