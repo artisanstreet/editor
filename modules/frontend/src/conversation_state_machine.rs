@@ -1715,43 +1715,44 @@ impl ConversationStateController {
         if self.delivery.is_closed() {
             return;
         }
-        let Some(snapshot) = self.delivery.snapshot() else {
-            return;
-        };
-        for turn in snapshot.turns() {
-            let mut runs: BTreeSet<String> = BTreeSet::new();
-            for item in snapshot.items() {
-                if item.turn_id() != &turn.turn_id {
-                    continue;
-                }
-                if let ConversationItem::AssistantMessage(message) = item {
-                    runs.insert(message.run_id.as_str().to_owned());
-                }
-            }
-            for fact in self.facts.values() {
-                if fact.turn_id != turn.turn_id {
-                    continue;
-                }
-                let work_kind = matches!(
-                    &fact.kind,
-                    SceneFactKind::Reasoning { .. }
-                        | SceneFactKind::Activity { .. }
-                        | SceneFactKind::Compaction { .. }
-                        | SceneFactKind::NativeFact { .. }
-                );
-                if work_kind {
-                    if let Some(run_id) = &fact.run_id {
-                        runs.insert(run_id.as_str().to_owned());
+        // Phase 1 borrows shared state only and collects the minimal owned
+        // action per turn, so phase 2 can mutate without holding snapshot
+        // borrows (and without cloning the snapshot).
+        let mut actions: Vec<(SceneId, bool, Option<DisclosureEvent>)> = Vec::new();
+        if let Some(snapshot) = self.delivery.snapshot() {
+            for turn in snapshot.turns() {
+                let mut runs: BTreeSet<String> = BTreeSet::new();
+                for item in snapshot.items() {
+                    if item.turn_id() != &turn.turn_id {
+                        continue;
+                    }
+                    if let ConversationItem::AssistantMessage(message) = item {
+                        runs.insert(message.run_id.as_str().to_owned());
                     }
                 }
-            }
-            if runs.len() != 1 {
-                continue;
-            }
-            let Ok(anchor) = session_anchor_id(&turn.turn_id) else {
-                continue;
-            };
-            let (working, event) = {
+                for fact in self.facts.values() {
+                    if fact.turn_id != turn.turn_id {
+                        continue;
+                    }
+                    let work_kind = matches!(
+                        &fact.kind,
+                        SceneFactKind::Reasoning { .. }
+                            | SceneFactKind::Activity { .. }
+                            | SceneFactKind::Compaction { .. }
+                            | SceneFactKind::NativeFact { .. }
+                    );
+                    if work_kind {
+                        if let Some(run_id) = &fact.run_id {
+                            runs.insert(run_id.as_str().to_owned());
+                        }
+                    }
+                }
+                if runs.len() != 1 {
+                    continue;
+                }
+                let Ok(anchor) = session_anchor_id(&turn.turn_id) else {
+                    continue;
+                };
                 let Some(controller) = self.turns.get(&turn.turn_id) else {
                     continue;
                 };
@@ -1771,8 +1772,12 @@ impl ConversationStateController {
                         _ => None,
                     }
                 };
-                (working, event)
-            };
+                actions.push((anchor, working, event));
+            }
+        }
+        // Phase 2 applies the collected actions; every turn stays fail-soft
+        // without registry or effect room.
+        for (anchor, working, event) in actions {
             let needs_register = !self.disclosures.contains_key(&anchor);
             let need_effects = if needs_register { 3 } else { 2 };
             if self.effects.len().saturating_add(need_effects) > MAX_PENDING_EFFECTS {
@@ -2012,6 +2017,7 @@ impl ConversationStateController {
                 turn_id: fact.turn_id.clone(),
                 ordinal: existing.ordinal,
                 kind: fact.kind.clone(),
+                run_id: existing.run_id.clone(),
                 observed_at_ms: fact.observed_at_ms,
                 derived: fact.derived,
             };

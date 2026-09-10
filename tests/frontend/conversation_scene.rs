@@ -1801,7 +1801,7 @@ fn unattributed_assistant_renders_top_level_in_session_turn() {
             provenanced(
                 assistant_item("m1", "turn_a", 2, "first", AssistantPhase::Final),
                 "run_a",
-                ConversationLifecycle::Completed,
+                ConversationLifecycle::Active,
             ),
             assistant_item("m2", "turn_a", 3, "second", AssistantPhase::Final),
         ],
@@ -1822,4 +1822,119 @@ fn unattributed_assistant_renders_top_level_in_session_turn() {
         scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
         Some("m2".to_owned())
     );
+}
+
+#[test]
+fn explicit_final_beats_newer_unspecified_while_work_is_newest() {
+    use conversation_scene::ConversationScene;
+
+    // Reference first loop records the latest explicit final independently:
+    // Final@2 wins even with newer Unspecified@3, and newer Activity@4
+    // keeps progress at Work so nothing overrides it.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("fin", "turn_a", 2, "final", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            provenanced(
+                assistant_item("unsp", "turn_a", 3, "later", AssistantPhase::Unspecified),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            provenanced(
+                activity_item("tool", "turn_a", 4, "ran"),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("builds");
+    assert_eq!(
+        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        Some("fin".to_owned())
+    );
+    let bodies: Vec<&str> = scene.turn_scenes()[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bodies, vec!["final"]);
+}
+
+#[test]
+fn cancelled_turn_with_later_work_promotes_nothing() {
+    use conversation_scene::ConversationScene;
+
+    // Failed/Cancelled turns are not completed work sessions: without an
+    // independent session lifecycle the limitation is stated, so
+    // settled-last never fires here even with later work present.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Cancelled)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("draft", "turn_a", 2, "draft", AssistantPhase::Unspecified),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            provenanced(
+                activity_item("tool", "turn_a", 4, "ran"),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Cancelled)],
+        Vec::new(),
+    )
+    .expect("builds");
+    assert_eq!(scene.promoted_reply_id(&turn_id("turn_a")), None);
+    assert!(!scene.turn_scenes()[0].blocks.iter().any(|block| matches!(
+        block,
+        TurnBlock::AssistantMessage(_)
+    )));
+}
+
+#[test]
+fn failed_turn_keeps_explicit_final_reply() {
+    use conversation_scene::ConversationScene;
+
+    // The independent latest-final branch does not depend on turn outcome:
+    // an explicit Final still promotes (the footer rule separately requires
+    // a completed turn, so no settlement is implied).
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Failed)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("fin", "turn_a", 2, "final", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Failed)],
+        Vec::new(),
+    )
+    .expect("builds");
+    assert_eq!(
+        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        Some("fin".to_owned())
+    );
+    let bodies: Vec<&str> = scene.turn_scenes()[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bodies, vec!["final"]);
 }

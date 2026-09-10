@@ -99,9 +99,10 @@ Exactly one `final_message_by_turn` per turn over non-empty assistants:
 2. If conversation progress phase is `reply` (newest reply ordinal beats
    newest work ordinal over durable items + facts), the latest reply is
    promoted even when `Unspecified` (phaseless providers).
-3. Settled-last-item promotion: turn lifecycle `Completed`, or turn terminal
-   with the message completed and last in turn order (native stand-in for
-   session settlement; session lifecycle does not exist durably).
+3. Settled-last-item promotion: turn lifecycle exactly `Completed`
+   selects the latest completed non-commentary non-empty message.
+   Failed/Cancelled turns never promote here — without an independent
+   session lifecycle that limitation is stated, not equated away.
 
 Progress and work ordinals use durable item ordinals + fact ordinals;
 commentary never counts as reply OR work for progress (it is prose-like
@@ -197,9 +198,15 @@ single promoted reply (same rule, single source); contract unchanged.
   nothing on it yet and must adopt it (with `items`) as the detail source.
 - `TurnStatusBlock { …, pub reasoning_summary: Option<String>, pub engine_label: Option<String> }`.
 - `ConversationScene::promoted_reply_id(&self, turn_id: &TurnId) -> Option<SceneId>` —
-  the single promoted reply per turn (footer/copy source); `None` when the
-  turn has no promotion (legacy or dissolved turns use the existing
-  aggregate footer rule).
+  exactly one reply id per turn at most, selected in reference loop order:
+  latest explicit final recorded independently of the latest reply (so
+  Final@2 beats newer Unspecified@3 unless progress overrides); newest-phase
+  reply promotes phaseless prose while current; settled-last promotes the
+  latest completed non-commentary message of a `Completed` turn only.
+  Failed/Cancelled turns never settled-last promote — without an independent
+  session lifecycle that limitation is stated, not equated away. Dissolved
+  and legacy turns still promote (footer/copy source); only top-level
+  placement differs.
 
 `conversation_state_machine.rs`:
 

@@ -1326,27 +1326,34 @@ impl ConversationScene {
             let session_mode = session_run.is_some();
 
             // Final promotion (reference store.ts:626-702): the latest
-            // non-commentary non-empty reply; explicit final wins;
-            // newest-phase reply promotes phaseless prose while current;
-            // settled-last promotes the completed last reply of a settled
-            // turn. Exactly one reply id per turn at most.
-            let mut latest_reply: Option<(u64, SceneId, AssistantPhase)> = None;
+            // non-commentary non-empty reply plus, independently, the latest
+            // explicit final; explicit final wins unless newest-phase reply
+            // promotes phaseless prose while current; settled-last promotes
+            // the completed last reply of a completed turn. Exactly one reply
+            // id per turn at most.
+            let mut latest_reply: Option<(u64, SceneId)> = None;
+            let mut latest_final: Option<(u64, SceneId)> = None;
             for item in &turn_items {
                 if let SceneItemKind::AssistantMessage { body, phase } = &item.kind {
-                    if *phase != AssistantPhase::Commentary
-                        && !body.is_empty()
-                        && latest_reply
-                            .as_ref()
-                            .is_none_or(|(ordinal, _, _)| item.ordinal > *ordinal)
+                    if *phase == AssistantPhase::Commentary || body.is_empty() {
+                        continue;
+                    }
+                    if latest_reply
+                        .as_ref()
+                        .is_none_or(|(ordinal, _)| item.ordinal > *ordinal)
                     {
-                        latest_reply = Some((item.ordinal, item.id.clone(), *phase));
+                        latest_reply = Some((item.ordinal, item.id.clone()));
+                    }
+                    if *phase == AssistantPhase::Final
+                        && latest_final
+                            .as_ref()
+                            .is_none_or(|(ordinal, _)| item.ordinal > *ordinal)
+                    {
+                        latest_final = Some((item.ordinal, item.id.clone()));
                     }
                 }
             }
-            let mut promoted_id: Option<SceneId> = None;
-            if let Some((_, id, AssistantPhase::Final)) = &latest_reply {
-                promoted_id = Some(id.clone());
-            }
+            let mut promoted_id: Option<SceneId> = latest_final.map(|(_, id)| id);
             let mut newest_reply_ord: Option<u64> = None;
             let mut newest_work_ord: Option<u64> = None;
             for item in &turn_items {
@@ -1384,41 +1391,39 @@ impl ConversationScene {
                 }
             };
             if progress == ProgressPhase::Reply {
-                promoted_id = latest_reply.map(|(_, id, _)| id);
+                promoted_id = latest_reply.map(|(_, id)| id);
             }
             if session_mode {
-                // Settled-last needs the session the reference requires; the
-                // message itself must be completed, like every promotion that
-                // outlives the live reply.
-                let last_ordinal = turn_items.iter().map(|item| item.ordinal).max();
-                let mut candidate: Option<(u64, SceneId)> = None;
-                for item in &turn_items {
-                    if let SceneItemKind::AssistantMessage { body, phase } = &item.kind {
-                        let completed = item
-                            .provenance
-                            .as_ref()
-                            .and_then(|provenance| provenance.lifecycle)
-                            == Some(ConversationLifecycle::Completed);
-                        if *phase == AssistantPhase::Commentary
-                            || body.is_empty()
-                            || !completed
-                        {
-                            continue;
-                        }
-                        let last_in_turn =
-                            Some(item.ordinal) == last_ordinal;
-                        if (turn.lifecycle == ConversationLifecycle::Completed
-                            || (turn.lifecycle.is_terminal() && last_in_turn))
-                            && candidate
+                // Settled-last promotes the completed last reply of a
+                // completed turn only. Failed/Cancelled turns are not
+                // completed work sessions; without an independent session
+                // lifecycle the limitation is stated, not equated away.
+                if turn.lifecycle == ConversationLifecycle::Completed {
+                    let mut candidate: Option<(u64, SceneId)> = None;
+                    for item in &turn_items {
+                        if let SceneItemKind::AssistantMessage { body, phase } = &item.kind {
+                            let completed = item
+                                .provenance
+                                .as_ref()
+                                .and_then(|provenance| provenance.lifecycle)
+                                == Some(ConversationLifecycle::Completed);
+                            if *phase == AssistantPhase::Commentary
+                                || body.is_empty()
+                                || !completed
+                            {
+                                continue;
+                            }
+                            if candidate
                                 .as_ref()
                                 .is_none_or(|(ordinal, _)| item.ordinal > *ordinal)
-                        {
-                            candidate = Some((item.ordinal, item.id.clone()));
+                            {
+                                candidate = Some((item.ordinal, item.id.clone()));
+                            }
                         }
                     }
-                }
-                if let Some((_, id)) = candidate {
-                    promoted_id = Some(id);
+                    if let Some((_, id)) = candidate {
+                        promoted_id = Some(id);
+                    }
                 }
             }
             if let Some(id) = &promoted_id {
