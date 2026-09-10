@@ -26,8 +26,8 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, FontStyle, FontWeight, HighlightStyle, IntoElement, SharedString,
-    StrikethroughStyle, Styled, div, px,
+    AnyElement, FontStyle, FontWeight, HighlightStyle, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StrikethroughStyle, div, px,
 };
 
 use crate::selectable_text::{SelectableText, TextRunOverride};
@@ -279,7 +279,7 @@ pub fn render_inline_fragments(
     let selector = selector.into();
     let element_id = selector.clone();
     div()
-        .debug_selector(move || selector.clone())
+        .debug_selector(move || selector.to_string())
         .child(
             SelectableText::retained(element_id, flat, theme, highlights)
                 .with_text_run_overrides(overrides),
