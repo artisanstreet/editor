@@ -25,6 +25,7 @@ pub mod lip_card;
 pub mod list_row;
 pub mod markdown;
 pub mod markdown_renderer;
+pub mod selectable_text;
 pub mod motion;
 pub mod native_select;
 pub mod popover;

@@ -58,3 +58,7 @@ path = "../../tests/ui/button.rs"
 [[test]]
 name = "markdown_seam"
 path = "../../tests/ui/markdown_seam.rs"
+
+[[test]]
+name = "selectable_text"
+path = "../../tests/ui/selectable_text.rs"
