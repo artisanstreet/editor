@@ -25,6 +25,9 @@ describe("bundled workspace modules", () => {
 			for (const file of Object.values(module.entries)) {
 				expect(existsSync(resolve(repository_root, module.directory, file))).toBe(true);
 			}
+			for (const file of Object.values(module.internal_entries ?? {})) {
+				expect(existsSync(resolve(repository_root, module.directory, file))).toBe(true);
+			}
 		}
 	});
 
@@ -49,7 +52,7 @@ describe("bundled workspace modules", () => {
 	});
 
 	/**
-	 * The two dashboards are loaded by the plain Node scripts in `.scripts`,
+	 * The dashboard packages are loaded by the plain Node scripts in `.scripts`,
 	 * including the one that produces the bundles. Pointing them at `.dist`
 	 * would make the build depend on its own output.
 	 */
@@ -59,6 +62,7 @@ describe("bundled workspace modules", () => {
 		expect(tooling.map((module) => module.name)).toEqual([
 			"@artisan/dev-tui",
 			"@artisanstreet/checklist",
+			"@artisanstreet/runner",
 		]);
 
 		for (const module of tooling) {
