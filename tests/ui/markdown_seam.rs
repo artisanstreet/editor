@@ -984,6 +984,41 @@ fn prose_reference_weights_request_exact_static_faces() {
 }
 
 #[test]
+fn fence_card_lg_shadow_matches_reference_stack() {
+    // `card-lg` (`utilities.css:48–54`) is four ordinary outer layers; the
+    // fence paints them through the shared recipe with no new machinery.
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        let shadow = ArtisanTheme::for_mode(mode).elevation.card_lg_shadow;
+        assert_eq!(shadow.len(), 4);
+        let geometry: Vec<(gpui::Pixels, gpui::Pixels, gpui::Pixels, gpui::Pixels)> = shadow
+            .iter()
+            .map(|layer| {
+                (
+                    layer.offset_x,
+                    layer.offset_y,
+                    layer.blur_radius,
+                    layer.spread_radius,
+                )
+            })
+            .collect();
+        assert_eq!(
+            geometry,
+            vec![
+                (px(0.0), px(-0.5), px(0.0), px(0.0)),
+                (px(0.0), px(10.0), px(24.0), px(-12.0)),
+                (px(0.0), px(4.0), px(12.0), px(-8.0)),
+                (px(0.0), px(0.0), px(0.0), px(0.5)),
+            ],
+            "card-lg geometry must stay verbatim"
+        );
+        assert_eq!(shadow[0].color.a, 0.12);
+        assert_eq!(shadow[1].color.a, 0.32);
+        assert_eq!(shadow[2].color.a, 0.2);
+        assert_eq!(shadow[3].color.a, 0.12);
+    }
+}
+
+#[test]
 fn mailto_links_open_like_http() {
     let presentation = presented("Write [us](mailto:crew@example.invalid) today.\n");
     assert_merged(&presentation);

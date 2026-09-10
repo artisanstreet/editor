@@ -805,6 +805,9 @@ pub struct InsetShadowLayer {
 ///
 /// - `card` utility stack verbatim (`utilities.css:31–37`), with the
 ///   highlight-relative layer resolved against this mode's `--highlight`.
+/// - `card-lg` utility stack verbatim (`utilities.css:48–54`), same
+///   highlight treatment: the code-snippet face.
+///
 /// - menu/popover elevation: Tailwind `shadow-2xl` on dropdown/context/select
 ///   contents (`0 25px 50px -12px rgb(0 0 0 / 0.25)`, pinned
 ///   `tailwindcss/theme.css`; INVENTORY §2 rows 10/21).
@@ -813,6 +816,8 @@ pub struct InsetShadowLayer {
 pub struct ElevationTokens {
     /// The four outer `@utility card` layers.
     pub card_shadow: [ShadowLayer; 4],
+    /// The four outer `@utility card-lg` layers.
+    pub card_lg_shadow: [ShadowLayer; 4],
     /// The single floating-menu layer (`shadow-2xl`).
     pub menu_shadow: [ShadowLayer; 1],
     /// `--shadow-inset`, recorded only.
@@ -1181,6 +1186,13 @@ impl ArtisanTheme {
             layer(oklch_srgb(highlight.with_alpha(0.08)), 0.0, 0.0, 0.0, 0.5),
             layer(black, 0.0, 1.0, 6.0, -4.0),
         ];
+        // `@utility card-lg`, utilities.css:48–54: the code-snippet face.
+        let card_lg_shadow = [
+            layer(with_alpha(white, 0.12), 0.0, -0.5, 0.0, 0.0),
+            layer(with_alpha(black, 0.32), 0.0, 10.0, 24.0, -12.0),
+            layer(with_alpha(black, 0.2), 0.0, 4.0, 12.0, -8.0),
+            layer(oklch_srgb(highlight.with_alpha(0.12)), 0.0, 0.0, 0.0, 0.5),
+        ];
         // Tailwind `--shadow-2xl` on dropdown/context/select content.
         let menu_shadow = [layer(with_alpha(black, 0.25), 0.0, 25.0, 50.0, -12.0)];
         // `--shadow-inset`, theme.css:207–211.
@@ -1201,6 +1213,7 @@ impl ArtisanTheme {
         ];
         ElevationTokens {
             card_shadow,
+            card_lg_shadow,
             menu_shadow,
             inset: inset_stack,
             inset_artwork: artwork_stack,

@@ -153,8 +153,9 @@ blocks. The renderer then painted heading + prose + fence with no list.
 - Body, headings, and strong carry their reference colors (muted body,
   foreground headings/strong) instead of inheriting the bright parent;
   fences read the foreground pre-code token under the reference vertical
-  gradient face, with the `card-lg` shadow stack deliberately unpainted
-  (no native helper exists).
+  gradient face and the shared `card-lg` shadow recipe (four verbatim
+  outer layers, no new machinery), with copy/filename chrome having no
+  renderer action counterpart.
 
 ## Streaming / balanced-events contract
 

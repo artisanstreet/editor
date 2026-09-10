@@ -452,12 +452,18 @@ fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) ->
     // 410/−0.64. The face is the reference vertical gradient
     // (`bg-linear-to-t from-surface-50 to-surface-125`, dark 950→900)
     // through the existing gradient helper; copy and filename chrome have
-    // no renderer action counterpart. The `card-lg` shadow stack has no
-    // native helper and stays unpainted rather than reinvented.
+    // no renderer action counterpart. The `card-lg` shadow stack paints
+    // through the shared recipe (no new machinery).
     let (gradient_top, gradient_bottom) = match theme.mode {
         ThemeMode::Light => (SurfaceStep::S125.oklch(), SurfaceStep::S50.oklch()),
         ThemeMode::Dark => (SurfaceStep::S900.oklch(), SurfaceStep::S950.oklch()),
     };
+    let card_lg = theme
+        .elevation
+        .card_lg_shadow
+        .into_iter()
+        .map(|layer| layer.to_box_shadow())
+        .collect::<Vec<_>>();
     let mut code = body_container(theme)
         .font_family(theme.typography.mono.family)
         .text_size(px(ProseTypography::CODE_SIZE_PX))
@@ -470,6 +476,7 @@ fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) ->
             gradient_bottom,
         ))
         .rounded(RadiusTokens::value(RadiusStep::X3l))
+        .shadow(card_lg)
         .p(px(ProseTypography::CODE_PAD_PX))
         .child(SelectableText::retained(id, source, theme, highlights));
     code = code.debug_selector(move || selector);
