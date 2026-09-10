@@ -30,7 +30,8 @@ use conversation_steering_machine::{
 };
 use conversation_turn_machine::{TurnError, TurnEvent};
 use conversation_view_machine::{
-    DisclosureEvent, ViewportEffect, ViewportEvent, ViewportGeneration, ViewportState,
+    DisclosureEvent, DisclosureState, ViewportEffect, ViewportEvent, ViewportGeneration,
+    ViewportState,
 };
 
 const THREAD: &str = "thread_controller";
@@ -246,15 +247,27 @@ fn authoritative_snapshot_projects_deterministic_durable_scene() {
         &turn_scene.blocks[0],
         TurnBlock::UserMessage(message) if message.id.as_str() == USER_A && message.body == "hello"
     ));
+    // Production provenance derives a session: the empty-details group sits
+    // at the anchor before the reply.
     assert!(matches!(
         &turn_scene.blocks[1],
+        TurnBlock::WorkGroup(group) if group.session.as_ref().map(SceneId::as_str) == Some("session-turn_a")
+            && group.session_details.is_empty()
+    ));
+    assert!(matches!(
+        &turn_scene.blocks[2],
         TurnBlock::AssistantMessage(message)
             if message.id.as_str() == ASSISTANT_A
                 && message.body == "hello back"
                 && matches!(message.phase, conversation_scene::AssistantPhase::Final)
+                && message.provenance.as_ref().is_some_and(|provenance| provenance.run_id.as_ref().map(RunId::as_str) == Some("run_controller"))
     ));
-    assert!(matches!(&turn_scene.blocks[2], TurnBlock::TurnStatus(_)));
-    assert!(matches!(&turn_scene.blocks[3], TurnBlock::TurnFooter(_)));
+    assert!(matches!(&turn_scene.blocks[3], TurnBlock::TurnStatus(_)));
+    assert!(matches!(&turn_scene.blocks[4], TurnBlock::TurnFooter(_)));
+    assert_eq!(
+        scene.promoted_reply_id(&turn_id(TURN_A)).map(|id| id.as_str().to_owned()),
+        Some(ASSISTANT_A.to_owned())
+    );
 }
 
 #[test]
@@ -1706,4 +1719,432 @@ fn first_snapshot_streaming_yields_suppressed_status_and_creation_basis() {
     );
     let (settled, _) = scene_status(&controller, TURN_A);
     assert_eq!(settled, SceneTurnNarration::ThoughtFor { millis: 400 });
+}
+
+fn activity_fact_with_run(
+    id: &str,
+    turn: &str,
+    ordinal: u64,
+    body: &str,
+    run: &str,
+) -> SceneFact {
+    SceneFact::new(
+        SceneId::parse(id).expect("valid scene id"),
+        turn_id(turn),
+        ordinal,
+        SceneFactKind::Activity {
+            body: body.to_owned(),
+        },
+    )
+    .expect("valid activity fact")
+    .with_run_id(RunId::parse(run).expect("valid run id"))
+}
+
+fn session_anchor(turn: &str) -> SceneId {
+    SceneId::parse(format!("session-{turn}")).expect("valid session anchor")
+}
+
+fn turn_blocks(controller: &ConversationStateController, turn: &str) -> Vec<String> {
+    let scene = controller.scene().expect("scene builds");
+    scene
+        .turn_scene(&turn_id(turn))
+        .expect("turn present")
+        .blocks
+        .iter()
+        .map(|block| match block {
+            TurnBlock::UserMessage(_) => "user".to_owned(),
+            TurnBlock::AssistantMessage(_) => "reply".to_owned(),
+            TurnBlock::WorkGroup(group) if group.session.is_some() => "session".to_owned(),
+            TurnBlock::WorkGroup(_) => "work".to_owned(),
+            TurnBlock::SteeringLabel(_) => "steer-label".to_owned(),
+            TurnBlock::TurnStatus(_) => "status".to_owned(),
+            TurnBlock::TurnFooter(_) => "footer".to_owned(),
+            _ => "other".to_owned(),
+        })
+        .collect()
+}
+
+#[test]
+fn commentary_phase_preserved_without_collapsing_into_streaming() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            1,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+            vec![
+                make_user(USER_A, TURN_A, 1, "hi"),
+                make_assistant(
+                    ASSISTANT_A,
+                    TURN_A,
+                    2,
+                    "checking sources",
+                    AssistantMessagePhase::Commentary,
+                ),
+            ],
+        )))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+
+    // Commentary arrives as commentary with run/lifecycle attribution intact:
+    // never collapsed into a streaming marker, never text-inferred. It folds
+    // into the session trace, so no top-level assistant row exists for it —
+    // but the status row stays, because commentary is work, not a reply.
+    let scene = controller.scene().expect("scene builds");
+    let turn_scene = scene.turn_scene(&turn_id(TURN_A)).expect("turn present");
+    assert!(turn_scene.blocks.iter().any(|block| matches!(
+        block,
+        TurnBlock::TurnStatus(_)
+    )));
+    assert!(!turn_scene.blocks.iter().any(|block| matches!(
+        block,
+        TurnBlock::AssistantMessage(_)
+    )));
+    let group = turn_scene
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::WorkGroup(group) if group.session.is_some() => Some(group),
+            _ => None,
+        })
+        .expect("session group");
+    assert_eq!(group.session_details.len(), 1);
+    let message = match &group.session_details[0] {
+        conversation_scene::SessionDetail::Assistant {
+            phase, provenance, ..
+        } => (phase, provenance),
+        other => panic!("commentary folds as assistant prose, got {other:?}"),
+    };
+    assert!(matches!(
+        message.0,
+        conversation_scene::AssistantPhase::Commentary
+    ));
+    let provenance = message.1.as_ref().expect("production provenance");
+    assert_eq!(
+        provenance.run_id.as_ref().map(|run| run.as_str()),
+        Some("run_controller")
+    );
+    assert_eq!(
+        provenance.lifecycle,
+        Some(ConversationLifecycle::Streaming)
+    );
+}
+
+#[test]
+fn commentary_tool_final_flow_groups_folds_and_promotes() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            1,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+            vec![
+                make_user(USER_A, TURN_A, 1, "hi"),
+                make_assistant(
+                    "commentary_a",
+                    TURN_A,
+                    2,
+                    "checking",
+                    AssistantMessagePhase::Commentary,
+                ),
+                make_assistant_settled(
+                    ASSISTANT_A,
+                    TURN_A,
+                    4,
+                    "done",
+                    AssistantMessagePhase::Final,
+                    ConversationLifecycle::Completed,
+                    0,
+                    10,
+                ),
+            ],
+        )))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    controller
+        .register_fact(activity_fact_with_run("tool_a", TURN_A, 3, "ran", "run_controller"))
+        .expect("tool fact registers");
+    let _ = controller.drain_effects();
+
+    // One session: commentary + tool in trace order, the Final reply
+    // top-level and promoted, nothing rendered twice.
+    assert_eq!(
+        turn_blocks(&controller, TURN_A),
+        vec!["user", "session", "reply", "status", "footer"]
+    );
+    let scene = controller.scene().expect("scene builds");
+    let group = scene.turn_scenes()[0]
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::WorkGroup(group) if group.session.is_some() => Some(group),
+            _ => None,
+        })
+        .expect("session group");
+    assert_eq!(group.session_details.len(), 2);
+    assert_eq!(
+        scene.promoted_reply_id(&turn_id(TURN_A)).map(|id| id.as_str().to_owned()),
+        Some(ASSISTANT_A.to_owned())
+    );
+}
+
+#[test]
+fn explicit_final_newer_promotes_and_settles() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            1,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Completed)],
+            vec![
+                make_user(USER_A, TURN_A, 1, "hi"),
+                make_assistant_settled(
+                    "older_a",
+                    TURN_A,
+                    2,
+                    "draft",
+                    AssistantMessagePhase::Unspecified,
+                    ConversationLifecycle::Completed,
+                    0,
+                    10,
+                ),
+                make_assistant_settled(
+                    ASSISTANT_A,
+                    TURN_A,
+                    3,
+                    "final answer",
+                    AssistantMessagePhase::Final,
+                    ConversationLifecycle::Completed,
+                    0,
+                    10,
+                ),
+            ],
+        )))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+
+    assert_eq!(
+        turn_footer_settlement(&controller, TURN_A),
+        Some(("final answer".to_owned(), 10))
+    );
+    // Exactly one top-level reply: the older prose folded into the session.
+    let scene = controller.scene().expect("scene builds");
+    let replies: Vec<&str> = scene.turn_scenes()[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies, vec!["final answer"]);
+}
+
+#[test]
+fn steering_boundary_keeps_post_steer_work_top_level() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            1,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+            vec![
+                make_user(USER_A, TURN_A, 1, "go"),
+                make_user(USER_B, TURN_A, 5, "actually, stop"),
+            ],
+        )))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    register_steering(&mut controller, "cmd_steer", 1);
+    controller
+        .on_steering(SteeringEvent::DispatchStarted {
+            command_id: steering_request("cmd_steer"),
+            generation: 1,
+            at_ms: 1,
+        })
+        .expect("dispatch starts");
+    controller
+        .on_steering(SteeringEvent::DispatchAccepted {
+            command_id: steering_request("cmd_steer"),
+            generation: 1,
+            at_ms: 2,
+        })
+        .expect("dispatch accepts");
+    controller
+        .on_steering(SteeringEvent::DurableItemAnchored {
+            command_id: steering_request("cmd_steer"),
+            generation: 1,
+            item_id: item_id(USER_B),
+            at_ms: 3,
+        })
+        .expect("steer anchors");
+    controller
+        .register_fact(activity_fact_with_run("tool_pre", TURN_A, 3, "ran", "run_controller"))
+        .expect("pre-steer tool registers");
+    controller
+        .register_fact(activity_fact_with_run("tool_post", TURN_A, 8, "stopping", "run_controller"))
+        .expect("post-steer tool registers");
+    let _ = controller.drain_effects();
+
+    // Pre-steer work joins the session; post-steer work stays top-level
+    // below the steering label and supersedes the session. The tool chain
+    // carries progress, so no status row renders.
+    assert_eq!(
+        turn_blocks(&controller, TURN_A),
+        vec!["user", "session", "user", "steer-label", "work", "footer"]
+    );
+    let scene = controller.scene().expect("scene builds");
+    let group = scene.turn_scenes()[0]
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::WorkGroup(group) if group.session.is_some() => Some(group),
+            _ => None,
+        })
+        .expect("session group");
+    assert!(group.superseded);
+    assert_eq!(group.session_details.len(), 1);
+}
+
+#[test]
+fn live_to_settled_disclosure_reconcile_respects_user_choice() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            1,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+            vec![
+                make_user(USER_A, TURN_A, 1, "hi"),
+                make_assistant(ASSISTANT_A, TURN_A, 2, "draft", AssistantMessagePhase::Unspecified),
+            ],
+        )))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+
+    // Live session work starts open through the derived anchor.
+    let anchor = session_anchor(TURN_A);
+    let state = controller
+        .view()
+        .disclosure_views
+        .into_iter()
+        .find(|view| view.scene_id == anchor)
+        .expect("session disclosure auto-registered")
+        .state;
+    assert_eq!(state, DisclosureState::AutoOpen);
+
+    // Settlement folds it closed.
+    controller
+        .on_delivery(ConversationDeliveryEvent::BatchReceived(PatchBatch::new(
+            thread_id(),
+            ConversationCursor::new(1),
+            ConversationCursor::new(2),
+            vec![ConversationPatch::TurnLifecycle {
+                patch_id: patch_id("turn_done"),
+                sequence: PatchSequence::new(2).expect("valid patch sequence"),
+                turn_id: turn_id(TURN_A),
+                revision: Revision::new(1),
+                lifecycle: ConversationLifecycle::Completed,
+                updated_at: stamp(20),
+            }],
+        )
+        .expect("valid settle batch")))
+        .expect("settle applies");
+    let _ = controller.drain_effects();
+    let state = controller
+        .view()
+        .disclosure_views
+        .into_iter()
+        .find(|view| view.scene_id == anchor)
+        .expect("session disclosure retained")
+        .state;
+    assert_eq!(state, DisclosureState::AutoClosed);
+
+    // Explicit user choice is authoritative across refreshes: the settled
+    // event routes into a user-held controller and changes nothing.
+    controller
+        .on_disclosure(
+            anchor.clone(),
+            conversation_view_machine::DisclosureEvent::UserOpen,
+        )
+        .expect("user opens");
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(
+            ConversationSnapshot::new(
+                thread_id(),
+                ConversationCursor::new(2),
+                vec![ConversationTurn {
+                    turn_id: turn_id(TURN_A),
+                    ordinal: TurnOrdinal::new(0),
+                    revision: Revision::new(1),
+                    lifecycle: ConversationLifecycle::Completed,
+                    created_at: stamp(0),
+                    updated_at: stamp(20),
+                }],
+                vec![
+                    make_user(USER_A, TURN_A, 1, "hi"),
+                    make_assistant(ASSISTANT_A, TURN_A, 2, "draft", AssistantMessagePhase::Unspecified),
+                ],
+                stamp(20),
+            )
+            .expect("valid refresh snapshot"),
+        ))
+        .expect("refresh succeeds");
+    let _ = controller.drain_effects();
+    let state = controller
+        .view()
+        .disclosure_views
+        .into_iter()
+        .find(|view| view.scene_id == anchor)
+        .expect("session disclosure retained")
+        .state;
+    assert_eq!(state, DisclosureState::UserOpen);
+}
+
+#[test]
+fn duplicate_replay_keeps_single_blocks_and_settlement() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    let frame = snapshot(
+        1,
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Completed)],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hi"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                2,
+                "done",
+                AssistantMessagePhase::Final,
+                ConversationLifecycle::Completed,
+                0,
+                10,
+            ),
+        ],
+    );
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(frame.clone()))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    controller
+        .register_fact(activity_fact_with_run("tool_a", TURN_A, 3, "ran", "run_controller"))
+        .expect("tool fact registers");
+    let _ = controller.drain_effects();
+    let before = controller.scene().expect("scene builds");
+    let settlement_before = turn_footer_settlement(&controller, TURN_A);
+
+    // Identical reinstall plus identical fact upsert: replay idempotence,
+    // one block per identity, settlement untouched.
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(frame))
+        .expect("replay succeeds");
+    let _ = controller.drain_effects();
+    controller
+        .upsert_fact(activity_fact_with_run("tool_a", TURN_A, 3, "ran", "run_controller"))
+        .expect("identical upsert is a no-op");
+    let _ = controller.drain_effects();
+    let after = controller.scene().expect("scene builds");
+    assert_eq!(after, before);
+    assert_eq!(turn_footer_settlement(&controller, TURN_A), settlement_before);
+    assert_eq!(user_block_count(&controller, USER_A), 1);
 }

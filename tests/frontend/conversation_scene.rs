@@ -2,15 +2,17 @@
 //!
 //! Structural enum assertions only: no string snapshots of debug output.
 
-use artisan_domain::{ConversationLifecycle, ItemId, MESSAGE_BODY_MAX_BYTES, MessageBody, TurnId};
+use artisan_domain::{
+    ConversationLifecycle, ItemId, MESSAGE_BODY_MAX_BYTES, MessageBody, RunId, TurnId,
+};
 use artisan_frontend::conversation_scene;
 use artisan_frontend::conversation_scene::{
-    AssistantPhase, FileChangeStatus, SCENE_MAX_CHANGED_FILES_PER_CARD,
+    AssistantPhase, FileChangeStatus, ItemProvenance, ProgressPhase, SCENE_MAX_CHANGED_FILES_PER_CARD,
     SCENE_MAX_DISPLAY_PATH_BYTES, SCENE_MAX_ITEMS, SCENE_MAX_MESSAGE_BODY_BYTES,
     SCENE_MAX_NARRATIONS, SCENE_MAX_NATIVE_FACT_BYTES, SCENE_MAX_PLAN_ENTRIES,
     SCENE_MAX_STEERING_PLACEMENTS, SCENE_MAX_TURNS, SCENE_MAX_WORK_GROUP_ITEMS, SceneBuildError,
     SceneDisclosure, SceneFileChange, SceneId, SceneItem, SceneItemKind, SceneTurn,
-    SteeringPlacement, TurnBlock, TurnNarration, TurnNarrationEntry, WorkGroupBlock,
+    SessionDetail, SteeringPlacement, TurnBlock, TurnNarration, TurnNarrationEntry, WorkGroupBlock,
     WorkGroupLabel, WorkItem,
 };
 
@@ -61,6 +63,26 @@ fn assistant_item(
         None,
     )
     .expect("assistant item valid")
+}
+
+fn run_id(value: &str) -> RunId {
+    RunId::parse(value).expect("run id valid")
+}
+
+fn provenance(run: &str, lifecycle: ConversationLifecycle) -> ItemProvenance {
+    ItemProvenance {
+        run_id: Some(run_id(run)),
+        lifecycle: Some(lifecycle),
+    }
+}
+
+/// Attaches run/lifecycle provenance to one scene item.
+fn provenanced(
+    item: SceneItem,
+    run: &str,
+    lifecycle: ConversationLifecycle,
+) -> SceneItem {
+    item.with_provenance(provenance(run, lifecycle))
 }
 
 fn reasoning_item(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneItem {
@@ -426,14 +448,25 @@ fn streaming_reply_suppresses_quiet_status_row_only() {
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Streaming)];
     let items = vec![
-        reasoning_item("r1", "turn_a", 1, "reasoning"),
-        assistant_item("assist", "turn_a", 2, "partial", AssistantPhase::Streaming),
+        provenanced(
+            reasoning_item("r1", "turn_a", 1, "reasoning"),
+            "run_a",
+            ConversationLifecycle::Active,
+        ),
+        provenanced(
+            assistant_item("assist", "turn_a", 2, "partial", AssistantPhase::Unspecified),
+            "run_a",
+            ConversationLifecycle::Streaming,
+        ),
     ];
     let narrations = vec![narration("turn_a", TurnNarration::StreamingSuppression)];
     let scene = ConversationScene::build(turns, items, narrations, Vec::new()).expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
-    // Still has work group and assistant message, but no status row
-    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::WorkGroup(_))));
+    // Session group present with the reply top-level, but no status row.
+    assert!(blocks.iter().any(|b| matches!(
+        b,
+        TurnBlock::WorkGroup(group) if group.session.is_some()
+    )));
     assert!(
         blocks
             .iter()
@@ -450,14 +483,21 @@ fn streaming_reply_does_not_remove_message_or_work_group_when_not_suppressing() 
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Streaming)];
     let items = vec![
-        reasoning_item("r1", "turn_a", 1, "r"),
-        assistant_item("assist", "turn_a", 2, "partial", AssistantPhase::Streaming),
+        activity_item("a1", "turn_a", 1, "tool"),
+        provenanced(
+            assistant_item("assist", "turn_a", 2, "partial", AssistantPhase::Unspecified),
+            "run_a",
+            ConversationLifecycle::Streaming,
+        ),
     ];
     // narration is Quiet, not suppression – status should remain
     let narrations = vec![narration("turn_a", TurnNarration::Quiet)];
     let scene = ConversationScene::build(turns, items, narrations, Vec::new()).expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
-    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::WorkGroup(_))));
+    assert!(blocks.iter().any(|b| matches!(
+        b,
+        TurnBlock::WorkGroup(group) if group.session.is_some()
+    )));
     assert!(
         blocks
             .iter()
@@ -1204,7 +1244,7 @@ fn active_clock_basis_flows_to_status_only_for_active_work() {
             "turn_a",
             1,
             "draft",
-            AssistantPhase::Streaming,
+            AssistantPhase::Unspecified,
         )],
         vec![
             TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::Thinking)
@@ -1257,8 +1297,8 @@ fn adjacent_assistant_segments_keep_exact_bytes_and_block_boundaries() {
     let scene = ConversationScene::build(
         vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
         vec![
-            assistant_item("seg_a", "turn_a", 1, "naturally", AssistantPhase::Streaming),
-            assistant_item("seg_b", "turn_a", 2, "I'm", AssistantPhase::Streaming),
+            assistant_item("seg_a", "turn_a", 1, "naturally", AssistantPhase::Unspecified),
+            assistant_item("seg_b", "turn_a", 2, "I'm", AssistantPhase::Unspecified),
         ],
         Vec::new(),
         Vec::new(),
@@ -1273,4 +1313,513 @@ fn adjacent_assistant_segments_keep_exact_bytes_and_block_boundaries() {
         })
         .collect();
     assert_eq!(bodies, vec!["naturally", "I'm"]);
+}
+
+// ---- 12. session-anchored details (R1/H): late work joins the session ----
+
+fn session_group<'a>(
+    blocks: &'a [TurnBlock],
+) -> &'a conversation_scene::WorkGroupBlock {
+    blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::WorkGroup(group) if group.session.is_some() => Some(group),
+            _ => None,
+        })
+        .expect("one session group")
+}
+
+#[test]
+fn session_groups_late_reasoning_before_final_reply() {
+    use conversation_scene::{ConversationScene, WorkGroupBlock};
+
+    // Screenshot shape: the reply settled first, reasoning landed later at a
+    // higher ordinal. The late work joins the session trace in place; the
+    // transcript shows user → session → final reply → footer, with no work
+    // block after the reply and no visible reasoning row anywhere.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)],
+        vec![
+            user_item("user_a", "turn_a", 1, "Whoopty"),
+            provenanced(
+                assistant_item("reply", "turn_a", 2, "Whoopty! What's up?", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            provenanced(
+                reasoning_item("late", "turn_a", 3, "Planning playful ambiguous response"),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::ThoughtFor { millis: 6_000 })],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    let kinds: Vec<&str> = blocks
+        .iter()
+        .map(|block| match block {
+            TurnBlock::UserMessage(_) => "user",
+            TurnBlock::WorkGroup(_) => "session",
+            TurnBlock::AssistantMessage(_) => "reply",
+            TurnBlock::TurnStatus(_) => "status",
+            TurnBlock::TurnFooter(_) => "footer",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, vec!["user", "session", "reply", "status", "footer"]);
+    let group = session_group(blocks);
+    assert_eq!(
+        group.session.as_ref().map(SceneId::as_str),
+        Some("session-turn_a")
+    );
+    assert!(group.items.is_empty());
+    assert!(group.session_details.is_empty());
+    // Settled rows never carry the live summary, and reasoning never becomes
+    // a visible work item even though it arrived late.
+    assert_eq!(group.reasoning_summary, None);
+    assert!(!group.superseded);
+    assert!(matches!(
+        group.label,
+        Some(WorkGroupLabel::ThoughtFor { millis: 6_000 })
+    ));
+}
+
+#[test]
+fn live_session_exposes_one_reasoning_summary_line() {
+    use conversation_scene::ConversationScene;
+
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                reasoning_item("r1", "turn_a", 2, "first thought"),
+                "run_a",
+                ConversationLifecycle::Active,
+            ),
+            provenanced(
+                reasoning_item("r2", "turn_a", 3, "second thought"),
+                "run_a",
+                ConversationLifecycle::Active,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Thinking)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let group = session_group(&scene.turn_scenes()[0].blocks);
+    // Newest non-empty reasoning body only; no visible reasoning rows.
+    assert_eq!(group.reasoning_summary.as_deref(), Some("second thought"));
+    assert!(group.items.is_empty());
+    assert!(!group.superseded);
+}
+
+#[test]
+fn commentary_folds_into_session_details_without_suppressing() {
+    use conversation_scene::ConversationScene;
+
+    // Streaming commentary is intermediate work, not a reply: the status row
+    // stays while the commentary folds into the session trace.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("note", "turn_a", 2, "checking", AssistantPhase::Commentary),
+                "run_a",
+                ConversationLifecycle::Streaming,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::StreamingSuppression)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
+    assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::AssistantMessage(_))));
+    let group = session_group(blocks);
+    assert_eq!(group.session_details.len(), 1);
+    assert!(matches!(
+        &group.session_details[0],
+        conversation_scene::SessionDetail::Assistant { phase: AssistantPhase::Commentary, .. }
+    ));
+}
+
+#[test]
+fn settled_last_promotes_completed_reply_without_final_phase() {
+    use conversation_scene::ConversationScene;
+
+    // Phaseless providers never emit Final: the settled last completed
+    // message still promotes to the single top-level reply.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("m1", "turn_a", 2, "interim", AssistantPhase::Unspecified),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            provenanced(
+                assistant_item("m2", "turn_a", 3, "settled", AssistantPhase::Unspecified),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::ThoughtFor { millis: 7 })],
+        Vec::new(),
+    )
+    .expect("builds");
+    let turn_scene = &scene.turn_scenes()[0];
+    let replies: Vec<&str> = turn_scene
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies, vec!["settled"]);
+    assert_eq!(
+        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        Some("m2".to_owned())
+    );
+    assert!(
+        turn_scene.blocks.iter().any(|block| matches!(
+            block,
+            TurnBlock::TurnFooter(footer) if footer.settlement.is_none()
+        )),
+        "settlement is aggregate-owned, never built"
+    );
+}
+
+#[test]
+fn progress_reply_promotes_phaseless_prose_while_current() {
+    use conversation_scene::ConversationScene;
+
+    // Newest prose wins while it remains the newest phase, even Unspecified.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("m1", "turn_a", 2, "reply", AssistantPhase::Unspecified),
+                "run_a",
+                ConversationLifecycle::Streaming,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::StreamingSuppression)],
+        Vec::new(),
+    )
+    .expect("builds");
+    assert_eq!(
+        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        Some("m1".to_owned())
+    );
+}
+
+#[test]
+fn newer_work_returns_prose_to_session_details() {
+    use conversation_scene::ConversationScene;
+
+    // A tool result landing after the prose makes work the newest phase: the
+    // prose returns to session details and nothing renders top-level twice.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("m1", "turn_a", 2, "reply", AssistantPhase::Unspecified),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            provenanced(
+                activity_item("tool", "turn_a", 3, "ran"),
+                "run_a",
+                ConversationLifecycle::Active,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::AssistantMessage(_))));
+    let group = session_group(blocks);
+    assert_eq!(group.progress, ProgressPhase::Work);
+    assert_eq!(group.session_details.len(), 1);
+    assert!(matches!(
+        &group.session_details[0],
+        conversation_scene::SessionDetail::Assistant { .. }
+    ));
+}
+
+#[test]
+fn multi_run_dissolves_session_grouping_without_losing_prose() {
+    use conversation_scene::ConversationScene;
+
+    // Two runs with content mirror the reference multi-session rule: no
+    // group, every assistant top-level in ordinal order, nothing voided.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("r1", "turn_a", 2, "first", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            provenanced(
+                assistant_item("r2", "turn_a", 3, "second", AssistantPhase::Final),
+                "run_b",
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::WorkedFor { millis: 9 })],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(!blocks.iter().any(|b| matches!(
+        b,
+        TurnBlock::WorkGroup(group) if group.session.is_some()
+    )));
+    let bodies: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bodies, vec!["first", "second"]);
+}
+
+#[test]
+fn post_steer_work_stays_top_level_and_supersedes_session() {
+    use conversation_scene::ConversationScene;
+
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("prompt", "turn_a", 1, "go"),
+            provenanced(
+                activity_item("tool", "turn_a", 2, "ran"),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            user_item("steer", "turn_a", 5, "actually, stop"),
+            provenanced(
+                activity_item("tool2", "turn_a", 8, "stopping"),
+                "run_a",
+                ConversationLifecycle::Active,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        vec![steering("steer_1", "steer", "steering")],
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    let kinds: Vec<&str> = blocks
+        .iter()
+        .map(|block| match block {
+            TurnBlock::UserMessage(_) => "user",
+            TurnBlock::WorkGroup(group) if group.session.is_some() => "session",
+            TurnBlock::WorkGroup(_) => "work",
+            TurnBlock::SteeringLabel(_) => "steer-label",
+            TurnBlock::TurnStatus(_) => "status",
+            TurnBlock::TurnFooter(_) => "footer",
+            _ => "other",
+        })
+        .collect();
+    // No status row: the live tool chain newer than any model prose carries
+    // progress itself (waiting-for-activity suppression).
+    assert_eq!(
+        kinds,
+        vec!["user", "session", "user", "steer-label", "work", "footer"]
+    );
+    let group = session_group(blocks);
+    assert!(group.superseded);
+    assert_eq!(group.session_details.len(), 1);
+}
+
+#[test]
+fn session_anchor_overlong_is_typed_error() {
+    use conversation_scene::ConversationScene;
+
+    // Turn ids admit 128 bytes; the session prefix pushes past the scene
+    // identity ceiling instead of fabricating a colliding anchor.
+    let long = "t".repeat(128);
+    let err = ConversationScene::build(
+        vec![scene_turn(&long, 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_long", &long, 1, "hi"),
+            provenanced(
+                assistant_item("m_long", &long, 2, "reply", AssistantPhase::Unspecified),
+                "run_a",
+                ConversationLifecycle::Active,
+            ),
+        ],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect_err("overlong session anchor is refused");
+    assert!(matches!(
+        err,
+        SceneBuildError::SessionAnchorTooLong { .. }
+    ));
+}
+
+#[test]
+fn legacy_positional_layout_without_provenance_is_unchanged() {
+    use conversation_scene::{ConversationScene, WorkGroupBlock};
+
+    // No provenance anywhere: contiguous work groups, top-level reply, no
+    // session fields — byte-for-byte the pre-session contract.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            reasoning_item("r1", "turn_a", 1, "thinking"),
+            activity_item("a1", "turn_a", 2, "tool"),
+            assistant_item("assist", "turn_a", 3, "final", AssistantPhase::Final),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(matches!(
+        &blocks[0],
+        TurnBlock::WorkGroup(WorkGroupBlock {
+            session: None,
+            ..
+        })
+    ));
+    assert!(matches!(&blocks[1], TurnBlock::AssistantMessage(_)));
+    assert!(blocks.iter().any(|b| matches!(
+        b,
+        TurnBlock::WorkGroup(group) if group.session.is_none()
+            && group.reasoning_summary.is_none()
+            && group.progress == ProgressPhase::None
+    )));
+}
+
+#[test]
+fn waiting_activity_suppresses_status_row() {
+    use conversation_scene::ConversationScene;
+
+    // A live tool chain newer than model prose carries progress itself, so
+    // the row stays absent even while working.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("m1", "turn_a", 2, "reply", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            provenanced(
+                activity_item("tool", "turn_a", 3, "running"),
+                "run_a",
+                ConversationLifecycle::Active,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
+}
+
+#[test]
+fn engine_handoff_folds_into_session_header() {
+    use conversation_scene::ConversationScene;
+
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("m1", "turn_a", 2, "reply", AssistantPhase::Unspecified),
+                "run_a",
+                ConversationLifecycle::Streaming,
+            ),
+            SceneItem::new(
+                scene_id("hop"),
+                turn_id("turn_a"),
+                3,
+                SceneItemKind::ModelTransition {
+                    from_model: "engine-a".to_owned(),
+                    to_model: "engine-b".to_owned(),
+                },
+                None,
+            )
+            .expect("transition item valid"),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::ModelTransition(_))));
+    let group = session_group(blocks);
+    assert!(group.transition.is_some());
+    let status = blocks.iter().find_map(|block| match block {
+        TurnBlock::TurnStatus(status) => Some(status),
+        _ => None,
+    });
+    assert!(status.is_none(), "live reply suppresses the row");
+}
+
+#[test]
+fn promoted_reply_id_absent_without_candidates() {
+    use conversation_scene::ConversationScene;
+
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)],
+        vec![user_item("user_a", "turn_a", 1, "hi")],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("builds");
+    assert_eq!(scene.promoted_reply_id(&turn_id("turn_a")), None);
+}
+
+#[test]
+fn unattributed_assistant_renders_top_level_in_session_turn() {
+    use conversation_scene::ConversationScene;
+
+    // Promotion (phase-based) still selects the latest reply, but the
+    // unattributed message keeps its legacy top-level row.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("m1", "turn_a", 2, "first", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            assistant_item("m2", "turn_a", 3, "second", AssistantPhase::Final),
+        ],
+        vec![narration("turn_a", TurnNarration::WorkedFor { millis: 9 })],
+        Vec::new(),
+    )
+    .expect("builds");
+    let bodies: Vec<&str> = scene.turn_scenes()[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bodies, vec!["second"]);
+    assert_eq!(
+        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        Some("m2".to_owned())
+    );
 }

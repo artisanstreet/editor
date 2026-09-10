@@ -196,6 +196,7 @@ pub fn project_activities(
         candidates.push(Candidate {
             id,
             turn: turn.clone(),
+            run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
             kind: CandidateKind::Reasoning {
@@ -232,6 +233,7 @@ pub fn project_activities(
         candidates.push(Candidate {
             id,
             turn: turn.clone(),
+            run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
             kind: CandidateKind::Activity { body },
@@ -270,6 +272,7 @@ pub fn project_activities(
         candidates.push(Candidate {
             id,
             turn: turn.clone(),
+            run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
             kind,
@@ -300,6 +303,7 @@ pub fn project_activities(
         candidates.push(Candidate {
             id,
             turn: turn.clone(),
+            run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
             kind: CandidateKind::Approval {
@@ -332,6 +336,7 @@ pub fn project_activities(
         candidates.push(Candidate {
             id,
             turn: turn.clone(),
+            run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
             kind: CandidateKind::Question {
@@ -367,6 +372,7 @@ pub fn project_activities(
         candidates.push(Candidate {
             id,
             turn: turn.clone(),
+            run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
             kind,
@@ -397,7 +403,8 @@ pub fn project_activities(
             continue;
         };
         facts.push(
-            fact.with_observed_at_ms(candidate.committed_at_ms)
+            fact.with_run_id(candidate.run.clone())
+                .with_observed_at_ms(candidate.committed_at_ms)
                 .with_derived(),
         );
     }
@@ -474,6 +481,7 @@ enum CandidateKind {
 struct Candidate {
     id: SceneId,
     turn: TurnId,
+    run: RunId,
     committed_at_ms: i64,
     delivery_sequence: u64,
     kind: CandidateKind,

@@ -19,7 +19,7 @@ use std::fmt;
 
 use artisan_domain::{
     AssistantMessagePhase, ConversationItem, ConversationLifecycle, ConversationPatch,
-    ConversationSnapshot, ConversationTurn, ItemId, RequestId, ThreadId, TurnId,
+    ConversationSnapshot, ConversationTurn, ItemId, RequestId, RunId, ThreadId, TurnId,
 };
 use thiserror::Error;
 
@@ -28,9 +28,10 @@ use crate::conversation_delivery_machine::{
     ConversationDeliveryEvent, ConversationDeliveryView, DeliveryPhase,
 };
 use crate::conversation_scene::{
-    AssistantPhase, ConversationScene, SceneBuildError, SceneDisclosure, SceneId, SceneIdError,
-    SceneItem, SceneItemKind, SceneTurn, SteeringPlacement as SceneSteeringPlacement,
-    TurnFooterSettlement, TurnNarration as SceneTurnNarration, TurnNarrationEntry,
+    AssistantPhase, ConversationScene, ItemProvenance, SceneBuildError, SceneDisclosure, SceneId,
+    SceneIdError, SceneItem, SceneItemKind, SceneTurn,
+    SteeringPlacement as SceneSteeringPlacement, TurnFooterSettlement,
+    TurnNarration as SceneTurnNarration, TurnNarrationEntry, session_anchor_id,
 };
 use crate::conversation_steering_machine::{
     ConversationSteeringMachine, SteeringControllerError, SteeringEvent, SteeringLabelKind,
@@ -82,6 +83,11 @@ pub struct SceneFact {
     pub ordinal: u64,
     /// Closed non-durable fact kind.
     pub kind: SceneFactKind,
+    /// Attributed run for run-scoped session derivation, when known.
+    ///
+    /// Filled by the observation projection from row attribution; manually
+    /// registered facts leave it empty and never fabricate one.
+    pub run_id: Option<RunId>,
     /// Narrow typed event timing in signed Unix millis, when known.
     ///
     /// This is the persisted engine commit time for activity projected from
@@ -105,6 +111,7 @@ impl fmt::Debug for SceneFact {
             .field("turn_id", &self.turn_id)
             .field("ordinal", &self.ordinal)
             .field("kind", &self.kind)
+            .field("run_id", &self.run_id)
             .field("observed_at_ms", &self.observed_at_ms)
             .field("derived", &self.derived)
             .finish()
@@ -130,6 +137,7 @@ impl SceneFact {
             turn_id,
             ordinal,
             kind,
+            run_id: None,
             observed_at_ms: None,
             derived: false,
         };
@@ -145,6 +153,19 @@ impl SceneFact {
     pub fn with_observed_at_ms(self, observed_at_ms: i64) -> Self {
         Self {
             observed_at_ms: Some(observed_at_ms),
+            ..self
+        }
+    }
+
+    /// Attaches the attributed run for run-scoped session derivation.
+    ///
+    /// The run comes from retained observation attribution, never parsed
+    /// text. It does not change the fact identity, owning turn, ordinal, or
+    /// kind.
+    #[must_use]
+    pub fn with_run_id(self, run_id: RunId) -> Self {
+        Self {
+            run_id: Some(run_id),
             ..self
         }
     }
@@ -178,13 +199,20 @@ impl SceneFact {
         &self,
         disclosure: Option<SceneDisclosure>,
     ) -> Result<SceneItem, SceneBuildError> {
-        SceneItem::new(
+        let item = SceneItem::new(
             self.id.clone(),
             self.turn_id.clone(),
             self.ordinal,
             self.kind.as_scene_item_kind(),
             disclosure,
-        )
+        )?;
+        if let Some(run_id) = &self.run_id {
+            return Ok(item.with_provenance(ItemProvenance {
+                run_id: Some(run_id.clone()),
+                lifecycle: None,
+            }));
+        }
+        Ok(item)
     }
 }
 
@@ -1397,6 +1425,14 @@ impl ConversationStateController {
                 {
                     entry = entry.with_active_started_at_ms(started_at);
                 }
+                // Session disclosure travels on the turn-scoped entry: the
+                // anchor is a pure function of the turn, so no build input
+                // changes shape for it.
+                if let Ok(anchor) = session_anchor_id(turn_id)
+                    && let Some(disclosure) = self.scene_disclosure(&anchor)
+                {
+                    entry = entry.with_session_disclosure(disclosure);
+                }
                 narrations.push(entry);
             }
         }
@@ -1660,6 +1696,95 @@ impl ConversationStateController {
             snapshot,
             &mut self.effects,
         );
+        self.synchronize_session_disclosures();
+    }
+
+    /// Ensures one disclosure controller per derived session anchor and
+    /// routes lifecycle-following auto events.
+    ///
+    /// Session anchors come from the same run-counting rule as the scene
+    /// build (exactly one content run: assistant runs plus run-attributed
+    /// work facts). Registration seeds open-while-working so settled history
+    /// starts closed even with details or failure; auto events follow the
+    /// turn narration while explicit user choice stays authoritative inside
+    /// the controller. Failure opening-once and reply-phase folding stay
+    /// renderer-driven (they observe user intent); this only keeps the auto
+    /// baseline truthful. Every turn is fail-soft: without registry or
+    /// effect room the turn keeps its prior disclosure state.
+    fn synchronize_session_disclosures(&mut self) {
+        if self.delivery.is_closed() {
+            return;
+        }
+        let Some(snapshot) = self.delivery.snapshot() else {
+            return;
+        };
+        for turn in snapshot.turns() {
+            let mut runs: BTreeSet<String> = BTreeSet::new();
+            for item in snapshot.items() {
+                if item.turn_id() != &turn.turn_id {
+                    continue;
+                }
+                if let ConversationItem::AssistantMessage(message) = item {
+                    runs.insert(message.run_id.as_str().to_owned());
+                }
+            }
+            for fact in self.facts.values() {
+                if fact.turn_id != turn.turn_id {
+                    continue;
+                }
+                let work_kind = matches!(
+                    &fact.kind,
+                    SceneFactKind::Reasoning { .. }
+                        | SceneFactKind::Activity { .. }
+                        | SceneFactKind::Compaction { .. }
+                        | SceneFactKind::NativeFact { .. }
+                );
+                if work_kind {
+                    if let Some(run_id) = &fact.run_id {
+                        runs.insert(run_id.as_str().to_owned());
+                    }
+                }
+            }
+            if runs.len() != 1 {
+                continue;
+            }
+            let Ok(anchor) = session_anchor_id(&turn.turn_id) else {
+                continue;
+            };
+            let (working, event) = {
+                let Some(controller) = self.turns.get(&turn.turn_id) else {
+                    continue;
+                };
+                let working = controller.state().is_active();
+                let event = if working {
+                    Some(DisclosureEvent::WorkBecameActive)
+                } else {
+                    match &controller.view().narration {
+                        TurnNarration::WorkedFor { .. } | TurnNarration::ThoughtFor { .. } => {
+                            Some(DisclosureEvent::WorkSettledSuccessfully)
+                        }
+                        TurnNarration::Failed { .. }
+                        | TurnNarration::Interrupted { .. }
+                        | TurnNarration::Cancelled { .. } => {
+                            Some(DisclosureEvent::WorkFailedOrInterrupted)
+                        }
+                        _ => None,
+                    }
+                };
+                (working, event)
+            };
+            let needs_register = !self.disclosures.contains_key(&anchor);
+            let need_effects = if needs_register { 3 } else { 2 };
+            if self.effects.len().saturating_add(need_effects) > MAX_PENDING_EFFECTS {
+                continue;
+            }
+            if needs_register && self.register_disclosure(anchor.clone(), working).is_err() {
+                continue;
+            }
+            if let Some(event) = event {
+                let _ = self.on_disclosure(anchor, event);
+            }
+        }
     }
 
     fn dispatch_turn(
@@ -1795,6 +1920,7 @@ impl ConversationStateController {
                 snapshot,
                 &mut self.effects,
             );
+            self.synchronize_session_disclosures();
         }
         Ok(())
     }
@@ -2124,13 +2250,19 @@ impl ConversationStateController {
     ) -> Result<SceneItem, ConversationStateError> {
         let id = SceneId::from_item_id(item.item_id());
         let disclosure = self.scene_disclosure(&id);
-        let (turn_id, ordinal, kind) = match item {
+        let (turn_id, ordinal, kind, provenance): (
+            TurnId,
+            u64,
+            SceneItemKind,
+            Option<ItemProvenance>,
+        ) = match item {
             ConversationItem::UserMessage(message) => (
                 message.turn_id.clone(),
                 message.ordinal.get(),
                 SceneItemKind::UserMessage {
                     body: message.body.as_str().to_owned(),
                 },
+                None,
             ),
             ConversationItem::MultimodalUserMessage(message) => (
                 message.turn_id.clone(),
@@ -2139,34 +2271,46 @@ impl ConversationStateController {
                     body: message.text.as_ref().map_or_else(String::new, |text| text.as_str().to_owned()),
                     attachments: message.attachments.clone(),
                 },
+                None,
             ),
-            ConversationItem::AssistantMessage(message) => (
-                message.turn_id.clone(),
-                message.ordinal.get(),
-                SceneItemKind::AssistantMessage {
+            ConversationItem::AssistantMessage(message) => {
+                let kind = SceneItemKind::AssistantMessage {
                     body: message.body.as_str().to_owned(),
                     phase: match message.phase {
                         AssistantMessagePhase::Final => AssistantPhase::Final,
-                        AssistantMessagePhase::Unspecified | AssistantMessagePhase::Commentary => {
-                            AssistantPhase::Streaming
-                        }
+                        AssistantMessagePhase::Unspecified => AssistantPhase::Unspecified,
+                        AssistantMessagePhase::Commentary => AssistantPhase::Commentary,
                     },
-                },
-            ),
+                };
+                let provenance = ItemProvenance {
+                    run_id: Some(message.run_id.clone()),
+                    lifecycle: Some(message.lifecycle),
+                };
+                (
+                    message.turn_id.clone(),
+                    message.ordinal.get(),
+                    kind,
+                    Some(provenance),
+                )
+            }
         };
-        SceneItem::new(id, turn_id, ordinal, kind, disclosure)
-            .map_err(ConversationStateError::Scene)
+        let item = SceneItem::new(id, turn_id, ordinal, kind, disclosure)
+            .map_err(ConversationStateError::Scene)?;
+        Ok(match provenance {
+            Some(provenance) => item.with_provenance(provenance),
+            None => item,
+        })
     }
 
     /// Attaches settled footer facts to eligible completed turns.
     ///
     /// Eligibility mirrors the Electron reference: a footer exists only for a
     /// turn whose lifecycle is exactly [`ConversationLifecycle::Completed`]
-    /// with the latest-by-ordinal non-empty settled reply — a completed
-    /// [`AssistantMessagePhase::Final`] item — in that same turn. The
-    /// settlement time is the turn's authoritative Forge `updated_at`, never a
-    /// local clock. Anything else keeps its footer without a settlement, so
-    /// the renderer shows no footer rather than a fabricated one.
+    /// with the build-promoted reply settled. The reply comes from the
+    /// scene's single promotion source, never a second scan; the settlement
+    /// time is the turn's authoritative Forge `updated_at`, never a local
+    /// clock. Anything else keeps its footer without a settlement, so the
+    /// renderer shows no footer rather than a fabricated one.
     fn annotate_turn_footer_settlements(
         &self,
         scene: &mut ConversationScene,
@@ -2178,28 +2322,22 @@ impl ConversationStateController {
             if turn.lifecycle != ConversationLifecycle::Completed {
                 continue;
             }
-            let mut reply: Option<&artisan_domain::AssistantMessageItem> = None;
-            for item in snapshot.items() {
-                let ConversationItem::AssistantMessage(message) = item else {
-                    continue;
-                };
-                if message.turn_id != turn.turn_id
-                    || message.phase != AssistantMessagePhase::Final
-                    || message.lifecycle != ConversationLifecycle::Completed
-                    || message.body.as_str().is_empty()
-                {
-                    continue;
-                }
-                let newer = reply.is_none_or(|current: &_| {
-                    message.ordinal.get() > current.ordinal.get()
-                });
-                if newer {
-                    reply = Some(message);
-                }
-            }
-            let Some(message) = reply else {
+            let Some(reply_id) = scene.promoted_reply_id(&turn.turn_id) else {
                 continue;
             };
+            let Some(item) = snapshot.items().iter().find(|item| {
+                item.item_id().as_str() == reply_id.as_str()
+            }) else {
+                continue;
+            };
+            let ConversationItem::AssistantMessage(message) = item else {
+                continue;
+            };
+            if message.lifecycle != ConversationLifecycle::Completed
+                || message.body.as_str().is_empty()
+            {
+                continue;
+            }
             let settlement = TurnFooterSettlement::new(
                 message.body.as_str().to_owned(),
                 turn.updated_at.as_millis(),

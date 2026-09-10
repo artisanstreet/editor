@@ -206,6 +206,8 @@ fn upsert_all(controller: &mut ConversationStateController, facts: Vec<SceneFact
 }
 
 fn work_bodies(controller: &ConversationStateController, turn: &str) -> Vec<String> {
+    use artisan_frontend::conversation_scene::SessionDetail;
+
     let scene = controller.scene().expect("scene builds");
     let turn_scene = scene.turn_scene(&turn_id(turn)).expect("turn scene exists");
     let mut bodies = Vec::new();
@@ -222,6 +224,17 @@ fn work_bodies(controller: &ConversationStateController, turn: &str) -> Vec<Stri
                     } => {
                         bodies.push(title.clone());
                     }
+                }
+            }
+            // Session mode carries activity details in the ordered detail
+            // list instead; legacy groups leave it empty. Never both.
+            for detail in &group.session_details {
+                if let artisan_frontend::conversation_scene::SessionDetail::Activity {
+                    body,
+                    ..
+                } = detail
+                {
+                    bodies.push(body.clone());
                 }
             }
         }
@@ -1098,4 +1111,99 @@ fn capacity_blocked_delivery_mutates_neither_ordinals_nor_effects() {
         "blocked delivery leaves ordinals untouched"
     );
     assert_eq!(controller.view().scene_fact_count, 1);
+}
+
+#[test]
+fn projected_facts_carry_their_attributed_run() {
+    let mut state = EngineObservationState::new(thread_id());
+    state.apply(
+        7,
+        &attributed_event(
+            tool_observation("obs-tool-1", 1, "tool-1", ToolAction::Started),
+            RUN_A,
+            TURN_A,
+            2_000,
+            10,
+        ),
+    );
+    state.apply(
+        8,
+        &attributed_event(
+            reasoning_completed("obs-reason-1", 2, "item-1", Some("thinking")),
+            RUN_B,
+            TURN_A,
+            2_100,
+            11,
+        ),
+    );
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
+    let projection = project_activities(&state, &snapshot);
+    assert_eq!(projection.facts.len(), 2);
+    let runs: Vec<Option<String>> = projection
+        .facts
+        .iter()
+        .map(|fact| fact.run_id.as_ref().map(|run| run.as_str().to_owned()))
+        .collect();
+    assert!(
+        runs.contains(&Some(RUN_A.to_owned())) && runs.contains(&Some(RUN_B.to_owned())),
+        "every projected fact carries its attributed run, got {runs:?}"
+    );
+}
+
+#[test]
+fn late_reasoning_joins_the_session_without_a_visible_row() {
+    // Screenshot shape through the real pipeline: a settled reply first,
+    // then reasoning landing later from retained observations. The late
+    // work joins the session trace in place; the transcript shows user →
+    // session → final reply → footer, with no work block after the reply
+    // and no visible reasoning row.
+    let mut state = EngineObservationState::new(thread_id());
+    state.apply(
+        7,
+        &attributed_event(
+            reasoning_completed("obs-reason-late", 2, "item-late", Some("Planning playful ambiguous response")),
+            RUN_A,
+            TURN_A,
+            4_900,
+            12,
+        ),
+    );
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Completed)],
+        vec![
+            make_user("user_a", TURN_A, 1),
+            make_assistant("reply_a", TURN_A, 2, RUN_A),
+        ],
+    );
+    let projection = project_activities(&state, &snapshot);
+    assert_eq!(projection.facts.len(), 1);
+
+    let mut controller = controller_with_snapshot(snapshot);
+    upsert_all(&mut controller, projection.facts);
+    let scene = controller.scene().expect("scene builds");
+    let blocks = scene.turn_scene(&turn_id(TURN_A)).expect("turn present").blocks();
+    let kinds: Vec<&str> = blocks
+        .iter()
+        .map(|block| match block {
+            TurnBlock::UserMessage(_) => "user",
+            TurnBlock::WorkGroup(_) => "session",
+            TurnBlock::AssistantMessage(_) => "reply",
+            TurnBlock::TurnStatus(_) => "status",
+            TurnBlock::TurnFooter(_) => "footer",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, vec!["user", "session", "reply", "status", "footer"]);
+    // Settled reasoning is invisible, period: no member rows and no live
+    // summary on a settled turn.
+    for block in blocks {
+        if let TurnBlock::WorkGroup(group) = block {
+            assert!(group.items.is_empty());
+            assert!(group.session_details.is_empty());
+            assert_eq!(group.reasoning_summary, None);
+        }
+    }
 }

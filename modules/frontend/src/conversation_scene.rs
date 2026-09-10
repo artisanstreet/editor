@@ -39,7 +39,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use artisan_domain::{ConversationLifecycle, ItemId, TurnId};
+use artisan_domain::{ConversationLifecycle, ItemId, RunId, TurnId};
 use thiserror::Error;
 
 /// Maximum turn descriptors per scene (count).
@@ -251,6 +251,10 @@ pub struct TurnNarrationEntry {
     /// here, so it stays stable across rerenders, and [`ConversationScene::build`]
     /// accepts it only alongside an active-work narration.
     pub active_started_at_ms: Option<i64>,
+    /// Explicit disclosure for the turn's session group, when the aggregate
+    /// resolved one. The build copies this onto the session group only;
+    /// legacy positional groups keep item-derived disclosure.
+    pub session_disclosure: Option<SceneDisclosure>,
 }
 
 impl TurnNarrationEntry {
@@ -261,6 +265,7 @@ impl TurnNarrationEntry {
             turn_id,
             narration,
             active_started_at_ms: None,
+            session_disclosure: None,
         }
     }
 
@@ -272,6 +277,18 @@ impl TurnNarrationEntry {
     pub fn with_active_started_at_ms(self, started_at_ms: i64) -> Self {
         Self {
             active_started_at_ms: Some(started_at_ms),
+            ..self
+        }
+    }
+
+    /// Attaches the aggregate-resolved session disclosure for this turn.
+    ///
+    /// Copied onto the session group when the build derives one; ignored
+    /// otherwise. Never fabricated here.
+    #[must_use]
+    pub fn with_session_disclosure(self, disclosure: SceneDisclosure) -> Self {
+        Self {
+            session_disclosure: Some(disclosure),
             ..self
         }
     }
@@ -311,11 +328,17 @@ impl SteeringPlacement {
 // ---------------------------------------------------------------------------
 
 /// Assistant message display phase supplied by the caller, not inferred.
+///
+/// A 1:1 copy of the disclosed domain phase: `Unspecified` and `Commentary`
+/// never collapse into a streaming marker. Whether text is still arriving is
+/// carried separately by item provenance lifecycle, never guessed from text.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AssistantPhase {
-    /// Streaming/incremental text.
-    Streaming,
-    /// Final settled text.
+    /// No phase was disclosed for this text.
+    Unspecified,
+    /// Progress commentary rather than the settled reply.
+    Commentary,
+    /// The settled reply text.
     Final,
 }
 
@@ -397,6 +420,21 @@ pub enum SceneItemKind {
     NativeFact { text: String },
 }
 
+/// Caller-supplied durable attribution for one scene item.
+///
+/// Carries the exact domain lifecycle and run identity the aggregate
+/// observed; nothing here is inferred from text. Absent provenance means the
+/// legacy positional layout (no session derivation), never a default.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemProvenance {
+    /// Owning run for assistant items; `None` for user items and
+    /// unattributed facts.
+    pub run_id: Option<RunId>,
+    /// Renderer-visible lifecycle for assistant items; `None` for
+    /// fact-derived cards, which are never treated as live.
+    pub lifecycle: Option<ConversationLifecycle>,
+}
+
 /// One renderer input record with stable identity, owning turn, and ordinal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SceneItem {
@@ -411,6 +449,9 @@ pub struct SceneItem {
     pub kind: SceneItemKind,
     /// Explicit disclosure for the owning group/card, if any.
     pub disclosure: Option<SceneDisclosure>,
+    /// Durable attribution for session derivation; `None` selects the legacy
+    /// positional layout for unattributed inputs.
+    pub provenance: Option<ItemProvenance>,
 }
 
 impl SceneItem {
@@ -435,7 +476,20 @@ impl SceneItem {
             ordinal,
             kind,
             disclosure,
+            provenance: None,
         })
+    }
+
+    /// Attaches durable attribution for session derivation.
+    ///
+    /// Items without provenance keep the legacy positional layout; provenance
+    /// never defaults and is never inferred.
+    #[must_use]
+    pub fn with_provenance(self, provenance: ItemProvenance) -> Self {
+        Self {
+            provenance: Some(provenance),
+            ..self
+        }
     }
 }
 
@@ -559,6 +613,79 @@ pub struct UserMessageBlock {
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Newest-phase computation over one turn's content, mirroring the
+/// reference progress phase. Commentary counts on neither side.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ProgressPhase {
+    /// No reply and no work yet.
+    None,
+    /// The newest visible progress is model prose.
+    Reply,
+    /// The newest visible progress is work.
+    Work,
+}
+
+/// One session detail row owned by a session group.
+///
+/// Commentary, non-final assistant prose, activities, compaction summaries,
+/// and native facts join the owning session here instead of rendering
+/// top-level, in durable ordinal order (every variant carries its exact
+/// ordinal for merge). The renderer matches nothing on this enum yet; it is
+/// purely additive data. Session mode fills only this list and leaves
+/// `items` empty; legacy positional groups do the reverse — never both.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionDetail {
+    /// Assistant prose that is not the promoted reply (commentary or
+    /// interim/unspecified text).
+    Assistant {
+        /// Scene identity.
+        id: SceneId,
+        /// Complete bounded body.
+        body: String,
+        /// Preserved disclosed phase, never inferred.
+        phase: AssistantPhase,
+        /// Stable ordinal for merge order.
+        ordinal: u64,
+        /// Durable attribution when the caller supplied it.
+        provenance: Option<ItemProvenance>,
+        /// Explicit disclosure.
+        disclosure: Option<SceneDisclosure>,
+    },
+    /// Activity or tool-result summary folded into the session.
+    Activity {
+        /// Scene identity.
+        id: SceneId,
+        /// Bounded body.
+        body: String,
+        /// Stable ordinal for merge order.
+        ordinal: u64,
+        /// Explicit disclosure.
+        disclosure: Option<SceneDisclosure>,
+    },
+    /// Compaction summary folded into the session.
+    Compaction {
+        /// Scene identity.
+        id: SceneId,
+        /// Bounded summary.
+        summary: String,
+        /// Stable ordinal for merge order.
+        ordinal: u64,
+        /// Explicit disclosure.
+        disclosure: Option<SceneDisclosure>,
+    },
+    /// Native fact folded into the session.
+    NativeFact {
+        /// Scene identity.
+        id: SceneId,
+        /// Bounded native fact text.
+        text: String,
+        /// Stable ordinal for merge order.
+        ordinal: u64,
+        /// Explicit disclosure.
+        disclosure: Option<SceneDisclosure>,
+    },
+}
+
 /// Assistant message block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssistantMessageBlock {
@@ -568,6 +695,9 @@ pub struct AssistantMessageBlock {
     pub body: String,
     /// Caller-supplied text phase.
     pub phase: AssistantPhase,
+    /// Durable attribution when the caller supplied it; `None` is
+    /// settled/unknown, never live.
+    pub provenance: Option<ItemProvenance>,
     /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
@@ -581,6 +711,26 @@ pub struct WorkGroupBlock {
     pub label: Option<WorkGroupLabel>,
     /// Disclosure owned by the group.
     pub disclosure: Option<SceneDisclosure>,
+    /// Stable session anchor (`session-{turn_id}`) when this group is a
+    /// session; `None` for legacy positional groups, which never carry the
+    /// fields below.
+    pub session: Option<SceneId>,
+    /// The session's run, when run evidence identified one.
+    pub session_run: Option<RunId>,
+    /// Whether later content in the same turn supersedes this session: a
+    /// superseded session never narrates live status.
+    pub superseded: bool,
+    /// Newest non-empty reasoning body for the one live summary line;
+    /// never present on settled rows.
+    pub reasoning_summary: Option<String>,
+    /// Newest-phase computation for reply-phase disclosure folding.
+    pub progress: ProgressPhase,
+    /// Engine handoff folded into the session header, when the turn carried
+    /// one.
+    pub transition: Option<ModelTransitionBlock>,
+    /// Session-owned detail rows (assistant prose, compaction, native
+    /// facts) in durable ordinal order.
+    pub session_details: Vec<SessionDetail>,
 }
 
 /// Compaction card.
@@ -698,7 +848,7 @@ pub struct SteeringBlock {
 }
 
 /// Turn status row.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnStatusBlock {
     /// Closed narration value.
     pub narration: TurnNarration,
@@ -708,6 +858,12 @@ pub struct TurnStatusBlock {
     /// stable live elapsed value from its own frame clock minus this basis and
     /// stops ticking once the narration settles.
     pub active_started_at_ms: Option<i64>,
+    /// Newest non-empty reasoning body for the one live summary line,
+    /// shown in place of the verb; never present on settled rows.
+    pub reasoning_summary: Option<String>,
+    /// Handoff target label from the turn's model transition, for
+    /// `Waiting for {engine}` wording and header attribution.
+    pub engine_label: Option<String>,
 }
 
 /// Settled response facts for one turn footer.
@@ -809,6 +965,31 @@ pub struct DeferredChangeSet {
 pub struct ConversationScene {
     turn_scenes: Vec<TurnScene>,
     deferred: Vec<DeferredChangeSet>,
+    promoted: HashMap<TurnId, SceneId>,
+}
+
+/// Derives the stable session anchor for one turn.
+///
+/// The anchor is render-only grouping identity, never a persisted row:
+/// `session-{turn_id}`. Turn identities admit no whitespace or control
+/// characters, so only the byte ceiling can fail.
+///
+/// # Errors
+///
+/// Returns [`SceneBuildError::SessionAnchorTooLong`] when the anchor exceeds
+/// [`SCENE_ID_MAX_BYTES`] UTF-8 bytes.
+pub fn session_anchor_id(turn_id: &TurnId) -> Result<SceneId, SceneBuildError> {
+    let text = format!("session-{}", turn_id.as_str());
+    if text.len() > SCENE_ID_MAX_BYTES {
+        return Err(SceneBuildError::SessionAnchorTooLong {
+            length: text.len(),
+            maximum: SCENE_ID_MAX_BYTES,
+        });
+    }
+    SceneId::parse(text).map_err(|_| SceneBuildError::SessionAnchorTooLong {
+        length: turn_id.as_str().len().saturating_add("session-".len()),
+        maximum: SCENE_ID_MAX_BYTES,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -836,6 +1017,18 @@ impl ConversationScene {
         self.turn_scenes
             .iter()
             .find(|scene| &scene.turn_id == turn_id)
+    }
+
+    /// Returns the single promoted reply for `turn_id`, if promotion
+    /// selected one.
+    ///
+    /// Promotion mirrors the reference final-message rules (explicit final,
+    /// newest-phase reply, settled-last); dissolved and legacy turns may
+    /// still promote a footer/copy source while rendering all prose
+    /// top-level.
+    #[must_use]
+    pub fn promoted_reply_id(&self, turn_id: &TurnId) -> Option<SceneId> {
+        self.promoted.get(turn_id).cloned()
     }
 
     /// Attaches settled footer facts to one turn's footer.
@@ -1071,12 +1264,268 @@ impl ConversationScene {
 
         let mut turn_scenes = Vec::with_capacity(sorted_turns.len());
         let mut deferred = Vec::new();
+        let mut promoted: HashMap<TurnId, SceneId> = HashMap::new();
 
         for turn in &sorted_turns {
             let entry = narration_map.get(&turn.turn_id);
             let narration = entry.map_or(TurnNarration::Quiet, |entry| entry.narration);
             let active_started_at_ms = entry.and_then(|entry| entry.active_started_at_ms);
+            let session_disclosure = entry.and_then(|entry| entry.session_disclosure);
             let turn_items = items_by_turn.remove(&turn.turn_id).unwrap_or_default();
+
+            // --- Session derivation pre-pass (R1/H): exact run evidence only.
+            // Steering anchors in this turn, by ordinal: items after an
+            // anchor render top-level and never join session details.
+            let mut steer_anchor_ordinals: Vec<u64> = Vec::new();
+            for item in &turn_items {
+                if !matches!(
+                    &item.kind,
+                    SceneItemKind::UserMessage { .. } | SceneItemKind::MultimodalUserMessage { .. }
+                ) {
+                    continue;
+                }
+                if steerings_by_anchor.contains_key(item.id.as_str()) {
+                    steer_anchor_ordinals.push(item.ordinal);
+                }
+            }
+            let min_steer_ordinal: Option<u64> =
+                steer_anchor_ordinals.into_iter().min();
+            let is_post_steer =
+                |ordinal: u64| min_steer_ordinal.is_some_and(|anchor| ordinal > anchor);
+
+            // Runs with session content: assistant runs plus work-fact runs
+            // carrying run attribution. Runs are never parsed, guessed, or
+            // defaulted; unattributed content selects the legacy layout.
+            let mut content_runs: HashMap<String, RunId> = HashMap::new();
+            for item in &turn_items {
+                let run_id: Option<&RunId> = match &item.kind {
+                    SceneItemKind::AssistantMessage { .. }
+                    | SceneItemKind::ReasoningSummary { .. }
+                    | SceneItemKind::Activity { .. }
+                    | SceneItemKind::Compaction { .. }
+                    | SceneItemKind::NativeFact { .. } => item
+                        .provenance
+                        .as_ref()
+                        .and_then(|provenance| provenance.run_id.as_ref()),
+                    _ => None,
+                };
+                if let Some(run_id) = run_id {
+                    content_runs
+                        .entry(run_id.as_str().to_owned())
+                        .or_insert_with(|| run_id.clone());
+                }
+            }
+            // Exactly one content run mirrors the reference single session;
+            // zero runs keep the legacy positional layout and several runs
+            // dissolve grouping the same flat way (no group, prose top-level).
+            let session_run: Option<RunId> = if content_runs.len() == 1 {
+                content_runs.values().next().cloned()
+            } else {
+                None
+            };
+            let session_mode = session_run.is_some();
+
+            // Final promotion (reference store.ts:626-702): the latest
+            // non-commentary non-empty reply; explicit final wins;
+            // newest-phase reply promotes phaseless prose while current;
+            // settled-last promotes the completed last reply of a settled
+            // turn. Exactly one reply id per turn at most.
+            let mut latest_reply: Option<(u64, SceneId, AssistantPhase)> = None;
+            for item in &turn_items {
+                if let SceneItemKind::AssistantMessage { body, phase } = &item.kind {
+                    if *phase != AssistantPhase::Commentary
+                        && !body.is_empty()
+                        && latest_reply
+                            .as_ref()
+                            .is_none_or(|(ordinal, _, _)| item.ordinal > *ordinal)
+                    {
+                        latest_reply = Some((item.ordinal, item.id.clone(), *phase));
+                    }
+                }
+            }
+            let mut promoted_id: Option<SceneId> = None;
+            if let Some((_, id, AssistantPhase::Final)) = &latest_reply {
+                promoted_id = Some(id.clone());
+            }
+            let mut newest_reply_ord: Option<u64> = None;
+            let mut newest_work_ord: Option<u64> = None;
+            for item in &turn_items {
+                match &item.kind {
+                    SceneItemKind::AssistantMessage { body, phase }
+                        if *phase != AssistantPhase::Commentary && !body.is_empty() =>
+                    {
+                        newest_reply_ord = Some(
+                            newest_reply_ord.map_or(item.ordinal, |ord| ord.max(item.ordinal)),
+                        );
+                    }
+                    SceneItemKind::Activity { .. } => {
+                        newest_work_ord = Some(
+                            newest_work_ord.map_or(item.ordinal, |ord| ord.max(item.ordinal)),
+                        );
+                    }
+                    SceneItemKind::ReasoningSummary { body } if !body.is_empty() => {
+                        newest_work_ord = Some(
+                            newest_work_ord.map_or(item.ordinal, |ord| ord.max(item.ordinal)),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            let progress = match (newest_reply_ord, newest_work_ord) {
+                (None, None) => ProgressPhase::None,
+                (Some(_), None) => ProgressPhase::Reply,
+                (None, Some(_)) => ProgressPhase::Work,
+                (Some(reply), Some(work)) => {
+                    if reply > work {
+                        ProgressPhase::Reply
+                    } else {
+                        ProgressPhase::Work
+                    }
+                }
+            };
+            if progress == ProgressPhase::Reply {
+                promoted_id = latest_reply.map(|(_, id, _)| id);
+            }
+            if session_mode {
+                // Settled-last needs the session the reference requires; the
+                // message itself must be completed, like every promotion that
+                // outlives the live reply.
+                let last_ordinal = turn_items.iter().map(|item| item.ordinal).max();
+                let mut candidate: Option<(u64, SceneId)> = None;
+                for item in &turn_items {
+                    if let SceneItemKind::AssistantMessage { body, phase } = &item.kind {
+                        let completed = item
+                            .provenance
+                            .as_ref()
+                            .and_then(|provenance| provenance.lifecycle)
+                            == Some(ConversationLifecycle::Completed);
+                        if *phase == AssistantPhase::Commentary
+                            || body.is_empty()
+                            || !completed
+                        {
+                            continue;
+                        }
+                        let last_in_turn =
+                            Some(item.ordinal) == last_ordinal;
+                        if (turn.lifecycle == ConversationLifecycle::Completed
+                            || (turn.lifecycle.is_terminal() && last_in_turn))
+                            && candidate
+                                .as_ref()
+                                .is_none_or(|(ordinal, _)| item.ordinal > *ordinal)
+                        {
+                            candidate = Some((item.ordinal, item.id.clone()));
+                        }
+                    }
+                }
+                if let Some((_, id)) = candidate {
+                    promoted_id = Some(id);
+                }
+            }
+            if let Some(id) = &promoted_id {
+                promoted.insert(turn.turn_id.clone(), id.clone());
+            }
+
+            // Detail membership (session mode): work kinds, commentary, and
+            // non-promoted assistants — except post-steer items, which stay
+            // top-level, and WorkSession markers, which the session consumes.
+            // The anchor sits at the earliest session-owned position so late
+            // work joins before the final reply.
+            let mut detail_ids: HashSet<String> = HashSet::new();
+            let mut marker_ids: HashSet<String> = HashSet::new();
+            let mut fold_transition_id: Option<String> = None;
+            let mut anchor_pos: Option<u64> = None;
+            let mut track_anchor = |ordinal: u64| {
+                anchor_pos = Some(anchor_pos.map_or(ordinal, |pos| pos.min(ordinal)));
+            };
+            if session_mode {
+                for item in &turn_items {
+                    if promoted_id.as_ref().is_some_and(|reply| &item.id == reply) {
+                        track_anchor(item.ordinal);
+                    }
+                    if is_post_steer(item.ordinal) {
+                        continue;
+                    }
+                    match &item.kind {
+                        SceneItemKind::ReasoningSummary { .. }
+                        | SceneItemKind::Activity { .. }
+                        | SceneItemKind::Compaction { .. }
+                        | SceneItemKind::NativeFact { .. } => {
+                            detail_ids.insert(item.id.as_str().to_owned());
+                            track_anchor(item.ordinal);
+                        }
+                        SceneItemKind::AssistantMessage { .. } => {
+                            if promoted_id.as_ref().is_none_or(|reply| &item.id != reply) {
+                                detail_ids.insert(item.id.as_str().to_owned());
+                                track_anchor(item.ordinal);
+                            }
+                        }
+                        SceneItemKind::WorkSession { .. } => {
+                            marker_ids.insert(item.id.as_str().to_owned());
+                        }
+                        SceneItemKind::ModelTransition { .. } => {
+                            if fold_transition_id.is_none() {
+                                fold_transition_id = Some(item.id.as_str().to_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Live-reply and tool-progress inputs (session mode only): a
+            // genuine reply (Final/Unspecified, live lifecycle, non-empty)
+            // suppresses the row as its own status, while commentary never
+            // does; a live tool chain newer than model prose suppresses it
+            // the same way. Legacy inputs never suppress.
+            let mut live_reply = false;
+            let mut newest_model_ord: Option<u64> = None;
+            let mut newest_tool_ord: Option<u64> = None;
+            if session_mode {
+                for item in &turn_items {
+                    match &item.kind {
+                        SceneItemKind::AssistantMessage { body, phase } => {
+                            let live = item
+                                .provenance
+                                .as_ref()
+                                .and_then(|provenance| provenance.lifecycle)
+                                .is_some_and(is_live_lifecycle);
+                            if live
+                                && *phase != AssistantPhase::Commentary
+                                && !body.is_empty()
+                            {
+                                live_reply = true;
+                            }
+                            if !body.is_empty() {
+                                newest_model_ord = Some(
+                                    newest_model_ord.map_or(item.ordinal, |ord| {
+                                        ord.max(item.ordinal)
+                                    }),
+                                );
+                            }
+                        }
+                        SceneItemKind::Activity { .. } => {
+                            newest_tool_ord = Some(
+                                newest_tool_ord.map_or(item.ordinal, |ord| {
+                                    ord.max(item.ordinal)
+                                }),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let waiting_for_activity = narration.is_active_work()
+                && newest_tool_ord.is_some_and(|tool| {
+                    newest_model_ord.is_none_or(|model| tool > model)
+                });
+
+            // The anchor is render-only grouping identity, resolved eagerly
+            // so a malformed identity fails the atomic build explicitly.
+            let anchor_id: Option<SceneId> = if session_mode {
+                Some(session_anchor_id(&turn.turn_id)?)
+            } else {
+                None
+            };
 
             let mut blocks = Vec::new();
             let mut work_buffer = Vec::new();
@@ -1084,10 +1533,156 @@ impl ConversationScene {
             let mut change_id = None;
             let mut change_disclosure = None;
             let mut change_files = Vec::new();
-            let mut has_compaction = false;
-            let mut has_streaming_assistant = false;
+            let mut top_level_compaction = false;
+            let mut group_index: Option<usize> = None;
+            let mut pending_transition: Option<ModelTransitionBlock> = None;
+            let mut summary_all: Option<(u64, String)> = None;
+            let mut summary_scoped: Option<(u64, String)> = None;
+            let mut engine_label: Option<String> = None;
+
+            // The session group emits at the anchor position even when later
+            // details are still ahead: later members append into the emitted
+            // group by index, so bodies move exactly once.
+            let emit_session_group = |blocks: &mut Vec<TurnBlock>,
+                                        group_index: &mut Option<usize>,
+                                        pending_transition: &mut Option<ModelTransitionBlock>| {
+                blocks.push(TurnBlock::WorkGroup(WorkGroupBlock {
+                    items: Vec::new(),
+                    label: None,
+                    disclosure: session_disclosure,
+                    session: anchor_id.clone(),
+                    session_run: session_run.clone(),
+                    superseded: false,
+                    reasoning_summary: None,
+                    progress,
+                    transition: pending_transition.take(),
+                    session_details: Vec::new(),
+                }));
+                *group_index = Some(blocks.len() - 1);
+            };
 
             for item in turn_items {
+                // Session-owned content never reaches the positional arms.
+                // The group emits at the anchor position first; later members
+                // append into it by index, so bodies move exactly once.
+                if session_mode
+                    && group_index.is_none()
+                    && anchor_pos.is_some_and(|pos| item.ordinal >= pos)
+                {
+                    emit_session_group(
+                        &mut blocks,
+                        &mut group_index,
+                        &mut pending_transition,
+                    );
+                }
+                if session_mode && detail_ids.contains(item.id.as_str()) {
+                    let group_index =
+                        group_index.expect("session group precedes its details");
+                    let TurnBlock::WorkGroup(group) = &mut blocks[group_index] else {
+                        unreachable!("session index always addresses its group");
+                    };
+                    match item.kind {
+                        SceneItemKind::Activity { body } => {
+                            group.session_details.push(SessionDetail::Activity {
+                                id: item.id,
+                                body,
+                                ordinal: item.ordinal,
+                                disclosure: item.disclosure,
+                            });
+                        }
+                        SceneItemKind::ReasoningSummary { body } => {
+                            // Reasoning feeds the one live summary line only;
+                            // it never becomes a visible row (R2).
+                            if !body.is_empty() {
+                                let run_matches = match (
+                                    &session_run,
+                                    item.provenance
+                                        .as_ref()
+                                        .and_then(|provenance| provenance.run_id.as_ref()),
+                                ) {
+                                    (_, None) => true,
+                                    (None, _) => true,
+                                    (Some(session), Some(run)) => session == run,
+                                };
+                                if run_matches
+                                    && summary_scoped.as_ref().is_none_or(
+                                        |(ordinal, _)| item.ordinal > *ordinal,
+                                    )
+                                {
+                                    summary_scoped =
+                                        Some((item.ordinal, body.clone()));
+                                }
+                                if summary_all.as_ref().is_none_or(
+                                    |(ordinal, _)| item.ordinal > *ordinal,
+                                ) {
+                                    summary_all = Some((item.ordinal, body));
+                                }
+                            }
+                        }
+                        SceneItemKind::AssistantMessage { body, phase } => {
+                            group.session_details.push(SessionDetail::Assistant {
+                                id: item.id,
+                                body,
+                                phase,
+                                ordinal: item.ordinal,
+                                provenance: item.provenance,
+                                disclosure: item.disclosure,
+                            });
+                        }
+                        SceneItemKind::Compaction { summary } => {
+                            group.session_details.push(SessionDetail::Compaction {
+                                id: item.id,
+                                summary,
+                                ordinal: item.ordinal,
+                                disclosure: item.disclosure,
+                            });
+                        }
+                        SceneItemKind::NativeFact { text } => {
+                            group.session_details.push(SessionDetail::NativeFact {
+                                id: item.id,
+                                text,
+                                ordinal: item.ordinal,
+                                disclosure: item.disclosure,
+                            });
+                        }
+                        _ => {
+                            unreachable!("detail membership covers only detail kinds");
+                        }
+                    }
+                    continue;
+                }
+                if session_mode && marker_ids.contains(item.id.as_str()) {
+                    // WorkSession markers are consumed as the session signal;
+                    // the session group itself is their rendering.
+                    continue;
+                }
+                if session_mode
+                    && fold_transition_id.as_deref() == Some(item.id.as_str())
+                {
+                    if let SceneItemKind::ModelTransition {
+                        from_model,
+                        to_model,
+                    } = item.kind
+                    {
+                        let block = ModelTransitionBlock {
+                            id: item.id,
+                            from_model,
+                            to_model,
+                            disclosure: item.disclosure,
+                        };
+                        engine_label = Some(block.to_model.clone());
+                        if let Some(group_index) = group_index {
+                            let TurnBlock::WorkGroup(group) = &mut blocks[group_index]
+                            else {
+                                unreachable!("session index always addresses its group");
+                            };
+                            group.transition = Some(block);
+                        } else {
+                            pending_transition = Some(block);
+                        }
+                    }
+                    continue;
+                }
                 // Change facts are a barrier even though the card is rendered
                 // at the terminal position. This preserves *contiguous* work
                 // grouping around a deferred or settled change event.
@@ -1205,16 +1800,16 @@ impl ConversationScene {
                         }
                     }
                     SceneItemKind::AssistantMessage { body, phase } => {
-                        has_streaming_assistant |= phase == AssistantPhase::Streaming;
                         blocks.push(TurnBlock::AssistantMessage(AssistantMessageBlock {
                             id: item.id,
                             body,
                             phase,
+                            provenance: item.provenance,
                             disclosure: item.disclosure,
                         }));
                     }
                     SceneItemKind::Compaction { summary } => {
-                        has_compaction = true;
+                        top_level_compaction = true;
                         blocks.push(TurnBlock::Compaction(CompactionBlock {
                             id: item.id,
                             summary,
@@ -1287,16 +1882,37 @@ impl ConversationScene {
 
             flush_work(&mut work_buffer, &mut work_disclosure, &mut blocks)?;
 
+            // Finalize the session group: live summary, engine label, and
+            // superseded state resolve here, once the whole turn was seen.
+            // A superseded session never narrates: later content in the same
+            // turn owns the live line.
+            if let Some(group_index) = group_index {
+                let is_last_content = group_index == blocks.len().saturating_sub(1);
+                let TurnBlock::WorkGroup(group) = &mut blocks[group_index] else {
+                    unreachable!("session index always addresses its group");
+                };
+                group.superseded = !is_last_content;
+                if narration.is_active_work() {
+                    group.reasoning_summary =
+                        summary_scoped.clone().or(summary_all.clone()).map(|(_, body)| body);
+                }
+            }
+
             // A duration narration is a terminal label, not a label on every
-            // historical work fragment. Put exactly one label on the latest
-            // group when a turn contains work.
-            if let Some(label) = narration.terminal_label()
-                && let Some(group) = blocks.iter_mut().rev().find_map(|block| match block {
-                    TurnBlock::WorkGroup(group) => Some(group),
-                    _ => None,
-                })
-            {
-                group.label = Some(label);
+            // historical work fragment. Prefer the session group when the
+            // turn has one; otherwise keep the latest positional group.
+            if let Some(label) = narration.terminal_label() {
+                let session_at = blocks.iter().position(|block| {
+                    matches!(block, TurnBlock::WorkGroup(group) if group.session.is_some())
+                });
+                let positional_at = blocks.iter().rposition(|block| {
+                    matches!(block, TurnBlock::WorkGroup(_))
+                });
+                if let Some(index) = session_at.or(positional_at) {
+                    if let TurnBlock::WorkGroup(group) = &mut blocks[index] {
+                        group.label = Some(label);
+                    }
+                }
             }
 
             if let Some(change_id) = change_id
@@ -1319,18 +1935,28 @@ impl ConversationScene {
                 }
             }
 
-            if has_compaction
+            if top_level_compaction
                 && matches!(narration, TurnNarration::Thinking | TurnNarration::Working)
             {
                 return Err(SceneBuildError::CompactionNarrationConflict { narration });
             }
 
-            let suppress_status =
-                has_streaming_assistant && narration == TurnNarration::StreamingSuppression;
+            // A genuine live reply is its own status; commentary never
+            // suppresses as if it were a reply. Waiting tool progress
+            // suppresses the same way. Legacy inputs never suppress.
+            let suppress_status = (live_reply || waiting_for_activity)
+                && (narration == TurnNarration::StreamingSuppression
+                    || narration.is_active_work());
             if !suppress_status {
                 blocks.push(TurnBlock::TurnStatus(TurnStatusBlock {
                     narration,
                     active_started_at_ms,
+                    reasoning_summary: if session_mode && narration.is_active_work() {
+                        summary_scoped.clone().or(summary_all.clone()).map(|(_, body)| body)
+                    } else {
+                        None
+                    },
+                    engine_label: if session_mode { engine_label } else { None },
                 }));
             }
             blocks.push(TurnBlock::TurnFooter(TurnFooterBlock {
@@ -1363,8 +1989,23 @@ impl ConversationScene {
         Ok(Self {
             turn_scenes,
             deferred,
+            promoted,
         })
     }
+}
+
+/// Whether an assistant lifecycle means text may still be arriving.
+///
+/// Mirrors the reference live-lifecycle set; only these lifecycles combine
+/// with a genuine reply phase into a streaming reply.
+fn is_live_lifecycle(lifecycle: ConversationLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        ConversationLifecycle::Pending
+            | ConversationLifecycle::Streaming
+            | ConversationLifecycle::Active
+            | ConversationLifecycle::Waiting
+    )
 }
 
 fn flush_work(
@@ -1385,6 +2026,13 @@ fn flush_work(
         items: std::mem::take(buffer),
         label: None,
         disclosure: disclosure.take(),
+        session: None,
+        session_run: None,
+        superseded: false,
+        reasoning_summary: None,
+        progress: ProgressPhase::None,
+        transition: None,
+        session_details: Vec::new(),
     }));
     Ok(())
 }
@@ -1613,6 +2261,9 @@ pub enum SceneBuildError {
     /// narrations render no ticking row or carry their own settled durations.
     #[error("active clock basis requires an active-work narration, found {narration:?}")]
     ActiveBasisWithoutActiveNarration { narration: TurnNarration },
+    /// A derived session anchor exceeded the scene identity ceiling.
+    #[error("session anchor is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
+    SessionAnchorTooLong { length: usize, maximum: usize },
 }
 
 #[cfg(test)]
