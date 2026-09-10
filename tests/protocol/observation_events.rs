@@ -641,10 +641,10 @@ fn attributed_observation_roundtrips_with_thread_scoped_cursor() -> Result<(), B
         17,
     );
     let decoded = decode_envelope(&encode_envelope(&value)?)?;
-    let WireEnvelopeBody::Event(event) = decoded.body else {
+    let WireEnvelopeBody::Event(event) = &decoded.body else {
         panic!("an attributed observation frame must decode as an event");
     };
-    let Event::EngineObservation(delivered) = event.event else {
+    let Event::EngineObservation(delivered) = &event.event else {
         panic!("an attributed observation frame must decode as an engine observation");
     };
     let attribution = delivered
