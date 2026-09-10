@@ -1,12 +1,16 @@
 //! Application-side exact-run observation and cancellation controls.
 use super::*;
 use artisan_domain::{RunId, StopRun};
-use artisan_protocol::{ActiveRunResult, StopRunDisposition, StopRunReceipt};
+use artisan_protocol::{
+    ActiveRunResult, RunLiveStatus, StopRunDisposition, StopRunReceipt,
+};
 
 #[derive(Default)]
 pub(super) struct RunControlsState {
     thread: Option<ThreadId>,
     active: Option<RunId>,
+    status: Option<RunLiveStatus>,
+    engine: Option<artisan_domain::EngineId>,
     available: bool,
     generation: u64,
     pending: Option<u64>,
@@ -23,10 +27,43 @@ impl RunControlsState {
     /// thread scope is preserved so a later service still knows its owner.
     pub(super) fn clear_transient_observation(&mut self) {
         self.active = None;
+        self.status = None;
+        self.engine = None;
         self.available = false;
         self.pending = None;
         self.stop = None;
         self.poll = None;
+    }
+
+    /// Returns the observed live run eligible for steer naming on the
+    /// selected thread: a `Running`/`Waiting` run (never a `Queued`
+    /// starting run) with its observed engine. The caller additionally
+    /// requires the selected engine to match. Scope-fenced on the observed
+    /// thread; never validates liveness beyond the last read.
+    pub(super) fn steer_candidate(
+        &self,
+        selected_thread: Option<&ThreadId>,
+    ) -> Option<(RunId, artisan_domain::EngineId)> {
+        if self.thread.as_ref() != selected_thread {
+            return None;
+        }
+        if !matches!(
+            self.status,
+            Some(RunLiveStatus::Running) | Some(RunLiveStatus::Waiting)
+        ) {
+            return None;
+        }
+        Some((self.active.clone()?, self.engine?))
+    }
+
+    /// Whether the observed run on the selected thread is still starting.
+    ///
+    /// Reference (`commands.ts:158-165`): sends never enter a starting
+    /// run's queue from this UI. Scope-fenced like [`Self::steer_candidate`].
+    pub(super) fn starting_guard_active(&self, selected_thread: Option<&ThreadId>) -> bool {
+        self.thread.as_ref() == selected_thread
+            && self.active.is_some()
+            && matches!(self.status, Some(RunLiveStatus::Queued))
     }
 }
 
@@ -50,6 +87,8 @@ impl NativeApplication {
         if self.run_controls.thread != self.selected_thread {
             self.run_controls.thread = self.selected_thread.clone();
             self.run_controls.active = None;
+            self.run_controls.status = None;
+            self.run_controls.engine = None;
             self.run_controls.available = false;
             self.run_controls.pending = None;
             self.run_controls.stop = None;
@@ -119,15 +158,21 @@ impl NativeApplication {
             Ok(ActiveRunResult::Active {
                 thread_id: owner,
                 run_id,
+                status,
+                engine_id,
             }) if owner == thread_id => {
                 if self.run_controls.active.as_ref() != Some(&run_id) {
                     self.run_controls.stop = None;
                 }
                 self.run_controls.active = Some(run_id);
+                self.run_controls.status = Some(status);
+                self.run_controls.engine = Some(engine_id);
                 self.run_controls.available = true;
             }
             Ok(ActiveRunResult::NoActive { thread_id: owner }) if owner == thread_id => {
                 self.run_controls.active = None;
+                self.run_controls.status = None;
+                self.run_controls.engine = None;
                 self.run_controls.stop = None;
                 self.run_controls.available = true;
             }
@@ -292,9 +337,17 @@ impl super::NativeApplication {
     ///
     /// Test-only direct state seeding: production observes runs exclusively
     /// through the generation-fenced read path.
-    pub(super) fn seed_active_run_for_tests(&mut self, thread_id: ThreadId, run_id: RunId) {
+    pub(super) fn seed_active_run_for_tests(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        status: RunLiveStatus,
+        engine_id: artisan_domain::EngineId,
+    ) {
         self.run_controls.thread = Some(thread_id);
         self.run_controls.active = Some(run_id);
+        self.run_controls.status = Some(status);
+        self.run_controls.engine = Some(engine_id);
         self.run_controls.available = true;
     }
 }
