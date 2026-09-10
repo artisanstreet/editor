@@ -1286,6 +1286,30 @@ mod tests {
     }
 
     #[test]
+    fn filter_with_spaces_matches_multiword_names() {
+        let options = vec![
+            option("proof-my-project", "my project"),
+            option("proof-other", "other"),
+        ];
+        let mut state = ProjectPickerState::new(options, None);
+        state.press_trigger();
+        // A lone space already narrows to names containing one.
+        state.set_filter(" ");
+        assert_eq!(state.visible_indexes(), vec![0]);
+        // The full multi-word prefix selects the exact catalog identity.
+        state.set_filter("my pro");
+        assert_eq!(state.visible_indexes(), vec![0]);
+        assert_eq!(state.highlighted_row(), Some(PickerRow::Project(0)));
+        state.activate_highlighted();
+        assert_eq!(
+            state.take_actions(),
+            vec![ProjectPickerAction::Choose(
+                ProjectId::parse("proof-my-project".to_owned()).expect("fixture id parses")
+            )]
+        );
+    }
+
+    #[test]
     fn filter_matching_nothing_leaves_only_the_final_row() {
         let mut state = ProjectPickerState::new(catalog(), None);
         state.press_trigger();

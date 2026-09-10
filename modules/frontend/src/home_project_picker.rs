@@ -3,7 +3,7 @@
 //!
 //! This leaf pairs the proven [`ProjectPickerState`] interaction model
 //! (controlled open state, current-row initial highlight, wrap-around arrow
-//! movement, Home/End jumps, Enter/Space activation with close-before-action
+//! movement, Home/End jumps, Enter activation with close-before-action
 //! emission, Escape/outside-press dismissal) with the home headline
 //! presentation: an inline dotted-style project name inside the centered
 //! heading, opening a floating dark rounded dropdown above the name with a
@@ -21,8 +21,8 @@
 //!   project names (Backspace shrinks it) rather than the picker's prefix
 //!   typeahead; an empty filter is exactly the legacy full-catalog behavior.
 //!   There is no caret or IME bridge (pinned-GPUI honesty, like the picker's
-//!   documented platform limits): Space still activates, so filters cannot
-//!   contain spaces;
+//!   documented platform limits): while open, Space types a space and only
+//!   Enter activates; the closed trigger still opens on Space;
 //! - there is no projectless row: the wired application has no genuine
 //!   deselect operation, and this leaf emits no fake one.
 //!
@@ -337,7 +337,7 @@ impl HomeProjectPickerView {
                 self.state.move_last();
                 true
             }
-            "enter" | "space" => {
+            "enter" => {
                 self.commit_row_from_highlight(window, cx);
                 self.suppress_trigger_release = true;
                 true
@@ -356,8 +356,9 @@ impl HomeProjectPickerView {
         };
 
         // Printable keystrokes feed the live substring filter (the picker's
-        // prefix typeahead stays dormant on this surface); Space keeps its
-        // activation meaning above, so filters cannot contain spaces.
+        // prefix typeahead stays dormant on this surface). Space types a
+        // space while the menu is open — only Enter activates — and the
+        // closed trigger still opens on Space through keyboard activation.
         let plain = !(keystroke.modifiers.control
             || keystroke.modifiers.alt
             || keystroke.modifiers.platform
@@ -476,6 +477,7 @@ impl HomeProjectPickerView {
             .child(self.render_filter_row());
 
         let mut list = div()
+            .id("home-project-menu-list")
             .flex()
             .flex_col()
             .overflow_y_scroll()
