@@ -2961,3 +2961,539 @@ async fn assert_midturn_restart_replay(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Codex send-dispatch proof: continuation rejection + live scratch send
+// ---------------------------------------------------------------------------
+
+use artisan_domain::{
+    ApprovalMode as CodexProofApprovalMode, CodexReasoningEffort as CodexProofEffort,
+    CodexSelection as CodexProofSelection, EngineModelId as CodexProofModel,
+    EngineProfileId as CodexProofProfile,
+};
+use crate::native_run_dispatch::binding_bytes_vec as codex_proof_binding_bytes;
+
+fn codex_send_proof_selection(profile_id: &str) -> artisan_domain::CodexSelection {
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-codex-proof").expect("permission id"),
+        EngineAgentId::parse("agent-codex-proof").expect("agent id"),
+        CodexProofApprovalMode::Never,
+        FilesystemAccess::None,
+        NetworkAccess::Disabled,
+        WebSearchAccess::Disabled,
+    );
+    CodexProofSelection::new(
+        CodexProofProfile::parse(profile_id).expect("profile id"),
+        Some(CodexProofModel::parse("gpt-5.6-luna").expect("model id")),
+        permission,
+        Some(CodexProofEffort::Medium),
+        None,
+        None,
+    )
+    .expect("exact gpt-5.6-luna medium read-only selection must stay valid")
+}
+
+fn codex_send_proof_config(profile_id: &str) -> EngineRunConfig {
+    let budget = |ms: u64| FiniteMillis::new(ms).expect("finite millis valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: budget(180_000),
+        readiness_budget: budget(10_000),
+        health_budget: budget(10_000),
+        prompt_budget: budget(30_000),
+        stream_budget: budget(90_000),
+        close_budget: budget(10_000),
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness limit"),
+        max_header_count: CountLimit::new(32).expect("header count"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr"),
+        observation_capacity: CountLimit::new(16).expect("observation cap"),
+    })
+    .expect("runtime valid");
+    EngineRunConfig::new(
+        EngineSelection::Codex(codex_send_proof_selection(profile_id)),
+        runtime,
+    )
+}
+
+async fn seed_codex_thread(
+    database: &DatabaseConnection,
+    repository: &Repository,
+    thread_id: &str,
+    profile_id: &str,
+    project_root: &str,
+) {
+    let project = entities::attached_project::ActiveModel {
+        project_id: Set("project-1".to_owned()),
+        root_path: Set(project_root.to_owned()),
+        display_name: Set("Artisan".to_owned()),
+        attached_at_ms: Set(1),
+    };
+    let _ = entities::attached_project::Entity::insert(project)
+        .exec(database)
+        .await;
+    let _ = repository
+        .create_thread(CreateThreadInput {
+            request_id: RequestId::parse(format!("req-{thread_id}")).expect("req"),
+            thread_id: ThreadId::parse(thread_id).expect("tid"),
+            project_id: ProjectId::parse("project-1").expect("pid"),
+            title: artisan_domain::ThreadTitle::parse("Thread").expect("title"),
+            created_at: UnixMillis::from_millis(10),
+            updated_at: UnixMillis::from_millis(10),
+        })
+        .await;
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse(format!("engine-{thread_id}")).expect("request id"),
+            thread_id: ThreadId::parse(thread_id).expect("tid"),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: codex_send_proof_config(profile_id),
+            accepted_at: UnixMillis::from_millis(10),
+        })
+        .await
+        .expect("codex engine configuration should create");
+}
+
+async fn bind_codex_running(
+    repository: &Repository,
+    claimed: &artisan_database::ClaimedMessageDispatch,
+    receipt: &artisan_database::LaunchedRunReceipt,
+    start_key: &RunStartKey,
+    creds: &RunLaunchCredentials,
+    profile_id: &str,
+    session_id: &str,
+) -> artisan_database::BoundRunReceipt {
+    let raw = codex_proof_binding_bytes("codex", profile_id, session_id)
+        .expect("codex binding bytes must encode");
+    let binding = ProviderBindingBytes::new(raw).expect("binding");
+    let outcome = repository
+        .bind_run_provider(BindRunProvider {
+            claimed,
+            receipt,
+            run_start_key: start_key,
+            credentials: creds,
+            expected_launch_at: UnixMillis::from_millis(150),
+            bound_at: UnixMillis::from_millis(200),
+            binding_version: 1,
+            binding_bytes: &binding,
+        })
+        .await
+        .expect("bind");
+    match outcome {
+        artisan_database::BindRunProviderOutcome::Bound(r)
+        | artisan_database::BindRunProviderOutcome::AlreadyBound(r) => r,
+    }
+}
+
+fn config_for_live_send_proof(
+    notifier: ConversationCommitNotifier,
+) -> Result<NativeRunDispatcherConfig, NativeRunDispatcherConfigError> {
+    NativeRunDispatcherConfig::new(
+        NativeOpenCode2Authority::new(),
+        notifier,
+        NativeRunDispatcherConfigInput {
+            claim_lease: Duration::from_secs(180),
+            poll_interval: Duration::from_millis(50),
+            retry_backoff: Duration::from_millis(500),
+            shutdown_budget: Duration::from_secs(10),
+            queue_capacity: NonZeroUsize::new(4).expect("four queue slots is nonzero"),
+            max_command_retries: NonZeroUsize::new(3).expect("three retries are nonzero"),
+            prompt_delivery: "immediate".to_owned(),
+            stream_after: 0,
+        },
+    )
+}
+
+fn codex_session_in_binding(binding: Option<&entities::OpaqueBytes>) -> String {
+    let value: serde_json::Value = serde_json::from_slice(
+        binding.expect("provider binding must be present").as_slice(),
+    )
+    .expect("provider binding JSON");
+    assert_eq!(value.get("engine").and_then(|v| v.as_str()), Some("codex"));
+    value
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .expect("session id")
+        .to_owned()
+}
+
+/// Configured Codex continuation rejection.
+///
+/// A real persisted prior bound run is left `Interrupted` (ambiguous
+/// external outcome), then a subsequent accepted message is dispatched
+/// through the production [`NativeRunDispatcher::start`] path (never the
+/// fixture bypass, which skips `resolve_continuation`). The dispatcher must
+/// fail the new dispatch with `provider continuation unavailable` and must
+/// not persist a new assistant run or spawn a provider child.
+///
+/// Requires the installed Codex CLI for the configured launch probe
+/// (`resolve_codex_launch` has no narrow executable injection; it reads the
+/// installed `NativeCodexAuthority` directly). Without an installed CLI the
+/// claim requeues before continuation, so this stays ignored.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires installed codex CLI for the configured Codex launch probe; proves real continuation rejection without provider inference"]
+async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
+    let profile_id = "codex-send-proof";
+    // Real persisted history uses the production default-session shape from
+    // the field report (bound, then interrupted with unknown outcome).
+    let prior_session = "session01a08ae6-4ad1-7173-97ad-8f68f4217f48";
+    let (database, repository, _temp) = temp_repository("dispatch-codex-continuation").await;
+    seed_codex_thread(
+        &database,
+        &repository,
+        "thread-codex-stuck",
+        profile_id,
+        "C:/repos/artisan",
+    )
+    .await;
+    let (claimed, receipt, start_key, creds) = queue_claim_launch(
+        &repository,
+        "thread-codex-stuck",
+        "msg-codex-old",
+        "run-codex-old",
+        "turn-codex-old",
+    )
+    .await;
+    let _bound = bind_codex_running(
+        &repository,
+        &claimed,
+        &receipt,
+        &start_key,
+        &creds,
+        profile_id,
+        prior_session,
+    )
+    .await;
+    // Subsequent accepted message on the same thread after the interruption.
+    // `queue_message` is the production follow-up admission seam.
+    repository
+        .queue_message(artisan_database::QueueMessageInput {
+            request_id: RequestId::parse("req-codex-retry").expect("req"),
+            message_id: MessageId::parse("msg-codex-retry").expect("mid"),
+            thread_id: ThreadId::parse("thread-codex-stuck").expect("tid"),
+            payload: artisan_domain::QueueMessagePayload::text_only(
+                "retry after interrupted Codex run",
+            )
+            .expect("payload"),
+            accepted_at: UnixMillis::from_millis(700),
+        })
+        .await
+        .expect("follow-up message should queue");
+
+    crate::engine_owner::reset_witnesses();
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        StdPathBuf::from("C:/forge/database.sqlite3"),
+        config,
+        Arc::clone(&process_cancel),
+        ActivityGateImpl::new(),
+        &tokio::runtime::Handle::current(),
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut settled = false;
+    while tokio::time::Instant::now() < deadline {
+        let after = fetch_all(&database).await;
+        let retry = after
+            .dispatches
+            .iter()
+            .find(|d| d.message_id == "msg-codex-retry");
+        if let Some(dispatch) = retry {
+            if dispatch.state == DispatchState::Failed
+                && dispatch.last_error.as_deref() == Some("provider continuation unavailable")
+            {
+                settled = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        settled,
+        "retry dispatch must fail closed with provider continuation unavailable"
+    );
+
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+
+    let after = fetch_all(&database).await;
+    // The prior bound run is interrupted by startup reconciliation with an
+    // ambiguous outcome; it is never resumed.
+    let old_run = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-codex-old")
+        .expect("prior run");
+    assert_eq!(old_run.lifecycle, AssistantRunLifecycle::Interrupted);
+    // No new assistant run was launched for the rejected retry.
+    assert_eq!(after.runs.len(), 1, "rejected continuation must not launch a run");
+    let retry = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == "msg-codex-retry")
+        .expect("retry dispatch");
+    assert_eq!(retry.state, DispatchState::Failed);
+    assert_eq!(
+        retry.last_error.as_deref(),
+        Some("provider continuation unavailable")
+    );
+    let counts = crate::engine_owner::witness_counts();
+    assert_eq!(counts.spawned, 0, "no provider child may spawn after rejection");
+}
+
+/// Live scratch send through the configured dispatcher.
+///
+/// Scratch DB/project only; never touches the live user DB. Exact
+/// `gpt-5.6-luna` at medium effort, read-only (`Never` approvals, no
+/// filesystem, no network, no tools, no file reads). The first accepted
+/// message must persist exactly `SEND_PROBE_OK` and `Completed`; the second
+/// follow-up on the same thread must persist exactly `FOLLOWUP_PROBE_OK`
+/// and `Completed` on the same provider session. The old interrupted
+/// thread is preserved elsewhere; this new scratch thread proves sends
+/// work normally.
+///
+/// Root runs this explicitly after the build gate; it performs real
+/// provider inference.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live scratch probe through the configured dispatcher; requires installed authenticated codex CLI and performs real inference"]
+async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
+    let profile_id = std::env::var("ARTISAN_CODEX_LIVE_PROFILE_ID")
+        .unwrap_or_else(|_| "codex-live-probe".to_owned());
+    // Keep the scratch selection exact even when the profile name is
+    // overridden: gpt-5.6-luna, medium effort, never approve, no
+    // filesystem, no network.
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-codex-proof").expect("permission id"),
+        EngineAgentId::parse("agent-codex-proof").expect("agent id"),
+        CodexProofApprovalMode::Never,
+        FilesystemAccess::None,
+        NetworkAccess::Disabled,
+        WebSearchAccess::Disabled,
+    );
+    let selection = CodexProofSelection::new(
+        CodexProofProfile::parse(profile_id.as_str()).expect("profile id"),
+        Some(CodexProofModel::parse("gpt-5.6-luna").expect("model id")),
+        permission,
+        Some(CodexProofEffort::Medium),
+        None,
+        None,
+    )
+    .expect("exact live selection must stay valid");
+
+    let (database, repository, temp) = temp_repository("dispatch-codex-live").await;
+    let project_root = temp
+        .path()
+        .parent()
+        .expect("scratch dir")
+        .to_str()
+        .expect("scratch dir utf8")
+        .to_owned();
+    let thread_id = ThreadId::parse("thread-codex-live-proof").expect("tid");
+    {
+        let project = entities::attached_project::ActiveModel {
+            project_id: Set("project-1".to_owned()),
+            root_path: Set(project_root.clone()),
+            display_name: Set("Artisan".to_owned()),
+            attached_at_ms: Set(1),
+        };
+        let _ = entities::attached_project::Entity::insert(project)
+            .exec(&database)
+            .await;
+        repository
+            .create_thread(CreateThreadInput {
+                request_id: RequestId::parse("req-live-thread").expect("req"),
+                thread_id: thread_id.clone(),
+                project_id: ProjectId::parse("project-1").expect("pid"),
+                title: artisan_domain::ThreadTitle::parse("Live proof").expect("title"),
+                created_at: UnixMillis::from_millis(10),
+                updated_at: UnixMillis::from_millis(10),
+            })
+            .await
+            .expect("create scratch thread");
+        let budget = |ms: u64| FiniteMillis::new(ms).expect("finite millis valid");
+        let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+            attempt_budget: budget(180_000),
+            readiness_budget: budget(10_000),
+            health_budget: budget(10_000),
+            prompt_budget: budget(30_000),
+            stream_budget: budget(90_000),
+            close_budget: budget(10_000),
+            max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit"),
+            max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit"),
+            max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit"),
+            max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness limit"),
+            max_header_count: CountLimit::new(32).expect("header count"),
+            max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer"),
+            max_stderr_bytes: ByteLimit::new(4_096).expect("stderr"),
+            observation_capacity: CountLimit::new(16).expect("observation cap"),
+        })
+        .expect("runtime valid");
+        repository
+            .set_thread_engine_config(SetThreadEngineConfigInput {
+                request_id: RequestId::parse("engine-live-thread").expect("request id"),
+                thread_id: thread_id.clone(),
+                precondition: EngineConfigUpdatePrecondition::Unconfigured,
+                config: EngineRunConfig::new(EngineSelection::Codex(selection), runtime),
+                accepted_at: UnixMillis::from_millis(10),
+            })
+            .await
+            .expect("scratch engine configuration should create");
+    }
+
+    let first_message = MessageId::parse("msg-live-first").expect("mid");
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("req-live-first").expect("request id"),
+            message_id: first_message.clone(),
+            thread_id: thread_id.clone(),
+            body: MessageBody::parse(
+                "Return SEND_PROBE_OK only. Do not use tools and do not read files.",
+            )
+            .expect("message body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("first scratch message should queue");
+
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_for_live_send_proof(notifier).expect("live dispatch policy");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        temp.path().to_owned(),
+        config,
+        Arc::clone(&process_cancel),
+        ActivityGateImpl::new(),
+        &tokio::runtime::Handle::current(),
+    );
+
+    async fn wait_for_completed_dispatch(
+        database: &DatabaseConnection,
+        message_id: &str,
+        timeout: Duration,
+    ) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let dispatch = entities::message_dispatch::Entity::find_by_id(message_id)
+                .one(database)
+                .await
+                .expect("dispatch query")
+                .expect("dispatch row");
+            if dispatch.state == DispatchState::Completed {
+                return;
+            }
+            assert_ne!(
+                dispatch.state,
+                DispatchState::Failed,
+                "live dispatch {message_id} must not fail: {:?}",
+                dispatch.last_error
+            );
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "live dispatch {message_id} must complete inside its budget"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    wait_for_completed_dispatch(&database, "msg-live-first", Duration::from_secs(180)).await;
+    let first_run_id = {
+        let after = fetch_all(&database).await;
+        let dispatch = after
+            .dispatches
+            .iter()
+            .find(|d| d.message_id == "msg-live-first")
+            .expect("first dispatch");
+        assert_eq!(dispatch.state, DispatchState::Completed);
+        let run = after
+            .runs
+            .iter()
+            .find(|r| r.origin_message_id.as_deref() == Some("msg-live-first"))
+            .expect("first run");
+        assert_eq!(run.lifecycle, AssistantRunLifecycle::Completed);
+        let assistant: Vec<_> = after
+            .items
+            .iter()
+            .filter(|i| {
+                i.item_kind == ConversationItemKind::AssistantMessage
+                    && i.run_id.as_deref() == Some(run.run_id.as_str())
+            })
+            .collect();
+        assert_eq!(assistant.len(), 1, "first send persists one assistant message");
+        assert_eq!(
+            assistant[0].body.trim(),
+            "SEND_PROBE_OK",
+            "first send persists the exact probe marker"
+        );
+        run.run_id.clone()
+    };
+    let first_session = {
+        let run = entities::assistant_run::Entity::find()
+            .all(&database)
+            .await
+            .expect("runs")
+            .into_iter()
+            .find(|r| r.run_id == first_run_id)
+            .expect("first run row");
+        codex_session_in_binding(run.provider_binding.as_ref())
+    };
+
+    // Second follow-up on the same scratch thread: same configured path,
+    // text-only prompt, no tools or file reads.
+    repository
+        .queue_message(artisan_database::QueueMessageInput {
+            request_id: RequestId::parse("req-live-second").expect("req"),
+            message_id: MessageId::parse("msg-live-second").expect("mid"),
+            thread_id: thread_id.clone(),
+            payload: artisan_domain::QueueMessagePayload::text_only(
+                "Return FOLLOWUP_PROBE_OK only. Do not use tools and do not read files.",
+            )
+            .expect("payload"),
+            accepted_at: UnixMillis::from_millis(600),
+        })
+        .await
+        .expect("follow-up message should queue");
+    wait_for_completed_dispatch(&database, "msg-live-second", Duration::from_secs(180)).await;
+
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+
+    let after = fetch_all(&database).await;
+    let second_run = after
+        .runs
+        .iter()
+        .find(|r| r.origin_message_id.as_deref() == Some("msg-live-second"))
+        .expect("second run");
+    assert_eq!(second_run.lifecycle, AssistantRunLifecycle::Completed);
+    assert_ne!(second_run.run_id, first_run_id);
+    let assistant: Vec<_> = after
+        .items
+        .iter()
+        .filter(|i| {
+            i.item_kind == ConversationItemKind::AssistantMessage
+                && i.run_id.as_deref() == Some(second_run.run_id.as_str())
+        })
+        .collect();
+    assert_eq!(assistant.len(), 1, "follow-up persists one assistant message");
+    assert_eq!(
+        assistant[0].body.trim(),
+        "FOLLOWUP_PROBE_OK",
+        "follow-up persists the exact probe marker"
+    );
+    let second_session = codex_session_in_binding(second_run.provider_binding.as_ref());
+    assert_eq!(
+        second_session, first_session,
+        "follow-up must continue the same provider session"
+    );
+}
