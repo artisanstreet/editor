@@ -107,8 +107,11 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
   `gap-[1lh]` (24px); inter-turn gap stays 32px.
 - Error card (capture-verified fault): the renderer painted an outer wrapper
   card with a second `Error` heading around the destructive alert. It now
-  paints the reference's single destructive card (own face, `role="alert"`
-  semantics, one title, message body), always mounted with stable anchor and
+  paints the reference's single destructive card through a specialized
+  `AlertStyle` (rounded-xl 12px, destructive/25 border, destructive/5 tint,
+  14/12px paddings, 6px content gap, 8px icon gap, CircleX icon, muted
+  description; no shared `Alert` global change, no copy action since the scene
+  block carries only the message), always mounted with stable anchor and
   debug selectors. No visual parity claimed without root capture evidence.
 - Delegated adjustment included: `attribution: None` on the surface test
   `EngineObservationEvent` constructor for the integrated domain row; that

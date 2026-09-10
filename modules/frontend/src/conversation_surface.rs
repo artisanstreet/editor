@@ -22,7 +22,7 @@ use artisan_domain::{
 use artisan_protocol::{
     ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt, RespondQuestionReceipt,
 };
-use artisan_ui::alert::{Alert, AlertVariant};
+use artisan_ui::alert::{Alert, AlertStyle, AlertVariant};
 use artisan_ui::asset_seam::asset_glyph;
 use artisan_ui::badge::{BadgeStyle, outline_badge};
 use artisan_ui::gradient::vertical_gradient;
@@ -2753,11 +2753,15 @@ impl ConversationSurface {
 
     /// Renders one error as the reference's single destructive card.
     ///
-    /// The alert carries its own face, `role="alert"` semantics, title, and
-    /// description: no outer wrapper card and no second heading. Error facts
+    /// The alert carries its own face, `role="alert"` semantics, icon,
+    /// title, and description: no outer wrapper card and no second heading.
+    /// The recipe specializes the existing destructive style to the reference
+    /// card (`rounded-xl`, destructive border/tint, tight paddings/gaps,
+    /// muted description) without touching the shared global. Error facts
     /// stay mounted in every disclosure state (the reference shows no
     /// disclosure control for errors), while the stable anchor and debug
-    /// selector preserve scroll and test addressing.
+    /// selector preserve scroll and test addressing. No copy action: the
+    /// scene block carries only the message.
     fn render_error(
         &self,
         block: &ErrorBlock,
@@ -2766,7 +2770,17 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
-        let alert = Alert::from_theme(*theme, AlertVariant::Destructive)
+        let mut style = AlertStyle::resolve(*theme, AlertVariant::Destructive);
+        style.corner_radius = px(12.0);
+        style.horizontal_padding = theme.spacing.steps(3.5);
+        style.vertical_padding = theme.spacing.steps(3.0);
+        style.content_gap = theme.spacing.steps(1.5);
+        style.icon_gap = theme.spacing.steps(2.0);
+        style.border_color = theme.colors.destructive.with_alpha(0.25).to_paint();
+        style.background = theme.colors.destructive.with_alpha(0.05).to_paint();
+        style.description_foreground = theme.colors.muted_foreground.to_paint();
+        let alert = Alert::new(style)
+            .icon(AssetId::TABLER_CIRCLE_X)
             .title("Error")
             .description(block.message.clone())
             .debug_selector(format!("{selector}-alert"));
