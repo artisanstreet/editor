@@ -1852,7 +1852,10 @@ impl ConversationSurface {
             .group(TURN_GROUP)
             .flex()
             .flex_col()
-            .gap(theme.spacing.steps(4.0));
+            // Reference intra-turn rhythm is `gap-[1lh]`: no app override in
+            // lib/styles, so Tailwind preflight 1.5 on the 16 px base applies
+            // and one line height is 24 px.
+            .gap(theme.spacing.steps(6.0));
         // At most one group owns the live Thinking/Working line: the latest
         // group headers it once from the same accepted narration and clock,
         // and the separate status row below stands down. Terminal labels

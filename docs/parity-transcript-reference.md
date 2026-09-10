@@ -78,8 +78,9 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
   shows through); cards, bubbles, panels, and popovers keep their faces.
 - Turn rhythm: inter-turn gap is the reference `gap-8` (32px); the absolute
   footer reveals inside that room. No per-turn pad is added, so unsettled
-  turns carry no phantom gap. Intra-turn block gap stays 16px against the
-  reference `1lh`; capture will judge.
+  turns carry no phantom gap. Intra-turn block gap is the reference `gap-[1lh]`
+  resolved to 24px (no app line-height override in lib/styles, so Tailwind
+  preflight 1.5 on the 16px base applies); inter-turn gap stays 32px.
 - Projection `c7892511` adds no new public scene API (internal turn-chart
   drive); this packet builds on `e6020f4` only. Root integrates `c7892511`
   separately.
@@ -101,8 +102,8 @@ lane `evidence/` path; content is the requested parity-LANE reference mapping.)
   `Work`/`Activity`/`Reasoning` headings; the latest group owns the live
   Thinking/Working header once while `Closed` is honored in every case through
   the existing disclosure action (headerless controlled groups use a
-  chevron-only affordance). Intra-turn block gap stays 16px against reference
-  `1lh`; capture judges next.
+  chevron-only affordance). Intra-turn block gap is the resolved reference
+  `gap-[1lh]` (24px); inter-turn gap stays 32px.
 - Error card (capture-verified fault): the renderer painted an outer wrapper
   card with a second `Error` heading around the destructive alert. It now
   paints the reference's single destructive card (own face, `role="alert"`
