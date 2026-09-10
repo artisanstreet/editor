@@ -4161,7 +4161,7 @@ mod tests {
     use super::*;
     use artisan_domain::{ConversationLifecycle, ItemId, TurnId};
     use artisan_ui::theme::ThemeMode;
-    use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
     use crate::conversation_scene::{
         AssistantPhase, ConversationScene, SceneDisclosure, SceneItem, SceneItemKind, SceneTurn,
@@ -4642,11 +4642,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn user_body_renders_selectable_without_disturbing_surface(cx: &mut TestAppContext) {
-        // The harness offers no pointer drag/copy simulation, so this mounts
-        // the real user bubble (with its retained selectable body) and proves
-        // frames settle with scene data intact and no spurious actions;
-        // generic selection behavior is covered by the shared module suite.
+    fn user_body_drag_selects_and_copies_exact_bytes(cx: &mut TestAppContext) {
+        // Real pointer drag across the painted user body, then the platform
+        // copy keystroke: the clipboard must carry the exact body bytes and
+        // no observation may cross the surface action boundary.
+        const BODY: &str = "selectable proof body";
         let user_scene = ConversationScene::build(
             vec![SceneTurn::new(
                 turn_id("turn_a"),
@@ -4657,7 +4657,7 @@ mod tests {
                 "user-a",
                 1,
                 SceneItemKind::UserMessage {
-                    body: "selectable proof body".to_owned(),
+                    body: BODY.to_owned(),
                 },
                 None,
             )],
@@ -4673,19 +4673,30 @@ mod tests {
         });
         cx.simulate_resize(size(px(720.0), px(240.0)));
         settle(cx);
+        let body_selector = format!(
+            "{CONVERSATION_SURFACE_SELECTOR}-turn-turn_a-block-user-user-a-body"
+        );
+        let bounds = cx
+            .debug_bounds(body_selector.as_str())
+            .expect("user body must paint");
+        let left = point(bounds.origin.x + px(1.0), bounds.origin.y + px(10.0));
+        let right = point(
+            bounds.origin.x + bounds.size.width - px(1.0),
+            bounds.origin.y + px(10.0),
+        );
+        cx.simulate_mouse_down(left, gpui::MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(right, gpui::MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(right, gpui::MouseButton::Left, Modifiers::default());
+        cx.simulate_keystrokes("ctrl-c");
+        settle(cx);
+
+        let copied = cx.update(|_, app| {
+            app.read_from_clipboard()
+                .as_ref()
+                .and_then(gpui::ClipboardItem::text)
+        });
+        assert_eq!(copied, Some(BODY.to_owned()));
         cx.update(|_, app| {
-            let body = surface
-                .read(app)
-                .scene()
-                .turn_scene(&turn_id("turn_a"))
-                .expect("turn present")
-                .blocks()
-                .iter()
-                .find_map(|block| match block {
-                    TurnBlock::UserMessage(message) => Some(message.body.clone()),
-                    _ => None,
-                });
-            assert_eq!(body.as_deref(), Some("selectable proof body"));
             assert!(surface.read(app).pending_actions().is_empty());
         });
     }
