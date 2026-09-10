@@ -2542,14 +2542,16 @@ pub(crate) async fn apply_event(
 
 /// Steers a live turn with follow-up text (`turn/steer`).
 ///
-/// Test-only until dispatcher steer wiring lands: proves the follow-up verb
-/// against the fixture stdio script without disturbing the authorize-once
-/// production flow.
+/// Production verb behind [`AcceptedTurn::steer_text`](super::operation::AcceptedTurn::steer_text):
+/// the pump writes the follow-up with the actual provider turn id as
+/// `expectedTurnId` and the correlated `turn/steer` result resolves the
+/// delivery; a correlated error reply resolves it failed without settling
+/// the turn. Proves the follow-up verb against the fixture stdio script
+/// without disturbing the authorize-once production flow.
 ///
 /// # Errors
 ///
 /// Returns [`CodexTurnError`] when the write fails.
-#[cfg(test)]
 pub(crate) async fn steer_live_turn<W: AsyncWrite + Unpin>(
     stdin: &mut W,
     request_id: &mut u64,

@@ -2259,14 +2259,15 @@ pub(crate) async fn apply_event(
 
 /// Steers a live turn with follow-up text (stream-input fold).
 ///
-/// Test-only until dispatcher steer wiring lands: proves the fold verb
-/// against the fixture stdio script without disturbing the authorize-once
-/// production flow. Experimental per the adapter: the CLI owns fold timing.
+/// Production verb behind [`AcceptedTurn::steer_text`](super::operation::AcceptedTurn::steer_text):
+/// the pump writes the fold line over its owned stdin and the write outcome
+/// resolves the delivery. Proves the fold verb against the fixture stdio
+/// script without disturbing the authorize-once production flow.
+/// Experimental per the adapter: the CLI owns fold timing.
 ///
 /// # Errors
 ///
 /// Returns [`ClaudeTurnError`] when the write fails.
-#[cfg(test)]
 pub(crate) async fn steer_live_turn<W: AsyncWrite + Unpin>(
     stdin: &mut W,
     session_id: &str,

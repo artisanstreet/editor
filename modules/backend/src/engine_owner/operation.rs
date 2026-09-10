@@ -20,6 +20,7 @@
 //! Hyper `TokioIo<TcpStream>` connection configured with caller-supplied
 //! `max_headers` and `max_buf_bytes` and body-bounded via `Limited`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -269,6 +270,9 @@ pub(crate) enum Job {
     /// A fully immutable configured turn handed to the owner after durable
     /// launch. Carries the single internal input so production and `#[cfg(test)]`
     /// fixture admissions share exactly one queued type and one executor.
+    /// `steer_rx` is `Some` only for steer-capable engines (codex/claude/
+    /// hermes); every other engine carries `None` and every steer attempt on
+    /// it resolves [`SteerError::Unsupported`] without prompt-state plumbing.
     Turn {
         input: Box<super::InternalTurnInput>,
         deadline: Instant,
@@ -277,6 +281,7 @@ pub(crate) enum Job {
         authorize: oneshot::Receiver<()>,
         observations: mpsc::Sender<EngineObservation>,
         respond: oneshot::Sender<TurnResult>,
+        steer_rx: Option<mpsc::Receiver<SteerDelivery>>,
     },
 }
 
@@ -453,6 +458,93 @@ impl EngineTurnResult {
 
 pub(crate) type TurnResult = Result<EngineTurnResult, EngineOperationError>;
 
+/// Bounded steer-write failure. Carries no payload bytes.
+///
+/// `Unsupported` covers every path without a steer verb (cursor/grok/
+/// opencode2 turns, or a turn whose pump never wired a steer channel) and
+/// maps from the existing prompt-state decisions without per-call
+/// fabrication. `DeliveryFailed` covers the failed provider write (stdin
+/// write, gateway request, or a rejected correlated reply) as well as a
+/// steer cut short by stop/cancel/deadline: only the provider ack counts,
+/// never channel enqueue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum SteerError {
+    /// No steer verb exists on this path.
+    #[error("steer is not supported on this engine path")]
+    Unsupported,
+    /// The provider write failed or the steer did not settle.
+    #[error("steer write to the provider failed")]
+    DeliveryFailed,
+}
+
+/// One follow-up text delivery into a live provider pump.
+///
+/// PRIVATE provider implementation: constructed only inside
+/// [`AcceptedTurn::steer_text`] and consumed only by the owning pump loop.
+/// Nothing outside `steer_text` names this shape; `message_id` stays with
+/// durable dispatch and never enters the provider request. The pump writes
+/// the engine verb with its owned writer/handles, then resolves `ack` with
+/// the real provider ack/write outcome — never mere channel enqueue.
+pub(crate) struct SteerDelivery {
+    #[allow(dead_code)]
+    request_id: String,
+    text: String,
+    ack: oneshot::Sender<Result<(), SteerError>>,
+}
+
+impl SteerDelivery {
+    /// Creates one delivery for focused provider tests.
+    ///
+    /// Production construction stays inside [`AcceptedTurn::steer_text`];
+    /// this constructor exists only so tests can drive the servicing path
+    /// without a live owner.
+    #[cfg(test)]
+    pub(crate) fn new(
+        request_id: String,
+        text: String,
+        ack: oneshot::Sender<Result<(), SteerError>>,
+    ) -> Self {
+        Self {
+            request_id,
+            text,
+            ack,
+        }
+    }
+}
+
+/// Capacity of one turn's steer channel: bounded like every other owner
+/// queue so a burst of follow-ups back-pressures instead of buffering
+/// without bound.
+pub(crate) const STEER_CHANNEL_CAPACITY: usize = 16;
+
+/// Resolves every unsettled steer delivery as failed: buffered pre-turn
+/// writes, correlated-but-unanswered provider requests, and queued channel
+/// arrivals. Called exactly once on every pump exit (terminal, failure,
+/// shutdown, cancel, deadline) so `steer_text` never wedges on an
+/// indefinite ack await and stop/cancel interrupts pending steers
+/// deterministically. Sending is best-effort: a gone caller already
+/// observed cancellation through its own control race.
+fn settle_steers_closed(
+    steer_rx: &mut Option<mpsc::Receiver<SteerDelivery>>,
+    buffered: &mut Vec<SteerDelivery>,
+    pending: &mut HashMap<u64, oneshot::Sender<Result<(), SteerError>>>,
+) {
+    for delivery in buffered.drain(..) {
+        let _ = delivery.ack.send(Err(SteerError::DeliveryFailed));
+    }
+    // Correlated-but-unanswered provider requests fail typed: their waiter
+    // never saw an ack, so dropping the entry must resolve it failed.
+    for (_, ack) in pending.drain() {
+        let _ = ack.send(Err(SteerError::DeliveryFailed));
+    }
+    if let Some(rx) = steer_rx.as_mut() {
+        rx.close();
+        while let Ok(delivery) = rx.try_recv() {
+            let _ = delivery.ack.send(Err(SteerError::DeliveryFailed));
+        }
+    }
+}
+
 /// Single-owner handoff for the configured turn phases.
 pub(crate) struct AcceptedTurn {
     prepared: oneshot::Receiver<Result<PreparedSession, EngineOperationError>>,
@@ -461,6 +553,7 @@ pub(crate) struct AcceptedTurn {
     receiver: Option<oneshot::Receiver<TurnResult>>,
     control: Arc<CancelHandle>,
     interactions: TurnInteractionLedger,
+    steer_tx: Option<mpsc::Sender<SteerDelivery>>,
 }
 
 impl AcceptedTurn {
@@ -471,6 +564,7 @@ impl AcceptedTurn {
         observations: mpsc::Receiver<EngineObservation>,
         receiver: oneshot::Receiver<TurnResult>,
         control: Arc<CancelHandle>,
+        steer_tx: Option<mpsc::Sender<SteerDelivery>>,
     ) -> Self {
         Self {
             interactions: TurnInteractionLedger::new(run_id),
@@ -479,6 +573,7 @@ impl AcceptedTurn {
             observations,
             receiver: Some(receiver),
             control,
+            steer_tx,
         }
     }
 
@@ -499,6 +594,80 @@ impl AcceptedTurn {
 
     pub(crate) async fn next_observation(&mut self) -> Option<EngineObservation> {
         self.observations.recv().await
+    }
+
+    /// Writes follow-up text into the live turn's provider session.
+    ///
+    /// Returns an OWNED future (not `async fn`): the future captures a
+    /// CLONED sender and owned request/text, never a borrowed turn, so the
+    /// dispatch-side arm can drive it with `select!` while draining
+    /// observations inline through `&mut turn`. A taken/consumed sender
+    /// or a `&self`-borrowing future would either break subsequent steers
+    /// or collide with the drain borrow — both are rejected shapes.
+    ///
+    /// Provider-ack result ONLY: `Ok(())` means the exact engine bytes
+    /// reached the provider transport AND its ack resolved (never
+    /// fire-and-forget: write-only acks that swallow late provider errors
+    /// were rejected). Late provider rejections resolve `Err` with their
+    /// typed reason preserved. No durability, no ledger, no commit, no row
+    /// transitions — the dispatch-side arm owns all of those and polls
+    /// the returned future exactly once per applied steer (redelivery
+    /// dedup happens before this call via ledger `seen_commands`, never
+    /// inside it).
+    ///
+    /// `request_id` is the ORIGINAL client request id (for wire correlation
+    /// and log tracing only). `text` is the validated follow-up text. The
+    /// sender is retained across calls, so consecutive steers on one turn
+    /// each write exactly once; no accessor exposes the sender. A turn
+    /// without a steer channel resolves [`SteerError::Unsupported`]; a
+    /// steer cut short by stop/cancel, a dead pump, or a failed provider
+    /// write resolves [`SteerError::DeliveryFailed`]. Channel enqueue
+    /// alone never counts as success.
+    ///
+    /// Progress invariant (no drain-coupled deadlock): the ack waits for
+    /// the actual provider outcome — the correlated `turn/steer` result
+    /// for codex, the gateway round-trip for hermes, the fold write for
+    /// claude — and progress while it is outstanding comes from split
+    /// ownership: the dispatch Steer arm keeps draining
+    /// `next_observation()` through the existing `handle_observation`
+    /// while awaiting the returned future, and the pump polls the steer
+    /// receiver alongside its observation sends, so a provider withholding
+    /// its reply while streaming past channel capacity wedges neither
+    /// side. There is no ack timeout and no retry: one write attempt per
+    /// call, and an ambiguous outcome fails typed instead of resending.
+    pub(crate) fn steer_text(
+        &self,
+        request_id: &str,
+        text: &str,
+    ) -> impl std::future::Future<Output = Result<(), SteerError>> + Send + use<> {
+        let sender = self.steer_tx.clone();
+        let control = Arc::clone(&self.control);
+        let request_id = request_id.to_owned();
+        let text = text.to_owned();
+        async move {
+            let Some(sender) = sender else {
+                return Err(SteerError::Unsupported);
+            };
+            let (ack_tx, ack_rx) = oneshot::channel();
+            let delivery = SteerDelivery {
+                request_id,
+                text,
+                ack: ack_tx,
+            };
+            let sent = tokio::select! {
+                biased;
+                () = control.wait() => false,
+                result = sender.send(delivery) => result.is_ok(),
+            };
+            if !sent {
+                return Err(SteerError::DeliveryFailed);
+            }
+            tokio::select! {
+                biased;
+                () = control.wait() => Err(SteerError::DeliveryFailed),
+                result = ack_rx => result.unwrap_or(Err(SteerError::DeliveryFailed)),
+            }
+        }
     }
 
     /// Notes one pending provider target on this turn's delivery ledger.
@@ -1550,6 +1719,7 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         authorize,
         observations,
         respond,
+        steer_rx,
     } = job
     else {
         unreachable!("configured executor received a legacy launch");
@@ -1563,6 +1733,7 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         authorize,
         observations,
         respond,
+        steer_rx,
     };
     let runtime = match configured_runtime(&request.input.settings, request.input.control_capacity)
     {
@@ -1620,6 +1791,7 @@ struct ConfiguredTurnRequest {
     authorize: oneshot::Receiver<()>,
     observations: mpsc::Sender<EngineObservation>,
     respond: oneshot::Sender<TurnResult>,
+    steer_rx: Option<mpsc::Receiver<SteerDelivery>>,
 }
 
 impl ConfiguredTurnRequest {
@@ -1981,6 +2153,7 @@ async fn execute_codex_turn(
         mut authorize,
         observations,
         respond,
+        mut steer_rx,
     } = request;
     if prepared
         .send(Ok(PreparedSession::new(thread_id.clone())))
@@ -2061,6 +2234,10 @@ async fn execute_codex_turn(
                 model_id: &attribution.model_id,
                 provider_session_id: thread_id.as_str(),
             });
+    // Steers arriving before the provider turn id is known wait here,
+    // bounded by the same phase deadline: the id is never invented, and a
+    // turn that never starts rejects every buffered steer typed.
+    let mut pending_steers: Vec<SteerDelivery> = Vec::new();
     let turn_wait = codex_await_turn_start(
         &mut reader,
         &mut line,
@@ -2075,11 +2252,16 @@ async fn execute_codex_turn(
         &observations,
         usage_scope.as_ref(),
         turn_request_id,
+        &mut steer_rx,
+        &mut pending_steers,
     )
     .await;
+    let mut no_pending_acks: HashMap<u64, oneshot::Sender<Result<(), SteerError>>> =
+        HashMap::new();
     let provider_turn_id = match turn_wait {
         CodexTurnWait::Accepted(turn_id) => turn_id,
         CodexTurnWait::Terminal(state) => {
+            settle_steers_closed(&mut steer_rx, &mut pending_steers, &mut no_pending_acks);
             drop(stdin);
             drop(observations);
             return finish_turn_result(
@@ -2091,10 +2273,31 @@ async fn execute_codex_turn(
             .await;
         }
         CodexTurnWait::Failed(error) => {
+            settle_steers_closed(&mut steer_rx, &mut pending_steers, &mut no_pending_acks);
             drop(stdin);
             return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
         }
     };
+    // Flush pre-turn-start steers in arrival order against the now-known
+    // provider turn id. Each write allocates its own request id and
+    // registers its ack for the correlated `turn/steer` result; a failed
+    // write resolves that delivery immediately. The ack is never the
+    // write alone: only the provider result counts, and a correlated
+    // error (for example an `expectedTurnId` mismatch) fails typed
+    // without settling the turn.
+    let mut pending_steer_acks: HashMap<u64, oneshot::Sender<Result<(), SteerError>>> =
+        HashMap::new();
+    for delivery in std::mem::take(&mut pending_steers) {
+        service_codex_steer_delivery(
+            &mut stdin,
+            &mut next_id,
+            thread_id.as_str(),
+            Some(provider_turn_id.as_str()),
+            delivery,
+            &mut pending_steer_acks,
+        )
+        .await;
+    }
     // The turn is in flight from the server's `turn/start` result: seeding
     // the active turn lets the inactivity deadline settle a silent turn as
     // stalled instead of waiting idle until the attempt budget expires.
@@ -2117,6 +2320,9 @@ async fn execute_codex_turn(
         &observations,
         &thread_id,
         usage_scope.as_ref(),
+        &mut steer_rx,
+        &mut pending_steer_acks,
+        &mut next_id,
     )
     .await;
     drop(stdin);
@@ -2222,6 +2428,11 @@ enum CodexTurnWait {
 /// `threadId`) fails fast. Uncorrelated error envelopes and unparseable
 /// lines keep the wait alive inside the same absolute phase deadline; the
 /// turn is not yet in flight, so no inactivity deadline applies here.
+///
+/// Steers arriving before the provider turn id is known are buffered in
+/// arrival order into `pending_steers` and flushed by the caller once the
+/// id is known — the id is never invented. A wait that ends without a turn
+/// rejects every buffered steer typed through the shared settle helper.
 #[allow(clippy::too_many_arguments)]
 async fn codex_await_turn_start(
     reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
@@ -2237,56 +2448,168 @@ async fn codex_await_turn_start(
     observations: &mpsc::Sender<EngineObservation>,
     usage: Option<&super::codex::CodexUsageScope<'_>>,
     turn_request_id: u64,
+    steer_rx: &mut Option<mpsc::Receiver<SteerDelivery>>,
+    pending_steers: &mut Vec<SteerDelivery>,
 ) -> CodexTurnWait {
     use super::codex as codex_runtime;
 
     loop {
         line.clear();
-        if read_codex_line(reader, line, deadline, shutdown, control)
-            .await
-            .is_err()
-        {
-            if shutdown.is_cancelled() {
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => {
                 return CodexTurnWait::Failed(EngineOperationError::Shutdown);
             }
-            if control.is_cancelled() {
+            () = control.wait() => {
                 return CodexTurnWait::Failed(EngineOperationError::Cancelled);
             }
-            if Instant::now() >= deadline {
+            () = tokio::time::sleep_until(deadline) => {
                 return CodexTurnWait::Failed(EngineOperationError::Deadline);
             }
-            return CodexTurnWait::Failed(EngineOperationError::ProviderRequestFailed);
-        }
-        *last_activity = Instant::now();
-        *frame_sequence += 1;
-        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
-        if codex_runtime::is_codex_error_response(&trimmed)
-            && codex_response_id_matches(&trimmed, turn_request_id)
-        {
-            return CodexTurnWait::Failed(EngineOperationError::ProviderRequestFailed);
-        }
-        if let Some(turn_id) = codex_turn_id(&trimmed, turn_request_id) {
-            return CodexTurnWait::Accepted(turn_id);
-        }
-        match codex_runtime::parse_frame(&trimmed, *frame_sequence) {
-            Ok(event) => {
-                if let Some(terminal) = codex_runtime::apply_event(
-                    event,
-                    run_id,
-                    tracker,
-                    active_turn,
-                    observations,
-                    *frame_sequence,
-                    usage,
-                )
-                .await
-                {
-                    return CodexTurnWait::Terminal(terminal);
+            steer_msg = async {
+                match steer_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(delivery) = steer_msg {
+                    pending_steers.push(delivery);
                 }
             }
-            Err(_) => continue,
+            result = read_codex_line(reader, line, deadline, shutdown, control) => {
+                if result.is_err() {
+                    if shutdown.is_cancelled() {
+                        return CodexTurnWait::Failed(EngineOperationError::Shutdown);
+                    }
+                    if control.is_cancelled() {
+                        return CodexTurnWait::Failed(EngineOperationError::Cancelled);
+                    }
+                    if Instant::now() >= deadline {
+                        return CodexTurnWait::Failed(EngineOperationError::Deadline);
+                    }
+                    return CodexTurnWait::Failed(EngineOperationError::ProviderRequestFailed);
+                }
+                *last_activity = Instant::now();
+                *frame_sequence += 1;
+                let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                if codex_runtime::is_codex_error_response(&trimmed)
+                    && codex_response_id_matches(&trimmed, turn_request_id)
+                {
+                    return CodexTurnWait::Failed(EngineOperationError::ProviderRequestFailed);
+                }
+                if let Some(turn_id) = codex_turn_id(&trimmed, turn_request_id) {
+                    return CodexTurnWait::Accepted(turn_id);
+                }
+                match codex_runtime::parse_frame(&trimmed, *frame_sequence) {
+                    Ok(event) => {
+                        if let Some(terminal) = codex_runtime::apply_event(
+                            event,
+                            run_id,
+                            tracker,
+                            active_turn,
+                            observations,
+                            *frame_sequence,
+                            usage,
+                        )
+                        .await
+                        {
+                            return CodexTurnWait::Terminal(terminal);
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
         }
     }
+}
+
+/// Extracts the JSON-RPC response id of one inbound line, if it carries one.
+///
+/// Method envelopes (notifications and server requests) carry no id and
+/// yield `None`; numeric and string id forms both correlate. Used to route
+/// correlated `turn/steer` replies to their pending delivery instead of
+/// misparsing a steer response as turn completion.
+fn codex_response_id(line: &str) -> Option<u64> {
+    if line.len() > super::codex::CODEX_MAX_FRAME_BYTES {
+        return None;
+    }
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("method").is_some() {
+        return None;
+    }
+    let id = value.get("id")?;
+    if let Some(numeric) = id.as_u64() {
+        return Some(numeric);
+    }
+    id.as_str()?.parse::<u64>().ok()
+}
+
+/// Services one codex steer delivery from the pump's owned stdin.
+///
+/// Writes the `turn/steer` verb with the actual provider turn id as
+/// `expectedTurnId` and registers the delivery ack for the correlated
+/// provider result: the ack resolves `Ok(())` only on the matching
+/// `turn/steer` result, and `Err(DeliveryFailed)` on a failed write or a
+/// correlated error reply (for example an `expectedTurnId` mismatch) —
+/// never success on error, and never a turn settlement either way. The
+/// write alone does not resolve: only the provider result counts.
+/// Progress while the ack is outstanding comes from split ownership — the
+/// dispatch Steer arm keeps draining observations while awaiting it, and
+/// this pump polls the steer receiver alongside its observation sends.
+/// A missing turn id rejects typed without inventing one; exactly one
+/// write attempt is made per delivery, never a retry of an ambiguous
+/// write.
+pub(crate) async fn service_codex_steer_delivery<W: tokio::io::AsyncWrite + Unpin>(
+    stdin: &mut W,
+    next_id: &mut u64,
+    thread_id: &str,
+    turn_id: Option<&str>,
+    delivery: SteerDelivery,
+    pending_acks: &mut HashMap<u64, oneshot::Sender<Result<(), SteerError>>>,
+) {
+    use super::codex as codex_runtime;
+
+    let Some(turn_id) = turn_id else {
+        let _ = delivery.ack.send(Err(SteerError::DeliveryFailed));
+        return;
+    };
+    let steer_id = *next_id;
+    match codex_runtime::steer_live_turn(stdin, next_id, thread_id, turn_id, &delivery.text).await
+    {
+        Ok(()) => {
+            pending_acks.insert(steer_id, delivery.ack);
+        }
+        Err(_) => {
+            let _ = delivery.ack.send(Err(SteerError::DeliveryFailed));
+        }
+    }
+}
+
+/// Routes one inbound line to its pending steer delivery, if correlated.
+///
+/// Returns true when the line answers an outstanding `turn/steer`
+/// request: a result envelope resolves the delivery successfully and an
+/// error envelope resolves it failed, and the line never becomes a turn
+/// event either way — a steer response is not turn completion, and a
+/// rejected follow-up fails only its own delivery, never the turn.
+/// Uncorrelated lines return false and keep the existing turn handling
+/// (notably the fail-fast on unrelated error envelopes).
+pub(crate) fn ack_codex_steer_response(
+    line: &str,
+    pending_acks: &mut HashMap<u64, oneshot::Sender<Result<(), SteerError>>>,
+) -> bool {
+    let Some(id) = codex_response_id(line) else {
+        return false;
+    };
+    let Some(ack) = pending_acks.remove(&id) else {
+        return false;
+    };
+    if super::codex::is_codex_error_response(line) {
+        let _ = ack.send(Err(SteerError::DeliveryFailed));
+    } else {
+        let _ = ack.send(Ok(()));
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2307,6 +2630,61 @@ async fn codex_pump_loop(
     observations: &mpsc::Sender<EngineObservation>,
     thread_id: &str,
     usage: Option<&super::codex::CodexUsageScope<'_>>,
+    steer_rx: &mut Option<mpsc::Receiver<SteerDelivery>>,
+    pending_acks: &mut HashMap<u64, oneshot::Sender<Result<(), SteerError>>>,
+    next_id: &mut u64,
+) -> CodexPumpOutcome {
+    let outcome = codex_pump_loop_inner(
+        reader,
+        stdin,
+        parts,
+        line,
+        run_id,
+        tracker,
+        active_turn,
+        frame_sequence,
+        last_activity,
+        inactivity,
+        deadline,
+        shutdown,
+        control,
+        observations,
+        thread_id,
+        usage,
+        steer_rx,
+        pending_acks,
+        next_id,
+    )
+    .await;
+    // Every exit settles unsettled steers typed: stop/cancel interrupts
+    // pending steer requests deterministically instead of leaving
+    // `steer_text` on an indefinite ack await.
+    let mut buffered: Vec<SteerDelivery> = Vec::new();
+    settle_steers_closed(steer_rx, &mut buffered, pending_acks);
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn codex_pump_loop_inner(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    stdin: &mut tokio::process::ChildStdin,
+    parts: &mut ChildParts,
+    line: &mut String,
+    run_id: &artisan_domain::RunId,
+    tracker: &mut super::codex::CodexPendingTracker,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    inactivity: Duration,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+    thread_id: &str,
+    usage: Option<&super::codex::CodexUsageScope<'_>>,
+    steer_rx: &mut Option<mpsc::Receiver<SteerDelivery>>,
+    pending_acks: &mut HashMap<u64, oneshot::Sender<Result<(), SteerError>>>,
+    next_id: &mut u64,
 ) -> CodexPumpOutcome {
     use super::codex as codex_runtime;
     use tokio::io::AsyncBufReadExt as _;
@@ -2365,6 +2743,31 @@ async fn codex_pump_loop(
                 }
                 let _ = parts.stderr_counter.pump().await;
             }
+            steer_msg = async {
+                match steer_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(delivery) = steer_msg else {
+                    continue;
+                };
+                *last_activity = Instant::now();
+                // Servicing writes the verb and registers the ack for the
+                // correlated provider result; the ack resolves only when
+                // that result arrives below. Progress meanwhile comes from
+                // split ownership: the dispatch arm drains observations
+                // while awaiting, and this loop keeps polling both sides.
+                service_codex_steer_delivery(
+                    stdin,
+                    next_id,
+                    thread_id,
+                    active_turn.as_deref(),
+                    delivery,
+                    pending_acks,
+                )
+                .await;
+            }
             read = reader.read_line(line) => {
                 match read {
                     Ok(0) => {
@@ -2375,6 +2778,13 @@ async fn codex_pump_loop(
                         *last_activity = Instant::now();
                         *frame_sequence += 1;
                         let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                        // Correlated `turn/steer` replies resolve their own
+                        // delivery and never become turn events: a steer
+                        // response is not turn completion, and a rejected
+                        // follow-up fails only its delivery, never the turn.
+                        if ack_codex_steer_response(&trimmed, pending_acks) {
+                            continue;
+                        }
                         // Late JSON-RPC error replies (for example a rejected
                         // steer/interrupt) never become turn events: fail the
                         // turn fast instead of ignoring them until the lease
@@ -2753,6 +3163,7 @@ async fn execute_claude_turn(
         mut authorize,
         observations,
         respond,
+        mut steer_rx,
     } = request;
     if prepared
         .send(Ok(PreparedSession::new(session_id.clone())))
@@ -2817,6 +3228,7 @@ async fn execute_claude_turn(
         &control,
         &observations,
         usage_scope.as_ref(),
+        &mut steer_rx,
     )
     .await;
     drop(stdin);
@@ -2936,6 +3348,37 @@ async fn forward_subagent_rows(
     }
 }
 
+/// Services one claude steer delivery from the pump's owned stdin.
+///
+/// Writes the stream-input fold line and resolves the delivery from the
+/// transport-write outcome: `Ok(())` means the exact bytes reached the
+/// provider stdin, never mere channel enqueue. The fold has no correlated
+/// provider result — fold timing stays CLI-owned — so the write is the
+/// ack. No observation emission precedes it. A closed stdin rejects
+/// typed. Exactly one write attempt is made per delivery, never a retry
+/// of an ambiguous write.
+pub(crate) async fn service_claude_steer_delivery<W: tokio::io::AsyncWrite + Unpin>(
+    stdin: &mut Option<W>,
+    session_id: &str,
+    delivery: SteerDelivery,
+) {
+    use super::claude as claude_runtime;
+
+    let wrote = match stdin.as_mut() {
+        Some(stdin) => {
+            claude_runtime::steer_live_turn(stdin, session_id, &delivery.text)
+                .await
+                .is_ok()
+        }
+        None => false,
+    };
+    let _ = delivery.ack.send(if wrote {
+        Ok(())
+    } else {
+        Err(SteerError::DeliveryFailed)
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn claude_pump_loop(
     reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
@@ -2954,6 +3397,56 @@ async fn claude_pump_loop(
     control: &Arc<CancelHandle>,
     observations: &mpsc::Sender<EngineObservation>,
     usage: Option<&super::claude::ClaudeUsageScope<'_>>,
+    steer_rx: &mut Option<mpsc::Receiver<SteerDelivery>>,
+) -> ClaudePumpOutcome {
+    let outcome = claude_pump_loop_inner(
+        reader,
+        stdin,
+        parts,
+        line,
+        run_id,
+        expected_session,
+        tracker,
+        active_turn,
+        frame_sequence,
+        last_activity,
+        inactivity,
+        deadline,
+        shutdown,
+        control,
+        observations,
+        usage,
+        steer_rx,
+    )
+    .await;
+    // Every exit settles queued steers typed: stop/cancel interrupts
+    // pending steer requests deterministically instead of leaving
+    // `steer_text` on an indefinite ack await.
+    let mut buffered: Vec<SteerDelivery> = Vec::new();
+    let mut pending: HashMap<u64, oneshot::Sender<Result<(), SteerError>>> = HashMap::new();
+    settle_steers_closed(steer_rx, &mut buffered, &mut pending);
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn claude_pump_loop_inner(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    stdin: &mut Option<tokio::process::ChildStdin>,
+    parts: &mut ChildParts,
+    line: &mut String,
+    run_id: &artisan_domain::RunId,
+    expected_session: &str,
+    tracker: &mut super::claude::ClaudePendingTracker,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    inactivity: Duration,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+    usage: Option<&super::claude::ClaudeUsageScope<'_>>,
+    steer_rx: &mut Option<mpsc::Receiver<SteerDelivery>>,
 ) -> ClaudePumpOutcome {
     use super::claude as claude_runtime;
     use tokio::io::AsyncBufReadExt as _;
@@ -3037,6 +3530,21 @@ async fn claude_pump_loop(
                     };
                 }
                 let _ = parts.stderr_counter.pump().await;
+            }
+            steer_msg = async {
+                match steer_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(delivery) = steer_msg else {
+                    continue;
+                };
+                *last_activity = Instant::now();
+                // Servicing resolves from the transport write alone and
+                // touches neither the observation channel nor the provider
+                // read side, so a suspended dispatch drain cannot wedge it.
+                service_claude_steer_delivery(stdin, expected_session, delivery).await;
             }
             status = parts.child.wait(), if exited.is_none() => {
                 match status {
@@ -3406,6 +3914,10 @@ async fn execute_grok_turn(
         mut authorize,
         observations,
         respond,
+        // Grok carries no steer verb: admit never wires a channel here, so
+        // every steer attempt resolves `Unsupported` without prompt-state
+        // plumbing.
+        steer_rx: _,
     } = request;
     if prepared
         .send(Ok(PreparedSession::new(session.as_str().to_owned())))
@@ -4031,6 +4543,7 @@ async fn execute_hermes_turn(
         mut authorize,
         observations,
         respond,
+        mut steer_rx,
     } = request;
     if prepared
         .send(Ok(PreparedSession::new(opened.durable_session_id.clone())))
@@ -4110,6 +4623,7 @@ async fn execute_hermes_turn(
         &control,
         &observations,
         &mut parts,
+        &mut steer_rx,
     )
     .await;
     let close_scope = hermes_runtime::RequestScope {
@@ -4147,6 +4661,35 @@ enum HermesPumpOutcome {
     Failed(EngineOperationError),
 }
 
+/// Services one hermes steer delivery over the pump-owned gateway client.
+///
+/// Issues the `session.steer` request under the pump's scope and resolves
+/// the delivery from the correlated gateway result at once, returning the
+/// interleaved events for the pump to project afterwards. The gateway
+/// request round-trip buffers interleaved events client-side without
+/// touching the observation channel, and the ack precedes projection while
+/// the dispatch arm keeps draining, so a provider streaming past channel
+/// capacity before answering wedges neither side. A failed or timed-out
+/// request resolves typed failure with exactly one attempt — never a
+/// retry of an ambiguous write.
+pub(crate) async fn service_hermes_steer_delivery(
+    client: &mut super::hermes::GatewayClient,
+    runtime_session: &str,
+    delivery: SteerDelivery,
+    scope: &super::hermes::RequestScope<'_>,
+) -> Vec<super::hermes::HermesEvent> {
+    match super::hermes::steer_live_turn(client, runtime_session, &delivery.text, scope).await {
+        Ok(events) => {
+            let _ = delivery.ack.send(Ok(()));
+            events
+        }
+        Err(_) => {
+            let _ = delivery.ack.send(Err(SteerError::DeliveryFailed));
+            Vec::new()
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn hermes_pump_loop(
     client: &mut super::hermes::GatewayClient,
@@ -4166,6 +4709,58 @@ async fn hermes_pump_loop(
     control: &Arc<CancelHandle>,
     observations: &mpsc::Sender<EngineObservation>,
     parts: &mut ChildParts,
+    steer_rx: &mut Option<mpsc::Receiver<SteerDelivery>>,
+) -> HermesPumpOutcome {
+    let outcome = hermes_pump_loop_inner(
+        client,
+        normalizer,
+        tracker,
+        settings,
+        run_id,
+        thread_id,
+        runtime_session,
+        early_events,
+        active_turn,
+        frame_sequence,
+        last_activity,
+        inactivity,
+        deadline,
+        shutdown,
+        control,
+        observations,
+        parts,
+        steer_rx,
+    )
+    .await;
+    // Every exit settles queued steers typed: stop/cancel interrupts
+    // pending steer requests deterministically instead of leaving
+    // `steer_text` on an indefinite ack await.
+    let mut buffered: Vec<SteerDelivery> = Vec::new();
+    let mut pending: HashMap<u64, oneshot::Sender<Result<(), SteerError>>> = HashMap::new();
+    settle_steers_closed(steer_rx, &mut buffered, &mut pending);
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn hermes_pump_loop_inner(
+    client: &mut super::hermes::GatewayClient,
+    normalizer: &mut super::hermes::HermesNormalizer,
+    tracker: &mut super::hermes::HermesPendingTracker,
+    settings: &super::hermes::HermesSettings,
+    run_id: &artisan_domain::RunId,
+    thread_id: Option<&artisan_domain::ThreadId>,
+    runtime_session: &str,
+    early_events: Vec<super::hermes::HermesEvent>,
+    active_turn: &mut Option<String>,
+    frame_sequence: &mut u64,
+    last_activity: &mut Instant,
+    inactivity: Duration,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    observations: &mpsc::Sender<EngineObservation>,
+    parts: &mut ChildParts,
+    steer_rx: &mut Option<mpsc::Receiver<SteerDelivery>>,
 ) -> HermesPumpOutcome {
     use super::hermes as hermes_runtime;
 
@@ -4250,6 +4845,60 @@ async fn hermes_pump_loop(
                     return HermesPumpOutcome::Terminal(TerminalState::Failed);
                 }
                 let _ = parts.stderr_counter.pump().await;
+            }
+            steer_msg = async {
+                match steer_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(delivery) = steer_msg else {
+                    continue;
+                };
+                *last_activity = Instant::now();
+                // Servicing resolves the ack from the gateway round-trip
+                // before projecting interleaved events, so a suspended
+                // dispatch drain cannot wedge the waiter: the ack is already
+                // home while the pump still delivers every event in order.
+                let scope = hermes_runtime::RequestScope {
+                    deadline,
+                    cancel: control,
+                    shutdown,
+                };
+                let events = service_hermes_steer_delivery(
+                    client,
+                    runtime_session,
+                    delivery,
+                    &scope,
+                )
+                .await;
+                let mut terminal = None;
+                for event in &events {
+                    *frame_sequence = frame_sequence.wrapping_add(1);
+                    *last_activity = Instant::now();
+                    if let Some(state) = hermes_runtime::apply_observations(
+                        normalizer,
+                        event,
+                        hermes_runtime::ApplyContext {
+                            run_id,
+                            thread_id,
+                            settings,
+                            runtime_session_id: runtime_session,
+                            tracker,
+                            active_turn,
+                            observations,
+                            frame_sequence: *frame_sequence,
+                        },
+                    )
+                    .await
+                    {
+                        terminal = Some(state);
+                        break;
+                    }
+                }
+                if let Some(state) = terminal {
+                    return HermesPumpOutcome::Terminal(state);
+                }
             }
             event = client.next_event(control, shutdown) => {
                 match event {
@@ -4486,6 +5135,10 @@ async fn create_configured_session(
         authorize,
         observations,
         respond,
+        // OpenCode2 carries no steer verb: admit never wires a channel here,
+        // so every steer attempt resolves `Unsupported`. The binding passes
+        // through the reconstructions below unchanged.
+        steer_rx,
     } = request;
     let artisan_domain::EngineSelection::OpenCode2(selection) = input.settings.config().selection()
     else {

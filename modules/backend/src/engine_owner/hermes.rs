@@ -1587,29 +1587,31 @@ async fn set_session_permission(
 
 /// Sends follow-up text to a live turn (`session.steer`).
 ///
-/// Test-only until dispatcher steer wiring lands: proves the steer verb
-/// against the fixture gateway without disturbing the authorize-once
-/// production flow.
+/// Production verb behind [`AcceptedTurn::steer_text`](super::operation::AcceptedTurn::steer_text):
+/// the pump issues the request over its owned gateway client and the
+/// correlated gateway result resolves the delivery. Interleaved gateway
+/// events ride back alongside the result so the pump can project them in
+/// order. Proves the steer verb against the fixture gateway without
+/// disturbing the authorize-once production flow.
 ///
 /// # Errors
 ///
 /// Returns [`HermesTurnError`] when the gateway fails or `scope` expires.
-#[cfg(test)]
 pub(crate) async fn steer_live_turn(
     client: &mut GatewayClient,
     runtime_session_id: &str,
     text: &str,
     scope: &RequestScope<'_>,
-) -> Result<(), HermesTurnError> {
+) -> Result<Vec<HermesEvent>, HermesTurnError> {
     let params = serde_json::json!({
         "session_id": runtime_session_id,
         "text": text,
     });
-    client
+    let (_, events) = client
         .request("session.steer", params, scope)
         .await
         .map_err(|_| HermesTurnError::StreamFailed)?;
-    Ok(())
+    Ok(events)
 }
 
 /// Interrupts a live turn (`session.interrupt`) before cancelling the driver.

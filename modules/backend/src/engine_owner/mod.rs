@@ -1300,6 +1300,24 @@ impl EngineOwner {
         let (respond, receiver) = oneshot::channel();
         let (observations, observation_receiver) = mpsc::channel(observation_capacity);
         let run_id = input.run_id.clone();
+        // One steer channel pair per turn for steer-capable engines
+        // (codex/claude/hermes) ONLY. The receiver travels into the pump
+        // input; the sender travels with `AcceptedTurn` and is retained
+        // across steers behind `steer_text`. Cursor/grok/opencode2 turns
+        // never carry a sender, so every steer attempt on them resolves
+        // `Unsupported` without prompt-state plumbing.
+        let steer_capable = matches!(
+            input.launch,
+            InternalLaunch::Codex(_)
+                | InternalLaunch::Claude(_)
+                | InternalLaunch::Hermes(_)
+        );
+        let (steer_tx, steer_rx) = if steer_capable {
+            let (sender, receiver) = mpsc::channel(operation::STEER_CHANNEL_CAPACITY);
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
         let job = Job::Turn {
             input: Box::new(input),
             deadline,
@@ -1308,6 +1326,7 @@ impl EngineOwner {
             authorize: authorize_receiver,
             observations,
             respond,
+            steer_rx,
         };
         match self.jobs.try_send(job) {
             Ok(()) => Ok(operation::AcceptedTurn::from_parts(
@@ -1317,6 +1336,7 @@ impl EngineOwner {
                 observation_receiver,
                 receiver,
                 control,
+                steer_tx,
             )),
             Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),

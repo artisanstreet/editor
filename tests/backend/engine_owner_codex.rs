@@ -45,8 +45,9 @@ use super::codex::{
 };
 use super::observation::{EngineObservation, TerminalState};
 use super::operation::{
-    AcceptedTurn, EngineOperationError, codex_response_id_matches, codex_resumed_thread_id,
-    codex_thread_id, codex_turn_id, is_codex_result_for,
+    AcceptedTurn, EngineOperationError, SteerDelivery, SteerError, ack_codex_steer_response,
+    codex_response_id_matches, codex_resumed_thread_id, codex_thread_id, codex_turn_id,
+    is_codex_result_for, service_codex_steer_delivery,
 };
 use super::{EngineCodexTurnInput, EngineContinuation, EngineOwner, EngineOwnerShutdown};
 use crate::native_run_dispatch::{binding_bytes_vec, binding_matches_bytes};
@@ -484,6 +485,223 @@ async fn question_answer_and_steer_verbs_shape_lines() {
         .expect("interrupt readable");
     let interrupt: serde_json::Value = serde_json::from_str(line.trim()).expect("interrupt json");
     assert_eq!(interrupt["method"], "turn/interrupt");
+}
+
+#[test]
+fn steer_ack_routing_resolves_typed_never_as_turn_event() {
+    use std::collections::HashMap;
+
+    // A correlated result resolves the delivery successfully and the line
+    // is consumed: it must never reach the turn-event pipeline as a
+    // completion.
+    let mut pending: HashMap<u64, tokio::sync::oneshot::Sender<Result<(), SteerError>>> =
+        HashMap::new();
+    let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+    pending.insert(41, ack_tx);
+    assert!(ack_codex_steer_response(
+        r#"{"id":41,"result":{"ok":true}}"#,
+        &mut pending
+    ));
+    assert!(pending.is_empty());
+    assert_eq!(
+        ack_rx.try_recv(),
+        Ok(Ok(())),
+        "correlated result acks the steer"
+    );
+
+    // A correlated error — for example an `expectedTurnId` mismatch
+    // rejection — resolves the SAME delivery as typed failure, never as
+    // success, and still never as a turn event.
+    let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+    pending.insert(42, ack_tx);
+    assert!(ack_codex_steer_response(
+        r#"{"id":42,"error":{"code":-32600,"message":"Invalid request: wrong expectedTurnId"}}"#,
+        &mut pending
+    ));
+    assert!(pending.is_empty());
+    assert_eq!(
+        ack_rx.try_recv(),
+        Ok(Err(SteerError::DeliveryFailed)),
+        "provider rejection fails typed, never success"
+    );
+
+    // String-form ids correlate exactly like numeric ones.
+    let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+    pending.insert(43, ack_tx);
+    assert!(ack_codex_steer_response(
+        r#"{"id":"43","result":{"ok":true}}"#,
+        &mut pending
+    ));
+    assert_eq!(ack_rx.try_recv(), Ok(Ok(())));
+
+    // Anything uncorrelated keeps the existing turn handling: unknown ids,
+    // method notifications, and error envelopes for other requests all
+    // return false and leave pending entries intact.
+    let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+    pending.insert(44, ack_tx);
+    assert!(!ack_codex_steer_response(
+        r#"{"id":7,"result":{"turn":{"id":"turn-9"}}}"#,
+        &mut pending
+    ));
+    assert!(!ack_codex_steer_response(
+        r#"{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}"#,
+        &mut pending
+    ));
+    assert!(!ack_codex_steer_response(
+        r#"{"id":9,"error":{"code":-32600,"message":"other request failed"}}"#,
+        &mut pending
+    ));
+    assert_eq!(pending.len(), 1, "uncorrelated lines never disturb pending");
+}
+
+#[tokio::test]
+async fn steer_servicing_registers_ack_without_resolving_on_write() {
+    // The write alone must not resolve: the ack waits for the correlated
+    // provider result even though the exact `turn/steer` bytes (with the
+    // actual provider turn id as `expectedTurnId`) already reached the
+    // transport. A withheld provider reply leaves the delivery pending,
+    // never spuriously successful.
+    let (mut pump_end, provider_end) = tokio::io::duplex(65_536);
+    let mut provider_end = BufReader::new(provider_end);
+    let mut pending = std::collections::HashMap::new();
+    let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+    let mut next_id = 41u64;
+    service_codex_steer_delivery(
+        &mut pump_end,
+        &mut next_id,
+        "t-1",
+        Some("turn-1"),
+        SteerDelivery::new("req-steer-1".to_owned(), "follow up".to_owned(), ack_tx),
+        &mut pending,
+    )
+    .await;
+    assert_eq!(next_id, 42, "one request id consumed per steer");
+    assert_eq!(pending.len(), 1, "ack registered for the correlated result");
+    assert!(
+        ack_rx.try_recv().is_err(),
+        "withheld provider reply leaves the ack pending"
+    );
+    let mut line = String::new();
+    provider_end
+        .read_line(&mut line)
+        .await
+        .expect("steer bytes readable");
+    let steer: serde_json::Value = serde_json::from_str(line.trim()).expect("steer json");
+    assert_eq!(steer["id"], 41);
+    assert_eq!(steer["method"], "turn/steer");
+    assert_eq!(steer["params"]["expectedTurnId"], "turn-1");
+    assert_eq!(steer["params"]["threadId"], "t-1");
+
+    // The correlated result then resolves the registered ack.
+    assert!(ack_codex_steer_response(
+        r#"{"id":41,"result":{"ok":true}}"#,
+        &mut pending
+    ));
+    assert_eq!(
+        ack_rx.try_recv(),
+        Ok(Ok(())),
+        "correlated result settles the delivery"
+    );
+}
+
+#[tokio::test]
+async fn steer_servicing_rejects_missing_turn_id_without_inventing_one() {
+    // Pre-turn-start input with no known provider id rejects typed and
+    // consumes no request id: the pump never fabricates an `expectedTurnId`.
+    let (mut pump_end, _provider_end) = tokio::io::duplex(65_536);
+    let mut pending = std::collections::HashMap::new();
+    let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+    let mut next_id = 41u64;
+    service_codex_steer_delivery(
+        &mut pump_end,
+        &mut next_id,
+        "t-1",
+        None,
+        SteerDelivery::new("req-steer-2".to_owned(), "follow up".to_owned(), ack_tx),
+        &mut pending,
+    )
+    .await;
+    assert_eq!(next_id, 41, "rejected steer allocates nothing");
+    assert!(pending.is_empty());
+    assert_eq!(
+        ack_rx.try_recv(),
+        Ok(Err(SteerError::DeliveryFailed)),
+        "missing turn id fails typed"
+    );
+}
+
+#[tokio::test]
+async fn steer_text_without_channel_is_typed_unsupported() {
+    // Cursor/grok/opencode2 turns never carry a sender: the attempt
+    // resolves `Unsupported` without touching any pump or hanging.
+    let (_prepared_tx, prepared_rx) =
+        tokio::sync::oneshot::channel::<Result<
+            super::operation::PreparedSession,
+            EngineOperationError,
+        >>();
+    let (authorize_tx, authorize_rx) = tokio::sync::oneshot::channel::<()>();
+    let (_obs_tx, obs_rx) = mpsc::channel(8);
+    let (_respond_tx, respond_rx) =
+        tokio::sync::oneshot::channel::<Result<
+            super::operation::EngineTurnResult,
+            EngineOperationError,
+        >>();
+    let control = Arc::new(CancelHandle::new());
+    let turn = AcceptedTurn::from_parts(
+        run_id(),
+        prepared_rx,
+        authorize_tx,
+        obs_rx,
+        respond_rx,
+        control,
+        None,
+    );
+    let _ = authorize_rx;
+    assert_eq!(
+        turn.steer_text("req-unsupported", "follow up").await,
+        Err(SteerError::Unsupported)
+    );
+}
+
+#[tokio::test]
+async fn steer_text_future_holds_no_turn_borrow() {
+    // Frozen split-borrow shape (§1/§7): the dispatch arm builds the
+    // steer future, then drains observations through `&mut turn` while
+    // driving it. This compiles only if the future owns its clones and
+    // retains no `turn` borrow — precisely what the `use<>` capture on
+    // the return position pins. `require_send_static` additionally pins
+    // the frozen `Send + 'static` bounds at the call site.
+    fn require_send_static<T: Send + 'static>(value: T) -> T {
+        value
+    }
+    let (_prepared_tx, prepared_rx) =
+        tokio::sync::oneshot::channel::<Result<
+            super::operation::PreparedSession,
+            EngineOperationError,
+        >>();
+    let (authorize_tx, _authorize_rx) = tokio::sync::oneshot::channel::<()>();
+    let (_obs_tx, obs_rx) = mpsc::channel(8);
+    let (_respond_tx, respond_rx) =
+        tokio::sync::oneshot::channel::<Result<
+            super::operation::EngineTurnResult,
+            EngineOperationError,
+        >>();
+    let control = Arc::new(CancelHandle::new());
+    let mut turn = AcceptedTurn::from_parts(
+        run_id(),
+        prepared_rx,
+        authorize_tx,
+        obs_rx,
+        respond_rx,
+        control,
+        None,
+    );
+    let pending = require_send_static(turn.steer_text("req-borrow", "follow up"));
+    // Mutable drain-side use BEFORE the first poll: borrows `turn`
+    // mutably while the future is alive but unpolled.
+    turn.authorize()
+        .expect("mutable turn use alongside the live future");
+    assert_eq!(pending.await, Err(SteerError::Unsupported));
 }
 
 #[tokio::test]
