@@ -1778,6 +1778,7 @@ mod tests {
             view.update(app, |probe, probe_cx| {
                 let intents = probe
                     .screen
+                    .read(probe_cx)
                     .host()
                     .read(probe_cx)
                     .surface()

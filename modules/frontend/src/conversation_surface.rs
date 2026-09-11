@@ -6682,7 +6682,7 @@ mod tests {
         // same 768 px column the composer card keeps.
         const TURN_A: &str = "artisan-conversation-surface-turn-turn_a";
         let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
-            ConversationSurface::new(navigator_scene(), ThemeMode::Dark, surface_cx)
+            ConversationSurface::new(tall_navigator_scene(), ThemeMode::Dark, surface_cx)
         });
         cx.simulate_resize(size(px(1200.0), px(800.0)));
         settle(cx);
