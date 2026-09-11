@@ -33,7 +33,7 @@ use artisan_ui::button::{
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::collapsible::Collapsible;
 use artisan_ui::input_state::TextInputState;
-use artisan_ui::markdown_renderer::MarkdownRenderer;
+use artisan_ui::markdown_renderer::{MarkdownBodyTone, MarkdownRenderer};
 use artisan_ui::motion::{MotionCurve, MotionDuration, MotionPlan, MotionPolicy, MotionRecipe};
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::selectable_text::SelectableText;
@@ -44,8 +44,8 @@ use artisan_ui::theme::{
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, ElementId, Entity, Filter, FocusHandle,
-    FontWeight, IntoElement, Modifiers, Render, ScrollAnchor, ScrollHandle, SharedString, Stateful,
-    Window, div,
+    FontWeight, IntoElement, Modifiers, Render, ScrollAnchor, ScrollHandle, ScrollWheelEvent,
+    SharedString, Stateful, Window, div, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -64,8 +64,8 @@ use crate::conversation_scene::{
 };
 use crate::conversation_scroll_position::conversation_is_following;
 use crate::conversation_turn_navigator::{
-    ConversationSnapshotInput, ConversationTurnInput, LoadedConversationItemInput,
-    conversation_turn_markers,
+    ConversationSnapshotInput, ConversationTurnInput, ConversationTurnOffset,
+    LoadedConversationItemInput, active_conversation_turn, conversation_turn_markers,
 };
 use crate::engine_approve_ui::{
     APPROVAL_DENY_LABEL, APPROVAL_DENYING_LABEL, AnswerFlight, AnswerKind, AnswerPairing,
@@ -75,6 +75,7 @@ use crate::engine_approve_ui::{
 };
 use crate::conversation_turn_footer_policy::{COPY_RESPONSE_LABEL, TURN_ACTIONS_LABEL};
 use crate::engine_observation_state::EngineObservationState;
+use crate::native_model_selector::PickerScrollState;
 use crate::native_transport_service::{CommandSendError, NativeTransportCommand};
 
 /// Stable debug selector for the conversation surface root.
@@ -93,6 +94,9 @@ pub const TURN_NAVIGATOR_SELECTOR: &str = "artisan-conversation-surface-turn-nav
 /// scene or item identity is appended after a `-` separator.
 pub const TURN_NAVIGATOR_CONTROL_PREFIX: &str =
     "artisan-conversation-surface-turn-navigator-control";
+
+/// Stable debug selector for the navigator's own capped label list.
+pub const TURN_NAVIGATOR_LIST_SELECTOR: &str = "artisan-conversation-surface-turn-navigator-list";
 
 /// Alias for callers that use the shorter root-selector vocabulary.
 pub const ROOT_SELECTOR: &str = CONVERSATION_SURFACE_SELECTOR;
@@ -767,6 +771,19 @@ pub struct ConversationSurface {
     /// the tick column paints, so full message texts never float beside the
     /// transcript.
     navigator_expanded: bool,
+    /// Dedicated scroll handle for the navigator's own capped label list.
+    ///
+    /// Long threads scroll the rail independently of the transcript through
+    /// the same bounded tracking the thread screen uses for viewports.
+    navigator_scroll: ScrollHandle,
+    /// Bounded wheel-smoothing state for the transcript scroll offset.
+    ///
+    /// Reuses the model picker's [`PickerScrollState`] verbatim: discrete
+    /// wheel ticks accumulate into one target and settle through bounded
+    /// interpolation frames instead of jumping per tick.
+    transcript_scroll: PickerScrollState,
+    /// Whether a transcript smoothing frame is already scheduled.
+    transcript_scroll_frame_scheduled: bool,
     /// Host-mirrored frame time in millis for live Thinking/Working elapsed.
     ///
     /// This is a paint-time mirror only: the surface never reads a clock and
@@ -930,6 +947,37 @@ struct NavigatorMarker {
     label: String,
     /// Exact scroll target; identity only, never body text.
     target: ConversationSurfaceTarget,
+}
+
+/// Window-local rail geometry for the turn navigator.
+///
+/// The rail centers vertically in the card from live measurement: both
+/// windows sharing one surface converge independently, exactly like the
+/// transcript end-space height.
+#[derive(Clone, Copy, Debug, Default)]
+struct TurnNavigatorMetrics {
+    /// Rail top offset in px within the surface root.
+    top_px: f32,
+    /// Viewport height in px at the last measurement.
+    viewport_px: f32,
+}
+
+/// Returns whether one work group paints actual visible trace content.
+///
+/// This is the native `has_visible_details` trace predicate
+/// (`work_session_disclosure`): session-title markers and empty bodies are
+/// signals, not content, so a `Thought for …` group with no rows paints no
+/// disclosure control at all instead of a blank collapsible.
+fn work_group_has_visible_details(block: &WorkGroupBlock) -> bool {
+    ordered_detail_rows(block).iter().any(|(_, row)| {
+        let body = match row {
+            DetailRow::Assistant { body, .. } | DetailRow::Activity { body, .. } => body,
+            DetailRow::Compaction { summary, .. } => summary,
+            DetailRow::NativeFact { text, .. } => text,
+            DetailRow::SessionTitle { .. } => return false,
+        };
+        !body.trim().is_empty()
+    })
 }
 
 /// Returns the stable focus-map key for one navigator target
@@ -1127,6 +1175,9 @@ impl ConversationSurface {
             scroll_anchor_paint_token: None,
             navigator_focus: HashMap::new(),
             navigator_expanded: false,
+            navigator_scroll: ScrollHandle::new(),
+            transcript_scroll: PickerScrollState::default(),
+            transcript_scroll_frame_scheduled: false,
             active_now_ms: None,
             status_motion: MotionPolicy::Full,
             footer_mirrors: HashMap::new(),
@@ -1755,6 +1806,108 @@ impl ConversationSurface {
         true
     }
 
+    /// Handles one transcript wheel event with the model picker's smoothing.
+    ///
+    /// The content wrapper is the first bubble listener inside the scroll
+    /// container, so stopping propagation here keeps the viewport's built-in
+    /// immediate jump from applying on top. Precise trackpad deltas and
+    /// reduced motion take the direct path; coarse wheel ticks accumulate
+    /// into one bounded target and settle through interpolation frames.
+    fn handle_transcript_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        let delta = f32::from(event.delta.pixel_delta(window.line_height()).y);
+        if delta.abs() <= f32::EPSILON {
+            return;
+        }
+        let offset = self.scroll_handle.offset();
+        let current = f32::from(offset.y);
+        let maximum = f32::from(self.scroll_handle.max_offset().y).max(0.0);
+        if event.delta.precise() || cx.reduce_motion() {
+            let next = (current + delta).clamp(-maximum, 0.0);
+            self.scroll_handle.set_offset(point(offset.x, px(next)));
+            self.transcript_scroll.cancel_to(next, maximum);
+            cx.notify();
+            return;
+        }
+        self.transcript_scroll.push(current, delta, maximum);
+        self.schedule_transcript_scroll_frame(window, cx);
+    }
+
+    /// Schedules one transcript smoothing frame while a target is outstanding.
+    fn schedule_transcript_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.transcript_scroll.active() || self.transcript_scroll_frame_scheduled {
+            return;
+        }
+        self.transcript_scroll_frame_scheduled = true;
+        cx.on_next_frame(window, |surface, window, cx| {
+            surface.advance_transcript_scroll(window, cx);
+        });
+    }
+
+    /// Applies one bounded smoothing step toward the wheel target.
+    fn advance_transcript_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.transcript_scroll_frame_scheduled = false;
+        let offset = self.scroll_handle.offset();
+        let maximum = f32::from(self.scroll_handle.max_offset().y).max(0.0);
+        if let Some(next) = self.transcript_scroll.step(f32::from(offset.y), maximum) {
+            self.scroll_handle.set_offset(point(offset.x, px(next)));
+            cx.notify();
+        }
+        self.schedule_transcript_scroll_frame(window, cx);
+    }
+
+    /// Selects the reader's current marker from painted turn geometry.
+    ///
+    /// Pure over its inputs: turn roots arrive in scene order with the
+    /// spacer last. A turn counts as reached once its top passes the
+    /// reference 96 px threshold below the viewport top; the last reached
+    /// marker-bearing turn wins, else the first marker. Callers keep the
+    /// result in window-local state with a change guard, so two windows
+    /// sharing one surface converge independently and never ping-pong.
+    fn navigator_active_for_geometry(
+        scene: &ConversationScene,
+        scroll_handle: &ScrollHandle,
+        children_bounds: &[gpui::Bounds<gpui::Pixels>],
+        window: &Window,
+    ) -> Option<String> {
+        let markers = loaded_turn_navigator_markers(scene);
+        if markers.is_empty() {
+            return None;
+        }
+        let scroll_top = -f64::from(scroll_handle.offset().y);
+        let element_offset = f64::from(window.element_offset().y);
+        let mut reached: Vec<(String, f64)> = Vec::new();
+        for (index, turn) in scene.turn_scenes().iter().enumerate() {
+            let Some(bounds) = children_bounds.get(index) else {
+                continue;
+            };
+            let marker = turn.blocks().iter().find_map(|block| match block {
+                TurnBlock::UserMessage(message) => {
+                    item_id_for_scene_id(&message.id).map(|id| id.as_str().to_owned())
+                }
+                _ => None,
+            });
+            let Some(slug) = marker else { continue };
+            if !markers
+                .iter()
+                .any(|marker| navigator_target_slug(&marker.target) == slug)
+            {
+                continue;
+            }
+            reached.push((slug, f64::from(bounds.origin.y) - element_offset));
+        }
+        let offsets: Vec<ConversationTurnOffset<'_>> = reached
+            .iter()
+            .map(|(id, top)| ConversationTurnOffset::new(id.as_str(), *top))
+            .collect();
+        active_conversation_turn(&offsets).map(str::to_owned)
+    }
+
     /// Measures end-space height from live prepaint geometry, if measurable.
     ///
     /// Pure over its inputs: `children_bounds` holds every transcript child
@@ -2295,10 +2448,15 @@ impl ConversationSurface {
         _anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         // Parity with conversation-message.svelte assistant branch: chromeless
-        // markdown at prose width, no card, no title.
-        let rendered_body =
-            self.markdown_renderer
-                .render_source(&block.body, *theme, selector.clone());
+        // markdown at prose width, no card, no title. The reply body reads in
+        // the foreground token per product direction; detail prose keeps the
+        // reference muted body.
+        let rendered_body = self.markdown_renderer.render_source_with_tone(
+            &block.body,
+            *theme,
+            selector.clone(),
+            MarkdownBodyTone::Foreground,
+        );
         div()
             .w_full()
             .max_w(px(672.0))
@@ -2371,8 +2529,13 @@ impl ConversationSurface {
         // Controlled state is never overridden: Closed hides through the
         // collapsible in every case, and the toggle always flows through the
         // existing disclosure action. Uncontrolled groups always show their
-        // items, exactly like the previous static branch did.
-        let controlled = group_id.is_some() && block.disclosure.is_some();
+        // items, exactly like the previous static branch did. Control
+        // additionally requires actual visible trace content: an empty
+        // `Thought for …` group paints its header with no chevron at all,
+        // never a blank collapsible.
+        let controlled = group_id.is_some()
+            && block.disclosure.is_some()
+            && work_group_has_visible_details(block);
         let open = !controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed));
         let items_mounted =
             !controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed));
@@ -4223,15 +4386,25 @@ impl Render for ConversationSurface {
         // viewports, and a shared scalar could never converge for both.
         let end_space = window.use_state(cx, |_, _| TRANSCRIPT_END_SPACE_PX);
         let end_space_px = *end_space.read(cx);
+        // The reader's current navigator marker is geometry-derived like
+        // end space, so it lives in the same window-local state: two
+        // windows sharing one surface converge independently.
+        let navigator_active = window.use_state(cx, |_, _| None::<String>);
         // Reference rhythm keeps 32 px (`gap-8`) between turn groups; the
         // settled footer's absolute reveal lives inside that room instead of
         // overlapping the next turn. No per-turn pad is added, so unsettled
         // turns carry no phantom gap.
+        let wheel_surface = entity.downgrade();
         let mut transcript = div()
             .w_full()
             .flex()
             .flex_col()
-            .gap(theme.spacing.steps(8.0));
+            .gap(theme.spacing.steps(8.0))
+            .on_scroll_wheel(move |event, window, cx| {
+                let _ = wheel_surface.update(cx, |surface, surface_cx| {
+                    surface.handle_transcript_wheel(event, window, surface_cx);
+                });
+            });
         let previous_anchors = std::mem::take(&mut self.scroll_anchors);
         let mut rendered_anchors = Vec::new();
         self.sync_footer_focus(&mut *window, cx);
@@ -4282,6 +4455,7 @@ impl Render for ConversationSurface {
         self.scroll_anchor_paint_token = Some(paint_token.clone());
         let surface = entity.downgrade();
         let end_space_state = end_space.clone();
+        let navigator_active_state = navigator_active.clone();
         // Painted custody comes from the real prepaint boundary. GPUI writes
         // each retained anchor origin during Div prepaint, and this listener
         // runs after the transcript children are prepainted. A defer marker
@@ -4318,6 +4492,24 @@ impl Render for ConversationSurface {
                     if changed {
                         cx.notify();
                     }
+                }
+
+                // Reader-position tracking rides the same prepaint boundary
+                // into the same window-local state discipline: per-window
+                // geometry in, change-guarded notify out.
+                let active = ConversationSurface::navigator_active_for_geometry(
+                    &surface.scene,
+                    &surface.scroll_handle,
+                    &children_bounds,
+                    window,
+                );
+                let active_changed = navigator_active_state.update(cx, |value, _| {
+                    let changed = *value != active;
+                    *value = active;
+                    changed
+                });
+                if active_changed {
+                    cx.notify();
                 }
 
                 let mut newly_painted = false;
@@ -4389,7 +4581,13 @@ impl Render for ConversationSurface {
                     .child(button),
             );
         }
-        if let Some(rail) = self.render_turn_navigator(&entity, &theme, window, cx) {
+        if let Some(rail) = self.render_turn_navigator(
+            &entity,
+            &theme,
+            window,
+            cx,
+            navigator_active.read(cx).clone(),
+        ) {
             root = root.child(rail);
         }
         root
@@ -4521,8 +4719,13 @@ impl ConversationSurface {
         theme: &ArtisanTheme,
         window: &mut Window,
         cx: &mut Context<Self>,
+        navigator_active: Option<String>,
     ) -> Option<AnyElement> {
         let markers = loaded_turn_navigator_markers(&self.scene);
+        // Window-local rail geometry, measured live: two windows sharing one
+        // surface center independently, exactly like end-space height.
+        let navigator_metrics = window.use_state(cx, |_, _| TurnNavigatorMetrics::default());
+        let metrics = *navigator_metrics.read(cx);
         // Prune focus handles whose targets left the scene on every render,
         // even when the replacement scene has no markers at all. A focused
         // control that disappears returns focus to the transcript.
@@ -4562,129 +4765,165 @@ impl ConversationSurface {
                 .is_some_and(|handle| handle.is_focused(window))
         });
         let expanded = self.navigator_expanded || focus_expanded;
-        // The reference lights the turn the reader is at. Viewport-turn
-        // tracking stays a host extension; the latest marker is the tail the
-        // reader follows, so it carries the active tick.
-        let active_index = markers.len().checked_sub(1);
+        // The lit marker is the turn the reader is at, tracked from painted
+        // geometry against the reference 96 px threshold — never the tail.
         let navigator_surface = entity.downgrade();
-        let content = if expanded {
-            // Expanded panel at inspector width with the message labels. No
-            // shader glass or scale entrance here: existing GPUI motion only.
-            let mut panel = div()
-                .flex()
-                .flex_col()
-                .gap(theme.spacing.steps(1.0))
-                .w(px(288.0))
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(theme.colors.border.to_paint())
-                .bg(theme.colors.popover.to_paint())
-                .p(px(8.0));
-            for marker in &markers {
-                let key = navigator_focus_key(&marker.target);
-                let Some(handle) = self.navigator_focus.get(&key).cloned() else {
-                    continue;
-                };
-                let target = marker.target.clone();
-                let control_selector = format!(
-                    "{TURN_NAVIGATOR_CONTROL_PREFIX}-{}",
-                    navigator_target_slug(&marker.target)
-                );
-                let surface_handle = navigator_surface.clone();
-                let button = Button::new(
-                    SharedString::from(control_selector.clone()),
-                    handle,
-                    *theme,
-                    MotionPolicy::Reduced,
-                    ButtonVariant::Ghost,
-                    ButtonSize::Small,
-                    ButtonContent::text(marker.label.clone()),
-                )
-                .expect("turn-navigator button configuration is valid")
-                .focus_visibility(FocusVisibility::Visible)
-                .debug_selector(control_selector)
-                .on_activate(move |_, _, app| {
-                    let _ = surface_handle.update(app, |surface, cx| {
-                        surface.request_scroll(target.clone(), cx);
-                    });
-                });
-                panel = panel.child(button);
-            }
-            panel.into_any_element()
+        // One control per marker in every state, exactly like the reference:
+        // hovering reveals the labels of controls that were already there
+        // rather than mounting new ones, so pointer and keyboard activation
+        // can never race a remount.
+        // Plain Div until the metrics listener below: `on_children_prepainted`
+        // is a Div inherent, so identity and scrolling attach at the tail.
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(theme.spacing.steps(1.0))
+            .p(px(8.0));
+        if expanded {
+            list = list.w(px(288.0));
         } else {
-            // At rest only the tick column paints: a 1 px rule per message,
-            // wider and brighter for the latest. Every row stays a focusable
-            // button carrying the message as its accessible name; hovering the
-            // rail or focusing a row expands into the labels above.
-            let mut ticks = div()
-                .flex()
-                .flex_col()
-                .items_end()
-                .gap(theme.spacing.steps(1.0))
-                .w(px(40.0))
-                .py(theme.spacing.steps(2.0));
-            for (index, marker) in markers.iter().enumerate() {
-                let active = Some(index) == active_index;
-                let key = navigator_focus_key(&marker.target);
-                let Some(handle) = self.navigator_focus.get(&key).cloned() else {
-                    continue;
-                };
-                let control_selector = format!(
-                    "{TURN_NAVIGATOR_CONTROL_PREFIX}-{}",
-                    navigator_target_slug(&marker.target)
-                );
-                let click_surface = navigator_surface.clone();
-                let click_target = marker.target.clone();
-                let key_surface = navigator_surface.clone();
-                let key_target = marker.target.clone();
-                let tick_color = if active {
+            list = list.w(px(40.0));
+        }
+        if metrics.viewport_px > 0.0 {
+            list = list.max_h(px(metrics.viewport_px * 0.7));
+        }
+        for marker in &markers {
+            let key = navigator_focus_key(&marker.target);
+            let Some(handle) = self.navigator_focus.get(&key).cloned() else {
+                continue;
+            };
+            let slug = navigator_target_slug(&marker.target);
+            let control_selector = format!("{TURN_NAVIGATOR_CONTROL_PREFIX}-{slug}");
+            let label_selector = format!("{control_selector}-label");
+            let tick_selector = format!("{control_selector}-tick");
+            let active = navigator_active.as_deref() == Some(slug);
+            let click_surface = navigator_surface.clone();
+            let click_target = marker.target.clone();
+            let key_surface = navigator_surface.clone();
+            let key_target = marker.target.clone();
+            let mut label = div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_size(theme.typography.control_text)
+                .text_color(theme.colors.foreground.to_paint())
+                .debug_selector({
+                    let selector = label_selector.clone();
+                    move || selector.clone()
+                })
+                .child(marker.label.clone());
+            if active {
+                label = label.font_weight(FontWeight::MEDIUM);
+            }
+            if !expanded {
+                label = label.hidden();
+            }
+            let mut tick = div()
+                .h(px(1.0))
+                .w(px(if active { 24.0 } else { 16.0 }))
+                .rounded_full()
+                .debug_selector({
+                    let selector = tick_selector.clone();
+                    move || selector.clone()
+                })
+                .bg(if active {
                     theme.colors.foreground.to_paint()
                 } else {
                     theme.colors.muted_foreground.with_alpha(0.5).to_paint()
-                };
-                let row = div()
-                    .id(control_selector.clone())
-                    .track_focus(&handle)
-                    .tab_index(0)
-                    .role(gpui::Role::Button)
-                    .aria_label(marker.label.clone())
-                    .cursor_pointer()
-                    .w_full()
-                    .h(px(16.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_end()
-                    .debug_selector(move || control_selector.clone())
-                    .on_click(move |_, _, app| {
-                        let _ = click_surface.update(app, |surface, cx| {
-                            surface.request_scroll(click_target.clone(), cx);
-                        });
-                    })
-                    .on_key_down(move |event, _, app| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            let _ = key_surface.update(app, |surface, cx| {
-                                surface.request_scroll(key_target.clone(), cx);
-                            });
-                        }
-                    })
-                    .child(
-                        div()
-                            .h(px(1.0))
-                            .w(px(if active { 24.0 } else { 16.0 }))
-                            .rounded_full()
-                            .bg(tick_color),
-                    );
-                ticks = ticks.child(row);
+                });
+            if expanded {
+                tick = tick.hidden();
             }
-            ticks.into_any_element()
-        };
+            let row = div()
+                .id(control_selector.clone())
+                .track_focus(&handle)
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .aria_label(marker.label.clone())
+                .cursor_pointer()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .gap(theme.spacing.steps(3.0))
+                .debug_selector(move || control_selector.clone())
+                .on_click(move |_, _, app| {
+                    let _ = click_surface.update(app, |surface, cx| {
+                        surface.request_scroll(click_target.clone(), cx);
+                    });
+                })
+                .on_key_down(move |event, _, app| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        let _ = key_surface.update(app, |surface, cx| {
+                            surface.request_scroll(key_target.clone(), cx);
+                        });
+                    }
+                })
+                .child(label)
+                .child(tick);
+            list = list.child(row);
+        }
+        // Rail metrics converge through the same window-local discipline as
+        // end space: measured per window, notified only on change.
+        let metrics_state = navigator_metrics.clone();
+        list = list.on_children_prepainted(move |children_bounds, window, app| {
+            let _ = navigator_surface.update(app, |surface, cx| {
+                let viewport = f64::from(surface.scroll_handle.bounds().size.height);
+                let height = match (children_bounds.first(), children_bounds.last()) {
+                    (Some(first), Some(last)) => {
+                        let bottom = f64::from(last.origin.y) + f64::from(last.size.height) + 16.0;
+                        (bottom - f64::from(first.origin.y)).max(0.0)
+                    }
+                    _ => return,
+                };
+                let next = TurnNavigatorMetrics {
+                    top_px: (((viewport - height) / 2.0).max(0.0)) as f32,
+                    viewport_px: viewport as f32,
+                };
+                let changed = metrics_state.update(cx, |metrics, _| {
+                    let changed =
+                        metrics.top_px != next.top_px || metrics.viewport_px != next.viewport_px;
+                    *metrics = next;
+                    changed
+                });
+                if changed {
+                    cx.notify();
+                }
+            });
+        });
+        // Identity and scrolling attach after the Div-phase listener above:
+        // the rail owns gestures over its own rows, applying the bounded
+        // immediate scroll locally (the reference plain scroller has no
+        // smoothing) and containing the event so the transcript does not
+        // scroll underneath.
+        let navigator_scroll_handle = self.navigator_scroll.clone();
+        let list = list
+            .id(SharedString::from(TURN_NAVIGATOR_LIST_SELECTOR))
+            .overflow_y_scroll()
+            .track_scroll(&self.navigator_scroll)
+            .on_scroll_wheel(move |event, window, cx| {
+                let delta = f32::from(event.delta.pixel_delta(window.line_height()).y);
+                if delta.abs() <= f32::EPSILON {
+                    return;
+                }
+                let offset = navigator_scroll_handle.offset();
+                let maximum = f32::from(navigator_scroll_handle.max_offset().y).max(0.0);
+                let next = (f32::from(offset.y) + delta).clamp(-maximum, 0.0);
+                navigator_scroll_handle.set_offset(point(offset.x, px(next)));
+                cx.stop_propagation();
+            });
         let hover_surface = entity.downgrade();
+        // Middle of the card, not the prose column: the reference anchors
+        // the rail at `top-1/2 right-2` with a 70 % height cap. Centering
+        // has no translate primitive here, so the top offset converges from
+        // the measured list height in window-local state.
         let rail = div()
             .id(SharedString::from(TURN_NAVIGATOR_SELECTOR))
             .absolute()
             .right(px(8.0))
-            .top(px(64.0))
+            .top(px(metrics.top_px))
             .debug_selector(|| TURN_NAVIGATOR_SELECTOR.to_owned())
             .on_hover(move |hovered: &bool, _, app| {
                 let _ = hover_surface.update(app, |surface, cx| {
@@ -4694,7 +4933,7 @@ impl ConversationSurface {
                     }
                 });
             })
-            .child(content);
+            .child(list);
         Some(rail.into_any_element())
     }
 }
@@ -4756,7 +4995,10 @@ mod tests {
     use super::*;
     use artisan_domain::{ConversationLifecycle, ItemId, TurnId};
     use artisan_ui::theme::ThemeMode;
-    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, px, size};
+    use gpui::{
+        Entity, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+        VisualTestContext, point, px, size,
+    };
 
     use crate::conversation_scene::{
         AssistantPhase, ConversationScene, SceneDisclosure, SceneItem, SceneItemKind, SceneTurn,
@@ -5840,6 +6082,222 @@ mod tests {
             cx.debug_bounds(HEADER).is_some(),
             "the plain header row paints without a disclosure wrapper"
         );
+    }
+
+    fn tall_navigator_scene() -> ConversationScene {
+        let long_body = (0..40)
+            .map(|line| format!("Navigator line {line} fills the viewport for tracking."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ConversationScene::build(
+            vec![
+                SceneTurn::new(turn_id("turn_a"), 0, ConversationLifecycle::Completed),
+                SceneTurn::new(turn_id("turn_b"), 1, ConversationLifecycle::Completed),
+            ],
+            vec![
+                SceneItem::new(
+                    scene_id("nav-first"),
+                    turn_id("turn_a"),
+                    1,
+                    SceneItemKind::UserMessage {
+                        body: long_body.clone(),
+                    },
+                    None,
+                )
+                .expect("first navigator item is valid"),
+                SceneItem::new(
+                    scene_id("nav-first-reply"),
+                    turn_id("turn_a"),
+                    2,
+                    SceneItemKind::AssistantMessage {
+                        body: "first reply".to_owned(),
+                        phase: AssistantPhase::Final,
+                    },
+                    None,
+                )
+                .expect("first reply is valid"),
+                SceneItem::new(
+                    scene_id("nav-second"),
+                    turn_id("turn_b"),
+                    3,
+                    SceneItemKind::UserMessage { body: long_body },
+                    None,
+                )
+                .expect("second navigator item is valid"),
+                SceneItem::new(
+                    scene_id("nav-second-reply"),
+                    turn_id("turn_b"),
+                    4,
+                    SceneItemKind::AssistantMessage {
+                        body: "second reply".to_owned(),
+                        phase: AssistantPhase::Final,
+                    },
+                    None,
+                )
+                .expect("second reply is valid"),
+            ],
+            vec![
+                TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::Quiet),
+                TurnNarrationEntry::new(turn_id("turn_b"), TurnNarration::Quiet),
+            ],
+            Vec::new(),
+        )
+        .expect("tall navigator scene is valid")
+    }
+
+    #[gpui::test]
+    fn reasoning_only_group_paints_no_disclosure_trigger(cx: &mut TestAppContext) {
+        // Disclosure is registered but the group holds no visible trace
+        // content: reasoning is stripped from visible details, so the gate —
+        // not the missing registration — must hide the control.
+        const GROUP: &str = "artisan-conversation-surface-turn-turn_a-block-work-thinking-only";
+        const TRIGGER: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-thinking-only-disclosure-trigger";
+        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                scene(vec![item(
+                    "thinking-only",
+                    1,
+                    SceneItemKind::ReasoningSummary {
+                        body: "stripped".to_owned(),
+                    },
+                    Some(SceneDisclosure::Open),
+                )]),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(240.0)));
+        settle(cx);
+        assert!(
+            cx.debug_bounds(GROUP).is_some(),
+            "the group section still paints"
+        );
+        assert!(
+            cx.debug_bounds(TRIGGER).is_none(),
+            "no disclosure control without visible details"
+        );
+    }
+
+    #[gpui::test]
+    fn navigator_active_tracks_the_reader_not_the_tail(cx: &mut TestAppContext) {
+        const FIRST_TICK: &str =
+            "artisan-conversation-surface-turn-navigator-control-nav-first-tick";
+        const SECOND_TICK: &str =
+            "artisan-conversation-surface-turn-navigator-control-nav-second-tick";
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(tall_navigator_scene(), ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        // At the top the first turn owns the position, not the tail.
+        let first_tick = cx.debug_bounds(FIRST_TICK).expect("first tick paints");
+        let second_tick = cx.debug_bounds(SECOND_TICK).expect("second tick paints");
+        assert_eq!(first_tick.size.width, px(24.0));
+        assert_eq!(second_tick.size.width, px(16.0));
+        // Scrolled to the end the second turn takes over.
+        let handle = cx.update(|_, app| surface.read(app).scroll_handle().clone());
+        let maximum = cx.update(|_, app| surface.read(app).scroll_handle().max_offset().y);
+        assert!(maximum > px(0.0), "the tall fixture must scroll");
+        handle.set_offset(point(px(0.0), -maximum));
+        settle(cx);
+        let first_tick = cx.debug_bounds(FIRST_TICK).expect("first tick paints");
+        let second_tick = cx.debug_bounds(SECOND_TICK).expect("second tick paints");
+        assert_eq!(first_tick.size.width, px(16.0));
+        assert_eq!(second_tick.size.width, px(24.0));
+    }
+
+    #[gpui::test]
+    fn transcript_wheel_smooths_through_intermediate_frames(cx: &mut TestAppContext) {
+        let body = (0..40)
+            .map(|line| format!("Wheel line {line} makes the transcript scrollable."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                scene(vec![item(
+                    "tall-user",
+                    1,
+                    SceneItemKind::UserMessage { body },
+                    None,
+                )]),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(240.0)));
+        settle(cx);
+        let maximum = cx.update(|_, app| surface.read(app).scroll_handle().max_offset().y);
+        assert!(maximum > px(0.0), "the tall fixture must scroll");
+        let before = offset(&surface, cx);
+        let viewport = cx
+            .debug_bounds(CONVERSATION_VIEWPORT_SELECTOR)
+            .expect("viewport paints");
+        cx.simulate_event(ScrollWheelEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Lines(point(0.0f32, -3.0f32)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::default(),
+        });
+        // No synchronous jump: smoothing only queues a bounded target.
+        assert_eq!(offset(&surface, cx), before);
+        cx.run_until_parked();
+        let settled = offset(&surface, cx);
+        assert_ne!(settled, before, "wheel smoothing must move the viewport");
+        // Bounded and converged: a further parked pass changes nothing.
+        cx.run_until_parked();
+        assert_eq!(offset(&surface, cx), settled);
+    }
+
+    #[gpui::test]
+    fn provider_wait_paints_without_group_or_disclosure(cx: &mut TestAppContext) {
+        // Pre-response state: user plus wait narration, no assistant and no
+        // work group. The status row still narrates the wait, and with no
+        // group there is no header, trigger, or fabricated detail anywhere.
+        const STATUS: &str = "artisan-conversation-surface-turn-turn_a-status";
+        const NO_GROUP_TRIGGER: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-turn_a-disclosure-trigger";
+        let scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            vec![item(
+                "user-a",
+                1,
+                SceneItemKind::UserMessage {
+                    body: "hi".to_owned(),
+                },
+                None,
+            )],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::ProviderWait,
+            )],
+            Vec::new(),
+        )
+        .expect("waiting scene is valid");
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(scene, ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(720.0), px(240.0)));
+        settle(cx);
+        assert!(
+            cx.debug_bounds(STATUS).is_some(),
+            "the wait line narrates before any work exists"
+        );
+        assert!(
+            cx.debug_bounds(NO_GROUP_TRIGGER).is_none(),
+            "no disclosure control without a work group"
+        );
+        cx.update(|_, app| {
+            assert!(
+                !ordered_block_kinds(surface.read(app).scene())
+                    .contains(&RenderedBlockKind::WorkGroup),
+                "no fabricated work detail"
+            );
+        });
     }
 
     #[gpui::test]

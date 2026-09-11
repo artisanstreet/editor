@@ -41,7 +41,9 @@ use gpui::{
 
 use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownEngine, Span};
 use crate::selectable_text::{SelectableText, TextRunOverride};
-use crate::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
+use crate::theme::{
+    ArtisanTheme, Oklch, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode,
+};
 
 /// Synchronous renderer for accepted Markdown message bodies.
 ///
@@ -84,24 +86,39 @@ impl MarkdownRenderer {
         theme: ArtisanTheme,
         selector: impl Into<SharedString>,
     ) -> AnyElement {
+        self.render_source_with_tone(source, theme, selector, MarkdownBodyTone::Muted)
+    }
+
+    /// Parses and renders one source body with an explicit body text tone.
+    ///
+    /// Assistant replies render [`MarkdownBodyTone::Foreground`]; every other
+    /// message keeps the reference muted body.
+    #[must_use]
+    pub fn render_source_with_tone(
+        &self,
+        source: &str,
+        theme: ArtisanTheme,
+        selector: impl Into<SharedString>,
+        tone: MarkdownBodyTone,
+    ) -> AnyElement {
         let selector = selector.into();
         let markdown_selector = format!("{}-markdown", selector.as_ref());
         let Ok(document) = self.engine.parse_document(source) else {
-            return plain_source(source, theme, markdown_selector);
+            return plain_source(source, theme, markdown_selector, tone);
         };
 
         if (!source.is_empty() && document.blocks().is_empty())
             || document.blocks().iter().any(block_needs_plain_fallback)
         {
-            return plain_source(source, theme, markdown_selector);
+            return plain_source(source, theme, markdown_selector, tone);
         }
 
-        let mut root = markdown_root(markdown_selector.clone(), theme);
+        let mut root = markdown_root(markdown_selector.clone(), theme, tone);
         let blocks = document.blocks();
         let gaps = block_gaps(blocks, BlockScope::Root);
         for (index, block) in blocks.iter().enumerate() {
             root = root.child(with_block_margins(
-                render_block(index, block, theme, &markdown_selector),
+                render_block(index, block, theme, &markdown_selector, tone),
                 gaps[index],
             ));
         }
@@ -119,17 +136,22 @@ fn block_needs_plain_fallback(block: &Block) -> bool {
     matches!(block, Block::Code(fence) if !fence.closed || fence.tokens.is_none())
 }
 
-fn markdown_root(selector: String, theme: ArtisanTheme) -> Div {
+fn markdown_root(selector: String, theme: ArtisanTheme, tone: MarkdownBodyTone) -> Div {
     // No container gap: inter-block spacing lives in per-block margins so
     // collapsing behavior matches the reference.
-    let mut root = body_container(theme).flex().flex_col();
+    let mut root = body_container(theme, tone).flex().flex_col();
     root = root.debug_selector(move || selector);
     root
 }
 
-fn plain_source(source: &str, theme: ArtisanTheme, selector: String) -> AnyElement {
+fn plain_source(
+    source: &str,
+    theme: ArtisanTheme,
+    selector: String,
+    tone: MarkdownBodyTone,
+) -> AnyElement {
     let id = SharedString::from(format!("{selector}-plain"));
-    let mut root = body_container(theme);
+    let mut root = body_container(theme, tone);
     root = root.debug_selector(move || selector);
     root.child(SelectableText::retained(
         id,
@@ -140,7 +162,32 @@ fn plain_source(source: &str, theme: ArtisanTheme, selector: String) -> AnyEleme
     .into_any_element()
 }
 
-fn body_container(theme: ArtisanTheme) -> Div {
+/// Which body text tone a rendered message carries.
+///
+/// The reference prose body reads muted; the assistant reply is explicitly
+/// promoted to the foreground token per product direction, so the tone
+/// rides the render entry instead of living in any shared default.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MarkdownBodyTone {
+    /// Reference muted prose body.
+    Muted,
+    /// Assistant reply body in the foreground token.
+    Foreground,
+}
+
+/// Returns the theme body color for one markdown body tone.
+///
+/// Span-level recipes (strong, code, links, headings) carry their own exact
+/// tokens and never consult this; only untagged body text inherits it.
+#[must_use]
+pub fn markdown_body_text_color(tone: MarkdownBodyTone, theme: ArtisanTheme) -> Oklch {
+    match tone {
+        MarkdownBodyTone::Muted => theme.colors.muted_foreground,
+        MarkdownBodyTone::Foreground => theme.colors.foreground,
+    }
+}
+
+fn body_container(theme: ArtisanTheme, tone: MarkdownBodyTone) -> Div {
     div()
         .w_full()
         .min_w_0()
@@ -148,7 +195,7 @@ fn body_container(theme: ArtisanTheme) -> Div {
         .line_height(px(ProseTypography::BODY_LINE_PX))
         .font_weight(ProseTypography::BODY_WEIGHT)
         .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
-        .text_color(theme.colors.muted_foreground.to_paint())
+        .text_color(markdown_body_text_color(tone, theme).to_paint())
         .whitespace_normal()
 }
 
@@ -245,8 +292,9 @@ fn render_block(
     block: &Block,
     theme: ArtisanTheme,
     parent_selector: &str,
+    tone: MarkdownBodyTone,
 ) -> AnyElement {
-    render_block_at_depth(index, block, theme, parent_selector, 0)
+    render_block_at_depth(index, block, theme, parent_selector, 0, tone)
 }
 
 fn render_block_at_depth(
@@ -255,9 +303,10 @@ fn render_block_at_depth(
     theme: ArtisanTheme,
     parent_selector: &str,
     depth: u32,
+    tone: MarkdownBodyTone,
 ) -> AnyElement {
     let selector = format!("{parent_selector}-block-{index}");
-    let mut element = body_container(theme).flex().flex_col();
+    let mut element = body_container(theme, tone).flex().flex_col();
 
     match block {
         Block::Heading { level, spans, .. } => {
@@ -295,12 +344,7 @@ fn render_block_at_depth(
             ..
         } => {
             element = element.child(render_list(
-                &selector,
-                *ordered,
-                *start,
-                items,
-                theme,
-                depth,
+                &selector, *ordered, *start, items, theme, depth, tone,
             ));
         }
     }
@@ -320,6 +364,7 @@ fn render_list(
     items: &[ListItem],
     theme: ArtisanTheme,
     depth: u32,
+    tone: MarkdownBodyTone,
 ) -> AnyElement {
     let mut list = div()
         .w_full()
@@ -349,6 +394,7 @@ fn render_list(
                     theme,
                     &item_selector,
                     depth.saturating_add(1),
+                    tone,
                 ),
                 gaps[sub_index],
             ));
@@ -465,7 +511,7 @@ fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) ->
         .into_iter()
         .map(|layer| layer.to_box_shadow())
         .collect::<Vec<_>>();
-    let mut code = body_container(theme)
+    let mut code = body_container(theme, MarkdownBodyTone::Muted)
         .font_family(theme.typography.mono.family)
         .text_size(px(ProseTypography::CODE_SIZE_PX))
         .line_height(px(ProseTypography::CODE_LINE_PX))
@@ -749,5 +795,24 @@ fn code_token_style(theme: ArtisanTheme, kind: CodeTokenKind) -> HighlightStyle 
     HighlightStyle {
         color: Some(color.to_paint()),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::ThemeMode;
+
+    #[test]
+    fn reply_body_tone_is_foreground_detail_body_stays_muted() {
+        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        assert_eq!(
+            markdown_body_text_color(MarkdownBodyTone::Foreground, theme),
+            theme.colors.foreground
+        );
+        assert_eq!(
+            markdown_body_text_color(MarkdownBodyTone::Muted, theme),
+            theme.colors.muted_foreground
+        );
     }
 }

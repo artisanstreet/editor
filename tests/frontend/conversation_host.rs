@@ -88,6 +88,7 @@ fn make_user(id: &str, turn: &str, ordinal: u64, body: &str) -> ConversationItem
         revision: Revision::new(0),
         lifecycle: ConversationLifecycle::Pending,
         body: MessageBody::parse(body.to_owned()).expect("test user body is valid"),
+        source_message_id: None,
         created_at: stamp(1),
         updated_at: stamp(10),
     })
@@ -438,6 +439,17 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
     let snapshot = baseline_snapshot();
     // The session disclosure is auto-registered from scene evidence on
     // snapshot accept; registering it again would refuse as a duplicate.
+    // The control itself needs actual visible trace content, so the turn
+    // carries one activity detail alongside the snapshot pair.
+    let detail = SceneFact::new(
+        scene_id("detail_host"),
+        turn_id(TURN_A),
+        3,
+        SceneFactKind::Activity {
+            body: "hosted trace detail".to_owned(),
+        },
+    )
+    .expect("test activity fact is valid");
     cx.update(|_, app| {
         host.update(app, |host, host_cx| {
             host.dispatch(
@@ -447,6 +459,11 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
                 host_cx,
             )
             .expect("snapshot dispatch succeeds");
+            host.dispatch(
+                ConversationStateEvent::Fact(SceneFactCommand::Register(detail)),
+                host_cx,
+            )
+            .expect("activity fact dispatch succeeds");
         });
     });
     cx.simulate_resize(size(px(720.0), px(520.0)));

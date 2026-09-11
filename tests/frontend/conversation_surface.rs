@@ -1328,6 +1328,51 @@ fn loaded_turn_navigator_keyboard_activation_matches_pointer(cx: &mut TestAppCon
     assert_eq!(intents, [target.clone(), target]);
 }
 
+const NAV_FIRST_LABEL: &str = "artisan-conversation-surface-turn-navigator-control-nav-first-label";
+
+#[gpui::test]
+fn loaded_turn_navigator_rail_centers_in_the_card(cx: &mut TestAppContext) {
+    let (_surface, cx) = mount_navigator_scene(navigator_scene(), cx);
+    let rail = cx
+        .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+        .expect("rail paints");
+    let viewport = cx.debug_bounds(VIEWPORT_SELECTOR).expect("viewport paints");
+    let rail_center = f64::from(rail.origin.y) + f64::from(rail.size.height) / 2.0;
+    let viewport_center = f64::from(viewport.origin.y) + f64::from(viewport.size.height) / 2.0;
+    assert!(
+        (rail_center - viewport_center).abs() <= 2.0,
+        "the rail centers vertically instead of hugging the prose column"
+    );
+    let right_gap = (f64::from(viewport.origin.x) + f64::from(viewport.size.width))
+        - (f64::from(rail.origin.x) + f64::from(rail.size.width));
+    assert!(
+        (right_gap - 8.0).abs() <= 2.0,
+        "the rail sits at the card's right edge"
+    );
+}
+
+#[gpui::test]
+fn loaded_turn_navigator_labels_hide_at_rest_and_show_on_hover(cx: &mut TestAppContext) {
+    let (_surface, cx) = mount_navigator_scene(navigator_scene(), cx);
+    assert!(
+        cx.debug_bounds(NAV_FIRST_LABEL).is_none(),
+        "labels hide at rest"
+    );
+    let tick = cx
+        .debug_bounds(NAV_FIRST_CONTROL)
+        .expect("tick control paints");
+    cx.simulate_mouse_move(tick.center(), None::<gpui::MouseButton>, Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(NAV_FIRST_LABEL).is_some(),
+        "hover reveals the already-mounted label"
+    );
+    assert!(
+        cx.debug_bounds(NAV_FIRST_CONTROL).is_some(),
+        "the same control persists across expansion"
+    );
+}
+
 #[gpui::test]
 fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(cx: &mut TestAppContext) {
     let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
