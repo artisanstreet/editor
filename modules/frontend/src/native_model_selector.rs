@@ -4017,6 +4017,12 @@ mod tests {
             id: "superfast".to_owned(),
             native_value: "superfast".to_owned(),
         });
+        // Pin the effort so this test measures the speed token/gradient, not
+        // whatever thinking default the catalog currently ships.
+        policy.reasoning_effort = Some(NativeOptionValue {
+            id: "high".to_owned(),
+            native_value: "high".to_owned(),
+        });
 
         let label = model_display_label(&snapshot, &policy);
         assert_eq!(label.plain_text(), "GPT 5.6 Sol 272K High Superfast");
