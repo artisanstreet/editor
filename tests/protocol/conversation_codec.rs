@@ -748,7 +748,7 @@ fn decoded_snapshot_items(bytes: &[u8]) -> Vec<ConversationItem> {
             payload: ResponsePayload::ConversationSnapshot(snapshot),
             ..
         }) => snapshot.items().to_vec(),
-        other => panic!("expected snapshot response, got {other:?}"),
+        _ => panic!("expected snapshot response"),
     }
 }
 

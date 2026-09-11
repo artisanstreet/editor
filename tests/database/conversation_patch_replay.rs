@@ -638,7 +638,7 @@ async fn all_five_variants_round_trip() {
                     assert_eq!(u.created_at.as_millis(), OPERATED_AT_MS);
                     assert_eq!(u.updated_at.as_millis(), OPERATED_AT_MS);
                 }
-                ConversationItem::AssistantMessage(_) => panic!("expected user"),
+                _ => panic!("expected user"),
             }
         }
         other => panic!("seq2 {other:?}"),
@@ -801,7 +801,7 @@ async fn legacy_item_upsert_without_source_message_replays_with_none() {
                         "legacy patch carries no source identity"
                     );
                 }
-                ConversationItem::AssistantMessage(_) => panic!("expected user"),
+                _ => panic!("expected user"),
             }
         }
         other => panic!("seq2 {other:?}"),
