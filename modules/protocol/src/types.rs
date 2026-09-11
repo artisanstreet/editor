@@ -36,6 +36,10 @@ pub const ERROR_DETAIL_MAX_BYTES: usize = 1_024;
 /// The application frame retains at least one additional MiB for Cap'n Proto
 /// metadata and envelope overhead.
 pub const CATALOG_SNAPSHOT_MAX_BYTES: usize = 15 * 1024 * 1024;
+/// Maximum UTF-8 byte length of one wire-supplied rich-link URL.
+pub const RICH_LINK_URL_MAX_BYTES: usize = 2_048;
+/// Maximum UTF-8 byte length of one resolved rich-link page name.
+pub const RICH_LINK_PAGE_NAME_MAX_BYTES: usize = 2_048;
 
 /// Validation failure for protocol-owned metadata.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -94,6 +98,12 @@ pub enum ProtocolValueError {
     /// The embedded catalog scope belongs to a different engine profile.
     #[error("catalog result profile scope does not match its response profile")]
     CatalogScopeMismatch,
+    /// A rich-link URL or resolved page name violated its bounded shape.
+    #[error("invalid rich link value: {reason}")]
+    RichLink {
+        /// Stable validation reason.
+        reason: &'static str,
+    },
 }
 
 /// Exact, bounded bytes of a shared native model catalog snapshot.
@@ -213,6 +223,125 @@ impl ComposerCatalogResult {
         }
         Ok(())
     }
+}
+
+/// One bounded rich-link metadata read for an absolute HTTP(S) URL.
+///
+/// The URL is untrusted assistant-authored text: this value re-applies the
+/// shared absolute-HTTP(S) policy at the protocol edge, and Forge re-applies
+/// its own outbound policy again before any fetch.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ResolveRichLinkRequest {
+    url: String,
+}
+
+impl ResolveRichLinkRequest {
+    /// Validates one absolute HTTP(S) URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::RichLink`] when the URL is empty,
+    /// exceeds [`RICH_LINK_URL_MAX_BYTES`], is not an absolute `http(s)`
+    /// URL, or contains whitespace or control characters. The error carries
+    /// no URL payload.
+    pub fn new(url: impl Into<String>) -> Result<Self, ProtocolValueError> {
+        let url = url.into();
+        validate_rich_link_url(&url)?;
+        Ok(Self { url })
+    }
+
+    /// Returns the validated absolute URL.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+/// Resolved rich-link page metadata for one requested URL.
+///
+/// `page_name` is the backend's resolved display title and is never empty.
+/// `cache_expires_at_ms` is the backend cache entry's absolute Unix epoch
+/// millisecond expiry so clients bound their retained titles by the same
+/// freshness decision Forge used; the URL is echoed for exact correlation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RichLinkPageMetadata {
+    /// Exact URL the caller requested, echoed for correlation.
+    pub requested_url: String,
+    /// Resolved display title.
+    pub page_name: String,
+    /// Backend cache expiry as Unix epoch milliseconds.
+    pub cache_expires_at_ms: i64,
+}
+
+impl RichLinkPageMetadata {
+    /// Creates response metadata after checking both bounded text fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::RichLink`] when the requested URL fails
+    /// the shared absolute-HTTP(S) policy or the page name is empty or
+    /// exceeds [`RICH_LINK_PAGE_NAME_MAX_BYTES`]. The error carries no
+    /// payload.
+    pub fn new(
+        requested_url: impl Into<String>,
+        page_name: impl Into<String>,
+        cache_expires_at_ms: i64,
+    ) -> Result<Self, ProtocolValueError> {
+        let metadata = Self {
+            requested_url: requested_url.into(),
+            page_name: page_name.into(),
+            cache_expires_at_ms,
+        };
+        metadata.validate()?;
+        Ok(metadata)
+    }
+
+    /// Validates the bounded URL and page-name fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::RichLink`] when the requested URL fails
+    /// the shared absolute-HTTP(S) policy or the page name is empty or
+    /// exceeds [`RICH_LINK_PAGE_NAME_MAX_BYTES`]. The error carries no
+    /// payload.
+    pub fn validate(&self) -> Result<(), ProtocolValueError> {
+        validate_rich_link_url(&self.requested_url)?;
+        if self.page_name.trim().is_empty() || self.page_name.len() > RICH_LINK_PAGE_NAME_MAX_BYTES {
+            return Err(ProtocolValueError::RichLink {
+                reason: "page name is empty or exceeds its byte bound",
+            });
+        }
+        Ok(())
+    }
+}
+
+fn validate_rich_link_url(url: &str) -> Result<(), ProtocolValueError> {
+    if url.is_empty() || url.len() > RICH_LINK_URL_MAX_BYTES {
+        return Err(ProtocolValueError::RichLink {
+            reason: "url is empty or exceeds its byte bound",
+        });
+    }
+    if url
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(ProtocolValueError::RichLink {
+            reason: "url contains whitespace or control characters",
+        });
+    }
+    let scheme_length = "https://".len();
+    let scheme_ok = url
+        .get(..scheme_length)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+        || url
+            .get(.."http://".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"));
+    if !scheme_ok {
+        return Err(ProtocolValueError::RichLink {
+            reason: "url must be absolute HTTP(S)",
+        });
+    }
+    Ok(())
 }
 
 /// Ordered, domain-validated durable model favorites projection.
@@ -845,6 +974,12 @@ pub enum ClientRequest {
     PickDirectory,
     /// Negotiated native lifecycle status or stop control.
     Lifecycle(LifecycleRequest),
+    /// Bounded rich-link metadata read for one absolute HTTP(S) URL.
+    ///
+    /// Not a durable command: nothing is persisted, a resolve may be retried
+    /// or dropped freely, and each deliberate attempt uses a fresh frame
+    /// identity.
+    ResolveRichLink(ResolveRichLinkRequest),
 }
 
 /// Successful durable thread engine-configuration mutation.
@@ -1187,6 +1322,8 @@ pub enum ResponsePayload {
     RunUsage(artisan_domain::RunUsageResult),
     /// Provider-account usage snapshot for the requested engines.
     AccountUsage(artisan_domain::EngineUsageSnapshot),
+    /// Resolved rich-link page metadata for one requested URL.
+    RichLink(RichLinkPageMetadata),
 }
 
 /// Successful response correlated to a client request frame.
@@ -1441,5 +1578,54 @@ impl WireEnvelope {
             }
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        RICH_LINK_PAGE_NAME_MAX_BYTES, RICH_LINK_URL_MAX_BYTES, RichLinkPageMetadata,
+        ResolveRichLinkRequest,
+    };
+
+    #[test]
+    fn rich_link_request_accepts_only_bounded_absolute_http_urls() {
+        let request = ResolveRichLinkRequest::new("https://example.com/docs?q=1#frag")
+            .expect("absolute https URL is valid");
+        assert_eq!(request.url(), "https://example.com/docs?q=1#frag");
+        assert!(ResolveRichLinkRequest::new("http://example.com").is_ok());
+
+        assert!(ResolveRichLinkRequest::new("").is_err());
+        assert!(ResolveRichLinkRequest::new("example.com").is_err());
+        assert!(ResolveRichLinkRequest::new("file:///etc/passwd").is_err());
+        assert!(ResolveRichLinkRequest::new("mailto:user@example.com").is_err());
+        assert!(ResolveRichLinkRequest::new("//example.com/path").is_err());
+        assert!(ResolveRichLinkRequest::new("https://example.com/a b").is_err());
+        assert!(ResolveRichLinkRequest::new(format!(
+            "https://example.com/{}",
+            "a".repeat(RICH_LINK_URL_MAX_BYTES)
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn rich_link_metadata_requires_url_and_nonempty_bounded_page_name() {
+        let metadata =
+            RichLinkPageMetadata::new("https://example.com/a", "Example", 1_700_000_000_000)
+                .expect("valid metadata");
+        assert_eq!(metadata.page_name, "Example");
+        metadata.validate().expect("validated metadata stays valid");
+
+        assert!(RichLinkPageMetadata::new("https://example.com/a", "", 0).is_err());
+        assert!(RichLinkPageMetadata::new("https://example.com/a", "  ", 0).is_err());
+        assert!(RichLinkPageMetadata::new("not-a-url", "Example", 0).is_err());
+        assert!(
+            RichLinkPageMetadata::new(
+                "https://example.com/a",
+                "t".repeat(RICH_LINK_PAGE_NAME_MAX_BYTES + 1),
+                0,
+            )
+            .is_err()
+        );
     }
 }

@@ -33,7 +33,7 @@ use artisan_ui::button::{
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::collapsible::Collapsible;
 use artisan_ui::input_state::TextInputState;
-use artisan_ui::markdown_renderer::{MarkdownBodyTone, MarkdownRenderer};
+use artisan_ui::markdown_renderer::{MarkdownBodyTone, MarkdownRenderer, RichLinkTitleSource};
 use artisan_ui::motion::{MotionCurve, MotionDuration, MotionPlan, MotionPolicy, MotionRecipe};
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::selectable_text::SelectableText;
@@ -85,6 +85,7 @@ use crate::native_model_selector::{
     HoverRect, PickerScrollState, SlidingHoverState,
 };
 use crate::native_transport_service::{CommandSendError, NativeTransportCommand};
+use crate::rich_link_titles::RichLinkTitleTable;
 
 /// Stable debug selector for the conversation surface root.
 pub const CONVERSATION_SURFACE_SELECTOR: &str = "artisan-conversation-surface";
@@ -254,6 +255,16 @@ pub enum ConversationSurfaceAction {
         turn: TurnId,
         /// Exact response payload from the footer settlement.
         text: String,
+    },
+    /// One render pass observed assistant links with no resolved title.
+    ///
+    /// The host forwards each canonical URL to the transport's bounded
+    /// rich-link resolver; results return through
+    /// [`ConversationSurface::set_rich_link_title`] or
+    /// [`ConversationSurface::set_rich_link_failure`].
+    ResolveRichLinks {
+        /// Canonical absolute HTTP(S) URLs that need a resolve attempt.
+        urls: Vec<String>,
     },
 }
 
@@ -787,6 +798,14 @@ pub struct ConversationSurface {
     message_images_observation: Option<gpui::Subscription>,
     theme_mode: ThemeMode,
     markdown_renderer: MarkdownRenderer,
+    /// Bounded resolved rich-link titles for this surface's markdown links.
+    rich_link_titles: RichLinkTitleTable,
+    /// Destinations observed as unresolved by the current render pass.
+    ///
+    /// Render-local: the probe pushes here while the renderer flattens links,
+    /// and the render tail queues each new destination exactly once before
+    /// notifying the host.
+    rich_link_missing: RefCell<Vec<String>>,
     scroll_handle: ScrollHandle,
     transcript_focus: FocusHandle,
     disclosure_focus: FocusHandle,
@@ -1319,6 +1338,33 @@ struct ControlledCardOptions {
     style: CardStyle,
 }
 
+/// Render-scoped rich-link title probe.
+///
+/// Reads the surface's retained titles and records every unresolved HTTP(S)
+/// destination for the render-tail flush. It never fetches and never blocks;
+/// the authored label renders whenever [`Self::resolved_title`] is `None`.
+struct SurfaceRichLinkTitles<'a> {
+    titles: &'a RichLinkTitleTable,
+    missing: &'a RefCell<Vec<String>>,
+    now_ms: i64,
+}
+
+impl RichLinkTitleSource for SurfaceRichLinkTitles<'_> {
+    fn resolved_title(&self, destination: &str) -> Option<SharedString> {
+        if let Some(title) = self.titles.lookup(destination) {
+            return Some(title);
+        }
+        if self
+            .titles
+            .request_candidate(destination, self.now_ms)
+            .is_some()
+        {
+            self.missing.borrow_mut().push(destination.to_owned());
+        }
+        None
+    }
+}
+
 impl ConversationSurface {
     /// Creates a surface with keyboard-focusable transcript and disclosure
     /// handles. The surface starts with the supplied scene and no actions.
@@ -1330,6 +1376,8 @@ impl ConversationSurface {
             message_images_observation: None,
             theme_mode,
             markdown_renderer: MarkdownRenderer::new(),
+            rich_link_titles: RichLinkTitleTable::new(),
+            rich_link_missing: RefCell::new(Vec::new()),
             scroll_handle: ScrollHandle::new(),
             transcript_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             disclosure_focus: cx.focus_handle().tab_index(1).tab_stop(true),
@@ -1595,6 +1643,67 @@ impl ConversationSurface {
     pub fn set_theme_mode(&mut self, theme_mode: ThemeMode, cx: &mut Context<Self>) {
         if self.theme_mode != theme_mode {
             self.theme_mode = theme_mode;
+            cx.notify();
+        }
+    }
+
+    /// Mirrors one resolved rich-link title and repaints when it is new.
+    ///
+    /// The URL is the backend's echoed canonical URL; the table re-applies
+    /// the shared canonical policy before retaining it.
+    pub fn set_rich_link_title(
+        &mut self,
+        requested_url: &str,
+        page_name: &SharedString,
+        expires_at_ms: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.rich_link_titles.lookup(requested_url);
+        self.rich_link_titles
+            .resolve(requested_url, page_name.clone(), expires_at_ms);
+        if before.as_ref() != Some(page_name) {
+            cx.notify();
+        }
+    }
+
+    /// Records one failed rich-link resolution; the authored label stays.
+    pub fn set_rich_link_failure(&mut self, requested_url: &str, cx: &mut Context<Self>) {
+        self.rich_link_titles.fail(requested_url);
+        cx.notify();
+    }
+
+    /// Returns one render-scoped probe over the surface title table.
+    fn rich_link_probe(&self, now_ms: i64) -> SurfaceRichLinkTitles<'_> {
+        SurfaceRichLinkTitles {
+            titles: &self.rich_link_titles,
+            missing: &self.rich_link_missing,
+            now_ms,
+        }
+    }
+
+    /// Queues every newly missing rich-link destination exactly once.
+    ///
+    /// Runs at the end of one render pass: the probe recorded misses while
+    /// the renderer flattened links, and this drain marks them pending and
+    /// hands the host one bounded resolver action. The extra notification is
+    /// guarded by the table's pending state, so a second frame queues nothing
+    /// and the loop ends.
+    fn flush_rich_link_requests(&mut self, cx: &mut Context<Self>) {
+        let missing = std::mem::take(&mut *self.rich_link_missing.borrow_mut());
+        if missing.is_empty() {
+            return;
+        }
+        let now_ms = crate::conversation_host::host_now_millis();
+        let mut queued = Vec::new();
+        for destination in missing {
+            if let Some(url) = self.rich_link_titles.queue(&destination, now_ms) {
+                queued.push(url);
+            }
+        }
+        if queued.is_empty() {
+            return;
+        }
+        if self.enqueue_action(ConversationSurfaceAction::ResolveRichLinks { urls: queued }) {
             cx.notify();
         }
     }
@@ -2663,11 +2772,14 @@ impl ConversationSurface {
         // markdown at prose width, no card, no title. The reply body reads in
         // the foreground token per product direction; detail prose keeps the
         // reference muted body.
-        let rendered_body = self.markdown_renderer.render_source_with_tone(
+        let rich_link_titles =
+            self.rich_link_probe(crate::conversation_host::host_now_millis());
+        let rendered_body = self.markdown_renderer.render_source_with_tone_and_titles(
             &block.body,
             *theme,
             selector.clone(),
             MarkdownBodyTone::Foreground,
+            &rich_link_titles,
         );
         div()
             .w_full()
@@ -3068,10 +3180,14 @@ impl ConversationSurface {
             row => {
                 let content: AnyElement = match &row {
                     DetailRow::Assistant { body, .. } => {
-                        let rendered = self.markdown_renderer.render_source(
+                        let rich_link_titles =
+                            self.rich_link_probe(crate::conversation_host::host_now_millis());
+                        let rendered = self.markdown_renderer.render_source_with_tone_and_titles(
                             body,
                             *theme,
                             format!("{selector}-markdown"),
+                            MarkdownBodyTone::Muted,
+                            &rich_link_titles,
                         );
                         div()
                             .w_full()
@@ -4995,6 +5111,7 @@ impl Render for ConversationSurface {
             // unaffected.
             root = root.child(deferred(rail).with_priority(2));
         }
+        self.flush_rich_link_requests(cx);
         root
     }
 }
@@ -6216,6 +6333,102 @@ mod tests {
                 }
             });
             assert!(surface.read(app).pending_actions().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn unresolved_assistant_links_queue_one_bounded_resolve_request(cx: &mut TestAppContext) {
+        let link_scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Completed,
+            )],
+            vec![item(
+                "reply",
+                1,
+                SceneItemKind::AssistantMessage {
+                    body: "See [the docs](https://Example.com/page#section) and [again](https://example.com/page)."
+                        .to_owned(),
+                    phase: AssistantPhase::Final,
+                },
+                None,
+            )],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Quiet,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid");
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(link_scene, ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+
+        // One render pass observes both links; the fragment variant and the
+        // exact duplicate collapse into one canonical resolve URL.
+        cx.update(|_, app| {
+            surface.update(app, |surface, cx| {
+                let urls = surface
+                    .take_actions()
+                    .into_iter()
+                    .filter_map(|action| match action {
+                        ConversationSurfaceAction::ResolveRichLinks { urls } => Some(urls),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                assert_eq!(urls, vec!["https://example.com/page".to_owned()]);
+
+                // A resolved title repaints without another resolve request.
+                surface.set_rich_link_title(
+                    "https://example.com/page",
+                    &SharedString::from("Resolved Docs"),
+                    4_000_000_000_000,
+                    cx,
+                );
+            });
+        });
+        settle(cx);
+        cx.update(|_, app| {
+            surface.update(app, |surface, _| {
+                assert_eq!(
+                    surface.rich_link_titles.lookup("https://example.com/page#section"),
+                    Some(SharedString::from("Resolved Docs"))
+                );
+                assert!(
+                    !surface.take_actions().iter().any(|action| matches!(
+                        action,
+                        ConversationSurfaceAction::ResolveRichLinks { .. }
+                    )),
+                    "a fresh title must not queue another resolve"
+                );
+            });
+        });
+
+        // A failed resolution keeps the authored label and never retries.
+        cx.update(|_, app| {
+            surface.update(app, |surface, cx| {
+                surface.set_rich_link_failure("https://example.com/page", cx);
+            });
+        });
+        settle(cx);
+        cx.update(|_, app| {
+            surface.update(app, |surface, _| {
+                assert!(
+                    surface.rich_link_titles.lookup("https://example.com/page").is_none(),
+                    "a failed resolution keeps the authored label"
+                );
+                assert!(
+                    !surface.take_actions().iter().any(|action| matches!(
+                        action,
+                        ConversationSurfaceAction::ResolveRichLinks { .. }
+                    )),
+                    "a failed resolution must not be retried"
+                );
+            });
         });
     }
 

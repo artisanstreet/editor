@@ -134,6 +134,7 @@ pub mod reasoning_display;
 pub mod relative_time;
 pub mod repository_mark;
 pub mod rich_link_url;
+pub mod rich_link_titles;
 pub mod route_navigation;
 pub mod route_navigation_adapter;
 pub mod run_usage_policy;

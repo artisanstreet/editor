@@ -50,9 +50,10 @@ use artisan_domain::{
 use artisan_protocol::{
     ActiveRunResult, ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome,
     ErrorCode, ErrorDetail, FirstMessageReceipt, MessageImageResult, ProtocolFailure,
-    QueueMessageReceipt, RegisteredEngineProfilesResult, RespondApprovalReceipt,
-    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, RunLiveStatus, ServerResponse,
-    SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
+    QueueMessageReceipt, RegisteredEngineProfilesResult, ResolveRichLinkRequest,
+    RespondApprovalReceipt, RespondQuestionReceipt, ResponsePayload, RichLinkPageMetadata,
+    RunInteractionOutcome, RunLiveStatus, ServerResponse, SetThreadEngineConfigResult,
+    StopRunDisposition, StopRunReceipt,
 };
 use tokio::sync::Mutex;
 
@@ -356,6 +357,7 @@ pub struct RequestHandler {
     run_interaction: Option<RunInteractionRegistry>,
     composer_catalog: Option<crate::composer_catalog_service::ComposerCatalogService>,
     account_usage: Option<crate::account_usage_service::AccountUsageService>,
+    rich_link_resolver: Option<crate::rich_link_service::RichLinkResolver>,
 }
 
 impl fmt::Debug for RequestHandler {
@@ -488,6 +490,7 @@ impl RequestHandler {
             run_interaction: None,
             composer_catalog: None,
             account_usage: None,
+            rich_link_resolver: None,
         }
     }
 
@@ -513,6 +516,7 @@ impl RequestHandler {
             run_interaction: None,
             composer_catalog: None,
             account_usage: None,
+            rich_link_resolver: None,
         }
     }
 
@@ -539,6 +543,7 @@ impl RequestHandler {
             run_interaction: None,
             composer_catalog: None,
             account_usage: None,
+            rich_link_resolver: None,
         }
     }
 
@@ -588,6 +593,21 @@ impl RequestHandler {
         service: crate::account_usage_service::AccountUsageService,
     ) -> Self {
         self.account_usage = Some(service);
+        self
+    }
+
+    /// Attaches the one process-owned bounded rich-link resolver.
+    ///
+    /// The resolver owns the outbound HTML fetch, metadata parse, and its
+    /// bounded TTL cache. Without it, `ResolveRichLink` answers the
+    /// established unsupported-capability failure instead of fabricating a
+    /// title.
+    #[must_use]
+    pub fn with_rich_link_resolver(
+        mut self,
+        resolver: crate::rich_link_service::RichLinkResolver,
+    ) -> Self {
+        self.rich_link_resolver = Some(resolver);
         self
     }
 
@@ -698,6 +718,9 @@ impl RequestHandler {
                 request_id,
             )),
             ClientRequest::PickDirectory => self.pick_directory_outcome(request_id).await,
+            ClientRequest::ResolveRichLink(request) => {
+                self.resolve_rich_link_outcome(request_id, request).await
+            }
         }
     }
 
@@ -888,6 +911,40 @@ impl RequestHandler {
                 issued.directory_id,
             )),
         ))
+    }
+
+    /// Resolves one bounded rich-link metadata read through the attached
+    /// resolver.
+    ///
+    /// The resolver applies its own URL policy before any fetch; this adapter
+    /// only classifies the typed failure into the protocol vocabulary and
+    /// re-validates the resolved metadata before it crosses the wire.
+    async fn resolve_rich_link_outcome(
+        &self,
+        request_id: &RequestId,
+        request: &ResolveRichLinkRequest,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        let Some(resolver) = self.rich_link_resolver.as_ref() else {
+            return Err(unbacked_failure(request_id, "rich-link metadata resolution"));
+        };
+        let resolution = resolver
+            .resolve(request.url())
+            .await
+            .map_err(|error| rich_link_failure(error, request_id))?;
+        let metadata = RichLinkPageMetadata::new(
+            resolution.requested_url,
+            resolution.page_name,
+            resolution.expires_at_ms,
+        )
+        .map_err(|_| {
+            typed_failure(
+                ErrorCode::Internal,
+                "rich-link resolution produced invalid metadata",
+                false,
+                request_id,
+            )
+        })?;
+        Ok(outcome(request_id, ResponsePayload::RichLink(metadata)))
     }
 
     async fn subscribe_with_receipt(
@@ -2635,6 +2692,56 @@ fn forged_identity_failure(kind: &'static str, request_id: &RequestId) -> Protoc
     )
 }
 
+/// Classifies one rich-link resolver failure into the stable protocol
+/// vocabulary without formatting URLs, HTML, or transport payloads.
+fn rich_link_failure(
+    error: crate::rich_link_service::RichLinkError,
+    request_id: &RequestId,
+) -> ProtocolFailure {
+    use crate::rich_link_service::RichLinkError as Failure;
+
+    let (code, detail_text, retryable) = match error {
+        Failure::InvalidUrl => (
+            ErrorCode::InvalidInput,
+            "rich link url is not an absolute HTTP(S) destination",
+            false,
+        ),
+        Failure::BlockedAddress => (
+            ErrorCode::InvalidInput,
+            "rich link address is not publicly routable",
+            false,
+        ),
+        Failure::UnsupportedContentType => (
+            ErrorCode::InvalidInput,
+            "rich link target is not an HTML page",
+            false,
+        ),
+        Failure::HttpStatus => (
+            ErrorCode::Internal,
+            "rich link target returned an unexpected HTTP status",
+            true,
+        ),
+        Failure::ResponseTooLarge => (
+            ErrorCode::Internal,
+            "rich link target exceeded its HTML byte bound",
+            false,
+        ),
+        Failure::Timeout => (ErrorCode::Internal, "rich link resolution timed out", true),
+        Failure::Transport => (ErrorCode::Internal, "rich link transport failed", true),
+        Failure::Configuration => (
+            ErrorCode::Internal,
+            "rich link resolution is misconfigured",
+            false,
+        ),
+        Failure::Unavailable => (
+            ErrorCode::Internal,
+            "rich link resolution owner is unavailable",
+            true,
+        ),
+    };
+    typed_failure(code, detail_text, retryable, request_id)
+}
+
 /// Bounds a diagnostic text into the protocol's failure contract.
 fn typed_failure(
     code: ErrorCode,
@@ -2660,3 +2767,30 @@ mod composer_state_handler;
 #[cfg(test)]
 #[path = "../../../tests/backend/composer_state_handler.rs"]
 mod composer_state_handler_tests;
+
+#[cfg(test)]
+mod rich_link_failure_tests {
+    use super::{rich_link_failure, ErrorCode, RequestId};
+
+    #[test]
+    fn rich_link_failures_are_bounded_and_classified() {
+        let request_id = RequestId::parse("rich-link-request").expect("request id is valid");
+        let invalid =
+            rich_link_failure(crate::rich_link_service::RichLinkError::InvalidUrl, &request_id);
+        assert_eq!(invalid.code, ErrorCode::InvalidInput);
+        assert!(!invalid.retryable);
+        assert_eq!(invalid.request_id.as_ref(), Some(&request_id));
+
+        let timeout =
+            rich_link_failure(crate::rich_link_service::RichLinkError::Timeout, &request_id);
+        assert_eq!(timeout.code, ErrorCode::Internal);
+        assert!(timeout.retryable);
+
+        let oversized = rich_link_failure(
+            crate::rich_link_service::RichLinkError::ResponseTooLarge,
+            &request_id,
+        );
+        assert!(!oversized.retryable);
+        assert!(format!("{invalid:?}").len() < 256);
+    }
+}

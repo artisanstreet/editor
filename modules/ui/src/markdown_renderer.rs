@@ -101,6 +101,25 @@ impl MarkdownRenderer {
         selector: impl Into<SharedString>,
         tone: MarkdownBodyTone,
     ) -> AnyElement {
+        self.render_source_with_tone_and_titles(source, theme, selector, tone, &NoRichLinkTitles)
+    }
+
+    /// Parses and renders one source body with resolved rich-link titles.
+    ///
+    /// An openable HTTP(S) link whose destination has a resolved title renders
+    /// that title in place of the authored label while keeping the exact
+    /// destination and link range; every unresolved or failed destination
+    /// keeps the authored label. Callers without resolver state use
+    /// [`Self::render_source_with_tone`], which behaves as an empty lookup.
+    #[must_use]
+    pub fn render_source_with_tone_and_titles(
+        &self,
+        source: &str,
+        theme: ArtisanTheme,
+        selector: impl Into<SharedString>,
+        tone: MarkdownBodyTone,
+        titles: &dyn RichLinkTitleSource,
+    ) -> AnyElement {
         let selector = selector.into();
         let markdown_selector = format!("{}-markdown", selector.as_ref());
         let Ok(document) = self.engine.parse_document(source) else {
@@ -118,11 +137,32 @@ impl MarkdownRenderer {
         let gaps = block_gaps(blocks, BlockScope::Root);
         for (index, block) in blocks.iter().enumerate() {
             root = root.child(with_block_margins(
-                render_block(index, block, theme, &markdown_selector, tone),
+                render_block(index, block, theme, &markdown_selector, tone, titles),
                 gaps[index],
             ));
         }
         root.into_any_element()
+    }
+}
+
+/// Read-only lookup for resolved rich-link page titles.
+///
+/// The renderer consults this seam for every openable HTTP(S) link: a present
+/// title replaces the authored label; `None` keeps it. Implementations own
+/// their caching, freshness, and request policy; the renderer is synchronous
+/// and never fetches.
+pub trait RichLinkTitleSource {
+    /// Returns the resolved title for one absolute destination, if known.
+    fn resolved_title(&self, destination: &str) -> Option<SharedString>;
+}
+
+/// Empty title lookup for callers without resolver state.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoRichLinkTitles;
+
+impl RichLinkTitleSource for NoRichLinkTitles {
+    fn resolved_title(&self, _destination: &str) -> Option<SharedString> {
+        None
     }
 }
 
@@ -293,8 +333,9 @@ fn render_block(
     theme: ArtisanTheme,
     parent_selector: &str,
     tone: MarkdownBodyTone,
+    titles: &dyn RichLinkTitleSource,
 ) -> AnyElement {
-    render_block_at_depth(index, block, theme, parent_selector, 0, tone)
+    render_block_at_depth(index, block, theme, parent_selector, 0, tone, titles)
 }
 
 fn render_block_at_depth(
@@ -304,6 +345,7 @@ fn render_block_at_depth(
     parent_selector: &str,
     depth: u32,
     tone: MarkdownBodyTone,
+    titles: &dyn RichLinkTitleSource,
 ) -> AnyElement {
     let selector = format!("{parent_selector}-block-{index}");
     let mut element = body_container(theme, tone).flex().flex_col();
@@ -318,10 +360,10 @@ fn render_block_at_depth(
                 .line_height(px(heading.line_px))
                 .letter_spacing(px(heading.tracking_px))
                 .text_color(theme.colors.foreground.to_paint())
-                .child(render_inline(&selector, spans, theme));
+                .child(render_inline(&selector, spans, theme, titles));
         }
         Block::Paragraph { spans, .. } => {
-            element = element.child(render_inline(&selector, spans, theme));
+            element = element.child(render_inline(&selector, spans, theme, titles));
         }
         Block::Code(fence) => {
             element = element.child(render_code(&selector, fence, theme));
@@ -344,7 +386,7 @@ fn render_block_at_depth(
             ..
         } => {
             element = element.child(render_list(
-                &selector, *ordered, *start, items, theme, depth, tone,
+                &selector, *ordered, *start, items, theme, depth, tone, titles,
             ));
         }
     }
@@ -365,6 +407,7 @@ fn render_list(
     theme: ArtisanTheme,
     depth: u32,
     tone: MarkdownBodyTone,
+    titles: &dyn RichLinkTitleSource,
 ) -> AnyElement {
     let mut list = div()
         .w_full()
@@ -383,7 +426,7 @@ fn render_list(
         let mut content = div().flex().flex_1().min_w_0().flex_col();
         if item.blocks.is_empty() {
             let empty: &[Span] = &[];
-            content = content.child(render_inline(&item_selector, empty, theme));
+            content = content.child(render_inline(&item_selector, empty, theme, titles));
         }
         let gaps = block_gaps(&item.blocks, BlockScope::Item);
         for (sub_index, block) in item.blocks.iter().enumerate() {
@@ -395,6 +438,7 @@ fn render_list(
                     &item_selector,
                     depth.saturating_add(1),
                     tone,
+                    titles,
                 ),
                 gaps[sub_index],
             ));
@@ -437,8 +481,13 @@ fn item_marker(ordered: bool, base: u64, position: usize, task: Option<bool>) ->
     }
 }
 
-fn render_inline(selector: &str, spans: &[Span], theme: ArtisanTheme) -> AnyElement {
-    let presentation = present_inline(spans, theme);
+fn render_inline(
+    selector: &str,
+    spans: &[Span],
+    theme: ArtisanTheme,
+    titles: &dyn RichLinkTitleSource,
+) -> AnyElement {
+    let presentation = present_inline_with_titles(spans, theme, titles);
     let id = SharedString::from(selector.to_owned());
     let text = SharedString::from(presentation.source);
     // Inline code rides the frozen text-run contract: mono family plus
@@ -597,8 +646,30 @@ pub struct InlinePresentation {
 /// silently loses the presentation.
 #[must_use]
 pub fn present_inline(spans: &[Span], theme: ArtisanTheme) -> InlinePresentation {
+    present_inline_with_titles(spans, theme, &NoRichLinkTitles)
+}
+
+/// Flattens spans with resolved rich-link titles and one merged highlight
+/// list.
+///
+/// Behaves exactly like [`present_inline`], except an openable HTTP(S) link
+/// whose destination resolves through `titles` replaces its authored label
+/// with the resolved title. The link entry still names the authored
+/// destination and its range addresses the substituted visible text, so
+/// selection, clipboard, and click behavior stay on one presentation.
+///
+/// # Must use
+///
+/// The return value owns the flattened text the ranges address; dropping it
+/// silently loses the presentation.
+#[must_use]
+pub fn present_inline_with_titles(
+    spans: &[Span],
+    theme: ArtisanTheme,
+    titles: &dyn RichLinkTitleSource,
+) -> InlinePresentation {
     let mut accumulator = InlineAccumulator::default();
-    flatten_spans(spans, HighlightStyle::default(), &mut accumulator, theme);
+    flatten_spans(spans, HighlightStyle::default(), &mut accumulator, theme, titles);
     InlinePresentation {
         source: accumulator.source,
         highlights: accumulator.runs,
@@ -635,8 +706,9 @@ fn flatten_spans(
     inherited: HighlightStyle,
     accumulator: &mut InlineAccumulator,
     theme: ArtisanTheme,
+    titles: &dyn RichLinkTitleSource,
 ) {
-    flatten_spans_in_link(spans, inherited, accumulator, theme, false);
+    flatten_spans_in_link(spans, inherited, accumulator, theme, titles, false);
 }
 
 /// Flattens with link-ancestor context: the reference resolves `a strong`
@@ -647,6 +719,7 @@ fn flatten_spans_in_link(
     inherited: HighlightStyle,
     accumulator: &mut InlineAccumulator,
     theme: ArtisanTheme,
+    titles: &dyn RichLinkTitleSource,
     in_link: bool,
 ) {
     for span in spans {
@@ -676,6 +749,7 @@ fn flatten_spans_in_link(
                     inherited.highlight(emphasis_style()),
                     accumulator,
                     theme,
+                    titles,
                     in_link,
                 );
             }
@@ -685,19 +759,35 @@ fn flatten_spans_in_link(
                     inherited.highlight(strong_style(theme, in_link)),
                     accumulator,
                     theme,
+                    titles,
                     in_link,
                 );
             }
             Span::Link { label, destination } => {
                 if is_openable_link_destination(destination) {
                     let start = accumulator.source.len();
-                    flatten_spans_in_link(
-                        label,
-                        inherited.highlight(link_style(theme)),
-                        accumulator,
-                        theme,
-                        true,
-                    );
+                    let resolved = is_rich_link_destination(destination)
+                        .then(|| titles.resolved_title(destination))
+                        .flatten()
+                        .filter(|title| !title.trim().is_empty());
+                    if let Some(title) = resolved {
+                        accumulator.source.push_str(title.as_ref());
+                        emit_run(
+                            accumulator,
+                            start,
+                            accumulator.source.len(),
+                            inherited.highlight(link_style(theme)),
+                        );
+                    } else {
+                        flatten_spans_in_link(
+                            label,
+                            inherited.highlight(link_style(theme)),
+                            accumulator,
+                            theme,
+                            titles,
+                            true,
+                        );
+                    }
                     let end = accumulator.source.len();
                     if start < end {
                         accumulator.links.push(InlineLink {
@@ -706,7 +796,7 @@ fn flatten_spans_in_link(
                         });
                     }
                 } else {
-                    flatten_spans_in_link(label, inherited, accumulator, theme, in_link);
+                    flatten_spans_in_link(label, inherited, accumulator, theme, titles, in_link);
                 }
             }
         }
@@ -725,6 +815,15 @@ fn is_openable_link_destination(destination: &str) -> bool {
     }
     let lower = trimmed.to_ascii_lowercase();
     lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+}
+
+/// Whether one destination is eligible for resolved rich-link titles.
+///
+/// Mirrors the native URL policy: only absolute HTTP(S) links resolve; a
+/// `mailto:` destination is openable but never replaced.
+fn is_rich_link_destination(destination: &str) -> bool {
+    let lower = destination.trim().to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
 }
 
 fn code_style(theme: ArtisanTheme, in_link: bool) -> HighlightStyle {
@@ -802,6 +901,28 @@ fn code_token_style(theme: ArtisanTheme, kind: CodeTokenKind) -> HighlightStyle 
 mod tests {
     use super::*;
     use crate::theme::ThemeMode;
+    use std::collections::HashMap;
+
+    struct TestTitles(HashMap<&'static str, &'static str>);
+
+    impl RichLinkTitleSource for TestTitles {
+        fn resolved_title(&self, destination: &str) -> Option<SharedString> {
+            self.0
+                .get(destination)
+                .map(|title| SharedString::from(*title))
+        }
+    }
+
+    fn link_spans(destination: &str, label: &str) -> Vec<Span> {
+        vec![
+            Span::Text("see ".to_owned()),
+            Span::Link {
+                label: vec![Span::Text(label.to_owned())],
+                destination: destination.to_owned(),
+            },
+            Span::Text(" end".to_owned()),
+        ]
+    }
 
     #[test]
     fn reply_body_tone_is_foreground_detail_body_stays_muted() {
@@ -814,5 +935,122 @@ mod tests {
             markdown_body_text_color(MarkdownBodyTone::Muted, theme),
             theme.colors.muted_foreground
         );
+    }
+
+    #[test]
+    fn resolved_title_replaces_label_and_keeps_destination_openable() {
+        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let titles = TestTitles(HashMap::from([(
+            "https://example.com/page",
+            "Resolved Page",
+        )]));
+        let presentation = present_inline_with_titles(
+            &link_spans("https://example.com/page", "authored label"),
+            theme,
+            &titles,
+        );
+        assert_eq!(presentation.source, "see Resolved Page end");
+        assert_eq!(presentation.links.len(), 1);
+        assert_eq!(
+            presentation.links[0].destination,
+            "https://example.com/page"
+        );
+        assert_eq!(
+            &presentation.source[presentation.links[0].range.clone()],
+            "Resolved Page"
+        );
+        assert!(presentation.highlights.iter().any(|(range, style)| {
+            range == &presentation.links[0].range && *style == link_style(theme)
+        }));
+        assert!(presentation.code_ranges.is_empty());
+    }
+
+    #[test]
+    fn unresolved_or_failed_links_keep_the_authored_label() {
+        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let spans = link_spans("https://example.com/pending", "authored label");
+
+        // Pending and failed resolutions are simply absent from the lookup.
+        let empty = TestTitles(HashMap::new());
+        let presentation = present_inline_with_titles(&spans, theme, &empty);
+        assert_eq!(presentation.source, "see authored label end");
+        assert_eq!(
+            presentation.links[0].destination,
+            "https://example.com/pending"
+        );
+        assert_eq!(
+            &presentation.source[presentation.links[0].range.clone()],
+            "authored label"
+        );
+
+        // A title for a different URL never leaks into this link.
+        let unrelated = TestTitles(HashMap::from([(
+            "https://example.com/other",
+            "Other Page",
+        )]));
+        let presentation = present_inline_with_titles(&spans, theme, &unrelated);
+        assert_eq!(presentation.source, "see authored label end");
+
+        // mailto stays an openable authored label even when a lookup names it.
+        let mailto = TestTitles(HashMap::from([("mailto:user@example.com", "Email")]));
+        let presentation = present_inline_with_titles(
+            &link_spans("mailto:user@example.com", "user@example.com"),
+            theme,
+            &mailto,
+        );
+        assert_eq!(presentation.source, "see user@example.com end");
+        assert_eq!(presentation.links.len(), 1);
+    }
+
+    #[test]
+    fn resolved_title_replaces_a_formatted_label_wholesale() {
+        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let titles = TestTitles(HashMap::from([(
+            "https://example.com/page",
+            "Resolved Page",
+        )]));
+        let spans = vec![
+            Span::Text("read ".to_owned()),
+            Span::Link {
+                label: vec![Span::Strong(vec![Span::Text("bold label".to_owned())])],
+                destination: "https://example.com/page".to_owned(),
+            },
+        ];
+        let presentation = present_inline_with_titles(&spans, theme, &titles);
+        assert_eq!(presentation.source, "read Resolved Page");
+        assert_eq!(
+            &presentation.source[presentation.links[0].range.clone()],
+            "Resolved Page"
+        );
+
+        // Relative links stay inert labels and never consult the lookup.
+        let relative = present_inline_with_titles(
+            &link_spans("/docs/page", "relative label"),
+            theme,
+            &titles,
+        );
+        assert_eq!(relative.source, "see relative label end");
+        assert!(relative.links.is_empty());
+    }
+
+    #[test]
+    fn blank_resolved_title_never_erases_the_authored_label() {
+        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let titles = TestTitles(HashMap::from([("https://example.com/page", "   ")]));
+        let presentation = present_inline_with_titles(
+            &link_spans("https://example.com/page", "authored label"),
+            theme,
+            &titles,
+        );
+        assert_eq!(presentation.source, "see authored label end");
+    }
+
+    #[test]
+    fn empty_lookup_matches_plain_presentation() {
+        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let spans = link_spans("https://example.com/page", "authored label");
+        let plain = present_inline(&spans, theme);
+        let empty = present_inline_with_titles(&spans, theme, &NoRichLinkTitles);
+        assert_eq!(plain, empty);
     }
 }

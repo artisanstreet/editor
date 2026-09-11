@@ -249,6 +249,8 @@ mod tests {
 
 mod composer_catalog_service;
 
+mod rich_link_service;
+
 mod account_usage_handler;
 
 mod native_model_catalog;

@@ -1370,6 +1370,8 @@ async fn run_with_handler(
     )
     .expect("validated Forge admission capacity is nonzero");
     let handler = handler.with_run_cancellation_registry(run_cancellation.clone());
+    let handler =
+        handler.with_rich_link_resolver(crate::rich_link_service::RichLinkResolver::with_defaults());
     let activity = ActivityGateImpl::new();
     let lifecycle = LifecycleController::with_activity_gate(Arc::new(activity.clone()));
     let ForgeListenerStartup {

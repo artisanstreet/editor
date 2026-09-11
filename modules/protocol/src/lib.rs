@@ -55,12 +55,13 @@ pub use types::{
     LOCAL_CAPABILITY_BYTES, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
     LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, LocalCapabilityError,
     MessageImageResult, ModelFavoritesSnapshot, ProtocolFailure, ProtocolValueError,
-    ProtocolVersion, QueueMessageReceipt, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
-    ReconnectCapabilityError, RegisteredEngineProfilesResult, RespondApprovalReceipt,
-    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, RunLiveStatus, ServerEvent, ServerResponse,
-    SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
-    ThreadEngineSettingsResult, VersionOffer, VersionOfferError, Welcome, WireEnvelope,
-    WireEnvelopeBody,
+    ProtocolVersion, QueueMessageReceipt, RICH_LINK_PAGE_NAME_MAX_BYTES, RICH_LINK_URL_MAX_BYTES,
+    RECONNECT_CAPABILITY_BYTES, ReconnectCapability, ReconnectCapabilityError,
+    RegisteredEngineProfilesResult, ResolveRichLinkRequest, RespondApprovalReceipt,
+    RespondQuestionReceipt, ResponsePayload, RichLinkPageMetadata, RunInteractionOutcome,
+    RunLiveStatus, ServerEvent, ServerResponse, SetModelFavoriteReceipt,
+    SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt, ThreadEngineSettingsResult,
+    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
 
 #[allow(clippy::all)]

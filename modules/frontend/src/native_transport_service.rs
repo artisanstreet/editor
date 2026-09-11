@@ -49,8 +49,9 @@ use artisan_editor_cli::{
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ConversationSubscriptionStopped, ErrorCode,
     FirstMessageReceipt, FrameId, Hello, HelloCredential, ProtocolVersion, QueueMessageReceipt,
-    RegisteredEngineProfilesResult, ResponsePayload, ServerEvent, SetThreadEngineConfigResult,
-    ThreadEngineSettingsResult, VersionOffer, WireEnvelope, WireEnvelopeBody,
+    RegisteredEngineProfilesResult, ResolveRichLinkRequest, ResponsePayload, ServerEvent,
+    SetThreadEngineConfigResult, ThreadEngineSettingsResult, VersionOffer, WireEnvelope,
+    WireEnvelopeBody,
 };
 use artisan_transport::{
     CancelHandle, ClientRequestError, ClientSession, ClientSessionLimits, DeadlineError,
@@ -193,6 +194,11 @@ pub enum NativeTransportCommand {
     QueueFirstMessage(Box<QueueFirstMessage>),
     /// Durably queue text and ordered images, including subsequent messages.
     QueueMessage(Box<QueueMessage>),
+    /// Resolve one assistant-authored HTTP(S) link's page title.
+    ResolveRichLink {
+        /// Canonical absolute URL selected by the rich-link URL policy.
+        url: String,
+    },
     /// Begin or resume authoritative conversation subscription.
     Subscribe {
         /// Thread to observe.
@@ -239,6 +245,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::SetModelFavorite(_) => "SetModelFavorite",
             Self::QueueFirstMessage(_) => "QueueFirstMessage",
             Self::QueueMessage(_) => "QueueMessage",
+            Self::ResolveRichLink { .. } => "ResolveRichLink",
             Self::Subscribe { .. } => "Subscribe",
             Self::Unsubscribe { .. } => "Unsubscribe",
             Self::AcknowledgePatch { .. } => "AcknowledgePatch",
@@ -610,6 +617,22 @@ pub enum NativeTransportEvent {
         request_id: RequestId,
         /// Authoritative mutation receipt and post-state.
         receipt: artisan_protocol::SetModelFavoriteReceipt,
+    },
+    /// One resolved rich-link page title.
+    RichLinkResolved {
+        /// Canonical URL the resolution answers.
+        requested_url: String,
+        /// Resolved display title.
+        page_name: String,
+        /// Backend cache expiry as Unix epoch milliseconds.
+        expires_at_ms: i64,
+    },
+    /// One rich-link resolution failure; the authored label stays.
+    RichLinkFailed {
+        /// Canonical URL whose resolution failed.
+        requested_url: String,
+        /// Redacted failure.
+        failure: ServiceFailure,
     },
     /// Correlated durable favorite mutation failure. The application retains
     /// the command for an explicit same-identity retry.
@@ -1150,6 +1173,21 @@ fn composer_catalog_request(
     )))
 }
 
+/// Builds one bounded rich-link resolve request plus its exact echoed URL.
+///
+/// The fragment is removed before sending because Forge's canonical
+/// resolution key and echoed `requestedUrl` both drop it; keeping the exact
+/// URL here lets the response filter prove correlation.
+fn rich_link_request(url: &str) -> Result<(ClientRequest, String), ServiceFailure> {
+    let invalid = || ServiceFailure::invalid(ServiceFailureStage::Request);
+    let url = crate::rich_link_url::rich_link_metadata_url(Some(url)).ok_or_else(invalid)?;
+    let mut parsed = url::Url::parse(&url).map_err(|_| invalid())?;
+    parsed.set_fragment(None);
+    let canonical = parsed.as_str().to_owned();
+    let request = ResolveRichLinkRequest::new(canonical.clone()).map_err(|_| invalid())?;
+    Ok((ClientRequest::ResolveRichLink(request), canonical))
+}
+
 fn model_favorites_request() -> ClientRequest {
     query_request(Query::ReadModelFavorites(ReadModelFavorites))
 }
@@ -1405,6 +1443,9 @@ enum ExpectedResponse {
     ComposerCatalog {
         thread_id: ThreadId,
         profile_id: artisan_domain::EngineProfileId,
+    },
+    RichLink {
+        requested_url: String,
     },
     ModelFavorites,
     ModelFavoriteSet {
@@ -1855,6 +1896,11 @@ fn validate_response_family(
             ResponsePayload::ComposerCatalog(result),
         ) if result.thread_id == thread_id && result.profile_id == profile_id => {
             Ok(ResponsePayload::ComposerCatalog(result))
+        }
+        (ExpectedResponse::RichLink { requested_url }, ResponsePayload::RichLink(result))
+            if result.requested_url == requested_url =>
+        {
+            Ok(ResponsePayload::RichLink(result))
         }
         (ExpectedResponse::ModelFavorites, ResponsePayload::ModelFavorites(result)) => {
             Ok(ResponsePayload::ModelFavorites(result))
@@ -3404,6 +3450,9 @@ async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::QueueMessage(command)) => {
                         queue_message(runtime, frames, events, *command).await?;
                     }
+                    Some(NativeTransportCommand::ResolveRichLink { url }) => {
+                        resolve_rich_link(runtime, frames, events, url).await?;
+                    }
                     Some(NativeTransportCommand::Subscribe { thread_id, after }) => {
                         handle_subscribe_command(runtime, frames, events, thread_id, after).await?;
                     }
@@ -4106,6 +4155,65 @@ async fn request_snapshot(
     publish(events, NativeTransportEvent::Snapshot(snapshot))
 }
 
+/// Resolves one assistant-authored HTTP(S) link's page title.
+///
+/// The request is deliberately not thread-scoped: it reads no durable state,
+/// so the one bounded resolve may serve whichever surface asked. Every
+/// failure publishes the typed outcome instead of failing the command loop,
+/// so the authored label stays visible for exactly one link.
+async fn resolve_rich_link(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    url: String,
+) -> Result<(), ServiceFailure> {
+    let (request, expected_url) = match rich_link_request(&url) {
+        Ok(request) => request,
+        Err(failure) => {
+            return publish(
+                events,
+                NativeTransportEvent::RichLinkFailed {
+                    requested_url: url,
+                    failure,
+                },
+            );
+        }
+    };
+    let outcome = runtime
+        .request(
+            frames,
+            request,
+            ExpectedResponse::RichLink {
+                requested_url: expected_url.clone(),
+            },
+        )
+        .await;
+    match outcome {
+        Ok(ResponsePayload::RichLink(result)) => publish(
+            events,
+            NativeTransportEvent::RichLinkResolved {
+                requested_url: result.requested_url,
+                page_name: result.page_name,
+                expires_at_ms: result.cache_expires_at_ms,
+            },
+        ),
+        Ok(_) => publish(
+            events,
+            NativeTransportEvent::RichLinkFailed {
+                requested_url: expected_url,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        ),
+        Err(failure) => publish(
+            events,
+            NativeTransportEvent::RichLinkFailed {
+                requested_url: expected_url,
+                failure: failure.into(),
+            },
+        ),
+    }
+}
+
 async fn read_message_image(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
@@ -4741,9 +4849,9 @@ mod tests {
         create_command_values, create_mutation, engine_config_stable_mutation, finite_duration,
         first_message_stable_mutation, known_thread_for_queue, make_request_frame,
         message_stable_mutation, payload_health_decision, project_request,
-        question_stable_mutation, reconnect_hello, session_needs_reconnect, snapshot_request,
-        thread_engine_settings_request, thread_selection_decision, threads_request,
-        try_send_command, validate_readiness, validate_response_family,
+        question_stable_mutation, reconnect_hello, rich_link_request, session_needs_reconnect,
+        snapshot_request, thread_engine_settings_request, thread_selection_decision,
+        threads_request, try_send_command, validate_readiness, validate_response_family,
     };
     use artisan_domain::UnixMillis;
     use artisan_domain::{
@@ -5955,6 +6063,46 @@ mod tests {
             validate_response_family(expected, ResponsePayload::ComposerCatalog(wrong_thread))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn rich_link_response_family_requires_the_exact_requested_url() {
+        let metadata =
+            artisan_protocol::RichLinkPageMetadata::new("https://example.com/page", "Example", 5)
+                .expect("valid metadata");
+        assert!(
+            validate_response_family(
+                ExpectedResponse::RichLink {
+                    requested_url: "https://example.com/page".to_owned(),
+                },
+                ResponsePayload::RichLink(metadata.clone()),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_response_family(
+                ExpectedResponse::RichLink {
+                    requested_url: "https://example.com/other".to_owned(),
+                },
+                ResponsePayload::RichLink(metadata),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rich_link_requests_apply_the_shared_url_policy() {
+        let (ClientRequest::ResolveRichLink(request), expected_url) =
+            rich_link_request("https://Example.com/dir/../page#section").expect("valid request")
+        else {
+            panic!("rich-link helper must build the resolve arm");
+        };
+        assert_eq!(request.url(), "https://example.com/page");
+        assert_eq!(expected_url, "https://example.com/page");
+
+        assert!(rich_link_request("example.com/page").is_err());
+        assert!(rich_link_request("mailto:user@example.com").is_err());
+        assert!(rich_link_request("ftp://example.com/file").is_err());
     }
 
     #[test]

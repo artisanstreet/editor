@@ -664,6 +664,29 @@ struct SetModelFavoriteReceipt {
   snapshot @4 :ModelFavoritesSnapshot;
 }
 
+# One bounded rich-link metadata read for an absolute HTTP(S) URL.
+#
+# The URL is untrusted assistant-authored text. Receivers re-apply the shared
+# absolute-HTTP(S) policy, resolve through Forge's bounded outbound fetch, and
+# never treat the value as a filesystem path or credential carrier.
+struct ResolveRichLinkRequest {
+  url @0 :Text;
+}
+
+# Resolved rich-link page metadata for one requested URL.
+#
+# `pageName` already applies the reference fallback chain (`og:title`,
+# `twitter:title`, document title, or the canonical host) and is never empty.
+# `cacheExpiresAtMs` is the backend cache entry's absolute Unix epoch
+# millisecond expiry so clients can bound their own retained titles without
+# inventing a second freshness policy. The requested URL is echoed so a client
+# can prove the response answers the exact URL it asked for.
+struct RichLinkPageMetadata {
+  requestedUrl @0 :Text;
+  pageName @1 :Text;
+  cacheExpiresAtMs @2 :Int64;
+}
+
 # The request arms of the native protocol: the five original workflow
 # requests, project rediscovery, the three conversation read/subscription
 # requests, explicit host interaction, lifecycle control, durable engine
@@ -729,6 +752,10 @@ struct Request {
     readAccountUsage @25 :ReadAccountUsageRequest;
     respondApproval @26 :RespondApprovalRequest;
     respondQuestion @27 :RespondQuestionRequest;
+
+    # Bounded rich-link metadata read for one absolute HTTP(S) URL. Appended
+    # after respondQuestion; fresh ordinal, existing ordinals frozen.
+    resolveRichLink @29 :ResolveRichLinkRequest;
   }
 }
 
@@ -796,6 +823,10 @@ struct Response {
     # Terminally failed-dispatch listing. Appended after the question
     # response; fresh ordinal, existing ordinals frozen.
     failedMessages @29 :ComposerState.FailedMessageListing;
+
+    # Resolved rich-link page metadata for one resolveRichLink request.
+    # Appended after failedMessages; fresh ordinal, existing ordinals frozen.
+    richLink @30 :RichLinkPageMetadata;
   }
 }
 

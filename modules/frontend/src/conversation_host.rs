@@ -76,6 +76,14 @@ pub enum ConversationHostEffect {
         /// Stable scene or item target.
         target: ConversationSurfaceTarget,
     },
+    /// One surface render pass observed unresolved rich-link destinations.
+    ///
+    /// The outer adapter forwards each URL to the transport's bounded
+    /// resolver; nothing is fetched by the host itself.
+    RichLinkRequests {
+        /// Canonical absolute HTTP(S) URLs that need a resolve attempt.
+        urls: Vec<String>,
+    },
     /// A typed refusal that could be observed by the outer adapter.
     Refused {
         /// Redacted refusal diagnosis.
@@ -491,6 +499,9 @@ impl ConversationHost {
                 ConversationSurfaceAction::ScrollIntent { target } => {
                     self.route_scroll_intent(target, cx)
                 }
+                ConversationSurfaceAction::ResolveRichLinks { urls } => {
+                    self.route_rich_link_requests(urls, cx)
+                }
                 ConversationSurfaceAction::TurnFooterRevealed { turn } => {
                     self.route_footer_revealed(turn, surface, cx)
                 }
@@ -546,6 +557,30 @@ impl ConversationHost {
         }
         self.effects
             .push(ConversationHostEffect::ScrollIntent { target });
+        cx.notify();
+        SurfaceRouteDecision::Accepted
+    }
+
+    /// Retains one bounded batch of unresolved rich-link destinations for the
+    /// outer adapter. The controller outbox and host outbox share the same
+    /// backpressure rule as scroll intents, so a full adapter queue stalls the
+    /// surface action instead of dropping resolve requests.
+    fn route_rich_link_requests(
+        &mut self,
+        urls: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> SurfaceRouteDecision {
+        if urls.is_empty() {
+            return SurfaceRouteDecision::Accepted;
+        }
+        self.flush_controller_effects();
+        if self.controller.pending_effect_count() > 0
+            || self.effects.len() >= CONVERSATION_HOST_MAX_EFFECTS
+        {
+            return SurfaceRouteDecision::Backpressured;
+        }
+        self.effects
+            .push(ConversationHostEffect::RichLinkRequests { urls });
         cx.notify();
         SurfaceRouteDecision::Accepted
     }

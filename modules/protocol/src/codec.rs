@@ -75,10 +75,11 @@ use crate::types::{
     LifecycleState, LifecycleStatus, LifecycleStopDisposition, LifecycleStopReceipt,
     LocalCapability, LocalCapabilityError, MessageImageResult, ModelFavoritesSnapshot,
     ProtocolFailure, ProtocolValueError, ProtocolVersion, QueueMessageReceipt, ReconnectCapability,
-    ReconnectCapabilityError, RegisteredEngineProfilesResult, RespondApprovalReceipt,
-    RespondQuestionReceipt, ResponsePayload, RunInteractionOutcome, RunLiveStatus, ServerEvent, ServerResponse,
-    SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
-    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
+    ReconnectCapabilityError, RegisteredEngineProfilesResult, ResolveRichLinkRequest,
+    RespondApprovalReceipt, RespondQuestionReceipt, ResponsePayload, RichLinkPageMetadata,
+    RunInteractionOutcome, RunLiveStatus, ServerEvent, ServerResponse, SetModelFavoriteReceipt,
+    SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt, VersionOffer,
+    VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
 
 /// Maximum Cap'n Proto graph traversal for one already-framed application
@@ -904,6 +905,12 @@ fn encode_request(
             )
             .map_err(|_| ProtocolEncodeError::ComposerState)?
         }
+        ClientRequest::ResolveRichLink(request) => {
+            builder
+                .reborrow()
+                .init_resolve_rich_link()
+                .set_url(request.url());
+        }
     }
     Ok(())
 }
@@ -1146,6 +1153,13 @@ fn encode_response_payload(
                 builder.reborrow().init_registered_engine_profiles(),
                 result,
             )?;
+        }
+        ResponsePayload::RichLink(result) => {
+            result.validate()?;
+            let mut encoded = builder.reborrow().init_rich_link();
+            encoded.set_requested_url(&result.requested_url);
+            encoded.set_page_name(&result.page_name);
+            encoded.set_cache_expires_at_ms(result.cache_expires_at_ms);
         }
     }
     Ok(())
@@ -2276,6 +2290,12 @@ fn decode_request(
             )))
         }
         request::Which::ReadAccountUsage(value) => decode_read_account_usage(value?),
+        request::Which::ResolveRichLink(query) => {
+            let query = query?;
+            Ok(ClientRequest::ResolveRichLink(ResolveRichLinkRequest::new(
+                read_text(query.get_url(), "request.resolveRichLink.url")?,
+            )?))
+        }
         request::Which::ReadModelFavorites(()) => Ok(ClientRequest::Query(
             Query::ReadModelFavorites(ReadModelFavorites),
         )),
@@ -3615,6 +3635,7 @@ fn decode_response(
         response::Which::RegisteredEngineProfiles(result) => {
             decode_registered_engine_profiles_result(result?)?
         }
+        response::Which::RichLink(result) => decode_rich_link_page_metadata(result?)?,
     };
     Ok(ServerResponse {
         request_id,
@@ -3725,6 +3746,19 @@ fn decode_registered_engine_profiles_result(
         }
     };
     Ok(ResponsePayload::RegisteredEngineProfiles(result))
+}
+
+fn decode_rich_link_page_metadata(
+    value: artisan_capnp::rich_link_page_metadata::Reader<'_>,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    Ok(ResponsePayload::RichLink(RichLinkPageMetadata::new(
+        read_text(
+            value.get_requested_url(),
+            "response.richLink.requestedUrl",
+        )?,
+        read_text(value.get_page_name(), "response.richLink.pageName")?,
+        value.get_cache_expires_at_ms(),
+    )?))
 }
 
 fn decode_lifecycle_response(
@@ -7124,5 +7158,67 @@ fn decode_transcript_content(
                 decode_observation_search_state(content.get_state()?),
             )?))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ProtocolVersion, ResolveRichLinkRequest, RichLinkPageMetadata};
+
+    fn envelope(body: WireEnvelopeBody) -> WireEnvelope {
+        WireEnvelope {
+            protocol_version: ProtocolVersion::V1,
+            frame_id: FrameId::parse("frame-1").expect("frame id is valid"),
+            sent_at: UnixMillis::from_millis(1_700_000_000_000),
+            body,
+        }
+    }
+
+    #[test]
+    fn resolve_rich_link_request_round_trips() {
+        let request = ResolveRichLinkRequest::new("https://example.com/docs?q=1#frag")
+            .expect("request is valid");
+        let wire = envelope(WireEnvelopeBody::Request(ClientRequest::ResolveRichLink(
+            request,
+        )));
+        let encoded = encode_envelope(&wire).expect("request encodes");
+        let decoded = decode_envelope(&encoded).expect("request decodes");
+        assert!(decoded.body == wire.body);
+    }
+
+    #[test]
+    fn rich_link_response_round_trips() {
+        let metadata =
+            RichLinkPageMetadata::new("https://example.com/docs", "Example — Docs", 1_700_000_060_000)
+                .expect("metadata is valid");
+        let wire = envelope(WireEnvelopeBody::Response(ServerResponse {
+            request_id: RequestId::parse("frame-1").expect("request id is valid"),
+            payload: ResponsePayload::RichLink(metadata),
+        }));
+        let encoded = encode_envelope(&wire).expect("response encodes");
+        let decoded = decode_envelope(&encoded).expect("response decodes");
+        assert!(decoded.body == wire.body);
+    }
+
+    #[test]
+    fn decode_rejects_non_http_rich_link_url() {
+        let mut message = Builder::new(HeapAllocator::new());
+        {
+            let mut root = message.init_root::<artisan_capnp::envelope::Builder>();
+            root.set_protocol_version(1);
+            root.set_message_id("frame-1");
+            root.set_sent_at_millis(0);
+            root.reborrow()
+                .init_body()
+                .init_request()
+                .init_resolve_rich_link()
+                .set_url("file:///etc/passwd");
+        }
+        let bytes = serialize::write_message_to_words(&message);
+        assert!(matches!(
+            decode_envelope(&bytes),
+            Err(ProtocolDecodeError::ProtocolValue { .. })
+        ));
     }
 }
