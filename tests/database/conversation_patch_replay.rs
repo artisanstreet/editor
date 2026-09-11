@@ -679,7 +679,7 @@ async fn all_five_variants_round_trip() {
                     assert_eq!(a.created_at.as_millis(), BATCH_AT_MS);
                     assert_eq!(a.updated_at.as_millis(), BATCH_AT_MS);
                 }
-                ConversationItem::UserMessage(_) => panic!("expected assistant"),
+                _ => panic!("expected assistant"),
             }
         }
         other => panic!("seq4 {other:?}"),
