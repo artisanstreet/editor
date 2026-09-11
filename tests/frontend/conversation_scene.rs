@@ -105,6 +105,8 @@ fn activity_item(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneItem {
         ordinal,
         SceneItemKind::Activity {
             body: body.to_owned(),
+            kind: None,
+            detail: None,
         },
         None,
     )

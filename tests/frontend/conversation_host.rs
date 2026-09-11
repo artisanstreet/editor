@@ -447,6 +447,8 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
         3,
         SceneFactKind::Activity {
             body: "hosted trace detail".to_owned(),
+            kind: None,
+            detail: None,
         },
     )
     .expect("test activity fact is valid");

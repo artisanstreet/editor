@@ -307,7 +307,7 @@ fn tool_detail_is_the_displayed_body_without_machine_prefix() {
     let projection = project_activities(&state, &snapshot);
     assert_eq!(projection.facts.len(), 1);
     assert!(
-        matches!(&projection.facts[0].kind, SceneFactKind::Activity { body } if body == "read 42 lines"),
+        matches!(&projection.facts[0].kind, SceneFactKind::Activity { body, .. } if body == "read 42 lines"),
         "the meaningful detail replaces the raw tool prefix"
     );
 }
@@ -770,6 +770,8 @@ fn upsert_refuses_cross_turn_reassignment() {
         100,
         SceneFactKind::Activity {
             body: String::from("tool read started"),
+            kind: None,
+            detail: None,
         },
     )
     .expect("valid fact");
@@ -782,6 +784,8 @@ fn upsert_refuses_cross_turn_reassignment() {
         101,
         SceneFactKind::Activity {
             body: String::from("tool read started"),
+            kind: None,
+            detail: None,
         },
     )
     .expect("valid fact");
@@ -1039,6 +1043,8 @@ fn stale_batch_with_colliding_ordinal_rolls_back_without_side_effects() {
                 99,
                 SceneFactKind::Activity {
                     body: String::from("read"),
+                    kind: Some(String::from("read")),
+                    detail: None,
                 },
             )
             .expect("valid fact")
@@ -1055,6 +1061,8 @@ fn stale_batch_with_colliding_ordinal_rolls_back_without_side_effects() {
         2,
         SceneFactKind::Activity {
             body: String::from("probe"),
+            kind: None,
+            detail: None,
         },
     )
     .expect("valid fact");

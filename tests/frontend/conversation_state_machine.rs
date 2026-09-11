@@ -934,6 +934,8 @@ fn activity_fact(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneFact {
         ordinal,
         SceneFactKind::Activity {
             body: body.to_owned(),
+            kind: None,
+            detail: None,
         },
     )
     .expect("valid activity fact")
@@ -1784,6 +1786,8 @@ fn activity_fact_with_run(
         ordinal,
         SceneFactKind::Activity {
             body: body.to_owned(),
+            kind: None,
+            detail: None,
         },
     )
     .expect("valid activity fact")
