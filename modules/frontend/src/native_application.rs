@@ -11016,22 +11016,22 @@ mod tests {
         });
         cx.run_until_parked();
         let staged_turn = TurnId::parse("turn-staged").expect("turn");
+        let staged_turn_selector: &'static str = Box::leak(
+            crate::conversation_surface::turn_selector(&staged_turn).into_boxed_str(),
+        );
+        let staged_status_selector: &'static str = Box::leak(
+            crate::conversation_surface::status_selector(&staged_turn).into_boxed_str(),
+        );
         assert!(
-            cx.debug_bounds(crate::conversation_surface::turn_selector(
-                &staged_turn
-            ))
-            .is_some(),
+            cx.debug_bounds(staged_turn_selector).is_some(),
             "echoed turn paints"
         );
         assert!(
-            cx.debug_bounds(user_selector.clone()).is_some(),
+            cx.debug_bounds(Box::leak(user_selector.into_boxed_str())).is_some(),
             "echoed user body paints"
         );
         assert!(
-            cx.debug_bounds(crate::conversation_surface::status_selector(
-                &staged_turn
-            ))
-            .is_some(),
+            cx.debug_bounds(staged_status_selector).is_some(),
             "provider wait row paints"
         );
         // Stage 3: genuine attributed reasoning before any assistant text.
@@ -11078,10 +11078,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds(crate::conversation_surface::status_selector(
-                &staged_turn
-            ))
-            .is_some(),
+            cx.debug_bounds(staged_status_selector).is_some(),
             "thinking row paints"
         );
         // Stage 4: first streamed body on the SAME echoed turn.
@@ -11143,7 +11140,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds(first_reply_selector.clone()).is_some(),
+            cx.debug_bounds(Box::leak(first_reply_selector.into_boxed_str())).is_some(),
             "first streamed body paints"
         );
         // Stage 5: two streamed bodies, one update each. "Hel" + "lo " +
@@ -11205,7 +11202,7 @@ mod tests {
             });
             cx.run_until_parked();
             assert!(
-                cx.debug_bounds(assistant_selector.clone()).is_some(),
+                cx.debug_bounds(Box::leak(assistant_selector.into_boxed_str())).is_some(),
                 "streamed reply paints after its own update"
             );
         };
@@ -11275,10 +11272,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(terminal_reply, ["Hello world"]);
         assert!(
-            cx.debug_bounds(crate::conversation_surface::turn_selector(
-                &staged_turn
-            ))
-            .is_some(),
+            cx.debug_bounds(staged_turn_selector).is_some(),
             "settled turn still paints"
         );
     }
