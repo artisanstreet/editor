@@ -308,7 +308,10 @@ pub(crate) fn from_discovery(
     discovery: &crate::model_discovery::DiscoveryBundle,
 ) -> Result<NativeModelCatalog, NativeModelCatalogBridgeError> {
     let runtime = NativeCatalogRuntime {
-        catalog_revision: Some(format!("static+discovery-{:016x}", discovery_revision_hash(discovery))),
+        catalog_revision: Some(format!(
+            "static+discovery-{:016x}",
+            discovery_revision_hash(discovery)
+        )),
         runnable_harness_ids: RUNNABLE_ENGINE_IDS
             .iter()
             .map(|harness| (*harness).to_owned())
@@ -1204,6 +1207,43 @@ mod tests {
                 .iter()
                 .all(|model| model.native_model_id != "gpt-reserve"),
             "engine-internal hidden rows must not reach the picker"
+        );
+    }
+
+    #[test]
+    fn discovery_only_catalog_overlays_static_baseline() {
+        let catalog = from_discovery(&crate::model_discovery::DiscoveryBundle {
+            models: vec![discovered(
+                "codex",
+                "openai",
+                "gpt-5.6-sol",
+                "Sol Live",
+                Some(272_000),
+                Some(872_000),
+            )],
+            probed_engines: vec!["codex"],
+        })
+        .expect("scope-free catalog builds");
+        assert_eq!(
+            catalog
+                .manifest
+                .model("codex-sol")
+                .expect("static row")
+                .name,
+            "Sol Live"
+        );
+        assert!(
+            catalog
+                .manifest
+                .model("codex-sol")
+                .expect("static row")
+                .capabilities
+                .context_window
+                .is_some()
+        );
+        assert_eq!(
+            catalog.manifest.models.len(),
+            NativeModelCatalog::offline().unwrap().manifest.models.len()
         );
     }
 
