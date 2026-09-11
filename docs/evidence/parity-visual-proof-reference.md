@@ -51,12 +51,12 @@ conversation column are.
 1. Root registers the module (`mod parity_visual_proof;`, feature gate at
    root discretion) and enables `test-support` on the workspace
    `gpui_platform` dependency plus binary/export and Bazel wiring.
-2. Root runs one process per capture (9 states × narrow/wide = 18
+2. Root runs one process per capture (10 states × narrow/wide = 20
    sequential invocations; GPU/RAM reclaimed between — the all-at-once
    shape exhausted RAM and is gone):
    `parity-proof --case <slug> --viewport <narrow|wide>`.
    Slugs: `empty thinking working streaming completed error longform
-   reference-settled reference-thinking`.
+   reference-settled reference-thinking reference-navigator`.
    Anything else (missing, reordered, extra, unknown slug/viewport) fails
    closed with usage on stderr and opens no windows.
 3. Each process: shipping boot parity (`.with_assets(CatalogAssetSource)`
@@ -109,6 +109,16 @@ passes through as plain text), `lib/conversation/store.ts` +
   run. Exercises the live thinking summary line with inline code,
   strong, and italic fragments. Tests assert the session run, the exact
   summary body, and `Thinking` narration.
+- `reference-navigator`: same settled Whoopty scene plus a second
+  genuine Completed exchange (`Whoopty again` / `Still here and
+  playful.`) on its own turn with globally unique ordinals, so the rail
+  carries more than one user marker (a single marker renders collapsed
+  per the marker policy). At capture the fixture focuses the first
+  rendered navigator control through real window focus
+  (`navigator_focus_handle`), asserts more than one candidate marker
+  and a rendered handle, and fails rather than capturing a collapsed
+  rail. Wide + narrow readbacks show the expanded rail above the
+  composer.
 
 Generic unattributed facts cannot trigger session grouping (runs are
 never parsed or defaulted: zero or several content runs keep the legacy

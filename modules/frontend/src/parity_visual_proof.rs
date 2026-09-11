@@ -61,11 +61,11 @@ use gpui::{
 
 use crate::conversation_delivery_machine::ConversationDeliveryEvent;
 use crate::conversation_host::{ConversationHost, ConversationHostError};
-use crate::conversation_scene::SceneId;
+use crate::conversation_scene::{SceneId, TurnBlock};
 use crate::conversation_state_machine::{
     ConversationStateEvent, SceneFact, SceneFactCommand, SceneFactKind,
 };
-use crate::conversation_surface::ordered_block_kinds;
+use crate::conversation_surface::{ConversationSurfaceTarget, ordered_block_kinds};
 use crate::desktop_shell::{
     DESKTOP_SIDEBAR_WIDTH_PX, DESKTOP_TITLEBAR_HEIGHT_PX, DesktopShellStyle, desktop_shell,
 };
@@ -106,6 +106,8 @@ pub enum ProofSceneCase {
     ReferenceSettled,
     /// Live thinking summary with markdown fragments, run-attributed.
     ReferenceThinking,
+    /// Same settled Whoopty reference with the navigator rail focused.
+    ReferenceNavigator,
 }
 
 impl ProofSceneCase {
@@ -122,6 +124,7 @@ impl ProofSceneCase {
             Self::Longform => "longform",
             Self::ReferenceSettled => "reference-settled",
             Self::ReferenceThinking => "reference-thinking",
+            Self::ReferenceNavigator => "reference-navigator",
         }
     }
 
@@ -138,13 +141,14 @@ impl ProofSceneCase {
             "longform" => Some(Self::Longform),
             "reference-settled" => Some(Self::ReferenceSettled),
             "reference-thinking" => Some(Self::ReferenceThinking),
+            "reference-navigator" => Some(Self::ReferenceNavigator),
             _ => None,
         }
     }
 
     /// Every case in matrix order (root runs each as its own process).
     #[must_use]
-    pub fn all() -> [Self; 9] {
+    pub fn all() -> [Self; 10] {
         [
             Self::Empty,
             Self::Thinking,
@@ -155,7 +159,14 @@ impl ProofSceneCase {
             Self::Longform,
             Self::ReferenceSettled,
             Self::ReferenceThinking,
+            Self::ReferenceNavigator,
         ]
+    }
+
+    /// Whether this case focuses the real navigator rail before capture.
+    #[must_use]
+    pub fn focuses_navigator(self) -> bool {
+        matches!(self, Self::ReferenceNavigator)
     }
 }
 
@@ -255,6 +266,61 @@ fn make_multimodal(
 
 fn proof_run_id() -> RunId {
     RunId::parse("parity-proof-run").expect("fixture run id is valid")
+}
+
+fn followup_turn_id() -> TurnId {
+    TurnId::parse("parity-proof-turn-two").expect("fixture turn id is valid")
+}
+
+/// Second genuine exchange for the navigator case only: its own turn and
+/// globally unique ordinals (turn 3, items 4 and 5), so the navigator rail
+/// has more than one user marker and never renders collapsed. Whoopty
+/// content in turn one is untouched.
+fn make_followup_turn(created_at: UnixMillis, updated_at: UnixMillis) -> ConversationTurn {
+    ConversationTurn {
+        turn_id: followup_turn_id(),
+        ordinal: TurnOrdinal::new(3),
+        revision: Revision::new(0),
+        lifecycle: ConversationLifecycle::Completed,
+        created_at,
+        updated_at,
+    }
+}
+
+/// Second-turn user message for the navigator case only.
+fn make_followup_user(body: &str, created_at: UnixMillis, updated_at: UnixMillis) -> ConversationItem {
+    ConversationItem::UserMessage(UserMessageItem {
+        item_id: ItemId::parse("parity-proof-user-4").expect("fixture item id is valid"),
+        turn_id: followup_turn_id(),
+        ordinal: ItemOrdinal::new(4),
+        revision: Revision::new(0),
+        lifecycle: ConversationLifecycle::Pending,
+        body: MessageBody::parse(body.to_owned()).expect("fixture user body is valid"),
+        source_message_id: None,
+        created_at,
+        updated_at,
+    })
+}
+
+/// Second-turn assistant reply for the navigator case only, sharing the
+/// reference run.
+fn make_followup_assistant(
+    body: &str,
+    created_at: UnixMillis,
+    updated_at: UnixMillis,
+) -> ConversationItem {
+    ConversationItem::AssistantMessage(AssistantMessageItem {
+        item_id: ItemId::parse("parity-proof-assistant-5").expect("fixture item id is valid"),
+        turn_id: followup_turn_id(),
+        run_id: reference_run_id(),
+        ordinal: ItemOrdinal::new(5),
+        revision: Revision::new(0),
+        lifecycle: ConversationLifecycle::Completed,
+        body: AssistantBody::parse(body.to_owned()).expect("fixture assistant body is valid"),
+        phase: AssistantMessagePhase::Final,
+        created_at,
+        updated_at,
+    })
 }
 
 /// Run identity shared by one reference exchange's assistant reply and its
@@ -413,6 +479,11 @@ fn case_snapshot(
         // reply's run so single-run session grouping engages from the real
         // pipeline (no producer emits WorkSession markers); the 6s
         // terminal span settles ThoughtFor{6000}.
+        // settled reply plus session facts. The navigator variant shares
+        // turn one verbatim, then adds a second genuine Completed
+        // exchange on its own turn with globally unique ordinals, so the
+        // navigator rail carries more than one user marker and never
+        // renders collapsed.
         ProofSceneCase::ReferenceSettled => build(
             vec![make_turn(
                 ConversationLifecycle::Completed,
@@ -432,6 +503,38 @@ fn case_snapshot(
                 ),
             ],
         )?,
+        ProofSceneCase::ReferenceNavigator => ConversationSnapshot::new(
+            thread.clone(),
+            ConversationCursor::new(2),
+            vec![
+                make_turn(
+                    ConversationLifecycle::Completed,
+                    ago(6_000),
+                    now,
+                ),
+                make_followup_turn(ago(4_000), ago(1_000)),
+            ],
+            vec![
+                make_user(1, "Whoopty", ago(5_500), now),
+                make_assistant(
+                    2,
+                    "Whoopty! \u{1F604} Whats up?",
+                    AssistantMessagePhase::Final,
+                    ConversationLifecycle::Completed,
+                    reference_run_id(),
+                    ago(5_000),
+                    now,
+                ),
+                make_followup_user("Whoopty again", ago(3_500), ago(1_000)),
+                make_followup_assistant(
+                    "Still here and playful.",
+                    ago(3_000),
+                    ago(1_000),
+                ),
+            ],
+            now,
+        )
+        .map_err(|error| format!("fixture snapshot invalid: {error:?}"))?,
         // Live counterpart: active turn, same user prompt, markdown-rich
         // reasoning summary (inline code, strong, italic) attributed to the
         // run, so the live thinking summary line renders from provenance.
@@ -492,13 +595,15 @@ fn case_facts(case: ProofSceneCase) -> Result<Vec<SceneFact>, String> {
                 message: "fixture failure: transport refused".to_owned(),
             },
         )?]),
-        ProofSceneCase::ReferenceSettled => Ok(vec![attributed_fact(
-            "reference-reasoning",
-            100,
-            SceneFactKind::Reasoning {
-                body: "Planning a playful response.".to_owned(),
-            },
-        )?]),
+        ProofSceneCase::ReferenceSettled | ProofSceneCase::ReferenceNavigator => {
+            Ok(vec![attributed_fact(
+                "reference-reasoning",
+                100,
+                SceneFactKind::Reasoning {
+                    body: "Planning a playful response.".to_owned(),
+                },
+            )?])
+        }
         ProofSceneCase::ReferenceThinking => Ok(vec![attributed_fact(
             "reference-thinking",
             100,
@@ -547,7 +652,71 @@ fn seed_case(
     })
 }
 
-/// Prints the text manifest bound to one capture: the published thread
+/// Candidate navigator targets from a projected scene, in transcript
+/// order: user and assistant message identities, each tried as a domain
+/// item target first (the navigator marker form) and then as a scene
+/// target. Pure projection over real block identities — never invented.
+fn navigator_candidates(scene: &ConversationScene) -> Vec<ConversationSurfaceTarget> {
+    let mut targets = Vec::new();
+    for turn in scene.turn_scenes() {
+        for block in turn.blocks() {
+            let id = match block {
+                TurnBlock::UserMessage(message) => Some(message.id.clone()),
+                TurnBlock::AssistantMessage(message) => Some(message.id.clone()),
+                _ => None,
+            };
+            if let Some(id) = id {
+                if let Ok(item) = ItemId::parse(id.as_str()) {
+                    targets.push(ConversationSurfaceTarget::Item(item));
+                }
+                targets.push(ConversationSurfaceTarget::Scene(id));
+            }
+        }
+    }
+    targets
+}
+
+/// Stable manifest label for a navigator target.
+fn navigator_target_label(target: &ConversationSurfaceTarget) -> String {
+    match target {
+        ConversationSurfaceTarget::Item(id) => format!("item:{}", id.as_str()),
+        ConversationSurfaceTarget::Scene(id) => format!("scene:{}", id.as_str()),
+    }
+}
+
+/// Focuses the first rendered navigator control of the mounted surface
+/// through actual window focus state, returning its manifest label.
+/// Fewer than two candidate markers means the rail would render collapsed,
+/// and a missing control means nothing rendered: both are errors, so a
+/// collapsed or empty rail can never be silently captured.
+fn focus_first_navigator(
+    screen: &Entity<ThreadScreen>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<String, String> {
+    let host = screen.read(cx).host().clone();
+    let surface = host.read(cx).surface().clone();
+    let candidates = {
+        let rendered = surface.read(cx);
+        navigator_candidates(rendered.scene())
+    };
+    if candidates.len() <= 1 {
+        return Err(format!(
+            "navigator collapsed: {} candidate markers, need more than one",
+            candidates.len()
+        ));
+    }
+    for target in &candidates {
+        let rendered = surface.read(cx);
+        if let Some(handle) = rendered.navigator_focus_handle(target) {
+            let label = navigator_target_label(target);
+            drop(rendered);
+            window.focus(&handle, cx);
+            return Ok(label);
+        }
+    }
+    Err(String::from("navigator rendered no focusable control"))
+}
 /// title plus the composer attachment count read back from the live
 /// entity. Draft content has no production-visible accessor outside tests
 /// (`draft()` is `cfg(test)`), so the manifest omits it rather than faking
@@ -743,7 +912,7 @@ impl ProofCapture {
 /// and RAM between captures; root orchestrates the 7 × 2 matrix as
 /// sequential processes. Unknown or missing arguments fail closed: usage on
 /// stderr and no windows opened.
-const PROOF_USAGE: &str = "usage: parity-proof --case <empty|thinking|working|streaming|completed|error|longform|reference-settled|reference-thinking> --viewport <narrow|wide>";
+const PROOF_USAGE: &str = "usage: parity-proof --case <empty|thinking|working|streaming|completed|error|longform|reference-settled|reference-thinking|reference-navigator> --viewport <narrow|wide>";
 
 /// Parses one explicit selection; anything else is a hard error.
 fn parse_selection(args: &[String]) -> Result<ProofCapture, String> {
@@ -872,6 +1041,7 @@ pub fn run() -> ExitCode {
                         let clock = cx.background_executor().clone();
                         let mut cx = cx;
                         let mut warmup_draws = 0u32;
+                        let navigator_focused = Rc::new(Cell::new(false));
                         for _ in 0..RESIZE_MAX_POLLS {
                             let outcome =
                                 cx.update_window(any_handle, |_, window, cx| {
@@ -900,6 +1070,29 @@ pub fn run() -> ExitCode {
                                             screen_cx.notify();
                                         }
                                     });
+                                    // Navigator cases focus the real rail
+                                    // control through window focus state on
+                                    // every settled poll until it lands, so
+                                    // warmup draws include the expanded rail.
+                                    if capture.case.focuses_navigator()
+                                        && !navigator_focused.get()
+                                    {
+                                        match focus_first_navigator(&screen, window, cx) {
+                                            Ok(label) => {
+                                                navigator_focused.set(true);
+                                                println!(
+                                                    "parity-proof navigator focused \
+                                                     {label} for {stem}"
+                                                );
+                                            }
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "parity-proof navigator not ready \
+                                                     for {stem}: {error}"
+                                                );
+                                            }
+                                        }
+                                    }
                                     // Settle the frame: a hidden window paints
                                     // nothing on its own, and one draw can
                                     // reuse incomplete cached paint while the
@@ -916,6 +1109,19 @@ pub fn run() -> ExitCode {
                                     warmup_draws += 1;
                                     if warmup_draws < WARMUP_DRAW_PASSES {
                                         return ResizePoll::Waiting;
+                                    }
+                                    // A navigator capture without a focused
+                                    // rail control proves nothing about the
+                                    // expanded rail: fail rather than capture
+                                    // collapsed pixels.
+                                    if capture.case.focuses_navigator()
+                                        && !navigator_focused.get()
+                                    {
+                                        eprintln!(
+                                            "parity-proof navigator never expanded \
+                                             for {stem}"
+                                        );
+                                        return ResizePoll::Done(true);
                                     }
                                     print_capture_geometry(
                                         &stem,
@@ -1033,8 +1239,8 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        NARROW_LOGICAL_WIDTH, ProofSceneCase, case_facts, case_snapshot, parse_selection,
-        reference_run_id,
+        NARROW_LOGICAL_WIDTH, ProofSceneCase, case_facts, case_snapshot, navigator_candidates,
+        parse_selection, reference_run_id,
     };
     use crate::conversation_delivery_machine::ConversationDeliveryEvent;
     use crate::conversation_scene::{
@@ -1043,7 +1249,8 @@ mod tests {
     use crate::conversation_state_machine::{
         ConversationStateController, ConversationStateEvent, SceneFactCommand, SceneFactKind,
     };
-    use artisan_domain::{ThreadId, UnixMillis};
+    use crate::conversation_surface::ConversationSurfaceTarget;
+    use artisan_domain::{ItemId, ThreadId, UnixMillis};
 
     fn thread() -> ThreadId {
         ThreadId::parse("parity-proof-test").expect("fixture thread id is valid")
@@ -1269,6 +1476,29 @@ mod tests {
             Some("Checking `mood` for **playful** *tone* before replying.")
         );
         assert_eq!(status_narration(&scene), TurnNarration::Thinking);
+    }
+
+    #[test]
+    fn reference_navigator_has_two_turns_and_many_markers() {
+        let scene = project(ProofSceneCase::ReferenceNavigator);
+        assert_eq!(scene.turn_scenes().len(), 2);
+        let candidates = navigator_candidates(&scene);
+        assert!(
+            candidates.len() > 1,
+            "navigator rail needs more than one marker, got {candidates:?}"
+        );
+        let first_user = ItemId::parse("parity-proof-user-1").expect("item id parses");
+        assert_eq!(
+            candidates.first(),
+            Some(&ConversationSurfaceTarget::Item(first_user)),
+            "first candidate is the first user marker in domain form"
+        );
+    }
+
+    #[test]
+    fn reference_settled_stays_single_turn() {
+        let scene = project(ProofSceneCase::ReferenceSettled);
+        assert_eq!(scene.turn_scenes().len(), 1);
     }
 
     #[test]
