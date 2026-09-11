@@ -14,6 +14,7 @@ mod claude;
 mod codex;
 mod cursor;
 mod grok;
+mod opencode2;
 mod process;
 
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use claude::discover_claude;
 use codex::discover_codex;
 use cursor::discover_cursor;
 use grok::discover_grok;
+use opencode2::discover_opencode2;
 
 /// How long one discovery snapshot is served before re-probing.
 pub(crate) const DISCOVERY_TTL: Duration = Duration::from_secs(300);
@@ -121,6 +123,9 @@ pub(crate) struct DiscoveryBundle {
     pub(crate) models: Vec<DiscoveredModel>,
     /// Engines whose probe completed successfully (empty probes included).
     pub(crate) probed_engines: Vec<&'static str>,
+    /// Engines whose CLI is not installed on this machine; their harnesses
+    /// are hidden from the picker until the engine appears.
+    pub(crate) missing_engines: Vec<&'static str>,
 }
 
 impl DiscoveryBundle {
@@ -183,43 +188,93 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
         return Arc::clone(bundle);
     }
 
-    let (codex, claude, cursor, grok) = tokio::join!(
+    let cursor_program = engine_executable("ARTISAN_CURSOR_EXECUTABLE", &["cursor-agent", "agent"]);
+    let grok_program = engine_executable("ARTISAN_GROK_EXECUTABLE", &["grok"]);
+    let opencode2_program = engine_executable("ARTISAN_OPENCODE2_EXECUTABLE", &["opencode2"]);
+    let (codex, claude, opencode2, cursor, grok) = tokio::join!(
         discover_codex(),
         discover_claude(),
-        discover_cursor(),
-        discover_grok(),
+        discover_opencode2(opencode2_program.as_deref()),
+        discover_cursor(cursor_program.as_deref()),
+        discover_grok(grok_program.as_deref()),
     );
 
     let mut models = Vec::new();
     let mut probed_engines = Vec::new();
-    for (engine_id, rows) in [
-        ("codex", codex),
-        ("claude", claude),
-        ("cursor", cursor),
-        ("grok", grok),
+    let mut missing_engines = Vec::new();
+    for (engine_id, program, rows) in [
+        ("codex", None, codex),
+        ("claude", None, claude),
+        ("opencode2", opencode2_program, opencode2),
+        ("cursor", cursor_program, cursor),
+        ("grok", grok_program, grok),
     ] {
-        if let Some(rows) = rows {
-            probed_engines.push(engine_id);
-            models.extend(rows);
+        match rows {
+            Some(rows) => {
+                probed_engines.push(engine_id);
+                models.extend(rows);
+            }
+            // A CLI-backed engine whose executable does not resolve is
+            // definitively not installed; a resolved executable that fails
+            // its probe stays visible with the static fallback.
+            None if program.is_none() && matches!(engine_id, "opencode2" | "cursor" | "grok") => {
+                missing_engines.push(engine_id);
+            }
+            None => {}
         }
     }
 
     let bundle = Arc::new(DiscoveryBundle {
         models,
         probed_engines,
+        missing_engines,
     });
     *guard = Some((Instant::now(), Arc::clone(&bundle)));
     bundle
 }
 
-/// Returns the executable for one engine: an explicit `ARTISAN_<ENGINE>_
-/// EXECUTABLE` override, then `fallback`.
-fn engine_executable(env_var: &str, fallback: &str) -> String {
-    std::env::var(env_var)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| fallback.to_owned())
+/// Resolves one engine executable: an explicit `ARTISAN_<ENGINE>_EXECUTABLE`
+/// override, then the first candidate found on `PATH`. Windows resolves
+/// `.exe` images before `.cmd`/`.bat` shims; `run_bounded` routes the latter
+/// through `cmd.exe`.
+fn engine_executable(env_var: &str, candidates: &[&str]) -> Option<String> {
+    if let Ok(value) = std::env::var(env_var) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
+        }
+    }
+    candidates.iter().find_map(|name| resolve_program(name))
+}
+
+/// Finds one program on `PATH`, returning the full path so batch shims keep
+/// their `.cmd` routing. Extensionless shell scripts are skipped on Windows
+/// because they are not executable images.
+fn resolve_program(name: &str) -> Option<String> {
+    if name.contains(['/', '\\']) {
+        return std::path::Path::new(name)
+            .is_file()
+            .then(|| name.to_owned());
+    }
+    let path = std::env::var_os("PATH")?;
+    let extensions: &[&str] = if cfg!(windows) {
+        &["exe", "cmd", "bat"]
+    } else {
+        &[""]
+    };
+    for directory in std::env::split_paths(&path) {
+        for extension in extensions {
+            let candidate = if extension.is_empty() {
+                directory.join(name)
+            } else {
+                directory.join(format!("{name}.{extension}"))
+            };
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Maps an engine effort spelling to the Artisan level identifier.
@@ -255,12 +310,13 @@ mod tests {
     #[ignore = "requires locally installed engine CLIs and network access"]
     async fn live_discovery_smoke() {
         let bundle = discovery_bundle().await;
-        for engine in ["codex", "claude", "cursor", "grok"] {
+        for engine in ["codex", "claude", "opencode2", "cursor", "grok"] {
             let rows = bundle.for_engine(engine);
             println!(
-                "{engine}: {} rows probed={}",
+                "{engine}: {} rows probed={} missing={}",
                 rows.len(),
-                bundle.probed_engines.contains(&engine)
+                bundle.probed_engines.contains(&engine),
+                bundle.missing_engines.contains(&engine)
             );
         }
         assert!(
@@ -270,6 +326,26 @@ mod tests {
         assert!(
             !bundle.for_engine("claude").is_empty(),
             "the published Claude catalogue is expected to be reachable"
+        );
+        let catalog = crate::native_model_catalog::from_discovery(&bundle)
+            .expect("the live discovery bundle must build a wire-valid catalog");
+        let opencode2_rows = catalog
+            .manifest
+            .models
+            .iter()
+            .filter(|model| model.harness == "opencode2")
+            .count();
+        assert!(
+            opencode2_rows > 0,
+            "the opencode2 CLI is expected on this development host"
+        );
+        assert!(
+            catalog
+                .manifest
+                .harness("hermes")
+                .expect("hermes stays decodable")
+                .hidden,
+            "hermes is hidden by the bundled manifest"
         );
     }
 }

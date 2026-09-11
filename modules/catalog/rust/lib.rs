@@ -108,6 +108,12 @@ pub struct NativeHarness {
     pub label: String,
     /// Permission options accepted by the harness.
     pub permissions: NativePermissionCapability,
+    /// Whether the picker suppresses this harness (and its tab).
+    ///
+    /// Hidden harnesses stay fully decodable so stored selections still
+    /// resolve; runtime discovery may additionally hide harnesses whose
+    /// engine is not installed on this machine.
+    pub hidden: bool,
 }
 
 /// An optional native context-window configuration.
@@ -1666,6 +1672,7 @@ fn parse_harness(value: &Value, index: usize) -> Result<NativeHarness, NativeMod
             default: required_string(permissions_object, "default", &permissions_path)?,
             options: permission_options,
         },
+        hidden: optional_bool(object, "hidden", &path)?.unwrap_or(false),
     })
 }
 

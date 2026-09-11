@@ -8,18 +8,18 @@
 use std::time::Duration;
 
 use super::process::run_bounded;
-use super::{DiscoveredModel, DiscoveredThinking, engine_executable};
+use super::{DiscoveredModel, DiscoveredThinking};
 
 /// Deadline for the listing command.
 const DEADLINE: Duration = Duration::from_secs(4);
 /// Output bound for the listing command.
 const MAX_BYTES: usize = 1024 * 1024;
 
-/// Probes Grok Build; `None` when it is absent or does not answer.
-pub(super) async fn discover_grok() -> Option<Vec<DiscoveredModel>> {
-    let executable = engine_executable("ARTISAN_GROK_EXECUTABLE", "grok");
+/// Probes Grok Build; `None` when it does not answer.
+pub(super) async fn discover_grok(program: Option<&str>) -> Option<Vec<DiscoveredModel>> {
+    let executable = program?;
     let output = run_bounded(
-        &executable,
+        executable,
         &["--no-auto-update", "models"],
         DEADLINE,
         MAX_BYTES,

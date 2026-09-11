@@ -8,20 +8,17 @@
 use std::time::Duration;
 
 use super::process::run_bounded;
-use super::{DiscoveredModel, DiscoveredThinking, engine_executable};
+use super::{DiscoveredModel, DiscoveredThinking};
 
 /// Deadline for the listing command.
 const DEADLINE: Duration = Duration::from_secs(4);
 /// Output bound for the listing command.
 const MAX_BYTES: usize = 1024 * 1024;
 
-/// Probes the Cursor CLI; `None` when it is absent or does not answer.
-pub(super) async fn discover_cursor() -> Option<Vec<DiscoveredModel>> {
-    let executable = engine_executable(
-        "ARTISAN_CURSOR_EXECUTABLE",
-        if cfg!(windows) { "agent.cmd" } else { "agent" },
-    );
-    let output = run_bounded(&executable, &["models"], DEADLINE, MAX_BYTES).await?;
+/// Probes the Cursor CLI; `None` when it does not answer.
+pub(super) async fn discover_cursor(program: Option<&str>) -> Option<Vec<DiscoveredModel>> {
+    let executable = program?;
+    let output = run_bounded(executable, &["models"], DEADLINE, MAX_BYTES).await?;
     if !output.success {
         return None;
     }

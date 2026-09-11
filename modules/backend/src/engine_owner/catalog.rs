@@ -669,7 +669,7 @@ pub(crate) fn normalize_catalog(
     })
 }
 
-fn route_for(provider_route_id: &str) -> CatalogRoute {
+pub(crate) fn route_for(provider_route_id: &str) -> CatalogRoute {
     let (group, label) = match provider_route_id {
         "opencode-go" => (
             CatalogRouteGroup {

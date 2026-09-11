@@ -884,27 +884,35 @@ impl NativeApplication {
         })
         .detach();
         // The Forge publishes its scope-free catalog snapshot shortly after it
-        // starts (discovery warms in the background). Pick it up for the home
-        // picker while no thread-scoped runtime catalog is active.
+        // starts (discovery warms in the background); its first discovery is
+        // cold, so an older snapshot may already exist on disk. Watch through
+        // that window and re-apply whenever the revision changes.
         #[cfg(not(test))]
         cx.spawn(async move |view, cx| {
-            for _ in 0..15 {
+            let mut applied: Option<String> = None;
+            for _ in 0..90 {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(1))
                     .await;
-                let available = cx
+                let revision = cx
                     .background_executor()
-                    .spawn(async { scope_free_catalog_snapshot().is_some() })
+                    .spawn(async {
+                        scope_free_catalog_snapshot().map(|catalog| catalog.catalog_revision)
+                    })
                     .await;
-                if available {
-                    let _ = view.update(cx, |app, cx| {
-                        if app.selected_thread.is_none() {
-                            app.reset_model_selector_offline(cx);
-                            cx.notify();
-                        }
-                    });
-                    break;
+                let Some(revision) = revision else {
+                    continue;
+                };
+                if applied.as_deref() == Some(revision.as_str()) {
+                    continue;
                 }
+                applied = Some(revision);
+                let _ = view.update(cx, |app, cx| {
+                    if app.selected_thread.is_none() {
+                        app.reset_model_selector_offline(cx);
+                        cx.notify();
+                    }
+                });
             }
         })
         .detach();

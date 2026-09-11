@@ -137,6 +137,7 @@
     {
       "id": "hermes",
       "gateways": [],
+      "hidden": true,
       "label": "Hermes",
       "permissions": {
         "default": "autonomous",

@@ -383,12 +383,18 @@ impl NativeModelSelectorState {
         let active_engine = policy
             .as_ref()
             .map(|policy| policy.engine_id.clone())
-            .filter(|engine| snapshot.manifest.harness(engine).is_some())
+            .filter(|engine| {
+                snapshot
+                    .manifest
+                    .harness(engine)
+                    .is_some_and(|harness| !harness.hidden)
+            })
             .or_else(|| {
                 snapshot
                     .manifest
                     .harnesses
-                    .first()
+                    .iter()
+                    .find(|harness| !harness.hidden)
                     .map(|harness| harness.id.clone())
             })
             .unwrap_or_default();
@@ -418,17 +424,28 @@ impl NativeModelSelectorState {
             .policy
             .as_ref()
             .and_then(|policy| rebase_selection_policy(&snapshot, policy));
-        let active_engine = if snapshot.manifest.harness(&self.active_engine).is_some() {
+        let active_engine = if snapshot
+            .manifest
+            .harness(&self.active_engine)
+            .is_some_and(|harness| !harness.hidden)
+        {
             self.active_engine.clone()
         } else {
             policy
                 .as_ref()
                 .map(|policy| policy.engine_id.clone())
+                .filter(|engine| {
+                    snapshot
+                        .manifest
+                        .harness(engine)
+                        .is_some_and(|harness| !harness.hidden)
+                })
                 .or_else(|| {
                     snapshot
                         .manifest
                         .harnesses
-                        .first()
+                        .iter()
+                        .find(|harness| !harness.hidden)
                         .map(|harness| harness.id.clone())
                 })
                 .unwrap_or_default()
@@ -1924,7 +1941,14 @@ impl NativeModelSelector {
         if let Some(indicator) = indicator {
             tabs = tabs.child(indicator);
         }
-        for harness in &self.state.snapshot().manifest.harnesses {
+        for harness in self
+            .state
+            .snapshot()
+            .manifest
+            .harnesses
+            .iter()
+            .filter(|harness| !harness.hidden)
+        {
             let engine_id = harness.id.clone();
             let measured_engine_id = engine_id.clone();
             let indicator_policy = Rc::clone(&self.engine_indicator);
@@ -3814,6 +3838,30 @@ mod tests {
             NativeModelCatalog::offline().expect("the real bundled catalog must decode"),
             None,
         )
+    }
+
+    #[test]
+    fn hidden_harnesses_are_skipped_by_the_picker() {
+        let snapshot = NativeModelCatalog::offline().expect("bundled catalog");
+        assert!(
+            snapshot
+                .manifest
+                .harness("hermes")
+                .expect("hermes stays decodable")
+                .hidden,
+            "hermes is hidden by the bundled manifest"
+        );
+
+        // Hiding the first harness must move the default tab to the next
+        // visible engine instead of leaving an empty panel.
+        let mut snapshot = snapshot;
+        for harness in &mut snapshot.manifest.harnesses {
+            if harness.id == "codex" {
+                harness.hidden = true;
+            }
+        }
+        let state = NativeModelSelectorState::new(snapshot, None);
+        assert_eq!(state.active_engine(), "claude");
     }
 
     #[test]

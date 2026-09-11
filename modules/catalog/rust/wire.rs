@@ -212,6 +212,7 @@ fn permission_option_value(option: &NativePermissionOption) -> Value {
 fn harness_value(harness: &NativeHarness) -> Value {
     json!({
         "compaction_default_model_id": harness.compaction_default_model_id,
+        "hidden": harness.hidden,
         "id": harness.id,
         "gateways": harness.gateways.iter().map(gateway_value).collect::<Vec<_>>(),
         "label": harness.label,
@@ -534,6 +535,7 @@ fn validate_harness_value(value: &Value) -> Result<(), NativeModelCatalogWireErr
         object,
         &[
             "compaction_default_model_id",
+            "hidden",
             "id",
             "gateways",
             "label",
@@ -541,6 +543,7 @@ fn validate_harness_value(value: &Value) -> Result<(), NativeModelCatalogWireErr
         ],
     )?;
     optional_identifier(object, "compaction_default_model_id")?;
+    let _ = optional_bool(object, "hidden")?;
     let _ = read_identifier(required(object, "id")?)?;
     let _ = read_text(required(object, "label")?)?;
 
@@ -1299,6 +1302,19 @@ fn validate_manifest_semantics(
     Ok(())
 }
 
+/// Compares bundled and runtime harness descriptors by identity, ignoring the
+/// presentation-only hidden flag that discovery may set.
+fn harnesses_match_identity(runtime: &[NativeHarness], bundled: &[NativeHarness]) -> bool {
+    runtime.len() == bundled.len()
+        && runtime.iter().zip(bundled).all(|(runtime, bundled)| {
+            let mut runtime = runtime.clone();
+            let mut bundled = bundled.clone();
+            runtime.hidden = false;
+            bundled.hidden = false;
+            runtime == bundled
+        })
+}
+
 fn validate_bundled_manifest_prefix(
     manifest: &NativeModelManifest,
 ) -> Result<(), NativeModelCatalogWireError> {
@@ -1312,8 +1328,10 @@ fn validate_bundled_manifest_prefix(
     // immutable, every bundled provider identity is retained, and every
     // bundled model keeps its id, harness, and native identity. Reported
     // fields (name, description, capabilities) and the disabled flag may be
-    // overlaid, and runtime rows may be appended after the baseline.
-    if manifest.harnesses != bundled.harnesses
+    // overlaid, runtime rows may be appended after the baseline, and the
+    // presentation-only hidden flag may change when discovery determines an
+    // engine is not installed.
+    if !harnesses_match_identity(&manifest.harnesses, &bundled.harnesses)
         || manifest.providers.len() < bundled.providers.len()
         || manifest.models.len() < bundled.models.len()
     {

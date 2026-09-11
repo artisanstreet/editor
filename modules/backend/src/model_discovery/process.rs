@@ -88,7 +88,12 @@ where
 
 /// Builds the process command, routing Windows batch shims through `cmd.exe`.
 fn command_for(program: &str) -> Command {
-    if cfg!(windows) && (program.ends_with(".cmd") || program.ends_with(".bat")) {
+    let is_batch = std::path::Path::new(program)
+        .extension()
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        });
+    if cfg!(windows) && is_batch {
         let mut command = Command::new("cmd.exe");
         command.arg("/C").arg(program);
         command

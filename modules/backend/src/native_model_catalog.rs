@@ -283,17 +283,24 @@ pub(crate) fn from_catalog_result_with_discovery(
     if discovery.probed_engines.is_empty() {
         return Ok(catalog);
     }
-    let runtime = catalog.runtime();
-    let base_revision = runtime.catalog_revision.clone().unwrap_or_default();
-    let runtime = NativeCatalogRuntime {
-        catalog_revision: Some(format!(
-            "{base_revision}+discovery-{:016x}",
-            discovery_revision_hash(discovery)
-        )),
-        ..runtime
-    };
+    let mut runtime = catalog.runtime();
     let mut manifest = catalog.manifest;
-    apply_discovery(&mut manifest, discovery);
+    let base_revision = runtime.catalog_revision.clone().unwrap_or_default();
+    // Runtime rows win; CLI discovery fills only identities the scoped engine
+    // result did not return (including every route when that result was empty).
+    for route in apply_discovery(&mut manifest, discovery, true) {
+        if !runtime
+            .routes
+            .iter()
+            .any(|existing| existing.id == route.id && existing.engine_id == route.engine_id)
+        {
+            runtime.routes.push(route);
+        }
+    }
+    runtime.catalog_revision = Some(format!(
+        "{base_revision}+discovery-{:016x}",
+        discovery_revision_hash(discovery)
+    ));
     let next = NativeModelCatalog::from_manifest(manifest, runtime);
     artisan_catalog::wire::encode_catalog(&next)
         .map_err(|_| NativeModelCatalogBridgeError::InvalidCatalog)?;
@@ -307,6 +314,10 @@ pub(crate) fn from_catalog_result_with_discovery(
 pub(crate) fn from_discovery(
     discovery: &crate::model_discovery::DiscoveryBundle,
 ) -> Result<NativeModelCatalog, NativeModelCatalogBridgeError> {
+    let mut manifest = NativeModelCatalog::offline()
+        .map_err(|_| NativeModelCatalogBridgeError::BundledManifest)?
+        .manifest;
+    let routes = apply_discovery(&mut manifest, discovery, true);
     let runtime = NativeCatalogRuntime {
         catalog_revision: Some(format!(
             "static+discovery-{:016x}",
@@ -316,12 +327,9 @@ pub(crate) fn from_discovery(
             .iter()
             .map(|harness| (*harness).to_owned())
             .collect(),
+        routes,
         ..NativeCatalogRuntime::default()
     };
-    let mut manifest = NativeModelCatalog::offline()
-        .map_err(|_| NativeModelCatalogBridgeError::BundledManifest)?
-        .manifest;
-    apply_discovery(&mut manifest, discovery);
     let catalog = NativeModelCatalog::from_manifest(manifest, runtime);
     artisan_catalog::wire::encode_catalog(&catalog)
         .map_err(|_| NativeModelCatalogBridgeError::InvalidCatalog)?;
@@ -351,8 +359,20 @@ fn discovery_is_authoritative(engine_id: &str) -> bool {
 fn apply_discovery(
     manifest: &mut NativeModelManifest,
     discovery: &crate::model_discovery::DiscoveryBundle,
-) {
+    include_opencode2: bool,
+) -> Vec<NativeModelRoute> {
+    let mut routes = Vec::new();
     for engine_id in &discovery.probed_engines {
+        // OpenCode2 rows carry route identity that the generic overlay cannot
+        // express, so they are built by their own converter. The runtime
+        // result, when present, already owns these rows.
+        if *engine_id == OPENCODE2_ENGINE_ID {
+            if include_opencode2 {
+                let rows = discovery.for_engine(engine_id);
+                apply_opencode2_rows(manifest, &rows, &mut routes);
+            }
+            continue;
+        }
         // Hidden rows are engine internals (Codex's `hide` visibility), not
         // picker entries: they are never surfaced, overlaid, or counted as
         // account availability.
@@ -429,6 +449,114 @@ fn apply_discovery(
                 }
             }
         }
+    }
+    hide_missing_harnesses(manifest, discovery);
+    routes
+}
+
+/// Hides harnesses whose engine CLI is not installed on this machine.
+///
+/// Harness descriptors stay fully decodable, so stored selections still
+/// resolve; only the picker tab and its rows disappear.
+fn hide_missing_harnesses(
+    manifest: &mut NativeModelManifest,
+    discovery: &crate::model_discovery::DiscoveryBundle,
+) {
+    if discovery.missing_engines.is_empty() {
+        return;
+    }
+    for harness in &mut manifest.harnesses {
+        if discovery
+            .missing_engines
+            .iter()
+            .any(|engine_id| *engine_id == harness.id)
+        {
+            harness.hidden = true;
+        }
+    }
+}
+
+/// Adds runtime-only OpenCode2 rows from local CLI discovery.
+///
+/// Each row is built with the exact `opencode2:` route identity the runtime
+/// path uses, so a selection stays runnable end to end. Route metadata is
+/// emitted so the picker can group Go/Zen/custom rows.
+fn apply_opencode2_rows(
+    manifest: &mut NativeModelManifest,
+    rows: &[&DiscoveredModel],
+    routes: &mut Vec<NativeModelRoute>,
+) {
+    let mut existing = manifest
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<HashSet<_>>();
+    for row in rows {
+        if row.hidden {
+            continue;
+        }
+        let Ok(id) =
+            artisan_catalog::wire::opencode2_catalog_id(&row.native_model_id, &row.provider, None)
+        else {
+            continue;
+        };
+        if !existing.insert(id.clone()) {
+            continue;
+        }
+        if !routes.iter().any(|route| route.id == row.provider) {
+            let route = crate::engine_owner::catalog::route_for(&row.provider);
+            if manifest.provider(&route.id).is_none() {
+                manifest.providers.push(NativeModelProvider {
+                    id: route.id.clone(),
+                    label: route.label.clone(),
+                });
+            }
+            routes.push(convert_route(route));
+        }
+        manifest.models.push(opencode2_definition(row, id));
+    }
+}
+
+/// Builds one CLI-discovered OpenCode2 row with exact route identity.
+fn opencode2_definition(row: &DiscoveredModel, id: String) -> NativeModelDefinition {
+    NativeModelDefinition {
+        id,
+        name: readable_name(&row.name),
+        native_model_id: row.native_model_id.clone(),
+        description: row.description.clone(),
+        harness: OPENCODE2_ENGINE_ID.to_owned(),
+        provider: row.provider.clone(),
+        routing: NativeModelRouting::ProviderRoute {
+            provider_route_id: row.provider.clone(),
+        },
+        native_selection: Some(NativeModelSelection {
+            model_id: row.native_model_id.clone(),
+            provider_route_id: row.provider.clone(),
+            variant_id: None,
+        }),
+        status: "dynamic".to_owned(),
+        upstream_model_id: row
+            .upstream_model_id
+            .clone()
+            .or_else(|| Some(row.native_model_id.clone())),
+        metadata_confidence: Some(row.metadata_confidence.to_owned()),
+        cost: row.cost.map(|(input, output)| NativeModelCost {
+            input_usd_per_million: Some(input),
+            output_usd_per_million: Some(output),
+        }),
+        disabled: None,
+        capabilities: NativeModelCapabilities {
+            context_window_tokens: row.context_window_tokens,
+            context_window: None,
+            image_input: row.image_input,
+            local_tools: row.tools,
+            mcp: false,
+            output_tokens: row.output_tokens,
+            reasoning_display: None,
+            speed_options: Vec::new(),
+            thinking: NativeThinkingCapability::Unavailable,
+            web_search: false,
+        },
     }
 }
 
@@ -1092,6 +1220,7 @@ mod tests {
                 ),
             ],
             probed_engines: vec!["codex"],
+            missing_engines: Vec::new(),
         };
         let catalog = from_catalog_result_with_discovery(
             fixture_result(),
@@ -1136,6 +1265,63 @@ mod tests {
     }
 
     #[test]
+    fn cli_discovered_opencode2_rows_carry_runnable_route_identity() {
+        let discovery = crate::model_discovery::DiscoveryBundle {
+            models: vec![discovered(
+                "opencode2",
+                "opencode-go",
+                "kimi-k3",
+                "Kimi K3",
+                Some(262_144),
+                Some(262_144),
+            )],
+            probed_engines: vec!["opencode2"],
+            missing_engines: Vec::new(),
+        };
+        let catalog = from_discovery(&discovery).expect("catalog builds");
+        let id = artisan_catalog::wire::opencode2_catalog_id("kimi-k3", "opencode-go", None)
+            .expect("route identity");
+        let model = catalog
+            .manifest
+            .model(&id)
+            .expect("discovered opencode2 row");
+        assert_eq!(model.harness, "opencode2");
+        assert_eq!(model.name, "Kimi K3");
+        assert_eq!(model.status, "dynamic");
+        let selection = model.native_selection.as_ref().expect("route selection");
+        assert_eq!(selection.model_id, "kimi-k3");
+        assert_eq!(selection.provider_route_id, "opencode-go");
+        let route = catalog
+            .routes
+            .iter()
+            .find(|route| route.id == "opencode-go")
+            .expect("Go route");
+        assert_eq!(route.label, "Go");
+        assert_eq!(route.engine_id, "opencode2");
+        assert!(
+            catalog.selectability(&id).is_available(),
+            "CLI-discovered OpenCode2 rows must be selectable through their route"
+        );
+    }
+
+    #[test]
+    fn missing_engine_harnesses_are_hidden_and_hermes_is_static_hidden() {
+        let discovery = crate::model_discovery::DiscoveryBundle {
+            models: Vec::new(),
+            probed_engines: Vec::new(),
+            missing_engines: vec!["cursor", "grok"],
+        };
+        let catalog = from_discovery(&discovery).expect("catalog builds");
+        let hidden = |id: &str| catalog.manifest.harness(id).expect("harness exists").hidden;
+        assert!(hidden("cursor"));
+        assert!(hidden("grok"));
+        assert!(hidden("hermes"), "hermes is hidden by the bundled manifest");
+        assert!(!hidden("codex"));
+        assert!(!hidden("claude"));
+        assert!(!hidden("opencode2"));
+    }
+
+    #[test]
     fn discovered_display_names_are_dehyphenated() {
         let discovery = crate::model_discovery::DiscoveryBundle {
             models: vec![
@@ -1157,6 +1343,7 @@ mod tests {
                 ),
             ],
             probed_engines: vec!["codex"],
+            missing_engines: Vec::new(),
         };
         let catalog = from_catalog_result_with_discovery(
             fixture_result(),
@@ -1198,6 +1385,7 @@ mod tests {
                 ),
             ],
             probed_engines: vec!["claude"],
+            missing_engines: Vec::new(),
         };
         let catalog = from_catalog_result_with_discovery(
             fixture_result(),
@@ -1256,6 +1444,7 @@ mod tests {
                 hidden,
             ],
             probed_engines: vec!["codex"],
+            missing_engines: Vec::new(),
         };
         let catalog = from_catalog_result_with_discovery(
             fixture_result(),
@@ -1285,6 +1474,7 @@ mod tests {
                 Some(872_000),
             )],
             probed_engines: vec!["codex"],
+            missing_engines: Vec::new(),
         })
         .expect("scope-free catalog builds");
         assert_eq!(
@@ -1322,12 +1512,13 @@ mod tests {
                 Some(872_000),
             )],
             probed_engines: vec!["codex"],
+            missing_engines: Vec::new(),
         };
         let catalog = from_catalog_result(fixture_result(), &ModelFavoritesSnapshot::empty())
             .expect("base catalog");
         let runtime = catalog.runtime();
         let mut manifest = catalog.manifest;
-        apply_discovery(&mut manifest, &discovery);
+        let _ = apply_discovery(&mut manifest, &discovery, false);
         let next = NativeModelCatalog::from_manifest(manifest, runtime);
         if let Err(error) = artisan_catalog::wire::encode_catalog(&next) {
             panic!("wire error: {error:?}");
