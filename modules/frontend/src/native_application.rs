@@ -10883,6 +10883,10 @@ mod tests {
     #[gpui::test]
     fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext) {
         let thread_id = ThreadId::parse("staged-task").expect("thread");
+        // Flow test, not animation test: motion holds would obscure paint.
+        cx.update(|app| {
+            app.set_reduce_motion(true);
+        });
         let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
         let (sink, _) = command_sink([Ok(())]);
         // Stage 1: submit + receipt. Pending before ACK, accepted with the
@@ -11035,8 +11039,9 @@ mod tests {
             "provider wait row paints"
         );
         // Stage 3: genuine attributed reasoning before any assistant text.
-        // The trace narrates Thinking; the user body stays exact-once.
-        cx.update(|_, app| {
+        // The finished sentence is the trace: header owns Thinking, the
+        // status row renders the summary, the user body stays exact-once.
+        let header_selector: String = cx.update(|_, app| {
             view.update(app, |application, cx| {
                 let delta = artisan_domain::ReasoningSummaryDeltaObservation::new(
                     artisan_domain::ObservationId::parse("obs-1").expect("observation"),
@@ -11044,7 +11049,7 @@ mod tests {
                     artisan_domain::ObservationId::parse("obs-item-1")
                         .expect("observation item"),
                     0,
-                    "Considering options".to_owned(),
+                    "Considering options.".to_owned(),
                     None,
                     artisan_domain::ObservationId::parse("obs-turn-1")
                         .expect("observation turn"),
@@ -11074,12 +11079,61 @@ mod tests {
                 );
                 assert_eq!(staged_user_bodies(&scene), ["staged prompt"]);
                 assert!(application.message_failure.is_none());
-            });
+                // The finished sentence is the trace: the owning work-group
+                // header carries it and the status row renders it through
+                // the same summary policy (no duplicate Thinking line).
+                let group = scene
+                    .blocks()
+                    .iter()
+                    .find_map(|block| match block {
+                        TurnBlock::WorkGroup(group) => Some(group.clone()),
+                        _ => None,
+                    })
+                    .expect("thinking work group");
+                assert_eq!(
+                    group.reasoning_summary.as_deref(),
+                    Some("Considering options.")
+                );
+                let status = scene
+                    .blocks()
+                    .iter()
+                    .find_map(|block| match block {
+                        TurnBlock::TurnStatus(status) => Some(status.clone()),
+                        _ => None,
+                    })
+                    .expect("thinking status row");
+                assert_eq!(
+                    status.reasoning_summary.as_deref(),
+                    Some("Considering options.")
+                );
+                assert_eq!(
+                    crate::conversation_surface::turn_status_copy_text(
+                        status.narration,
+                        status.active_started_at_ms,
+                        None,
+                        status.reasoning_summary.as_deref(),
+                        status.engine_label.as_deref(),
+                    )
+                    .as_deref(),
+                    Some("Considering options.")
+                );
+                format!(
+                    "{}-header",
+                    crate::conversation_surface::block_selector(
+                        &TurnId::parse("turn-staged").expect("turn"),
+                        &TurnBlock::WorkGroup(group),
+                    )
+                )
+            })
         });
         cx.run_until_parked();
         assert!(
+            cx.debug_bounds(Box::leak(header_selector.into_boxed_str())).is_some(),
+            "thinking header paints"
+        );
+        assert!(
             cx.debug_bounds(staged_status_selector).is_some(),
-            "thinking row paints"
+            "thinking trace paints"
         );
         // Stage 4: first streamed body on the SAME echoed turn.
         let first_reply_selector: String = cx.update(|_, app| {
