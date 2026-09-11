@@ -824,6 +824,12 @@ pub struct ConversationSurface {
     /// `apply_progress` pattern), so an interrupted flight reverses from
     /// the displayed width instead of jumping to a fixed endpoint.
     navigator_width_px: Rc<RefCell<f32>>,
+    /// Transition start width, frozen when the width generation bumps.
+    ///
+    /// The open-keyed clock replays from this value for the whole
+    /// generation; resampling the retained width every render would bend
+    /// the interpolation path mid-flight.
+    navigator_width_from: f32,
     /// Bounded wheel-smoothing state for the transcript scroll offset.
     ///
     /// Reuses the model picker's [`PickerScrollState`] verbatim: discrete
@@ -1236,6 +1242,7 @@ impl ConversationSurface {
             navigator_hover_surface: Rc::new(RefCell::new(None)),
             navigator_width_generation: 0,
             navigator_width_px: Rc::new(RefCell::new(40.0)),
+            navigator_width_from: 40.0,
             transcript_scroll: PickerScrollState::default(),
             transcript_scroll_frame_scheduled: false,
             active_now_ms: None,
@@ -5035,10 +5042,10 @@ impl ConversationSurface {
                         inset: false,
                     }])
                 })
-                .on_hover(move |hovered: &bool, _, cx| {
+                .on_hover(move |hovered: &bool, window, _cx| {
                     if *hovered {
                         hover_state.borrow_mut().set_active(hover_id.clone());
-                        cx.notify();
+                        window.refresh();
                     }
                 })
                 .on_click(move |_, _, app| {
@@ -5151,7 +5158,7 @@ impl ConversationSurface {
             *self.navigator_width_px.borrow_mut() = width_target;
             list.w(px(width_target)).into_any_element()
         } else {
-            let from_w = *self.navigator_width_px.borrow();
+            let from_w = self.navigator_width_from;
             let width_state = Rc::clone(&self.navigator_width_px);
             let generation = self.navigator_width_generation;
             let duration_ms = if expanded { 250 } else { 150 };
@@ -5186,6 +5193,7 @@ impl ConversationSurface {
                     let mut changed = false;
                     if surface.navigator_expanded != *hovered {
                         surface.navigator_expanded = *hovered;
+                        surface.navigator_width_from = *surface.navigator_width_px.borrow();
                         surface.navigator_width_generation =
                             surface.navigator_width_generation.wrapping_add(1);
                         changed = true;
