@@ -3522,16 +3522,29 @@ impl NativeApplication {
             self.state = NativeViewState::Failure(invalid_service_failure());
         }
         let disabled = !self.message_submission_is_admissible(cx);
-        let model_label = self
-            .engine_settings
-            .authoritative_config()
-            .and_then(|config| match config.selection() {
-                artisan_domain::EngineSelection::OpenCode2(selection) => {
-                    Some(selection.model_id().as_str().to_owned())
-                }
-                other => other.model_id().map(|model| model.as_str().to_owned()),
-            })
-            .unwrap_or_else(|| "Select model".into());
+        // The composer label uses the same full-format composer as the picker
+        // trigger: `<name> <context> <effort> <speed>`, never a raw model id
+        // when the durable selection can be projected back onto the catalog.
+        let model_label = {
+            let catalog = self.model_selector.read(cx).state().snapshot();
+            self.engine_settings
+                .authoritative_config()
+                .and_then(|config| {
+                    crate::composer_model_config::policy_for_selection(catalog, config)
+                        .ok()
+                        .map(|policy| {
+                            crate::native_model_selector::model_display_label(catalog, &policy)
+                                .plain_text()
+                        })
+                        .or_else(|| {
+                            config
+                                .selection()
+                                .model_id()
+                                .map(|model| model.as_str().to_owned())
+                        })
+                })
+                .unwrap_or_else(|| "Select model".into())
+        };
         self.composer.update(cx, |composer, composer_cx| {
             composer.set_attachment_delivery_enabled(true, composer_cx);
             composer.set_surface(disabled, model_label, composer_cx);

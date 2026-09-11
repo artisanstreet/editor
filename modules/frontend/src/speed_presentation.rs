@@ -76,14 +76,98 @@ impl SpeedOption {
 }
 
 /// Tailwind classes used for the exact `fast` presentation.
+///
+/// Retained as the reference-parity value: the native surface deliberately
+/// paints `fast` as the [`FAST_GRADIENT`] instead of this flat amber.
 pub const FAST_CLASS: &str = "text-amber-600 dark:text-amber-400";
 /// Exact label used for the `fast` presentation.
 pub const FAST_LABEL: &str = "Fast";
 /// Tailwind classes used for the exact `superfast` presentation.
+///
+/// Retained as the reference-parity value: the native surface deliberately
+/// paints `superfast` as the [`SUPERFAST_GRADIENT`] instead of this
+/// purple-to-green sweep.
 pub const SUPERFAST_CLASS: &str =
     "bg-linear-to-r from-purple-500 to-green-500 bg-clip-text text-transparent";
 /// Exact label used for the `superfast` presentation.
 pub const SUPERFAST_LABEL: &str = "Superfast";
+
+/// A static left-to-right gradient painted across a speed label's glyphs.
+///
+/// Both stops are packed `0xRRGGBB` sRGB values. [`Self::color_at`] linearly
+/// interpolates the three channels and clamps its progress, so a renderer can
+/// walk a label's characters from left to right without consulting motion or
+/// theme state: reduced motion never changes the colour.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpeedGradient {
+    start: u32,
+    end: u32,
+}
+
+impl SpeedGradient {
+    /// Creates a gradient from its leftmost and rightmost sRGB stops.
+    #[must_use]
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    /// The leftmost packed sRGB stop.
+    #[must_use]
+    pub const fn start(self) -> u32 {
+        self.start
+    }
+
+    /// The rightmost packed sRGB stop.
+    #[must_use]
+    pub const fn end(self) -> u32 {
+        self.end
+    }
+
+    /// Returns the packed sRGB colour at `progress`, clamped to `0..=1`.
+    ///
+    /// `NaN` and infinite input resolve to the left stop, so a bad call site
+    /// can never paint an unpredictable colour.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    pub fn color_at(self, progress: f32) -> u32 {
+        let progress = if progress.is_finite() {
+            progress.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let channel = |shift: u32| {
+            let from = ((self.start >> shift) & 0xff) as f32;
+            let to = ((self.end >> shift) & 0xff) as f32;
+            (from + (to - from) * progress).round().clamp(0.0, 255.0) as u32
+        };
+        (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    }
+}
+
+/// `fast` glyph gradient: deep gold into bright gold, left to right.
+pub const FAST_GRADIENT: SpeedGradient = SpeedGradient::new(0xB8_86_0B, 0xFF_E0_66);
+/// `superfast` glyph gradient: neon green into neon pink, left to right.
+pub const SUPERFAST_GRADIENT: SpeedGradient = SpeedGradient::new(0x39_FF_14, 0xFF_2B_D6);
+
+/// Returns the native glyph-gradient treatment for one speed id.
+///
+/// The reference leaf paints `fast` flat amber and `superfast`
+/// purple-to-green; the native surface deliberately uses gold and
+/// neon-green-to-pink instead. The label vocabulary stays identical, and
+/// unbranded tiers return `None` so they keep inherited text colour.
+#[must_use]
+pub fn speed_label_gradient(id: &str) -> Option<SpeedGradient> {
+    match id {
+        "fast" => Some(FAST_GRADIENT),
+        "superfast" => Some(SUPERFAST_GRADIENT),
+        _ => None,
+    }
+}
+
 /// Fallback picker id used when no selectable speed resolves.
 pub const DEFAULT_SPEED_ID: &str = "standard";
 /// Fallback wire value used when no selectable speed resolves.
@@ -249,4 +333,75 @@ pub fn dispatch_speed_presentation(
         return None;
     }
     Some(speed_option_presentation(option))
+}
+
+#[cfg(test)]
+mod gradient_tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn fast_gradient_interpolates_gold_from_left_to_right() {
+        assert_eq!(FAST_GRADIENT.start(), 0xB8_86_0B);
+        assert_eq!(FAST_GRADIENT.end(), 0xFF_E0_66);
+        assert_eq!(FAST_GRADIENT.color_at(0.0), FAST_GRADIENT.start());
+        assert_eq!(FAST_GRADIENT.color_at(1.0), FAST_GRADIENT.end());
+
+        let mut previous = FAST_GRADIENT.color_at(0.0);
+        for step in 1..=10 {
+            let next = FAST_GRADIENT.color_at(step as f32 / 10.0);
+            assert!(
+                red(next) >= red(previous)
+                    && green(next) >= green(previous)
+                    && blue(next) >= blue(previous),
+                "gold must brighten monotonically: {previous:#08x} -> {next:#08x}"
+            );
+            previous = next;
+        }
+    }
+
+    #[test]
+    fn superfast_gradient_runs_neon_green_into_neon_pink() {
+        assert_eq!(SUPERFAST_GRADIENT.start(), 0x39_FF_14);
+        assert_eq!(SUPERFAST_GRADIENT.end(), 0xFF_2B_D6);
+        assert_eq!(SUPERFAST_GRADIENT.color_at(0.0), SUPERFAST_GRADIENT.start());
+        assert_eq!(SUPERFAST_GRADIENT.color_at(1.0), SUPERFAST_GRADIENT.end());
+
+        let middle = SUPERFAST_GRADIENT.color_at(0.5);
+        assert!(red(middle) > red(SUPERFAST_GRADIENT.start()));
+        assert!(red(middle) < red(SUPERFAST_GRADIENT.end()));
+        assert!(green(middle) < green(SUPERFAST_GRADIENT.start()));
+        assert!(green(middle) > green(SUPERFAST_GRADIENT.end()));
+        assert!(blue(middle) > blue(SUPERFAST_GRADIENT.start()));
+        assert!(blue(middle) < blue(SUPERFAST_GRADIENT.end()));
+    }
+
+    #[test]
+    fn gradient_progress_clamps_and_survives_bad_input() {
+        assert_eq!(FAST_GRADIENT.color_at(-3.0), FAST_GRADIENT.start());
+        assert_eq!(FAST_GRADIENT.color_at(4.0), FAST_GRADIENT.end());
+        assert_eq!(FAST_GRADIENT.color_at(f32::NAN), FAST_GRADIENT.start());
+        assert_eq!(FAST_GRADIENT.color_at(f32::INFINITY), FAST_GRADIENT.start());
+    }
+
+    #[test]
+    fn only_branded_tiers_receive_native_gradients() {
+        assert_eq!(speed_label_gradient("fast"), Some(FAST_GRADIENT));
+        assert_eq!(speed_label_gradient("superfast"), Some(SUPERFAST_GRADIENT));
+        assert_eq!(speed_label_gradient("standard"), None);
+        assert_eq!(speed_label_gradient("Fast"), None);
+        assert_eq!(speed_label_gradient(""), None);
+    }
+
+    fn red(color: u32) -> u32 {
+        (color >> 16) & 0xff
+    }
+
+    fn green(color: u32) -> u32 {
+        (color >> 8) & 0xff
+    }
+
+    fn blue(color: u32) -> u32 {
+        color & 0xff
+    }
 }

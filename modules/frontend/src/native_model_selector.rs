@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
-use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 use artisan_assets::AssetId;
 use artisan_ui::{
@@ -22,10 +22,11 @@ use artisan_ui::{
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Bounds, ClickEvent,
     Context, Div, ElementId, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    ImageSource, InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels,
-    Point, Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, Size, Stateful,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Task, Window, anchored, canvas,
-    deferred, div, img, point, prelude::FluentBuilder as _, prelude::IntoElement, px,
+    Hsla, ImageSource, InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _,
+    Pixels, Point, Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, Size,
+    Stateful, StatefulInteractiveElement as _, Styled as _, StyledText, Task, Window, anchored,
+    canvas, deferred, div, img, point, prelude::FluentBuilder as _, prelude::IntoElement, px, rgb,
+    rgb_to_hsla,
 };
 
 use crate::engine_section_indicator_policy::{
@@ -39,6 +40,7 @@ use crate::native_model_catalog::{
     NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeModelView,
     NativeOptionValue, NativePolicyValidationError, NativeThinkingCapability,
 };
+use crate::speed_presentation::SpeedGradient;
 
 #[path = "native_picker_motion.rs"]
 mod native_picker_motion;
@@ -146,6 +148,215 @@ pub enum NativePolicyAxis {
     ContextWindow,
     /// Select a harness permission option.
     Permission,
+}
+
+/// Paint treatment for one token of the full model label.
+///
+/// The trigger paints the name with its inherited foreground, context/effort/
+/// variant detail muted, and an accelerated tier with a static left-to-right
+/// glyph gradient. Roles carry no motion: reduced motion never changes a
+/// colour.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeModelLabelRole {
+    /// The model name; paints with the inherited foreground.
+    Name,
+    /// Context/effort/variant detail; paints muted.
+    Detail,
+    /// An accelerated speed tier; paints the gradient across its glyphs.
+    Gradient(SpeedGradient),
+}
+
+/// One ordered token of the full model label.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeModelLabelToken {
+    /// Exact token text.
+    pub text: String,
+    /// Paint treatment for this token.
+    pub role: NativeModelLabelRole,
+}
+
+impl NativeModelLabelToken {
+    fn name(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            role: NativeModelLabelRole::Name,
+        }
+    }
+
+    fn detail(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            role: NativeModelLabelRole::Detail,
+        }
+    }
+}
+
+/// Ordered tokens of the full model label
+/// (`<name> <context> <effort> <variant> <speed>`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NativeModelLabel {
+    tokens: Vec<NativeModelLabelToken>,
+}
+
+impl NativeModelLabel {
+    /// Builds a name-only label; used when no model resolves.
+    #[must_use]
+    pub fn name(text: impl Into<String>) -> Self {
+        Self {
+            tokens: vec![NativeModelLabelToken::name(text)],
+        }
+    }
+
+    /// Returns the ordered tokens.
+    #[must_use]
+    pub fn tokens(&self) -> &[NativeModelLabelToken] {
+        &self.tokens
+    }
+
+    /// Returns the plain space-separated label text.
+    #[must_use]
+    pub fn plain_text(&self) -> String {
+        self.tokens
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// Composes the full model label in reference order:
+/// `<name> <context> <effort> <variant> <speed>`.
+///
+/// Only existing tokens are included: the active context-window label appears
+/// for a model that declares a configurable window (never for a model with
+/// only a fixed token count), the effort label uses the shared thinking
+/// vocabulary, a non-default routed variant adds its label, and the speed
+/// token appears only when the selection is not the model's own default.
+/// Tokens are separated by single spaces; no bullet or middot separator is
+/// emitted anywhere.
+#[must_use]
+pub fn model_display_label(
+    catalog: &NativeModelCatalog,
+    policy: &NativeModelPolicy,
+) -> NativeModelLabel {
+    let Some(model) = catalog.manifest.model(&policy.model_id) else {
+        return NativeModelLabel::name(policy.model_id.clone());
+    };
+    let mut tokens = vec![NativeModelLabelToken::name(model.name.clone())];
+    if let Some(context) = context_window_label(model, policy) {
+        tokens.push(NativeModelLabelToken::detail(context));
+    }
+    if let Some(effort) = effort_label(model, policy) {
+        tokens.push(NativeModelLabelToken::detail(effort));
+    }
+    if let Some(variant) = variant_label(policy) {
+        tokens.push(NativeModelLabelToken::detail(variant));
+    }
+    if let Some(speed) = speed_label_token(model, policy) {
+        tokens.push(speed);
+    }
+    NativeModelLabel { tokens }
+}
+
+/// Resolves the active context-window label for a configurable window.
+///
+/// The policy's exact option id wins; a missing or stale id falls back to the
+/// capability default and then the first option. The catalog's display label
+/// is authoritative (`272K`, `1M`, `200K`), with the token formatter as a
+/// defensive fallback for a label the manifest left empty.
+fn context_window_label(
+    model: &NativeModelDefinition,
+    policy: &NativeModelPolicy,
+) -> Option<String> {
+    let capability = model.capabilities.context_window.as_ref()?;
+    if capability.options.is_empty() {
+        return None;
+    }
+    let selected = policy
+        .context_window
+        .as_ref()
+        .and_then(|selection| {
+            capability
+                .options
+                .iter()
+                .find(|option| option.id == selection.id)
+        })
+        .or_else(|| {
+            capability
+                .options
+                .iter()
+                .find(|option| option.id == capability.default)
+        })
+        .or_else(|| capability.options.first())?;
+    Some(if selected.label.trim().is_empty() {
+        format_context_tokens(selected.tokens)
+    } else {
+        selected.label.clone()
+    })
+}
+
+/// Resolves the reasoning-effort label using the shared thinking vocabulary.
+fn effort_label(model: &NativeModelDefinition, policy: &NativeModelPolicy) -> Option<String> {
+    let effort = policy.reasoning_effort.as_ref()?;
+    if !matches!(
+        &model.capabilities.thinking,
+        NativeThinkingCapability::Supported { .. }
+    ) {
+        return None;
+    }
+    Some(thinking_level_label(&effort.id))
+}
+
+/// Resolves a routed variant label; `default` adds no token.
+fn variant_label(policy: &NativeModelPolicy) -> Option<String> {
+    let variant = policy.native_selection.as_ref()?.variant_id.as_deref()?;
+    (variant != "default").then(|| humanize_variant(variant))
+}
+
+/// Resolves the accelerated-speed token, hiding the model's own default.
+fn speed_label_token(
+    model: &NativeModelDefinition,
+    policy: &NativeModelPolicy,
+) -> Option<NativeModelLabelToken> {
+    let value = policy.speed.as_ref()?;
+    let option = model
+        .capabilities
+        .speed_options
+        .iter()
+        .find(|option| option.id == value.id)?;
+    if option.default {
+        return None;
+    }
+    let presentation = crate::speed_presentation::speed_option_presentation(
+        &crate::speed_presentation::SpeedOption::new(
+            option.id.clone(),
+            option.label.clone(),
+            option.native_value.clone(),
+            option.description.clone(),
+            option.default,
+            option.disabled.map(|_| String::new()),
+        ),
+    );
+    let role = crate::speed_presentation::speed_label_gradient(&option.id)
+        .map_or(NativeModelLabelRole::Detail, NativeModelLabelRole::Gradient);
+    Some(NativeModelLabelToken {
+        text: presentation.label,
+        role,
+    })
+}
+
+/// Maps a policy effort id onto the reference thinking vocabulary.
+fn thinking_level_label(value: &str) -> String {
+    match value {
+        "xhigh" => "Extra High".to_owned(),
+        "high" => "High".to_owned(),
+        "medium" => "Medium".to_owned(),
+        "light" | "low" => "Light".to_owned(),
+        "minimal" => "Minimal".to_owned(),
+        "max" => "Max".to_owned(),
+        "ultra" => "Ultra".to_owned(),
+        other => humanize_variant(other),
+    }
 }
 
 /// Pure model-selector interaction state, independent of GPUI.
@@ -327,61 +538,17 @@ impl NativeModelSelectorState {
         self.snapshot.preview_policy_for_model(model_id).ok()
     }
 
-    /// Returns the compact trigger label without inventing a model name.
+    /// Returns the full-format trigger label as ordered tokens.
+    ///
+    /// The label never invents a model name: with no selected model it reads
+    /// `No model`. Every existing policy axis contributes at most one token,
+    /// and accelerated speed tiers keep their gradient role for painting.
     #[must_use]
-    pub fn trigger_label(&self) -> String {
-        self.selected_model_id()
-            .and_then(|model_id| self.snapshot.manifest.model(model_id))
-            .map_or_else(|| "No model".to_owned(), |model| model.name.clone())
-    }
-
-    /// Returns the compact trigger's exact policy-axis summary.
-    #[must_use]
-    pub fn trigger_summary(&self) -> String {
-        let Some(policy) = &self.policy else {
-            return String::new();
-        };
-        let model = self.snapshot.manifest.model(&policy.model_id);
-        let mut values = Vec::new();
-        if let Some(value) = &policy.reasoning_effort {
-            let has_selectable_thinking = model.map_or(true, |model| {
-                matches!(
-                    &model.capabilities.thinking,
-                    NativeThinkingCapability::Supported { .. }
-                )
-            });
-            if has_selectable_thinking {
-                values.push(humanize_variant(&value.id));
-            }
-        }
-        if let Some(selection) = &policy.native_selection
-            && let Some(variant) = selection.variant_id.as_deref()
-            && variant != "default"
-        {
-            values.push(humanize_variant(variant));
-        }
-        if let Some(value) = &policy.speed
-            && !model.is_some_and(|model| {
-                model
-                    .capabilities
-                    .speed_options
-                    .iter()
-                    .any(|option| option.id == value.id && option.default)
-            })
-        {
-            let label = model
-                .and_then(|model| {
-                    model
-                        .capabilities
-                        .speed_options
-                        .iter()
-                        .find(|option| option.id == value.id)
-                        .map(|option| option.label.clone())
-                })
-                .unwrap_or_else(|| humanize_variant(&value.id));
-            values.push(label);
-        }
-        values.join(" \u{b7} ")
+    pub fn trigger_label(&self) -> NativeModelLabel {
+        self.policy.as_ref().map_or_else(
+            || NativeModelLabel::name("No model"),
+            |policy| model_display_label(&self.snapshot, policy),
+        )
     }
 
     /// Opens/closes the popover without emitting a policy event.
@@ -1579,12 +1746,11 @@ impl NativeModelSelector {
 
     fn render_trigger(&self, cx: &Context<Self>) -> Stateful<Div> {
         let foreground = self.theme.colors.foreground.to_paint();
-        let muted = self.theme.colors.muted_foreground.to_paint();
         let engine = self.state.policy().map_or_else(
             || self.state.active_engine().to_owned(),
             |policy| policy.engine_id.clone(),
         );
-        let summary = self.state.trigger_summary();
+        let label = self.state.trigger_label();
         let mut trigger = div()
             .id("artisan-native-model-selector-trigger")
             .track_focus(&self.trigger_focus)
@@ -1612,32 +1778,18 @@ impl NativeModelSelector {
             .size(px(16.0))
             .flex_shrink_0(),
         );
-        trigger = trigger.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .flex_1()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(14.0))
-                        .line_height(px(20.0))
-                        .child(self.state.trigger_label()),
-                )
-                .when(!summary.is_empty(), |body| {
-                    body.child(
-                        div()
-                            .truncate()
-                            .text_size(px(14.0))
-                            .line_height(px(20.0))
-                            .text_color(muted)
-                            .child(summary),
-                    )
-                }),
-        );
+        let mut body = div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden();
+        let muted = self.theme.colors.muted_foreground.to_paint();
+        for token in label.tokens() {
+            body = body.child(render_trigger_label_token(muted, token));
+        }
+        trigger = trigger.child(body);
         trigger.child(
             icon(IconStyle::resolve(
                 self.theme,
@@ -3333,8 +3485,7 @@ fn humanize_variant(value: &str) -> String {
         "minimal" => "Minimal".to_owned(),
         "medium" => "Medium".to_owned(),
         "high" => "High".to_owned(),
-        "light" => "Light".to_owned(),
-        "low" => "Low".to_owned(),
+        "light" | "low" => "Light".to_owned(),
         "max" => "Max".to_owned(),
         "ultra" => "Ultra".to_owned(),
         "default" => "Default".to_owned(),
@@ -3346,6 +3497,59 @@ fn humanize_variant(value: &str) -> String {
             )
         }
     }
+}
+
+/// Paints one trigger-label token; gradient tokens recolor their own glyphs.
+fn render_trigger_label_token(muted: Hsla, token: &NativeModelLabelToken) -> AnyElement {
+    let text = div().truncate().text_size(px(14.0)).line_height(px(20.0));
+    match token.role {
+        NativeModelLabelRole::Name => text.child(token.text.clone()).into_any_element(),
+        NativeModelLabelRole::Detail => text
+            .text_color(muted)
+            .child(token.text.clone())
+            .into_any_element(),
+        NativeModelLabelRole::Gradient(gradient) => text
+            .child(gradient_label_text(token.text.clone(), gradient))
+            .into_any_element(),
+    }
+}
+
+/// Builds one static styled text whose glyphs interpolate `gradient`.
+fn gradient_label_text(text: String, gradient: SpeedGradient) -> StyledText {
+    let highlights = gradient_highlights(&text, gradient);
+    StyledText::new(text).with_highlights(highlights)
+}
+
+/// Builds one contiguous character-sized highlight range per glyph.
+///
+/// The first character receives the gradient start and the last receives its
+/// end; a single-character label keeps the start colour. Ranges are exact
+/// UTF-8 byte ranges and cover the whole text without gaps.
+#[allow(clippy::cast_precision_loss)]
+fn gradient_highlights(text: &str, gradient: SpeedGradient) -> Vec<(Range<usize>, HighlightStyle)> {
+    let count = text.chars().count();
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut highlights = Vec::with_capacity(count);
+    let mut start = 0;
+    for (index, character) in text.chars().enumerate() {
+        let end = start + character.len_utf8();
+        let progress = if count > 1 {
+            index as f32 / (count - 1) as f32
+        } else {
+            0.0
+        };
+        highlights.push((
+            start..end,
+            HighlightStyle {
+                color: Some(rgb_to_hsla(rgb(gradient.color_at(progress)))),
+                ..HighlightStyle::default()
+            },
+        ));
+        start = end;
+    }
+    highlights
 }
 
 fn same_model_family(left: &NativeModelView, right: &NativeModelView) -> bool {
@@ -3713,6 +3917,173 @@ mod tests {
     fn xhigh_thinking_value_uses_source_label() {
         let wire_id = "xhigh";
         assert_eq!(humanize_variant(wire_id), "Extra High");
+    }
+
+    #[test]
+    fn full_trigger_label_includes_variable_context_and_keeps_no_separators() {
+        let snapshot = NativeModelCatalog::offline().expect("real catalog");
+        let mut policy = snapshot
+            .selection_policy_for_model("codex-sol")
+            .expect("codex policy");
+        policy.reasoning_effort = Some(NativeOptionValue {
+            id: "xhigh".to_owned(),
+            native_value: "xhigh".to_owned(),
+        });
+        policy.speed = Some(NativeOptionValue {
+            id: "fast".to_owned(),
+            native_value: "fast".to_owned(),
+        });
+        policy.context_window = Some(crate::native_model_catalog::NativeContextSelection {
+            id: "extended".to_owned(),
+            native_suffix: "1m".to_owned(),
+            native_config: Some(crate::native_model_catalog::NativeContextConfig {
+                model_context_window: 1_050_000,
+            }),
+        });
+
+        let state = NativeModelSelectorState::new(snapshot, Some(policy));
+        let label = state.trigger_label();
+        assert_eq!(label.plain_text(), "GPT 5.6 Sol 1M Extra High Fast");
+        assert_eq!(label.tokens().len(), 4);
+        assert_eq!(label.tokens()[0].role, NativeModelLabelRole::Name);
+        assert_eq!(
+            label.tokens()[3].role,
+            NativeModelLabelRole::Gradient(crate::speed_presentation::FAST_GRADIENT)
+        );
+        let plain = label.plain_text();
+        for separator in ['\u{b7}', '\u{2022}', '|'] {
+            assert!(
+                !plain.contains(separator),
+                "label must not separate: {plain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_trigger_label_omits_missing_context_and_default_speed() {
+        let snapshot = NativeModelCatalog::offline().expect("real catalog");
+        let mut policy = snapshot
+            .selection_policy_for_model("codex-gpt-5-5")
+            .expect("gpt-5.5 policy");
+        policy.reasoning_effort = Some(NativeOptionValue {
+            id: "xhigh".to_owned(),
+            native_value: "xhigh".to_owned(),
+        });
+        // The model carries no variable window, and standard is its default
+        // speed, so both tokens stay absent.
+        let label = model_display_label(&snapshot, &policy);
+        assert_eq!(label.plain_text(), "GPT 5.5 Extra High");
+        assert_eq!(label.tokens().len(), 2);
+        assert!(
+            label
+                .tokens()
+                .iter()
+                .all(|token| !matches!(token.role, NativeModelLabelRole::Gradient(_)))
+        );
+    }
+
+    #[test]
+    fn superfast_speed_token_uses_the_neon_gradient() {
+        let mut snapshot = NativeModelCatalog::offline().expect("real catalog");
+        let model = snapshot
+            .manifest
+            .models
+            .iter_mut()
+            .find(|model| model.id == "codex-sol")
+            .expect("codex-sol exists");
+        model
+            .capabilities
+            .speed_options
+            .push(crate::native_model_catalog::NativeSpeedOption {
+                availability: "always".to_owned(),
+                consumption_basis: "standard".to_owned(),
+                consumption_multiplier: None,
+                input_consumption_multiplier: None,
+                output_consumption_multiplier: None,
+                default: false,
+                description: "Fastest tier.".to_owned(),
+                disabled: None,
+                id: "superfast".to_owned(),
+                label: "Provider accelerated".to_owned(),
+                native_value: "superfast".to_owned(),
+                source_url: None,
+                speed_multiplier: None,
+                verified_at: None,
+            });
+        let mut policy = snapshot
+            .selection_policy_for_model("codex-sol")
+            .expect("codex policy");
+        policy.speed = Some(NativeOptionValue {
+            id: "superfast".to_owned(),
+            native_value: "superfast".to_owned(),
+        });
+
+        let label = model_display_label(&snapshot, &policy);
+        assert_eq!(label.plain_text(), "GPT 5.6 Sol 272K High Superfast");
+        assert_eq!(
+            label.tokens().last().expect("speed token").role,
+            NativeModelLabelRole::Gradient(crate::speed_presentation::SUPERFAST_GRADIENT)
+        );
+    }
+
+    #[test]
+    fn gradient_highlights_cover_every_character_left_to_right() {
+        let text = "Fast";
+        let highlights = gradient_highlights(text, crate::speed_presentation::FAST_GRADIENT);
+        assert_eq!(highlights.len(), text.len());
+        let mut cursor = 0;
+        for (range, _) in &highlights {
+            assert_eq!(range.start, cursor);
+            cursor = range.end;
+        }
+        assert_eq!(cursor, text.len());
+        let expected_start = Some(rgb_to_hsla(rgb(
+            crate::speed_presentation::FAST_GRADIENT.start()
+        )));
+        let expected_end = Some(rgb_to_hsla(rgb(
+            crate::speed_presentation::FAST_GRADIENT.end()
+        )));
+        assert_eq!(highlights[0].1.color, expected_start);
+        assert_eq!(highlights[3].1.color, expected_end);
+    }
+
+    #[gpui::test]
+    fn trigger_mounts_the_full_label_with_a_gradient_speed_token(cx: &mut gpui::TestAppContext) {
+        let snapshot = NativeModelCatalog::offline().expect("real catalog");
+        let mut policy = snapshot
+            .selection_policy_for_model("codex-sol")
+            .expect("codex policy");
+        policy.reasoning_effort = Some(NativeOptionValue {
+            id: "xhigh".to_owned(),
+            native_value: "xhigh".to_owned(),
+        });
+        policy.speed = Some(NativeOptionValue {
+            id: "fast".to_owned(),
+            native_value: "fast".to_owned(),
+        });
+        policy.context_window = Some(crate::native_model_catalog::NativeContextSelection {
+            id: "extended".to_owned(),
+            native_suffix: "1m".to_owned(),
+            native_config: Some(crate::native_model_catalog::NativeContextConfig {
+                model_context_window: 1_050_000,
+            }),
+        });
+
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            NativeModelSelector::new(snapshot, Some(policy), ThemeMode::Dark, cx)
+        });
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR)
+            .expect("trigger paints with the full label");
+        assert!(f32::from(trigger.size.width) > 0.0);
+        cx.update(|_, app| {
+            assert_eq!(
+                view.read(app).state.trigger_label().plain_text(),
+                "GPT 5.6 Sol 1M Extra High Fast"
+            );
+        });
     }
 
     #[test]
