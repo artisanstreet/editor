@@ -368,7 +368,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             Box::new(StreamOrigin::new()),
             stream_listener_limits(),
             NonZeroU32::new(1).expect("admission capacity"),
-            NonZeroU32::new(2).expect("request capacity"),
+            NonZeroU32::new(4).expect("request capacity"),
         )
         .expect("forge listener binds");
         let address = listener.local_addr().expect("listener address");
@@ -409,6 +409,37 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
                 ),
                 "subscribe must answer, got {:?}",
                 subscribed.body
+            );
+            // Barrier: the subscribe response is written before activation
+            // finishes, so a second round trip is required. The driver
+            // serves requests strictly in order only after the previous
+            // activation (replay drain included) completes, hence this
+            // re-subscribe response proves the subscription is active and
+            // the launch below cannot slip into activation replay.
+            let (mut barrier_send, mut barrier_recv) = connection
+                .open_bi()
+                .await
+                .expect("barrier stream opens");
+            let mut barrier = subscribe_envelope(&thread_id);
+            barrier.frame_id = FrameId::parse("stream-subscribe-again").expect("frame id");
+            artisan_transport::send_envelope(&mut barrier_send, &barrier)
+                .await
+                .expect("barrier sends");
+            drop(barrier_send);
+            let barriered = tokio::time::timeout(
+                TEST_DEADLINE,
+                artisan_transport::receive_envelope(&mut barrier_recv),
+            )
+            .await
+            .expect("barrier response settles")
+            .expect("barrier response decodes");
+            assert!(
+                matches!(
+                    barriered.body,
+                    WireEnvelopeBody::Response(_)
+                ),
+                "barrier must answer, got {:?}",
+                barriered.body
             );
             subscribed_tx.send(()).expect("driver waits for subscribe");
             // The production launch below is the first publication: the
@@ -546,7 +577,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
 
         let (serve_result, (), ()) = tokio::join!(serve, wire, drive);
         let (listener, report) = serve_result.expect("serve must end cleanly");
-        assert_eq!(report.completed_requests, 1);
+        assert_eq!(report.completed_requests, 2);
         assert!(matches!(
             report.termination,
             RequestTermination::Failed {
