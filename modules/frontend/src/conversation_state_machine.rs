@@ -413,6 +413,17 @@ pub enum ConversationStateEvent {
     RegisterTurn { turn_id: TurnId },
     /// Route one event to an already registered turn.
     Turn { turn_id: TurnId, event: TurnEvent },
+    /// Set or clear one turn's send-time engine display label.
+    ///
+    /// Carries only validated display metadata captured at send time; it
+    /// never fabricates work, sessions, or lifecycle. `None` clears a
+    /// previously set label.
+    SetTurnEngineLabel {
+        /// Turn the label belongs to.
+        turn_id: TurnId,
+        /// Display label, or `None` to clear.
+        engine_label: Option<String>,
+    },
     /// Register one exact `(RequestId, generation)` steering machine.
     RegisterSteering {
         /// Client command identity.
@@ -490,6 +501,14 @@ impl fmt::Debug for ConversationStateEvent {
                 .field("turn_id", turn_id)
                 .field("event", event)
                 .finish(),
+            Self::SetTurnEngineLabel {
+                turn_id,
+                engine_label,
+            } => formatter
+                .debug_struct("SetTurnEngineLabel")
+                .field("turn_id", turn_id)
+                .field("engine_label", engine_label)
+                .finish(),
             Self::RegisterSteering {
                 command_id,
                 generation,
@@ -542,6 +561,16 @@ impl PartialEq for ConversationStateEvent {
                     event: right_event,
                 },
             ) => left_id == right_id && left_event == right_event,
+            (
+                Self::SetTurnEngineLabel {
+                    turn_id: left_id,
+                    engine_label: left_label,
+                },
+                Self::SetTurnEngineLabel {
+                    turn_id: right_id,
+                    engine_label: right_label,
+                },
+            ) => left_id == right_id && left_label == right_label,
             (
                 Self::RegisterSteering {
                     command_id: left_command,
@@ -906,6 +935,14 @@ pub struct ConversationStateController {
     /// semantics never change under a live subscription. Bounded by
     /// [`MAX_TURN_CONTROLLERS`] together with [`Self::turns`].
     explicit_turns: BTreeSet<TurnId>,
+    /// Send-time engine display labels keyed by turn.
+    ///
+    /// Display metadata only: labels never fabricate work, sessions, or
+    /// lifecycle. Entries exist only for turns present in [`Self::turns`],
+    /// so the map stays bounded by [`MAX_TURN_CONTROLLERS`]; labels for
+    /// turns that leave the authoritative snapshot are pruned during
+    /// synchronization.
+    turn_engine_labels: BTreeMap<TurnId, String>,
     steerings: BTreeMap<SteeringKey, SteeringRecord>,
     disclosures: BTreeMap<SceneId, DisclosureController>,
     facts: BTreeMap<SceneId, SceneFact>,
@@ -921,6 +958,7 @@ impl fmt::Debug for ConversationStateController {
             .field("delivery_phase", &self.delivery.phase())
             .field("turn_count", &self.turns.len())
             .field("explicit_turn_count", &self.explicit_turns.len())
+            .field("engine_label_count", &self.turn_engine_labels.len())
             .field("steering_count", &self.steerings.len())
             .field("disclosure_count", &self.disclosures.len())
             .field("scene_fact_count", &self.facts.len())
@@ -947,6 +985,7 @@ impl ConversationStateController {
             delivery,
             turns: BTreeMap::new(),
             explicit_turns: BTreeSet::new(),
+            turn_engine_labels: BTreeMap::new(),
             steerings: BTreeMap::new(),
             disclosures: BTreeMap::new(),
             facts: BTreeMap::new(),
@@ -988,6 +1027,10 @@ impl ConversationStateController {
             ConversationStateEvent::Delivery(event) => self.dispatch_delivery(&event),
             ConversationStateEvent::RegisterTurn { turn_id } => self.register_turn(turn_id),
             ConversationStateEvent::Turn { turn_id, event } => self.dispatch_turn(turn_id, event),
+            ConversationStateEvent::SetTurnEngineLabel {
+                turn_id,
+                engine_label,
+            } => self.set_turn_engine_label(turn_id, engine_label),
             ConversationStateEvent::RegisterSteering {
                 command_id,
                 generation,
@@ -1087,6 +1130,80 @@ impl ConversationStateController {
         event: TurnEvent,
     ) -> Result<(), ConversationStateError> {
         self.dispatch(ConversationStateEvent::Turn { turn_id, event })
+    }
+
+    /// Sets or clears one turn's send-time engine display label.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError::OwnerClosed`] for a closed owner,
+    /// [`ConversationStateError::UnknownTurn`] when no controller (explicit
+    /// or delivery-derived) exists for the turn, [`ConversationStateError::Scene`]
+    /// when a supplied label violates the scene label limits, or
+    /// [`ConversationStateError::CapacityExhausted`] when the invalidation
+    /// cannot wait. A repeated identical label (including clearing an
+    /// already absent one) is a no-op success.
+    pub fn on_turn_engine_label(
+        &mut self,
+        turn_id: TurnId,
+        engine_label: Option<String>,
+    ) -> Result<(), ConversationStateError> {
+        self.dispatch(ConversationStateEvent::SetTurnEngineLabel {
+            turn_id,
+            engine_label,
+        })
+    }
+
+    /// Applies a send-time engine display label mutation.
+    ///
+    /// Storage is keyed by turns already present in [`Self::turns`], so the
+    /// map stays bounded by [`MAX_TURN_CONTROLLERS`] without its own ceiling.
+    /// Labels for turns that leave the authoritative snapshot are pruned by
+    /// [`Self::synchronize_turn_controllers`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError::OwnerClosed`] for a closed owner,
+    /// [`ConversationStateError::UnknownTurn`] for an absent turn,
+    /// [`ConversationStateError::Scene`] for a label that violates the scene
+    /// label limits, or [`ConversationStateError::CapacityExhausted`] when
+    /// the invalidation cannot wait.
+    pub fn set_turn_engine_label(
+        &mut self,
+        turn_id: TurnId,
+        engine_label: Option<String>,
+    ) -> Result<(), ConversationStateError> {
+        if self.delivery.is_closed() {
+            return Err(ConversationStateError::OwnerClosed);
+        }
+        if !self.turns.contains_key(&turn_id) {
+            return Err(ConversationStateError::UnknownTurn {
+                turn_id: turn_id.clone(),
+            });
+        }
+        if let Some(label) = &engine_label {
+            crate::conversation_scene::validate_engine_label(label)
+                .map_err(ConversationStateError::Scene)?;
+        }
+        let changed = match (self.turn_engine_labels.get(&turn_id), &engine_label) {
+            (None, None) => false,
+            (Some(stored), Some(incoming)) if stored == incoming => false,
+            _ => true,
+        };
+        if !changed {
+            return Ok(());
+        }
+        self.ensure_effect_capacity(1)?;
+        match engine_label {
+            Some(label) => {
+                self.turn_engine_labels.insert(turn_id, label);
+            }
+            None => {
+                self.turn_engine_labels.remove(&turn_id);
+            }
+        }
+        self.push_effect(ConversationStateEffect::SceneInvalidated);
+        Ok(())
     }
 
     /// Registers one exact steering command generation.
@@ -1467,6 +1584,11 @@ impl ConversationStateController {
                 {
                     entry = entry.with_session_disclosure(disclosure);
                 }
+                // Explicit send-time engine labels travel the same entry so
+                // the row can name the engine without session state.
+                if let Some(label) = self.turn_engine_labels.get(turn_id) {
+                    entry = entry.with_engine_label(label.clone());
+                }
                 narrations.push(entry);
             }
         }
@@ -1730,6 +1852,23 @@ impl ConversationStateController {
             snapshot,
             &mut self.effects,
         );
+        // A turn that left the authoritative snapshot is retired from view:
+        // its engine label goes with it so a later turn reusing nothing
+        // stale can never inherit it. Removal changes future scenes, so it
+        // invalidates exactly once when anything was actually dropped.
+        let live: BTreeSet<TurnId> = snapshot
+            .turns()
+            .iter()
+            .map(|turn| turn.turn_id.clone())
+            .collect();
+        let labels_before = self.turn_engine_labels.len();
+        self.turn_engine_labels
+            .retain(|turn_id, _| live.contains(turn_id));
+        if self.turn_engine_labels.len() != labels_before
+            && self.effects.len() < MAX_PENDING_EFFECTS
+        {
+            self.push_effect(ConversationStateEffect::SceneInvalidated);
+        }
         self.synchronize_session_disclosures();
     }
 
@@ -2565,7 +2704,7 @@ fn synchronize_turns(
 ///   settled kind stays truthful;
 /// - active lifecycles report a streaming reply while non-commentary reply
 ///   text streams, else work/thought evidence, else provider wait;
-/// - `Pending` derives nothing: a queued turn renders quiet.
+/// - `Pending` with a visible durable user message reports like an active turn; without one it stays quiet.
 ///
 /// Timestamps are authoritative Forge times from the turn's own entities:
 /// first activation counts from the turn's own creation (send time), so the
@@ -2598,7 +2737,29 @@ fn derive_turn_events(
     let second_revision = controller.revision().saturating_add(2);
 
     match turn.lifecycle {
-        ConversationLifecycle::Pending => Vec::new(),
+        ConversationLifecycle::Pending => {
+            // A durable user message is the launch evidence: the send
+            // happened, so the request is out even though the provider has
+            // not responded yet. Without one, there is nothing visible to
+            // anchor a status row to and the turn stays quiet.
+            let launched = items.iter().any(|item| {
+                matches!(
+                    item,
+                    ConversationItem::UserMessage(_)
+                        | ConversationItem::MultimodalUserMessage(_)
+                )
+            });
+            if !launched {
+                return Vec::new();
+            }
+            vec![drive_active_like(
+                items,
+                work_evidence,
+                thought_evidence,
+                activate_at,
+                first_revision,
+            )]
+        }
         ConversationLifecycle::Completed
         | ConversationLifecycle::Failed
         | ConversationLifecycle::Cancelled => {
@@ -2647,33 +2808,55 @@ fn derive_turn_events(
         ConversationLifecycle::Active
         | ConversationLifecycle::Streaming
         | ConversationLifecycle::Waiting => {
-            let streaming_reply = items.iter().any(|item| {
-                matches!(item, ConversationItem::AssistantMessage(message)
-                    if message.lifecycle == ConversationLifecycle::Streaming
-                        && message.phase != AssistantMessagePhase::Commentary
-                        && !message.body.as_str().is_empty())
-            });
-            vec![if streaming_reply {
-                TurnEvent::StreamingReply {
-                    at: activate_at,
-                    revision: first_revision,
-                }
-            } else if work_evidence {
-                TurnEvent::Working {
-                    at: activate_at,
-                    revision: first_revision,
-                }
-            } else if thought_evidence {
-                TurnEvent::Thinking {
-                    at: activate_at,
-                    revision: first_revision,
-                }
-            } else {
-                TurnEvent::WaitingForProvider {
-                    at: activate_at,
-                    revision: first_revision,
-                }
-            }]
+            vec![drive_active_like(
+                items,
+                work_evidence,
+                thought_evidence,
+                activate_at,
+                first_revision,
+            )]
+        }
+    }
+}
+
+/// Single active-like drive shared by launched lifecycles.
+///
+/// Evidence of provider response outranks the wait, in reference order: a
+/// streaming non-commentary reply speaks for itself, then work evidence,
+/// then thought evidence; otherwise the request is still out and waits on
+/// the provider. Callers gate on launch evidence; this helper only ranks it.
+fn drive_active_like(
+    items: &[&ConversationItem],
+    work_evidence: bool,
+    thought_evidence: bool,
+    activate_at: i64,
+    first_revision: u64,
+) -> TurnEvent {
+    let streaming_reply = items.iter().any(|item| {
+        matches!(item, ConversationItem::AssistantMessage(message)
+            if message.lifecycle == ConversationLifecycle::Streaming
+                && message.phase != AssistantMessagePhase::Commentary
+                && !message.body.as_str().is_empty())
+    });
+    if streaming_reply {
+        TurnEvent::StreamingReply {
+            at: activate_at,
+            revision: first_revision,
+        }
+    } else if work_evidence {
+        TurnEvent::Working {
+            at: activate_at,
+            revision: first_revision,
+        }
+    } else if thought_evidence {
+        TurnEvent::Thinking {
+            at: activate_at,
+            revision: first_revision,
+        }
+    } else {
+        TurnEvent::WaitingForProvider {
+            at: activate_at,
+            revision: first_revision,
         }
     }
 }

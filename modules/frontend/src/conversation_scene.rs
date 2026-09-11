@@ -255,6 +255,11 @@ pub struct TurnNarrationEntry {
     /// resolved one. The build copies this onto the session group only;
     /// legacy positional groups keep item-derived disclosure.
     pub session_disclosure: Option<SceneDisclosure>,
+    /// Explicit engine display label for the turn's status row, when the
+    /// aggregate resolved one from authoritative send-time metadata.
+    /// The build prefers this over transition-derived labels; it carries
+    /// no work, session, or lifecycle meaning.
+    pub engine_label: Option<String>,
 }
 
 impl TurnNarrationEntry {
@@ -266,6 +271,7 @@ impl TurnNarrationEntry {
             narration,
             active_started_at_ms: None,
             session_disclosure: None,
+            engine_label: None,
         }
     }
 
@@ -289,6 +295,19 @@ impl TurnNarrationEntry {
     pub fn with_session_disclosure(self, disclosure: SceneDisclosure) -> Self {
         Self {
             session_disclosure: Some(disclosure),
+            ..self
+        }
+    }
+
+    /// Attaches an aggregate-validated engine display label for this turn.
+    ///
+    /// The caller validates through [`validate_engine_label`]; the build
+    /// prefers this label over transition-derived ones without inferring
+    /// anything from it.
+    #[must_use]
+    pub fn with_engine_label(self, label: String) -> Self {
+        Self {
+            engine_label: Some(label),
             ..self
         }
     }
@@ -1167,6 +1186,12 @@ impl ConversationScene {
                     narration: entry.narration,
                 });
             }
+            // Explicit engine labels are validated here, not only at the
+            // aggregate boundary: entry fields and builders are public, so a
+            // direct build caller can bypass dispatch validation.
+            if let Some(label) = &entry.engine_label {
+                validate_engine_label(label)?;
+            }
             let narration_turn_id = entry.turn_id.clone();
             if narration_map
                 .insert(narration_turn_id.clone(), entry)
@@ -1271,6 +1296,9 @@ impl ConversationScene {
             let narration = entry.map_or(TurnNarration::Quiet, |entry| entry.narration);
             let active_started_at_ms = entry.and_then(|entry| entry.active_started_at_ms);
             let session_disclosure = entry.and_then(|entry| entry.session_disclosure);
+            // Explicit send-time engine labels outrank transition-derived
+            // ones everywhere, including outside session mode.
+            let explicit_engine_label = entry.and_then(|entry| entry.engine_label.clone());
             let turn_items = items_by_turn.remove(&turn.turn_id).unwrap_or_default();
 
             // --- Session derivation pre-pass (R1/H): exact run evidence only.
@@ -1980,7 +2008,11 @@ impl ConversationScene {
                     } else {
                         None
                     },
-                    engine_label: if session_mode { engine_label } else { None },
+                    engine_label: explicit_engine_label.clone().or(if session_mode {
+                        engine_label
+                    } else {
+                        None
+                    }),
                 }));
             }
             blocks.push(TurnBlock::TurnFooter(TurnFooterBlock {
@@ -2075,6 +2107,30 @@ fn validate_steering_label(label: &str) -> Result<(), SceneBuildError> {
     }
     if label.len() > SCENE_MAX_STEERING_LABEL_BYTES {
         return Err(SceneBuildError::SteeringLabelTooLong {
+            length: label.len(),
+            maximum: SCENE_MAX_STEERING_LABEL_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// Validates an engine display label against the existing scene label limits.
+///
+/// Non-blank text within [`SCENE_MAX_STEERING_LABEL_BYTES`] UTF-8 bytes;
+/// display names are short by construction and anything larger is a
+/// producer defect, never silently truncated.
+///
+/// # Errors
+///
+/// Returns [`SceneBuildError::EmptyEngineLabel`] for blank input (including
+/// whitespace-only) or [`SceneBuildError::EngineLabelTooLong`] past the
+/// ceiling.
+pub fn validate_engine_label(label: &str) -> Result<(), SceneBuildError> {
+    if label.trim().is_empty() {
+        return Err(SceneBuildError::EmptyEngineLabel);
+    }
+    if label.len() > SCENE_MAX_STEERING_LABEL_BYTES {
+        return Err(SceneBuildError::EngineLabelTooLong {
             length: label.len(),
             maximum: SCENE_MAX_STEERING_LABEL_BYTES,
         });
@@ -2277,6 +2333,12 @@ pub enum SceneBuildError {
     /// A steering label exceeded its conservative ceiling.
     #[error("steering label is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
     SteeringLabelTooLong { length: usize, maximum: usize },
+    /// An engine display label was empty.
+    #[error("engine label must not be empty")]
+    EmptyEngineLabel,
+    /// An engine display label exceeded its conservative ceiling.
+    #[error("engine label is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
+    EngineLabelTooLong { length: usize, maximum: usize },
     /// A compaction card was paired with a generic active-work narration.
     #[error("compaction card cannot coexist with {narration:?} narration")]
     CompactionNarrationConflict { narration: TurnNarration },

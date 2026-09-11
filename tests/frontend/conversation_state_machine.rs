@@ -80,6 +80,10 @@ fn make_user(id: &str, turn: &str, ordinal: u64, body: &str) -> ConversationItem
         revision: Revision::new(0),
         lifecycle: ConversationLifecycle::Pending,
         body: MessageBody::parse(body.to_owned()).expect("valid user body"),
+        // Frozen native contract: the send-time source message id lives on
+        // the durable item; fixtures leave it absent unless a correlation
+        // case specifically needs one.
+        source_message_id: None,
         created_at: stamp(1),
         updated_at: stamp(10),
     })
@@ -1056,6 +1060,49 @@ fn user_block_count(controller: &ConversationStateController, item: &str) -> usi
         .count()
 }
 
+fn reasoning_fact(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneFact {
+    SceneFact::new(
+        scene_id(id),
+        turn_id(turn),
+        ordinal,
+        SceneFactKind::Reasoning {
+            body: body.to_owned(),
+        },
+    )
+    .expect("valid reasoning fact")
+}
+
+fn turn_status_engine_label(
+    controller: &ConversationStateController,
+    turn: &str,
+) -> Option<String> {
+    let scene = controller.scene().expect("scene builds");
+    scene
+        .turn_scene(&turn_id(turn))
+        .expect("turn present")
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::TurnStatus(status) => Some(status.engine_label.clone()),
+            _ => None,
+        })
+        .expect("status present")
+}
+
+fn assistant_bodies(controller: &ConversationStateController, turn: &str) -> Vec<String> {
+    let scene = controller.scene().expect("scene builds");
+    scene
+        .turn_scene(&turn_id(turn))
+        .expect("turn present")
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message.body.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn completed_turn_with_settled_final_reply_exposes_footer_settlement() {
     let mut controller = ConversationStateController::new(thread_id());
@@ -1284,7 +1331,8 @@ fn delivery_drives_pending_waiting_work_stream_and_completed_without_manual_driv
     let mut controller = ConversationStateController::new(thread_id());
     let _ = controller.drain_effects();
 
-    // Pending turn renders quiet with no clock basis.
+    // Launch: a Pending turn with a visible durable user message waits on
+    // the provider, counting from the turn's own creation.
     delivered_snapshot(
         &mut controller,
         1,
@@ -1299,9 +1347,9 @@ fn delivery_drives_pending_waiting_work_stream_and_completed_without_manual_driv
         )],
         vec![make_user(USER_A, TURN_A, 1, "hi")],
     );
-    let (pending, _) = scene_status(&controller, TURN_A);
-    assert_eq!(pending, SceneTurnNarration::Quiet);
-    assert_eq!(turn_status_basis(&controller, TURN_A), None);
+    let (waiting, _) = scene_status(&controller, TURN_A);
+    assert_eq!(waiting, SceneTurnNarration::ProviderWait);
+    assert_eq!(turn_status_basis(&controller, TURN_A), Some(90));
 
     // Activation without output waits on the provider, counting from the
     // turn's own creation.
@@ -2157,4 +2205,406 @@ fn duplicate_replay_keeps_single_blocks_and_settlement() {
     assert_eq!(after, before);
     assert_eq!(turn_footer_settlement(&controller, TURN_A), settlement_before);
     assert_eq!(user_block_count(&controller, USER_A), 1);
+}
+
+#[test]
+fn launched_pending_waiting_through_streaming_to_terminal() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+
+    // Stage 1, launch: Pending turn with a visible durable user message
+    // waits on the provider, counting from the turn's own creation, with
+    // no engine label to name yet.
+    delivered_snapshot(
+        &mut controller,
+        1,
+        100,
+        vec![make_turn_full(TURN_A, 0, 0, ConversationLifecycle::Pending, 90, 95)],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    let (waiting, _) = scene_status(&controller, TURN_A);
+    assert_eq!(waiting, SceneTurnNarration::ProviderWait);
+    assert_eq!(turn_status_basis(&controller, TURN_A), Some(90));
+    assert_eq!(turn_status_engine_label(&controller, TURN_A), None);
+    assert_eq!(user_block_count(&controller, USER_A), 1);
+
+    // Stage 2, provider activity: reasoning then a tool move the same
+    // Pending turn through Thinking to Working without touching the basis.
+    controller
+        .register_fact(reasoning_fact("reason_a", TURN_A, 100, "thinking aloud"))
+        .expect("reasoning fact registers");
+    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        2,
+        120,
+        vec![make_turn_full(TURN_A, 0, 1, ConversationLifecycle::Pending, 90, 115)],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    let (thinking, _) = scene_status(&controller, TURN_A);
+    assert_eq!(thinking, SceneTurnNarration::Thinking);
+    controller
+        .register_fact(activity_fact("tool_a", TURN_A, 101, "ran"))
+        .expect("activity fact registers");
+    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        3,
+        140,
+        vec![make_turn_full(TURN_A, 0, 2, ConversationLifecycle::Pending, 90, 135)],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    let (working, _) = scene_status(&controller, TURN_A);
+    assert_eq!(working, SceneTurnNarration::Working);
+    assert_eq!(turn_status_basis(&controller, TURN_A), Some(90));
+
+    // Stage 3, incremental response: sequential versions of the SAME
+    // assistant item arrive in separate snapshots, each asserted before
+    // anything terminal.
+    delivered_snapshot(
+        &mut controller,
+        4,
+        150,
+        vec![make_turn_full(TURN_A, 0, 3, ConversationLifecycle::Pending, 90, 145)],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hi"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                102,
+                "first",
+                AssistantMessagePhase::Unspecified,
+                ConversationLifecycle::Streaming,
+                0,
+                145,
+            ),
+        ],
+    );
+    let scene = controller.scene().expect("scene builds");
+    let turn_scene = scene.turn_scene(&turn_id(TURN_A)).expect("turn present");
+    assert!(
+        turn_scene
+            .blocks
+            .iter()
+            .all(|block| !matches!(block, TurnBlock::TurnStatus(_))),
+        "streaming reply suppresses the status row"
+    );
+    assert_eq!(
+        assistant_bodies(&controller, TURN_A),
+        vec!["first".to_owned()]
+    );
+    delivered_snapshot(
+        &mut controller,
+        5,
+        160,
+        vec![make_turn_full(TURN_A, 0, 4, ConversationLifecycle::Pending, 90, 150)],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hi"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                102,
+                "first second",
+                AssistantMessagePhase::Unspecified,
+                ConversationLifecycle::Streaming,
+                1,
+                155,
+            ),
+        ],
+    );
+    let scene = controller.scene().expect("scene builds");
+    let turn_scene = scene.turn_scene(&turn_id(TURN_A)).expect("turn present");
+    assert!(
+        turn_scene
+            .blocks
+            .iter()
+            .all(|block| !matches!(block, TurnBlock::TurnStatus(_))),
+        "streaming reply suppresses the status row"
+    );
+    assert_eq!(
+        assistant_bodies(&controller, TURN_A),
+        vec!["first second".to_owned()]
+    );
+
+    // Stage 4, terminal: the same item settles as Final at revision 2.
+    // Worked time still counts from the send, the final body settles the
+    // footer, and the basis is retired with it.
+    delivered_snapshot(
+        &mut controller,
+        6,
+        170,
+        vec![make_turn_full(TURN_A, 0, 5, ConversationLifecycle::Completed, 90, 160)],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hi"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                102,
+                "first second",
+                AssistantMessagePhase::Final,
+                ConversationLifecycle::Completed,
+                2,
+                165,
+            ),
+        ],
+    );
+    let (settled, _) = scene_status(&controller, TURN_A);
+    assert_eq!(settled, SceneTurnNarration::WorkedFor { millis: 70 });
+    assert_eq!(turn_status_basis(&controller, TURN_A), None);
+    assert_eq!(
+        turn_footer_settlement(&controller, TURN_A),
+        Some(("first second".to_owned(), 160))
+    );
+    assert_eq!(user_block_count(&controller, USER_A), 1);
+}
+
+#[test]
+fn pending_turn_without_user_message_stays_quiet() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    // No launch evidence: a Pending turn with nothing visible has no anchor
+    // for a status row, so it stays quiet.
+    delivered_snapshot(
+        &mut controller,
+        1,
+        100,
+        vec![make_turn_full(TURN_A, 0, 0, ConversationLifecycle::Pending, 90, 95)],
+        vec![],
+    );
+    let (quiet, _) = scene_status(&controller, TURN_A);
+    assert_eq!(quiet, SceneTurnNarration::Quiet);
+    assert_eq!(turn_status_basis(&controller, TURN_A), None);
+}
+
+#[test]
+fn duplicate_pending_snapshot_is_effect_quiet_and_stable() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        1,
+        100,
+        vec![make_turn_full(TURN_A, 0, 0, ConversationLifecycle::Pending, 90, 95)],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    let before = controller.scene().expect("scene builds");
+    let (waiting, _) = scene_status(&controller, TURN_A);
+    assert_eq!(waiting, SceneTurnNarration::ProviderWait);
+
+    // Redelivering the identical frame changes nothing visible and emits
+    // nothing: same narration, same basis, empty outbox.
+    delivered_snapshot(
+        &mut controller,
+        1,
+        100,
+        vec![make_turn_full(TURN_A, 0, 0, ConversationLifecycle::Pending, 90, 95)],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    assert!(controller.drain_effects().is_empty());
+    assert_eq!(controller.scene().expect("scene builds"), before);
+    let (still_waiting, _) = scene_status(&controller, TURN_A);
+    assert_eq!(still_waiting, SceneTurnNarration::ProviderWait);
+    assert_eq!(turn_status_basis(&controller, TURN_A), Some(90));
+}
+
+#[test]
+fn terminal_snapshot_reinstall_keeps_frozen_settlement() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    let frame = snapshot(
+        1,
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Completed)],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hi"),
+            make_assistant_settled(
+                ASSISTANT_A,
+                TURN_A,
+                2,
+                "done",
+                AssistantMessagePhase::Final,
+                ConversationLifecycle::Completed,
+                0,
+                10,
+            ),
+        ],
+    );
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(frame.clone()))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    let before = controller.scene().expect("scene builds");
+    let settlement_before = turn_footer_settlement(&controller, TURN_A);
+    assert_eq!(settlement_before, Some(("done".to_owned(), 10)));
+
+    // Identical terminal reinstall: frozen settlement, identical scene,
+    // quiet outbox.
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(frame))
+        .expect("replay succeeds");
+    assert!(controller.drain_effects().is_empty());
+    assert_eq!(controller.scene().expect("scene builds"), before);
+    assert_eq!(turn_footer_settlement(&controller, TURN_A), settlement_before);
+}
+
+#[test]
+fn failed_after_completed_is_refused_without_state_change() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(
+            baseline_snapshot(),
+        ))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    controller
+        .register_turn(turn_id(TURN_A))
+        .expect("turn registration succeeds");
+    controller
+        .on_turn(turn_id(TURN_A), TurnEvent::Completed { at: 14, revision: 1 })
+        .expect("completion succeeds");
+    let _ = controller.drain_effects();
+    let before_view = controller.view();
+    let before_scene = controller.scene().expect("scene builds");
+    let before_effects = controller.pending_effects().to_vec();
+
+    // A terminal state is sealed: a later failure is refused and changes
+    // nothing, instead of rewriting history.
+    assert!(matches!(
+        controller.on_turn(
+            turn_id(TURN_A),
+            TurnEvent::Failed {
+                at: 14,
+                revision: 2,
+                kind: None
+            }
+        ),
+        Err(ConversationStateError::Turn {
+            error: TurnError::Sealed { .. },
+            ..
+        })
+    ));
+    assert_eq!(controller.view(), before_view);
+    assert_eq!(controller.scene().expect("scene remains"), before_scene);
+    assert_eq!(controller.pending_effects(), before_effects.as_slice());
+}
+
+#[test]
+fn unknown_turn_engine_label_is_rejected() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    assert!(matches!(
+        controller.on_turn_engine_label(turn_id(TURN_A), Some("Claude".to_owned())),
+        Err(ConversationStateError::UnknownTurn { .. })
+    ));
+    assert!(controller.drain_effects().is_empty());
+}
+
+#[test]
+fn engine_label_names_waiting_row_and_clears() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        1,
+        100,
+        vec![make_turn_full(TURN_A, 0, 0, ConversationLifecycle::Pending, 90, 95)],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    assert_eq!(turn_status_engine_label(&controller, TURN_A), None);
+
+    controller
+        .on_turn_engine_label(turn_id(TURN_A), Some("Claude".to_owned()))
+        .expect("label sets");
+    let effects = controller.drain_effects();
+    assert_eq!(effects.len(), 1);
+    assert!(matches!(
+        effects[0],
+        ConversationStateEffect::SceneInvalidated
+    ));
+    let (waiting, _) = scene_status(&controller, TURN_A);
+    assert_eq!(waiting, SceneTurnNarration::ProviderWait);
+    assert_eq!(
+        turn_status_engine_label(&controller, TURN_A),
+        Some("Claude".to_owned())
+    );
+
+    // A repeated identical label is a no-op success without effects.
+    controller
+        .on_turn_engine_label(turn_id(TURN_A), Some("Claude".to_owned()))
+        .expect("repeated label succeeds");
+    assert!(controller.drain_effects().is_empty());
+
+    // Clearing restores the generic copy, again invalidating once.
+    controller
+        .on_turn_engine_label(turn_id(TURN_A), None)
+        .expect("clear succeeds");
+    let cleared = controller.drain_effects();
+    assert_eq!(cleared.len(), 1);
+    assert_eq!(turn_status_engine_label(&controller, TURN_A), None);
+}
+
+#[test]
+fn invalid_engine_label_is_rejected_without_state_change() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .register_turn(turn_id(TURN_A))
+        .expect("turn registration succeeds");
+    let _ = controller.drain_effects();
+    let before_effects = controller.pending_effects().to_vec();
+
+    assert!(matches!(
+        controller.on_turn_engine_label(turn_id(TURN_A), Some(String::new())),
+        Err(ConversationStateError::Scene(..))
+    ));
+    assert!(matches!(
+        controller.on_turn_engine_label(turn_id(TURN_A), Some("x".repeat(1025))),
+        Err(ConversationStateError::Scene(..))
+    ));
+    assert_eq!(controller.pending_effects(), before_effects.as_slice());
+    // A valid label still applies afterwards: refusals changed nothing.
+    controller
+        .on_turn_engine_label(turn_id(TURN_A), Some("Claude".to_owned()))
+        .expect("valid label applies");
+}
+
+#[test]
+fn engine_label_pruned_when_turn_leaves_snapshot() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        1,
+        100,
+        vec![make_turn_full(TURN_A, 0, 0, ConversationLifecycle::Pending, 90, 95)],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    controller
+        .on_turn_engine_label(turn_id(TURN_A), Some("Claude".to_owned()))
+        .expect("label sets");
+    let _ = controller.drain_effects();
+    assert!(format!("{:?}", controller).contains("engine_label_count: 1"));
+
+    // The turn leaving the authoritative snapshot retires its label: nothing
+    // stale can be inherited afterwards.
+    delivered_snapshot(
+        &mut controller,
+        2,
+        200,
+        vec![make_turn_full(TURN_B, 3, 0, ConversationLifecycle::Pending, 150, 190)],
+        vec![make_user(USER_B, TURN_B, 4, "hey")],
+    );
+    assert!(format!("{:?}", controller).contains("engine_label_count: 0"));
+
+    // Returning without a fresh label renders generic again, while the
+    // clock basis kept by the retained controller does not reset.
+    delivered_snapshot(
+        &mut controller,
+        3,
+        300,
+        vec![make_turn_full(TURN_A, 0, 0, ConversationLifecycle::Pending, 90, 95)],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    assert_eq!(turn_status_engine_label(&controller, TURN_A), None);
+    assert_eq!(turn_status_basis(&controller, TURN_A), Some(90));
 }

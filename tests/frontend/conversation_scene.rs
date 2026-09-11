@@ -2040,3 +2040,125 @@ fn later_reasoning_retires_tool_wait() {
     let blocks = &scene.turn_scenes()[0].blocks;
     assert!(blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
 }
+
+fn turn_statuses(scene: &conversation_scene::ConversationScene) -> Vec<(TurnNarration, Option<String>)> {
+    scene.turn_scenes()[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::TurnStatus(status) => {
+                Some((status.narration, status.engine_label.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn explicit_engine_label_wins_outside_session_mode() {
+    use conversation_scene::ConversationScene;
+
+    // No runs anywhere, so legacy layout applies - yet an explicit
+    // send-time label still names the waiting row, ahead of the
+    // transition-derived fallback which only fills session rows.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            SceneItem::new(
+                scene_id("hop"),
+                turn_id("turn_a"),
+                2,
+                SceneItemKind::ModelTransition {
+                    from_model: "engine-a".to_owned(),
+                    to_model: "engine-b".to_owned(),
+                },
+                None,
+            )
+            .expect("transition item valid"),
+        ],
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::ProviderWait)
+                .with_engine_label("Claude".to_owned()),
+        ],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::ModelTransition(_))));
+    assert_eq!(
+        turn_statuses(&scene),
+        vec![(TurnNarration::ProviderWait, Some("Claude".to_owned()))]
+    );
+}
+
+#[test]
+fn transition_label_fills_status_without_explicit_label() {
+    use conversation_scene::ConversationScene;
+
+    // Session mode with no explicit label: the folded handoff still names
+    // the row through the existing transition fallback.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("user_a", "turn_a", 1, "hi"),
+            provenanced(
+                assistant_item("m1", "turn_a", 2, "done", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            SceneItem::new(
+                scene_id("hop"),
+                turn_id("turn_a"),
+                3,
+                SceneItemKind::ModelTransition {
+                    from_model: "engine-a".to_owned(),
+                    to_model: "engine-b".to_owned(),
+                },
+                None,
+            )
+            .expect("transition item valid"),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    assert_eq!(
+        turn_statuses(&scene),
+        vec![(TurnNarration::Working, Some("engine-b".to_owned()))]
+    );
+}
+
+#[test]
+fn empty_engine_label_is_rejected() {
+    use conversation_scene::ConversationScene;
+
+    let err = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)],
+        vec![user_item("user_a", "turn_a", 1, "hi")],
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::Quiet)
+                .with_engine_label(String::new()),
+        ],
+        Vec::new(),
+    )
+    .expect_err("blank engine label is refused");
+    assert!(matches!(err, SceneBuildError::EmptyEngineLabel));
+}
+
+#[test]
+fn overlong_engine_label_is_rejected() {
+    use conversation_scene::ConversationScene;
+
+    let err = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)],
+        vec![user_item("user_a", "turn_a", 1, "hi")],
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::Quiet)
+                .with_engine_label("x".repeat(1025)),
+        ],
+        Vec::new(),
+    )
+    .expect_err("overlong engine label is refused");
+    assert!(matches!(err, SceneBuildError::EngineLabelTooLong { .. }));
+}
