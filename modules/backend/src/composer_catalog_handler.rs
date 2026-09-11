@@ -230,9 +230,19 @@ async fn current_catalog(
         .read_model_favorites()
         .await
         .map_err(|error| favorites_error(&error))?;
-    let discovery = crate::model_discovery::discovery_bundle().await;
-    crate::native_model_catalog::from_catalog_result_with_discovery(result, &discovery, &favorites)
-        .map_err(|_| ComposerCatalogHandlerError::InvalidCatalog)
+    // Discovery warms in the background: startup and the first catalog
+    // response never wait on engine processes, and the next read merges the
+    // discovered rows.
+    crate::model_discovery::warm_discovery();
+    match crate::model_discovery::cached_bundle() {
+        Some(discovery) => crate::native_model_catalog::from_catalog_result_with_discovery(
+            result,
+            &discovery,
+            &favorites,
+        ),
+        None => crate::native_model_catalog::from_catalog_result(result, &favorites),
+    }
+    .map_err(|_| ComposerCatalogHandlerError::InvalidCatalog)
 }
 
 fn service_error(error: ComposerCatalogServiceError) -> ComposerCatalogHandlerError {

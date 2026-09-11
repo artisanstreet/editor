@@ -137,9 +137,39 @@ impl DiscoveryBundle {
 type Cache = Mutex<Option<(Instant, Arc<DiscoveryBundle>)>>;
 
 static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+/// Guards against duplicate warm-up probes while one is already in flight.
+static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn cache() -> &'static Cache {
     CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Returns a fresh cached bundle without blocking. `None` while the first
+/// warm-up is still running or the cache is empty/stale.
+pub(crate) fn cached_bundle() -> Option<Arc<DiscoveryBundle>> {
+    let mut guard = cache().try_lock().ok()?;
+    match guard.as_ref() {
+        Some((observed, bundle)) if observed.elapsed() < DISCOVERY_TTL => {
+            Some(Arc::clone(bundle))
+        }
+        _ => None,
+    }
+}
+
+/// Starts a background warm-up probe when the cache is cold. Startup and the
+/// first catalog response never wait on engine processes; the next catalog
+/// read merges discovered rows.
+pub(crate) fn warm_discovery() {
+    if cached_bundle().is_some() {
+        return;
+    }
+    if WARMING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    tokio::spawn(async {
+        let _ = discovery_bundle().await;
+        WARMING.store(false, std::sync::atomic::Ordering::Release);
+    });
 }
 
 /// Returns the current discovery bundle, probing all engines when the cache is
