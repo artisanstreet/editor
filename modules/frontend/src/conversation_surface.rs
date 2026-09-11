@@ -51,7 +51,7 @@ use gpui::{
     },
     px,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -874,11 +874,11 @@ pub struct ConversationSurface {
     /// never resets the scene's authoritative `active_started_at_ms` basis.
     /// `None` renders the bare verb truthfully until the host supplies time.
     active_now_ms: Option<i64>,
-    /// Motion preference for the live status shimmer. Defaults to `Full`;
-    /// an explicit `Reduced` always wins over the system signal (see
-    /// [`effective_status_motion`]). The fork exposes no OS query beyond the
-    /// live window signal read at render time, so a stored `Full` follows
-    /// `cx.reduce_motion()`.
+    /// Motion preference for the live status shimmer and work-session
+    /// disclosure flights. Defaults to `Full`; an explicit `Reduced` always
+    /// wins over the system signal (see [`effective_status_motion`]). The fork
+    /// exposes no OS query beyond the live window signal read at render time,
+    /// so a stored `Full` follows `cx.reduce_motion()`.
     status_motion: MotionPolicy,
     /// Host-mirrored footer view state keyed by [`footer_key`].
     footer_mirrors: HashMap<String, TurnFooterMirror>,
@@ -1029,6 +1029,85 @@ impl ScrollAnchorRegistry<'_> {
             painted,
         });
     }
+}
+
+/// The collapsed disclosure panel's inner blur, mirroring `--blur-small`.
+const WORK_GROUP_PANEL_BLUR_PX: f32 = 2.0;
+
+/// One work-session disclosure transition: direction plus start fraction.
+///
+/// The fraction is the expanded share of the panel's measured content height
+/// in `0.0..=1.0`. A flight always moves toward [`Self::target`] on the
+/// reference 250 ms `cubic-bezier(0.22, 1, 0.36, 1)` clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DisclosureFlight {
+    /// The open value the flight is moving to.
+    open: bool,
+    /// The expanded fraction the flight starts from.
+    ///
+    /// Captured from the last painted frame so an interrupted flight reverses
+    /// from the displayed height instead of snapping to an endpoint.
+    from: f32,
+}
+
+impl DisclosureFlight {
+    /// Returns the expanded fraction this flight settles on.
+    const fn target(self) -> f32 {
+        if self.open { 1.0 } else { 0.0 }
+    }
+}
+
+/// Window-local disclosure panel state for one work group.
+///
+/// The reference tweens `grid-template-rows` from zero to the content height;
+/// GPUI has no intrinsic track to tween, so the panel's measured content height
+/// is the flight target and the panel is clipped to the animated height. A
+/// mount rests at its final state exactly like a browser mounting `data-open`
+/// without a transition; only an actual open-value change arms a flight, and
+/// reduced motion records the change without arming one.
+struct DisclosurePanelState {
+    /// Intrinsic height of the mounted detail rows in px.
+    ///
+    /// Updated from prepaint child bounds while content is mounted, so the
+    /// last measurement survives a collapsed panel that unmounts its rows.
+    content_height: f32,
+    /// Open value of the last rendered frame; the flip detector.
+    painted_open: bool,
+    /// The in-flight transition, if any.
+    flight: Option<DisclosureFlight>,
+    /// Last painted expanded fraction in `0.0..=1.0`.
+    ///
+    /// The height animator writes every painted frame, so the next flight can
+    /// start from the displayed fraction.
+    progress: Rc<Cell<f32>>,
+}
+
+impl DisclosurePanelState {
+    /// Creates the mount state for one group; no flight is armed at mount.
+    fn new(open: bool) -> Self {
+        Self {
+            content_height: 0.0,
+            painted_open: open,
+            flight: None,
+            progress: Rc::new(Cell::new(if open { 1.0 } else { 0.0 })),
+        }
+    }
+}
+
+/// Builds one disclosure flight clock: 250 ms
+/// `cubic-bezier(0.22, 1, 0.36, 1)`, sampled by [`MotionCurve::SmoothOut`].
+///
+/// The curve is sampled inside the animator rather than installed as GPUI
+/// easing, mirroring the other local clocks in this surface. The panel and its
+/// inner share the clock shape, so height, opacity, and blur all ride the
+/// reference's single 250 ms ease.
+fn disclosure_flight_animation(plan: MotionPlan) -> Animation {
+    let MotionPlan::Animate(animation) = plan else {
+        unreachable!("a disclosure flight only runs under full motion");
+    };
+    let curve = animation.curve();
+    Animation::new(animation.duration())
+        .with_easing(move |progress: f32| curve.sample(f64::from(progress)) as f32)
 }
 
 /// One loaded user-message control in the turn navigator rail.
@@ -1425,18 +1504,19 @@ impl ConversationSurface {
         }
     }
 
-    /// Returns the motion policy applied to the live status shimmer.
+    /// Returns the motion policy applied to the live status shimmer and the
+    /// work-session disclosure flights.
     #[must_use]
     pub const fn status_motion(&self) -> MotionPolicy {
         self.status_motion
     }
 
     /// Mirrors an explicit reduced-motion preference for the live status
-    /// shimmer.
+    /// shimmer and the work-session disclosure flights.
     ///
     /// `Full` (the default) follows the window's reduced-motion signal at
-    /// render time; `Reduced` forces immediate static text regardless of it.
-    /// Settled rows never animate regardless of this preference.
+    /// render time; `Reduced` forces immediate static presentation regardless
+    /// of it. Settled status rows never animate regardless of this preference.
     pub fn set_status_motion(&mut self, motion: MotionPolicy, cx: &mut Context<Self>) {
         if self.status_motion != motion {
             self.status_motion = motion;
@@ -2445,6 +2525,8 @@ impl ConversationSurface {
                     owned,
                     status_motion,
                     mounted_working,
+                    &mut *window,
+                    cx,
                 ))
             }
             TurnBlock::Compaction(block) => {
@@ -2636,6 +2718,8 @@ impl ConversationSurface {
         live_header: Option<String>,
         status_motion: MotionPolicy,
         mounted_working: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         // The stable anchor prefers the session id (disclosure/scroll key);
         // legacy positional groups fall back to the first-item derivation.
@@ -2656,13 +2740,13 @@ impl ConversationSurface {
             .as_ref()
             .map(|handoff| format!("{} → {}", handoff.from_model, handoff.to_model));
 
-        // Controlled state is never overridden: Closed hides through the
-        // collapsible in every case, and the toggle always flows through the
-        // existing disclosure action. Uncontrolled groups always show their
-        // items, exactly like the previous static branch did. Control
-        // additionally requires actual visible trace content: an empty
-        // `Thought for …` group paints its header with no chevron at all,
-        // never a blank collapsible.
+        // Controlled state is never overridden: Closed hides the panel in
+        // every case, and the toggle always flows through the existing
+        // disclosure action. Uncontrolled groups always show their items,
+        // exactly like the previous static branch did. Control additionally
+        // requires actual visible trace content: an empty `Thought for …`
+        // group paints its header with no chevron at all, never a blank
+        // disclosure.
         let controlled = group_id.is_some()
             && block.disclosure.is_some()
             && work_group_has_visible_details(block);
@@ -2729,41 +2813,212 @@ impl ConversationSurface {
             mounted_working,
             theme,
         );
-        // The disclosure wrapper never conditions the header's ancestry:
-        // the collapsible always wraps header plus items and only its
-        // disabled flag follows control, so registering disclosure later
-        // never remounts the row.
+        // The disclosure root wraps header plus panel in every state so the
+        // header ancestry never changes; registering disclosure later must
+        // not remount the row. `Collapsible` cannot own this slot: it unmounts
+        // closed content and holds no clock, which is exactly the flash the
+        // reference `t-acc-panel` lip removes.
         let disclosure_selector = format!("{selector}-disclosure");
-        let collapsible = Collapsible::new(
-            SharedString::from(disclosure_selector.clone()),
-            self.disclosure_focus.clone(),
-            open,
-            header_row,
-            items,
-        )
-        .disabled(!controlled)
-        .debug_selector(disclosure_selector);
-        let surface = entity.downgrade();
-        // The toggle callback exists only for controlled groups; the wrapper
-        // itself stays mounted in every case so the header ancestry never
-        // changes. Uncontrolled groups have no scene identity to address,
-        // and their trigger is inert through `disabled` above.
-        let collapsible = if let Some(group_id) = group_id {
-            collapsible.on_change(move |requested_open, _, _, app| {
-                let action = ConversationSurfaceAction::DisclosureToggleRequested {
-                    id: group_id.clone(),
-                    requested_open,
+        let base_trigger = div()
+            .min_w_0()
+            .child(header_row)
+            .debug_selector({
+                let trigger_selector = format!("{disclosure_selector}-trigger");
+                move || trigger_selector.clone()
+            });
+        let trigger: AnyElement = if controlled {
+            // The toggle callback exists only for controlled groups; the
+            // wrapper itself stays mounted in every case. Uncontrolled groups
+            // have no scene identity to address, and their trigger is inert.
+            let surface = entity.downgrade();
+            let action_id = group_id
+                .clone()
+                .expect("controlled groups carry a scene identity");
+            let requested_open = !open;
+            base_trigger
+                .id(ElementId::Name(SharedString::from(format!(
+                    "{disclosure_selector}-trigger"
+                ))))
+                .track_focus(&self.disclosure_focus)
+                .on_click(move |event, _, app| {
+                    if !event.standard_click() {
+                        return;
+                    }
+                    let action = ConversationSurfaceAction::DisclosureToggleRequested {
+                        id: action_id.clone(),
+                        requested_open,
+                    };
+                    let _ = surface.update(app, |surface, cx| {
+                        if surface.enqueue_action(action) {
+                            cx.notify();
+                        }
+                    });
+                })
+                .into_any_element()
+        } else {
+            base_trigger.into_any_element()
+        };
+        let mut disclosure = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .child(trigger)
+            .debug_selector({
+                let root_selector = disclosure_selector.clone();
+                move || root_selector.clone()
+            });
+
+        // The panel is the reference lip as a real clipped height. Its content
+        // stays mounted only while it can be seen or measured (open, or a
+        // collapse still in flight), so settled history keeps the reference's
+        // unmounted-details policy.
+        let mut panel = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .debug_selector({
+                let panel_selector = format!("{selector}-disclosure-panel");
+                move || panel_selector.clone()
+            });
+        let inner = div()
+            .w_full()
+            .min_w_0()
+            .flex_shrink_0()
+            .debug_selector({
+                let content_selector = format!("{disclosure_selector}-content");
+                move || content_selector.clone()
+            })
+            .child(items);
+
+        if controlled {
+            let panel_state = window.use_keyed_state(
+                ElementId::Name(SharedString::from(format!(
+                    "{selector}-disclosure-panel-state"
+                ))),
+                cx,
+                |_, _| DisclosurePanelState::new(open),
+            );
+            let (painted_open, mut flight, progress, content_height) = {
+                let state = panel_state.read(cx);
+                (
+                    state.painted_open,
+                    state.flight,
+                    state.progress.clone(),
+                    state.content_height,
+                )
+            };
+            if painted_open != open {
+                let from = progress.get().clamp(0.0, 1.0);
+                flight = match status_motion {
+                    MotionPolicy::Full => Some(DisclosureFlight { open, from }),
+                    MotionPolicy::Reduced => None,
                 };
-                let _ = surface.update(app, |surface, cx| {
-                    if surface.enqueue_action(action) {
-                        cx.notify();
+                panel_state.update(cx, |state, _| {
+                    state.painted_open = open;
+                    state.flight = flight;
+                });
+            }
+            let animated = matches!(flight, Some(armed) if armed.open == open)
+                && status_motion == MotionPolicy::Full;
+            if !animated && flight.is_some() {
+                // A policy switch midway through a flight (or a reduced-motion
+                // render) settles at the final state now; the clock is dropped
+                // so it can never replay when full motion returns.
+                flight = None;
+                panel_state.update(cx, |state, _| state.flight = None);
+            }
+            let content_mounted = open || matches!(flight, Some(armed) if !armed.open);
+
+            // Height measurement rides the panel's prepaint boundary, after
+            // this frame's animator has written its fraction: a completed
+            // flight disarms here, which unmounts a settled collapse's rows on
+            // the next frame without ever dropping the stored target height.
+            let panel_state_for_prepaint = panel_state.clone();
+            panel = panel.on_children_prepainted(move |children_bounds, _, app| {
+                let Some(content_bounds) = children_bounds.first() else {
+                    return;
+                };
+                panel_state_for_prepaint.update(app, |state, state_cx| {
+                    state.content_height = f32::from(content_bounds.size.height);
+                    if state
+                        .flight
+                        .is_some_and(|flight| (state.progress.get() - flight.target()).abs() <= 1e-4)
+                    {
+                        state.flight = None;
+                        state_cx.notify();
                     }
                 });
-            })
+            });
+
+            if content_mounted {
+                if animated {
+                    let armed = flight.expect("the animated branch always carries a flight");
+                    let (from, target) = (armed.from, armed.target());
+                    let full_height = content_height;
+                    let progress_for_height = progress.clone();
+                    let inner_animation = disclosure_flight_animation(
+                        status_motion.resolve(MotionRecipe::AccordionExpand),
+                    );
+                    let inner = inner
+                        .with_animations(
+                            ElementId::Name(SharedString::from(format!(
+                                "{selector}-disclosure-content-{}",
+                                if open { "open" } else { "closed" }
+                            ))),
+                            vec![inner_animation],
+                            move |inner, _index, value| {
+                                let fraction = from + (target - from) * value;
+                                if fraction >= 1.0 {
+                                    inner.opacity(1.0)
+                                } else {
+                                    inner.opacity(fraction).filter(vec![Filter::Blur(px(
+                                        WORK_GROUP_PANEL_BLUR_PX * (1.0 - fraction),
+                                    ))])
+                                }
+                            },
+                        )
+                        .into_any_element();
+                    let panel_animation = disclosure_flight_animation(
+                        status_motion.resolve(MotionRecipe::AccordionExpand),
+                    );
+                    disclosure = disclosure.child(
+                        panel
+                            .child(inner)
+                            .overflow_hidden()
+                            .with_animations(
+                                ElementId::Name(SharedString::from(format!(
+                                    "{selector}-disclosure-panel-{}",
+                                    if open { "open" } else { "closed" }
+                                ))),
+                                vec![panel_animation],
+                                move |panel, _index, value| {
+                                    let fraction = from + (target - from) * value;
+                                    progress_for_height.set(fraction);
+                                    panel.h(px(full_height * fraction))
+                                },
+                            )
+                            .into_any_element(),
+                    );
+                } else {
+                    // A settled flight disarms above, so mounted content
+                    // outside a flight is always the open side.
+                    debug_assert!(open, "mounted content outside a flight is open");
+                    progress.set(1.0);
+                    disclosure = disclosure.child(panel.child(inner));
+                }
+            } else {
+                progress.set(if open { 1.0 } else { 0.0 });
+                disclosure = disclosure.child(panel.h(px(0.0)).overflow_hidden());
+            }
+        } else if open {
+            disclosure = disclosure.child(panel.child(inner));
         } else {
-            collapsible
-        };
-        section.child(collapsible).into_any_element()
+            disclosure = disclosure.child(panel.h(px(0.0)).overflow_hidden());
+        }
+
+        section.child(disclosure).into_any_element()
     }
 
     /// Renders one ordered detail row with its scroll anchor.
@@ -5994,7 +6249,7 @@ mod tests {
         });
         cx.simulate_resize(size(px(720.0), px(480.0)));
         settle(cx);
-        // Trigger bounds key follows the Collapsible `-trigger` suffix
+        // Trigger bounds key follows the disclosure `-trigger` suffix
         // convention on the group disclosure selector.
         let trigger = cx
             .debug_bounds(
@@ -6035,6 +6290,285 @@ mod tests {
             assert_eq!(id.as_str(), "work-a");
             assert!(!requested_open, "an open group toggles closed");
         });
+    }
+
+    /// Builds one live work-group scene whose disclosure is `disclosure`.
+    fn disclosure_flight_scene(disclosure: SceneDisclosure) -> ConversationScene {
+        ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            vec![item(
+                "work-a",
+                1,
+                SceneItemKind::Activity { body: body() },
+                Some(disclosure),
+            )],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Working,
+            )],
+            Vec::new(),
+        )
+        .expect("disclosure flight scene is valid")
+    }
+
+    /// Waits out real motion time, then delivers the pending animation frame.
+    ///
+    /// GPUI's element animation clock is the wall clock, which the test
+    /// harness cannot advance through its dispatcher. A real wait guarantees
+    /// at least that much elapsed motion before the next frame samples it.
+    fn pump_animation_frame_after(cx: &mut VisualTestContext, wait: Duration) {
+        std::thread::sleep(wait);
+        cx.update(|window, app| {
+            window.simulate_next_frame(app);
+        });
+        settle(cx);
+    }
+
+    #[gpui::test]
+    fn open_flight_paints_a_partial_height_before_settling_full(cx: &mut TestAppContext) {
+        const PANEL: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-panel";
+        const CONTENT: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-content";
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                disclosure_flight_scene(SceneDisclosure::Closed),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        // Settled closed history keeps its rows unmounted (the reference
+        // `details_mounted` policy) and its panel measured at zero.
+        assert!(
+            cx.debug_bounds(CONTENT).is_none(),
+            "closed details stay unmounted"
+        );
+        assert_eq!(
+            cx.debug_bounds(PANEL).expect("panel paints").size.height,
+            px(0.0)
+        );
+
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                surface.replace_scene(
+                    disclosure_flight_scene(SceneDisclosure::Open),
+                    surface_cx,
+                );
+            });
+        });
+        settle(cx);
+        // The flip frame mounts the rows at the flight's zero-height start and
+        // measures the full target during prepaint.
+        let flip = cx.debug_bounds(PANEL).expect("panel paints on the flip frame");
+        let full = cx
+            .debug_bounds(CONTENT)
+            .expect("the open flight mounts its rows");
+        assert!(
+            f32::from(flip.size.height) < f32::from(full.size.height),
+            "the flip frame starts the flight at zero, got {flip:?}"
+        );
+
+        let full_height = f32::from(full.size.height);
+        pump_animation_frame_after(cx, Duration::from_millis(60));
+        let mid_height =
+            f32::from(cx.debug_bounds(PANEL).expect("panel paints mid-flight").size.height);
+        assert!(
+            mid_height > 0.0 && mid_height < full_height,
+            "the open flight must pass through a partial height, got {mid_height} of {full_height}"
+        );
+
+        pump_animation_frame_after(cx, Duration::from_millis(300));
+        let settled = f32::from(cx.debug_bounds(PANEL).expect("panel paints settled").size.height);
+        assert!(
+            (settled - full_height).abs() < 0.5,
+            "the open flight settles at the measured content height, got {settled} of {full_height}"
+        );
+    }
+
+    #[gpui::test]
+    fn collapse_flight_animates_then_settles_unmounted(cx: &mut TestAppContext) {
+        const PANEL: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-panel";
+        const CONTENT: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-content";
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                disclosure_flight_scene(SceneDisclosure::Open),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        let full_height = f32::from(
+            cx.debug_bounds(CONTENT)
+                .expect("an open group mounts its rows")
+                .size
+                .height,
+        );
+        let opened = f32::from(cx.debug_bounds(PANEL).expect("panel paints").size.height);
+        assert!(
+            (opened - full_height).abs() < 0.5,
+            "a mounted open group rests at its content height"
+        );
+
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                surface.replace_scene(
+                    disclosure_flight_scene(SceneDisclosure::Closed),
+                    surface_cx,
+                );
+            });
+        });
+        settle(cx);
+        // The collapse starts from the displayed height rather than snapping.
+        let start = f32::from(
+            cx.debug_bounds(PANEL)
+                .expect("panel paints at the collapse start")
+                .size
+                .height,
+        );
+        assert!(
+            start > full_height * 0.9 && start <= full_height + 0.5,
+            "the collapse flight starts at the displayed height, got {start} of {full_height}"
+        );
+
+        pump_animation_frame_after(cx, Duration::from_millis(60));
+        let mid_height =
+            f32::from(cx.debug_bounds(PANEL).expect("panel paints mid-collapse").size.height);
+        assert!(
+            mid_height > 0.0 && mid_height < full_height,
+            "the collapse flight must pass through a partial height, got {mid_height} of {full_height}"
+        );
+
+        pump_animation_frame_after(cx, Duration::from_millis(300));
+        assert_eq!(
+            cx.debug_bounds(PANEL).expect("panel paints settled").size.height,
+            px(0.0)
+        );
+        // The settled collapse disarms the flight and unmounts the rows again.
+        pump_animation_frame_after(cx, Duration::from_millis(20));
+        assert!(
+            cx.debug_bounds(CONTENT).is_none(),
+            "a settled collapse unmounts its rows"
+        );
+    }
+
+    #[gpui::test]
+    fn reduced_motion_jumps_the_disclosure(cx: &mut TestAppContext) {
+        const PANEL: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-panel";
+        const CONTENT: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-content";
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                disclosure_flight_scene(SceneDisclosure::Closed),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        cx.update(|_, app| {
+            app.set_reduce_motion(true);
+        });
+
+        // The system signal: an open flip lands at full height on its frame.
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                surface.replace_scene(
+                    disclosure_flight_scene(SceneDisclosure::Open),
+                    surface_cx,
+                );
+            });
+        });
+        settle(cx);
+        let full_height = f32::from(
+            cx.debug_bounds(CONTENT)
+                .expect("reduced motion mounts the rows")
+                .size
+                .height,
+        );
+        let opened = f32::from(cx.debug_bounds(PANEL).expect("panel paints").size.height);
+        assert!(
+            (opened - full_height).abs() < 0.5,
+            "reduced motion jumps the open flip, got {opened} of {full_height}"
+        );
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                surface.replace_scene(
+                    disclosure_flight_scene(SceneDisclosure::Closed),
+                    surface_cx,
+                );
+            });
+        });
+        settle(cx);
+        assert_eq!(
+            cx.debug_bounds(PANEL).expect("panel paints").size.height,
+            px(0.0),
+            "reduced motion jumps the close flip"
+        );
+        assert!(
+            cx.debug_bounds(CONTENT).is_none(),
+            "reduced motion never mounts settled rows"
+        );
+        cx.update(|_, app| {
+            app.set_reduce_motion(false);
+        });
+
+        // The stored explicit override wins over the live system signal.
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                surface.set_status_motion(MotionPolicy::Reduced, surface_cx);
+                surface.replace_scene(
+                    disclosure_flight_scene(SceneDisclosure::Open),
+                    surface_cx,
+                );
+            });
+        });
+        settle(cx);
+        let opened = f32::from(cx.debug_bounds(PANEL).expect("panel paints").size.height);
+        assert!(
+            (opened - full_height).abs() < 0.5,
+            "an explicit reduced preference jumps the open flip, got {opened} of {full_height}"
+        );
+
+        // A policy switch midway through a flight settles at the final state
+        // and drops the clock: the close must never replay once motion returns.
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                surface.set_status_motion(MotionPolicy::Full, surface_cx);
+                surface.replace_scene(
+                    disclosure_flight_scene(SceneDisclosure::Closed),
+                    surface_cx,
+                );
+            });
+        });
+        settle(cx);
+        cx.update(|_, app| {
+            app.set_reduce_motion(true);
+        });
+        settle(cx);
+        assert_eq!(
+            cx.debug_bounds(PANEL).expect("panel paints").size.height,
+            px(0.0),
+            "a reduced-motion switch settles the in-flight close"
+        );
+        cx.update(|_, app| {
+            app.set_reduce_motion(false);
+        });
+        pump_animation_frame_after(cx, Duration::from_millis(60));
+        assert_eq!(
+            cx.debug_bounds(PANEL).expect("panel paints").size.height,
+            px(0.0),
+            "a settled reduced-motion close never replays"
+        );
     }
 
     #[test]
