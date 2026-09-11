@@ -1121,6 +1121,11 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
     let custody =
         ForgeProcessCustody::acquire(&custody_path).map_err(ForgeRuntimeError::Custody)?;
 
+    // Publish the scope-free model catalog next to the readiness receipt so
+    // the Editor can render live model rows on surfaces that never read a
+    // thread-scoped runtime catalog (the home picker).
+    spawn_catalog_snapshot_publisher(ready_file.clone());
+
     let app = match ForgeApp::start(ForgeConfig::new(SqliteConfig::file(database.clone()))).await {
         Ok(app) => app,
         Err(error) => {
@@ -1142,6 +1147,32 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         native_run,
     }))
     .await
+}
+
+/// Publishes the scope-free model catalog next to the readiness receipt so
+/// the Editor can render live model rows on surfaces that never read a
+/// thread-scoped runtime catalog (the home picker). Rewrites atomically only
+/// when the encoded snapshot changes, and refreshes with the discovery TTL.
+fn spawn_catalog_snapshot_publisher(ready_file: PathBuf) {
+    tokio::spawn(async move {
+        loop {
+            let bundle = crate::model_discovery::discovery_bundle().await;
+            if let Ok(catalog) = crate::native_model_catalog::from_discovery(&bundle)
+                && let Ok(bytes) = artisan_catalog::wire::encode_catalog(&catalog)
+                && let Some(directory) = ready_file.parent()
+            {
+                let path = directory.join("model-catalog.json");
+                let current = std::fs::read(&path).ok();
+                if current.as_deref() != Some(bytes.as_slice()) {
+                    let temporary = directory.join("model-catalog.json.tmp");
+                    if std::fs::write(&temporary, &bytes).is_ok() {
+                        let _ = std::fs::rename(&temporary, &path);
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        }
+    });
 }
 
 struct ForgeRunContext {

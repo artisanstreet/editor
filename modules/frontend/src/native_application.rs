@@ -468,6 +468,30 @@ const MAX_RETAINED_SWITCH_REQUEST_IDS: usize = 8;
 const MAX_RETAINED_SWITCH_PATCH_IDS: usize = 256;
 const MAX_RETAINED_SWITCH_LISTINGS: usize = 8;
 
+/// Loads the Forge-published scope-free catalog snapshot, if present.
+///
+/// The Forge writes `<home>/readiness/model-catalog.json` (static baseline
+/// plus live discovery) next to its readiness receipt. Surfaces without a
+/// thread-scoped runtime read (the home picker) use this snapshot when it is
+/// available and fall back to the bundled manifest otherwise.
+fn scope_free_catalog_snapshot() -> Option<NativeModelCatalog> {
+    #[cfg(test)]
+    {
+        return None;
+    }
+    let layout = artisan_editor_cli::paths::Layout::discover().ok()?;
+    let path = layout.root.join("readiness").join("model-catalog.json");
+    let metadata = std::fs::metadata(&path).ok()?;
+    if metadata.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    artisan_protocol::CatalogSnapshotWire::new(bytes)
+        .ok()?
+        .decoded()
+        .ok()
+}
+
 /// The real native window root and its application-thread entities.
 pub struct NativeApplication {
     theme: ArtisanTheme,
@@ -857,6 +881,31 @@ impl NativeApplication {
                 app.profile_picture = picture;
                 cx.notify();
             });
+        })
+        .detach();
+        // The Forge publishes its scope-free catalog snapshot shortly after it
+        // starts (discovery warms in the background). Pick it up for the home
+        // picker while no thread-scoped runtime catalog is active.
+        #[cfg(not(test))]
+        cx.spawn(async move |view, cx| {
+            for _ in 0..15 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let available = cx
+                    .background_executor()
+                    .spawn(async { scope_free_catalog_snapshot().is_some() })
+                    .await;
+                if available {
+                    let _ = view.update(cx, |app, cx| {
+                        if app.selected_thread.is_none() {
+                            app.reset_model_selector_offline(cx);
+                            cx.notify();
+                        }
+                    });
+                    break;
+                }
+            }
         })
         .detach();
         application
@@ -6948,8 +6997,13 @@ impl NativeApplication {
     }
 
     fn reset_model_selector_offline(&mut self, cx: &mut Context<Self>) {
-        let catalog = NativeModelCatalog::offline()
-            .expect("the bundled model catalog is validated at the native boundary");
+        // The Forge publishes a scope-free catalog snapshot (static baseline
+        // plus live discovery) for surfaces without a thread-scoped runtime
+        // read; fall back to the bundled manifest when it is absent.
+        let catalog = scope_free_catalog_snapshot().unwrap_or_else(|| {
+            NativeModelCatalog::offline()
+                .expect("the bundled model catalog is validated at the native boundary")
+        });
         self.model_selector.update(cx, |selector, cx| {
             selector.set_snapshot(catalog, cx);
             selector.set_policy(None, cx);
