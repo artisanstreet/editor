@@ -62,8 +62,6 @@ use crate::{
 };
 
 const TEST_DEADLINE: Duration = Duration::from_secs(20);
-
-const TEST_DEADLINE: Duration = Duration::from_secs(20);
 const INITIAL_CAPABILITY: [u8; 32] = [0x4d; 32];
 
 /// Real-clock base for seed chronology: observation commits fence the
@@ -812,8 +810,14 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                 .expect("delivery stream opens")
                 .expect("delivery stream accepts");
             let mut frames = Vec::new();
-            let mut saw_chunks = false;
+            let mut saw_burst_00 = false;
+            let mut saw_burst_01 = false;
             let mut saw_observation = false;
+            // Read until two DISTINCT chunk updates plus the reasoning
+            // observation are observed. Remaining burst patches may
+            // legitimately still be in flight (commits coalesce into
+            // replay batches), so there is no silence assertion here —
+            // but no terminal lifecycle may appear while held.
             loop {
                 let envelope = tokio::time::timeout(
                     TEST_DEADLINE,
@@ -825,15 +829,24 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                 match envelope.body {
                     WireEnvelopeBody::PatchBatch(batch) => {
                         assert_eq!(batch.thread_id(), &thread_id);
-                        if batch.patches().iter().any(|patch| {
-                            matches!(
-                                patch,
-                                ConversationPatch::ItemAppend { text, .. }
-                                if text.as_str().contains("burst-00")
-                                    || text.as_str().contains("burst-01")
-                            )
-                        }) {
-                            saw_chunks = true;
+                        for patch in batch.patches() {
+                            match patch {
+                                ConversationPatch::ItemAppend { text, .. } => {
+                                    if text.as_str().contains("burst-00") {
+                                        saw_burst_00 = true;
+                                    }
+                                    if text.as_str().contains("burst-01") {
+                                        saw_burst_01 = true;
+                                    }
+                                }
+                                ConversationPatch::TurnLifecycle { lifecycle, .. } => {
+                                    assert!(
+                                        !lifecycle.is_terminal(),
+                                        "no terminal lifecycle while held"
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
                         frames.push(StreamFrame::PatchBatch(batch));
                     }
@@ -849,21 +862,10 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                     }
                     _ => panic!("unexpected delivery frame"),
                 }
-                if saw_chunks && saw_observation {
+                if saw_burst_00 && saw_burst_01 && saw_observation {
                     break;
                 }
             }
-            // While held, nothing further may arrive: the next commit is
-            // the terminal itself, which only cancellation triggers.
-            assert!(
-                tokio::time::timeout(
-                    Duration::from_millis(500),
-                    artisan_transport::receive_envelope(&mut delivery),
-                )
-                .await
-                .is_err(),
-                "held turn must stay silent after chunks and observation"
-            );
             run_cancel.cancel();
             // Drain to the terminal close.
             loop {
@@ -879,7 +881,8 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                     WireEnvelopeBody::PatchBatch(batch)
                         if batch.patches().iter().any(|patch| matches!(
                             patch,
-                            ConversationPatch::TurnLifecycle { .. }
+                            ConversationPatch::TurnLifecycle { lifecycle, .. }
+                            if lifecycle.is_terminal()
                         ))
                 );
                 match envelope.body {
@@ -1103,7 +1106,8 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
         // one observation event, terminal last after the cancel.
         assert!(!frames.is_empty(), "delivery must stream");
         let mut user_index = None;
-        let mut chunk_count = 0usize;
+        let mut saw_burst_00 = false;
+        let mut saw_burst_01 = false;
         let mut observation_index = None;
         let mut terminal_index = None;
         for (index, frame) in frames.iter().enumerate() {
@@ -1119,10 +1123,13 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                                 }
                             }
                             ConversationPatch::ItemAppend { text, .. } => {
-                                if text.as_str().contains("burst-00")
-                                    || text.as_str().contains("burst-01")
-                                {
-                                    chunk_count += 1;
+                                // Two DISTINCT cumulative updates: one frame
+                                // alone proves a single chunk.
+                                if text.as_str().contains("burst-00") {
+                                    saw_burst_00 = true;
+                                }
+                                if text.as_str().contains("burst-01") {
+                                    saw_burst_01 = true;
                                 }
                             }
                             ConversationPatch::TurnLifecycle { lifecycle, .. } => {
@@ -1146,8 +1153,8 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
         }
         let user_index = user_index.expect("user admission must stream");
         assert!(
-            chunk_count >= 2,
-            "two incremental chunks must stream, saw {chunk_count}"
+            saw_burst_00 && saw_burst_01,
+            "two distinct incremental chunks must stream"
         );
         let observation_index =
             observation_index.expect("observation event must stream before terminal");
