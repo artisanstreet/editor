@@ -1,17 +1,18 @@
 //! Pure titlebar workspace-header composition.
 //!
 //! The reference desktop shell names the open workspace and the conversation
-//! inside it on one line at the leading end of the window strip:
+//! inside it on one line at the leading end of the titlebar's content section:
 //! `<vcs mark> owner/repository / <thread title>`. This is the native
 //! projection of that line. The adapter owns repository inspection, host-mark
 //! selection, and rendering; this leaf only selects the visible segments and
 //! their exact order.
 //!
-//! The repository segment is emitted only from inspected facts. No production
-//! repository source is wired yet, so adapters currently pass
-//! `repository: None` and the project-folder fallback paints; the types here
-//! exist so the forthcoming Git read query can fill the line without
-//! reshaping the composition.
+//! The repository segment is emitted only from inspected facts: the frontend
+//! retains the bounded `QueryProjectRepository` response for the selected
+//! project and passes it here as a [`TitlebarRepository`]. A project whose
+//! repository has no browsable web remote, or whose root is not a repository,
+//! keeps the project-folder fallback. Nothing in this module inspects Git or
+//! synthesizes a link.
 
 #![allow(clippy::module_name_repetitions)]
 #![forbid(unsafe_code)]
@@ -54,6 +55,23 @@ impl TitlebarRepository {
     pub fn qualified_label(&self) -> String {
         repository_qualified_label(&self.web_url)
     }
+}
+
+/// Builds titlebar repository facts from one inspected remote projection.
+///
+/// `host` is the protocol's repository-host spelling and `web_url` the
+/// browser-facing URL the backend's Git remote policy derived from the remote
+/// exactly as Git reported it. A remote without a browser URL names no page a
+/// browser can open, so the function returns `None` and the caller keeps the
+/// project-folder fallback instead of synthesizing a link.
+#[must_use]
+pub fn titlebar_repository_from_remote(
+    host: &str,
+    web_url: Option<&str>,
+) -> Option<TitlebarRepository> {
+    let web_url = web_url?;
+    let host = host.parse().unwrap_or(RepositoryHost::Unknown);
+    Some(TitlebarRepository::new(host, web_url))
 }
 
 /// The already-decoded facts consumed by the titlebar header policy.
@@ -208,6 +226,34 @@ mod tests {
         assert_eq!(
             github_repository().qualified_label(),
             "artisanstreet/editor"
+        );
+    }
+
+    #[test]
+    fn inspected_remote_projects_host_and_web_url_into_facts() {
+        let repository = titlebar_repository_from_remote(
+            "github",
+            Some("https://github.com/artisanstreet/editor"),
+        )
+        .expect("a browsable remote contributes facts");
+        assert_eq!(repository.host, RepositoryHost::GitHub);
+        assert_eq!(repository.qualified_label(), "artisanstreet/editor");
+
+        assert_eq!(
+            titlebar_repository_from_remote("gitlab", Some("https://gitlab.com/owner/repo"))
+                .expect("gitlab")
+                .host,
+            RepositoryHost::GitLab
+        );
+        assert_eq!(
+            titlebar_repository_from_remote("not-a-host", Some("https://example.test/repo"))
+                .expect("unknown spellings keep the plain git mark")
+                .host,
+            RepositoryHost::Unknown
+        );
+        assert!(
+            titlebar_repository_from_remote("github", None).is_none(),
+            "a repository with no web remote keeps the folder fallback"
         );
     }
 

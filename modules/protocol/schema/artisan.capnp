@@ -687,6 +687,85 @@ struct RichLinkPageMetadata {
   cacheExpiresAtMs @2 :Int64;
 }
 
+# The hosting service identified from a Git remote URL. Detection is
+# structural, so a self-hosted GitLab or Gitea is recognised the same way the
+# public services are.
+enum RepositoryHost {
+  azure @0;
+  bitbucket @1;
+  codeberg @2;
+  gitea @3;
+  github @4;
+  gitlab @5;
+  other @6;
+  sourcehut @7;
+  unknown @8;
+}
+
+# The branch HEAD names, with its unborn and detached states preserved.
+# `name` is empty exactly for the detached state.
+enum RepositoryBranchKind {
+  attached @0;
+  detached @1;
+  unborn @2;
+}
+
+struct RepositoryBranch {
+  kind @0 :RepositoryBranchKind;
+  name @1 :Text;
+}
+
+# One configured remote projected for presentation. `url` is the remote
+# exactly as Git reports it; `webUrl` is empty when the URL does not resolve to
+# an https page a browser can open. Receivers re-apply the bounded text rules.
+struct RepositoryRemote {
+  host @0 :RepositoryHost;
+  name @1 :Text;
+  url @2 :Text;
+  webUrl @3 :Text;
+}
+
+# One repository's identity: where HEAD sits and where it publishes. `remotes`
+# is bounded to 64; `defaultRemote` is empty exactly when `remotes` is empty,
+# and otherwise names one configured remote.
+struct RepositorySnapshot {
+  branch @0 :RepositoryBranch;
+  defaultRemote @1 :Text;
+  remotes @2 :List(RepositoryRemote);
+}
+
+# Every observation of one project's repository state. `state` distinguishes a
+# directory Git does not track from a repository identity; `snapshot` is
+# meaningful only in the repository state.
+enum ProjectRepositoryState {
+  notRepository @0;
+  repository @1;
+}
+
+struct ProjectRepository {
+  state @0 :ProjectRepositoryState;
+  snapshot @1 :RepositorySnapshot;
+}
+
+# One project paired with the repository observed at its root.
+struct ProjectRepositoryEntry {
+  projectId @0 :Text;
+  repository @1 :ProjectRepository;
+}
+
+# Bounded repository-identity read for named attached projects. An empty
+# `projectIds` asks for every project in the catalog.
+struct ProjectRepositoryQuery {
+  projectIds @0 :List(Text);
+}
+
+# Repository state per requested project, bounded to 128 entries. A root that
+# has moved or lost its repository reports `notRepository` rather than failing
+# the whole query.
+struct ProjectRepositoryQueryResult {
+  repositories @0 :List(ProjectRepositoryEntry);
+}
+
 # The request arms of the native protocol: the five original workflow
 # requests, project rediscovery, the three conversation read/subscription
 # requests, explicit host interaction, lifecycle control, durable engine
@@ -756,6 +835,10 @@ struct Request {
     # Bounded rich-link metadata read for one absolute HTTP(S) URL. Appended
     # after respondQuestion; fresh ordinal, existing ordinals frozen.
     resolveRichLink @29 :ResolveRichLinkRequest;
+
+    # Bounded repository-identity read for named attached projects. Appended
+    # after resolveRichLink; fresh ordinal, existing ordinals frozen.
+    queryProjectRepository @30 :ProjectRepositoryQuery;
   }
 }
 
@@ -827,6 +910,10 @@ struct Response {
     # Resolved rich-link page metadata for one resolveRichLink request.
     # Appended after failedMessages; fresh ordinal, existing ordinals frozen.
     richLink @30 :RichLinkPageMetadata;
+
+    # Repository state per requested project for one queryProjectRepository
+    # request. Appended after richLink; fresh ordinal, existing ordinals frozen.
+    projectRepository @31 :ProjectRepositoryQueryResult;
   }
 }
 

@@ -48,10 +48,10 @@ use artisan_editor_cli::{
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ConversationSubscriptionStopped, ErrorCode,
-    FirstMessageReceipt, FrameId, Hello, HelloCredential, ProtocolVersion, QueueMessageReceipt,
-    RegisteredEngineProfilesResult, ResolveRichLinkRequest, ResponsePayload, ServerEvent,
-    SetThreadEngineConfigResult, ThreadEngineSettingsResult, VersionOffer, WireEnvelope,
-    WireEnvelopeBody,
+    FirstMessageReceipt, FrameId, Hello, HelloCredential, ProjectRepository,
+    ProjectRepositoryQuery, ProtocolVersion, QueueMessageReceipt, RegisteredEngineProfilesResult,
+    ResolveRichLinkRequest, ResponsePayload, ServerEvent, SetThreadEngineConfigResult,
+    ThreadEngineSettingsResult, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
     CancelHandle, ClientRequestError, ClientSession, ClientSessionLimits, DeadlineError,
@@ -199,6 +199,11 @@ pub enum NativeTransportCommand {
         /// Canonical absolute URL selected by the rich-link URL policy.
         url: String,
     },
+    /// Inspect the selected attached project's Git repository identity.
+    QueryProjectRepository {
+        /// Project whose stored root is inspected.
+        project_id: ProjectId,
+    },
     /// Begin or resume authoritative conversation subscription.
     Subscribe {
         /// Thread to observe.
@@ -246,6 +251,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::QueueFirstMessage(_) => "QueueFirstMessage",
             Self::QueueMessage(_) => "QueueMessage",
             Self::ResolveRichLink { .. } => "ResolveRichLink",
+            Self::QueryProjectRepository { .. } => "QueryProjectRepository",
             Self::Subscribe { .. } => "Subscribe",
             Self::Unsubscribe { .. } => "Unsubscribe",
             Self::AcknowledgePatch { .. } => "AcknowledgePatch",
@@ -631,6 +637,24 @@ pub enum NativeTransportEvent {
     RichLinkFailed {
         /// Canonical URL whose resolution failed.
         requested_url: String,
+        /// Redacted failure.
+        failure: ServiceFailure,
+    },
+    /// Inspected repository identity for one project.
+    ///
+    /// `repository` is `None` for a root that is not (or is no longer) a
+    /// repository: the titlebar keeps its project-folder fallback rather than
+    /// inventing repository facts.
+    ProjectRepository {
+        /// Project whose stored root was inspected.
+        project_id: ProjectId,
+        /// Observed repository identity, when the root is a repository.
+        repository: Option<ProjectRepository>,
+    },
+    /// One project-repository read failed; the folder fallback stays.
+    ProjectRepositoryFailed {
+        /// Project whose read failed.
+        project_id: ProjectId,
         /// Redacted failure.
         failure: ServiceFailure,
     },
@@ -1188,6 +1212,14 @@ fn rich_link_request(url: &str) -> Result<(ClientRequest, String), ServiceFailur
     Ok((ClientRequest::ResolveRichLink(request), canonical))
 }
 
+/// Builds one bounded repository-identity query for a single project.
+fn project_repository_request(project_id: ProjectId) -> ClientRequest {
+    ClientRequest::QueryProjectRepository(
+        ProjectRepositoryQuery::new(vec![project_id])
+            .expect("one project identifier is within the query bound"),
+    )
+}
+
 fn model_favorites_request() -> ClientRequest {
     query_request(Query::ReadModelFavorites(ReadModelFavorites))
 }
@@ -1446,6 +1478,9 @@ enum ExpectedResponse {
     },
     RichLink {
         requested_url: String,
+    },
+    ProjectRepository {
+        project_id: ProjectId,
     },
     ModelFavorites,
     ModelFavoriteSet {
@@ -1901,6 +1936,16 @@ fn validate_response_family(
             if result.requested_url == requested_url =>
         {
             Ok(ResponsePayload::RichLink(result))
+        }
+        (
+            ExpectedResponse::ProjectRepository { project_id },
+            ResponsePayload::ProjectRepository(result),
+        ) if result
+            .repositories()
+            .iter()
+            .any(|entry| entry.project_id() == &project_id) =>
+        {
+            Ok(ResponsePayload::ProjectRepository(result))
         }
         (ExpectedResponse::ModelFavorites, ResponsePayload::ModelFavorites(result)) => {
             Ok(ResponsePayload::ModelFavorites(result))
@@ -3453,6 +3498,9 @@ async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::ResolveRichLink { url }) => {
                         resolve_rich_link(runtime, frames, events, url).await?;
                     }
+                    Some(NativeTransportCommand::QueryProjectRepository { project_id }) => {
+                        query_project_repository(runtime, frames, events, project_id).await?;
+                    }
                     Some(NativeTransportCommand::Subscribe { thread_id, after }) => {
                         handle_subscribe_command(runtime, frames, events, thread_id, after).await?;
                     }
@@ -4214,6 +4262,60 @@ async fn resolve_rich_link(
     }
 }
 
+/// Reads one attached project's repository identity.
+///
+/// The request is not thread-scoped: it inspects only the named project's
+/// stored root and persists nothing. Every failure publishes the typed
+/// outcome instead of failing the command loop, so the header keeps its
+/// project-folder fallback rather than losing the connection.
+async fn query_project_repository(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    project_id: ProjectId,
+) -> Result<(), ServiceFailure> {
+    let request = project_repository_request(project_id.clone());
+    match runtime
+        .request(
+            frames,
+            request,
+            ExpectedResponse::ProjectRepository {
+                project_id: project_id.clone(),
+            },
+        )
+        .await
+    {
+        Ok(ResponsePayload::ProjectRepository(result)) => {
+            let repository = result
+                .repositories()
+                .iter()
+                .find(|entry| entry.project_id() == &project_id)
+                .map(|entry| entry.repository().clone());
+            publish(
+                events,
+                NativeTransportEvent::ProjectRepository {
+                    project_id,
+                    repository,
+                },
+            )
+        }
+        Ok(_) => publish(
+            events,
+            NativeTransportEvent::ProjectRepositoryFailed {
+                project_id,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        ),
+        Err(error) => publish(
+            events,
+            NativeTransportEvent::ProjectRepositoryFailed {
+                project_id,
+                failure: error.into(),
+            },
+        ),
+    }
+}
+
 async fn read_message_image(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
@@ -4849,7 +4951,8 @@ mod tests {
         create_command_values, create_mutation, engine_config_stable_mutation, finite_duration,
         first_message_stable_mutation, known_thread_for_queue, make_request_frame,
         message_stable_mutation, payload_health_decision, project_request,
-        question_stable_mutation, reconnect_hello, rich_link_request, session_needs_reconnect,
+        project_repository_request, question_stable_mutation, reconnect_hello,
+        rich_link_request, session_needs_reconnect,
         snapshot_request, thread_engine_settings_request, thread_selection_decision,
         threads_request, try_send_command, validate_readiness, validate_response_family,
     };
@@ -4865,10 +4968,11 @@ mod tests {
     use artisan_editor_cli::payload::PayloadHealth;
     use artisan_protocol::{
         CatalogSnapshotWire, ClientRequest, ComposerCatalogResult, DirectoryPickOutcome, ErrorCode,
-        FirstMessageReceipt, HelloCredential, ModelFavoritesSnapshot, ProtocolVersion,
-        QueueMessageReceipt, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
-        RegisteredEngineProfilesResult, ResponsePayload, SetModelFavoriteReceipt,
-        SetThreadEngineConfigResult, WireEnvelopeBody, encode_envelope,
+        FirstMessageReceipt, HelloCredential, ModelFavoritesSnapshot, ProjectRepository,
+        ProjectRepositoryEntry, ProjectRepositoryQueryResult, ProtocolVersion, QueueMessageReceipt,
+        RECONNECT_CAPABILITY_BYTES, ReconnectCapability, RegisteredEngineProfilesResult,
+        ResponsePayload, SetModelFavoriteReceipt, SetThreadEngineConfigResult, WireEnvelopeBody,
+        encode_envelope,
     };
     use artisan_transport::{
         ClientRequestError, DeadlineError, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
@@ -6103,6 +6207,50 @@ mod tests {
         assert!(rich_link_request("example.com/page").is_err());
         assert!(rich_link_request("mailto:user@example.com").is_err());
         assert!(rich_link_request("ftp://example.com/file").is_err());
+    }
+
+    #[test]
+    fn project_repository_requests_name_exactly_one_project() {
+        let project = ProjectId::parse("project-a").expect("valid project");
+        let ClientRequest::QueryProjectRepository(query) =
+            project_repository_request(project.clone())
+        else {
+            panic!("repository helper must build the query arm");
+        };
+        assert_eq!(query.project_ids(), &[project]);
+    }
+
+    #[test]
+    fn project_repository_response_family_requires_the_requested_project_entry() {
+        let project = ProjectId::parse("project-a").expect("valid project");
+        let other = ProjectId::parse("project-b").expect("valid project");
+        let result = |entries| ProjectRepositoryQueryResult::new(entries).expect("valid result");
+
+        assert!(
+            validate_response_family(
+                ExpectedResponse::ProjectRepository {
+                    project_id: project.clone(),
+                },
+                ResponsePayload::ProjectRepository(result(vec![ProjectRepositoryEntry::new(
+                    project.clone(),
+                    ProjectRepository::NotRepository,
+                )])),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_response_family(
+                ExpectedResponse::ProjectRepository {
+                    project_id: project,
+                },
+                ResponsePayload::ProjectRepository(result(vec![ProjectRepositoryEntry::new(
+                    other,
+                    ProjectRepository::NotRepository,
+                )])),
+            )
+            .is_err(),
+            "a response for another project must not settle this read"
+        );
     }
 
     #[test]

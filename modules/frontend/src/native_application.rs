@@ -112,7 +112,7 @@ use crate::thread_environment_presentation::{HostIdentitySnapshot, ThreadEnviron
 use crate::thread_screen::{ThreadScreen, ThreadScreenGate, shell_black};
 use crate::titlebar_header_presentation::{
     TITLEBAR_HEADER_THREAD_SEPARATOR, TitlebarHeaderInput, TitlebarHeaderSegment,
-    TitlebarRepository, present_titlebar_header,
+    TitlebarRepository, present_titlebar_header, titlebar_repository_from_remote,
 };
 use crate::usage_meter::usage_segment_fraction;
 use crate::workspace_tab_state::EditorViewState;
@@ -552,13 +552,16 @@ pub struct NativeApplication {
     selected_project: Option<ProjectId>,
     /// Retained repository facts for the titlebar workspace header.
     ///
-    /// No production source is wired: the Git read query that would inspect
-    /// the attached project's default remote is the missing upstream, so this
-    /// stays `None` in the running app and the header paints the project
-    /// folder. The field is the adapter seam that query will fill, and tests
-    /// inject real-shaped facts to prove the mark/link composition. Never
-    /// store synthesized repository data here.
+    /// `None` paints the project-folder fallback. The facts come from the
+    /// bounded `QueryProjectRepository` read of the selected project's stored
+    /// root and are never synthesized; the titlebar renders real inspected
+    /// repository data or nothing.
     titlebar_repository: Option<TitlebarRepository>,
+    /// The project whose repository facts are retained (or requested).
+    ///
+    /// Fences stale replies: a repository observation for a project that is
+    /// no longer selected cannot replace the current header.
+    titlebar_repository_project: Option<ProjectId>,
     /// The latest authoritative thread listing for `selected_project`.
     thread_listing: Option<ThreadListing>,
     selected_thread: Option<ThreadId>,
@@ -796,6 +799,7 @@ impl NativeApplication {
             project_options: Vec::new(),
             selected_project: None,
             titlebar_repository: None,
+            titlebar_repository_project: None,
             thread_listing: None,
             selected_thread: None,
             pending_thread: None,
@@ -1032,6 +1036,61 @@ impl NativeApplication {
                 .find(|option| &option.id == selected)
                 .map(|option| option.name.to_string())
         })
+    }
+
+    /// Requests the selected project's repository facts when the selection
+    /// changes, clearing stale facts first.
+    ///
+    /// The read is a decoration, not a gate: a submission failure keeps the
+    /// project-folder fallback instead of failing the workspace, and the fence
+    /// resets so a later selection can retry.
+    fn request_project_repository(&mut self, cx: &mut Context<Self>) {
+        let selected = self.selected_project.clone();
+        if self.titlebar_repository_project == selected {
+            return;
+        }
+        self.titlebar_repository_project = selected.clone();
+        self.titlebar_repository = None;
+        let Some(project_id) = selected else {
+            cx.notify();
+            return;
+        };
+        if self
+            .submit_command(NativeTransportCommand::QueryProjectRepository { project_id })
+            .is_err()
+        {
+            self.titlebar_repository_project = None;
+        }
+        cx.notify();
+    }
+
+    /// Retains one inspected repository observation for the titlebar header.
+    ///
+    /// A reply for a project that is no longer selected is dropped: the
+    /// selection fence, not arrival order, decides what the header shows.
+    fn handle_project_repository(
+        &mut self,
+        project_id: &ProjectId,
+        repository: Option<&artisan_protocol::ProjectRepository>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_project.as_ref() != Some(project_id) {
+            return;
+        }
+        self.titlebar_repository = repository.and_then(titlebar_repository_for_project);
+        cx.notify();
+    }
+
+    /// Clears retained repository facts after a failed read for the selection.
+    fn handle_project_repository_failure(
+        &mut self,
+        project_id: &ProjectId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_project.as_ref() == Some(project_id) {
+            self.titlebar_repository = None;
+            cx.notify();
+        }
     }
 
     fn sync_command_menu_groups(&mut self, cx: &mut Context<Self>) {
@@ -1498,6 +1557,7 @@ impl NativeApplication {
             Ok(()) => cx.notify(),
             Err(error) => self.set_failure(command_failure(error), cx),
         }
+        self.request_project_repository(cx);
     }
 
     fn open_thread_from_sidebar(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
@@ -1531,14 +1591,14 @@ impl NativeApplication {
         cx.notify();
     }
 
-    /// Native titlebar leading cluster: the `Artisan Editor` wordmark, which
-    /// keeps the home navigation, followed by the workspace header naming the
-    /// open project and conversation.
+    /// Native titlebar sidebar section: the `Artisan Editor` wordmark, which
+    /// keeps the home navigation.
     ///
-    /// This is the reference strip's leading line: the wordmark anchors the
-    /// home identity, and the workspace header follows it into the same row.
-    fn desktop_identity(&self, cx: &Context<Self>) -> Div {
-        let mut identity = div()
+    /// The wordmark stays in the leading section above the sidebar; the
+    /// workspace header naming the open project and conversation lives in the
+    /// titlebar's content section, anchored to the primary card's left edge.
+    fn desktop_brand(&self, cx: &Context<Self>) -> Div {
+        div()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -1560,11 +1620,7 @@ impl NativeApplication {
                     .letter_spacing(px(-1.0))
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
-            );
-        if let Some(cluster) = self.desktop_header_cluster(cx) {
-            identity = identity.child(cluster);
-        }
-        identity
+            )
     }
 
     /// The titlebar workspace header, when the route names a conversation.
@@ -1588,6 +1644,10 @@ impl NativeApplication {
             .gap(px(6.0))
             .min_w(px(0.0))
             .overflow_hidden()
+            // The reference line paints the workspace context in muted
+            // foreground; only the repository link, the host mark, and the
+            // darker separator override it.
+            .text_color(titlebar_context_tone(&self.theme))
             .debug_selector(|| TITLEBAR_HEADER_SELECTOR.to_owned());
         for segment in presentation.segments() {
             cluster = cluster.child(self.render_titlebar_segment(segment));
@@ -1637,10 +1697,14 @@ impl NativeApplication {
                 .items_center()
                 .gap(px(6.0))
                 .flex_shrink_0()
+                // The folder fallback is workspace context: icon and label
+                // both carry the muted context tone, never the foreground.
+                .text_color(titlebar_context_tone(&self.theme))
                 .debug_selector(|| TITLEBAR_PROJECT_FOLDER_SELECTOR.to_owned())
                 .child(
                     asset_glyph(AssetId::TABLER_FOLDER)
                         .size(px(14.0))
+                        .text_color(titlebar_context_tone(&self.theme))
                         .flex_shrink_0(),
                 )
                 .child(SharedString::from((*label).to_owned()))
@@ -4300,6 +4364,9 @@ impl NativeApplication {
             NativeTransportEvent::Starting => {
                 self.state = NativeViewState::Loading;
                 self.reset_profile_usage_for_connection();
+                // Re-inspect repository facts for the new connection so a
+                // retained decoration cannot outlive its session.
+                self.titlebar_repository_project = None;
                 self.sync_composer_availability(cx);
                 cx.notify();
             }
@@ -4405,6 +4472,13 @@ impl NativeApplication {
             } => self.handle_rich_link_resolved(requested_url, page_name, expires_at_ms, cx),
             NativeTransportEvent::RichLinkFailed { requested_url, .. } => {
                 self.handle_rich_link_failed(&requested_url, cx);
+            }
+            NativeTransportEvent::ProjectRepository {
+                project_id,
+                repository,
+            } => self.handle_project_repository(&project_id, repository.as_ref(), cx),
+            NativeTransportEvent::ProjectRepositoryFailed { project_id, .. } => {
+                self.handle_project_repository_failure(&project_id, cx);
             }
             NativeTransportEvent::ThreadEngineConfigSet(result, retained) => {
                 self.handle_engine_config_set(&result, *retained, cx);
@@ -5895,6 +5969,7 @@ impl NativeApplication {
         self.try_mount_pending_thread(cx);
         self.sync_command_menu_groups(cx);
         self.sync_composer_availability(cx);
+        self.request_project_repository(cx);
         cx.notify();
     }
 
@@ -5922,6 +5997,7 @@ impl NativeApplication {
             self.state = NativeViewState::LoadingThreads;
         }
         self.sync_command_menu_groups(cx);
+        self.request_project_repository(cx);
         cx.notify();
     }
 
@@ -8476,6 +8552,32 @@ fn message_status_detail(
     })
 }
 
+/// Projects one inspected repository observation onto titlebar facts.
+///
+/// Only the default remote's browser-facing URL earns the link; a repository
+/// with no browsable remote, and a directory Git does not track, keep the
+/// project-folder fallback instead of synthesizing a link.
+fn titlebar_repository_for_project(
+    repository: &artisan_protocol::ProjectRepository,
+) -> Option<TitlebarRepository> {
+    let snapshot = repository.snapshot()?;
+    let default_remote = snapshot.default_remote()?;
+    let remote = snapshot
+        .remotes()
+        .iter()
+        .find(|remote| remote.name() == default_remote)?;
+    titlebar_repository_from_remote(remote.host().as_str(), remote.web_url())
+}
+
+/// The muted-foreground tone carried by the titlebar header's workspace
+/// context: the project-folder fallback and the thread subject.
+///
+/// The reference strip paints both in `text-muted-foreground`; only the
+/// repository link and the darker separator override the inherited tone.
+fn titlebar_context_tone(theme: &ArtisanTheme) -> gpui::Hsla {
+    theme.colors.muted_foreground.to_paint()
+}
+
 /// Maps a repository mark identity to its cataloged native asset.
 ///
 /// Every vendored host mark the reference table can select has a catalog row;
@@ -8498,12 +8600,16 @@ impl Render for NativeApplication {
         self.sync_composer_controls(cx);
         let sidebar = self.desktop_sidebar(window, cx).into_any_element();
         let body = self.desktop_route_body(window, cx);
-        let identity = self.desktop_identity(cx).into_any_element();
+        let brand = self.desktop_brand(cx).into_any_element();
+        let header = self
+            .desktop_header_cluster(cx)
+            .unwrap_or_else(|| div().into_any_element());
         let search = self.command_menu.clone().into_any_element();
         let shell = desktop_shell(
             self.desktop_theme,
             self.sidebar_collapsed,
-            identity,
+            brand,
+            header,
             search,
             sidebar,
             body,
@@ -9372,7 +9478,9 @@ mod tests {
     };
     use artisan_protocol::{
         ConversationSubscriptionStarted, ConversationSubscriptionStopped, EventCursor,
-        QueueMessageReceipt, ServerEvent,
+        QueueMessageReceipt, RepositoryBranchState, RepositoryHost as ProtocolRepositoryHost,
+        RepositoryRemote as ProtocolRepositoryRemote,
+        RepositorySnapshot as ProtocolRepositorySnapshot, ServerEvent,
     };
     use artisan_ui::button::{
         Button, ButtonContent, ButtonSize, ButtonStyle, ButtonVariant, FocusVisibility,
@@ -12779,7 +12887,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn titlebar_workspace_header_follows_the_wordmark_and_truncates_the_thread_name(
+    fn titlebar_workspace_header_starts_at_the_sidebar_edge_and_truncates_the_thread_name(
         cx: &mut TestAppContext,
     ) {
         let (view, cx) =
@@ -12798,6 +12906,9 @@ mod tests {
             .debug_bounds(DESKTOP_TITLEBAR_SELECTOR)
             .expect("titlebar");
         let wordmark = cx.debug_bounds("artisan-brand-home").expect("wordmark");
+        let sidebar = cx
+            .debug_bounds(DESKTOP_SIDEBAR_SELECTOR)
+            .expect("sidebar");
         let header = cx
             .debug_bounds(TITLEBAR_HEADER_SELECTOR)
             .expect("workspace header");
@@ -12820,12 +12931,18 @@ mod tests {
             .debug_bounds("artisan-desktop-titlebar-controls")
             .expect("caption controls");
 
-        // The cluster follows the wordmark in source order and stays on the
-        // leading half of the strip: the reference header is anchored left,
-        // never centred.
+        // The wordmark owns the leading sidebar section above the sidebar;
+        // the workspace header lives in the titlebar's content section and is
+        // anchored to the primary card's left edge, never following the
+        // wordmark into the sidebar.
+        let sidebar_right = sidebar.origin.x + sidebar.size.width;
         assert!(
-            wordmark.origin.x + wordmark.size.width <= header.origin.x,
-            "the workspace header follows the wordmark"
+            wordmark.origin.x + wordmark.size.width <= sidebar_right,
+            "the wordmark stays in the leading sidebar section"
+        );
+        assert!(
+            (f32::from(header.origin.x) - f32::from(sidebar_right)).abs() <= 1.0,
+            "the workspace header starts at the primary card's left edge"
         );
         assert!(
             header.origin.x < titlebar.origin.x + titlebar.size.width / 2.0,
@@ -12913,9 +13030,9 @@ mod tests {
             view.update(app, |application, cx| {
                 install_unnamed_title_task(application, cx, "", sink);
                 install_project_option(application, "artisan-street");
-                // Injected fixture, not synthesized production data: the
-                // titlebar adapter has no repository source yet, and this is
-                // the exact remote shape the Git read query will supply.
+                // Injected fixture shaped exactly like the attached-project
+                // repository query's response; the transport handler retains
+                // the same facts from the bounded Git read.
                 application.titlebar_repository = Some(TitlebarRepository::new(
                     RepositoryHost::GitHub,
                     "https://github.com/artisanstreet/editor",
@@ -12953,6 +13070,143 @@ mod tests {
             cx.debug_bounds(TITLEBAR_PROJECT_FOLDER_SELECTOR).is_none(),
             "inspected repository facts replace the project-folder fallback"
         );
+    }
+
+    #[test]
+    fn titlebar_workspace_context_paints_muted_instead_of_foreground() {
+        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let context = super::titlebar_context_tone(&theme);
+        assert_eq!(
+            context,
+            theme.colors.muted_foreground.to_paint(),
+            "the folder fallback and thread subject inherit muted foreground"
+        );
+        assert_ne!(
+            context,
+            theme.colors.foreground.to_paint(),
+            "workspace context must not paint as primary foreground"
+        );
+    }
+
+    fn protocol_repository_snapshot() -> ProtocolRepositorySnapshot {
+        ProtocolRepositorySnapshot::new(
+            RepositoryBranchState::attached("main").expect("branch"),
+            Some("origin".to_owned()),
+            vec![
+                ProtocolRepositoryRemote::new(
+                    ProtocolRepositoryHost::GitHub,
+                    "origin",
+                    "git@github.com:artisanstreet/varde.git",
+                    Some("https://github.com/artisanstreet/varde".to_owned()),
+                )
+                .expect("remote"),
+            ],
+        )
+        .expect("snapshot")
+    }
+
+    #[gpui::test]
+    fn selecting_a_project_requests_repository_facts_and_clears_stale_ones(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let project = ProjectId::parse("varde").expect("project");
+                application.test_command_sink = Some(sink);
+                application.selected_project = Some(project.clone());
+                application.titlebar_repository = Some(TitlebarRepository::new(
+                    RepositoryHost::GitHub,
+                    "https://github.com/old/stale",
+                ));
+
+                application.request_project_repository(cx);
+                assert!(matches!(
+                    commands.borrow().as_slice(),
+                    [NativeTransportCommand::QueryProjectRepository { project_id }]
+                        if project_id == &project
+                ));
+                assert!(
+                    application.titlebar_repository.is_none(),
+                    "stale facts are cleared while the new read is in flight"
+                );
+
+                // The same selection does not submit a duplicate read.
+                application.request_project_repository(cx);
+                assert_eq!(commands.borrow().len(), 1);
+
+                let other = ProjectId::parse("other").expect("project");
+                application.selected_project = Some(other.clone());
+                application.request_project_repository(cx);
+                assert_eq!(commands.borrow().len(), 2);
+                assert!(matches!(
+                    &commands.borrow()[1],
+                    NativeTransportCommand::QueryProjectRepository { project_id }
+                        if project_id == &other
+                ));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn repository_observations_update_the_titlebar_seam_for_the_selected_project(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let project = ProjectId::parse("varde").expect("project");
+                let other = ProjectId::parse("other").expect("project");
+                application.selected_project = Some(project.clone());
+
+                let repository = artisan_protocol::ProjectRepository::Repository(
+                    protocol_repository_snapshot(),
+                );
+                application.handle_project_repository(&project, Some(&repository), cx);
+                assert_eq!(
+                    application.titlebar_repository,
+                    Some(TitlebarRepository::new(
+                        RepositoryHost::GitHub,
+                        "https://github.com/artisanstreet/varde",
+                    ))
+                );
+
+                // A reply for a project that is no longer selected is dropped.
+                application.selected_project = Some(other.clone());
+                application.handle_project_repository(&project, None, cx);
+                assert!(
+                    application.titlebar_repository.is_some(),
+                    "a stale reply cannot clear the newer selection"
+                );
+
+                // The current project's not-repository observation falls back
+                // to the project folder.
+                application.handle_project_repository(
+                    &other,
+                    Some(&artisan_protocol::ProjectRepository::NotRepository),
+                    cx,
+                );
+                assert!(application.titlebar_repository.is_none());
+
+                // A repository with no browsable remote keeps the fallback.
+                let local_only = ProtocolRepositorySnapshot::new(
+                    RepositoryBranchState::unborn("main").expect("branch"),
+                    None,
+                    vec![],
+                )
+                .expect("snapshot");
+                application.selected_project = Some(project.clone());
+                application.handle_project_repository(
+                    &project,
+                    Some(&artisan_protocol::ProjectRepository::Repository(local_only)),
+                    cx,
+                );
+                assert!(application.titlebar_repository.is_none());
+            });
+        });
     }
 
     #[gpui::test]

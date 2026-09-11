@@ -21,6 +21,8 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use zeroize::Zeroize;
 
+use crate::repository::{ProjectRepositoryQuery, ProjectRepositoryQueryResult};
+
 /// Current application protocol revision.
 pub const APPLICATION_PROTOCOL_VERSION: u32 = 1;
 /// Maximum number of application revisions offered during hello.
@@ -101,6 +103,12 @@ pub enum ProtocolValueError {
     /// A rich-link URL or resolved page name violated its bounded shape.
     #[error("invalid rich link value: {reason}")]
     RichLink {
+        /// Stable validation reason.
+        reason: &'static str,
+    },
+    /// A project-repository field violated its bounded shape or invariant.
+    #[error("invalid project repository value: {reason}")]
+    Repository {
         /// Stable validation reason.
         reason: &'static str,
     },
@@ -980,6 +988,11 @@ pub enum ClientRequest {
     /// or dropped freely, and each deliberate attempt uses a fresh frame
     /// identity.
     ResolveRichLink(ResolveRichLinkRequest),
+    /// Bounded repository-identity read for named attached projects.
+    ///
+    /// Not a durable command: the read inspects the attached project roots on
+    /// demand, persists nothing, and uses a fresh frame identity per attempt.
+    QueryProjectRepository(ProjectRepositoryQuery),
 }
 
 /// Successful durable thread engine-configuration mutation.
@@ -1324,6 +1337,8 @@ pub enum ResponsePayload {
     AccountUsage(artisan_domain::EngineUsageSnapshot),
     /// Resolved rich-link page metadata for one requested URL.
     RichLink(RichLinkPageMetadata),
+    /// Repository identity per requested project.
+    ProjectRepository(ProjectRepositoryQueryResult),
 }
 
 /// Successful response correlated to a client request frame.

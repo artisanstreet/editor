@@ -22,6 +22,7 @@ use artisan_backend::run_interaction::{
     OwnedInteractionCommand, RunInteractionAck, RunInteractionEnvelope, RunInteractionLease,
     RunInteractionRegistry,
 };
+use artisan_backend::project_repository_service::ProjectRepositoryService;
 use artisan_backend::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, ForgeStorage, RequestHandler,
 };
@@ -49,8 +50,10 @@ use artisan_domain::{
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt, FrameId,
-    LifecycleRequest, ProtocolFailure, ProtocolValueError, ProtocolVersion, QueueMessageReceipt,
-    ResponsePayload, ServerResponse, SetThreadEngineConfigResult, WireEnvelope, WireEnvelopeBody,
+    LifecycleRequest, ProjectRepository, ProjectRepositoryQuery, ProtocolFailure,
+    ProtocolValueError, ProtocolVersion, QueueMessageReceipt, RepositoryBranchState,
+    RepositoryHost, ResponsePayload, ServerResponse, SetThreadEngineConfigResult, WireEnvelope,
+    WireEnvelopeBody,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -107,6 +110,43 @@ fn attach_input(request_id: &str, directory_id: &str, project_id: &str) -> Attac
             .expect("test root path should be valid"),
         display_name: DisplayName::parse("Project").expect("test display name should be valid"),
         attached_at: UnixMillis::from_millis(100),
+    }
+}
+
+/// One disposable directory a test can initialize as a Git repository.
+struct TemporaryDirectory {
+    path: PathBuf,
+}
+
+impl TemporaryDirectory {
+    fn new(label: &str) -> Self {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "artisan-forge-project-repository-{label}-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("temporary repository directory should be created");
+        Self { path }
+    }
+
+    fn git(&self, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.path)
+            .args(args)
+            .output()
+            .expect("git should be available to the project repository test");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _cleanup_result = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -608,6 +648,159 @@ async fn list_attached_projects_maps_durable_catalog_into_correlated_response() 
         listing.projects()[0].root_path.as_str(),
         "C:/repos/project-1"
     );
+}
+
+#[tokio::test]
+async fn project_repository_query_reads_attached_root_git_identity() {
+    let working_directory = TemporaryDirectory::new("attached");
+    working_directory.git(&["init", "-b", "main"]);
+    working_directory.git(&[
+        "-c",
+        "user.name=Artisan Test",
+        "-c",
+        "user.email=test@artisan.example",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+    ]);
+    working_directory.git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@github.com:artisanstreet/varde.git",
+    ]);
+
+    let (_temporary, storage) = opened_storage("project-repository").await;
+    let project_id = ProjectId::parse("varde").expect("valid project id");
+    storage
+        .repository()
+        .attach_project(AttachProjectInput {
+            request_id: request("request-project-repository"),
+            directory_id: DirectoryId::parse("directory-varde").expect("valid directory id"),
+            project_id: project_id.clone(),
+            root_path: RootPath::parse(
+                working_directory
+                    .path
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .expect("valid root path"),
+            display_name: DisplayName::parse("varde").expect("valid display name"),
+            attached_at: UnixMillis::from_millis(100),
+        })
+        .await
+        .expect("seed attach should persist");
+    let handler = RequestHandler::new(storage.repository().clone())
+        .with_project_repository_service(ProjectRepositoryService::new(storage.repository().clone()));
+
+    let response = handler
+        .respond(
+            &request("frame-project-repository"),
+            &ClientRequest::QueryProjectRepository(
+                ProjectRepositoryQuery::new(vec![project_id.clone()]).expect("valid query"),
+            ),
+        )
+        .await
+        .expect("repository-backed read should succeed");
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(response.request_id, request("frame-project-repository"));
+    let ResponsePayload::ProjectRepository(result) = response.payload else {
+        panic!("expected a project repository payload");
+    };
+    assert_eq!(result.repositories().len(), 1);
+    let entry = &result.repositories()[0];
+    assert_eq!(entry.project_id(), &project_id);
+    let ProjectRepository::Repository(snapshot) = entry.repository() else {
+        panic!("the attached root should be a repository");
+    };
+    assert_eq!(
+        snapshot.branch(),
+        &RepositoryBranchState::Attached {
+            name: "main".to_owned()
+        }
+    );
+    assert_eq!(snapshot.default_remote(), Some("origin"));
+    assert_eq!(snapshot.remotes().len(), 1);
+    let remote = &snapshot.remotes()[0];
+    assert_eq!(remote.host(), RepositoryHost::GitHub);
+    assert_eq!(remote.url(), "git@github.com:artisanstreet/varde.git");
+    assert_eq!(
+        remote.web_url(),
+        Some("https://github.com/artisanstreet/varde")
+    );
+}
+
+#[tokio::test]
+async fn project_repository_query_reports_plain_roots_without_failing() {
+    let (_temporary, storage) = opened_storage("project-repository-plain").await;
+    let project_id = ProjectId::parse("plain-project").expect("valid project id");
+    storage
+        .repository()
+        .attach_project(AttachProjectInput {
+            request_id: request("request-project-plain"),
+            directory_id: DirectoryId::parse("directory-plain").expect("valid directory id"),
+            project_id: project_id.clone(),
+            root_path: RootPath::parse("C:/repos/plain-project").expect("valid root path"),
+            display_name: DisplayName::parse("Plain").expect("valid display name"),
+            attached_at: UnixMillis::from_millis(100),
+        })
+        .await
+        .expect("seed attach should persist");
+    let handler = RequestHandler::new(storage.repository().clone())
+        .with_project_repository_service(ProjectRepositoryService::new(storage.repository().clone()));
+
+    let response = handler
+        .respond(
+            &request("frame-project-repository-plain"),
+            &ClientRequest::QueryProjectRepository(
+                ProjectRepositoryQuery::new(vec![
+                    project_id.clone(),
+                    ProjectId::parse("not-attached").expect("valid project id"),
+                ])
+                .expect("valid query"),
+            ),
+        )
+        .await
+        .expect("plain-root read should succeed");
+    storage.close().await.expect("storage should close");
+
+    let ResponsePayload::ProjectRepository(result) = response.payload else {
+        panic!("expected a project repository payload");
+    };
+    assert_eq!(result.repositories().len(), 1);
+    assert_eq!(result.repositories()[0].project_id(), &project_id);
+    assert_eq!(
+        result.repositories()[0].repository(),
+        &ProjectRepository::NotRepository
+    );
+}
+
+#[tokio::test]
+async fn project_repository_query_without_service_reports_unsupported() {
+    let (_temporary, storage) = opened_storage("project-repository-unbacked").await;
+    let handler = RequestHandler::new(storage.repository().clone());
+
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("frame-project-repository-unbacked"),
+                &ClientRequest::QueryProjectRepository(
+                    ProjectRepositoryQuery::new(vec![]).expect("valid query"),
+                ),
+            )
+            .await,
+    );
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(failure.code, ErrorCode::Internal);
+    assert_eq!(
+        failure.request_id.as_ref(),
+        Some(&request("frame-project-repository-unbacked"))
+    );
+    assert!(!failure.retryable);
+    assert!(failure.detail.as_str().contains("project repository inspection"));
 }
 
 #[tokio::test]

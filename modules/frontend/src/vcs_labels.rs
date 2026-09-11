@@ -458,3 +458,41 @@ fn valid_port(port: &str) -> bool {
         || (port.bytes().all(|byte| byte.is_ascii_digit())
             && port.parse::<u32>().is_ok_and(|value| value <= 65_535))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{repository_link_label, repository_qualified_label};
+
+    #[test]
+    fn qualified_labels_follow_the_reference_projection_for_browsable_remotes() {
+        let cases = [
+            (
+                "https://github.com/artisanstreet/varde",
+                "artisanstreet/varde",
+            ),
+            (
+                "https://github.com/artisanstreet/varde/",
+                "artisanstreet/varde",
+            ),
+            ("https://gitlab.com/group/subgroup/varde", "subgroup/varde"),
+            ("https://example.test/varde", "varde"),
+            (
+                "https://bitbucket.org/owner/repository.git",
+                "owner/repository.git",
+            ),
+        ];
+        for (web_url, expected) in cases {
+            assert_eq!(
+                repository_qualified_label(web_url),
+                expected,
+                "web url: {web_url}"
+            );
+        }
+
+        assert_eq!(repository_qualified_label("not a url"), "not a url");
+        assert_eq!(
+            repository_link_label("https://github.com/artisanstreet/varde"),
+            "varde"
+        );
+    }
+}

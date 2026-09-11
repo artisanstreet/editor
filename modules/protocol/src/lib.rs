@@ -39,12 +39,21 @@ pub mod artisan_capnp;
 /// Dependency-free classification and presentation for conversation activity rows.
 pub mod conversation_activity;
 
+/// Owned project-repository facts for the native protocol.
+pub mod repository;
+
 mod codec;
 mod types;
 
 pub use codec::{
     CAPNP_NESTING_LIMIT, CAPNP_TRAVERSAL_LIMIT_WORDS, ProtocolDecodeError, ProtocolEncodeError,
     decode_envelope, encode_envelope,
+};
+pub use repository::{
+    PROJECT_REPOSITORY_MAXIMUM_PROJECTS, ProjectRepository, ProjectRepositoryEntry,
+    ProjectRepositoryQuery, ProjectRepositoryQueryResult, REPOSITORY_REMOTE_MAXIMUM,
+    REPOSITORY_TEXT_MAX_BYTES, RepositoryBranchState, RepositoryHost, RepositoryRemote,
+    RepositorySnapshot,
 };
 pub use types::{
     APPLICATION_PROTOCOL_VERSION, ActiveRunResult, CATALOG_SNAPSHOT_MAX_BYTES, CatalogSnapshotWire,

@@ -49,11 +49,11 @@ use artisan_domain::{
 };
 use artisan_protocol::{
     ActiveRunResult, ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome,
-    ErrorCode, ErrorDetail, FirstMessageReceipt, MessageImageResult, ProtocolFailure,
-    QueueMessageReceipt, RegisteredEngineProfilesResult, ResolveRichLinkRequest,
-    RespondApprovalReceipt, RespondQuestionReceipt, ResponsePayload, RichLinkPageMetadata,
-    RunInteractionOutcome, RunLiveStatus, ServerResponse, SetThreadEngineConfigResult,
-    StopRunDisposition, StopRunReceipt,
+    ErrorCode, ErrorDetail, FirstMessageReceipt, MessageImageResult, ProjectRepositoryQuery,
+    ProjectRepositoryQueryResult, ProtocolFailure, QueueMessageReceipt,
+    RegisteredEngineProfilesResult, ResolveRichLinkRequest, RespondApprovalReceipt,
+    RespondQuestionReceipt, ResponsePayload, RichLinkPageMetadata, RunInteractionOutcome,
+    RunLiveStatus, ServerResponse, SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
 };
 use tokio::sync::Mutex;
 
@@ -358,6 +358,7 @@ pub struct RequestHandler {
     composer_catalog: Option<crate::composer_catalog_service::ComposerCatalogService>,
     account_usage: Option<crate::account_usage_service::AccountUsageService>,
     rich_link_resolver: Option<crate::rich_link_service::RichLinkResolver>,
+    project_repository: Option<crate::project_repository_service::ProjectRepositoryService>,
 }
 
 impl fmt::Debug for RequestHandler {
@@ -491,6 +492,7 @@ impl RequestHandler {
             composer_catalog: None,
             account_usage: None,
             rich_link_resolver: None,
+            project_repository: None,
         }
     }
 
@@ -517,6 +519,7 @@ impl RequestHandler {
             composer_catalog: None,
             account_usage: None,
             rich_link_resolver: None,
+            project_repository: None,
         }
     }
 
@@ -544,6 +547,7 @@ impl RequestHandler {
             composer_catalog: None,
             account_usage: None,
             rich_link_resolver: None,
+            project_repository: None,
         }
     }
 
@@ -608,6 +612,22 @@ impl RequestHandler {
         resolver: crate::rich_link_service::RichLinkResolver,
     ) -> Self {
         self.rich_link_resolver = Some(resolver);
+        self
+    }
+
+    /// Attaches the one process-owned bounded project-repository reader.
+    ///
+    /// The reader inspects the durable catalog's stored project roots on
+    /// demand and owns no persisted state. Without it,
+    /// `QueryProjectRepository` answers the established
+    /// unsupported-capability failure instead of fabricating repository
+    /// facts.
+    #[must_use]
+    pub fn with_project_repository_service(
+        mut self,
+        service: crate::project_repository_service::ProjectRepositoryService,
+    ) -> Self {
+        self.project_repository = Some(service);
         self
     }
 
@@ -720,6 +740,9 @@ impl RequestHandler {
             ClientRequest::PickDirectory => self.pick_directory_outcome(request_id).await,
             ClientRequest::ResolveRichLink(request) => {
                 self.resolve_rich_link_outcome(request_id, request).await
+            }
+            ClientRequest::QueryProjectRepository(query) => {
+                self.query_project_repository_outcome(request_id, query).await
             }
         }
     }
@@ -945,6 +968,38 @@ impl RequestHandler {
             )
         })?;
         Ok(outcome(request_id, ResponsePayload::RichLink(metadata)))
+    }
+
+    /// Resolves one bounded project-repository read through the attached
+    /// service.
+    ///
+    /// The service reads the durable catalog and runs the bounded Git
+    /// inspection; this adapter only re-validates the projected entries
+    /// before they cross the wire and classifies catalog failures.
+    async fn query_project_repository_outcome(
+        &self,
+        request_id: &RequestId,
+        query: &ProjectRepositoryQuery,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        let Some(service) = self.project_repository.as_ref() else {
+            return Err(unbacked_failure(request_id, "project repository inspection"));
+        };
+        let entries = service
+            .inspect(query.project_ids())
+            .await
+            .map_err(|error| project_repository_failure(error, request_id))?;
+        let result = ProjectRepositoryQueryResult::new(entries).map_err(|_| {
+            typed_failure(
+                ErrorCode::Internal,
+                "project repository read produced an invalid result",
+                false,
+                request_id,
+            )
+        })?;
+        Ok(outcome(
+            request_id,
+            ResponsePayload::ProjectRepository(result),
+        ))
     }
 
     async fn subscribe_with_receipt(
@@ -2742,6 +2797,24 @@ fn rich_link_failure(
     typed_failure(code, detail_text, retryable, request_id)
 }
 
+/// Classifies one project-repository service failure into the stable protocol
+/// vocabulary without formatting catalog, path, or database detail.
+fn project_repository_failure(
+    error: crate::project_repository_service::ProjectRepositoryServiceError,
+    request_id: &RequestId,
+) -> ProtocolFailure {
+    use crate::project_repository_service::ProjectRepositoryServiceError as Failure;
+
+    let (code, detail_text, retryable) = match error {
+        Failure::CatalogUnavailable => (
+            ErrorCode::Internal,
+            "project repository catalog is unavailable",
+            true,
+        ),
+    };
+    typed_failure(code, detail_text, retryable, request_id)
+}
+
 /// Bounds a diagnostic text into the protocol's failure contract.
 fn typed_failure(
     code: ErrorCode,
@@ -2792,5 +2865,25 @@ mod rich_link_failure_tests {
         );
         assert!(!oversized.retryable);
         assert!(format!("{invalid:?}").len() < 256);
+    }
+}
+
+#[cfg(test)]
+mod project_repository_failure_tests {
+    use super::{ErrorCode, RequestId, project_repository_failure};
+    use crate::project_repository_service::ProjectRepositoryServiceError;
+
+    #[test]
+    fn project_repository_catalog_failures_are_bounded_and_retryable() {
+        let request_id = RequestId::parse("repository-request").expect("request id is valid");
+        let failure = project_repository_failure(
+            ProjectRepositoryServiceError::CatalogUnavailable,
+            &request_id,
+        );
+        assert_eq!(failure.code, ErrorCode::Internal);
+        assert!(failure.retryable);
+        assert_eq!(failure.request_id.as_ref(), Some(&request_id));
+        assert!(failure.detail.as_str().contains("catalog"));
+        assert!(format!("{failure:?}").len() < 256);
     }
 }

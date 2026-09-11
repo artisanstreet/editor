@@ -869,6 +869,7 @@ impl ParityProofShell {
             div().into_any_element(),
             div().into_any_element(),
             div().into_any_element(),
+            div().into_any_element(),
             body,
             window.scale_factor(),
             window.is_maximized(),

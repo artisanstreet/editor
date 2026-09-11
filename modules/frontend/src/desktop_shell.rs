@@ -21,6 +21,8 @@ use crate::shell::title_bar_caption_button;
 pub const DESKTOP_ROOT_SELECTOR: &str = "artisan-desktop-workspace";
 /// Native titlebar selector.
 pub const DESKTOP_TITLEBAR_SELECTOR: &str = "artisan-desktop-titlebar";
+/// Titlebar sidebar section selector, holding the wordmark above the sidebar.
+pub const DESKTOP_TITLEBAR_BRAND_SELECTOR: &str = "artisan-desktop-titlebar-brand";
 /// Sidebar selector.
 pub const DESKTOP_SIDEBAR_SELECTOR: &str = "artisan-desktop-sidebar";
 /// Main workspace selector.
@@ -131,17 +133,20 @@ pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
 /// composer, cards, and popovers keep their own glass/material fills for
 /// contrast.
 ///
-/// `identity` owns the whole leading cluster: the wordmark and, following it,
-/// the workspace header naming the open project and conversation. It starts at
-/// the leading end of the strip, and the drag surface continues from its end
-/// to the caption controls, matching the reference desktop shell.
-/// `search` is the command menu, mounted without reserving space: it paints
-/// nothing in flow at rest and overlays its palette dialog when open.
+/// `brand` owns the leading sidebar section: the `Artisan Editor` wordmark,
+/// seated above the sidebar at exactly its width. `header` owns the titlebar's
+/// content section, which starts at the sidebar's right edge and runs toward
+/// the caption controls, so the workspace header is anchored to the primary
+/// card's left edge rather than the wordmark. The drag surface fills the rest
+/// of the content section after the header. `search` is the command menu,
+/// mounted without reserving space: it paints nothing in flow at rest and
+/// overlays its palette dialog when open.
 #[must_use]
 pub fn desktop_shell(
     theme: DesktopTheme,
     collapsed: bool,
-    identity: AnyElement,
+    brand: AnyElement,
+    header: AnyElement,
     search: AnyElement,
     sidebar: AnyElement,
     body: AnyElement,
@@ -171,37 +176,45 @@ pub fn desktop_shell(
             "artisan-desktop-titlebar-close",
         ));
 
-    let drag = div()
+    // The sidebar section reserves exactly the sidebar's width, so the
+    // content section starts on the primary card's left edge. The wordmark
+    // keeps its clicks; the remaining leading strip still drags the window.
+    let brand = div()
+        .w(style.sidebar_width)
+        .h_full()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .px(px(14.0))
+        .overflow_hidden()
+        .debug_selector(|| DESKTOP_TITLEBAR_BRAND_SELECTOR.to_owned())
+        .child(brand)
+        .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag));
+
+    // The content section carries the workspace header at its leading end and
+    // the window drag surface up to the caption controls, the native reading
+    // of the reference strip's content region. The right inset keeps the
+    // elastic thread name from truncating flush against the controls, and the
+    // header itself is not a drag area, so its repository link keeps its
+    // click.
+    let content = div()
         .flex_1()
         .min_w(px(0.0))
         .h_full()
         .flex()
         .items_center()
+        .overflow_hidden()
         .child(
-            // The leading region owns the whole header cluster and then the
-            // window drag surface up to the caption controls, the native
-            // reading of the reference strip's leading workspace header. The
-            // cluster itself is not a drag area, so the wordmark and the
-            // workspace link keep their clicks.
             div()
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
                 .flex()
                 .items_center()
-                .px(px(14.0))
+                .pr(px(24.0))
                 .overflow_hidden()
-                .child(identity)
+                .child(header)
                 .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag)),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_end()
-                .child(controls),
         );
 
     let titlebar = div()
@@ -214,11 +227,13 @@ pub fn desktop_shell(
         .border_b_1()
         .border_color(theme.line)
         .debug_selector(|| DESKTOP_TITLEBAR_SELECTOR.to_string())
-        .child(drag)
+        .child(brand)
+        .child(content)
         // The command menu is mounted without reserving a slot: it paints
         // nothing in flow at rest and overlays its palette dialog when open,
         // so the header stays flush against the controls' drag region.
         .child(search)
+        .child(controls)
         .child(
             // One-physical-pixel continuation of the sidebar's right rule
             // above the junction. The sidebar border paints the rightmost
