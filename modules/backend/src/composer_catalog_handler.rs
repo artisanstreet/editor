@@ -230,7 +230,8 @@ async fn current_catalog(
         .read_model_favorites()
         .await
         .map_err(|error| favorites_error(&error))?;
-    crate::native_model_catalog::from_catalog_result(result, &favorites)
+    let discovery = crate::model_discovery::discovery_bundle().await;
+    crate::native_model_catalog::from_catalog_result_with_discovery(result, &discovery, &favorites)
         .map_err(|_| ComposerCatalogHandlerError::InvalidCatalog)
 }
 
@@ -271,7 +272,11 @@ fn validate_current_catalog(
     if catalog.catalog_revision != command.catalog_revision().as_str() {
         return Err(ComposerCatalogHandlerError::StaleCatalog);
     }
-    if catalog.manifest.model(command.model_id().as_str()).is_none() {
+    if catalog
+        .manifest
+        .model(command.model_id().as_str())
+        .is_none()
+    {
         return Err(ComposerCatalogHandlerError::UnknownModel);
     }
     Ok(())

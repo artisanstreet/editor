@@ -256,4 +256,6 @@ mod account_usage_handler;
 
 mod native_model_catalog;
 
+mod model_discovery;
+
 mod composer_catalog_handler;

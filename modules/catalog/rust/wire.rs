@@ -1,8 +1,10 @@
 //! Versioned, bounded JSON transport for a complete native model catalog.
 //!
-//! The bundled manifest remains the source of truth and is not rewritten by
-//! this module. A wire snapshot carries that manifest plus the owner-supplied
-//! runtime layer, provenance, scope, and authoritative favorites. The schema
+//! The bundled manifest remains the baseline and is never replaced by this
+//! module. A wire snapshot carries that baseline plus the owner-supplied
+//! runtime layer, provenance, scope, and authoritative favorites; runtime
+//! overlay may replace reported fields on bundled rows and append new rows,
+//! but every bundled provider and model identity must survive. The schema
 //! is intentionally explicit rather than derived from `Debug`: unknown keys,
 //! malformed numbers, oversized collections, stale references, and mismatched
 //! OpenCode2 native identities are rejected before a snapshot is returned.
@@ -1306,13 +1308,33 @@ fn validate_bundled_manifest_prefix(
     let bundled = NativeModelCatalog::offline()
         .map_err(|_| NativeModelCatalogWireError::InvalidCatalog)?
         .manifest;
+    // The bundled baseline must survive a runtime overlay: harness policy is
+    // immutable, every bundled provider identity is retained, and every
+    // bundled model keeps its id, harness, and native identity. Reported
+    // fields (name, description, capabilities) and the disabled flag may be
+    // overlaid, and runtime rows may be appended after the baseline.
     if manifest.harnesses != bundled.harnesses
         || manifest.providers.len() < bundled.providers.len()
         || manifest.models.len() < bundled.models.len()
-        || manifest.providers[..bundled.providers.len()] != bundled.providers[..]
-        || manifest.models[..bundled.models.len()] != bundled.models[..]
     {
         return Err(NativeModelCatalogWireError::InvalidCatalog);
+    }
+    for provider in &bundled.providers {
+        if !manifest
+            .providers
+            .iter()
+            .any(|candidate| candidate.id == provider.id && candidate.label == provider.label)
+        {
+            return Err(NativeModelCatalogWireError::InvalidCatalog);
+        }
+    }
+    for model in &bundled.models {
+        let Some(current) = manifest.model(&model.id) else {
+            return Err(NativeModelCatalogWireError::InvalidCatalog);
+        };
+        if current.harness != model.harness || current.native_model_id != model.native_model_id {
+            return Err(NativeModelCatalogWireError::InvalidCatalog);
+        }
     }
     Ok(())
 }
