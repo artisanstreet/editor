@@ -818,6 +818,12 @@ pub struct ConversationSurface {
     /// The open-keyed width clock replays on this generation, never on
     /// mount: generation zero paints the static width outright.
     navigator_width_generation: u64,
+    /// Currently painted rail width, retained across hover reversals.
+    ///
+    /// The width animator writes every painted frame (the picker's
+    /// `apply_progress` pattern), so an interrupted flight reverses from
+    /// the displayed width instead of jumping to a fixed endpoint.
+    navigator_width_px: Rc<RefCell<f32>>,
     /// Bounded wheel-smoothing state for the transcript scroll offset.
     ///
     /// Reuses the model picker's [`PickerScrollState`] verbatim: discrete
@@ -1229,6 +1235,7 @@ impl ConversationSurface {
             navigator_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             navigator_hover_surface: Rc::new(RefCell::new(None)),
             navigator_width_generation: 0,
+            navigator_width_px: Rc::new(RefCell::new(40.0)),
             transcript_scroll: PickerScrollState::default(),
             transcript_scroll_frame_scheduled: false,
             active_now_ms: None,
@@ -5133,17 +5140,21 @@ impl ConversationSurface {
                 navigator_scroll_handle.set_offset(point(offset.x, px(next)));
                 cx.stop_propagation();
             });
-        let list: AnyElement = if self.navigator_width_generation == 0 {
-            list
-                .w(px(if expanded { 288.0 } else { 40.0 }))
-                .into_any_element()
+        // Width motion replays per hover generation, never on mount, and
+        // never under reduced motion: generation zero paints the static
+        // width outright. Reversals start from the retained painted width,
+        // so an interrupted flight never jumps to a fixed endpoint. Open
+        // runs the reference 250 ms, close 150 ms, both on the dropdown
+        // curve.
+        let width_target = if expanded { 288.0 } else { 40.0 };
+        let list: AnyElement = if self.navigator_width_generation == 0 || cx.reduce_motion() {
+            *self.navigator_width_px.borrow_mut() = width_target;
+            list.w(px(width_target)).into_any_element()
         } else {
-            let (from_w, to_w, duration_ms) = if expanded {
-                (40.0, 288.0, 250)
-            } else {
-                (288.0, 40.0, 150)
-            };
+            let from_w = *self.navigator_width_px.borrow();
+            let width_state = Rc::clone(&self.navigator_width_px);
             let generation = self.navigator_width_generation;
+            let duration_ms = if expanded { 250 } else { 150 };
             list.w(px(from_w))
                 .with_animation(
                     ElementId::Name(SharedString::from(format!(
@@ -5151,7 +5162,11 @@ impl ConversationSurface {
                     ))),
                     Animation::new(Duration::from_millis(duration_ms))
                         .with_easing(navigator_smooth_out),
-                    move |list, progress| list.w(px(from_w + (to_w - from_w) * progress)),
+                    move |list, progress| {
+                        let width = from_w + (width_target - from_w) * progress;
+                        *width_state.borrow_mut() = width;
+                        list.w(px(width))
+                    },
                 )
                 .into_any_element()
         };
@@ -5171,9 +5186,8 @@ impl ConversationSurface {
                     let mut changed = false;
                     if surface.navigator_expanded != *hovered {
                         surface.navigator_expanded = *hovered;
-                        surface.navigator_width_generation = surface
-                            .navigator_width_generation
-                            .wrapping_add(1);
+                        surface.navigator_width_generation =
+                            surface.navigator_width_generation.wrapping_add(1);
                         changed = true;
                     }
                     // The pill belongs to the expanded area: leaving the rail
