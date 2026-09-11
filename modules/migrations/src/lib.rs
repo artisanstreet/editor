@@ -25,7 +25,7 @@ mod m20260910_000012_message_steer_target;
 mod m20260910_000013_queue_message_config_snapshot;
 
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::sea_orm::DatabaseConnection;
+use sea_orm_migration::sea_orm::{DatabaseConnection, TransactionTrait};
 use thiserror::Error;
 
 /// Ordered migration set for the native database.
@@ -62,6 +62,18 @@ pub struct MigrationError {
 
 /// Applies every pending native migration in order.
 ///
+/// The whole set runs inside ONE owned transaction on ONE pooled
+/// connection. SeaORM's migrator does not wrap SQLite migrations itself,
+/// and the observed failure reproduces across pooled connections within
+/// one open: drop/create DDL (notably migration 000009's shape triggers)
+/// interleaves and fails with already-exists conflicts. One connection
+/// plus one atomic migration set removes that interleaving surface, and
+/// a failed set is explicitly rolled back so a retry never meets
+/// half-applied DDL without its tracking records. No serialization
+/// guarantee beyond that is claimed: a racing opener can still observe a
+/// read-to-write BUSY failure, which surfaces typed like any other
+/// migration error.
+///
 /// Calling this function after the schema is current is a no-op. Forge calls
 /// it during startup after opening its sole production database handle.
 ///
@@ -69,7 +81,16 @@ pub struct MigrationError {
 ///
 /// Returns [`MigrationError`] with the original `SeaORM` migration failure.
 pub async fn migrate_to_current(database: &DatabaseConnection) -> Result<(), MigrationError> {
-    Migrator::up(database, None)
+    let transaction = database
+        .begin()
+        .await
+        .map_err(|source| MigrationError { source })?;
+    if let Err(source) = Migrator::up(&transaction, None).await {
+        let _ = transaction.rollback().await;
+        return Err(MigrationError { source });
+    }
+    transaction
+        .commit()
         .await
         .map_err(|source| MigrationError { source })
 }

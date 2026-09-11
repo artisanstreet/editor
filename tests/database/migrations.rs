@@ -1028,3 +1028,73 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
     database.close().await?;
     Ok(())
 }
+
+/// Concurrent opens of one fresh file converge on a single schema: every
+/// caller observes all thirteen migrations, exactly one copy of each
+/// shape trigger, and live V2 guards. Regression coverage for parallel
+/// startup failures (`trigger ... already exists` from interleaved
+/// drop/create DDL across pooled connections within one open): the
+/// wrapper migrates inside one owned transaction on one connection, so
+/// the racy interleaving surface is gone and every caller lands on the
+/// same committed schema.
+#[tokio::test]
+async fn concurrent_same_file_migrations_converge_on_single_schema(
+) -> Result<(), Box<dyn Error>> {
+    let temp = TempDatabase::new("concurrent-migrate")?;
+    let path = temp.database().to_owned();
+    let mut handles = Vec::with_capacity(8);
+    for _ in 0..8 {
+        let path = path.clone();
+        handles.push(tokio::spawn(async move {
+            let database = connect(SqliteConfig::file(&path).sqlx_logging(false))
+                .await
+                .map_err(|error| error.to_string())?;
+            migrate_to_current(&database)
+                .await
+                .map_err(|error| error.to_string())?;
+            database
+                .close()
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        }));
+    }
+    for handle in handles {
+        handle.await.map_err(|error| error.to_string())??;
+    }
+
+    let database = connect(SqliteConfig::file(temp.database()).sqlx_logging(false)).await?;
+    migrate_to_current(&database).await?;
+    assert_eq!(
+        scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
+        13,
+        "concurrent migration must record no duplicate versions"
+    );
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name IN \
+             ('ck_threads_engine_run_config_shape_insert', \
+              'ck_threads_engine_run_config_shape_update', \
+              'ck_assistant_runs_engine_run_config_shape_insert')",
+        )
+        .await?,
+        3,
+        "exactly one copy of each shape trigger must survive the race"
+    );
+    let guard_sql: String = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' \
+             AND name = 'ck_threads_engine_run_config_shape_insert'",
+        ))
+        .await?
+        .ok_or_else(|| std::io::Error::other("shape trigger must exist after migration"))?
+        .try_get_by_index(0)?;
+    assert!(
+        guard_sql.contains("IN (1, 2)"),
+        "surviving guard must be the widened version"
+    );
+    database.close().await?;
+    Ok(())
+}
