@@ -110,6 +110,7 @@ rust_library(
         "//tests/backend:lifecycle_listener.rs",
         "//tests/backend:native_run_dispatch.rs",
         "//tests/backend:steer_drive.rs",
+        "//tests/backend:visible_stream_delivery.rs",
         "//tests/backend:composer_state_handler.rs",
     ],
     crate_name = "artisan_backend",
