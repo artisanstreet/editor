@@ -24,25 +24,24 @@ use artisan_database::{
     AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
     CreateThreadInput, DispatchLeaseOwner, ProviderBindingBytes, QueueFirstMessageInput,
     Repository, RunBatchScope, RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput,
-    SqliteConfig, ThreadEngineSettings, connect,
+    SqliteConfig, connect,
 };
 use artisan_domain::{
     ApprovalMode, ByteLimit, CodexModelContextWindow, CodexReasoningEffort, CodexSelection,
-    CodexServiceTier, Command, ConversationCursor, ConversationItem, ConversationLifecycle,
-    ConversationPatch, CountLimit, DirectoryId, DisplayName, EngineAgentId,
-    EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
+    CodexServiceTier, Command, ConversationCursor, ConversationItem, ConversationPatch,
+    ConversationRequest, ConversationSubscribe, CountLimit, DirectoryId, DisplayName,
+    EngineAgentId, EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
     EngineProfileId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody, MessageId,
-    NetworkAccess, Observation, ObservationId, ObservationSequence, PermissionId, ProjectId,
-    QueueMessage, QueueMessagePayload, RequestId, RootPath, RunId, SteerTarget, ThreadId,
-    ThreadTitle, ToolAction, ToolObservation, TurnId, UnixMillis, WebSearchAccess,
+    NetworkAccess, Observation, ObservationId, ObservationSequence, PatchId, PermissionId,
+    ProjectId, QueueMessage, QueueMessagePayload, RequestId, RootPath, RunId, SteerTarget,
+    ThreadId, ThreadTitle, ToolAction, ToolObservation, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_native_engine::{NativeCodexAuthority, NativeOpenCode2Authority};
 use artisan_protocol::{
-    APPLICATION_PROTOCOL_VERSION, ClientRequest, ConversationRequest, ConversationSubscribe,
-    ConversationSubscriptionStarted, FrameId, Hello, HelloCredential, LocalCapability,
-    ProtocolVersion, ResponsePayload, VersionOffer, WireEnvelope, WireEnvelopeBody,
+    APPLICATION_PROTOCOL_VERSION, ClientRequest, FrameId, Hello, HelloCredential,
+    LocalCapability, ProtocolVersion, ResponsePayload, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
     CancelHandle, DeadlineError, OperationKind, PinnedIdentity, LOOPBACK_SERVER_NAME,
@@ -133,8 +132,8 @@ fn stream_client_config(pki: &StreamPki) -> ClientConfig {
         .expect("client configuration")
 }
 
-fn stream_listener_limits() -> artisan_backend::ListenerLimits {
-    artisan_backend::ListenerLimits {
+fn stream_listener_limits() -> crate::ListenerLimits {
+    crate::ListenerLimits {
         admission: Duration::from_secs(2),
         handshake: Duration::from_secs(2),
         next_request: Duration::from_secs(20),
@@ -407,8 +406,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
                     subscribed.body,
                     WireEnvelopeBody::Response(_)
                 ),
-                "subscribe must answer, got {:?}",
-                subscribed.body
+                "subscribe must answer with a response",
             );
             // Barrier: the subscribe response is written before activation
             // finishes, so a second round trip is required. The driver
@@ -438,8 +436,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
                     barriered.body,
                     WireEnvelopeBody::Response(_)
                 ),
-                "barrier must answer, got {:?}",
-                barriered.body
+                "barrier must answer with a response",
             );
             subscribed_tx.send(()).expect("driver waits for subscribe");
             // The production launch below is the first publication: the
@@ -456,7 +453,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             .expect("admission frame settles")
             .expect("admission frame decodes");
             let WireEnvelopeBody::PatchBatch(batch) = admission.body else {
-                panic!("launch must deliver a patch batch, got {:?}", admission.body);
+                panic!("launch must deliver a patch batch");
             };
             assert_eq!(batch.thread_id(), &thread_id);
             let mut saw_user = false;
@@ -754,8 +751,7 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                     subscribed.body,
                     WireEnvelopeBody::Response(_)
                 ),
-                "subscribe must answer, got {:?}",
-                subscribed.body
+                "subscribe must answer with a response",
             );
 
             // The turn must be live before the send names it: a steer into
@@ -816,14 +812,11 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                                 let artisan_domain::Event::EngineObservation(observation) =
                                     event.event
                                 else {
-                                    panic!(
-                                        "expected an engine observation event, got {:?}",
-                                        event.event
-                                    );
+                                    panic!("expected an engine observation event");
                                 };
                                 StreamFrame::ObservationEvent(observation)
                             }
-                            other => panic!("unexpected delivery frame: {other:?}"),
+                            _ => panic!("unexpected delivery frame"),
                         };
                         if frame_tx.send(frame).is_err() {
                             return;
