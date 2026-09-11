@@ -44,8 +44,8 @@ use artisan_ui::theme::{
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, Context, Div, ElementId, Entity, Filter,
-    FocusHandle, FontWeight, IntoElement, Modifiers, Render, ScrollAnchor, ScrollHandle,
-    ScrollWheelEvent, SharedString, Stateful, Window, canvas, deferred, div, point,
+    FocusHandle, FontWeight, IntoElement, Modifiers, MouseMoveEvent, Render, ScrollAnchor,
+    ScrollHandle, ScrollWheelEvent, SharedString, Stateful, Window, canvas, deferred, div, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -77,6 +77,10 @@ use crate::engine_approve_ui::{
 };
 use crate::conversation_turn_footer_policy::{COPY_RESPONSE_LABEL, TURN_ACTIONS_LABEL};
 use crate::engine_observation_state::EngineObservationState;
+use crate::native_composer_material::{
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
+};
 use crate::native_model_selector::{
     HoverRect, PickerScrollState, SlidingHoverState,
 };
@@ -813,6 +817,10 @@ pub struct ConversationSurface {
     /// Window-space bounds like the picker's surface bounds, so row origins
     /// subtract to list-relative pill rects with plain pixel arithmetic.
     navigator_hover_surface: Rc<RefCell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// Focused navigator row identity; selecting the pill only on arrival
+    /// keeps a later trigger-zone clear from being reselected every render,
+    /// even while the row retains keyboard focus.
+    navigator_focused_key: Option<String>,
     /// Width-motion generation, bumped only when rail hover flips expansion.
     ///
     /// The open-keyed width clock replays on this generation, never on
@@ -1240,6 +1248,7 @@ impl ConversationSurface {
             navigator_scroll: ScrollHandle::new(),
             navigator_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             navigator_hover_surface: Rc::new(RefCell::new(None)),
+            navigator_focused_key: None,
             navigator_width_generation: 0,
             navigator_width_px: Rc::new(RefCell::new(40.0)),
             navigator_width_from: 40.0,
@@ -4816,18 +4825,10 @@ impl ConversationSurface {
     /// paints the retained flight behind the rows and settles interrupted
     /// flights from the currently displayed rectangle, exactly like the
     /// model picker surface. Reduced motion jumps to the target.
-    fn render_navigator_hover_pill(
-        &self,
-        theme: &ArtisanTheme,
-        reduce_motion: bool,
-    ) -> AnyElement {
+    fn render_navigator_hover_pill(&self, theme: &ArtisanTheme, reduce_motion: bool) -> AnyElement {
         let (mut rect, visible, transition) = {
             let hover = self.navigator_hover.borrow();
-            (
-                hover.visual_rect(),
-                hover.visible(),
-                hover.transition(),
-            )
+            (hover.visual_rect(), hover.visible(), hover.transition())
         };
         if reduce_motion {
             if let Some(transition) = transition {
@@ -4928,6 +4929,36 @@ impl ConversationSurface {
                 .is_some_and(|handle| handle.is_focused(window))
         });
         let expanded = self.navigator_expanded || focus_expanded;
+        // --inspector-width: clamp(16rem, 25vw, 350px) (theme.css:176): the
+        // expanded panel matches the inspector facing it across the
+        // transcript, capped to the card actually available.
+        let card_width = f64::from(self.scroll_handle.bounds().size.width);
+        let mut inspector_width =
+            (f64::from(window.bounds().size.width) * 0.25).clamp(256.0, 350.0);
+        if card_width > 0.0 {
+            inspector_width = inspector_width.min(card_width);
+        }
+        let inspector_width = inspector_width as f32;
+        // Keyboard arrival selects the pill exactly like pointer hover
+        // does (`onfocusin`); the guard selects only on arrival so a later
+        // trigger-zone clear survives while the row keeps focus. Render is
+        // already painting, so neither path notifies.
+        if let Some(focused) = markers.iter().find(|marker| {
+            self.navigator_focus
+                .get(&navigator_focus_key(&marker.target))
+                .is_some_and(|handle| handle.is_focused(window))
+        }) {
+            let slug = navigator_target_slug(&focused.target).to_owned();
+            if self.navigator_focused_key.as_deref() != Some(slug.as_str()) {
+                self.navigator_focused_key = Some(slug.clone());
+                self.navigator_hover.borrow_mut().set_active(slug);
+            }
+        } else {
+            self.navigator_focused_key = None;
+            if !expanded && self.navigator_hover.borrow().visible() {
+                self.navigator_hover.borrow_mut().hide();
+            }
+        }
         // The lit marker is the turn the reader is at, tracked from painted
         // geometry against the reference 96 px threshold — never the tail.
         let navigator_surface = entity.downgrade();
@@ -4976,49 +5007,54 @@ impl ConversationSurface {
             let active = navigator_active.as_deref() == Some(slug);
             let click_surface = navigator_surface.clone();
             let click_target = marker.target.clone();
-            let key_surface = navigator_surface.clone();
-            let key_target = marker.target.clone();
-            let hover_id = slug.to_owned();
-            let hover_state = Rc::clone(&self.navigator_hover);
             let probe_hover = Rc::clone(&self.navigator_hover);
             let probe_surface = Rc::clone(&self.navigator_hover_surface);
             let probe_id = slug.to_owned();
+            let move_hover = Rc::clone(&self.navigator_hover);
+            let move_surface = Rc::clone(&self.navigator_hover_surface);
+            let move_id = slug.to_owned();
             let focus_ring_color = theme.interaction.focus_ring_color.to_paint();
             let focus_ring_width = theme.interaction.focus_ring_width;
-            let mut label = div()
-                .min_w_0()
-                .flex_1()
-                .truncate()
-                .text_size(theme.typography.control_text)
-                .text_color(theme.colors.foreground.to_paint())
-                .debug_selector({
-                    let selector = label_selector.clone();
-                    move || selector.clone()
-                })
-                .child(marker.label.clone());
-            if active {
-                label = label.font_weight(FontWeight::MEDIUM);
-            }
-            if !expanded {
-                label = label.hidden();
-            }
-            let mut tick = div()
-                .h(px(1.0))
-                .w(px(if active { 24.0 } else { 16.0 }))
-                .rounded_full()
-                .debug_selector({
-                    let selector = tick_selector.clone();
-                    move || selector.clone()
-                })
-                .bg(if active {
-                    theme.colors.foreground.to_paint()
-                } else {
-                    theme.colors.muted_foreground.with_alpha(0.5).to_paint()
-                });
+            // Labels show expanded, ticks at rest: the spans swap while the
+            // row itself never remounts, so pointer and keyboard activation
+            // keep one stable target.
+            let mut row_content_label = None;
             if expanded {
-                tick = tick.hidden();
+                let mut label = div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(theme.typography.control_text)
+                    .text_color(theme.colors.foreground.to_paint())
+                    .debug_selector({
+                        let selector = label_selector.clone();
+                        move || selector.clone()
+                    })
+                    .child(marker.label.clone());
+                if active {
+                    label = label.font_weight(FontWeight::MEDIUM);
+                }
+                row_content_label = Some(label);
             }
-            let row = div()
+            let mut row_content_tick = None;
+            if !expanded {
+                row_content_tick = Some(
+                    div()
+                        .h(px(1.0))
+                        .w(px(if active { 24.0 } else { 16.0 }))
+                        .rounded_full()
+                        .debug_selector({
+                            let selector = tick_selector.clone();
+                            move || selector.clone()
+                        })
+                        .bg(if active {
+                            theme.colors.foreground.to_paint()
+                        } else {
+                            theme.colors.muted_foreground.with_alpha(0.5).to_paint()
+                        }),
+                );
+            }
+            let mut row = div()
                 .id(control_selector.clone())
                 .relative()
                 .track_focus(&handle)
@@ -5042,65 +5078,75 @@ impl ConversationSurface {
                         inset: false,
                     }])
                 })
-                .on_hover(move |hovered: &bool, window, _cx| {
-                    if *hovered {
-                        hover_state.borrow_mut().set_active(hover_id.clone());
-                        window.refresh();
+                // Trigger zone: the rightmost 40 px strip reveals the card,
+                // so the pill belongs to the label area — a pointer over the
+                // strip clears it instead of highlighting a tick row of its
+                // own. Keyboard focus selects through render instead.
+                .on_mouse_move(move |event: &MouseMoveEvent, window, _cx| {
+                    let over_strip = move_surface.borrow().as_ref().is_some_and(|surface| {
+                        f64::from(event.position.x) >= f64::from(surface.right()) - 40.0
+                    });
+                    if over_strip {
+                        move_hover.borrow_mut().hide();
+                    } else {
+                        move_hover.borrow_mut().set_active(move_id.clone());
                     }
+                    window.refresh();
                 })
+                // Pointer and keyboard activation share one path: the button
+                // role synthesizes click from Enter/Space, so no separate key
+                // handler may double the intent.
                 .on_click(move |_, _, app| {
                     let _ = click_surface.update(app, |surface, cx| {
                         surface.request_scroll(click_target.clone(), cx);
                     });
-                })
-                .on_key_down(move |event, _, app| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        let _ = key_surface.update(app, |surface, cx| {
-                            surface.request_scroll(key_target.clone(), cx);
-                        });
-                    }
-                })
-                .child(label)
-                .child(tick)
-                .child(
-                    canvas(
-                        |_, _, _| {},
-                        move |bounds, (), window, cx| {
-                            let Some(surface) = *probe_surface.borrow() else {
-                                return;
-                            };
-                            let rect = HoverRect {
-                                left: f32::from(bounds.left() - surface.left()),
-                                top: f32::from(bounds.top() - surface.top()),
-                                width: f32::from(bounds.size.width),
-                                height: f32::from(bounds.size.height),
-                            };
-                            if probe_hover.borrow_mut().measure(&probe_id, rect) {
-                                window.defer(cx, |window, _| window.refresh());
-                            }
-                        },
-                    )
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full(),
-                );
+                });
+            if let Some(label) = row_content_label {
+                row = row.child(label);
+            }
+            if let Some(tick) = row_content_tick {
+                row = row.child(tick);
+            }
+            row = row.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, cx| {
+                        let Some(surface) = *probe_surface.borrow() else {
+                            return;
+                        };
+                        let rect = HoverRect {
+                            left: f32::from(bounds.left() - surface.left()),
+                            top: f32::from(bounds.top() - surface.top()),
+                            width: f32::from(bounds.size.width),
+                            height: f32::from(bounds.size.height),
+                        };
+                        if probe_hover.borrow_mut().measure(&probe_id, rect) {
+                            window.defer(cx, |window, _| window.refresh());
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
             list = list.child(row);
         }
         // Rail metrics converge through the same window-local discipline as
         // end space: measured per window, notified only on change.
         let metrics_state = navigator_metrics.clone();
-        list = list.on_children_prepainted(move |children_bounds, window, app| {
+        let metrics_hover_surface = Rc::clone(&self.navigator_hover_surface);
+        list = list.on_children_prepainted(move |_children_bounds, _window, app| {
             let _ = navigator_surface.update(app, |surface, cx| {
                 let viewport = f64::from(surface.scroll_handle.bounds().size.height);
-                let height = match (children_bounds.first(), children_bounds.last()) {
-                    (Some(first), Some(last)) => {
-                        let bottom =
-                            f64::from(last.origin.y) + f64::from(last.size.height) + 16.0;
-                        (bottom - f64::from(first.origin.y)).max(0.0)
-                    }
-                    _ => return,
+                // Center the actually painted list box, read from its probe:
+                // row spans miscount once absolute overlays (pill, probe,
+                // glass) join the children.
+                let guard = metrics_hover_surface.borrow();
+                let Some(list_bounds) = guard.as_ref() else {
+                    return;
                 };
+                let height = f64::from(list_bounds.size.height);
                 // The capped list is what actually paints: clamp the measured
                 // height to the 70 % cap before centering, or a long list
                 // pins its top at zero instead of centering the cap.
@@ -5153,7 +5199,7 @@ impl ConversationSurface {
         // so an interrupted flight never jumps to a fixed endpoint. Open
         // runs the reference 250 ms, close 150 ms, both on the dropdown
         // curve.
-        let width_target = if expanded { 288.0 } else { 40.0 };
+        let width_target = if expanded { inspector_width } else { 40.0 };
         let list: AnyElement = if self.navigator_width_generation == 0 || cx.reduce_motion() {
             *self.navigator_width_px.borrow_mut() = width_target;
             list.w(px(width_target)).into_any_element()
@@ -5182,7 +5228,7 @@ impl ConversationSurface {
         // the rail at `top-1/2 right-2` with a 70 % height cap. Centering
         // has no translate primitive here, so the top offset converges from
         // the measured list height in window-local state.
-        let rail = div()
+        let mut rail = div()
             .id(SharedString::from(TURN_NAVIGATOR_SELECTOR))
             .absolute()
             .right(px(8.0))
@@ -5215,8 +5261,22 @@ impl ConversationSurface {
                         cx.notify();
                     }
                 });
-            })
-            .child(list);
+            });
+        // Expanded glass card behind the labels, composed from the shipped
+        // picker/composer material primitives: backdrop blur, foreground
+        // base, material and highlight layers, and the card shadow. The
+        // collapsed tick strip stays unpainted and click-through.
+        if expanded {
+            let radius = RadiusTokens::value(RadiusStep::Xl);
+            rail = rail
+                .rounded(radius)
+                .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+                .bg(glass_foreground_base(*theme))
+                .shadow(glass_card_shadows())
+                .child(glass_material_layer(GlassStrength::Strong, radius))
+                .child(glass_highlight_layer(GlassStrength::Strong, radius));
+        }
+        rail = rail.child(list);
         Some(rail.into_any_element())
     }
 }
@@ -6368,6 +6428,8 @@ mod tests {
     }
 
     fn tall_navigator_scene() -> ConversationScene {
+        // Turn ordinals (0, 1) share the global ordinal namespace with
+        // items, so item ordinals continue after them.
         let long_body = (0..40)
             .map(|line| format!("Navigator line {line} fills the viewport for tracking."))
             .collect::<Vec<_>>()
@@ -6381,7 +6443,7 @@ mod tests {
                 SceneItem::new(
                     scene_id("nav-first"),
                     turn_id("turn_a"),
-                    1,
+                    2,
                     SceneItemKind::UserMessage {
                         body: long_body.clone(),
                     },
@@ -6391,7 +6453,7 @@ mod tests {
                 SceneItem::new(
                     scene_id("nav-first-reply"),
                     turn_id("turn_a"),
-                    2,
+                    3,
                     SceneItemKind::AssistantMessage {
                         body: "first reply".to_owned(),
                         phase: AssistantPhase::Final,
@@ -6402,7 +6464,7 @@ mod tests {
                 SceneItem::new(
                     scene_id("nav-second"),
                     turn_id("turn_b"),
-                    3,
+                    4,
                     SceneItemKind::UserMessage { body: long_body },
                     None,
                 )
@@ -6410,7 +6472,7 @@ mod tests {
                 SceneItem::new(
                     scene_id("nav-second-reply"),
                     turn_id("turn_b"),
-                    4,
+                    5,
                     SceneItemKind::AssistantMessage {
                         body: "second reply".to_owned(),
                         phase: AssistantPhase::Final,
@@ -6429,14 +6491,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn reasoning_only_group_paints_no_disclosure_trigger(cx: &mut TestAppContext) {
+    fn reasoning_only_group_has_no_working_disclosure(cx: &mut TestAppContext) {
         // Disclosure is registered but the group holds no visible trace
-        // content: reasoning is stripped from visible details, so the gate —
-        // not the missing registration — must hide the control.
-        const GROUP: &str = "artisan-conversation-surface-turn-turn_a-block-work-thinking-only";
+        // content: reasoning is stripped from visible details. The disabled
+        // wrapper keeps stable ancestry (its selector still paints), but no
+        // chevron control exists and neither click nor Enter may emit a
+        // toggle — this is the no-empty-collapse requirement, evidenced by
+        // behavior rather than selector absence.
         const TRIGGER: &str =
             "artisan-conversation-surface-turn-turn_a-block-work-thinking-only-disclosure-trigger";
-        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
             ConversationSurface::new(
                 scene(vec![item(
                     "thinking-only",
@@ -6452,14 +6516,24 @@ mod tests {
         });
         cx.simulate_resize(size(px(720.0), px(240.0)));
         settle(cx);
-        assert!(
-            cx.debug_bounds(GROUP).is_some(),
-            "the group section still paints"
-        );
-        assert!(
-            cx.debug_bounds(TRIGGER).is_none(),
-            "no disclosure control without visible details"
-        );
+        let trigger = cx
+            .debug_bounds(TRIGGER)
+            .expect("disabled wrapper keeps stable ancestry");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let toggles: Vec<ConversationSurfaceAction> =
+                surface.update(app, |surface, _| surface.take_actions());
+            assert!(
+                toggles.iter().all(|action| !matches!(
+                    action,
+                    ConversationSurfaceAction::DisclosureToggleRequested { .. }
+                )),
+                "an empty group must never emit a disclosure toggle, got {toggles:?}"
+            );
+        });
     }
 
     #[gpui::test]
@@ -6492,6 +6566,10 @@ mod tests {
 
     #[gpui::test]
     fn transcript_wheel_queues_bounded_target_then_settles(cx: &mut TestAppContext) {
+        // Manual frame pump, stated honestly: the test harness never runs
+        // `on_next_frame` callbacks on dirty draws, so parked frames alone
+        // cannot advance the smoothing clock. Each pumped frame calls the
+        // same `advance_transcript_scroll` the production callback runs.
         let body = (0..40)
             .map(|line| format!("Wheel line {line} makes the transcript scrollable."))
             .collect::<Vec<_>>()
@@ -6523,26 +6601,52 @@ mod tests {
             touch_phase: TouchPhase::default(),
         });
         // No synchronous jump: smoothing queues a bounded target with
-        // frames still pending, then settles onto it.
+        // frames still pending.
         assert_eq!(offset(&surface, cx), before);
-        cx.update(|_, app| {
+        let target = cx.update(|_, app| {
+            let surface_ref = surface.read(app);
             assert!(
-                surface.read(app).transcript_scroll.active(),
+                surface_ref.transcript_scroll.active(),
                 "a coarse wheel tick must leave an interpolation target outstanding"
             );
+            surface_ref.transcript_scroll.target()
         });
-        cx.run_until_parked();
+        // Pump bounded frames with draws between steps: the first frame
+        // lands strictly between start and target, and the run settles
+        // exactly onto the queued target before retiring it.
+        let pump_frame = |cx: &mut VisualTestContext| {
+            cx.update(|window, app| {
+                surface.update(app, |surface, surface_cx| {
+                    surface.advance_transcript_scroll(window, surface_cx);
+                });
+            });
+            cx.run_until_parked();
+        };
+        pump_frame(cx);
+        let mid = offset(&surface, cx);
+        assert!(
+            mid != before && f32::from(mid.y) != target,
+            "the first pumped frame must sit between start and target"
+        );
+        for _ in 0..64 {
+            let settled_now = cx.update(|_, app| !surface.read(app).transcript_scroll.active());
+            if settled_now {
+                break;
+            }
+            pump_frame(cx);
+        }
         let settled = offset(&surface, cx);
-        assert_ne!(settled, before, "wheel smoothing must move the viewport");
+        assert_eq!(
+            f32::from(settled.y),
+            target,
+            "smoothing must settle exactly onto the queued target"
+        );
         cx.update(|_, app| {
             assert!(
                 !surface.read(app).transcript_scroll.active(),
                 "settling must retire the interpolation target"
             );
         });
-        // Bounded and converged: a further parked pass changes nothing.
-        cx.run_until_parked();
-        assert_eq!(offset(&surface, cx), settled);
     }
 
     #[gpui::test]
@@ -6632,7 +6736,7 @@ mod tests {
                 SceneItem::new(
                     scene_id(&format!("nq{index:02}")),
                     turn.turn_id.clone(),
-                    (index + 1) as u64,
+                    (turns.len() + index + 1) as u64,
                     SceneItemKind::UserMessage {
                         body: format!("question {index}"),
                     },
