@@ -40,8 +40,9 @@
 //! (valid or not) is appended with its id and params to
 //! `steer-requests.jsonl` in the working directory, flushed per line, so a
 //! test can count exactly one provider write. `steer_burst` answers a valid
-//! steer with 64 valid `item/agentMessage/delta` frames (same thread, turn,
-//! and item; cumulative distinct content) BEFORE the correlated success
+//! steer with one bounded reasoning frame plus 64 valid
+//! `item/agentMessage/delta` frames (same thread, turn, and item;
+//! cumulative distinct content) BEFORE the correlated success
 //! result, then stays live until `turn/interrupt` (which answers its ack
 //! plus a cancelled terminal) or EOF. `steer_reject` answers every steer
 //! with a correlated JSON-RPC error and never emits a terminal, a success,
@@ -283,8 +284,20 @@ fn main() {
                     );
                     continue;
                 }
-                // `steer_burst` valid steer: the full burst precedes the
-                // correlated success, synchronously — no sleep fakes the ack.
+                // `steer_burst` valid steer: one bounded reasoning frame
+                // precedes the full burst, synchronously — no sleep fakes
+                // the ack. The thinking trace streams through the
+                // production activity path while the turn is held.
+                emit(
+                    &mut output,
+                    &serde_json::json!({"method": "item/reasoning/summaryTextDelta", "params": {
+                        "threadId": THREAD_ID,
+                        "turnId": TURN_ID,
+                        "itemId": "item-steer-rs1",
+                        "summaryIndex": 1,
+                        "delta": "thinking trace ",
+                    }}),
+                );
                 for index in 0..STEER_BURST_COUNT {
                     emit(
                         &mut output,

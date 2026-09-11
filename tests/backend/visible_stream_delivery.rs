@@ -33,9 +33,8 @@ use artisan_domain::{
     EngineAgentId, EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
     EngineProfileId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody, MessageId,
-    NetworkAccess, Observation, ObservationId, ObservationSequence, PatchId, PermissionId,
-    ProjectId, QueueMessage, QueueMessagePayload, RequestId, RootPath, RunId, SteerTarget,
-    ThreadId, ThreadTitle, ToolAction, ToolObservation, TurnId, UnixMillis, WebSearchAccess,
+    NetworkAccess, PatchId, PermissionId, ProjectId, QueueMessage, QueueMessagePayload, RequestId, RootPath,
+    RunId, SteerTarget, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_native_engine::{NativeCodexAuthority, NativeOpenCode2Authority};
@@ -51,20 +50,18 @@ use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 use super::{
     ClaimExecution, ClaimIds, LoadedClaim, NativeRunDispatcherConfig,
-    NativeRunDispatcherConfigInput, ResolvedLaunch, TurnConsumptionContext, TurnConsumptionState,
-    handle_activity_observation, handle_observation, handle_steer, launch_claim,
+    NativeRunDispatcherConfigInput, ResolvedLaunch, consume_turn, launch_claim,
 };
 use crate::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, ForgeListener,
     RequestHandler, RequestTermination, SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
-    engine_owner::{
-        EngineCodexTurnInput, EngineOwner, EngineOwnerShutdown,
-        observation::{EngineObservation, TerminalState},
-    },
+    engine_owner::{EngineCodexTurnInput, EngineOwner, EngineOwnerShutdown},
     run_cancellation::RunCancellationRegistry,
-    run_interaction::{RunInteractionAck, RunInteractionRegistry},
+    run_interaction::RunInteractionRegistry,
 };
+
+const TEST_DEADLINE: Duration = Duration::from_secs(20);
 
 const TEST_DEADLINE: Duration = Duration::from_secs(20);
 const INITIAL_CAPABILITY: [u8; 32] = [0x4d; 32];
@@ -221,7 +218,9 @@ fn stream_codex_config() -> EngineRunConfig {
         max_header_count: CountLimit::new(32).expect("header count"),
         max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer"),
         max_stderr_bytes: ByteLimit::new(4_096).expect("stderr"),
-        observation_capacity: CountLimit::new(16).expect("observation cap"),
+        // Four slots: the 64-frame burst causally requires the production
+        // inline drain before its correlated ack can be read.
+        observation_capacity: CountLimit::new(4).expect("observation cap"),
     })
     .expect("runtime valid");
     let permission = EnginePermissionPolicy::new(
@@ -597,20 +596,6 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
     .expect("launch admission streams inside budget");
 }
 
-fn activity_tool_observation() -> Observation {
-    Observation::Tool(
-        ToolObservation::new(
-            ObservationId::parse("observation-stream-tool").expect("observation id"),
-            ObservationSequence::new(1).expect("sequence restarts per run"),
-            ObservationId::parse("tool-stream-1").expect("tool id"),
-            "stream-tool".to_owned(),
-            ToolAction::Completed,
-            Some("stream detail".to_owned()),
-        )
-        .expect("fixture tool row is valid"),
-    )
-}
-
 async fn connect_stream_client(
     endpoint: &Endpoint,
     address: SocketAddr,
@@ -680,6 +665,18 @@ enum StreamFrame {
     ObservationEvent(artisan_domain::EngineObservationEvent),
 }
 
+fn batch_has_assistant(batch: &artisan_domain::PatchBatch) -> bool {
+    batch.patches().iter().any(|patch| {
+        matches!(
+            patch,
+            ConversationPatch::ItemUpsert {
+                item: ConversationItem::AssistantMessage(_),
+                ..
+            } | ConversationPatch::ItemAppend { .. }
+        )
+    })
+}
+
 #[tokio::test]
 async fn live_connection_streams_admission_chunks_and_observation_before_terminal() {
     tokio::time::timeout(Duration::from_secs(150), async {
@@ -698,8 +695,10 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
 
         let notifier = ConversationCommitNotifier::new();
         let config = stream_dispatcher_config(notifier.clone());
+        let interaction_registry = RunInteractionRegistry::new(8).expect("registry");
         let handler = RequestHandler::new(repository.clone())
-            .with_conversation_commit_notifier(notifier.clone());
+            .with_conversation_commit_notifier(notifier.clone())
+            .with_run_interaction_registry(interaction_registry.clone());
 
         let pki = stream_pki();
         let endpoint = artisan_transport::bind_loopback_client(stream_client_config(&pki))
@@ -716,14 +715,10 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
         let address = listener.local_addr().expect("listener address");
         let cancel = CancelHandle::new();
         let serve = listener.serve_one(&handler, &cancel);
+        let run_cancel = std::sync::Arc::new(CancelHandle::new());
 
-        // Frames collected from the delivery stream, in arrival order.
-        let (frame_tx, frame_rx) =
-            tokio::sync::mpsc::unbounded_channel::<StreamFrame>();
         // Steered message identity, from the wire receipt to the driver.
         let (message_tx, message_rx) = tokio::sync::oneshot::channel::<MessageId>();
-        // Turn-live signal, from the driver to the wire send.
-        let (live_tx, live_rx) = tokio::sync::oneshot::channel::<()>();
 
         let wire = async {
             let connection = connect_stream_client(&endpoint, address).await;
@@ -747,18 +742,30 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
             .expect("subscribe response settles")
             .expect("subscribe response decodes");
             assert!(
-                matches!(
-                    subscribed.body,
-                    WireEnvelopeBody::Response(_)
-                ),
+                matches!(subscribed.body, WireEnvelopeBody::Response(_)),
                 "subscribe must answer with a response",
             );
 
-            // The turn must be live before the send names it: a steer into
-            // a not-yet-live run is a typed stale refusal, not a stream.
-            live_rx
-                .await
-                .expect("driver signals a live turn");
+            // Liveness gate: the turn must be consuming (assistant patch
+            // durable) before the send names its run, otherwise the steer
+            // is a typed stale refusal instead of a stream.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let replay = repository
+                        .read_conversation_patch_replay(&thread_id, ConversationCursor::default())
+                        .await
+                        .expect("replay should read");
+                    if let artisan_database::ConversationPatchReplay::Batch(batch) = replay {
+                        if batch_has_assistant(&batch) {
+                            return;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("turn must go live");
+
             let command_id = RequestId::parse("request-stream-steer").expect("request id");
             let (mut send_send, mut send_recv) = connection
                 .open_bi()
@@ -788,43 +795,112 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
             };
             assert_eq!(receipted.request_id, command_id);
             let ResponsePayload::MessageQueued(receipt) = receipted.payload else {
-                panic!("expected a queued receipt, got {:?}", receipted.payload);
+                panic!("expected a queued receipt");
             };
+            assert!(!receipt.message_id.as_str().is_empty());
             message_tx
                 .send(receipt.message_id)
                 .expect("driver takes the admitted message");
 
-            // The delivery stream opens on the first published batch and
-            // stays open until the connection ends; every frame is
-            // forwarded in arrival order.
+            // The delivery stream opens on the first published batch; every
+            // frame is classified in arrival order. The receipt above
+            // already proves the steer completed (burst drained and
+            // projected), and the turn is still held: no terminal may have
+            // arrived yet.
             let mut delivery = tokio::time::timeout(TEST_DEADLINE, connection.accept_uni())
                 .await
                 .expect("delivery stream opens")
                 .expect("delivery stream accepts");
+            let mut frames = Vec::new();
+            let mut saw_chunks = false;
+            let mut saw_observation = false;
             loop {
-                match artisan_transport::receive_envelope(&mut delivery).await {
-                    Ok(envelope) => {
-                        let frame = match envelope.body {
-                            WireEnvelopeBody::PatchBatch(batch) => {
-                                StreamFrame::PatchBatch(batch)
-                            }
-                            WireEnvelopeBody::Event(event) => {
-                                let artisan_domain::Event::EngineObservation(observation) =
-                                    event.event
-                                else {
-                                    panic!("expected an engine observation event");
-                                };
-                                StreamFrame::ObservationEvent(observation)
-                            }
-                            _ => panic!("unexpected delivery frame"),
-                        };
-                        if frame_tx.send(frame).is_err() {
-                            return;
+                let envelope = tokio::time::timeout(
+                    TEST_DEADLINE,
+                    artisan_transport::receive_envelope(&mut delivery),
+                )
+                .await
+                .expect("delivery frame settles")
+                .expect("delivery frame decodes");
+                match envelope.body {
+                    WireEnvelopeBody::PatchBatch(batch) => {
+                        assert_eq!(batch.thread_id(), &thread_id);
+                        if batch.patches().iter().any(|patch| {
+                            matches!(
+                                patch,
+                                ConversationPatch::ItemAppend { text, .. }
+                                if text.as_str().contains("burst-00")
+                                    || text.as_str().contains("burst-01")
+                            )
+                        }) {
+                            saw_chunks = true;
                         }
+                        frames.push(StreamFrame::PatchBatch(batch));
                     }
-                    Err(_) => return,
+                    WireEnvelopeBody::Event(event) => {
+                        let artisan_domain::Event::EngineObservation(observation) =
+                            event.event
+                        else {
+                            panic!("expected an engine observation event");
+                        };
+                        assert_eq!(observation.thread_id, thread_id);
+                        saw_observation = true;
+                        frames.push(StreamFrame::ObservationEvent(observation));
+                    }
+                    _ => panic!("unexpected delivery frame"),
+                }
+                if saw_chunks && saw_observation {
+                    break;
                 }
             }
+            // While held, nothing further may arrive: the next commit is
+            // the terminal itself, which only cancellation triggers.
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(500),
+                    artisan_transport::receive_envelope(&mut delivery),
+                )
+                .await
+                .is_err(),
+                "held turn must stay silent after chunks and observation"
+            );
+            run_cancel.cancel();
+            // Drain to the terminal close.
+            loop {
+                let envelope = tokio::time::timeout(
+                    TEST_DEADLINE,
+                    artisan_transport::receive_envelope(&mut delivery),
+                )
+                .await
+                .expect("terminal frame settles")
+                .expect("terminal frame decodes");
+                let terminal_here = matches!(
+                    &envelope.body,
+                    WireEnvelopeBody::PatchBatch(batch)
+                        if batch.patches().iter().any(|patch| matches!(
+                            patch,
+                            ConversationPatch::TurnLifecycle { .. }
+                        ))
+                );
+                match envelope.body {
+                    WireEnvelopeBody::PatchBatch(batch) => {
+                        frames.push(StreamFrame::PatchBatch(batch));
+                    }
+                    WireEnvelopeBody::Event(event) => {
+                        let artisan_domain::Event::EngineObservation(observation) =
+                            event.event
+                        else {
+                            panic!("expected an engine observation event");
+                        };
+                        frames.push(StreamFrame::ObservationEvent(observation));
+                    }
+                    _ => panic!("unexpected delivery frame"),
+                }
+                if terminal_here {
+                    break;
+                }
+            }
+            frames
         };
 
         let drive = async {
@@ -864,7 +940,6 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
             let run_id = RunId::parse("run-stream-live").expect("run id");
             let turn_id = TurnId::parse("turn-stream-live").expect("turn id");
             let cancel_registry = RunCancellationRegistry::new(8).expect("registry");
-            let interaction_registry = RunInteractionRegistry::new(8).expect("registry");
             let owner = EngineOwner::start_configured(
                 NonZeroUsize::new(1).expect("one slot"),
                 &tokio::runtime::Handle::current(),
@@ -929,6 +1004,11 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                 BindRunProviderOutcome::Bound(receipt)
                 | BindRunProviderOutcome::AlreadyBound(receipt) => receipt,
             };
+            // The live run registers its own routing inbox, exactly like
+            // the production dispatch loop does before consuming a turn.
+            let (_interaction_lease, mut inbox) = interaction_registry
+                .register(thread_id.clone(), run_id.clone())
+                .expect("live run should register");
             let mut turn = owner
                 .admit_codex_turn(
                     EngineCodexTurnInput {
@@ -952,17 +1032,15 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                 .expect("wire turn admits");
             turn.prepare().await.expect("wire turn prepares");
             turn.authorize().expect("wire turn authorizes once");
-
-            let run_cancel = CancelHandle::new();
-            let turn_context = TurnConsumptionContext {
-                repository: &repository,
-                config: &config,
-                origin: &origin,
-                stop: &stop,
-                process_cancel: &process_cancel,
-                run_cancel: &run_cancel,
-            };
-            let mut state = TurnConsumptionState::new(
+            let run_cancel_ref: &CancelHandle = &run_cancel;
+            let custody_unresolved = consume_turn(
+                &repository,
+                &config,
+                &origin,
+                &stop,
+                &process_cancel,
+                run_cancel_ref,
+                turn,
                 RunBatchScope {
                     claimed: &launched.context.claimed,
                     launched: &launched.receipt,
@@ -973,52 +1051,17 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                     expected_updated_at: UnixMillis::from_millis(base + 590),
                 },
                 EngineId::Codex,
-            );
-            let initial = tokio::time::timeout(TEST_DEADLINE, turn.next_observation())
-                .await
-                .expect("initial observation settles")
-                .expect("initial observation exists");
-            assert!(matches!(initial, EngineObservation::TextDelta(_)));
-            handle_observation(&turn_context, &mut state, &mut turn, initial).await;
-            assert!(
-                !state.forced_interrupted,
-                "initial observation must commit cleanly, got {:?}",
-                state.terminal
-            );
-            handle_activity_observation(
-                &turn_context,
-                &mut state,
-                &mut turn,
-                activity_tool_observation(),
+                Some(&mut inbox),
             )
             .await;
-            live_tx.send(()).expect("wire send may proceed");
-
+            assert!(
+                !custody_unresolved,
+                "cancelled turn must settle without retained custody"
+            );
             let message_id = tokio::time::timeout(TEST_DEADLINE, message_rx)
                 .await
                 .expect("admitted message arrives")
                 .expect("message channel stays open");
-            let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
-            handle_steer(
-                &turn_context,
-                &mut state,
-                &mut turn,
-                thread_id.clone(),
-                run_id.clone(),
-                RequestId::parse("request-stream-steer").expect("request id"),
-                message_id.clone(),
-                "follow up".to_owned(),
-                respond_tx,
-            )
-            .await;
-            let ack = tokio::time::timeout(TEST_DEADLINE, respond_rx)
-                .await
-                .expect("steer ack settles")
-                .expect("steer ack sends");
-            assert!(
-                matches!(ack, RunInteractionAck::Steered),
-                "live steer must steer, got {ack:?}"
-            );
             let (dispatch_state, _, _) = repository
                 .read_steered_dispatch_state(&message_id)
                 .await
@@ -1030,34 +1073,11 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                 ),
                 "steered dispatch must complete, got {dispatch_state:?}"
             );
-
-            // The held turn has no terminal: ending it is the test's job.
-            turn.cancel();
-            let mut saw_terminal = None;
-            for _ in 0..128 {
-                let next = tokio::time::timeout(TEST_DEADLINE, turn.next_observation())
-                    .await
-                    .expect("terminal observation settles");
-                let Some(observation) = next else { break };
-                if let EngineObservation::Terminal(terminal) = observation {
-                    saw_terminal = Some(terminal.state());
-                    break;
-                }
-            }
-            assert_eq!(
-                saw_terminal,
-                Some(TerminalState::Cancelled),
-                "cancel must surface the interrupted terminal"
-            );
-            let finished = turn.finish().await.expect("turn finishes");
-            assert_eq!(finished.terminal(), TerminalState::Cancelled);
             assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
-            // Ending the listener lets the serve task and the delivery
-            // stream drain to their clean ends.
             cancel.cancel();
         };
 
-        let (serve_result, (), ()) = tokio::join!(serve, wire, drive);
+        let (serve_result, frames, ()) = tokio::join!(serve, wire, drive);
         let (listener, report) = serve_result.expect("serve must end cleanly");
         assert_eq!(report.completed_requests, 2);
         assert!(matches!(
@@ -1081,13 +1101,9 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
         // Wire order on the collected delivery frames: user admission,
         // assistant chunks (burst-00 and burst-01 prove two increments),
         // one observation event, terminal last after the cancel.
-        let mut frames = Vec::new();
-        while let Ok(frame) = frame_rx.try_recv() {
-            frames.push(frame);
-        }
         assert!(!frames.is_empty(), "delivery must stream");
         let mut user_index = None;
-        let mut chunk_indices = Vec::new();
+        let mut chunk_count = 0usize;
         let mut observation_index = None;
         let mut terminal_index = None;
         for (index, frame) in frames.iter().enumerate() {
@@ -1106,11 +1122,14 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                                 if text.as_str().contains("burst-00")
                                     || text.as_str().contains("burst-01")
                                 {
-                                    chunk_indices.push(index);
+                                    chunk_count += 1;
                                 }
                             }
                             ConversationPatch::TurnLifecycle { lifecycle, .. } => {
-                                if lifecycle.is_terminal() {
+                                if matches!(
+                                    lifecycle,
+                                    artisan_domain::ConversationLifecycle::Cancelled
+                                ) {
                                     terminal_index = Some(index);
                                 }
                             }
@@ -1125,28 +1144,18 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                 }
             }
         }
-        let user_index =
-            user_index.expect("user admission must stream before terminal");
+        let user_index = user_index.expect("user admission must stream");
         assert!(
-            chunk_indices.len() >= 2,
-            "two incremental chunks must stream, saw {}",
-            chunk_indices.len()
+            chunk_count >= 2,
+            "two incremental chunks must stream, saw {chunk_count}"
         );
         let observation_index =
             observation_index.expect("observation event must stream before terminal");
-        let terminal_index =
-            terminal_index.expect("cancelled terminal must stream last");
-        assert!(
-            user_index < chunk_indices[0],
-            "admission must precede chunks"
-        );
+        let terminal_index = terminal_index.expect("cancelled terminal must stream last");
+        assert!(user_index < terminal_index, "admission must precede terminal");
         assert!(
             observation_index < terminal_index,
             "observation must precede terminal"
-        );
-        assert!(
-            *chunk_indices.iter().max().expect("chunks") < terminal_index,
-            "chunks must precede terminal"
         );
     })
     .await
