@@ -11139,7 +11139,7 @@ mod tests {
                         _ => None,
                     })
                     .expect("painted first reply block")
-            });
+            })
         });
         cx.run_until_parked();
         assert!(
@@ -11270,7 +11270,7 @@ mod tests {
                         _ => None,
                     })
                     .collect::<Vec<_>>()
-            });
+            })
         });
         cx.run_until_parked();
         assert_eq!(terminal_reply, ["Hello world"]);
