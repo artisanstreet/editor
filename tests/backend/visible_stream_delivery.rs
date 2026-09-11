@@ -857,7 +857,14 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                             panic!("expected an engine observation event");
                         };
                         assert_eq!(observation.thread_id, thread_id);
-                        saw_observation = true;
+                        // Only the provider thinking trace counts here, not
+                        // just any engine observation.
+                        if matches!(
+                            observation.observation,
+                            artisan_domain::Observation::ReasoningSummaryDelta(_)
+                        ) {
+                            saw_observation = true;
+                        }
                         frames.push(StreamFrame::ObservationEvent(observation));
                     }
                     _ => panic!("unexpected delivery frame"),
@@ -903,6 +910,10 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                     break;
                 }
             }
+            // End the listener only after the terminal frame is in hand:
+            // serve cleanup finishes the delivery stream, which must not
+            // race the terminal read above.
+            cancel.cancel();
             frames
         };
 
@@ -1077,7 +1088,6 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                 "steered dispatch must complete, got {dispatch_state:?}"
             );
             assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
-            cancel.cancel();
         };
 
         let (serve_result, frames, ()) = tokio::join!(serve, wire, drive);
@@ -1144,8 +1154,12 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                         }
                     }
                 }
-                StreamFrame::ObservationEvent(_) => {
-                    if observation_index.is_none() {
+                StreamFrame::ObservationEvent(observation) => {
+                    if matches!(
+                        observation.observation,
+                        artisan_domain::Observation::ReasoningSummaryDelta(_)
+                    ) && observation_index.is_none()
+                    {
                         observation_index = Some(index);
                     }
                 }
