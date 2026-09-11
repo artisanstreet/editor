@@ -4230,3 +4230,97 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
         2
     );
 }
+
+/// A turn that outlives its original claim window must stay owned and settle.
+///
+/// The production heartbeat is driven for real: a 40 ms claim window is
+/// extended while the turn sleeps for ~4x that, then the dispatch completes at
+/// a wall-clock instant past the original expiry. Without the heartbeat the
+/// completion fence rejects that settlement and the run is reaped as an
+/// unknown outcome, which is exactly the long-tool-call failure this covers.
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_lease_heartbeat_carries_a_turn_past_its_claim_window() {
+    use crate::SystemCommandOrigin;
+    use crate::native_run_dispatch::drive_turn_with_lease_heartbeat;
+
+    let (database, repository, _temp) = temp_repository("lease-heartbeat").await;
+    seed_project_and_thread(&database, &repository, "thread-lease-heartbeat").await;
+    let thread = ThreadId::parse("thread-lease-heartbeat").expect("tid");
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("req-lease-heartbeat").expect("req"),
+            message_id: MessageId::parse("message-lease-heartbeat").expect("mid"),
+            thread_id: thread,
+            body: MessageBody::parse("hello").expect("body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("message should queue");
+
+    let origin = SystemCommandOrigin;
+    let now_ms = origin
+        .acceptance_instant()
+        .expect("wall clock should succeed")
+        .as_millis();
+    let original_expiry_ms = now_ms.saturating_add(40);
+    let owner = artisan_database::DispatchLeaseOwner::new([0x5a; 32]);
+    let claimed = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: artisan_database::DispatchLeaseOwner::new([0x5a; 32]),
+            claimed_at: UnixMillis::from_millis(now_ms.saturating_sub(1_000)),
+            lease_expires_at: UnixMillis::from_millis(original_expiry_ms),
+        })
+        .await
+        .expect("claim should succeed")
+        .expect("queued dispatch should be claimed");
+
+    let turn_finished = drive_turn_with_lease_heartbeat(
+        &repository,
+        &origin,
+        &claimed,
+        Duration::from_millis(40),
+        async {
+            tokio::time::sleep(Duration::from_millis(160)).await;
+            true
+        },
+    )
+    .await;
+    assert!(turn_finished, "the driven turn must run to its own output");
+
+    let leased = entities::message_dispatch::Entity::find_by_id("message-lease-heartbeat")
+        .one(&database)
+        .await
+        .expect("dispatch should query")
+        .expect("dispatch should exist");
+    assert_eq!(leased.state, DispatchState::Leased);
+    assert!(
+        leased.lease_expires_at_ms.expect("renewed lease")
+            > original_expiry_ms,
+        "the heartbeat must move the lease past its original expiry"
+    );
+
+    let settled_at_ms = origin
+        .acceptance_instant()
+        .expect("wall clock should succeed")
+        .as_millis();
+    assert!(
+        settled_at_ms > original_expiry_ms,
+        "the turn must outlive the original lease for this regression to mean anything"
+    );
+    repository
+        .complete_message_dispatch(artisan_database::CompleteMessageDispatch {
+            message_id: MessageId::parse("message-lease-heartbeat").expect("mid"),
+            owner,
+            operated_at: UnixMillis::from_millis(settled_at_ms),
+        })
+        .await
+        .expect("settlement after the original expiry must pass under the renewed lease");
+
+    let settled = entities::message_dispatch::Entity::find_by_id("message-lease-heartbeat")
+        .one(&database)
+        .await
+        .expect("dispatch should query")
+        .expect("dispatch should exist");
+    assert_eq!(settled.state, DispatchState::Completed);
+    assert!(settled.lease_expires_at_ms.is_none());
+}

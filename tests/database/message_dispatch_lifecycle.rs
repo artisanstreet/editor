@@ -827,3 +827,128 @@ impl Drop for TemporaryDatabase {
         let _ = std::fs::remove_file(format!("{}-shm", self.path.display()));
     }
 }
+
+#[tokio::test]
+async fn lease_renewal_carries_a_turn_past_its_original_expiry() {
+    let (database, repository) = memory_database().await;
+    seed_foundation(&database).await;
+    seed_dispatch(&database, "message-1", "request-1", 0, 3, 3).await;
+    // The seeded claim holds a lease in [10, 20).
+    assert_eq!(claim_seeded(&repository, 0x11).await, 1);
+
+    // The heartbeat runs while the turn is still alive at 19 and extends the
+    // window to 60.
+    let message_id = MessageId::parse("message-1").expect("test message id should parse");
+    let renewed = repository
+        .renew_message_dispatch_lease(
+            &message_id,
+            &lease_owner(0x11),
+            UnixMillis::from_millis(19),
+            UnixMillis::from_millis(60),
+        )
+        .await
+        .expect("owner renewal should succeed");
+    assert_eq!(renewed.message_id.as_str(), "message-1");
+    assert_eq!(renewed.updated_at, UnixMillis::from_millis(19));
+    let persisted = dispatch(&database, "message-1").await;
+    assert_eq!(persisted.state, DispatchState::Leased);
+    assert_eq!(persisted.lease_expires_at_ms, Some(60));
+    assert_eq!(persisted.updated_at_ms, 19);
+    assert_eq!(persisted.attempt_count, 1);
+
+    // A competing dispatcher cannot claim the row at the original expiry,
+    // because the renewal moved the lease into the future.
+    let competing = repository
+        .claim_next_message_dispatch(claim(0x22, 25, 90))
+        .await
+        .expect("competing claim lookup should succeed");
+    assert!(
+        competing.is_none(),
+        "a renewed lease must hold the row against competing claims"
+    );
+
+    // The owner can still settle after the original expiry while the renewed
+    // window is live: this is the long-turn case the heartbeat exists for.
+    let completed = repository
+        .complete_message_dispatch(complete("message-1", 0x11, 50))
+        .await
+        .expect("renewed lease should accept its own settlement");
+    assert_eq!(completed.updated_at, UnixMillis::from_millis(50));
+    assert_eq!(dispatch(&database, "message-1").await.state, DispatchState::Completed);
+}
+
+#[tokio::test]
+async fn lease_renewal_is_owner_fenced_and_rejects_terminal_rows() {
+    let (database, repository) = memory_database().await;
+    seed_foundation(&database).await;
+    seed_dispatch(&database, "message-1", "request-1", 0, 3, 3).await;
+    assert_eq!(claim_seeded(&repository, 0x11).await, 1);
+    let message_id = MessageId::parse("message-1").expect("test message id should parse");
+
+    // A foreign owner is rejected without touching the stored lease.
+    let mismatch = repository
+        .renew_message_dispatch_lease(
+            &message_id,
+            &lease_owner(0x22),
+            UnixMillis::from_millis(15),
+            UnixMillis::from_millis(40),
+        )
+        .await;
+    assert!(matches!(
+        mismatch,
+        Err(RepositoryError::DispatchOwnerMismatch { .. })
+    ));
+    assert_eq!(
+        dispatch(&database, "message-1").await.lease_expires_at_ms,
+        Some(20)
+    );
+
+    // A window that does not extend the lease is refused before any write.
+    let invalid = repository
+        .renew_message_dispatch_lease(
+            &message_id,
+            &lease_owner(0x11),
+            UnixMillis::from_millis(30),
+            UnixMillis::from_millis(30),
+        )
+        .await;
+    assert!(matches!(
+        invalid,
+        Err(RepositoryError::InvalidDispatchLeaseWindow { .. })
+    ));
+
+    // An expired-but-owned lease is renewable: the owner token cannot be
+    // re-minted by another dispatcher, so extending cannot steal the row.
+    let late = repository
+        .renew_message_dispatch_lease(
+            &message_id,
+            &lease_owner(0x11),
+            UnixMillis::from_millis(25),
+            UnixMillis::from_millis(80),
+        )
+        .await
+        .expect("an owned expired lease should renew");
+    assert_eq!(late.updated_at, UnixMillis::from_millis(25));
+    assert_eq!(
+        dispatch(&database, "message-1").await.lease_expires_at_ms,
+        Some(80)
+    );
+
+    // Once the row is terminal, renewal reports the real state.
+    repository
+        .complete_message_dispatch(complete("message-1", 0x11, 70))
+        .await
+        .expect("renewed lease should complete");
+    let after_completion = repository
+        .renew_message_dispatch_lease(
+            &message_id,
+            &lease_owner(0x11),
+            UnixMillis::from_millis(75),
+            UnixMillis::from_millis(90),
+        )
+        .await;
+    assert!(matches!(
+        after_completion,
+        Err(RepositoryError::InvalidDispatchState { state, .. }) if state == "completed"
+    ));
+}

@@ -1066,6 +1066,69 @@ fn add_duration(value: UnixMillis, duration: Duration) -> Option<UnixMillis> {
         .map(UnixMillis::from_millis)
 }
 
+/// Renewal cadence for one claimed turn: a third of the lease, floored at a
+/// millisecond so a tiny test lease still heartbeats.
+fn claim_renew_interval(claim_lease: Duration) -> Duration {
+    (claim_lease / 3).max(Duration::from_millis(1))
+}
+
+/// Runs one provider turn while heartbeating its dispatch lease.
+///
+/// The turn may legitimately outlive the original claim window, and the
+/// recovery sweep only ever runs between turns: without the heartbeat a turn
+/// that settles after its old expiry would be fenced out of its own
+/// settlement and reaped as an unknown outcome. A failed renewal is never
+/// fatal by itself; if the lease truly lapsed the recovery sweep owns the
+/// outcome exactly as before.
+pub(crate) async fn drive_turn_with_lease_heartbeat<F>(
+    repository: &Repository,
+    origin: &SystemCommandOrigin,
+    claimed: &ClaimedMessageDispatch,
+    claim_lease: Duration,
+    turn: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    renew_claim_lease(repository, origin, claimed, claim_lease).await;
+    tokio::pin!(turn);
+    let renew_interval = claim_renew_interval(claim_lease);
+    let mut renew_at =
+        tokio::time::interval_at(tokio::time::Instant::now() + renew_interval, renew_interval);
+    renew_at.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            output = &mut turn => break output,
+            _ = renew_at.tick() => {
+                renew_claim_lease(repository, origin, claimed, claim_lease).await;
+            }
+        }
+    }
+}
+
+/// Best-effort renewal of the live dispatch lease.
+async fn renew_claim_lease(
+    repository: &Repository,
+    origin: &SystemCommandOrigin,
+    claimed: &ClaimedMessageDispatch,
+    claim_lease: Duration,
+) {
+    let Some(operated_at) = wall_clock(origin) else {
+        return;
+    };
+    let Some(lease_expires_at) = add_duration(operated_at, claim_lease) else {
+        return;
+    };
+    let _ = repository
+        .renew_message_dispatch_lease(
+            &claimed.message_id,
+            &claimed.owner,
+            operated_at,
+            lease_expires_at,
+        )
+        .await;
+}
+
 fn at_or_after(origin: &SystemCommandOrigin, not_before: UnixMillis) -> Option<UnixMillis> {
     Some(wall_clock(origin)?.max(not_before))
 }
@@ -2240,19 +2303,36 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         Err(_) => (None, None),
     };
     let mut inbox = inbox;
-    let custody_unresolved = consume_turn(
-        context.repository,
-        context.config,
-        context.origin,
-        context.stop,
-        context.process_cancel,
-        run_cancel.as_ref(),
-        turn,
-        scope,
-        engine,
-        inbox.as_mut(),
-    )
-    .await;
+    // A provider turn can legitimately outlive the original claim window (a
+    // slow tool call, a long response). The heartbeat below keeps the dispatch
+    // lease alive for the whole turn so the recovery sweep cannot reap work
+    // this dispatcher still owns, and so the terminal settlement still passes
+    // its lease fence instead of leaving an unknown-outcome run behind.
+    let custody_unresolved = {
+        let turn = consume_turn(
+            context.repository,
+            context.config,
+            context.origin,
+            context.stop,
+            context.process_cancel,
+            run_cancel.as_ref(),
+            turn,
+            scope,
+            engine,
+            inbox.as_mut(),
+        );
+        // Keep the dispatch lease alive for the whole turn: a slow tool call
+        // or long response must not be reaped mid-flight, and the terminal
+        // settlement must still pass its lease fence afterwards.
+        drive_turn_with_lease_heartbeat(
+            context.repository,
+            context.origin,
+            &context.claimed,
+            context.config.claim_lease,
+            turn,
+        )
+        .await
+    };
     if let Some(receiver) = inbox.as_mut() {
         drain_interactions(receiver);
     }
