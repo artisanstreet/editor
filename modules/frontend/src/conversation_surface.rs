@@ -717,6 +717,28 @@ pub fn footer_key(turn_id: &TurnId) -> String {
     format!("turn-footer:{}", turn_id.as_str())
 }
 
+/// Applies one footer hover observation to the retained reveal key.
+///
+/// The footer lives outside its turn group's bounds, so group hover alone
+/// drops while the pointer travels down to the controls. Retaining the
+/// footer's own hover here keeps it revealed for that trip; leaving the
+/// footer, or hovering a different turn's footer, releases it. Returns
+/// whether the visible state changed.
+fn footer_hover_transition(revealed: &mut Option<String>, key: &str, hovered: bool) -> bool {
+    if hovered {
+        if revealed.as_deref() == Some(key) {
+            return false;
+        }
+        *revealed = Some(key.to_owned());
+        true
+    } else if revealed.as_deref() == Some(key) {
+        *revealed = None;
+        true
+    } else {
+        false
+    }
+}
+
 /// Returns whether a footer block paints a child.
 ///
 /// Only an eligible settlement paints: the reference renders no footer at all
@@ -866,6 +888,12 @@ pub struct ConversationSurface {
     /// on render; a focused control that disappears returns focus to the
     /// transcript, mirroring `navigator_focus`.
     footer_focus: HashMap<String, FocusHandle>,
+    /// Footer the pointer is currently over, keyed by [`footer_key`].
+    ///
+    /// The footer sits outside the turn group's bounds, so GPUI's group hover
+    /// drops while the pointer travels down to it. Tracking the footer's own
+    /// hover keeps it revealed for the trip and while its controls are used.
+    footer_revealed: Option<String>,
     /// Focus handles for free-form question input rows, keyed by block
     /// identity text.
     ///
@@ -1258,6 +1286,7 @@ impl ConversationSurface {
             status_motion: MotionPolicy::Full,
             footer_mirrors: HashMap::new(),
             footer_focus: HashMap::new(),
+            footer_revealed: None,
             question_focus: HashMap::new(),
             answer_thread: None,
             answer_run: None,
@@ -3695,6 +3724,10 @@ impl ConversationSurface {
         )
         .expect("static footer copy button configuration is valid")
         .focus_visibility(FocusVisibility::Visible)
+        .tint(
+            theme.colors.muted_foreground.to_paint(),
+            theme.colors.foreground.to_paint(),
+        )
         .debug_selector(format!("{selector}-{FOOTER_COPY_SELECTOR_SUFFIX}"))
         .on_activate(move |_, _, app| {
             let _ = surface.update(app, |surface, cx| {
@@ -3709,6 +3742,7 @@ impl ConversationSurface {
 
         let hover_surface = entity.downgrade();
         let reveal_turn = turn_id.clone();
+        let reveal_key = key.clone();
         let message_selector = format!("{selector}-copy-message");
         let time_selector = format!("{selector}-time-{}", settlement.settled_at_ms());
         let mut footer = div()
@@ -3725,22 +3759,32 @@ impl ConversationSurface {
             .font_weight(ProseTypography::BODY_WEIGHT)
             .letter_spacing(px(ProseTypography::body_tracking_px(14.0)))
             .text_color(theme.colors.muted_foreground.to_paint())
-            .opacity(if focused { 1.0 } else { 0.0 })
+            .opacity(if focused || self.footer_revealed.as_deref() == Some(key.as_str()) {
+                1.0
+            } else {
+                0.0
+            })
             .group_hover(TURN_GROUP, |hover| hover.opacity(1.0))
             .aria_label(TURN_ACTIONS_LABEL)
             .debug_selector(move || selector.clone())
             .on_hover(move |hovered, _, app| {
-                if *hovered {
-                    let _ = hover_surface.update(app, |surface, cx| {
-                        if surface.enqueue_action(
-                            ConversationSurfaceAction::TurnFooterRevealed {
-                                turn: reveal_turn.clone(),
-                            },
-                        ) {
-                            cx.notify();
-                        }
-                    });
-                }
+                let _ = hover_surface.update(app, |surface, cx| {
+                    let mut changed = footer_hover_transition(
+                        &mut surface.footer_revealed,
+                        &reveal_key,
+                        *hovered,
+                    );
+                    if *hovered
+                        && surface.enqueue_action(ConversationSurfaceAction::TurnFooterRevealed {
+                            turn: reveal_turn.clone(),
+                        })
+                    {
+                        changed = true;
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                });
             })
             .child(copy_button);
         if !copy_message.is_empty() {
@@ -6115,6 +6159,39 @@ mod tests {
     fn footer_keys_are_stable_per_turn() {
         assert_eq!(footer_key(&turn_id("turn_a")), "turn-footer:turn_a");
         assert_ne!(footer_key(&turn_id("turn_a")), footer_key(&turn_id("turn_b")));
+    }
+
+    #[test]
+    fn footer_hover_reveal_survives_the_trip_from_the_turn() {
+        let mut revealed = None;
+        // The pointer arrives over the footer after the turn group's own hover
+        // has already dropped.
+        assert!(footer_hover_transition(
+            &mut revealed,
+            "turn-footer:turn_a",
+            true
+        ));
+        assert_eq!(revealed.as_deref(), Some("turn-footer:turn_a"));
+        // A repeat observation is not a change.
+        assert!(!footer_hover_transition(
+            &mut revealed,
+            "turn-footer:turn_a",
+            true
+        ));
+        // Another turn's footer leaving must not clear the retained key.
+        assert!(!footer_hover_transition(
+            &mut revealed,
+            "turn-footer:turn_b",
+            false
+        ));
+        assert_eq!(revealed.as_deref(), Some("turn-footer:turn_a"));
+        // Leaving the footer releases it.
+        assert!(footer_hover_transition(
+            &mut revealed,
+            "turn-footer:turn_a",
+            false
+        ));
+        assert!(revealed.is_none());
     }
 
     #[test]

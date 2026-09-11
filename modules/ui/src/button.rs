@@ -299,6 +299,16 @@ impl ButtonStyle {
 
 type ActivationHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
+/// Optional foreground override for one button, leaving the variant's
+/// background, border, and interaction recipe intact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ButtonTint {
+    /// Glyph/text color at rest.
+    pub foreground: Hsla,
+    /// Glyph/text color while hovered.
+    pub hover_foreground: Hsla,
+}
+
 /// One reusable native GPUI button.
 #[derive(IntoElement)]
 pub struct Button {
@@ -312,6 +322,7 @@ pub struct Button {
     content: ButtonContent,
     disabled: bool,
     corner_radius_override: Option<Pixels>,
+    tint: Option<ButtonTint>,
     on_activate: Option<ActivationHandler>,
     debug_selector: Option<SharedString>,
 }
@@ -358,6 +369,7 @@ impl Button {
             content,
             disabled: false,
             corner_radius_override: None,
+            tint: None,
             on_activate: None,
             debug_selector: None,
         })
@@ -382,6 +394,18 @@ impl Button {
     #[must_use]
     pub fn corner_radius(mut self, radius: Pixels) -> Self {
         self.corner_radius_override = Some(radius);
+        self
+    }
+
+    /// Overrides only the glyph/text color at rest and on hover, leaving the
+    /// variant's background, border, focus ring, and interaction recipe
+    /// intact (reference buttons carry `text-muted-foreground` this way).
+    #[must_use]
+    pub fn tint(mut self, foreground: Hsla, hover_foreground: Hsla) -> Self {
+        self.tint = Some(ButtonTint {
+            foreground,
+            hover_foreground,
+        });
         self
     }
 
@@ -435,6 +459,10 @@ impl RenderOnce for Button {
         let focus_visibility = self.focus_visibility;
         let focus = self.focus.clone();
         let on_activate = self.on_activate;
+        let (foreground, hover_foreground) = self.tint.map_or(
+            (style.foreground, style.hover_foreground),
+            |tint| (tint.foreground, tint.hover_foreground),
+        );
 
         let mut root = div()
             .id(self.id)
@@ -449,7 +477,7 @@ impl RenderOnce for Button {
             .border_1()
             .border_color(style.border)
             .bg(style.background)
-            .text_color(style.foreground)
+            .text_color(foreground)
             .text_size(self.theme.typography.control_text)
             .font_weight(FontWeight::MEDIUM)
             .whitespace_nowrap()
@@ -490,7 +518,7 @@ impl RenderOnce for Button {
             .hover(move |hover| {
                 hover
                     .bg(style.hover_background)
-                    .text_color(style.hover_foreground)
+                    .text_color(hover_foreground)
             })
             .when_some(style.pressed_offset_y, |element, offset| {
                 element.active(move |active| active.relative().top(offset))

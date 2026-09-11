@@ -2108,18 +2108,17 @@ impl NativeComposer {
                     .child(error),
             );
         }
-        tray.child(
-            div()
-                .id(NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR)
-                .text_color(desktop_theme.secondary)
-                .text_size(px(12.0))
-                .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR.to_owned())
-                .child(if self.attachment_delivery_enabled {
-                    "Images are ready to send."
-                } else {
-                    "Images stay attached until image delivery is available."
-                }),
-        )
+        if !self.attachment_delivery_enabled {
+            tray = tray.child(
+                div()
+                    .id(NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR)
+                    .text_color(desktop_theme.secondary)
+                    .text_size(px(12.0))
+                    .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR.to_owned())
+                    .child("Images stay attached until image delivery is available."),
+            );
+        }
+        tray
     }
 
     /// Fades a newly mounted tray in on the reference open clock.
