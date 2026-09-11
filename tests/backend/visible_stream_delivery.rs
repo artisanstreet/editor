@@ -520,7 +520,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             let run_id = RunId::parse("run-stream-launch").expect("run id");
             let cancel_registry = RunCancellationRegistry::new(8).expect("registry");
             let interaction_registry = RunInteractionRegistry::new(8).expect("registry");
-            let owner = EngineOwner::start_configured(
+            let mut owner = EngineOwner::start_configured(
                 NonZeroUsize::new(1).expect("one slot"),
                 &tokio::runtime::Handle::current(),
             );
@@ -940,7 +940,7 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
             let run_id = RunId::parse("run-stream-live").expect("run id");
             let turn_id = TurnId::parse("turn-stream-live").expect("turn id");
             let cancel_registry = RunCancellationRegistry::new(8).expect("registry");
-            let owner = EngineOwner::start_configured(
+            let mut owner = EngineOwner::start_configured(
                 NonZeroUsize::new(1).expect("one slot"),
                 &tokio::runtime::Handle::current(),
             );
