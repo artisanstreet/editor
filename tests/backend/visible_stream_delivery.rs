@@ -347,7 +347,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
         migrate_to_current(&database)
             .await
             .expect("migrations should apply");
-        let repository = Repository::new(database);
+        let repository = Repository::new(database.clone());
         let thread_id = ThreadId::parse("thread-stream-launch").expect("thread id");
         let base = seed_stream_thread(&repository, &thread_id, "launch", &temp.root).await;
 
@@ -688,7 +688,7 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
         migrate_to_current(&database)
             .await
             .expect("migrations should apply");
-        let repository = Repository::new(database);
+        let repository = Repository::new(database.clone());
         let thread_id = ThreadId::parse("thread-stream-live").expect("thread id");
         let base = seed_stream_thread(&repository, &thread_id, "live", &temp.root).await;
 
@@ -817,7 +817,8 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
             // A terminal lifecycle here preserves its full identity for
             // the post-loop diagnosis instead of failing blind: the run
             // row, dispatch row, and patch position are read below.
-            let mut terminal_seen: Option<(ConversationLifecycle, String, u64)> = None;
+            let mut terminal_seen: Option<(artisan_domain::ConversationLifecycle, String, u64)> =
+                None;
             // Read until two DISTINCT chunk updates plus the reasoning
             // observation are observed. Remaining burst patches may
             // legitimately still be in flight (commits coalesce into
@@ -904,7 +905,7 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                     .await
                     .expect("dispatch rows should read");
                 panic!(
-                    "terminal lifecycle while held: {lifecycle:?} turn {turn_id} patch sequence {sequence} after {} frames; run lifecycle {:?}; dispatches {:?}",
+                    "terminal lifecycle while held: {lifecycle:?} turn {turn_id} patch sequence {sequence} after {} frames (burst-00 {saw_burst_00}, burst-01 {saw_burst_01}, reasoning {saw_observation}); run lifecycle {:?}; dispatches {:?}",
                     frames.len(),
                     run.map(|row| (row.run_id, format!("{:?}", row.lifecycle))),
                     dispatch
