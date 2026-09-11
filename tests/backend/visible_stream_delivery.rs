@@ -1,18 +1,19 @@
 //! Visible-stream proof: admission streams at launch, chunks stream while
 //! the provider turn is held, terminal closes the flow.
 //!
-//! A real Forge listener serves a real QUIC client on loopback. The client
-//! subscribes, sends one steered message, and reads the server delivery
-//! stream while a live Codex fixture turn (burst mode: 64 deltas, no
-//! terminal until interrupt) is driven through the production dispatch
-//! arm. The test proves wire order: send receipt, user admission patch,
-//! assistant start, incremental chunks, one engine-observation event, no
-//! terminal while held, then the cancelled terminal after interrupt.
-//!
-//! A first regression pins the launch-publish invariant with no provider
-//! involved: subscribing the commit notifier before production
-//! `launch_claim` must observe a wake, proving user admission streams
-//! before provider startup instead of waiting for the first batch.
+//! A real Forge listener serves a real QUIC client on loopback. The first
+//! test subscribes, invokes production `launch_claim`, and reads the user
+//! admission patch batch off the wire with no provider ever admitted,
+//! then proves silence (no terminal follows unlaunched work). The second
+//! test sends one steered message over the wire and drives the live Codex
+//! fixture turn (burst mode: reasoning frame plus 64 deltas, no terminal
+//! until interrupt) through production `consume_turn` with a shared
+//! interaction registry. It proves wire order: send receipt, user
+//! admission patch, distinct `burst-01`/`burst-02` appends, one
+//! `ReasoningSummaryDelta` observation event, all before any terminal
+//! lifecycle, then the cancelled terminal after interrupt. Order
+//! assertions pin admission/observation/terminal relative positions;
+//! batch coalescing means no exact per-delta frame count is asserted.
 
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};

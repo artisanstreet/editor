@@ -71,3 +71,19 @@ cursors; nothing is ever re-minted.
 - `launch_claim` publishes only on `Started`. `AlreadyStarted` is durable
   replay owned by the recovery path; publishing there would wake
   subscribers for state another attempt owns.
+
+## Provenance (`tests/backend/visible_stream_delivery.rs`, gated green)
+
+- Launch wire-before-provider: a subscribed QUIC client with no provider
+  admitted reads the user admission `PatchBatch` off the delivery stream
+  right after production `launch_claim`, then 500 ms of silence. This is
+  the launch-publish invariant above, proven on the wire rather than on
+  the notifier alone.
+- Live production `consume_turn`: a steered send over the wire drives a
+  live burst fixture turn through the real consume loop with a shared
+  interaction registry. Distinct `burst-01` and `burst-02` appends (not
+  frame counts: commits coalesce) plus one `ReasoningSummaryDelta`
+  observation event are asserted before any terminal lifecycle; the
+  cancelled terminal is asserted only after interrupt. Replays and the
+  composer-facing receipt path are covered by the request-handler and
+  steer-drive suites, not duplicated here.
