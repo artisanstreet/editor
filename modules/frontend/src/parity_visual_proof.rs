@@ -842,13 +842,12 @@ impl ParityProofShell {
     /// seeding, as a message bound to the case.
     pub fn mount(
         thread_id: ThreadId,
-        title: String,
         content_width_px: f32,
         case: ProofSceneCase,
         cx: &mut App,
     ) -> Result<Entity<Self>, String> {
         let screen =
-            ThreadScreen::mount_proof(thread_id.clone(), title, content_width_px, cx)
+            ThreadScreen::mount_proof(thread_id.clone(), content_width_px, cx)
                 .map_err(|error| format!("mount refused: {error:?}"))?;
         seed_case(&screen, case, &thread_id, cx)?;
         print_case_manifest(&screen, case, cx);
@@ -867,6 +866,7 @@ impl ParityProofShell {
         desktop_shell(
             DesktopTheme::neutral_dark(),
             false,
+            div().into_any_element(),
             div().into_any_element(),
             div().into_any_element(),
             div().into_any_element(),
@@ -985,7 +985,6 @@ pub fn run() -> ExitCode {
         .expect("fixture thread id is valid");
         let shell = match ParityProofShell::mount(
             thread_id,
-            String::from(PROOF_THREAD_TITLE),
             capture.width - DESKTOP_SIDEBAR_WIDTH_PX,
             capture.case,
             cx,

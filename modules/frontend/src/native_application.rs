@@ -106,7 +106,7 @@ use crate::onboarding_harness_presentation::{
 };
 use crate::onboarding_screen::{OnboardingHarnessEntry, OnboardingScreen};
 use crate::thread_environment_presentation::{HostIdentitySnapshot, ThreadEnvironmentInput};
-use crate::thread_screen::{ThreadScreen, ThreadScreenGate, ThreadScreenTitle, shell_black};
+use crate::thread_screen::{ThreadScreen, ThreadScreenGate, shell_black};
 use crate::usage_meter::usage_segment_fraction;
 use crate::workspace_tab_state::EditorViewState;
 use crate::{
@@ -138,7 +138,7 @@ pub(crate) const WINDOW_TITLE: &str = "Artisan Editor";
 /// Stable selector for the real application root.
 pub(crate) const NATIVE_ROOT_SELECTOR: &str = "artisan-native-application";
 
-/// Debug selector prefix for the desktop header's route title breadcrumb.
+/// Debug selector prefix for the desktop header's centred route title.
 pub(crate) const TITLEBAR_ROUTE_TITLE_SELECTOR: &str = "artisan-desktop-route-title";
 
 /// Stable selector for the state panel.
@@ -1496,12 +1496,11 @@ impl NativeApplication {
         cx.notify();
     }
 
-    /// Native titlebar identity: the `Artisan Editor` wordmark. The
-    /// wordmark keeps the home navigation. When the route names a thread, the
-    /// policy-selected title follows it as a muted, truncating breadcrumb so
-    /// the header always names the open conversation.
+    /// Native titlebar identity: the `Artisan Editor` wordmark. The wordmark
+    /// keeps the home navigation. The open conversation's own title is the
+    /// titlebar's centred header subject, not a breadcrumb on this end.
     fn desktop_identity(&self, cx: &Context<Self>) -> Div {
-        let mut identity = div()
+        div()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -1523,22 +1522,28 @@ impl NativeApplication {
                     .letter_spacing(px(-1.0))
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
-            );
-        if let Some(route_title) = self.desktop_header_title(cx) {
-            let route_label = format!("/ {route_title}");
-            let route_selector = format!("{TITLEBAR_ROUTE_TITLE_SELECTOR}:{route_label}");
-            identity = identity.child(
-                div()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .whitespace_nowrap()
-                    .text_size(px(13.0))
-                    .text_color(self.desktop_theme.secondary)
-                    .debug_selector(move || route_selector.clone())
-                    .child(route_label),
-            );
-        }
-        identity
+            )
+    }
+
+    /// The titlebar's centred header subject, when the route names a thread.
+    ///
+    /// The reserved centre slot exists for exactly this header; an empty
+    /// element on subject-less routes leaves it bare above the wordmark.
+    fn desktop_center_title(&self, cx: &Context<Self>) -> AnyElement {
+        let Some(title) = self.desktop_header_title(cx) else {
+            return div().into_any_element();
+        };
+        let selector = format!("{TITLEBAR_ROUTE_TITLE_SELECTOR}:{title}");
+        div()
+            .min_w(px(0.0))
+            .truncate()
+            .whitespace_nowrap()
+            .text_size(px(13.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(self.desktop_theme.foreground)
+            .debug_selector(move || selector.clone())
+            .child(title)
+            .into_any_element()
     }
 
     fn desktop_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -8343,11 +8348,13 @@ impl Render for NativeApplication {
         let sidebar = self.desktop_sidebar(window, cx).into_any_element();
         let body = self.desktop_route_body(window, cx);
         let identity = self.desktop_identity(cx).into_any_element();
+        let title = self.desktop_center_title(cx);
         let search = self.command_menu.clone().into_any_element();
         let shell = desktop_shell(
             self.desktop_theme,
             self.sidebar_collapsed,
             identity,
+            title,
             search,
             sidebar,
             body,
@@ -8450,47 +8457,19 @@ impl NativeApplication {
                     self.thread_screen_key = key;
                 }
                 // Live presentation sync on every render (not just on mount):
-                // the header title follows the authoritative listing instead
-                // of the `"Thread"` default, and the content width (window
-                // minus the live sidebar, both in logical pixels) drives the
-                // inspector fit in both resize directions. Change-guarded
-                // setters keep this free of notify loops.
+                // the content width (window minus the live sidebar, both in
+                // logical pixels) drives the inspector fit in both resize
+                // directions. The change-guarded setter keeps this free of
+                // notify loops; the conversation title lives in the titlebar
+                // header, not on this screen.
                 if let Some(screen) = self.thread_screen.clone() {
-                    // Stored-title evidence is the authoritative listing
-                    // title, refined to the latest user message while the
-                    // thread still carries the creation placeholder. The
-                    // summary is the live harness title from the engine
-                    // observation stream; the screen applies the shared
-                    // display policy to both.
-                    let listed_title = self
-                        .thread_listing
-                        .as_ref()
-                        .and_then(|listing| {
-                            listing
-                                .threads()
-                                .iter()
-                                .find(|item| item.thread_id == thread)
-                        })
-                        .map(|item| item.title.as_str().to_owned());
-                    let latest_user_text = self.open_thread_latest_user_text(&thread, cx);
-                    let mut screen_title = ThreadScreenTitle::default();
-                    screen_title.title = match listed_title {
-                        Some(listed_title) => {
-                            refined_thread_title(&listed_title, latest_user_text.as_deref())
-                                .to_owned()
-                        }
-                        None => latest_user_text.unwrap_or_else(|| String::from("Thread")),
-                    };
-                    screen_title.summary_title = self.retained_summary_title(&thread);
                     let sidebar_width = f32::from(
                         DesktopShellStyle::resolve(self.sidebar_collapsed, window.scale_factor())
                             .sidebar_width,
                     );
                     let content_width_px = f32::from(window.bounds().size.width) - sidebar_width;
                     screen.update(cx, |screen, screen_cx| {
-                        let width_changed = screen.set_content_width(content_width_px);
-                        let title_changed = screen.set_title(screen_title);
-                        if width_changed || title_changed {
+                        if screen.set_content_width(content_width_px) {
                             screen_cx.notify();
                         }
                     });
@@ -12499,9 +12478,14 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("artisan-thread-screen-title:New task")
+            cx.debug_bounds("artisan-desktop-route-title:New task")
                 .is_some(),
-            "the conversation header paints the stored title before a summary exists"
+            "the titlebar header paints the stored title before a summary exists"
+        );
+        assert!(
+            cx.debug_bounds("artisan-thread-screen-title:New task")
+                .is_none(),
+            "the conversation screen carries no duplicate title header"
         );
 
         cx.update(|_, app| {
@@ -12517,9 +12501,9 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("artisan-thread-screen-title:Ship the port")
+            cx.debug_bounds("artisan-desktop-route-title:Ship the port")
                 .is_some(),
-            "the harness summary replaces the stored title in the header"
+            "the harness summary replaces the stored title in the titlebar header"
         );
     }
 
@@ -12556,9 +12540,14 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("artisan-thread-screen-title:Fix the header title")
+            cx.debug_bounds("artisan-desktop-route-title:Fix the header title")
                 .is_some(),
-            "the refined fallback paints in the conversation header"
+            "the refined fallback paints in the titlebar header"
+        );
+        assert!(
+            cx.debug_bounds("artisan-thread-screen-title:Fix the header title")
+                .is_none(),
+            "the conversation screen carries no duplicate title header"
         );
 
         cx.update(|_, app| {
@@ -12600,7 +12589,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("artisan-desktop-route-title:/ Ship the port")
+            cx.debug_bounds("artisan-desktop-route-title:Ship the port")
                 .is_some(),
             "the desktop header names the thread being created"
         );

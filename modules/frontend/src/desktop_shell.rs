@@ -135,6 +135,7 @@ pub fn desktop_shell(
     theme: DesktopTheme,
     collapsed: bool,
     identity: AnyElement,
+    title: AnyElement,
     search: AnyElement,
     sidebar: AnyElement,
     body: AnyElement,
@@ -191,6 +192,12 @@ pub fn desktop_shell(
                 .h_full()
                 .flex()
                 .items_center()
+                .justify_center()
+                // The reserved centre slot carries the open conversation's
+                // title as the titlebar header; the unanchored command menu
+                // renders nothing in flow at rest and overlays its dialog when
+                // open, so the header is never displaced by it.
+                .child(title)
                 .child(search),
         )
         .child(

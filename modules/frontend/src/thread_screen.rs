@@ -11,8 +11,10 @@
 //!   component the legacy gate renders (`size-6 text-muted-foreground`).
 //! - `routes/components/thread-route.svelte` is controller plumbing around
 //!   one headline visual fact: the document title renders
-//!   `thread_display_title`. The header row here renders that same policy via
-//!   [`crate::thread_title_policy::thread_display_title`].
+//!   `thread_display_title`. That policy now feeds the desktop titlebar's
+//!   centred header subject only; this screen carries no title row of its own
+//!   (the reference desktop shell renders the workspace header once, in the
+//!   window chrome).
 //! - `routes/components/thread-workspace.svelte` is the screen frame this
 //!   view follows in order: `main.relative.h-full.min-h-0.overflow-hidden`
 //!   holding the transcript column
@@ -71,14 +73,9 @@ use crate::terminal_presentation::{
 use crate::thread_environment_presentation::{ThreadEnvironmentInput, present_thread_environment};
 use crate::thread_panel_policy::{ChecklistEntry, ChecklistEntryState, present_checklist_entry};
 use crate::thread_route_gate_policy::{ThreadRouteGateRender, thread_route_gate_render};
-use crate::thread_title_policy::{ThreadTitleInput, ThreadTitleMode, thread_display_title};
 
 /// Stable debug selector for the thread screen root.
 pub const THREAD_SCREEN_SELECTOR: &str = "artisan-thread-screen";
-
-/// Debug selector prefix for the painted header title; the policy-selected
-/// title follows the prefix so tests can assert the exact rendered text.
-pub const THREAD_SCREEN_TITLE_SELECTOR: &str = "artisan-thread-screen-title";
 
 /// Stable debug selector for the gate loading indicator.
 pub const THREAD_SCREEN_LOADING_SELECTOR: &str = "artisan-thread-screen-loading";
@@ -358,33 +355,6 @@ impl ThreadScreenGate {
 /// unavailable, and the control renders disabled rather than faking a retry.
 pub type ThreadScreenRetry = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// Owned thread-title facts for the header row.
-///
-/// Borrowed [`ThreadTitleInput`] values are built per render so this view
-/// never retains a borrow across frames.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ThreadScreenTitle {
-    /// Harness-generated summary title, when the projection supplied one.
-    pub summary_title: Option<String>,
-    /// Stored title; the legacy document title falls back to `"Thread"`.
-    pub title: String,
-    /// Whether a manual rename has locked the stored title.
-    pub title_locked: bool,
-    /// Reader's title preference.
-    pub mode: ThreadTitleMode,
-}
-
-impl Default for ThreadScreenTitle {
-    fn default() -> Self {
-        Self {
-            summary_title: None,
-            title: String::from("Thread"),
-            title_locked: false,
-            mode: ThreadTitleMode::Summary,
-        }
-    }
-}
-
 /// One owned checklist entry for the inspector checklist card.
 ///
 /// [`ChecklistEntry`] borrows, so entries are stored owned and projected per
@@ -416,7 +386,6 @@ pub struct ThreadScreen {
     theme_mode: ThemeMode,
     gate: ThreadScreenGate,
     on_retry: Option<ThreadScreenRetry>,
-    title: ThreadScreenTitle,
     /// Latest content width (window minus desktop sidebar, logical pixels)
     /// published by the route integrator; `None` until the first publish.
     /// Drives inspector visibility and width.
@@ -452,7 +421,6 @@ impl ThreadScreen {
             theme_mode,
             gate: ThreadScreenGate::default(),
             on_retry: None,
-            title: ThreadScreenTitle::default(),
             content_width_px: None,
             environment: ThreadEnvironmentInput::default(),
             terminals: Vec::new(),
@@ -492,7 +460,6 @@ impl ThreadScreen {
     /// controller cannot produce its empty initial scene.
     pub fn mount_proof(
         thread_id: ThreadId,
-        title: String,
         content_width_px: f32,
         cx: &mut App,
     ) -> Result<Entity<Self>, ConversationHostError> {
@@ -500,12 +467,6 @@ impl ThreadScreen {
         screen.update(cx, |screen, _| {
             screen.set_gate(ThreadScreenGate::Open);
             screen.set_content_width(content_width_px);
-            screen.set_title(ThreadScreenTitle {
-                summary_title: None,
-                title,
-                title_locked: false,
-                mode: ThreadTitleMode::Summary,
-            });
         });
         Ok(screen)
     }
@@ -533,19 +494,6 @@ impl ThreadScreen {
     /// Installs the gate retry callback (or clears it when `None`).
     pub fn set_retry_handler(&mut self, on_retry: Option<ThreadScreenRetry>) {
         self.on_retry = on_retry;
-    }
-
-    /// Replaces the owned header-title facts.
-    ///
-    /// Returns whether the facts changed. Callers notify only on change so a
-    /// per-render sync can never busy-loop the frame.
-    pub fn set_title(&mut self, title: ThreadScreenTitle) -> bool {
-        if self.title != title {
-            self.title = title;
-            true
-        } else {
-            false
-        }
     }
 
     /// Publishes the content width the inspector fit is measured from.
@@ -617,49 +565,6 @@ impl ThreadScreen {
     fn gate_branch(&self) -> ThreadRouteGateRender {
         let (has_thread_open, loading, has_failure) = self.gate.presence();
         thread_route_gate_render(has_thread_open, loading, has_failure)
-    }
-
-    /// Selects the header title through the shared display policy.
-    fn display_title(&self) -> &str {
-        thread_display_title(
-            ThreadTitleInput::new(
-                self.title.summary_title.as_deref(),
-                self.title.title.as_str(),
-                self.title.title_locked,
-            ),
-            &self.title.mode,
-        )
-    }
-
-    /// Renders the header row carrying the policy-selected thread title.
-    ///
-    /// Legacy frame: the shell's workspace header line names the thread via
-    /// `thread_display_title`; this row keeps that title on the thread
-    /// screen itself as a `text-sm font-medium` line with `gap-2`/`py-3`
-    /// rhythm.
-    fn render_title_header(&self, theme: &ArtisanTheme) -> impl IntoElement {
-        let title = self.display_title().to_owned();
-        let title_selector = format!("{THREAD_SCREEN_TITLE_SELECTOR}:{title}");
-        div()
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap(px(ROW_GAP_PX))
-            .px(px(COLUMN_PAD_X_PX))
-            .py(px(12.0))
-            .bg(shell_black())
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(theme.typography.control_text)
-                    .font_weight(ProseTypography::BODY_WEIGHT)
-                    .letter_spacing(px(workspace_body_tracking(theme)))
-                    .text_color(theme.colors.foreground.to_paint())
-                    .debug_selector(move || title_selector.clone())
-                    .child(title),
-            )
     }
 
     /// Renders the transcript column: the live conversation host at full
@@ -1222,7 +1127,6 @@ impl ThreadScreen {
             .min_h_0()
             .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_SELECTOR.to_owned())
-            .child(self.render_title_header(theme))
             .child(row)
     }
 }
@@ -1275,43 +1179,6 @@ mod tests {
     /// `px-2 py-2` row (8 + 20 + 8) — 44 px
     /// (`thread-environment-card.svelte:294,372-376`). Test-only pin.
     const REFERENCE_ENV_CARD_PX: f32 = 44.0;
-
-    fn empty_title() -> ThreadScreenTitle {
-        ThreadScreenTitle::default()
-    }
-
-    #[test]
-    fn default_title_falls_back_to_thread() {
-        let title = empty_title();
-        let display = thread_display_title(
-            ThreadTitleInput::new(
-                title.summary_title.as_deref(),
-                &title.title,
-                title.title_locked,
-            ),
-            &title.mode,
-        );
-        assert_eq!(display, "Thread");
-    }
-
-    #[test]
-    fn summary_mode_selects_present_summary_for_unlocked_title() {
-        let title = ThreadScreenTitle {
-            summary_title: Some(String::from("Ship the port")),
-            title: String::from("old title"),
-            title_locked: false,
-            mode: ThreadTitleMode::Summary,
-        };
-        let display = thread_display_title(
-            ThreadTitleInput::new(
-                title.summary_title.as_deref(),
-                &title.title,
-                title.title_locked,
-            ),
-            &title.mode,
-        );
-        assert_eq!(display, "Ship the port");
-    }
 
     #[test]
     fn live_terminal_filter_keeps_opening_and_active_only() {
@@ -1472,7 +1339,6 @@ mod tests {
     ) -> ShellProofProbe {
         let screen = ThreadScreen::mount_proof(
             ThreadId::parse(thread).expect("thread id parses"),
-            String::from("Proof thread"),
             content_width_px,
             cx,
         )
