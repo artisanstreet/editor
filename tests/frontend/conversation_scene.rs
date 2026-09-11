@@ -2047,7 +2047,7 @@ fn turn_statuses(scene: &conversation_scene::ConversationScene) -> Vec<(TurnNarr
         .iter()
         .filter_map(|block| match block {
             TurnBlock::TurnStatus(status) => {
-                Some((status.narration, status.engine_label.clone())
+                Some((status.narration, status.engine_label.clone()))
             }
             _ => None,
         })
