@@ -518,6 +518,7 @@ async fn patch_from_row(
                                 revision,
                                 lifecycle,
                                 body,
+                                source_message_id: None,
                                 created_at,
                                 updated_at,
                             }),
@@ -551,6 +552,7 @@ async fn patch_from_row(
                             revision,
                             lifecycle,
                             body,
+                            source_message_id: Some(source_message_id),
                             created_at,
                             updated_at,
                         })
@@ -564,6 +566,7 @@ async fn patch_from_row(
                                 lifecycle,
                                 text,
                                 attachments,
+                                source_message_id: Some(source_message_id),
                                 created_at,
                                 updated_at,
                             },

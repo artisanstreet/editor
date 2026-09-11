@@ -554,6 +554,19 @@ async fn representative_user_and_assistant_values_round_trip_from_entities() {
     assert_eq!(user.revision, Revision::new(0));
     assert_eq!(user.lifecycle, ConversationLifecycle::Completed);
     assert_eq!(user.body.as_str(), "hello");
+    assert_eq!(
+        user.source_message_id.as_ref().map(|id| id.as_str()),
+        Some("message-1"),
+        "snapshot projects the queued source identity"
+    );
+    assert_ne!(
+        user.item_id.as_str(),
+        user.source_message_id
+            .as_ref()
+            .expect("source identity is present")
+            .as_str(),
+        "item and source identities stay separately minted"
+    );
     assert_eq!(user.created_at, UnixMillis::from_millis(100));
     assert_eq!(user.updated_at, UnixMillis::from_millis(110));
 
@@ -714,4 +727,177 @@ impl Drop for TemporaryDatabase {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.directory);
     }
+}
+
+#[tokio::test]
+async fn repeated_bodies_keep_distinct_source_identities() {
+    // Two queued messages share one repeated body under distinct message
+    // ids; the snapshot must carry each item's own source id so a receipt
+    // echo resolves without body guessing.
+    let (database, repository) = memory_database().await;
+    seed_thread(&database, 900).await;
+    insert_turn(
+        &database,
+        "turn-echo",
+        0,
+        0,
+        EntityLifecycle::Completed,
+        100,
+        110,
+    )
+    .await;
+    for (message_id, message_ordinal, item_id, ordinal) in [
+        ("message-echo-1", 0, "item-echo-1", 1),
+        ("message-echo-2", 1, "item-echo-2", 2),
+    ] {
+        insert_user_item(
+            &database,
+            UserItemSeed {
+                item_id,
+                turn_id: "turn-echo",
+                ordinal,
+                revision: 0,
+                lifecycle: EntityLifecycle::Completed,
+                message_id,
+                message_ordinal,
+                body: "same repeated body",
+                created_at_ms: 100,
+                updated_at_ms: 110,
+            },
+        )
+        .await;
+    }
+    entities::conversation_state::ActiveModel {
+        thread_id: Set(THREAD_ID.to_owned()),
+        next_renderer_ordinal: Set(3),
+        last_patch_sequence: Set(0),
+        updated_at_ms: Set(900),
+    }
+    .insert(&database)
+    .await
+    .expect("conversation state should insert");
+
+    let snapshot = repository
+        .read_conversation_snapshot(&window(4))
+        .await
+        .expect("echo snapshot should be readable");
+    assert_eq!(snapshot.items().len(), 2);
+    let mut sources = Vec::with_capacity(2);
+    for (item, expected_source) in snapshot
+        .items()
+        .iter()
+        .zip(["message-echo-1", "message-echo-2"])
+    {
+        let ConversationItem::UserMessage(user) = item else {
+            panic!("expected user echo item");
+        };
+        assert_eq!(user.body.as_str(), "same repeated body");
+        let source = user
+            .source_message_id
+            .as_ref()
+            .expect("echo carries its source");
+        assert_eq!(source.as_str(), expected_source);
+        assert_ne!(
+            user.item_id.as_str(),
+            source.as_str(),
+            "item and source identities stay separately minted"
+        );
+        sources.push(source.as_str().to_owned());
+    }
+    assert_ne!(
+        sources[0], sources[1],
+        "repeated bodies resolve through distinct source identities"
+    );
+}
+
+#[tokio::test]
+async fn multimodal_item_carries_source_message_id() {
+    // A captioned image message projects as the multimodal variant with
+    // the queued source identity attached, not dropped at the variant
+    // boundary.
+    let (database, repository) = memory_database().await;
+    seed_thread(&database, 900).await;
+    insert_turn(
+        &database,
+        "turn-mm",
+        0,
+        0,
+        EntityLifecycle::Completed,
+        100,
+        110,
+    )
+    .await;
+    insert_message(&database, "message-mm-1", 0, "caption", 100).await;
+    entities::message_image_attachment::ActiveModel {
+        message_id: Set("message-mm-1".to_owned()),
+        position: Set(0),
+        mime_type: Set("image/png".to_owned()),
+        name: Set("chart.png".to_owned()),
+        size_bytes: Set(3),
+        bytes: Set(OpaqueBytes::new(vec![1, 2, 3])),
+    }
+    .insert(&database)
+    .await
+    .expect("image attachment should insert");
+    entities::conversation_ordinal::ActiveModel {
+        thread_id: Set(THREAD_ID.to_owned()),
+        ordinal: Set(1),
+        kind: Set(OrdinalKind::Item),
+        entity_id: Set("item-mm-1".to_owned()),
+    }
+    .insert(&database)
+    .await
+    .expect("multimodal item ordinal should insert");
+    entities::conversation_item::ActiveModel {
+        item_id: Set("item-mm-1".to_owned()),
+        thread_id: Set(THREAD_ID.to_owned()),
+        turn_id: Set("turn-mm".to_owned()),
+        ordinal: Set(1),
+        kind: Set(OrdinalKind::Item),
+        revision: Set(0),
+        lifecycle: Set(EntityLifecycle::Completed),
+        item_kind: Set(ConversationItemKind::UserMessage),
+        source_message_id: Set(Some("message-mm-1".to_owned())),
+        run_id: Set(None),
+        native_item_key: Set(None),
+        phase: Set(None),
+        body: Set("caption".to_owned()),
+        created_at_ms: Set(100),
+        updated_at_ms: Set(110),
+    }
+    .insert(&database)
+    .await
+    .expect("multimodal item should insert");
+    entities::conversation_state::ActiveModel {
+        thread_id: Set(THREAD_ID.to_owned()),
+        next_renderer_ordinal: Set(2),
+        last_patch_sequence: Set(0),
+        updated_at_ms: Set(900),
+    }
+    .insert(&database)
+    .await
+    .expect("conversation state should insert");
+
+    let snapshot = repository
+        .read_conversation_snapshot(&window(4))
+        .await
+        .expect("multimodal snapshot should be readable");
+    assert_eq!(snapshot.items().len(), 1);
+    let ConversationItem::MultimodalUserMessage(item) = &snapshot.items()[0] else {
+        panic!("expected multimodal echo item");
+    };
+    assert_eq!(
+        item.source_message_id.as_ref().map(|id| id.as_str()),
+        Some("message-mm-1"),
+        "multimodal variant keeps its source identity"
+    );
+    assert_ne!(
+        item.item_id.as_str(),
+        item.source_message_id
+            .as_ref()
+            .expect("source identity is present")
+            .as_str(),
+        "item and source identities stay separately minted"
+    );
+    assert_eq!(item.attachments.len(), 1);
 }

@@ -620,6 +620,19 @@ async fn all_five_variants_round_trip() {
                 ConversationItem::UserMessage(u) => {
                     assert_eq!(u.item_id.as_str(), "item-5var");
                     assert_eq!(u.body.as_str(), "first body");
+                    assert_eq!(
+                        u.source_message_id.as_ref().map(|id| id.as_str()),
+                        Some("msg-5var"),
+                        "replay projects the queued source identity"
+                    );
+                    assert_ne!(
+                        u.item_id.as_str(),
+                        u.source_message_id
+                            .as_ref()
+                            .expect("source identity is present")
+                            .as_str(),
+                        "item and source identities stay separately minted"
+                    );
                     assert_eq!(u.revision.get(), 0);
                     assert_eq!(u.lifecycle, ConversationLifecycle::Completed);
                     assert_eq!(u.created_at.as_millis(), OPERATED_AT_MS);
@@ -724,6 +737,74 @@ async fn all_five_variants_round_trip() {
             assert_eq!(updated_at.as_millis(), BATCH_AT_MS + 20);
         }
         other => panic!("seq7 {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn legacy_item_upsert_without_source_message_replays_with_none() {
+    // Old rows may lack a source message (the replay subquery finds no
+    // item row): the patch still replays as a text-only user item with
+    // `source_message_id: None` instead of inventing an identity.
+    let (db, repo) = memory_database().await;
+    let tid = seed_thread(&db, &repo, "thread-legacy-none").await;
+    let launch = launch_fixture(
+        "run-legacy-none",
+        "turn-legacy-none",
+        "item-legacy-none",
+        "p-leg-a",
+        "p-leg-b",
+    );
+    let (_claimed, _launched, _bound) =
+        queue_claim_launch_bind(&db, &repo, &tid, "msg-legacy-none", "req-legacy-none", &launch)
+            .await;
+    db.execute_unprepared("PRAGMA foreign_keys = OFF")
+        .await
+        .expect("pragma");
+    db.execute_unprepared(
+        "DELETE FROM conversation_items WHERE item_id = 'item-legacy-none'",
+    )
+    .await
+    .expect("legacy item row removal");
+    db.execute_unprepared("PRAGMA foreign_keys = ON")
+        .await
+        .expect("pragma on");
+
+    let mut patches = Vec::new();
+    let mut cursor = ConversationCursor::default();
+    loop {
+        match read_replay(&repo, &tid, cursor).await.expect("replay") {
+            ConversationPatchReplay::Batch(batch) => {
+                patches.extend(batch.patches().to_vec());
+                cursor = batch.to_cursor();
+                if cursor.get() == 2 {
+                    break;
+                }
+            }
+            other => panic!("expected batch, got {other:?} at cursor {}", cursor.get()),
+        }
+    }
+    assert_eq!(patches.len(), 2);
+    match &patches[1] {
+        ConversationPatch::ItemUpsert {
+            patch_id,
+            sequence,
+            item,
+        } => {
+            assert_eq!(patch_id.as_str(), "p-leg-b");
+            assert_eq!(sequence.get(), 2);
+            match item {
+                ConversationItem::UserMessage(user) => {
+                    assert_eq!(user.item_id.as_str(), "item-legacy-none");
+                    assert_eq!(user.body.as_str(), "first body");
+                    assert_eq!(
+                        user.source_message_id, None,
+                        "legacy patch carries no source identity"
+                    );
+                }
+                ConversationItem::AssistantMessage(_) => panic!("expected user"),
+            }
+        }
+        other => panic!("seq2 {other:?}"),
     }
 }
 

@@ -157,6 +157,7 @@ fn make_user(id: &str, turn: &str, ordinal: u64) -> ConversationItem {
         revision: Revision::new(0),
         lifecycle: ConversationLifecycle::Completed,
         body: MessageBody::parse(String::from("hello")).expect("valid body"),
+        source_message_id: None,
         created_at: stamp(900),
         updated_at: stamp(950),
     })

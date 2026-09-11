@@ -95,6 +95,7 @@ fn make_user_at(
         revision: Revision::new(state.revision),
         lifecycle: state.lifecycle,
         body: MessageBody::parse(body).expect("fixture body is valid"),
+        source_message_id: None,
         created_at: stamp(state.created_at),
         updated_at: stamp(state.updated_at),
     })

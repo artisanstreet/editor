@@ -1657,6 +1657,11 @@ struct UserMessageItem {
 
   # Last update time. Signed Unix milliseconds.
   updatedAtMillis @7 :Int64;
+
+  # Original queued message identity for truthful receipt echo correlation.
+  # Empty on rows written before this field existed; present values
+  # validate as message ids. Identifier rule.
+  sourceMessageId @8 :Text;
 }
 
 # Renderer-disclosed display phase of one assistant message's text.
@@ -2109,6 +2114,11 @@ struct MultimodalUserMessageItem {
   attachments @7 :List(ImageAttachmentRef);
   createdAtMillis @8 :Int64;
   updatedAtMillis @9 :Int64;
+
+  # Original queued message identity for truthful receipt echo correlation.
+  # Empty on rows written before this field existed; present values
+  # validate as message ids. Identifier rule.
+  sourceMessageId @10 :Text;
 }
 
 # Byte-free renderer reference for one persisted image. The bytes are

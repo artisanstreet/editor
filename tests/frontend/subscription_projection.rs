@@ -56,6 +56,7 @@ fn conversation_snapshot(
             revision: Revision::new(item_revision),
             lifecycle: ConversationLifecycle::Pending,
             body: MessageBody::parse(body.to_owned()).expect("fixture body is valid"),
+            source_message_id: None,
             created_at: stamp(-5),
             updated_at: stamp(item_updated_at),
         })],

@@ -540,6 +540,7 @@ async fn item_from_row(
                     revision,
                     lifecycle,
                     body,
+                    source_message_id: Some(source_message_id),
                     created_at: UnixMillis::from_millis(created_at_ms),
                     updated_at: UnixMillis::from_millis(updated_at_ms),
                 }))
@@ -553,6 +554,7 @@ async fn item_from_row(
                         lifecycle,
                         text,
                         attachments,
+                        source_message_id: Some(source_message_id),
                         created_at: UnixMillis::from_millis(created_at_ms),
                         updated_at: UnixMillis::from_millis(updated_at_ms),
                     },

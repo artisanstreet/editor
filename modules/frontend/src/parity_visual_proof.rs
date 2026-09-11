@@ -204,6 +204,7 @@ fn make_user(
         revision: Revision::new(0),
         lifecycle: ConversationLifecycle::Pending,
         body: MessageBody::parse(body.to_owned()).expect("fixture user body is valid"),
+        source_message_id: None,
         created_at,
         updated_at,
     })
@@ -246,6 +247,7 @@ fn make_multimodal(
         lifecycle: ConversationLifecycle::Pending,
         text: Some(AuthoredText::parse(LONGFORM_USER_BODY).expect("fixture text is valid")),
         attachments: vec![attachment],
+        source_message_id: None,
         created_at,
         updated_at,
     })

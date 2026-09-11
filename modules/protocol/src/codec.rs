@@ -1795,6 +1795,9 @@ fn encode_conversation_item(
             encoded.set_body(message.body.as_str());
             encoded.set_created_at_millis(message.created_at.as_millis());
             encoded.set_updated_at_millis(message.updated_at.as_millis());
+            if let Some(source_message_id) = message.source_message_id.as_ref() {
+                encoded.set_source_message_id(source_message_id.as_str());
+            }
         }
         ConversationItem::MultimodalUserMessage(message) => {
             let mut encoded = builder.init_multimodal_user_message();
@@ -1822,6 +1825,9 @@ fn encode_conversation_item(
             }
             encoded.set_created_at_millis(message.created_at.as_millis());
             encoded.set_updated_at_millis(message.updated_at.as_millis());
+            if let Some(source_message_id) = message.source_message_id.as_ref() {
+                encoded.set_source_message_id(source_message_id.as_str());
+            }
         }
         ConversationItem::AssistantMessage(message) => {
             let mut encoded = builder.init_assistant_message();
@@ -4571,6 +4577,23 @@ fn decode_conversation_turn(
     })
 }
 
+/// Decodes the optional source-message identity carried by user items.
+///
+/// Empty or absent wire text means the row predates the field and decodes
+/// to `None` (legacy compatibility). Present text validates as a message
+/// id; corrupt text fails typed instead of fabricating an identity.
+fn decode_source_message_id(
+    value: capnp::Result<capnp::text::Reader<'_>>,
+    field: &'static str,
+) -> Result<Option<MessageId>, ProtocolDecodeError> {
+    let text = read_text(value, field)?;
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        parse_message_id(text, field).map(Some)
+    }
+}
+
 fn decode_conversation_item(
     value: artisan_capnp::conversation_item::Reader<'_>,
 ) -> Result<ConversationItem, ProtocolDecodeError> {
@@ -4581,6 +4604,10 @@ fn decode_conversation_item(
                 item_id: parse_item_id(
                     read_text(message.get_item_id(), "conversationItem.userMessage.itemId")?,
                     "conversationItem.userMessage.itemId",
+                )?,
+                source_message_id: decode_source_message_id(
+                    message.get_source_message_id(),
+                    "conversationItem.userMessage.sourceMessageId",
                 )?,
                 turn_id: parse_turn_id(
                     read_text(message.get_turn_id(), "conversationItem.userMessage.turnId")?,
@@ -4631,6 +4658,10 @@ fn decode_conversation_item(
                             "conversationItem.multimodalUserMessage.itemId",
                         )?,
                         "conversationItem.multimodalUserMessage.itemId",
+                    )?,
+                    source_message_id: decode_source_message_id(
+                        message.get_source_message_id(),
+                        "conversationItem.multimodalUserMessage.sourceMessageId",
                     )?,
                     turn_id: parse_turn_id(
                         read_text(

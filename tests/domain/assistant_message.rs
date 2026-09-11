@@ -32,6 +32,7 @@ fn user_item(id: &str, turn: &str, ordinal: u64) -> ConversationItem {
         revision: Revision::default(),
         lifecycle: ConversationLifecycle::Completed,
         body: MessageBody::parse("Queued question").expect("fixture body is valid"),
+        source_message_id: None,
         created_at: UnixMillis::from_millis(-5),
         updated_at: UnixMillis::from_millis(25),
     })

@@ -21,7 +21,7 @@ use crate::bounds::{
     CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
     CONVERSATION_TEXT_FRAGMENT_MAX_BYTES,
 };
-use crate::identifiers::{ItemId, PatchId, ThreadId, TurnId};
+use crate::identifiers::{ItemId, MessageId, PatchId, ThreadId, TurnId};
 use crate::{
     message::{AuthoredText, ImageAttachmentRef},
     text::MessageBody,
@@ -309,6 +309,9 @@ pub struct ConversationTurn {
 pub struct UserMessageItem {
     /// Forge-minted item identity.
     pub item_id: ItemId,
+    /// Original queued message identity for truthful receipt echo
+    /// correlation. `None` for rows projected before this field existed.
+    pub source_message_id: Option<MessageId>,
     /// Turn that owns the message.
     pub turn_id: TurnId,
     /// Stable position in the containing conversation.
@@ -336,6 +339,9 @@ pub struct UserMessageItem {
 pub struct MultimodalUserMessageItem {
     /// Forge-minted item identity.
     pub item_id: ItemId,
+    /// Original queued message identity for truthful receipt echo
+    /// correlation. `None` for rows projected before this field existed.
+    pub source_message_id: Option<MessageId>,
     /// Turn that owns the message.
     pub turn_id: TurnId,
     /// Stable position in the containing conversation.

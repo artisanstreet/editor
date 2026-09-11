@@ -7,9 +7,9 @@ use artisan_domain::{
     ConversationLifecycle, ConversationPatch, ConversationQuery, ConversationQueryBounds,
     ConversationRequest, ConversationSnapshot, ConversationSnapshotError, ConversationSubscribe,
     ConversationSubscriptionStart, ConversationUnsubscribe, CounterError, IncrementalText,
-    IncrementalTextError, ItemId, ItemOrdinal, LifecycleTransitionError, MessageBody, PatchBatch,
-    PatchBatchError, PatchId, PatchSequence, QueryTurnCount, QueryTurnCountError, Revision, RunId,
-    ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
+    IncrementalTextError, ItemId, ItemOrdinal, LifecycleTransitionError, MessageBody, MessageId,
+    PatchBatch, PatchBatchError, PatchId, PatchSequence, QueryTurnCount, QueryTurnCountError,
+    Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
 
 fn turn(id: &str, ordinal: u64) -> artisan_domain::ConversationTurn {
@@ -31,6 +31,7 @@ fn item(id: &str, turn_id: &str, ordinal: u64) -> ConversationItem {
         revision: Revision::default(),
         lifecycle: ConversationLifecycle::Pending,
         body: MessageBody::parse("Queued text").expect("fixture body is valid"),
+        source_message_id: None,
         created_at: UnixMillis::from_millis(-10),
         updated_at: UnixMillis::from_millis(20),
     })
@@ -506,6 +507,7 @@ fn patch_updated_at_accessor_covers_all_five_kinds_and_both_item_roles() {
             revision: Revision::default(),
             lifecycle: ConversationLifecycle::Completed,
             body: MessageBody::parse("Queued question").expect("fixture body is valid"),
+            source_message_id: None,
             created_at: stamp(-5),
             updated_at: stamp(updated_at),
         })
@@ -588,4 +590,77 @@ fn patch_updated_at_accessor_covers_all_five_kinds_and_both_item_roles() {
     for (patch, expected) in &patches {
         assert_eq!(patch.updated_at(), *expected);
     }
+}
+
+#[test]
+fn source_message_id_correlates_receipt_to_echo_without_body_guessing() {
+    // Two queued messages carry the SAME repeated body under DISTINCT
+    // message ids; their projected items must keep distinct source ids
+    // while item ids stay separately minted. A frontend matching
+    // `receipt.message_id` against `item.source_message_id` resolves each
+    // echo exactly; body comparison alone could not.
+    let make_item = |item: &str, source: &str, ordinal: u64| {
+        ConversationItem::UserMessage(UserMessageItem {
+            item_id: ItemId::parse(item).expect("fixture item id is valid"),
+            turn_id: TurnId::parse("turn-echo").expect("fixture turn id is valid"),
+            ordinal: ItemOrdinal::new(ordinal),
+            revision: Revision::default(),
+            lifecycle: ConversationLifecycle::Completed,
+            body: MessageBody::parse("same repeated body").expect("fixture body is valid"),
+            source_message_id: Some(
+                MessageId::parse(source).expect("fixture message id is valid"),
+            ),
+            created_at: UnixMillis::from_millis(-5),
+            updated_at: UnixMillis::from_millis(25),
+        })
+    };
+    let snapshot = ConversationSnapshot::new(
+        thread_id(),
+        ConversationCursor::default(),
+        vec![ConversationTurn {
+            turn_id: TurnId::parse("turn-echo").expect("fixture turn id is valid"),
+            ordinal: TurnOrdinal::new(0),
+            revision: Revision::default(),
+            lifecycle: ConversationLifecycle::Completed,
+            created_at: UnixMillis::from_millis(-10),
+            updated_at: UnixMillis::from_millis(20),
+        }],
+        vec![
+            make_item("item-echo-1", "message-echo-1", 1),
+            make_item("item-echo-2", "message-echo-2", 2),
+        ],
+        UnixMillis::from_millis(30),
+    )
+    .expect("echo snapshot is valid");
+    let items = snapshot.items();
+    assert_eq!(items.len(), 2);
+    for (item, expected_source) in items
+        .iter()
+        .zip(["message-echo-1", "message-echo-2"])
+    {
+        let ConversationItem::UserMessage(user) = item else {
+            panic!("expected user echo item");
+        };
+        assert_ne!(
+            user.item_id.as_str(),
+            user.source_message_id
+                .as_ref()
+                .expect("echo carries its source")
+                .as_str(),
+            "item and source identities stay separately minted"
+        );
+        assert_eq!(
+            user.source_message_id
+                .as_ref()
+                .expect("echo carries its source")
+                .as_str(),
+            expected_source
+        );
+        assert_eq!(user.body.as_str(), "same repeated body");
+    }
+    // The second echo resolves only through its own source id.
+    assert_ne!(
+        sources[0], sources[1],
+        "repeated bodies keep distinct source identities"
+    );
 }

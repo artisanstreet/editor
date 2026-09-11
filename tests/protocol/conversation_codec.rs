@@ -8,7 +8,7 @@ use artisan_domain::{
     ConversationLifecycle, ConversationPatch, ConversationQuery, ConversationQueryBounds,
     ConversationRequest, ConversationSnapshot, ConversationSnapshotError, ConversationSubscribe,
     ConversationSubscriptionStart, ConversationTurn, ConversationUnsubscribe, CounterError,
-    IncrementalText, IncrementalTextError, ItemId, ItemOrdinal, MessageBody, PatchBatch,
+    IncrementalText, IncrementalTextError, ItemId, ItemOrdinal, MessageBody, MessageId, PatchBatch,
     PatchBatchError, PatchId, PatchSequence, QueryTurnCount, QueryTurnCountError, RequestId,
     Revision, ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
@@ -24,6 +24,7 @@ use capnp::serialize;
 const THREAD_ID: &str = "thread-conversation-1";
 const TURN_ID: &str = "turn-conversation-1";
 const ITEM_ID: &str = "item-conversation-1";
+const MESSAGE_ID: &str = "message-conversation-1";
 const REQUEST_ID: &str = "request-conversation-1";
 
 fn thread_id() -> ThreadId {
@@ -57,6 +58,9 @@ fn item(lifecycle: ConversationLifecycle) -> ConversationItem {
         revision: Revision::new(2),
         lifecycle,
         body: MessageBody::parse("Queued conversation text").expect("fixture body is valid"),
+        source_message_id: Some(
+            MessageId::parse(MESSAGE_ID).expect("fixture message id is valid"),
+        ),
         created_at: UnixMillis::from_millis(-5),
         updated_at: UnixMillis::from_millis(25),
     })
@@ -735,4 +739,106 @@ fn unset_delta_timestamps_decode_as_epoch_zero_without_presence() -> Result<(), 
         );
     }
     Ok(())
+}
+
+fn decoded_snapshot_items(bytes: &[u8]) -> Vec<ConversationItem> {
+    let decoded = decode_envelope(bytes).expect("fixture frame decodes");
+    match decoded.body {
+        WireEnvelopeBody::Response(ServerResponse {
+            payload: ResponsePayload::ConversationSnapshot(snapshot),
+            ..
+        }) => snapshot.items().to_vec(),
+        other => panic!("expected snapshot response, got {other:?}"),
+    }
+}
+
+fn raw_snapshot_with_user_item(
+    frame_id: &str,
+    configure: impl FnOnce(
+        artisan_protocol::artisan_capnp::user_message_item::Builder<'_>,
+    ),
+) -> Vec<u8> {
+    let mut message = raw_message();
+    let mut response = init_raw_envelope(&mut message, frame_id)
+        .init_body()
+        .init_response();
+    response.set_request_id(REQUEST_ID);
+    let mut snapshot = response.init_conversation_snapshot();
+    snapshot.set_thread_id(THREAD_ID);
+    let turns = snapshot.reborrow().init_turns(1);
+    set_raw_turn(turns.get(0), TURN_ID, 0);
+    let items = snapshot.reborrow().init_items(1);
+    let mut item = items.get(0).init_user_message();
+    item.set_item_id(ITEM_ID);
+    item.set_turn_id(TURN_ID);
+    item.set_ordinal(1);
+    item.set_lifecycle(WireLifecycle::Completed);
+    item.set_body("Queued conversation text");
+    configure(item);
+    words(&message)
+}
+
+#[test]
+fn source_message_id_roundtrips_when_present() -> Result<(), Box<dyn Error>> {
+    // The shared `item()` fixture now carries `Some`; the owned roundtrip
+    // preserves the exact source identity alongside every other field.
+    assert_roundtrip(&response(
+        "server-source-present",
+        ResponsePayload::ConversationSnapshot(snapshot()),
+    ))?;
+    let items = decoded_snapshot_items(
+        &encode_envelope(&response(
+            "server-source-present",
+            ResponsePayload::ConversationSnapshot(snapshot()),
+        ))
+        .expect("snapshot encodes"),
+    );
+    let [ConversationItem::UserMessage(user)] = items.as_slice() else {
+        panic!("expected one user echo item");
+    };
+    assert_eq!(
+        user.source_message_id.as_ref().map(|id| id.as_str()),
+        Some(MESSAGE_ID),
+        "source identity survives the wire"
+    );
+    assert_ne!(
+        user.item_id.as_str(),
+        user.source_message_id
+            .as_ref()
+            .expect("source present")
+            .as_str(),
+        "item and source identities stay separately minted"
+    );
+    Ok(())
+}
+
+#[test]
+fn source_message_id_absent_on_legacy_wire_decodes_to_none() {
+    // A sender from before this field leaves it unset (empty text): the
+    // row still decodes, with `None` instead of a fabricated identity.
+    let items = decoded_snapshot_items(&raw_snapshot_with_user_item(
+        "server-source-absent",
+        |_| {},
+    ));
+    let [ConversationItem::UserMessage(user)] = items.as_slice() else {
+        panic!("expected one user echo item");
+    };
+    assert_eq!(
+        user.source_message_id, None,
+        "legacy wire carries no source identity"
+    );
+}
+
+#[test]
+fn source_message_id_invalid_text_fails_typed() {
+    // Present-but-corrupt source text fails the whole frame typed; the
+    // decoder never guesses or drops the identity.
+    let error = decode_error(&raw_snapshot_with_user_item(
+        "server-source-corrupt",
+        |mut item| item.set_source_message_id("not a message id"),
+    ));
+    let ProtocolDecodeError::Identifier { field, .. } = error else {
+        panic!("corrupt source id must return Identifier error, got {error:?}");
+    };
+    assert_eq!(field, "conversationItem.userMessage.sourceMessageId");
 }

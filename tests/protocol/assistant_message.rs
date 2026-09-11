@@ -73,6 +73,7 @@ fn user_item() -> ConversationItem {
         revision: Revision::new(2),
         lifecycle: ConversationLifecycle::Completed,
         body: MessageBody::parse(USER_BODY).expect("fixture body is valid"),
+        source_message_id: Some(MessageId::parse("message-user-proto-1").expect("fixture")),
         created_at: UnixMillis::from_millis(-5),
         updated_at: UnixMillis::from_millis(25),
     })
@@ -106,6 +107,9 @@ fn multimodal_snapshot() -> ConversationSnapshot {
                     lifecycle: ConversationLifecycle::Completed,
                     text: Some(AuthoredText::parse("caption").expect("caption is valid")),
                     attachments: vec![image_reference("message-mixed-proto-1", 0)],
+                    source_message_id: Some(
+                        MessageId::parse("message-mixed-proto-1").expect("fixture"),
+                    ),
                     created_at: UnixMillis::from_millis(1),
                     updated_at: UnixMillis::from_millis(2),
                 },
@@ -122,6 +126,9 @@ fn multimodal_snapshot() -> ConversationSnapshot {
                         image_reference("message-image-only-proto-1", 0),
                         image_reference("message-image-only-proto-1", 1),
                     ],
+                    source_message_id: Some(
+                        MessageId::parse("message-image-only-proto-1").expect("fixture"),
+                    ),
                     created_at: UnixMillis::from_millis(3),
                     updated_at: UnixMillis::from_millis(4),
                 },

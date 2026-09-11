@@ -53,6 +53,7 @@ fn make_user(id: &str, turn: &str, ordinal: u64, body: &str) -> ConversationItem
         revision: Revision::new(0),
         lifecycle: ConversationLifecycle::Pending,
         body: MessageBody::parse(body).expect("fixture body"),
+        source_message_id: None,
         created_at: stamp(-5),
         updated_at: stamp(25),
     })
