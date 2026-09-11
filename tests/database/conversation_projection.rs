@@ -546,7 +546,7 @@ async fn representative_user_and_assistant_values_round_trip_from_entities() {
 
     let user = match &snapshot.items()[0] {
         ConversationItem::UserMessage(item) => item,
-        ConversationItem::AssistantMessage(_) => panic!("first item should be a user message"),
+        _ => panic!("first item should be a user message"),
     };
     assert_eq!(user.item_id.as_str(), "item-1");
     assert_eq!(user.turn_id.as_str(), "turn-1");
@@ -572,7 +572,7 @@ async fn representative_user_and_assistant_values_round_trip_from_entities() {
 
     let assistant = match &snapshot.items()[1] {
         ConversationItem::AssistantMessage(item) => item,
-        ConversationItem::UserMessage(_) => panic!("second item should be an assistant message"),
+        _ => panic!("second item should be an assistant message"),
     };
     assert_eq!(assistant.item_id.as_str(), "item-2");
     assert_eq!(assistant.turn_id.as_str(), "turn-2");
