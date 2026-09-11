@@ -11017,18 +11017,18 @@ mod tests {
         cx.run_until_parked();
         let staged_turn = TurnId::parse("turn-staged").expect("turn");
         assert!(
-            cx.debug_bounds(&crate::conversation_surface::turn_selector(
+            cx.debug_bounds(crate::conversation_surface::turn_selector(
                 &staged_turn
             ))
             .is_some(),
             "echoed turn paints"
         );
         assert!(
-            cx.debug_bounds(&user_selector).is_some(),
+            cx.debug_bounds(user_selector.clone()).is_some(),
             "echoed user body paints"
         );
         assert!(
-            cx.debug_bounds(&crate::conversation_surface::status_selector(
+            cx.debug_bounds(crate::conversation_surface::status_selector(
                 &staged_turn
             ))
             .is_some(),
@@ -11078,7 +11078,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds(&crate::conversation_surface::status_selector(
+            cx.debug_bounds(crate::conversation_surface::status_selector(
                 &staged_turn
             ))
             .is_some(),
@@ -11143,12 +11143,12 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds(&first_reply_selector).is_some(),
+            cx.debug_bounds(first_reply_selector.clone()).is_some(),
             "first streamed body paints"
         );
         // Stage 5: two streamed bodies, one update each. "Hel" + "lo " +
         // "world". Each fragment is asserted painted before the next lands.
-        let append_reply = |patch_id: &str,
+        let mut append_reply = |patch_id: &str,
                             fragment: &str,
                             from: u64,
                             sequence: u64,
@@ -11205,7 +11205,7 @@ mod tests {
             });
             cx.run_until_parked();
             assert!(
-                cx.debug_bounds(&assistant_selector).is_some(),
+                cx.debug_bounds(assistant_selector.clone()).is_some(),
                 "streamed reply paints after its own update"
             );
         };
@@ -11275,7 +11275,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(terminal_reply, ["Hello world"]);
         assert!(
-            cx.debug_bounds(&crate::conversation_surface::turn_selector(
+            cx.debug_bounds(crate::conversation_surface::turn_selector(
                 &staged_turn
             ))
             .is_some(),
