@@ -78,7 +78,6 @@ impl RunControlsState {
         Some((self.active.clone()?, self.engine?))
     }
 }
-}
 
 impl NativeApplication {
     pub(super) fn project_run_controls(&self, snapshot: &mut NativeComposerControlsSnapshot) {
