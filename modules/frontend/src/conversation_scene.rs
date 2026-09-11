@@ -374,6 +374,391 @@ pub enum FileChangeStatus {
     Renamed,
 }
 
+// ---------------------------------------------------------------------------
+// Activity category vocabulary (ported from the reference protocol helpers)
+// ---------------------------------------------------------------------------
+
+/// The semantic bucket one activity kind falls in.
+///
+/// A port of the reference protocol `ConversationActivityCategory` and its
+/// `GetConversationActivityCategory` classifier, covering every category the
+/// native provider kinds can reach (tool names arrive open-ended, terminal
+/// rows are `terminal_activity`, timeline rows are their stable tags).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ActivityCategory {
+    /// App/preview inspection.
+    AppInspect,
+    /// Shell or process command.
+    Command,
+    /// Database inspection.
+    Database,
+    /// Change/diff review.
+    Diff,
+    /// File deletion.
+    FileDelete,
+    /// File editing.
+    FileEdit,
+    /// File reading.
+    FileRead,
+    /// File or workspace search.
+    FileSearch,
+    /// Git status inspection.
+    GitStatus,
+    /// Integration/MCP use.
+    Integration,
+    /// No recognised semantics; the activity's own label is the only truth.
+    Other,
+    /// Subagent conversation.
+    Subagent,
+    /// Test run.
+    Test,
+    /// Generic tool use.
+    Tool,
+    /// Type checking.
+    Typecheck,
+    /// Web search or fetch.
+    WebSearch,
+}
+
+impl ActivityCategory {
+    /// Returns the stable foreground label shared by row and header.
+    ///
+    /// Ported from `GetConversationActivityCategoryLabel`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AppInspect => "App",
+            Self::Command => "Command",
+            Self::Database => "Database",
+            Self::Diff => "Changes",
+            Self::FileDelete | Self::FileEdit | Self::FileRead | Self::FileSearch => "Files",
+            Self::GitStatus => "Git",
+            Self::Integration => "Integrations",
+            Self::Other | Self::Tool => "Tools",
+            Self::Subagent => "Subagents",
+            Self::Test => "Tests",
+            Self::Typecheck => "Types",
+            Self::WebSearch => "Web",
+        }
+    }
+
+    /// Returns the lowercase grouped-chain clause for `count` members.
+    ///
+    /// Ported from the reference `counted` copy so a chain reads as "ran 4
+    /// commands, edited 2 files" instead of a bare count.
+    #[must_use]
+    pub fn count_label(self, count: usize) -> String {
+        let plural = |singular: &str, many: &str| {
+            if count == 1 {
+                singular.to_owned()
+            } else {
+                format!("{count} {many}")
+            }
+        };
+        match self {
+            Self::AppInspect => {
+                if count == 1 {
+                    "inspected the app".to_owned()
+                } else {
+                    format!("ran {count} app inspections")
+                }
+            }
+            Self::Command => format!("ran {}", plural("a command", "commands")),
+            Self::Database => {
+                if count == 1 {
+                    "inspected the database".to_owned()
+                } else {
+                    format!("ran {count} database inspections")
+                }
+            }
+            Self::Diff => {
+                if count == 1 {
+                    "reviewed changes".to_owned()
+                } else {
+                    format!("reviewed {count} diffs")
+                }
+            }
+            Self::FileDelete => format!("deleted {}", plural("a file", "files")),
+            Self::FileEdit => format!("edited {}", plural("a file", "files")),
+            Self::FileRead => format!("read {}", plural("a file", "files")),
+            Self::FileSearch => {
+                if count == 1 {
+                    "searched files".to_owned()
+                } else {
+                    format!("searched {count} files")
+                }
+            }
+            Self::GitStatus => {
+                if count == 1 {
+                    "checked Git status".to_owned()
+                } else {
+                    format!("ran {count} Git status checks")
+                }
+            }
+            Self::Integration => format!("used {}", plural("an integration", "integrations")),
+            Self::Other | Self::Tool => format!("used {}", plural("a tool", "tools")),
+            Self::Subagent => format!("talked to {}", plural("a subagent", "subagents")),
+            Self::Test => {
+                if count == 1 {
+                    "ran tests".to_owned()
+                } else {
+                    format!("ran {count} test runs")
+                }
+            }
+            Self::Typecheck => {
+                if count == 1 {
+                    "checked types".to_owned()
+                } else {
+                    format!("ran {count} type checks")
+                }
+            }
+            Self::WebSearch => {
+                if count == 1 {
+                    "searched the web".to_owned()
+                } else {
+                    format!("ran {count} web searches")
+                }
+            }
+        }
+    }
+}
+
+/// Classifies one activity kind exactly like the reference helper.
+///
+/// Order is meaningful there and here: the narrower semantics are tested
+/// before the broad `tool` catch, so a kind naming both still reads as the
+/// specific work it did.
+#[must_use]
+pub fn activity_category(kind: &str) -> ActivityCategory {
+    let value = kind.to_lowercase().replace('-', ".").replace('_', ".");
+
+    if value.contains("terminal")
+        || value.contains("command")
+        || value.contains("shell")
+        || value.contains("bash")
+        || value.contains("exec")
+    {
+        return ActivityCategory::Command;
+    }
+    if value == "file"
+        || value == "read"
+        || value == "read.file"
+        || value.contains("file.read")
+        || value.contains("workspace.read")
+        || value.ends_with(".read")
+    {
+        return ActivityCategory::FileRead;
+    }
+    if value.contains("file.delete") {
+        return ActivityCategory::FileDelete;
+    }
+    if value == "write"
+        || value == "edit"
+        || value == "apply"
+        || value.contains("file.edit")
+        || value.contains("file.write")
+        || value.contains("workspace.edit")
+        || value.contains("workspace.write")
+        || value.contains("apply.patch")
+    {
+        return ActivityCategory::FileEdit;
+    }
+    if value.contains("workspace.search")
+        || value.contains("file.list")
+        || value.contains("grep")
+        || value.contains("glob")
+        || value.contains("find")
+        || value.contains("ripgrep")
+    {
+        return ActivityCategory::FileSearch;
+    }
+    if value == "search" || value.contains("web.search") || value.contains("fetch") {
+        return ActivityCategory::WebSearch;
+    }
+    if value.contains("test") {
+        return ActivityCategory::Test;
+    }
+    if value.contains("typescript") || value.contains("typecheck") {
+        return ActivityCategory::Typecheck;
+    }
+    if value.contains("git.status") {
+        return ActivityCategory::GitStatus;
+    }
+    if value.contains("diff") {
+        return ActivityCategory::Diff;
+    }
+    if value.contains("database") {
+        return ActivityCategory::Database;
+    }
+    if value.contains("preview")
+        || value.contains("browser")
+        || value.contains("ui.inspect")
+        || value.contains("accessibility")
+    {
+        return ActivityCategory::AppInspect;
+    }
+    if value.contains("subagent") || value.contains("agent.activity") {
+        return ActivityCategory::Subagent;
+    }
+    if value.contains("mcp") || value.contains("integration") {
+        return ActivityCategory::Integration;
+    }
+    if value == "tool" || value.contains("tool") || value.contains("plugin") {
+        return ActivityCategory::Tool;
+    }
+
+    ActivityCategory::Other
+}
+
+/// The reference presentation state one lifecycle maps onto.
+///
+/// `interrupted` joins `cancelled`: stopped without completing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivityPresentationState {
+    /// Failed, cancelled, or interrupted work.
+    Failed,
+    /// Settled or unknown work; unknown never means live.
+    Completed,
+    /// Work still in progress.
+    Active,
+}
+
+/// Maps one native lifecycle onto the reference presentation state.
+///
+/// Native absent lifecycle means unknown, and unknown never means live, so it
+/// settles as completed rather than claiming active work.
+const fn activity_state(lifecycle: Option<ConversationLifecycle>) -> ActivityPresentationState {
+    match lifecycle {
+        Some(
+            ConversationLifecycle::Failed
+            | ConversationLifecycle::Cancelled
+            | ConversationLifecycle::Interrupted,
+        ) => ActivityPresentationState::Failed,
+        Some(
+            ConversationLifecycle::Pending
+            | ConversationLifecycle::Streaming
+            | ConversationLifecycle::Active
+            | ConversationLifecycle::Waiting,
+        ) => ActivityPresentationState::Active,
+        Some(ConversationLifecycle::Completed) | None => ActivityPresentationState::Completed,
+    }
+}
+
+/// Maps one activity's provider kind and lifecycle onto the reference
+/// fallback label, used when the activity carries no detail of its own.
+///
+/// A port of `GetConversationActivityPresentation` with the activity's own
+/// provider label being the kind (native rows carry no second label).
+/// Returns `None` only for a blank unrecognised kind, where the reference
+/// would render the activity's own empty label.
+#[must_use]
+pub fn activity_presentation_label(
+    kind: &str,
+    lifecycle: Option<ConversationLifecycle>,
+) -> Option<String> {
+    use ActivityPresentationState::{Active, Completed, Failed};
+
+    let category = activity_category(kind);
+    let state = activity_state(lifecycle);
+    match category {
+        ActivityCategory::Other => {
+            let label = kind.trim();
+            if label.is_empty() {
+                None
+            } else {
+                Some(kind.to_owned())
+            }
+        }
+        ActivityCategory::Tool if kind != "Tool" && kind != "Tools" => {
+            let name = kind
+                .trim()
+                .split(|character: char| {
+                    matches!(character, '.' | '_' | '-') || character.is_whitespace()
+                })
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if name.is_empty() {
+                return None;
+            }
+            Some(match state {
+                Failed => {
+                    let mut characters = name.chars();
+                    match characters.next() {
+                        Some(first) => {
+                            format!("{}{} failed", first.to_uppercase(), characters.as_str())
+                        }
+                        None => format!("{name} failed"),
+                    }
+                }
+                Completed => format!("Used {name}"),
+                Active => format!("Using {name}"),
+            })
+        }
+        ActivityCategory::Subagent => Some(match state {
+            Failed => "Subagent work failed".to_owned(),
+            Completed => "Talked to a subagent".to_owned(),
+            Active => "Talking to a subagent".to_owned(),
+        }),
+        _ => Some(match state {
+            Failed => match category {
+                ActivityCategory::Command => "Command failed",
+                ActivityCategory::Test => "Tests failed",
+                ActivityCategory::Typecheck => "Type check failed",
+                ActivityCategory::FileRead => "File read failed",
+                ActivityCategory::FileEdit => "File edit failed",
+                ActivityCategory::FileDelete => "File delete failed",
+                ActivityCategory::FileSearch => "File search failed",
+                ActivityCategory::WebSearch => "Web search failed",
+                ActivityCategory::Diff => "Change review failed",
+                ActivityCategory::GitStatus => "Git status failed",
+                ActivityCategory::Database => "Database inspection failed",
+                ActivityCategory::AppInspect => "App inspection failed",
+                ActivityCategory::Integration => "Integration failed",
+                ActivityCategory::Subagent => "Subagent work failed",
+                ActivityCategory::Other | ActivityCategory::Tool => "Tool failed",
+            }
+            .to_owned(),
+            Completed => match category {
+                ActivityCategory::Command => "Ran a command",
+                ActivityCategory::Test => "Ran tests",
+                ActivityCategory::Typecheck => "Checked types",
+                ActivityCategory::FileRead => "Read a file",
+                ActivityCategory::FileEdit => "Edited a file",
+                ActivityCategory::FileDelete => "Deleted a file",
+                ActivityCategory::FileSearch => "Searched files",
+                ActivityCategory::WebSearch => "Searched the web",
+                ActivityCategory::Diff => "Reviewed changes",
+                ActivityCategory::GitStatus => "Checked Git status",
+                ActivityCategory::Database => "Inspected the database",
+                ActivityCategory::AppInspect => "Inspected the app",
+                ActivityCategory::Integration => "Used an integration",
+                ActivityCategory::Subagent => "Talked to a subagent",
+                ActivityCategory::Other | ActivityCategory::Tool => "Used a tool",
+            }
+            .to_owned(),
+            Active => match category {
+                ActivityCategory::Command => "Running a command",
+                ActivityCategory::Test => "Running tests",
+                ActivityCategory::Typecheck => "Checking types",
+                ActivityCategory::FileRead => "Reading a file",
+                ActivityCategory::FileEdit => "Editing a file",
+                ActivityCategory::FileDelete => "Deleting a file",
+                ActivityCategory::FileSearch => "Searching files",
+                ActivityCategory::WebSearch => "Searching the web",
+                ActivityCategory::Diff => "Reviewing changes",
+                ActivityCategory::GitStatus => "Checking Git status",
+                ActivityCategory::Database => "Inspecting the database",
+                ActivityCategory::AppInspect => "Inspecting the app",
+                ActivityCategory::Integration => "Using an integration",
+                ActivityCategory::Subagent => "Talking to a subagent",
+                ActivityCategory::Other | ActivityCategory::Tool => "Using a tool",
+            }
+            .to_owned(),
+        }),
+    }
+}
+
 /// One file fact for a change-set card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SceneFileChange {
@@ -411,7 +796,16 @@ pub enum SceneItemKind {
     /// Settled reasoning summary.
     ReasoningSummary { body: String },
     /// Activity or tool-result summary.
-    Activity { body: String },
+    Activity {
+        /// Bounded body used by legacy flat rows.
+        body: String,
+        /// Provider activity kind when the row carries one; `None` keeps the
+        /// legacy flat-body rendering for callers without provider kinds.
+        kind: Option<String>,
+        /// Raw provider detail (terminal command, file path, query), when
+        /// disclosed. Terminal details normalize at render time.
+        detail: Option<String>,
+    },
     /// Bounded work-session title.
     WorkSession { title: String },
     /// Compaction summary card.
@@ -574,6 +968,12 @@ pub enum WorkItem {
     Activity {
         id: SceneId,
         body: String,
+        /// Provider activity kind, when the source row carried one.
+        kind: Option<String>,
+        /// Raw provider detail, when disclosed.
+        detail: Option<String>,
+        /// Durable liveness for the chain's live/failed default-open rule.
+        lifecycle: Option<ConversationLifecycle>,
         disclosure: Option<SceneDisclosure>,
     },
     /// A work-session title.
@@ -676,6 +1076,12 @@ pub enum SessionDetail {
         id: SceneId,
         /// Bounded body.
         body: String,
+        /// Provider activity kind, when the source row carried one.
+        kind: Option<String>,
+        /// Raw provider detail, when disclosed.
+        detail: Option<String>,
+        /// Durable liveness for the chain's live/failed default-open rule.
+        lifecycle: Option<ConversationLifecycle>,
         /// Stable ordinal for merge order.
         ordinal: u64,
         /// Explicit disclosure.
@@ -1634,10 +2040,16 @@ impl ConversationScene {
                         unreachable!("session index always addresses its group");
                     };
                     match item.kind {
-                        SceneItemKind::Activity { body } => {
+                        SceneItemKind::Activity { body, kind, detail } => {
                             group.session_details.push(SessionDetail::Activity {
                                 id: item.id,
                                 body,
+                                kind,
+                                detail,
+                                lifecycle: item
+                                    .provenance
+                                    .as_ref()
+                                    .and_then(|provenance| provenance.lifecycle),
                                 ordinal: item.ordinal,
                                 disclosure: item.disclosure,
                             });
@@ -1792,9 +2204,15 @@ impl ConversationScene {
                             body,
                             disclosure: item.disclosure,
                         },
-                        SceneItemKind::Activity { body } => WorkItem::Activity {
+                        SceneItemKind::Activity { body, kind, detail } => WorkItem::Activity {
                             id: item.id,
                             body,
+                            kind,
+                            detail,
+                            lifecycle: item
+                                .provenance
+                                .as_ref()
+                                .and_then(|provenance| provenance.lifecycle),
                             disclosure: item.disclosure,
                         },
                         SceneItemKind::WorkSession { title } => WorkItem::WorkSession {
@@ -2203,8 +2621,16 @@ fn validate_item_kind(kind: &SceneItemKind) -> Result<(), SceneBuildError> {
             }
             Ok(())
         }
-        SceneItemKind::ReasoningSummary { body } | SceneItemKind::Activity { body } => {
-            validate_general_text(body)
+        SceneItemKind::ReasoningSummary { body } => validate_general_text(body),
+        SceneItemKind::Activity { body, kind, detail } => {
+            validate_general_text(body)?;
+            if let Some(kind) = kind {
+                validate_general_text(kind)?;
+            }
+            if let Some(detail) = detail {
+                validate_general_text(detail)?;
+            }
+            Ok(())
         }
         SceneItemKind::WorkSession { title } | SceneItemKind::Compaction { summary: title } => {
             validate_general_text(title)
@@ -2386,5 +2812,100 @@ mod multimodal_scene_tests {
             let kind = SceneItemKind::MultimodalUserMessage { body: String::new(), attachments };
             assert_eq!(validate_item_kind(&kind), Err(SceneBuildError::InvalidImageAttachments));
         }
+    }
+}
+
+#[cfg(test)]
+mod activity_category_tests {
+    use super::{ActivityCategory, activity_category, activity_presentation_label};
+    use artisan_domain::ConversationLifecycle;
+
+    #[test]
+    fn classifies_the_kinds_the_native_rows_carry() {
+        // Tool names, the terminal kind, and the timeline tags.
+        assert_eq!(
+            activity_category("terminal_activity"),
+            ActivityCategory::Command
+        );
+        assert_eq!(activity_category("bash"), ActivityCategory::Command);
+        assert_eq!(
+            activity_category("command_execution"),
+            ActivityCategory::Command
+        );
+        assert_eq!(activity_category("read"), ActivityCategory::FileRead);
+        assert_eq!(activity_category("file_read"), ActivityCategory::FileRead);
+        assert_eq!(
+            activity_category("workspace.read"),
+            ActivityCategory::FileRead
+        );
+        assert_eq!(activity_category("write"), ActivityCategory::FileEdit);
+        assert_eq!(activity_category("apply_patch"), ActivityCategory::FileEdit);
+        assert_eq!(
+            activity_category("file.delete"),
+            ActivityCategory::FileDelete
+        );
+        assert_eq!(activity_category("grep"), ActivityCategory::FileSearch);
+        assert_eq!(activity_category("glob"), ActivityCategory::FileSearch);
+        assert_eq!(activity_category("search"), ActivityCategory::WebSearch);
+        assert_eq!(activity_category("webfetch"), ActivityCategory::WebSearch);
+        assert_eq!(activity_category("test"), ActivityCategory::Test);
+        assert_eq!(activity_category("typecheck"), ActivityCategory::Typecheck);
+        assert_eq!(activity_category("git_status"), ActivityCategory::GitStatus);
+        assert_eq!(activity_category("diff"), ActivityCategory::Diff);
+        assert_eq!(activity_category("database"), ActivityCategory::Database);
+        assert_eq!(activity_category("browser"), ActivityCategory::AppInspect);
+        assert_eq!(activity_category("subagent"), ActivityCategory::Subagent);
+        assert_eq!(activity_category("mcp"), ActivityCategory::Integration);
+        assert_eq!(activity_category("plugin"), ActivityCategory::Tool);
+        assert_eq!(activity_category("something-new"), ActivityCategory::Other);
+    }
+
+    #[test]
+    fn labels_and_counted_clauses_match_the_reference() {
+        assert_eq!(ActivityCategory::Command.label(), "Command");
+        assert_eq!(ActivityCategory::FileRead.label(), "Files");
+        assert_eq!(ActivityCategory::Typecheck.label(), "Types");
+        assert_eq!(ActivityCategory::Command.count_label(1), "ran a command");
+        assert_eq!(ActivityCategory::Command.count_label(4), "ran 4 commands");
+        assert_eq!(ActivityCategory::FileRead.count_label(1), "read a file");
+        assert_eq!(ActivityCategory::FileRead.count_label(2), "read 2 files");
+        assert_eq!(ActivityCategory::Test.count_label(3), "ran 3 test runs");
+        assert_eq!(ActivityCategory::Other.count_label(2), "used 2 tools");
+    }
+
+    #[test]
+    fn presentation_labels_follow_kind_and_lifecycle() {
+        assert_eq!(
+            activity_presentation_label("read", Some(ConversationLifecycle::Completed)),
+            Some("Read a file".to_owned())
+        );
+        assert_eq!(
+            activity_presentation_label("read", Some(ConversationLifecycle::Active)),
+            Some("Reading a file".to_owned())
+        );
+        assert_eq!(
+            activity_presentation_label("read", Some(ConversationLifecycle::Failed)),
+            Some("File read failed".to_owned())
+        );
+        // Unknown lifecycle settles rather than claiming live work.
+        assert_eq!(
+            activity_presentation_label("read", None),
+            Some("Read a file".to_owned())
+        );
+        assert_eq!(
+            activity_presentation_label("mcp", Some(ConversationLifecycle::Completed)),
+            Some("Used an integration".to_owned())
+        );
+        // The generic tool bucket keeps its provider name, normalized.
+        assert_eq!(
+            activity_presentation_label("custom_tool", Some(ConversationLifecycle::Completed)),
+            Some("Used custom tool".to_owned())
+        );
+        // Unrecognised kinds keep their own label; blank ones say nothing.
+        assert_eq!(
+            activity_presentation_label("something-new", Some(ConversationLifecycle::Completed)),
+            Some("something-new".to_owned())
+        );
+        assert_eq!(activity_presentation_label("", None), None);
     }
 }

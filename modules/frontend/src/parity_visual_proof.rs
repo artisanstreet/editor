@@ -587,6 +587,8 @@ fn case_facts(case: ProofSceneCase) -> Result<Vec<SceneFact>, String> {
             "working-fact",
             SceneFactKind::Activity {
                 body: "fixture work: reading Cargo.toml".to_owned(),
+                kind: None,
+                detail: None,
             },
         )?]),
         ProofSceneCase::Error => Ok(vec![fact(

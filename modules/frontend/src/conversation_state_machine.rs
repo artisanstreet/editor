@@ -258,7 +258,14 @@ pub enum SceneFactKind {
     /// Settled reasoning summary.
     Reasoning { body: String },
     /// Activity or tool-result summary.
-    Activity { body: String },
+    Activity {
+        /// Bounded body preserved for legacy flat rows.
+        body: String,
+        /// Provider activity kind, when the source row carried one.
+        kind: Option<String>,
+        /// Raw provider detail, when disclosed.
+        detail: Option<String>,
+    },
     /// Work-session title.
     WorkSession { title: String },
     /// One changed-file set card.
@@ -312,7 +319,6 @@ impl fmt::Debug for SceneFactKind {
         match self {
             Self::Compaction { summary }
             | Self::Reasoning { body: summary }
-            | Self::Activity { body: summary }
             | Self::WorkSession { title: summary }
             | Self::Approval { prompt: summary }
             | Self::Question { prompt: summary }
@@ -320,6 +326,12 @@ impl fmt::Debug for SceneFactKind {
             | Self::UsageInterruption { detail: summary }
             | Self::NativeFact { text: summary } => {
                 structure.field("text_bytes", &summary.len());
+            }
+            Self::Activity { body, kind, detail } => {
+                structure
+                    .field("text_bytes", &body.len())
+                    .field("kind_bytes", &kind.as_ref().map_or(0, String::len))
+                    .field("detail_bytes", &detail.as_ref().map_or(0, String::len));
             }
             Self::ChangedFiles { files } => {
                 structure.field("file_count", &files.len());
@@ -349,7 +361,11 @@ impl SceneFactKind {
                 summary: summary.clone(),
             },
             Self::Reasoning { body } => SceneItemKind::ReasoningSummary { body: body.clone() },
-            Self::Activity { body } => SceneItemKind::Activity { body: body.clone() },
+            Self::Activity { body, kind, detail } => SceneItemKind::Activity {
+                body: body.clone(),
+                kind: kind.clone(),
+                detail: detail.clone(),
+            },
             Self::WorkSession { title } => SceneItemKind::WorkSession {
                 title: title.clone(),
             },

@@ -229,10 +229,11 @@ pub fn project_activities(
             rejected += 1;
             continue;
         };
-        let body = match row.detail() {
-            Some(detail) => truncate_bounded(detail, MAX_ACTIVITY_BODY_BYTES),
-            None => truncate_bounded(row.tool_name(), MAX_ACTIVITY_BODY_BYTES),
-        };
+        let kind = truncate_bounded(row.tool_name(), MAX_ACTIVITY_BODY_BYTES);
+        let detail = row
+            .detail()
+            .map(|detail| truncate_bounded(detail, MAX_ACTIVITY_BODY_BYTES));
+        let body = detail.clone().unwrap_or_else(|| kind.clone());
         candidates.push(Candidate {
             id,
             turn: turn.clone(),
@@ -240,7 +241,7 @@ pub fn project_activities(
             committed_at_ms: committed_at.as_millis(),
             delivery_sequence,
             activity_lifecycle: Some(tool_activity_lifecycle(row.action())),
-            kind: CandidateKind::Activity { body },
+            kind: CandidateKind::Activity { body, kind, detail },
         });
     }
 
@@ -276,6 +277,10 @@ pub fn project_activities(
             _ => (
                 CandidateKind::Activity {
                     body: terminal_body(row),
+                    kind: String::from("terminal_activity"),
+                    detail: row
+                        .command()
+                        .map(|command| truncate_bounded(command, MAX_ACTIVITY_BODY_BYTES)),
                 },
                 Some(terminal_activity_lifecycle(state)),
             ),
@@ -409,7 +414,11 @@ pub fn project_activities(
             .saturating_add(index as u64);
         let kind = match candidate.kind {
             CandidateKind::Reasoning { body } => SceneFactKind::Reasoning { body },
-            CandidateKind::Activity { body } => SceneFactKind::Activity { body },
+            CandidateKind::Activity { body, kind, detail } => SceneFactKind::Activity {
+                body,
+                kind: Some(kind),
+                detail,
+            },
             CandidateKind::Approval { prompt } => SceneFactKind::Approval { prompt },
             CandidateKind::Question { prompt } => SceneFactKind::Question { prompt },
             CandidateKind::Error { message } => SceneFactKind::Error { message },
@@ -496,14 +505,9 @@ fn terminal_body(row: &crate::engine_observation_state::TerminalRow) -> String {
 
 fn timeline_kind(row: &TimelineRow) -> Option<CandidateKind> {
     match row.tag() {
-        "file" | "search" | "subagent" | "subagent_transcript" | "native_action" => {
-            Some(CandidateKind::Activity {
-                body: truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES),
-            })
+        "file" | "search" | "subagent" | "subagent_transcript" | "native_action" | "plan" => {
+            Some(timeline_activity(row))
         }
-        "plan" => Some(CandidateKind::Activity {
-            body: truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES),
-        }),
         "compaction" => Some(CandidateKind::Compaction {
             summary: truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES),
         }),
@@ -514,13 +518,38 @@ fn timeline_kind(row: &TimelineRow) -> Option<CandidateKind> {
     }
 }
 
+/// Builds one timeline row's activity kind: the stable tag classifies it and
+/// the sanitized summary is both the body and the row's detail.
+fn timeline_activity(row: &TimelineRow) -> CandidateKind {
+    let summary = truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES);
+    CandidateKind::Activity {
+        body: summary.clone(),
+        kind: row.tag().to_owned(),
+        detail: Some(summary),
+    }
+}
+
 enum CandidateKind {
-    Reasoning { body: String },
-    Activity { body: String },
-    Approval { prompt: String },
-    Question { prompt: String },
-    Error { message: String },
-    Compaction { summary: String },
+    Reasoning {
+        body: String,
+    },
+    Activity {
+        body: String,
+        kind: String,
+        detail: Option<String>,
+    },
+    Approval {
+        prompt: String,
+    },
+    Question {
+        prompt: String,
+    },
+    Error {
+        message: String,
+    },
+    Compaction {
+        summary: String,
+    },
 }
 
 struct Candidate {
@@ -531,4 +560,186 @@ struct Candidate {
     delivery_sequence: u64,
     activity_lifecycle: Option<ConversationLifecycle>,
     kind: CandidateKind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_activities;
+    use crate::conversation_state_machine::SceneFactKind;
+    use crate::engine_observation_state::EngineObservationState;
+    use artisan_domain::{
+        ConversationCursor, ConversationLifecycle, ConversationSnapshot, ConversationTurn,
+        EngineObservationAttribution, EngineObservationEvent, FileAction, FileObservation,
+        Observation, ObservationId, ObservationSequence, Revision, RunId, TerminalActivityInput,
+        TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction, ToolObservation,
+        TurnId, TurnOrdinal, UnixMillis,
+    };
+
+    fn observation_id(value: &str) -> ObservationId {
+        ObservationId::parse(value).expect("fixture observation id is valid")
+    }
+
+    fn sequence(value: u64) -> ObservationSequence {
+        ObservationSequence::new(value).expect("fixture sequence is valid")
+    }
+
+    fn attributed_event(
+        thread: &ThreadId,
+        run: &RunId,
+        turn: &TurnId,
+        cursor: u64,
+        observation: Observation,
+    ) -> EngineObservationEvent {
+        EngineObservationEvent {
+            thread_id: thread.clone(),
+            observation,
+            attribution: Some(EngineObservationAttribution {
+                run_id: run.clone(),
+                turn_id: turn.clone(),
+                committed_at: UnixMillis::from_millis(cursor as i64),
+                delivery_sequence: cursor,
+            }),
+        }
+    }
+
+    fn snapshot(thread: &ThreadId, turn: &TurnId) -> ConversationSnapshot {
+        ConversationSnapshot::new(
+            thread.clone(),
+            ConversationCursor::new(0),
+            vec![ConversationTurn {
+                turn_id: turn.clone(),
+                ordinal: TurnOrdinal::new(0),
+                revision: Revision::new(0),
+                lifecycle: ConversationLifecycle::Active,
+                created_at: UnixMillis::from_millis(0),
+                updated_at: UnixMillis::from_millis(1),
+            }],
+            Vec::new(),
+            UnixMillis::from_millis(1),
+        )
+        .expect("fixture snapshot is valid")
+    }
+
+    #[test]
+    fn tool_rows_carry_provider_kind_and_detail_into_activity_facts() {
+        let thread = ThreadId::parse("thread-projection").expect("thread");
+        let turn = TurnId::parse("turn-projection").expect("turn");
+        let run = RunId::parse("run-projection").expect("run");
+        let event = attributed_event(
+            &thread,
+            &run,
+            &turn,
+            1,
+            Observation::Tool(
+                ToolObservation::new(
+                    observation_id("obs-tool"),
+                    sequence(3),
+                    observation_id("tool-1"),
+                    String::from("read"),
+                    ToolAction::Completed,
+                    Some(String::from("src/main.rs")),
+                )
+                .expect("fixture tool observation is valid"),
+            ),
+        );
+        let mut state = EngineObservationState::new(thread.clone());
+        state.apply(1, &event);
+
+        let projection = project_activities(&state, &snapshot(&thread, &turn));
+        assert_eq!(projection.facts.len(), 1);
+        let fact = &projection.facts[0];
+        match &fact.kind {
+            SceneFactKind::Activity { body, kind, detail } => {
+                assert_eq!(body, "src/main.rs");
+                assert_eq!(kind.as_deref(), Some("read"));
+                assert_eq!(detail.as_deref(), Some("src/main.rs"));
+            }
+            other => panic!("expected an activity fact, got {other:?}"),
+        }
+        assert_eq!(
+            fact.activity_lifecycle,
+            Some(ConversationLifecycle::Completed)
+        );
+    }
+
+    #[test]
+    fn terminal_rows_carry_the_raw_command_as_terminal_detail() {
+        let thread = ThreadId::parse("thread-terminal").expect("thread");
+        let turn = TurnId::parse("turn-terminal").expect("turn");
+        let run = RunId::parse("run-terminal").expect("run");
+        let event = attributed_event(
+            &thread,
+            &run,
+            &turn,
+            1,
+            Observation::TerminalActivity(
+                TerminalActivityObservation::new(
+                    observation_id("obs-terminal"),
+                    sequence(4),
+                    TerminalActivityInput {
+                        activity_id: observation_id("activity-1"),
+                        channel: None,
+                        command: Some(String::from("cargo test --locked")),
+                        shell: None,
+                        output: Some(String::from("test result: ok")),
+                        exit_code: Some(0),
+                        state: TerminalActivityState::Completed,
+                    },
+                )
+                .expect("fixture terminal observation is valid"),
+            ),
+        );
+        let mut state = EngineObservationState::new(thread.clone());
+        state.apply(1, &event);
+
+        let projection = project_activities(&state, &snapshot(&thread, &turn));
+        assert_eq!(projection.facts.len(), 1);
+        match &projection.facts[0].kind {
+            SceneFactKind::Activity { body, kind, detail } => {
+                // The accumulated output stays the legacy body; the row
+                // presentation reads the raw command detail.
+                assert_eq!(body, "test result: ok");
+                assert_eq!(kind.as_deref(), Some("terminal_activity"));
+                assert_eq!(detail.as_deref(), Some("cargo test --locked"));
+            }
+            other => panic!("expected an activity fact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timeline_activities_carry_their_tag_and_sanitized_summary() {
+        let thread = ThreadId::parse("thread-timeline").expect("thread");
+        let turn = TurnId::parse("turn-timeline").expect("turn");
+        let run = RunId::parse("run-timeline").expect("run");
+        let event = attributed_event(
+            &thread,
+            &run,
+            &turn,
+            1,
+            Observation::File(
+                FileObservation::new(
+                    observation_id("obs-file"),
+                    sequence(5),
+                    String::from("src/main.rs"),
+                    FileAction::Modified,
+                    Some(10),
+                    Some(2),
+                )
+                .expect("fixture file observation is valid"),
+            ),
+        );
+        let mut state = EngineObservationState::new(thread.clone());
+        state.apply(1, &event);
+
+        let projection = project_activities(&state, &snapshot(&thread, &turn));
+        assert_eq!(projection.facts.len(), 1);
+        match &projection.facts[0].kind {
+            SceneFactKind::Activity { body, kind, detail } => {
+                assert_eq!(body, "modified src/main.rs (+10/-2)");
+                assert_eq!(kind.as_deref(), Some("file"));
+                assert_eq!(detail.as_deref(), Some("modified src/main.rs (+10/-2)"));
+            }
+            other => panic!("expected an activity fact, got {other:?}"),
+        }
+    }
 }

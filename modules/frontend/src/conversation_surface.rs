@@ -16,8 +16,8 @@
 
 use artisan_assets::AssetId;
 use artisan_domain::{
-    Command, ItemId, OBSERVATION_ANSWER_MAX_BYTES, ObservationId, RequestId, RunId, ThreadId,
-    TurnId,
+    Command, ConversationLifecycle, ItemId, OBSERVATION_ANSWER_MAX_BYTES, ObservationId, RequestId,
+    RunId, ThreadId, TurnId,
 };
 use artisan_protocol::{
     ErrorCode, ErrorDetail, ProtocolFailure, RespondApprovalReceipt, RespondQuestionReceipt,
@@ -58,11 +58,11 @@ use std::time::Duration;
 
 use crate::approval_presentation::ApprovalKind as PresentationApprovalKind;
 use crate::conversation_scene::{
-    ChangeSetBlock, CompactionBlock, ConversationScene, ErrorBlock, FileChangeStatus,
-    ModelTransitionBlock, NativeFactBlock, PlanBlock, QuestionBlock, SceneDisclosure,
-    SceneFileChange, SceneId, SessionDetail, SteeringBlock, TurnBlock, TurnFooterBlock,
-    TurnFooterSettlement, TurnNarration, TurnScene, UsageInterruptionBlock, UserMessageBlock,
-    WorkGroupBlock, WorkItem,
+    ActivityCategory, ChangeSetBlock, CompactionBlock, ConversationScene, ErrorBlock,
+    FileChangeStatus, ModelTransitionBlock, NativeFactBlock, PlanBlock, QuestionBlock,
+    SceneDisclosure, SceneFileChange, SceneId, SessionDetail, SteeringBlock, TurnBlock,
+    TurnFooterBlock, TurnFooterSettlement, TurnNarration, TurnScene, UsageInterruptionBlock,
+    UserMessageBlock, WorkGroupBlock, WorkItem, activity_category, activity_presentation_label,
 };
 use crate::conversation_scroll_position::conversation_is_following;
 use crate::conversation_turn_navigator::{
@@ -899,6 +899,16 @@ pub struct ConversationSurface {
     /// exposes no OS query beyond the live window signal read at render time,
     /// so a stored `Full` follows `cx.reduce_motion()`.
     status_motion: MotionPolicy,
+    /// Explicit activity-chain disclosure overrides, keyed by chain identity
+    /// (the first activity's scene id).
+    ///
+    /// The reference keeps `open_groups` as local component state: an unset
+    /// chain falls back to its failure/liveness default every render, and
+    /// only a user toggle pins a value. The work-session disclosure stays
+    /// scene-owned; this map is presentation-only and never mutates the
+    /// scene. Entries persist while the surface owns them, exactly like the
+    /// reference component state; the set is bounded by user gestures.
+    trace_groups_open: RefCell<HashMap<String, bool>>,
     /// Host-mirrored footer view state keyed by [`footer_key`].
     footer_mirrors: HashMap<String, TurnFooterMirror>,
     /// Per-turn footer copy-button focus handles keyed by [`footer_key`].
@@ -1129,6 +1139,166 @@ fn disclosure_flight_animation(plan: MotionPlan) -> Animation {
         .with_easing(move |progress: f32| curve.sample(f64::from(progress)) as f32)
 }
 
+/// Attaches the shared accordion panel (height, opacity, blur) to one
+/// disclosure root.
+///
+/// `selector` is the owning element's selector; the panel state, content, and
+/// animator identities derive from it exactly as the work-session disclosure
+/// always has, so the session panel and every activity chain ride one clock
+/// implementation. `controlled` follows the existing work-group policy:
+/// uncontrolled roots paint their content statically, while controlled roots
+/// keep content mounted only while it is visible or a collapse is still
+/// measuring. The caller owns the root and panel debug selectors and the
+/// trigger child; this helper owns the content selector and flight.
+#[allow(clippy::too_many_arguments)]
+fn disclosure_flight_panel(
+    mut disclosure: Div,
+    mut panel: Div,
+    content: AnyElement,
+    selector: &str,
+    open: bool,
+    controlled: bool,
+    motion: MotionPolicy,
+    window: &mut Window,
+    cx: &mut Context<ConversationSurface>,
+) -> AnyElement {
+    let inner = div()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .debug_selector({
+            let content_selector = format!("{selector}-disclosure-content");
+            move || content_selector.clone()
+        })
+        .child(content);
+
+    if controlled {
+        let panel_state = window.use_keyed_state(
+            ElementId::Name(SharedString::from(format!(
+                "{selector}-disclosure-panel-state"
+            ))),
+            cx,
+            |_, _| DisclosurePanelState::new(open),
+        );
+        let (painted_open, mut flight, progress, content_height) = {
+            let state = panel_state.read(cx);
+            (
+                state.painted_open,
+                state.flight,
+                state.progress.clone(),
+                state.content_height,
+            )
+        };
+        if painted_open != open {
+            let from = progress.get().clamp(0.0, 1.0);
+            flight = match motion {
+                MotionPolicy::Full => Some(DisclosureFlight { open, from }),
+                MotionPolicy::Reduced => None,
+            };
+            panel_state.update(cx, |state, _| {
+                state.painted_open = open;
+                state.flight = flight;
+            });
+        }
+        let animated =
+            matches!(flight, Some(armed) if armed.open == open) && motion == MotionPolicy::Full;
+        if !animated && flight.is_some() {
+            // A policy switch midway through a flight (or a reduced-motion
+            // render) settles at the final state now; the clock is dropped
+            // so it can never replay when full motion returns.
+            flight = None;
+            panel_state.update(cx, |state, _| state.flight = None);
+        }
+        let content_mounted = open || matches!(flight, Some(armed) if !armed.open);
+
+        // Height measurement rides the panel's prepaint boundary, after
+        // this frame's animator has written its fraction: a completed
+        // flight disarms here, which unmounts a settled collapse's rows on
+        // the next frame without ever dropping the stored target height.
+        let panel_state_for_prepaint = panel_state.clone();
+        panel = panel.on_children_prepainted(move |children_bounds, _, app| {
+            let Some(content_bounds) = children_bounds.first() else {
+                return;
+            };
+            panel_state_for_prepaint.update(app, |state, state_cx| {
+                state.content_height = f32::from(content_bounds.size.height);
+                if state
+                    .flight
+                    .is_some_and(|flight| (state.progress.get() - flight.target()).abs() <= 1e-4)
+                {
+                    state.flight = None;
+                    state_cx.notify();
+                }
+            });
+        });
+
+        if content_mounted {
+            if animated {
+                let armed = flight.expect("the animated branch always carries a flight");
+                let (from, target) = (armed.from, armed.target());
+                let full_height = content_height;
+                let progress_for_height = progress.clone();
+                let inner_animation =
+                    disclosure_flight_animation(motion.resolve(MotionRecipe::AccordionExpand));
+                let inner = inner
+                    .with_animations(
+                        ElementId::Name(SharedString::from(format!(
+                            "{selector}-disclosure-content-{}",
+                            if open { "open" } else { "closed" }
+                        ))),
+                        vec![inner_animation],
+                        move |inner, _index, value| {
+                            let fraction = from + (target - from) * value;
+                            if fraction >= 1.0 {
+                                inner.opacity(1.0)
+                            } else {
+                                inner.opacity(fraction).filter(vec![Filter::Blur(px(
+                                    WORK_GROUP_PANEL_BLUR_PX * (1.0 - fraction),
+                                ))])
+                            }
+                        },
+                    )
+                    .into_any_element();
+                let panel_animation =
+                    disclosure_flight_animation(motion.resolve(MotionRecipe::AccordionExpand));
+                disclosure = disclosure.child(
+                    panel
+                        .child(inner)
+                        .overflow_hidden()
+                        .with_animations(
+                            ElementId::Name(SharedString::from(format!(
+                                "{selector}-disclosure-panel-{}",
+                                if open { "open" } else { "closed" }
+                            ))),
+                            vec![panel_animation],
+                            move |panel, _index, value| {
+                                let fraction = from + (target - from) * value;
+                                progress_for_height.set(fraction);
+                                panel.h(px(full_height * fraction))
+                            },
+                        )
+                        .into_any_element(),
+                );
+            } else {
+                // A settled flight disarms above, so mounted content
+                // outside a flight is always the open side.
+                debug_assert!(open, "mounted content outside a flight is open");
+                progress.set(1.0);
+                disclosure = disclosure.child(panel.child(inner));
+            }
+        } else {
+            progress.set(if open { 1.0 } else { 0.0 });
+            disclosure = disclosure.child(panel.h(px(0.0)).overflow_hidden());
+        }
+    } else if open {
+        disclosure = disclosure.child(panel.child(inner));
+    } else {
+        disclosure = disclosure.child(panel.h(px(0.0)).overflow_hidden());
+    }
+
+    disclosure.into_any_element()
+}
+
 /// One loaded user-message control in the turn navigator rail.
 struct NavigatorMarker {
     /// Visible policy label; never crosses the action boundary.
@@ -1158,21 +1328,299 @@ fn navigator_smooth_out(progress: f32) -> f32 {
     MotionCurve::SmoothOut.sample(f64::from(progress)) as f32
 }
 
+/// One recognised shell wrapper: how its executable is named and how it takes
+/// a command. Ported from the reference `shell-command.ts`.
+struct ShellWrapper {
+    flags: &'static [&'static str],
+    names: &'static [&'static str],
+}
+
+/// The wrappers a reader means, in the reference's exact order.
+const SHELL_WRAPPERS: &[ShellWrapper] = &[
+    ShellWrapper {
+        flags: &["-command", "-c"],
+        names: &["pwsh", "powershell"],
+    },
+    ShellWrapper {
+        flags: &["-c", "-lc", "-ic", "-lic"],
+        names: &["bash", "sh", "zsh", "dash"],
+    },
+    ShellWrapper {
+        flags: &["/c", "/k"],
+        names: &["cmd"],
+    },
+];
+
+/// Splits one leading argument, honouring the quotes a path with spaces needs.
+///
+/// Returns `(rest, value)` exactly like the reference: the rest keeps its
+/// leading whitespace (the next split trims it) and an unterminated quote
+/// falls back to the whitespace split.
+fn take_shell_argument(input: &str) -> (&str, &str) {
+    let text = input.trim_start();
+    let quote = if text.starts_with('"') {
+        Some('"')
+    } else if text.starts_with('\'') {
+        Some('\'')
+    } else {
+        None
+    };
+
+    if let Some(quote) = quote
+        && let Some(offset) = text[1..].find(quote)
+    {
+        let close = 1 + offset;
+        return (&text[close + 1..], &text[1..close]);
+    }
+
+    match text.find(char::is_whitespace) {
+        Some(break_at) => (&text[break_at..], &text[..break_at]),
+        None => ("", text),
+    }
+}
+
+/// The executable's own name, without its directory or extension.
+fn shell_executable_name(path: &str) -> String {
+    let file = match path.rfind(|character| character == '/' || character == '\\') {
+        Some(separator) => &path[separator + 1..],
+        None => path,
+    };
+    let lowered = file.to_lowercase();
+    lowered.strip_suffix(".exe").unwrap_or(&lowered).to_owned()
+}
+
+/// Drops one matching pair of surrounding quotes, which a shell would have
+/// eaten.
+fn unquote_shell_argument(text: &str) -> &str {
+    let first = text.chars().next();
+    match first {
+        Some(first @ ('"' | '\'')) if text.len() > 1 && text.ends_with(first) => {
+            &text[1..text.len() - 1]
+        }
+        _ => text,
+    }
+}
+
+/// Collapses every whitespace run to one space and trims, exactly like the
+/// reference `replaceAll(/\s+/g, " ").trim()`.
+fn collapse_whitespace(text: &str) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        pending_space = false;
+        collapsed.push(character);
+    }
+    collapsed
+}
+
+/// The command a reader means, recovered from the invocation an engine
+/// reports. Ported from the reference `PresentShellCommand`.
+///
+/// A run arrives as the full argv it was spawned with, which on Windows
+/// begins with an absolute path into `WindowsApps` before `-Command` and the
+/// actual work. In a truncated row every visible character would be that
+/// path, so the line would say less than the word it replaced. Anything not
+/// recognised is returned as it came, because a command this does not
+/// understand is still more useful whole than guessed at.
+#[must_use]
+pub fn present_shell_command(command: &str) -> String {
+    let collapsed = collapse_whitespace(command);
+    let (rest, executable) = take_shell_argument(&collapsed);
+    let name = shell_executable_name(executable);
+    let Some(wrapper) = SHELL_WRAPPERS
+        .iter()
+        .find(|candidate| candidate.names.contains(&name.as_str()))
+    else {
+        return collapsed;
+    };
+
+    let (body, flag) = take_shell_argument(rest);
+    if !wrapper.flags.contains(&flag.to_lowercase().as_str()) {
+        return collapsed;
+    }
+
+    let body = unquote_shell_argument(body.trim());
+
+    if body.is_empty() {
+        collapsed
+    } else {
+        body.to_owned()
+    }
+}
+
+/// Whether one lifecycle is a failure the trace must explain.
+const fn lifecycle_is_failed(lifecycle: ConversationLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        ConversationLifecycle::Failed
+            | ConversationLifecycle::Cancelled
+            | ConversationLifecycle::Interrupted
+    )
+}
+
+/// Whether one lifecycle is live work; the set the scene build treats as
+/// potentially still arriving.
+const fn lifecycle_is_live(lifecycle: ConversationLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        ConversationLifecycle::Pending
+            | ConversationLifecycle::Streaming
+            | ConversationLifecycle::Active
+            | ConversationLifecycle::Waiting
+    )
+}
+
+/// The muted row text for one activity: the normalized shell command for
+/// terminal details, the raw detail otherwise, else the presentation label.
+///
+/// A terminal detail whose normalization collapses to nothing falls back to
+/// the label, so the row never paints an empty second column.
+#[must_use]
+fn activity_detail_text(
+    kind: &str,
+    detail: Option<&str>,
+    lifecycle: Option<ConversationLifecycle>,
+) -> String {
+    match detail {
+        Some(detail) if kind == "terminal_activity" => {
+            let presented = present_shell_command(detail);
+            if presented.is_empty() {
+                activity_presentation_label(kind, lifecycle).unwrap_or_default()
+            } else {
+                presented
+            }
+        }
+        Some(detail) => detail.to_owned(),
+        None => activity_presentation_label(kind, lifecycle).unwrap_or_default(),
+    }
+}
+
+/// Builds one chain header's clause sentence from its activity kinds.
+///
+/// Composition is counted in first-appearance order so the header describes
+/// the work rather than measuring it: "Ran 1 command, read 2 files". The
+/// first clause is capitalized, later ones join with a comma, exactly like
+/// the reference `GroupClauses`.
+#[must_use]
+fn activity_chain_clause<'a>(kinds: impl Iterator<Item = &'a str>) -> String {
+    let mut composition: Vec<(ActivityCategory, usize)> = Vec::new();
+    for kind in kinds {
+        let category = activity_category(kind);
+        match composition.iter_mut().find(|(known, _)| *known == category) {
+            Some((_, count)) => *count += 1,
+            None => composition.push((category, 1)),
+        }
+    }
+
+    let mut clause_text = String::new();
+    for (index, (category, count)) in composition.iter().enumerate() {
+        let clause = category.count_label(*count);
+        if index == 0 {
+            let mut characters = clause.chars();
+            if let Some(first) = characters.next() {
+                clause_text.extend(first.to_uppercase());
+                clause_text.push_str(characters.as_str());
+            }
+        } else {
+            clause_text.push_str(", ");
+            clause_text.push_str(&clause);
+        }
+    }
+    clause_text
+}
+
+/// The Tabler glyph naming one activity category, matching the reference
+/// `CategoryIcon`.
+const fn activity_category_icon(category: ActivityCategory) -> AssetId {
+    match category {
+        ActivityCategory::Command | ActivityCategory::Test | ActivityCategory::Typecheck => {
+            AssetId::TABLER_TERMINAL_2
+        }
+        ActivityCategory::FileRead => AssetId::TABLER_FILE_TEXT,
+        ActivityCategory::FileEdit => AssetId::TABLER_FILE_PENCIL,
+        ActivityCategory::FileDelete => AssetId::TABLER_FILE_X,
+        ActivityCategory::FileSearch => AssetId::TABLER_FILE_SEARCH,
+        ActivityCategory::WebSearch => AssetId::TABLER_WORLD_SEARCH,
+        _ => AssetId::TABLER_TOOL,
+    }
+}
+
+/// The chain header's glyph: a homogeneous chain is represented by its tool
+/// category, while mixed work uses the group glyph because no single category
+/// can honestly name its contents (reference `GroupIcon`).
+#[must_use]
+fn activity_chain_icon<'a>(kinds: impl Iterator<Item = &'a str>) -> AssetId {
+    let mut categories: Vec<ActivityCategory> = Vec::new();
+    for kind in kinds {
+        let category = activity_category(kind);
+        if !categories.contains(&category) {
+            categories.push(category);
+        }
+    }
+    match categories.as_slice() {
+        [only] => activity_category_icon(*only),
+        _ => AssetId::TABLER_LIST_DETAILS,
+    }
+}
+
+/// Resolves one activity chain's default disclosure state.
+///
+/// The reference defaults an activity group closed unless the chain failed or
+/// is live. Native signals are the member lifecycles plus the owning turn: a
+/// group that owns the turn's live Thinking/Working line counts as live while
+/// the turn is not terminal (the closest native analogue of the reference
+/// `work_active` flag), and a failed, cancelled, or interrupted turn opens
+/// its chain so the failure can explain itself. Unknown liveness never counts
+/// as live.
+#[must_use]
+fn activity_chain_disclosure_state(
+    rows: &[(u64, DetailRow<'_>)],
+    live_header: bool,
+    turn_lifecycle: ConversationLifecycle,
+) -> (bool, bool) {
+    let mut live = live_header && !turn_lifecycle.is_terminal();
+    let mut failed = lifecycle_is_failed(turn_lifecycle);
+    for (_, row) in rows {
+        if let DetailRow::Activity {
+            lifecycle: Some(lifecycle),
+            ..
+        } = row
+        {
+            live |= lifecycle_is_live(*lifecycle);
+            failed |= lifecycle_is_failed(*lifecycle);
+        }
+    }
+    (live, failed)
+}
+
 /// Returns whether one work group paints actual visible trace content.
 ///
 /// This is the native `has_visible_details` trace predicate
 /// (`work_session_disclosure`): session-title markers and empty bodies are
 /// signals, not content, so a `Thought for …` group with no rows paints no
-/// disclosure control at all instead of a blank collapsible.
+/// disclosure control at all instead of a blank collapsible. A kinded
+/// activity counts as content even with an empty body, because its category
+/// label and fallback presentation always paint.
 fn work_group_has_visible_details(block: &WorkGroupBlock) -> bool {
-    ordered_detail_rows(block).iter().any(|(_, row)| {
-        let body = match row {
-            DetailRow::Assistant { body, .. } | DetailRow::Activity { body, .. } => body,
-            DetailRow::Compaction { summary, .. } => summary,
-            DetailRow::NativeFact { text, .. } => text,
-            DetailRow::SessionTitle { .. } => return false,
-        };
-        !body.trim().is_empty()
+    ordered_detail_rows(block).iter().any(|(_, row)| match row {
+        DetailRow::Assistant { body, .. } => !body.trim().is_empty(),
+        DetailRow::Activity {
+            body, kind, detail, ..
+        } => {
+            kind.is_some()
+                || !body.trim().is_empty()
+                || detail.is_some_and(|detail| !detail.trim().is_empty())
+        }
+        DetailRow::Compaction { summary, .. } => !summary.trim().is_empty(),
+        DetailRow::NativeFact { text, .. } => !text.trim().is_empty(),
+        DetailRow::SessionTitle { .. } => false,
     })
 }
 
@@ -1411,6 +1859,7 @@ impl ConversationSurface {
             transcript_scroll_frame_scheduled: false,
             active_now_ms: None,
             status_motion: MotionPolicy::Full,
+            trace_groups_open: RefCell::new(HashMap::new()),
             footer_mirrors: HashMap::new(),
             footer_focus: HashMap::new(),
             footer_revealed: None,
@@ -2565,6 +3014,7 @@ impl ConversationSurface {
         for (block_index, block) in turn.blocks().iter().enumerate() {
             if let Some(element) = self.render_block(
                 &turn.turn_id,
+                turn.lifecycle,
                 block,
                 entity,
                 theme,
@@ -2586,6 +3036,7 @@ impl ConversationSurface {
     fn render_block(
         &self,
         turn_id: &TurnId,
+        turn_lifecycle: ConversationLifecycle,
         block: &TurnBlock,
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
@@ -2626,6 +3077,7 @@ impl ConversationSurface {
                 };
                 Some(self.render_work_group(
                     turn_id,
+                    turn_lifecycle,
                     block,
                     selector,
                     entity,
@@ -2822,6 +3274,7 @@ impl ConversationSurface {
     fn render_work_group(
         &self,
         turn_id: &TurnId,
+        turn_lifecycle: ConversationLifecycle,
         block: &WorkGroupBlock,
         selector: String,
         entity: &Entity<Self>,
@@ -2844,6 +3297,7 @@ impl ConversationSurface {
         // groups and the separate status row stand down, so the line paints
         // exactly once per turn.
         let terminal = work_group_header_copy(block.label);
+        let owns_live_header = live_header.is_some();
         let header = terminal.or(live_header);
         // Engine handoffs fold into the header far end, never as standalone
         // timeline rows while a session hosts them.
@@ -2872,33 +3326,69 @@ impl ConversationSurface {
             .flex_col()
             .gap(theme.spacing.steps(2.0));
         let rows = ordered_detail_rows(block);
-        for (ordinal, row) in &rows {
-            items = items.child(self.render_detail_row(
-                *row,
-                *ordinal,
-                &selector,
-                entity,
-                theme,
-                anchors,
-                items_mounted,
-            ));
+        // Consecutive activity rows form one collapsible trace chain, exactly
+        // like the reference segmentation: anything else (assistant prose,
+        // compaction, native fact) is a seam that ends the chain. Chains keep
+        // their rows as their own children so each row's measured bound stays
+        // reachable by the scroll-target handoff below.
+        let mut child_identities: Vec<(Option<SceneId>, Option<ItemId>)> = Vec::new();
+        let mut chain_index = 0usize;
+        let mut row_index = 0usize;
+        while row_index < rows.len() {
+            let is_activity = matches!(rows[row_index].1, DetailRow::Activity { .. });
+            if is_activity {
+                let start = row_index;
+                while row_index < rows.len()
+                    && matches!(rows[row_index].1, DetailRow::Activity { .. })
+                {
+                    row_index += 1;
+                }
+                let chain_rows = &rows[start..row_index];
+                let (live, failed) =
+                    activity_chain_disclosure_state(chain_rows, owns_live_header, turn_lifecycle);
+                items = items.child(self.render_trace_chain(
+                    &selector,
+                    chain_index,
+                    chain_rows,
+                    live,
+                    failed,
+                    status_motion,
+                    entity,
+                    theme,
+                    anchors,
+                    items_mounted,
+                    window,
+                    cx,
+                ));
+                // The chain's own prepaint listener resolves its row bounds;
+                // at this level the chain is opaque to row targets so a
+                // collapsed chain cannot resolve one against its header.
+                child_identities.push((None, None));
+                chain_index += 1;
+            } else {
+                items = items.child(self.render_detail_row(
+                    rows[row_index].1,
+                    rows[row_index].0,
+                    &selector,
+                    entity,
+                    theme,
+                    anchors,
+                    items_mounted,
+                ));
+                let id = rows[row_index].1.scene_id();
+                child_identities.push((Some(id.clone()), item_id_for_scene_id(id)));
+                row_index += 1;
+            }
         }
         if header.is_some() {
             items = items.pt(theme.spacing.steps(2.0));
         }
-        // Identities mirror painted rows in order, so executed scroll
+        // Identities mirror painted children in order, so executed scroll
         // targets resolve against measured child bounds one-to-one.
-        let item_identities: Vec<(Option<SceneId>, Option<ItemId>)> = rows
-            .iter()
-            .map(|(_, row)| {
-                let id = row.scene_id();
-                (Some(id.clone()), item_id_for_scene_id(id))
-            })
-            .collect();
         let surface = entity.downgrade();
         items = items.on_children_prepainted(move |children_bounds, window, app| {
             let _ = surface.update(app, |surface, _| {
-                surface.apply_executed_scroll_targets(&item_identities, &children_bounds, window);
+                surface.apply_executed_scroll_targets(&child_identities, &children_bounds, window);
             });
         });
 
@@ -2970,7 +3460,7 @@ impl ConversationSurface {
         } else {
             base_trigger.into_any_element()
         };
-        let mut disclosure = div()
+        let disclosure = div()
             .flex()
             .flex_col()
             .min_w_0()
@@ -2984,7 +3474,7 @@ impl ConversationSurface {
         // stays mounted only while it can be seen or measured (open, or a
         // collapse still in flight), so settled history keeps the reference's
         // unmounted-details policy.
-        let mut panel = div()
+        let panel = div()
             .w_full()
             .min_w_0()
             .flex()
@@ -2994,143 +3484,223 @@ impl ConversationSurface {
                 let panel_selector = format!("{selector}-disclosure-panel");
                 move || panel_selector.clone()
             });
-        let inner = div()
-            .w_full()
-            .min_w_0()
-            .flex_shrink_0()
-            .debug_selector({
-                let content_selector = format!("{disclosure_selector}-content");
-                move || content_selector.clone()
-            })
-            .child(items);
 
-        if controlled {
-            let panel_state = window.use_keyed_state(
-                ElementId::Name(SharedString::from(format!(
-                    "{selector}-disclosure-panel-state"
-                ))),
-                cx,
-                |_, _| DisclosurePanelState::new(open),
-            );
-            let (painted_open, mut flight, progress, content_height) = {
-                let state = panel_state.read(cx);
-                (
-                    state.painted_open,
-                    state.flight,
-                    state.progress.clone(),
-                    state.content_height,
-                )
-            };
-            if painted_open != open {
-                let from = progress.get().clamp(0.0, 1.0);
-                flight = match status_motion {
-                    MotionPolicy::Full => Some(DisclosureFlight { open, from }),
-                    MotionPolicy::Reduced => None,
-                };
-                panel_state.update(cx, |state, _| {
-                    state.painted_open = open;
-                    state.flight = flight;
-                });
-            }
-            let animated = matches!(flight, Some(armed) if armed.open == open)
-                && status_motion == MotionPolicy::Full;
-            if !animated && flight.is_some() {
-                // A policy switch midway through a flight (or a reduced-motion
-                // render) settles at the final state now; the clock is dropped
-                // so it can never replay when full motion returns.
-                flight = None;
-                panel_state.update(cx, |state, _| state.flight = None);
-            }
-            let content_mounted = open || matches!(flight, Some(armed) if !armed.open);
-
-            // Height measurement rides the panel's prepaint boundary, after
-            // this frame's animator has written its fraction: a completed
-            // flight disarms here, which unmounts a settled collapse's rows on
-            // the next frame without ever dropping the stored target height.
-            let panel_state_for_prepaint = panel_state.clone();
-            panel = panel.on_children_prepainted(move |children_bounds, _, app| {
-                let Some(content_bounds) = children_bounds.first() else {
-                    return;
-                };
-                panel_state_for_prepaint.update(app, |state, state_cx| {
-                    state.content_height = f32::from(content_bounds.size.height);
-                    if state
-                        .flight
-                        .is_some_and(|flight| (state.progress.get() - flight.target()).abs() <= 1e-4)
-                    {
-                        state.flight = None;
-                        state_cx.notify();
-                    }
-                });
-            });
-
-            if content_mounted {
-                if animated {
-                    let armed = flight.expect("the animated branch always carries a flight");
-                    let (from, target) = (armed.from, armed.target());
-                    let full_height = content_height;
-                    let progress_for_height = progress.clone();
-                    let inner_animation = disclosure_flight_animation(
-                        status_motion.resolve(MotionRecipe::AccordionExpand),
-                    );
-                    let inner = inner
-                        .with_animations(
-                            ElementId::Name(SharedString::from(format!(
-                                "{selector}-disclosure-content-{}",
-                                if open { "open" } else { "closed" }
-                            ))),
-                            vec![inner_animation],
-                            move |inner, _index, value| {
-                                let fraction = from + (target - from) * value;
-                                if fraction >= 1.0 {
-                                    inner.opacity(1.0)
-                                } else {
-                                    inner.opacity(fraction).filter(vec![Filter::Blur(px(
-                                        WORK_GROUP_PANEL_BLUR_PX * (1.0 - fraction),
-                                    ))])
-                                }
-                            },
-                        )
-                        .into_any_element();
-                    let panel_animation = disclosure_flight_animation(
-                        status_motion.resolve(MotionRecipe::AccordionExpand),
-                    );
-                    disclosure = disclosure.child(
-                        panel
-                            .child(inner)
-                            .overflow_hidden()
-                            .with_animations(
-                                ElementId::Name(SharedString::from(format!(
-                                    "{selector}-disclosure-panel-{}",
-                                    if open { "open" } else { "closed" }
-                                ))),
-                                vec![panel_animation],
-                                move |panel, _index, value| {
-                                    let fraction = from + (target - from) * value;
-                                    progress_for_height.set(fraction);
-                                    panel.h(px(full_height * fraction))
-                                },
-                            )
-                            .into_any_element(),
-                    );
-                } else {
-                    // A settled flight disarms above, so mounted content
-                    // outside a flight is always the open side.
-                    debug_assert!(open, "mounted content outside a flight is open");
-                    progress.set(1.0);
-                    disclosure = disclosure.child(panel.child(inner));
-                }
-            } else {
-                progress.set(if open { 1.0 } else { 0.0 });
-                disclosure = disclosure.child(panel.h(px(0.0)).overflow_hidden());
-            }
-        } else if open {
-            disclosure = disclosure.child(panel.child(inner));
-        } else {
-            disclosure = disclosure.child(panel.h(px(0.0)).overflow_hidden());
-        }
+        let disclosure = disclosure_flight_panel(
+            disclosure,
+            panel,
+            items.into_any_element(),
+            &selector,
+            open,
+            controlled,
+            status_motion,
+            window,
+            cx,
+        );
 
         section.child(disclosure).into_any_element()
+    }
+
+    /// Renders one contiguous activity chain with the reference trace header,
+    /// left rail, and rows.
+    ///
+    /// The header carries the category icon, the counted clause sentence, and
+    /// the chevron; the rows indent under a 2 px rail inside the shared
+    /// accordion panel. Disclosure is surface-local state keyed by the first
+    /// activity's identity, exactly like the reference `open_groups`: an
+    /// unset chain re-evaluates its failed/live default every render, and a
+    /// user toggle pins the value for the surface's life.
+    #[allow(clippy::too_many_arguments)]
+    fn render_trace_chain(
+        &self,
+        group_selector: &str,
+        chain_index: usize,
+        rows: &[(u64, DetailRow<'_>)],
+        live: bool,
+        failed: bool,
+        motion: MotionPolicy,
+        entity: &Entity<Self>,
+        theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
+        mounted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selector = format!("{group_selector}-trace-{chain_index}");
+        let chain_key = rows
+            .first()
+            .map(|(_, row)| row.scene_id().as_str().to_owned())
+            .unwrap_or_default();
+        let open = self
+            .trace_groups_open
+            .borrow()
+            .get(&chain_key)
+            .copied()
+            .unwrap_or(live || failed);
+        let header_color = if open {
+            theme.colors.foreground
+        } else {
+            theme.colors.muted_foreground
+        };
+        let kinds: Vec<&str> = rows
+            .iter()
+            .map(|(_, row)| match row {
+                DetailRow::Activity { kind, .. } => (*kind).unwrap_or("tool"),
+                _ => "tool",
+            })
+            .collect();
+        let clause = activity_chain_clause(kinds.iter().copied());
+        let icon = activity_chain_icon(kinds.iter().copied());
+
+        let header = div()
+            .id(ElementId::Name(SharedString::from(format!(
+                "{selector}-trigger"
+            ))))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(theme.spacing.steps(2.0))
+            .w_full()
+            .min_w_0()
+            .py(theme.spacing.steps(0.5))
+            .cursor_pointer()
+            .track_focus(&self.disclosure_focus)
+            .aria_label("Toggle activity details")
+            .debug_selector({
+                let trigger_selector = format!("{selector}-trigger");
+                move || trigger_selector.clone()
+            })
+            .on_click({
+                let surface = entity.downgrade();
+                let chain_key = chain_key.clone();
+                let requested_open = !open;
+                move |event, _, app| {
+                    if !event.standard_click() {
+                        return;
+                    }
+                    let _ = surface.update(app, |surface, cx| {
+                        surface
+                            .trace_groups_open
+                            .borrow_mut()
+                            .insert(chain_key.clone(), requested_open);
+                        cx.notify();
+                    });
+                }
+            })
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(header_color.to_paint())
+                    .child(asset_glyph(icon).size(px(16.0))),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(ProseTypography::BODY_SIZE_PX))
+                    .line_height(theme.spacing.steps(6.0))
+                    .text_color(header_color.to_paint())
+                    .child(clause),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(header_color.to_paint())
+                    .child(
+                        asset_glyph(if open {
+                            AssetId::TABLER_CHEVRON_DOWN
+                        } else {
+                            AssetId::TABLER_CHEVRON_RIGHT
+                        })
+                        .size(px(14.0)),
+                    ),
+            );
+
+        // The reference `pl-6` rail column: one 16 px absolute rail with a
+        // centered 2 px `border/60` line, and the rows flowing beside it.
+        let mut rows_column = div()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.steps(1.0))
+            .pl(theme.spacing.steps(6.0))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .bottom(px(0.0))
+                    .left(px(0.0))
+                    .w(theme.spacing.steps(4.0))
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .bottom(px(0.0))
+                            .left(theme.spacing.steps(1.75))
+                            .w(px(2.0))
+                            .bg(theme.colors.border.with_alpha(0.6).to_paint())
+                            .debug_selector({
+                                let rail_selector = format!("{selector}-rail");
+                                move || rail_selector.clone()
+                            }),
+                    ),
+            );
+        // The absolute rail is the first child, so it takes the leading
+        // identity slot and the rows line up one-to-one behind it.
+        let mut row_identities: Vec<(Option<SceneId>, Option<ItemId>)> = vec![(None, None)];
+        for (ordinal, row) in rows {
+            rows_column = rows_column.child(self.render_detail_row(
+                *row,
+                *ordinal,
+                group_selector,
+                entity,
+                theme,
+                anchors,
+                mounted,
+            ));
+            let id = row.scene_id();
+            row_identities.push((Some(id.clone()), item_id_for_scene_id(id)));
+        }
+        let surface = entity.downgrade();
+        rows_column = rows_column.on_children_prepainted(move |children_bounds, window, app| {
+            let _ = surface.update(app, |surface, _| {
+                surface.apply_executed_scroll_targets(&row_identities, &children_bounds, window);
+            });
+        });
+
+        let disclosure = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .child(header)
+            .debug_selector({
+                let root_selector = format!("{selector}-disclosure");
+                move || root_selector.clone()
+            });
+        let panel = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .debug_selector({
+                let panel_selector = format!("{selector}-disclosure-panel");
+                move || panel_selector.clone()
+            });
+
+        disclosure_flight_panel(
+            disclosure,
+            panel,
+            rows_column.into_any_element(),
+            &selector,
+            open,
+            true,
+            motion,
+            window,
+            cx,
+        )
     }
 
     /// Renders one ordered detail row with its scroll anchor.
@@ -3195,19 +3765,81 @@ impl ConversationSurface {
                             .child(rendered)
                             .into_any_element()
                     }
-                    // The scene carries one body per activity (no label/detail
-                    // split); it renders as the reference baseline row's text
-                    // at text-sm, with no kind heading and no truncation of
-                    // content.
-                    DetailRow::Activity { body, .. } => div()
-                        .w_full()
-                        .min_w_0()
-                        .text_size(theme.typography.control_text)
-                        .font_weight(ProseTypography::BODY_WEIGHT)
-                        .letter_spacing(px(ProseTypography::body_tracking_px(14.0)))
-                        .text_color(theme.colors.foreground.to_paint())
-                        .child(body.to_string())
-                        .into_any_element(),
+                    // The reference activity row: the category label in the
+                    // foreground, then the detail — normalized and mono for
+                    // terminal commands, raw and truncated otherwise — or the
+                    // presentation label when no detail was disclosed. Rows
+                    // without a provider kind keep the legacy flat body.
+                    DetailRow::Activity {
+                        body,
+                        kind,
+                        detail,
+                        lifecycle,
+                        ..
+                    } => match kind {
+                        Some(kind) => {
+                            let category = activity_category(kind);
+                            let row_text = activity_detail_text(kind, *detail, *lifecycle);
+                            let detail_element: AnyElement = if *kind == "terminal_activity" {
+                                // The monospace face already says "shell": the
+                                // normalized command truncates on one line at
+                                // the reference `font-mono text-sm` recipe.
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .font_family(theme.typography.mono.family)
+                                    .text_size(theme.typography.control_text)
+                                    .text_color(theme.colors.muted_foreground.to_paint())
+                                    .child(row_text)
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_color(theme.colors.muted_foreground.to_paint())
+                                    .child(row_text)
+                                    .into_any_element()
+                            };
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .py(theme.spacing.steps(0.5))
+                                .text_size(px(ProseTypography::BODY_SIZE_PX))
+                                .line_height(theme.spacing.steps(6.0))
+                                .font_weight(ProseTypography::BODY_WEIGHT)
+                                .letter_spacing(px(ProseTypography::body_tracking_px(
+                                    ProseTypography::BODY_SIZE_PX,
+                                )))
+                                .text_color(theme.colors.muted_foreground.to_paint())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(theme.spacing.steps(2.0))
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_color(theme.colors.foreground.to_paint())
+                                                .child(category.label()),
+                                        )
+                                        .child(detail_element),
+                                )
+                                .into_any_element()
+                        }
+                        None => div()
+                            .w_full()
+                            .min_w_0()
+                            .text_size(theme.typography.control_text)
+                            .font_weight(ProseTypography::BODY_WEIGHT)
+                            .letter_spacing(px(ProseTypography::body_tracking_px(14.0)))
+                            .text_color(theme.colors.foreground.to_paint())
+                            .child(body.to_string())
+                            .into_any_element(),
+                    },
                     // Session titles render muted at base size (reference
                     // header tone); counting lives in the group header and
                     // status row.
@@ -5129,7 +5761,16 @@ enum DetailRow<'a> {
     /// Assistant prose that is not the promoted reply.
     Assistant { id: &'a SceneId, body: &'a str },
     /// Activity or tool-result summary.
-    Activity { id: &'a SceneId, body: &'a str },
+    Activity {
+        id: &'a SceneId,
+        body: &'a str,
+        /// Provider activity kind, when the source row carried one.
+        kind: Option<&'a str>,
+        /// Raw provider detail, when disclosed.
+        detail: Option<&'a str>,
+        /// Durable liveness for the chain's live/failed default-open rule.
+        lifecycle: Option<ConversationLifecycle>,
+    },
     /// Compaction summary folded into the session.
     Compaction { id: &'a SceneId, summary: &'a str },
     /// Native fact folded into the session.
@@ -5169,11 +5810,22 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
                         body: body.as_str(),
                     },
                 ),
-                SessionDetail::Activity { id, body, ordinal, .. } => (
+                SessionDetail::Activity {
+                    id,
+                    body,
+                    kind,
+                    detail,
+                    lifecycle,
+                    ordinal,
+                    ..
+                } => (
                     *ordinal,
                     DetailRow::Activity {
                         id,
                         body: body.as_str(),
+                        kind: kind.as_deref(),
+                        detail: detail.as_deref(),
+                        lifecycle: *lifecycle,
                     },
                 ),
                 SessionDetail::Compaction {
@@ -5207,11 +5859,20 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
                 let ordinal = u64::try_from(index).unwrap_or(u64::MAX);
                 match item {
                     WorkItem::Reasoning { .. } => None,
-                    WorkItem::Activity { body, .. } => Some((
+                    WorkItem::Activity {
+                        body,
+                        kind,
+                        detail,
+                        lifecycle,
+                        ..
+                    } => Some((
                         ordinal,
                         DetailRow::Activity {
                             id: work_item_id(item),
                             body: body.as_str(),
+                            kind: kind.as_deref(),
+                            detail: detail.as_deref(),
+                            lifecycle: *lifecycle,
                         },
                     )),
                     WorkItem::WorkSession { title, .. } => Some((
@@ -5795,8 +6456,8 @@ mod tests {
     };
 
     use crate::conversation_scene::{
-        AssistantPhase, ConversationScene, SceneDisclosure, SceneItem, SceneItemKind, SceneTurn,
-        TurnFooterBlock, TurnNarration, TurnNarrationEntry,
+        AssistantPhase, ConversationScene, ItemProvenance, SceneDisclosure, SceneItem,
+        SceneItemKind, SceneTurn, TurnFooterBlock, TurnNarration, TurnNarrationEntry,
     };
 
     fn scene_id(value: &str) -> SceneId {
@@ -5862,9 +6523,17 @@ mod tests {
             item(
                 "work-target",
                 10,
-                SceneItemKind::Activity { body: body() },
+                SceneItemKind::Activity {
+                    body: body(),
+                    kind: None,
+                    detail: None,
+                },
                 Some(disclosure),
-            ),
+            )
+            .with_provenance(ItemProvenance {
+                run_id: None,
+                lifecycle: Some(ConversationLifecycle::Active),
+            }),
         ]);
         scene(items)
     }
@@ -5961,6 +6630,8 @@ mod tests {
                     2,
                     SceneItemKind::Activity {
                         body: "a".to_owned(),
+                        kind: None,
+                        detail: None,
                     },
                     None,
                 ),
@@ -5978,6 +6649,8 @@ mod tests {
                     4,
                     SceneItemKind::Activity {
                         body: "b".to_owned(),
+                        kind: None,
+                        detail: None,
                     },
                     None,
                 ),
@@ -6288,6 +6961,8 @@ mod tests {
                     1,
                     SceneItemKind::Activity {
                         body: "first".to_owned(),
+                        kind: None,
+                        detail: None,
                     },
                     None,
                 ),
@@ -6296,6 +6971,8 @@ mod tests {
                     2,
                     SceneItemKind::Activity {
                         body: "second".to_owned(),
+                        kind: None,
+                        detail: None,
                     },
                     None,
                 ),
@@ -6334,6 +7011,179 @@ mod tests {
             });
             assert!(surface.read(app).pending_actions().is_empty());
         });
+    }
+
+    /// Builds one work group holding a single kinded terminal activity.
+    fn activity_chain_scene(
+        turn_lifecycle: ConversationLifecycle,
+        narration: TurnNarration,
+        disclosure: SceneDisclosure,
+    ) -> ConversationScene {
+        ConversationScene::build(
+            vec![SceneTurn::new(turn_id("turn_a"), 0, turn_lifecycle)],
+            vec![item(
+                "work-a",
+                1,
+                SceneItemKind::Activity {
+                    body: "cargo test --locked".to_owned(),
+                    kind: Some("terminal_activity".to_owned()),
+                    detail: Some(
+                        r#""C:\Program Files\WindowsApps\pwsh.exe" -Command "cargo test --locked""#
+                            .to_owned(),
+                    ),
+                },
+                Some(disclosure),
+            )],
+            vec![TurnNarrationEntry::new(turn_id("turn_a"), narration)],
+            Vec::new(),
+        )
+        .expect("activity chain scene is valid")
+    }
+
+    #[gpui::test]
+    fn settled_activity_chain_starts_closed_and_toggles_open(cx: &mut TestAppContext) {
+        const TRIGGER: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-a-trace-0-trigger";
+        const DETAIL: &str = "artisan-conversation-surface-turn-turn_a-block-work-work-a-detail-0";
+        const RAIL: &str =
+            "artisan-conversation-surface-turn-turn_a-block-work-work-a-trace-0-rail";
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                activity_chain_scene(
+                    ConversationLifecycle::Completed,
+                    TurnNarration::Quiet,
+                    SceneDisclosure::Open,
+                ),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        assert!(
+            cx.debug_bounds(TRIGGER).is_some(),
+            "the chain header paints even when closed"
+        );
+        assert!(
+            cx.debug_bounds(DETAIL).is_none(),
+            "a settled chain starts closed"
+        );
+
+        let trigger = cx.debug_bounds(TRIGGER).expect("chain trigger paints");
+        let center = point(trigger.origin.x + px(4.0), trigger.origin.y + px(4.0));
+        cx.simulate_mouse_down(center, gpui::MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(center, gpui::MouseButton::Left, Modifiers::default());
+        settle(cx);
+        let detail = cx
+            .debug_bounds(DETAIL)
+            .expect("toggling the header mounts the rows");
+        let rail = cx.debug_bounds(RAIL).expect("the left rail paints");
+        assert!(
+            rail.size.height >= detail.size.height,
+            "the rail spans the mounted rows, got {rail:?} over {detail:?}"
+        );
+        // The toggle is surface-local: it never emits a scene disclosure
+        // action for a chain identity the scene does not own.
+        cx.update(|_, app| {
+            let actions = surface.read(app).pending_actions().to_vec();
+            assert!(
+                actions
+                    .iter()
+                    .all(|action| matches!(action, ConversationSurfaceAction::ViewportObserved(_))),
+                "the chain toggle stays surface-local, got {actions:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn live_activity_chain_paints_open_without_a_toggle(cx: &mut TestAppContext) {
+        const DETAIL: &str = "artisan-conversation-surface-turn-turn_a-block-work-work-a-detail-0";
+        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                activity_chain_scene(
+                    ConversationLifecycle::Active,
+                    TurnNarration::Working,
+                    SceneDisclosure::Open,
+                ),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        assert!(
+            cx.debug_bounds(DETAIL).is_some(),
+            "a live chain opens itself"
+        );
+    }
+
+    #[gpui::test]
+    fn failed_activity_chain_paints_open_without_a_toggle(cx: &mut TestAppContext) {
+        const DETAIL: &str = "artisan-conversation-surface-turn-turn_a-block-work-work-a-detail-0";
+        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                activity_chain_scene(
+                    ConversationLifecycle::Failed,
+                    TurnNarration::Quiet,
+                    SceneDisclosure::Open,
+                ),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        assert!(
+            cx.debug_bounds(DETAIL).is_some(),
+            "a failed chain opens itself"
+        );
+    }
+
+    #[gpui::test]
+    fn session_activity_chain_carries_kind_and_detail(cx: &mut TestAppContext) {
+        const DETAIL: &str = "artisan-conversation-surface-turn-turn_a-block-work-turn_a-detail-1";
+        let run = artisan_domain::RunId::parse("run-a").expect("fixture run id is valid");
+        let session_scene = ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            vec![
+                item(
+                    "work-a",
+                    1,
+                    SceneItemKind::Activity {
+                        body: "cargo test --locked".to_owned(),
+                        kind: Some("terminal_activity".to_owned()),
+                        detail: Some(
+                            r#""C:\Program Files\WindowsApps\pwsh.exe" -Command "cargo test --locked""#
+                                .to_owned(),
+                        ),
+                    },
+                    None,
+                )
+                .with_provenance(ItemProvenance {
+                    run_id: Some(run),
+                    lifecycle: Some(ConversationLifecycle::Active),
+                }),
+            ],
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Working,
+            )],
+            Vec::new(),
+        )
+        .expect("session activity scene is valid");
+        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(session_scene, ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        assert!(
+            cx.debug_bounds(DETAIL).is_some(),
+            "a live session chain mounts its kinded row"
+        );
     }
 
     #[gpui::test]
@@ -6447,6 +7297,8 @@ mod tests {
                 1,
                 SceneItemKind::Activity {
                     body: "first".to_owned(),
+                    kind: None,
+                    detail: None,
                 },
                 Some(SceneDisclosure::Open),
             )],
@@ -6516,7 +7368,11 @@ mod tests {
             vec![item(
                 "work-a",
                 1,
-                SceneItemKind::Activity { body: body() },
+                SceneItemKind::Activity {
+                    body: body(),
+                    kind: None,
+                    detail: None,
+                },
                 Some(disclosure),
             )],
             vec![TurnNarrationEntry::new(
@@ -6802,6 +7658,8 @@ mod tests {
                     1,
                     SceneItemKind::Activity {
                         body: "first".to_owned(),
+                        kind: None,
+                        detail: None,
                     },
                     None,
                 ),
@@ -6818,6 +7676,8 @@ mod tests {
                     3,
                     SceneItemKind::Activity {
                         body: "second".to_owned(),
+                        kind: None,
+                        detail: None,
                     },
                     None,
                 ),
@@ -6863,6 +7723,9 @@ mod tests {
                 SessionDetail::Activity {
                     id: scene_id("act-2"),
                     body: "second".to_owned(),
+                    kind: None,
+                    detail: None,
+                    lifecycle: None,
                     ordinal: 4,
                     disclosure: None,
                 },
@@ -7046,6 +7909,164 @@ mod tests {
             .active(false)
             .motion_plan();
         assert!(matches!(settled, ShimmerMotionPlan::Immediate));
+    }
+
+    #[test]
+    fn present_shell_command_recovers_the_wrapped_command() {
+        // WindowsApps pwsh with `-Command` and a quoted inner script.
+        assert_eq!(
+            present_shell_command(
+                r#""C:\Program Files\WindowsApps\Microsoft.PowerShell\pwsh.exe" -Command "cargo test --locked""#,
+            ),
+            "cargo test --locked"
+        );
+        // PowerShell's short flag, single-quoted body.
+        assert_eq!(
+            present_shell_command(r#"pwsh -c 'git status --short'"#),
+            "git status --short"
+        );
+        // bash -lc.
+        assert_eq!(
+            present_shell_command(r#"bash -lc "cargo check -p artisan-frontend""#),
+            "cargo check -p artisan-frontend"
+        );
+        // cmd /c and /k read case-insensitively with `.exe` stripped.
+        assert_eq!(present_shell_command(r#"cmd.exe /C "dir /b""#), "dir /b");
+        assert_eq!(
+            present_shell_command(r#"C:\Windows\System32\cmd.exe /K ver"#),
+            "ver"
+        );
+    }
+
+    #[test]
+    fn present_shell_command_keeps_what_it_cannot_recognise() {
+        // Unrecognised input is returned collapsed, never guessed at.
+        assert_eq!(
+            present_shell_command("cargo   test\n--locked"),
+            "cargo test --locked"
+        );
+        assert_eq!(
+            present_shell_command(r#""C:\tools\runner.exe" --work"#),
+            r#""C:\tools\runner.exe" --work"#
+        );
+        // A recognised wrapper with a different flag stays whole.
+        assert_eq!(
+            present_shell_command("bash --login -c script.sh"),
+            "bash --login -c script.sh"
+        );
+        // An empty quoted body falls back to the collapsed invocation.
+        assert_eq!(
+            present_shell_command(r#"pwsh -Command """#),
+            r#"pwsh -Command """#
+        );
+        // An unterminated quote still yields the wrapper's body, exactly
+        // like the reference unquote (which only drops a matching pair).
+        assert_eq!(
+            present_shell_command(r#"pwsh -Command "unterminated"#),
+            "\"unterminated"
+        );
+    }
+
+    #[test]
+    fn activity_chain_clauses_describe_composition() {
+        assert_eq!(activity_chain_clause(["bash"].into_iter()), "Ran a command");
+        assert_eq!(
+            activity_chain_clause(["read", "read"].into_iter()),
+            "Read 2 files"
+        );
+        assert_eq!(
+            activity_chain_clause(["bash", "read", "read"].into_iter()),
+            "Ran a command, read 2 files"
+        );
+        // A kind-less legacy row counts as generic tool work.
+        assert_eq!(activity_chain_clause(["tool"].into_iter()), "Used a tool");
+        assert_eq!(activity_chain_clause(std::iter::empty()), "");
+    }
+
+    #[test]
+    fn activity_chain_icons_follow_the_reference_category_map() {
+        assert_eq!(
+            activity_chain_icon(["bash"].into_iter()),
+            AssetId::TABLER_TERMINAL_2
+        );
+        assert_eq!(
+            activity_chain_icon(["read"].into_iter()),
+            AssetId::TABLER_FILE_TEXT
+        );
+        assert_eq!(
+            activity_chain_icon(["edit"].into_iter()),
+            AssetId::TABLER_FILE_PENCIL
+        );
+        assert_eq!(
+            activity_chain_icon(["file.delete"].into_iter()),
+            AssetId::TABLER_FILE_X
+        );
+        assert_eq!(
+            activity_chain_icon(["grep"].into_iter()),
+            AssetId::TABLER_FILE_SEARCH
+        );
+        assert_eq!(
+            activity_chain_icon(["search"].into_iter()),
+            AssetId::TABLER_WORLD_SEARCH
+        );
+        assert_eq!(
+            activity_chain_icon(["mcp"].into_iter()),
+            AssetId::TABLER_TOOL
+        );
+        assert_eq!(
+            activity_chain_icon(["bash", "read"].into_iter()),
+            AssetId::TABLER_LIST_DETAILS
+        );
+        // Two distinct kinds sharing one category stay homogeneous.
+        assert_eq!(
+            activity_chain_icon(["read", "file"].into_iter()),
+            AssetId::TABLER_FILE_TEXT
+        );
+    }
+
+    #[test]
+    fn activity_detail_text_normalizes_terminal_and_falls_back_to_labels() {
+        assert_eq!(
+            activity_detail_text(
+                "terminal_activity",
+                Some(r#""C:\Program Files\WindowsApps\pwsh.exe" -Command "cargo test""#),
+                None,
+            ),
+            "cargo test"
+        );
+        assert_eq!(
+            activity_detail_text(
+                "read",
+                Some("src/main.rs"),
+                Some(ConversationLifecycle::Completed)
+            ),
+            "src/main.rs"
+        );
+        assert_eq!(
+            activity_detail_text("read", None, Some(ConversationLifecycle::Completed)),
+            "Read a file"
+        );
+        assert_eq!(
+            activity_detail_text("read", None, Some(ConversationLifecycle::Active)),
+            "Reading a file"
+        );
+        assert_eq!(
+            activity_detail_text(
+                "terminal_activity",
+                None,
+                Some(ConversationLifecycle::Failed)
+            ),
+            "Command failed"
+        );
+        // A terminal detail that normalizes to nothing falls back.
+        assert_eq!(
+            activity_detail_text(
+                "terminal_activity",
+                Some("   "),
+                Some(ConversationLifecycle::Completed),
+            ),
+            "Ran a command"
+        );
     }
 
     #[gpui::test]
@@ -7264,13 +8285,21 @@ mod tests {
                     item(
                         "plain-first",
                         1,
-                        SceneItemKind::Activity { body: body() },
+                        SceneItemKind::Activity {
+                            body: body(),
+                            kind: None,
+                            detail: None,
+                        },
                         None,
                     ),
                     item(
                         "plain-target",
                         2,
-                        SceneItemKind::Activity { body: body() },
+                        SceneItemKind::Activity {
+                            body: body(),
+                            kind: None,
+                            detail: None,
+                        },
                         None,
                     ),
                 ]),
