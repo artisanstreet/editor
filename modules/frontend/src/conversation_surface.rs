@@ -25,7 +25,7 @@ use artisan_protocol::{
 use artisan_ui::alert::{Alert, AlertStyle, AlertVariant};
 use artisan_ui::asset_seam::asset_glyph;
 use artisan_ui::badge::{BadgeStyle, outline_badge};
-use artisan_ui::gradient::vertical_gradient;
+use artisan_ui::gradient::{hover_fill_gradient, vertical_gradient};
 use artisan_ui::inline_code_text::{inline_runs, summary_line};
 use artisan_ui::button::{
     AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
@@ -43,16 +43,18 @@ use artisan_ui::theme::{
     ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, Div, ElementId, Entity, Filter, FocusHandle,
-    FontWeight, IntoElement, Modifiers, Render, ScrollAnchor, ScrollHandle, ScrollWheelEvent,
-    SharedString, Stateful, Window, div, point,
+    Animation, AnimationExt, AnyElement, BoxShadow, Context, Div, ElementId, Entity, Filter,
+    FocusHandle, FontWeight, IntoElement, Modifiers, Render, ScrollAnchor, ScrollHandle,
+    ScrollWheelEvent, SharedString, Stateful, Window, canvas, deferred, div, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
     px,
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::approval_presentation::ApprovalKind as PresentationApprovalKind;
 use crate::conversation_scene::{
@@ -75,7 +77,9 @@ use crate::engine_approve_ui::{
 };
 use crate::conversation_turn_footer_policy::{COPY_RESPONSE_LABEL, TURN_ACTIONS_LABEL};
 use crate::engine_observation_state::EngineObservationState;
-use crate::native_model_selector::PickerScrollState;
+use crate::native_model_selector::{
+    HoverRect, PickerScrollState, SlidingHoverState,
+};
 use crate::native_transport_service::{CommandSendError, NativeTransportCommand};
 
 /// Stable debug selector for the conversation surface root.
@@ -98,6 +102,9 @@ pub const TURN_NAVIGATOR_CONTROL_PREFIX: &str =
 /// Stable debug selector for the navigator's own capped label list.
 pub const TURN_NAVIGATOR_LIST_SELECTOR: &str = "artisan-conversation-surface-turn-navigator-list";
 
+/// Stable debug selector for the navigator's shared hover pill.
+pub const TURN_NAVIGATOR_HOVER_SELECTOR: &str = "artisan-conversation-surface-turn-navigator-hover";
+
 /// Alias for callers that use the shorter root-selector vocabulary.
 pub const ROOT_SELECTOR: &str = CONVERSATION_SURFACE_SELECTOR;
 
@@ -106,6 +113,25 @@ pub const VIEWPORT_SELECTOR: &str = CONVERSATION_VIEWPORT_SELECTOR;
 
 /// Stable debug selector for the transcript end-space spacer.
 pub const TRANSCRIPT_END_SPACE_SELECTOR: &str = "artisan-conversation-surface-end-space";
+
+/// Transcript reading-column width shared with the thread frame.
+///
+/// The screen mounts the host at full card width so the navigator rail
+/// anchors to the card; each turn root below re-applies this max width with
+/// auto margins, keeping the identical centered column for standalone
+/// fixtures. Mirrors `PROSE_WIDTH_PX` (`--prose-width: 48rem`).
+const TRANSCRIPT_PROSE_WIDTH_PX: f32 = 768.0;
+
+/// Transcript reading-column gutters shared with the thread frame (`px-6`).
+const TRANSCRIPT_GUTTER_PX: f32 = 24.0;
+
+/// Top spacing inside the scroll content, shared with the thread frame.
+///
+/// The legacy `pt-10` sat statically above the scroll viewport; it lives in
+/// the scroll content instead so the full host spans the actual card. It is
+/// container padding rather than a child, so turn/spacer child indices —
+/// and every identity bound to them — are preserved exactly.
+const TRANSCRIPT_PAD_TOP_PX: f32 = 40.0;
 
 /// Base transcript end space in px, mirroring
 /// `ConversationBaseEndSpacePixels`: the transcript always keeps at least
@@ -776,6 +802,22 @@ pub struct ConversationSurface {
     /// Long threads scroll the rail independently of the transcript through
     /// the same bounded tracking the thread screen uses for viewports.
     navigator_scroll: ScrollHandle,
+    /// Shared hover pill for navigator rows, reused from the model picker.
+    ///
+    /// Row probes measure into this state and the pill paints the retained
+    /// flight; hovering the rail selects, leaving it hides. Reference pill
+    /// behavior without a second motion invention.
+    navigator_hover: Rc<RefCell<SlidingHoverState>>,
+    /// Measured navigator list bounds backing pill-relative coordinates.
+    ///
+    /// Window-space bounds like the picker's surface bounds, so row origins
+    /// subtract to list-relative pill rects with plain pixel arithmetic.
+    navigator_hover_surface: Rc<RefCell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// Width-motion generation, bumped only when rail hover flips expansion.
+    ///
+    /// The open-keyed width clock replays on this generation, never on
+    /// mount: generation zero paints the static width outright.
+    navigator_width_generation: u64,
     /// Bounded wheel-smoothing state for the transcript scroll offset.
     ///
     /// Reuses the model picker's [`PickerScrollState`] verbatim: discrete
@@ -960,6 +1002,14 @@ struct TurnNavigatorMetrics {
     top_px: f32,
     /// Viewport height in px at the last measurement.
     viewport_px: f32,
+}
+
+/// Samples the reference dropdown easing for navigator motion clocks.
+///
+/// `cubic-bezier(0.22, 1, 0.36, 1)` (`theme.css:140`), shared with the model
+/// picker hover flights rather than re-solved per surface.
+fn navigator_smooth_out(progress: f32) -> f32 {
+    MotionCurve::SmoothOut.sample(f64::from(progress)) as f32
 }
 
 /// Returns whether one work group paints actual visible trace content.
@@ -1176,6 +1226,9 @@ impl ConversationSurface {
             navigator_focus: HashMap::new(),
             navigator_expanded: false,
             navigator_scroll: ScrollHandle::new(),
+            navigator_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
+            navigator_hover_surface: Rc::new(RefCell::new(None)),
+            navigator_width_generation: 0,
             transcript_scroll: PickerScrollState::default(),
             transcript_scroll_frame_scheduled: false,
             active_now_ms: None,
@@ -1869,6 +1922,13 @@ impl ConversationSurface {
     /// marker-bearing turn wins, else the first marker. Callers keep the
     /// result in window-local state with a change guard, so two windows
     /// sharing one surface converge independently and never ping-pong.
+    ///
+    /// Turn tops resolve to viewport coordinates through
+    /// [`navigator_turn_top_viewport`]: content origin in window coordinates
+    /// (`bounds.origin - element_offset`, the same quantity
+    /// [`apply_painted_scroll_offset`](Self::apply_painted_scroll_offset)
+    /// reproduces), re-based onto the viewport origin the host header
+    /// offsets in the full app.
     fn navigator_active_for_geometry(
         scene: &ConversationScene,
         scroll_handle: &ScrollHandle,
@@ -1881,6 +1941,7 @@ impl ConversationSurface {
         }
         let scroll_top = -f64::from(scroll_handle.offset().y);
         let element_offset = f64::from(window.element_offset().y);
+        let viewport_top = f64::from(scroll_handle.bounds().origin.y);
         let mut reached: Vec<(String, f64)> = Vec::new();
         for (index, turn) in scene.turn_scenes().iter().enumerate() {
             let Some(bounds) = children_bounds.get(index) else {
@@ -1899,13 +1960,27 @@ impl ConversationSurface {
             {
                 continue;
             }
-            reached.push((slug, f64::from(bounds.origin.y) - element_offset));
+            let content_top = f64::from(bounds.origin.y) - element_offset;
+            reached.push((
+                slug,
+                Self::navigator_turn_top_viewport(content_top, scroll_top, viewport_top),
+            ));
         }
         let offsets: Vec<ConversationTurnOffset<'_>> = reached
             .iter()
             .map(|(id, top)| ConversationTurnOffset::new(id.as_str(), *top))
             .collect();
         active_conversation_turn(&offsets).map(str::to_owned)
+    }
+
+    /// Rebases one content top onto the viewport origin.
+    ///
+    /// `content_top` is the turn origin in window coordinates, `scroll_top`
+    /// the scrolled distance, and `viewport_top` the viewport origin the
+    /// host header offsets in the full app (zero in standalone tests, which
+    /// is why geometry tests must cover a nonzero origin explicitly).
+    fn navigator_turn_top_viewport(content_top: f64, scroll_top: f64, viewport_top: f64) -> f64 {
+        content_top - scroll_top - viewport_top
     }
 
     /// Measures end-space height from live prepaint geometry, if measurable.
@@ -2159,6 +2234,9 @@ impl ConversationSurface {
         let selector = turn_selector(&turn.turn_id);
         let turn_element = div()
             .w_full()
+            .max_w(px(TRANSCRIPT_PROSE_WIDTH_PX))
+            .mx_auto()
+            .px(px(TRANSCRIPT_GUTTER_PX))
             .relative()
             .group(TURN_GROUP)
             .flex()
@@ -4400,6 +4478,7 @@ impl Render for ConversationSurface {
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(8.0))
+            .pt(px(TRANSCRIPT_PAD_TOP_PX))
             .on_scroll_wheel(move |event, window, cx| {
                 let _ = wheel_surface.update(cx, |surface, surface_cx| {
                     surface.handle_transcript_wheel(event, window, surface_cx);
@@ -4588,7 +4667,11 @@ impl Render for ConversationSurface {
             cx,
             navigator_active.read(cx).clone(),
         ) {
-            root = root.child(rail);
+            // Deferred overlay at dropdown priority: the rail paints above
+            // the composer dock exactly like the reference `z-30`, while its
+            // layout stays in this tree so measurement and hit-testing are
+            // unaffected.
+            root = root.child(deferred(rail).with_priority(2));
         }
         root
     }
@@ -4713,6 +4796,72 @@ impl ConversationSurface {
     /// the transcript. The rail itself paints only for two or more loaded
     /// user-message markers. Emitting a scroll intent never touches the GPUI
     /// handle or scene directly.
+    /// Paints the shared hover pill for navigator rows.
+    ///
+    /// Row probes measure into the picker's [`SlidingHoverState`]; the pill
+    /// paints the retained flight behind the rows and settles interrupted
+    /// flights from the currently displayed rectangle, exactly like the
+    /// model picker surface. Reduced motion jumps to the target.
+    fn render_navigator_hover_pill(
+        &self,
+        theme: &ArtisanTheme,
+        reduce_motion: bool,
+    ) -> AnyElement {
+        let (mut rect, visible, transition) = {
+            let hover = self.navigator_hover.borrow();
+            (
+                hover.visual_rect(),
+                hover.visible(),
+                hover.transition(),
+            )
+        };
+        if reduce_motion {
+            if let Some(transition) = transition {
+                rect = transition.to;
+                self.navigator_hover
+                    .borrow_mut()
+                    .apply_progress(transition.generation, 1.0);
+            }
+        }
+        let pill = div()
+            .id(SharedString::from(TURN_NAVIGATOR_HOVER_SELECTOR))
+            .absolute()
+            .left(px(rect.left))
+            .top(px(rect.top))
+            .w(px(rect.width))
+            .h(px(rect.height))
+            .rounded(RadiusTokens::value(RadiusStep::Lg))
+            .bg(hover_fill_gradient(*theme))
+            .opacity(if visible { 1.0 } else { 0.0 });
+        if !reduce_motion {
+            if let Some(transition) = transition {
+                let motion = Rc::clone(&self.navigator_hover);
+                let from = transition.from;
+                let to = transition.to;
+                let generation = transition.generation;
+                let animation_id = ElementId::Name(SharedString::from(format!(
+                    "{TURN_NAVIGATOR_HOVER_SELECTOR}-{generation}"
+                )));
+                return pill
+                    .with_animation(
+                        animation_id,
+                        Animation::new(Duration::from_millis(250))
+                            .with_easing(navigator_smooth_out),
+                        move |pill, progress| {
+                            let rect = from.lerp(to, progress);
+                            motion.borrow_mut().apply_progress(generation, progress);
+                            pill.left(px(rect.left))
+                                .top(px(rect.top))
+                                .w(px(rect.width))
+                                .h(px(rect.height))
+                        },
+                    )
+                    .into_any_element();
+            }
+        }
+        pill.into_any_element()
+    }
+
     fn render_turn_navigator(
         &mut self,
         entity: &Entity<Self>,
@@ -4773,21 +4922,34 @@ impl ConversationSurface {
         // rather than mounting new ones, so pointer and keyboard activation
         // can never race a remount.
         // Plain Div until the metrics listener below: `on_children_prepainted`
-        // is a Div inherent, so identity and scrolling attach at the tail.
+        // is a Div inherent, so identity, scrolling, and the width clock
+        // attach at the tail. The list is the pill's positioning context.
         let mut list = div()
+            .relative()
             .flex()
             .flex_col()
             .items_end()
             .gap(theme.spacing.steps(1.0))
             .p(px(8.0));
-        if expanded {
-            list = list.w(px(288.0));
-        } else {
-            list = list.w(px(40.0));
-        }
         if metrics.viewport_px > 0.0 {
             list = list.max_h(px(metrics.viewport_px * 0.7));
         }
+        // Shared hover pill behind the rows plus the probe capturing list
+        // bounds for pill-relative coordinates, mirroring the model picker.
+        list = list.child(self.render_navigator_hover_pill(theme, cx.reduce_motion()));
+        let hover_surface_bounds = Rc::clone(&self.navigator_hover_surface);
+        list = list.child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, (), _, _| {
+                    *hover_surface_bounds.borrow_mut() = Some(bounds);
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
         for marker in &markers {
             let key = navigator_focus_key(&marker.target);
             let Some(handle) = self.navigator_focus.get(&key).cloned() else {
@@ -4802,6 +4964,13 @@ impl ConversationSurface {
             let click_target = marker.target.clone();
             let key_surface = navigator_surface.clone();
             let key_target = marker.target.clone();
+            let hover_id = slug.to_owned();
+            let hover_state = Rc::clone(&self.navigator_hover);
+            let probe_hover = Rc::clone(&self.navigator_hover);
+            let probe_surface = Rc::clone(&self.navigator_hover_surface);
+            let probe_id = slug.to_owned();
+            let focus_ring_color = theme.interaction.focus_ring_color.to_paint();
+            let focus_ring_width = theme.interaction.focus_ring_width;
             let mut label = div()
                 .min_w_0()
                 .flex_1()
@@ -4837,6 +5006,7 @@ impl ConversationSurface {
             }
             let row = div()
                 .id(control_selector.clone())
+                .relative()
                 .track_focus(&handle)
                 .tab_index(0)
                 .role(gpui::Role::Button)
@@ -4849,6 +5019,21 @@ impl ConversationSurface {
                 .justify_end()
                 .gap(theme.spacing.steps(3.0))
                 .debug_selector(move || control_selector.clone())
+                .focus(move |focused| {
+                    focused.shadow(vec![BoxShadow {
+                        color: focus_ring_color,
+                        offset: point(px(0.0), px(0.0)),
+                        blur_radius: px(0.0),
+                        spread_radius: focus_ring_width,
+                        inset: false,
+                    }])
+                })
+                .on_hover(move |hovered: &bool, _, cx| {
+                    if *hovered {
+                        hover_state.borrow_mut().set_active(hover_id.clone());
+                        cx.notify();
+                    }
+                })
                 .on_click(move |_, _, app| {
                     let _ = click_surface.update(app, |surface, cx| {
                         surface.request_scroll(click_target.clone(), cx);
@@ -4862,7 +5047,30 @@ impl ConversationSurface {
                     }
                 })
                 .child(label)
-                .child(tick);
+                .child(tick)
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, (), window, cx| {
+                            let Some(surface) = *probe_surface.borrow() else {
+                                return;
+                            };
+                            let rect = HoverRect {
+                                left: f32::from(bounds.left() - surface.left()),
+                                top: f32::from(bounds.top() - surface.top()),
+                                width: f32::from(bounds.size.width),
+                                height: f32::from(bounds.size.height),
+                            };
+                            if probe_hover.borrow_mut().measure(&probe_id, rect) {
+                                window.defer(cx, |window, _| window.refresh());
+                            }
+                        },
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                );
             list = list.child(row);
         }
         // Rail metrics converge through the same window-local discipline as
@@ -4873,13 +5081,22 @@ impl ConversationSurface {
                 let viewport = f64::from(surface.scroll_handle.bounds().size.height);
                 let height = match (children_bounds.first(), children_bounds.last()) {
                     (Some(first), Some(last)) => {
-                        let bottom = f64::from(last.origin.y) + f64::from(last.size.height) + 16.0;
+                        let bottom =
+                            f64::from(last.origin.y) + f64::from(last.size.height) + 16.0;
                         (bottom - f64::from(first.origin.y)).max(0.0)
                     }
                     _ => return,
                 };
+                // The capped list is what actually paints: clamp the measured
+                // height to the 70 % cap before centering, or a long list
+                // pins its top at zero instead of centering the cap.
+                let capped = if viewport > 0.0 {
+                    height.min(viewport * 0.7)
+                } else {
+                    height
+                };
                 let next = TurnNavigatorMetrics {
-                    top_px: (((viewport - height) / 2.0).max(0.0)) as f32,
+                    top_px: (((viewport - capped) / 2.0).max(0.0)) as f32,
                     viewport_px: viewport as f32,
                 };
                 let changed = metrics_state.update(cx, |metrics, _| {
@@ -4893,11 +5110,13 @@ impl ConversationSurface {
                 }
             });
         });
-        // Identity and scrolling attach after the Div-phase listener above:
-        // the rail owns gestures over its own rows, applying the bounded
-        // immediate scroll locally (the reference plain scroller has no
-        // smoothing) and containing the event so the transcript does not
-        // scroll underneath.
+        // Identity, scrolling, and width attach after the Div-phase
+        // listener above: the rail owns gestures over its own rows, applying
+        // the bounded immediate scroll locally (the reference plain scroller
+        // has no smoothing) and containing the event so the transcript does
+        // not scroll underneath. Width motion replays per hover generation,
+        // never on mount: generation zero paints the static width outright
+        // (open 250 ms, close 150 ms on the dropdown curve).
         let navigator_scroll_handle = self.navigator_scroll.clone();
         let list = list
             .id(SharedString::from(TURN_NAVIGATOR_LIST_SELECTOR))
@@ -4914,6 +5133,28 @@ impl ConversationSurface {
                 navigator_scroll_handle.set_offset(point(offset.x, px(next)));
                 cx.stop_propagation();
             });
+        let list: AnyElement = if self.navigator_width_generation == 0 {
+            list
+                .w(px(if expanded { 288.0 } else { 40.0 }))
+                .into_any_element()
+        } else {
+            let (from_w, to_w, duration_ms) = if expanded {
+                (40.0, 288.0, 250)
+            } else {
+                (288.0, 40.0, 150)
+            };
+            let generation = self.navigator_width_generation;
+            list.w(px(from_w))
+                .with_animation(
+                    ElementId::Name(SharedString::from(format!(
+                        "{TURN_NAVIGATOR_SELECTOR}-width-{generation}"
+                    ))),
+                    Animation::new(Duration::from_millis(duration_ms))
+                        .with_easing(navigator_smooth_out),
+                    move |list, progress| list.w(px(from_w + (to_w - from_w) * progress)),
+                )
+                .into_any_element()
+        };
         let hover_surface = entity.downgrade();
         // Middle of the card, not the prose column: the reference anchors
         // the rail at `top-1/2 right-2` with a 70 % height cap. Centering
@@ -4925,10 +5166,30 @@ impl ConversationSurface {
             .right(px(8.0))
             .top(px(metrics.top_px))
             .debug_selector(|| TURN_NAVIGATOR_SELECTOR.to_owned())
-            .on_hover(move |hovered: &bool, _, app| {
+            .on_hover(move |hovered: &bool, window, app| {
                 let _ = hover_surface.update(app, |surface, cx| {
+                    let mut changed = false;
                     if surface.navigator_expanded != *hovered {
                         surface.navigator_expanded = *hovered;
+                        surface.navigator_width_generation = surface
+                            .navigator_width_generation
+                            .wrapping_add(1);
+                        changed = true;
+                    }
+                    // The pill belongs to the expanded area: leaving the rail
+                    // hides it unless a row keeps keyboard focus, which holds
+                    // the labels open on its own.
+                    if !*hovered {
+                        let any_focused = surface
+                            .navigator_focus
+                            .values()
+                            .any(|handle| handle.is_focused(window));
+                        if !any_focused && surface.navigator_hover.borrow().visible() {
+                            surface.navigator_hover.borrow_mut().hide();
+                            changed = true;
+                        }
+                    }
+                    if changed {
                         cx.notify();
                     }
                 });
@@ -6208,7 +6469,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn transcript_wheel_smooths_through_intermediate_frames(cx: &mut TestAppContext) {
+    fn transcript_wheel_queues_bounded_target_then_settles(cx: &mut TestAppContext) {
         let body = (0..40)
             .map(|line| format!("Wheel line {line} makes the transcript scrollable."))
             .collect::<Vec<_>>()
@@ -6239,11 +6500,24 @@ mod tests {
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::default(),
         });
-        // No synchronous jump: smoothing only queues a bounded target.
+        // No synchronous jump: smoothing queues a bounded target with
+        // frames still pending, then settles onto it.
         assert_eq!(offset(&surface, cx), before);
+        cx.update(|_, app| {
+            assert!(
+                surface.read(app).transcript_scroll.active(),
+                "a coarse wheel tick must leave an interpolation target outstanding"
+            );
+        });
         cx.run_until_parked();
         let settled = offset(&surface, cx);
         assert_ne!(settled, before, "wheel smoothing must move the viewport");
+        cx.update(|_, app| {
+            assert!(
+                !surface.read(app).transcript_scroll.active(),
+                "settling must retire the interpolation target"
+            );
+        });
         // Bounded and converged: a further parked pass changes nothing.
         cx.run_until_parked();
         assert_eq!(offset(&surface, cx), settled);
@@ -6298,6 +6572,112 @@ mod tests {
                 "no fabricated work detail"
             );
         });
+    }
+
+    #[test]
+    fn navigator_turn_top_accounts_for_host_header_offset() {
+        // Standalone tests see a zero viewport origin and would miss the
+        // parent offset, so the rebasing math carries an explicit case: a
+        // turn 300 px down the content, scrolled 100 px, under a host
+        // header offsetting the viewport 50 px, sits 150 px past the
+        // viewport top.
+        assert_eq!(
+            ConversationSurface::navigator_turn_top_viewport(300.0, 100.0, 50.0),
+            150.0
+        );
+        assert_eq!(
+            ConversationSurface::navigator_turn_top_viewport(300.0, 100.0, 0.0),
+            200.0
+        );
+    }
+
+    #[gpui::test]
+    fn long_navigator_list_centers_the_cap_not_the_content(cx: &mut TestAppContext) {
+        // Thirty turns overflow the 70 % cap once expanded: the rail must
+        // center the capped box instead of pinning a full-content top at zero.
+        let turns: Vec<SceneTurn> = (0..30)
+            .map(|index| {
+                SceneTurn::new(
+                    turn_id(&format!("turn_{index:02}")),
+                    index as u64,
+                    ConversationLifecycle::Completed,
+                )
+            })
+            .collect();
+        let mut items = Vec::new();
+        for (index, turn) in turns.iter().enumerate() {
+            items.push(
+                SceneItem::new(
+                    scene_id(&format!("nq{index:02}")),
+                    turn.turn_id.clone(),
+                    (index + 1) as u64,
+                    SceneItemKind::UserMessage {
+                        body: format!("question {index}"),
+                    },
+                    None,
+                )
+                .expect("navigator item is valid"),
+            );
+        }
+        let narrations = turns
+            .iter()
+            .map(|turn| TurnNarrationEntry::new(turn.turn_id.clone(), TurnNarration::Quiet))
+            .collect();
+        let scene = ConversationScene::build(turns, items, narrations, Vec::new())
+            .expect("long navigator scene is valid");
+        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(scene, ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        settle(cx);
+        let rail = cx
+            .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+            .expect("rail paints");
+        cx.simulate_mouse_move(rail.center(), None::<gpui::MouseButton>, Modifiers::none());
+        cx.run_until_parked();
+        let expanded = cx
+            .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+            .expect("expanded rail paints");
+        let viewport = cx
+            .debug_bounds(CONVERSATION_VIEWPORT_SELECTOR)
+            .expect("viewport paints");
+        let height = f64::from(expanded.size.height);
+        let top = f64::from(expanded.origin.y) - f64::from(viewport.origin.y);
+        assert!(
+            (height - 336.0).abs() <= 4.0,
+            "the expanded list caps at 70 % of the 480 px viewport, got {height}"
+        );
+        assert!(
+            (top - 72.0).abs() <= 4.0,
+            "the capped rail centers instead of pinning top at zero, got {top}"
+        );
+    }
+
+    #[gpui::test]
+    fn transcript_turns_keep_the_centered_prose_column(cx: &mut TestAppContext) {
+        // The screen mounts the host full-bleed; prose rhythm lives on the
+        // turn roots themselves, so a wide standalone surface centers the
+        // same 768 px column the composer card keeps.
+        const TURN_A: &str = "artisan-conversation-surface-turn-turn_a";
+        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(navigator_scene(), ThemeMode::Dark, surface_cx)
+        });
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        settle(cx);
+        let root = cx
+            .debug_bounds(CONVERSATION_SURFACE_SELECTOR)
+            .expect("surface root lays out");
+        let turn = cx.debug_bounds(TURN_A).expect("turn lays out");
+        assert!(
+            f64::from(turn.size.width) <= 769.0,
+            "turn keeps the prose max width"
+        );
+        let turn_center = f64::from(turn.origin.x) + f64::from(turn.size.width) / 2.0;
+        let root_center = f64::from(root.origin.x) + f64::from(root.size.width) / 2.0;
+        assert!(
+            (turn_center - root_center).abs() <= 1.0,
+            "turn centers in the surface"
+        );
     }
 
     #[gpui::test]

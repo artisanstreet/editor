@@ -88,10 +88,6 @@ pub const THREAD_SCREEN_RETRY_SELECTOR: &str = "artisan-thread-screen-retry";
 /// Stable debug selector for the transcript column.
 pub const THREAD_SCREEN_TRANSCRIPT_SELECTOR: &str = "artisan-thread-screen-transcript";
 
-/// Stable debug selector for the centered prose wrapper inside the transcript
-/// column (the native `prose-column`: `w-full max-w-(--prose-width)`).
-pub const THREAD_SCREEN_PROSE_SELECTOR: &str = "artisan-thread-screen-prose";
-
 /// Stable debug selector for the empty-transcript state.
 pub const THREAD_SCREEN_EMPTY_SELECTOR: &str = "artisan-thread-screen-empty";
 
@@ -659,19 +655,18 @@ impl ThreadScreen {
             )
     }
 
-    /// Renders the transcript column: prose-width wrapper around the live
-    /// conversation host, plus the honest empty state for a scene with no
-    /// turns yet.
+    /// Renders the transcript column: the live conversation host at full
+    /// card width, plus the honest empty state for a scene with no turns yet.
     ///
-    /// Legacy frame: `main.relative.h-full.min-h-0.overflow-hidden` holding
-    /// `div.prose-column.w-full.max-w-(--prose-width).px-6.pt-10` around the
-    /// turn sections. The wrapper centers with horizontal auto margins (the
-    /// `prose-column` default `margin-inline: auto`), so transcript and
-    /// composer share one centered reading column; the rail-shift variant is
-    /// a legacy-shell fact the native route does not mount. The host's own
-    /// surface paints the scroll area, turn navigator rail, and
-    /// jump-to-latest control; the empty overlay stays centered on the column
-    /// itself, not the wrapper.
+    /// The host owns the full column so the surface root — the turn
+    /// navigator rail's positioning context — spans the card, not the prose
+    /// box: the rail anchors right-8 of the card and centers in it. Reading
+    /// rhythm stays prose-bound one layer down, inside the surface itself:
+    /// each turn root carries the shared max-width, auto margins, and
+    /// gutters, so standalone surface fixtures keep the identical column
+    /// without this frame. The 40 px top spacing lives inside the scroll
+    /// content (owned by the surface); the empty overlay stays centered on
+    /// the column itself, not the content.
     fn render_transcript_column(
         &self,
         theme: &ArtisanTheme,
@@ -685,17 +680,7 @@ impl ThreadScreen {
             .overflow_hidden()
             .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_TRANSCRIPT_SELECTOR.to_owned())
-            .child(
-                div()
-                    .w_full()
-                    .h_full()
-                    .max_w(px(PROSE_WIDTH_PX))
-                    .mx_auto()
-                    .px(px(COLUMN_PAD_X_PX))
-                    .pt(px(TRANSCRIPT_PAD_TOP_PX))
-                    .debug_selector(|| THREAD_SCREEN_PROSE_SELECTOR.to_owned())
-                    .child(self.host.clone()),
-            );
+            .child(div().w_full().h_full().child(self.host.clone()));
         if empty {
             column = column.child(
                 div()
@@ -1664,12 +1649,41 @@ mod tests {
         assert_eq!(REFERENCE_ENV_CARD_PX, 44.0);
     }
 
-    /// Transcript and composer share one centered reading column: the prose
-    /// wrapper's center coincides with the composer dock's center at wide and
-    /// narrow content widths alike, while the wrapper keeps its max-width
-    /// rule. Both assertions read the real mounted wrappers, not helpers.
+    /// The host viewport spans the full card: the surface root coincides
+    /// with the transcript column (no prose inset), so the navigator rail
+    /// anchors to the card edge at wide and narrow widths alike. Reading
+    /// rhythm lives one layer down, inside the surface's own turn roots.
     #[gpui::test]
-    fn prose_wrapper_and_composer_share_one_center(cx: &mut gpui::TestAppContext) {
+    fn host_viewport_spans_the_full_card_width(cx: &mut gpui::TestAppContext) {
+        for (thread, content) in [
+            ("shell-proof-bleed-wide", EXPANDED_WIDE_CONTENT),
+            ("shell-proof-bleed-narrow", EXPANDED_1280_CONTENT),
+        ] {
+            let (_view, cx) =
+                cx.add_window_view(|_, cx| mount_proof_screen(thread, content, cx));
+            cx.run_until_parked();
+            let transcript = cx
+                .debug_bounds(THREAD_SCREEN_TRANSCRIPT_SELECTOR)
+                .expect("transcript column lays out");
+            let surface = cx
+                .debug_bounds("artisan-conversation-surface")
+                .expect("host surface lays out");
+            assert!(
+                (f32::from(surface.origin.x) - f32::from(transcript.origin.x)).abs() < 1.0
+                    && (f32::from(surface.size.width) - f32::from(transcript.size.width)).abs()
+                        < 1.0,
+                "surface root must span the full transcript column, not a prose inset"
+            );
+        }
+    }
+
+    /// Transcript and composer share one centered reading column: the
+    /// composer card stays centered in the transcript column at wide and
+    /// narrow content widths alike, while the card keeps its max-width rule.
+    /// Turn-level prose centering lives in the surface suite, where turns
+    /// exist to measure.
+    #[gpui::test]
+    fn composer_card_stays_centered_in_the_column(cx: &mut gpui::TestAppContext) {
         for (thread, content) in [
             ("shell-proof-center-wide", EXPANDED_WIDE_CONTENT),
             ("shell-proof-center-narrow", EXPANDED_1280_CONTENT),
@@ -1677,23 +1691,23 @@ mod tests {
             let (_view, cx) =
                 cx.add_window_view(|_, cx| mount_proof_screen(thread, content, cx));
             cx.run_until_parked();
-            let prose = cx
-                .debug_bounds(THREAD_SCREEN_PROSE_SELECTOR)
-                .expect("prose wrapper lays out");
+            let transcript = cx
+                .debug_bounds(THREAD_SCREEN_TRANSCRIPT_SELECTOR)
+                .expect("transcript column lays out");
             let composer = cx
-                .debug_bounds(THREAD_SCREEN_COMPOSER_SELECTOR)
-                .expect("composer dock lays out");
-            let prose_center =
-                f32::from(prose.origin.x) + f32::from(prose.size.width) / 2.0;
+                .debug_bounds(THREAD_SCREEN_COMPOSER_CARD_SELECTOR)
+                .expect("composer card lays out");
+            let transcript_center =
+                f32::from(transcript.origin.x) + f32::from(transcript.size.width) / 2.0;
             let composer_center =
                 f32::from(composer.origin.x) + f32::from(composer.size.width) / 2.0;
             assert!(
-                (prose_center - composer_center).abs() < 1.0,
-                "prose center {prose_center}px must match composer center {composer_center}px"
+                (transcript_center - composer_center).abs() < 1.0,
+                "transcript center {transcript_center}px must match composer center {composer_center}px"
             );
             assert!(
-                f32::from(prose.size.width) <= PROSE_WIDTH_PX + 1.0,
-                "prose wrapper keeps its max-width rule"
+                f32::from(composer.size.width) <= PROSE_WIDTH_PX + 1.0,
+                "composer card keeps its max-width rule"
             );
         }
     }
@@ -1743,6 +1757,43 @@ mod tests {
                 "overlay top {overlay_top}px must strictly overlap the transcript ending at {transcript_bottom}px (an in-flow dock would sit exactly below it)"
             );
         }
+    }
+
+    /// Clicks landing on the composer dock never route into the
+    /// transcript: the dock paints and hit-tests in the mounted screen
+    /// without queueing any surface scroll intent.
+    #[gpui::test]
+    fn composer_dock_click_never_reaches_the_transcript(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-composer-click", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(600.0)));
+        cx.run_until_parked();
+        let dock = cx
+            .debug_bounds(THREAD_SCREEN_COMPOSER_SELECTOR)
+            .expect("composer dock lays out");
+        cx.simulate_click(dock.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |probe, probe_cx| {
+                let intents = probe
+                    .screen
+                    .host()
+                    .read(probe_cx)
+                    .surface()
+                    .read(probe_cx)
+                    .pending_actions()
+                    .iter()
+                    .filter(|action| {
+                        matches!(
+                            action,
+                            crate::conversation_surface::ConversationSurfaceAction::ScrollIntent { .. }
+                        )
+                    })
+                    .count();
+                assert_eq!(intents, 0, "composer clicks must not scroll the transcript");
+            });
+        });
     }
 
     /// Mounted growth evidence: a 12-line draft grows the overlay card while
