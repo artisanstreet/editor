@@ -63,16 +63,9 @@ pub struct MigrationError {
 /// Applies every pending native migration in order.
 ///
 /// The whole set runs inside ONE owned transaction on ONE pooled
-/// connection. SeaORM's migrator does not wrap SQLite migrations itself,
-/// and the observed failure reproduces across pooled connections within
-/// one open: drop/create DDL (notably migration 000009's shape triggers)
-/// interleaves and fails with already-exists conflicts. One connection
-/// plus one atomic migration set removes that interleaving surface, and
-/// a failed set is explicitly rolled back so a retry never meets
-/// half-applied DDL without its tracking records. No serialization
-/// guarantee beyond that is claimed: a racing opener can still observe a
-/// read-to-write BUSY failure, which surfaces typed like any other
-/// migration error.
+/// connection: one connection, one atomic migration set, explicit
+/// rollback on failure. SeaORM's migrator does not wrap SQLite
+/// migrations itself.
 ///
 /// Calling this function after the schema is current is a no-op. Forge calls
 /// it during startup after opening its sole production database handle.
