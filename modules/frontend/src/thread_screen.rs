@@ -76,6 +76,10 @@ use crate::thread_title_policy::{ThreadTitleInput, ThreadTitleMode, thread_displ
 /// Stable debug selector for the thread screen root.
 pub const THREAD_SCREEN_SELECTOR: &str = "artisan-thread-screen";
 
+/// Debug selector prefix for the painted header title; the policy-selected
+/// title follows the prefix so tests can assert the exact rendered text.
+pub const THREAD_SCREEN_TITLE_SELECTOR: &str = "artisan-thread-screen-title";
+
 /// Stable debug selector for the gate loading indicator.
 pub const THREAD_SCREEN_LOADING_SELECTOR: &str = "artisan-thread-screen-loading";
 
@@ -634,6 +638,8 @@ impl ThreadScreen {
     /// screen itself as a `text-sm font-medium` line with `gap-2`/`py-3`
     /// rhythm.
     fn render_title_header(&self, theme: &ArtisanTheme) -> impl IntoElement {
+        let title = self.display_title().to_owned();
+        let title_selector = format!("{THREAD_SCREEN_TITLE_SELECTOR}:{title}");
         div()
             .flex()
             .flex_shrink_0()
@@ -651,7 +657,8 @@ impl ThreadScreen {
                     .font_weight(ProseTypography::BODY_WEIGHT)
                     .letter_spacing(px(workspace_body_tracking(theme)))
                     .text_color(theme.colors.foreground.to_paint())
-                    .child(self.display_title().to_owned()),
+                    .debug_selector(move || title_selector.clone())
+                    .child(title),
             )
     }
 

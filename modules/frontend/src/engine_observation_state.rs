@@ -836,6 +836,9 @@ pub struct EngineObservationState {
     turn_states: HashMap<String, TurnState>,
     run_state: Option<RunState>,
     run_terminal: Option<RunTerminalView>,
+    /// Latest harness-generated session title, retained as an owned string
+    /// because [`RunTerminalView`] stays `Copy`.
+    summary_title: Option<String>,
     usage: UsageTotals,
     timeline: Vec<TimelineRow>,
 }
@@ -864,6 +867,7 @@ impl EngineObservationState {
             turn_states: HashMap::new(),
             run_state: None,
             run_terminal: None,
+            summary_title: None,
             usage: UsageTotals {
                 reports: 0,
                 basis: UsageBasis::Unknown,
@@ -1031,6 +1035,17 @@ impl EngineObservationState {
     #[must_use]
     pub const fn run_terminal(&self) -> Option<RunTerminalView> {
         self.run_terminal
+    }
+
+    /// Returns the harness-generated session title once an engine produced
+    /// one.
+    ///
+    /// The latest present terminal title wins; a later terminal that carries
+    /// no title leaves the earlier one standing, mirroring the thread
+    /// projection's `summary_title`, which is never cleared once generated.
+    #[must_use]
+    pub fn summary_title(&self) -> Option<&str> {
+        self.summary_title.as_deref()
     }
 
     /// Returns the folded provider usage.
@@ -1430,6 +1445,11 @@ impl EngineObservationState {
             state: value.state(),
             has_summary_title: value.summary_title().is_some(),
         });
+        if let Some(title) = value.summary_title() {
+            // A later terminal without a title must not clear a summary an
+            // earlier run produced; the thread projection keeps the last one.
+            self.summary_title = Some(title.to_owned());
+        }
         let mut summary = format!("run {}", value.state().as_str());
         if let Some(title) = value.summary_title() {
             summary.push_str(": ");

@@ -121,7 +121,10 @@ use crate::{
     },
     native_thread_picker::{NativeThreadPicker, ThreadPickerAction},
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
-    thread_title_policy::{ThreadTitleInput, ThreadTitleMode, thread_display_title},
+    thread_title_policy::{
+        ThreadTitleInput, ThreadTitleMode, UNNAMED_THREAD_TITLE, refined_thread_title,
+        thread_display_title,
+    },
 };
 
 actions!(
@@ -134,6 +137,9 @@ pub(crate) const WINDOW_TITLE: &str = "Artisan Editor";
 
 /// Stable selector for the real application root.
 pub(crate) const NATIVE_ROOT_SELECTOR: &str = "artisan-native-application";
+
+/// Debug selector prefix for the desktop header's route title breadcrumb.
+pub(crate) const TITLEBAR_ROUTE_TITLE_SELECTOR: &str = "artisan-desktop-route-title";
 
 /// Stable selector for the state panel.
 pub(crate) const NATIVE_STATUS_SELECTOR: &str = "artisan-native-status";
@@ -1014,9 +1020,12 @@ impl NativeApplication {
                 .iter()
                 .filter(|thread| project_id == Some(&thread.project_id))
                 .map(|thread| {
+                    // The live harness summary is known for the mounted
+                    // thread; every other row keeps the stored listing title.
+                    let summary_title = self.retained_summary_title(&thread.thread_id);
                     let title = thread_display_title(
                         ThreadTitleInput {
-                            summary_title: None,
+                            summary_title: summary_title.as_deref(),
                             title: thread.title.as_str(),
                             title_locked: false,
                         },
@@ -1488,9 +1497,11 @@ impl NativeApplication {
     }
 
     /// Native titlebar identity: the `Artisan Editor` wordmark. The
-    /// wordmark keeps the home navigation.
+    /// wordmark keeps the home navigation. When the route names a thread, the
+    /// policy-selected title follows it as a muted, truncating breadcrumb so
+    /// the header always names the open conversation.
     fn desktop_identity(&self, cx: &Context<Self>) -> Div {
-        div()
+        let mut identity = div()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -1512,7 +1523,22 @@ impl NativeApplication {
                     .letter_spacing(px(-1.0))
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
-            )
+            );
+        if let Some(route_title) = self.desktop_header_title(cx) {
+            let route_label = format!("/ {route_title}");
+            let route_selector = format!("{TITLEBAR_ROUTE_TITLE_SELECTOR}:{route_label}");
+            identity = identity.child(
+                div()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .whitespace_nowrap()
+                    .text_size(px(13.0))
+                    .text_color(self.desktop_theme.secondary)
+                    .debug_selector(move || route_selector.clone())
+                    .child(route_label),
+            );
+        }
+        identity
     }
 
     fn desktop_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -3237,30 +3263,107 @@ impl NativeApplication {
         root
     }
 
-    fn desktop_route_title(&self) -> String {
-        let (title, _) = match self.route() {
-            NativeRoute::NewThread { .. } => ("New task".to_owned(), self.selected_project_name()),
-            NativeRoute::Thread { thread, .. } => {
-                let title = self
-                    .thread_listing
-                    .as_ref()
-                    .and_then(|listing| {
-                        listing
-                            .threads()
-                            .iter()
-                            .find(|item| &item.thread_id == thread)
-                    })
-                    .map(|item| item.title.as_str().to_owned())
-                    .unwrap_or_else(|| "Task".to_owned());
-                (title, self.selected_project_name())
+    /// The title the desktop header shows for the current route.
+    ///
+    /// Thread routes select through the shared display policy: the harness's
+    /// generated summary wins for an unlocked title, and the stored listing
+    /// title (refined to the latest user message while it is still the
+    /// creation placeholder) is the fallback. The new-thread route names the
+    /// thread being created once one exists; before then it is the unnamed
+    /// draft label.
+    fn desktop_route_title(&self, cx: &App) -> String {
+        match self.route() {
+            NativeRoute::NewThread { .. } => self
+                .pending_thread
+                .as_ref()
+                .and_then(|thread| self.listed_thread_display_title(thread, cx))
+                .unwrap_or_else(|| UNNAMED_THREAD_TITLE.to_owned()),
+            NativeRoute::Thread { thread, .. } => self
+                .listed_thread_display_title(thread, cx)
+                .unwrap_or_else(|| String::from("Thread")),
+            NativeRoute::Editor { .. } => String::from("Files"),
+            NativeRoute::Settings { section, .. } => format!("Settings / {}", section.as_str()),
+            NativeRoute::Onboarding => String::from("Welcome"),
+        }
+    }
+
+    /// The route title the desktop header names, when the route carries a
+    /// thread subject.
+    ///
+    /// The bare wordmark stays for routes that do not name a conversation;
+    /// once a thread is open — or a new-thread route already owns the thread
+    /// being created — the subject joins the titlebar like the reference's
+    /// workspace header.
+    fn desktop_header_title(&self, cx: &App) -> Option<String> {
+        match self.route() {
+            NativeRoute::Thread { .. } => Some(self.desktop_route_title(cx)),
+            NativeRoute::NewThread { .. } if self.pending_thread.is_some() => {
+                Some(self.desktop_route_title(cx))
             }
-            NativeRoute::Editor { .. } => ("Files".to_owned(), self.selected_project_name()),
-            NativeRoute::Settings { section, .. } => {
-                (format!("Settings / {}", section.as_str()), None)
-            }
-            NativeRoute::Onboarding => ("Welcome".to_owned(), None),
-        };
-        title
+            _ => None,
+        }
+    }
+
+    /// Returns the retained harness summary title for `thread`, when one has
+    /// arrived on the live engine observation stream.
+    fn retained_summary_title(&self, thread: &ThreadId) -> Option<String> {
+        self.engine_observations
+            .as_ref()
+            .filter(|state| state.thread_id() == thread)
+            .and_then(EngineObservationState::summary_title)
+            .map(str::to_owned)
+    }
+
+    /// Returns the latest user text from the open conversation for `thread`.
+    ///
+    /// This is the evidence the reference's live refiner derives its stored
+    /// title from. It is only consulted for the exact mounted, selected
+    /// thread; any other thread leaves the caller with the stored title.
+    fn open_thread_latest_user_text(&self, thread: &ThreadId, cx: &App) -> Option<String> {
+        if self.selected_thread.as_ref() != Some(thread) {
+            return None;
+        }
+        let host = self.conversation_host.as_ref()?;
+        if &host.read(cx).controller_view().delivery.thread_id != thread {
+            return None;
+        }
+        let snapshot = host.read(cx).canonical_snapshot()?;
+        snapshot.items().iter().rev().find_map(|item| match item {
+            ConversationItem::UserMessage(message) => Some(message.body.as_str().to_owned()),
+            ConversationItem::MultimodalUserMessage(message) => message
+                .text
+                .as_ref()
+                .map(|text| text.as_str().to_owned())
+                .filter(|text| !text.trim().is_empty()),
+            ConversationItem::AssistantMessage(_) => None,
+        })
+    }
+
+    /// Selects the display title for one listed thread through the shared
+    /// policy.
+    ///
+    /// The summary comes from the live harness observation for the mounted
+    /// thread, the stored title from the authoritative listing, and `false`
+    /// for the lock because native rename locking does not exist yet. `None`
+    /// means the thread is not listed, so the route supplies its own fallback
+    /// label instead.
+    fn listed_thread_display_title(&self, thread: &ThreadId, cx: &App) -> Option<String> {
+        let item = self
+            .thread_listing
+            .as_ref()?
+            .threads()
+            .iter()
+            .find(|item| &item.thread_id == thread)?;
+        let summary_title = self.retained_summary_title(thread);
+        let latest_user_text = self.open_thread_latest_user_text(thread, cx);
+        let stored_title = refined_thread_title(item.title.as_str(), latest_user_text.as_deref());
+        Some(
+            thread_display_title(
+                ThreadTitleInput::new(summary_title.as_deref(), stored_title, false),
+                ThreadTitleMode::Summary,
+            )
+            .to_owned(),
+        )
     }
 
     fn desktop_route_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -8268,6 +8371,12 @@ impl NativeApplication {
                 // inspector fit in both resize directions. Change-guarded
                 // setters keep this free of notify loops.
                 if let Some(screen) = self.thread_screen.clone() {
+                    // Stored-title evidence is the authoritative listing
+                    // title, refined to the latest user message while the
+                    // thread still carries the creation placeholder. The
+                    // summary is the live harness title from the engine
+                    // observation stream; the screen applies the shared
+                    // display policy to both.
                     let listed_title = self
                         .thread_listing
                         .as_ref()
@@ -8278,10 +8387,16 @@ impl NativeApplication {
                                 .find(|item| item.thread_id == thread)
                         })
                         .map(|item| item.title.as_str().to_owned());
+                    let latest_user_text = self.open_thread_latest_user_text(&thread, cx);
                     let mut screen_title = ThreadScreenTitle::default();
-                    if let Some(listed_title) = listed_title {
-                        screen_title.title = listed_title;
-                    }
+                    screen_title.title = match listed_title {
+                        Some(listed_title) => {
+                            refined_thread_title(&listed_title, latest_user_text.as_deref())
+                                .to_owned()
+                        }
+                        None => latest_user_text.unwrap_or_else(|| String::from("Thread")),
+                    };
+                    screen_title.summary_title = self.retained_summary_title(&thread);
                     let sidebar_width = f32::from(
                         DesktopShellStyle::resolve(self.sidebar_collapsed, window.scale_factor())
                             .sidebar_width,
@@ -9250,6 +9365,37 @@ mod tests {
             composer_cx.notify();
         });
         application.sync_composer_availability(cx);
+    }
+
+    /// Admits one harness run-terminal observation carrying `summary_title`
+    /// through the real engine-observation handler.
+    fn install_summary_title(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+        thread_id: &ThreadId,
+        summary_title: &str,
+    ) {
+        let terminal = artisan_domain::RunTerminalObservation::new(
+            artisan_domain::ObservationId::parse("obs-summary").expect("observation"),
+            artisan_domain::ObservationSequence::new(0).expect("sequence"),
+            artisan_domain::RunTerminalState::Completed,
+            None,
+            Some(summary_title.to_owned()),
+        )
+        .expect("terminal observation");
+        application.handle_service_event(
+            NativeTransportEvent::EngineObservation(artisan_protocol::ServerEvent {
+                cursor: artisan_protocol::EventCursor::new(1).expect("cursor"),
+                event: artisan_domain::Event::EngineObservation(
+                    artisan_domain::EngineObservationEvent {
+                        thread_id: thread_id.clone(),
+                        observation: artisan_domain::Observation::RunTerminal(terminal),
+                        attribution: None,
+                    },
+                ),
+            }),
+            cx,
+        );
     }
 
     /// Drives the engine-settings controller to a persisted configuration
@@ -12235,6 +12381,157 @@ mod tests {
             view.read(app).route(),
             NativeRoute::NewThread { project: None }
         )));
+    }
+
+    /// Installs a single listed thread titled with the creation placeholder.
+    fn install_unnamed_title_task(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+        draft: &str,
+        sink: NativeTestCommandSink,
+    ) -> ThreadId {
+        let thread_id = ThreadId::parse("title-task").expect("thread");
+        install_ready_message_surface(application, cx, thread_id.clone(), draft, sink);
+        application.thread_listing = Some(
+            ThreadListing::new(vec![thread(
+                "title-task",
+                "message-project",
+                super::UNNAMED_THREAD_TITLE,
+            )])
+            .expect("listing"),
+        );
+        thread_id
+    }
+
+    #[gpui::test]
+    fn conversation_header_paints_summary_then_stored_title(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_unnamed_title_task(application, cx, "", sink);
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("artisan-thread-screen-title:New task")
+                .is_some(),
+            "the conversation header paints the stored title before a summary exists"
+        );
+
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let thread_id = ThreadId::parse("title-task").expect("thread");
+                install_summary_title(application, cx, &thread_id, "Ship the port");
+                assert_eq!(
+                    application.desktop_route_title(cx),
+                    "Ship the port",
+                    "summary mode selects the harness title for the route"
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("artisan-thread-screen-title:Ship the port")
+                .is_some(),
+            "the harness summary replaces the stored title in the header"
+        );
+    }
+
+    #[gpui::test]
+    fn conversation_header_refines_the_creation_placeholder(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let thread_id = install_unnamed_title_task(application, cx, "", sink);
+                application.handle_service_event(
+                    NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
+                    cx,
+                );
+                application.handle_service_event(
+                    NativeTransportEvent::PatchBatch(echo_batch(
+                        &thread_id,
+                        1,
+                        "item-title",
+                        None,
+                        "turn-title",
+                        0,
+                        1,
+                        "Fix the header title",
+                    )),
+                    cx,
+                );
+                assert_eq!(
+                    application.desktop_route_title(cx),
+                    "Fix the header title",
+                    "the stored title is the latest user message until the harness names the thread"
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("artisan-thread-screen-title:Fix the header title")
+                .is_some(),
+            "the refined fallback paints in the conversation header"
+        );
+
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let thread_id = ThreadId::parse("title-task").expect("thread");
+                install_summary_title(application, cx, &thread_id, "Ship the port");
+                assert_eq!(
+                    application.desktop_route_title(cx),
+                    "Ship the port",
+                    "the harness summary wins over the refined stored title"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn new_thread_route_names_the_thread_being_created(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let thread_id = install_unnamed_title_task(application, cx, "", sink);
+                application.pending_thread = Some(thread_id.clone());
+                application.navigate(
+                    NativeRoute::NewThread {
+                        project: application.selected_project.clone(),
+                    },
+                    cx,
+                );
+                // The new-thread route names the thread being created, not
+                // the generic draft label, once the harness has named it.
+                install_summary_title(application, cx, &thread_id, "Ship the port");
+                assert_eq!(application.desktop_route_title(cx), "Ship the port");
+                assert_eq!(
+                    application.desktop_header_title(cx).as_deref(),
+                    Some("Ship the port")
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("artisan-desktop-route-title:/ Ship the port")
+                .is_some(),
+            "the desktop header names the thread being created"
+        );
+
+        // Without a thread the route keeps the unnamed draft label and the
+        // header stays on the bare wordmark.
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                application.pending_thread = None;
+                assert_eq!(
+                    application.desktop_route_title(cx),
+                    super::UNNAMED_THREAD_TITLE
+                );
+                assert_eq!(application.desktop_header_title(cx), None);
+            });
+        });
     }
 
     #[gpui::test]

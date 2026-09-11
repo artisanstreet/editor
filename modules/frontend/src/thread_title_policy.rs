@@ -15,6 +15,16 @@
 
 use std::borrow::Borrow;
 
+/// The placeholder title native task creation writes before any user text
+/// exists.
+///
+/// `native_transport_service` creates every new task with this exact title.
+/// The reference's live refiner replaces it with the latest user text as soon
+/// as one arrives; a display surface that has the message evidence and not yet
+/// the refined listing applies the same replacement through
+/// [`refined_thread_title`].
+pub const UNNAMED_THREAD_TITLE: &str = "New task";
+
 /// The reader's preference for naming a thread.
 ///
 /// `Summary` and `LatestMessage` mirror the current protocol literals. An
@@ -162,4 +172,91 @@ pub fn thread_display_title(
     }
 
     input.summary_title.unwrap_or(input.title)
+}
+
+/// Applies the reference refiner's stored-title rule to evidence the caller
+/// already holds.
+///
+/// The reference's live refiner derives the stored title from the latest user
+/// text while the title is unlocked
+/// (`modules/backend/src/threads/thread-metadata-refiner.ts`). While a native
+/// thread still carries the creation placeholder and no refreshed listing has
+/// arrived, the latest user message *is* that stored title for display
+/// purposes. Any other stored title — a refined title, an import, or a future
+/// manual rename — is returned untouched, so this never overrides real
+/// metadata. Blank evidence is ignored rather than replacing the placeholder
+/// with an empty label.
+#[must_use]
+pub fn refined_thread_title<'a>(
+    stored_title: &'a str,
+    latest_user_text: Option<&'a str>,
+) -> &'a str {
+    match latest_user_text {
+        Some(latest) if stored_title == UNNAMED_THREAD_TITLE => {
+            let trimmed = latest.trim();
+            if trimmed.is_empty() {
+                stored_title
+            } else {
+                trimmed
+            }
+        }
+        _ => stored_title,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ThreadTitleInput, ThreadTitleMode, refined_thread_title, thread_display_title};
+
+    #[test]
+    fn summary_wins_for_an_unlocked_title() {
+        let input = ThreadTitleInput::new(Some("Generated summary"), "Latest user message", false);
+
+        assert_eq!(
+            thread_display_title(input, ThreadTitleMode::Summary),
+            "Generated summary"
+        );
+    }
+
+    #[test]
+    fn a_manual_lock_wins_over_the_summary() {
+        let input = ThreadTitleInput::new(Some("Generated summary"), "My renamed thread", true);
+
+        assert_eq!(
+            thread_display_title(input, ThreadTitleMode::Summary),
+            "My renamed thread"
+        );
+    }
+
+    #[test]
+    fn an_absent_summary_falls_back_to_the_stored_title() {
+        let input = ThreadTitleInput::new(None, "Latest user message", false);
+
+        assert_eq!(
+            thread_display_title(input, ThreadTitleMode::Summary),
+            "Latest user message"
+        );
+    }
+
+    #[test]
+    fn creation_placeholder_refines_to_the_latest_user_message() {
+        assert_eq!(
+            refined_thread_title("New task", Some("  Fix the header title  ")),
+            "Fix the header title"
+        );
+        assert_eq!(
+            refined_thread_title("New task", Some("")),
+            "New task",
+            "blank evidence must not replace the placeholder with nothing"
+        );
+        assert_eq!(refined_thread_title("New task", None), "New task");
+    }
+
+    #[test]
+    fn real_stored_titles_are_never_overridden_by_message_evidence() {
+        assert_eq!(
+            refined_thread_title("Ship the port", Some("A later unrelated message")),
+            "Ship the port"
+        );
+    }
 }
