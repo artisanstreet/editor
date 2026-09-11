@@ -19,7 +19,7 @@ pub mod wire;
 /// The exact TypeScript source that produced the bundled manifest.
 pub const NATIVE_MODEL_CATALOG_SOURCE: &str = "modules/catalog/src/model-manifest.ts";
 /// The revision encoded by the bundled manifest snapshot.
-pub const NATIVE_MODEL_CATALOG_REVISION: &str = "2026-08-21.2";
+pub const NATIVE_MODEL_CATALOG_REVISION: &str = "2026-09-11.1";
 /// The complete static manifest bundled with the native selector.
 pub const NATIVE_MODEL_CATALOG_JSON: &str = include_str!("native_model_catalog.json");
 
@@ -1912,7 +1912,7 @@ mod tests {
         assert_eq!(catalog.manifest.revision, NATIVE_MODEL_CATALOG_REVISION);
         assert_eq!(catalog.manifest.providers.len(), 16);
         assert_eq!(catalog.manifest.harnesses.len(), 6);
-        assert_eq!(catalog.manifest.models.len(), 35);
+        assert_eq!(catalog.manifest.models.len(), 38);
         assert!(catalog.runnable_harness_ids.is_empty());
         assert!(catalog.routes.is_empty());
     }

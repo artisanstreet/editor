@@ -10,6 +10,35 @@ import {
 
 export const anthropic_models = [
 	{
+		id: "claude-fable-5-1",
+		name: "Claude Fable 5.1",
+		native_model_id: "claude-fable-5-1",
+		description: "Most capable for demanding reasoning and long-horizon agentic work.",
+		harness: "claude",
+		provider: "anthropic",
+		routing: { kind: "default" },
+		status: "prototype",
+		capabilities: {
+			thinking: {
+				availability: "supported",
+				default: "high",
+				options: [
+					standard("light", "low"),
+					standard("medium", "medium"),
+					standard("high", "high"),
+					standard("xhigh", "xhigh"),
+					exceptional("max", "max"),
+				],
+			},
+			context_window: anthropic_context_window,
+			speed_options: [anthropic_standard_speed("Claude Fable 5.1", false)],
+			image_input: true,
+			local_tools: true,
+			mcp: true,
+			web_search: true,
+		},
+	},
+	{
 		id: "claude-fable",
 		name: "Claude Fable 5",
 		native_model_id: "claude-fable-5",

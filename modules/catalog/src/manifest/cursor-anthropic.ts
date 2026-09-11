@@ -3,6 +3,34 @@ import { cursor_native_speed, exceptional, standard, unavailable } from "./optio
 
 export const cursor_anthropic_models = [
 	{
+		id: "cursor-claude-fable-5-1",
+		name: "Claude Fable 5.1",
+		native_model_id: "claude-fable-5-1",
+		description: "Most capable for demanding reasoning and long-horizon agentic work.",
+		harness: "cursor",
+		provider: "anthropic",
+		routing: { kind: "default" },
+		status: "prototype",
+		capabilities: {
+			thinking: {
+				availability: "supported",
+				default: "high",
+				options: [
+					standard("light", "low"),
+					standard("medium", "medium"),
+					standard("high", "high"),
+					standard("xhigh", "xhigh"),
+					exceptional("max", "max"),
+				],
+			},
+			speed_options: [cursor_native_speed("Claude Fable 5.1", false)],
+			image_input: false,
+			local_tools: true,
+			mcp: true,
+			web_search: false,
+		},
+	},
+	{
 		id: "cursor-claude-fable-5",
 		name: "Claude Fable 5",
 		native_model_id: "claude-fable-5",

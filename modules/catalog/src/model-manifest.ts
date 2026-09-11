@@ -16,7 +16,7 @@ export { thinking_level_labels };
 export { opencode2_big_pickle_compaction_model_id };
 
 export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
-	revision: "2026-08-21.2",
+	revision: "2026-09-11.1",
 	providers,
 	harnesses,
 	models: [

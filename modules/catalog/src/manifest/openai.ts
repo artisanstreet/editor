@@ -10,10 +10,10 @@ import {
 
 export const openai_models = [
 	{
-		id: "codex-sol",
-		name: "GPT 5.6 Sol",
-		native_model_id: "gpt-5.6-sol",
-		description: "OpenAI's frontier agentic coding model.",
+		id: "codex-astra",
+		name: "GPT 6 Astra",
+		native_model_id: "gpt-6-astra",
+		description: "OpenAI's most capable model for complex, demanding work.",
 		harness: "codex",
 		provider: "openai",
 		routing: { kind: "default" },
@@ -21,7 +21,40 @@ export const openai_models = [
 		capabilities: {
 			thinking: {
 				availability: "supported",
-				default: "high",
+				default: "medium",
+				options: [
+					standard("light", "low"),
+					standard("medium", "medium"),
+					standard("high", "high"),
+					standard("xhigh", "xhigh"),
+					exceptional("max", "max"),
+					harness_orchestration("ultra", "ultra"),
+				],
+			},
+			speed_options: [
+				openai_standard_speed("GPT 6 Astra", true),
+				openai_fast_speed("GPT 6 Astra", 2.5),
+			],
+			context_window: openai_context_window,
+			image_input: true,
+			local_tools: true,
+			mcp: true,
+			web_search: true,
+		},
+	},
+	{
+		id: "codex-sol",
+		name: "GPT 5.6 Sol",
+		native_model_id: "gpt-5.6-sol",
+		description: "Reliable agentic workhorse for everyday tasks.",
+		harness: "codex",
+		provider: "openai",
+		routing: { kind: "default" },
+		status: "prototype",
+		capabilities: {
+			thinking: {
+				availability: "supported",
+				default: "light",
 				options: [
 					standard("light", "low"),
 					standard("medium", "medium"),
@@ -54,7 +87,7 @@ export const openai_models = [
 		capabilities: {
 			thinking: {
 				availability: "supported",
-				default: "high",
+				default: "medium",
 				options: [
 					standard("light", "low"),
 					standard("medium", "medium"),
@@ -94,7 +127,6 @@ export const openai_models = [
 					standard("high", "high"),
 					standard("xhigh", "xhigh"),
 					exceptional("max", "max"),
-					harness_orchestration("ultra", "ultra"),
 				],
 			},
 			speed_options: [
@@ -112,7 +144,7 @@ export const openai_models = [
 		id: "codex-gpt-5-5",
 		name: "GPT 5.5",
 		native_model_id: "gpt-5.5",
-		description: "Strong all-round model for complex coding, research, and real-world work.",
+		description: "Proven previous-generation model for coding and general work.",
 		harness: "codex",
 		provider: "openai",
 		routing: { kind: "default" },
@@ -120,7 +152,7 @@ export const openai_models = [
 		capabilities: {
 			thinking: {
 				availability: "supported",
-				default: "high",
+				default: "medium",
 				options: [
 					standard("light", "low"),
 					standard("medium", "medium"),
@@ -139,63 +171,6 @@ export const openai_models = [
 		},
 	},
 	{
-		id: "codex-gpt-5-4",
-		name: "GPT 5.4",
-		native_model_id: "gpt-5.4",
-		description: "Strong model for everyday coding.",
-		harness: "codex",
-		provider: "openai",
-		routing: { kind: "default" },
-		status: "prototype",
-		capabilities: {
-			thinking: {
-				availability: "supported",
-				default: "high",
-				options: [
-					standard("light", "low"),
-					standard("medium", "medium"),
-					standard("high", "high"),
-					standard("xhigh", "xhigh"),
-				],
-			},
-			speed_options: [
-				openai_standard_speed("GPT 5.4", true),
-				openai_fast_speed("GPT 5.4", 2),
-			],
-			image_input: true,
-			local_tools: true,
-			mcp: true,
-			web_search: true,
-		},
-	},
-	{
-		id: "codex-gpt-5-4-mini",
-		name: "GPT 5.4 Mini",
-		native_model_id: "gpt-5.4-mini",
-		description: "Small, fast, and cost-efficient model for simpler coding tasks.",
-		harness: "codex",
-		provider: "openai",
-		routing: { kind: "default" },
-		status: "prototype",
-		capabilities: {
-			thinking: {
-				availability: "supported",
-				default: "medium",
-				options: [
-					standard("light", "low"),
-					standard("medium", "medium"),
-					standard("high", "high"),
-					standard("xhigh", "xhigh"),
-				],
-			},
-			speed_options: [openai_standard_speed("GPT 5.4 Mini", false)],
-			image_input: true,
-			local_tools: true,
-			mcp: true,
-			web_search: true,
-		},
-	},
-	{
 		id: "codex-spark",
 		name: "GPT 5.3 Codex Spark",
 		native_model_id: "gpt-5.3-codex-spark",
@@ -207,7 +182,7 @@ export const openai_models = [
 		capabilities: {
 			thinking: {
 				availability: "supported",
-				default: "medium",
+				default: "high",
 				options: [
 					standard("light", "low"),
 					standard("medium", "medium"),

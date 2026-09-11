@@ -3834,7 +3834,7 @@ mod tests {
     fn keyboard_commit_selects_policy_and_preserves_native_values() {
         let mut state = state_with_offline_catalog();
         state.press_trigger();
-        assert_eq!(state.highlighted_model_id(), Some("codex-sol"));
+        assert_eq!(state.highlighted_model_id(), Some("codex-astra"));
         state.handle_key(NativeModelSelectorKey::ArrowDown);
         let event = state
             .handle_key(NativeModelSelectorKey::Enter)
@@ -3842,14 +3842,14 @@ mod tests {
         let NativeModelSelectorEvent::SelectPolicy(policy) = event else {
             panic!("expected a policy event");
         };
-        assert_eq!(policy.model_id, "codex-terra");
-        assert_eq!(policy.native_model_id, "gpt-5.6-terra");
+        assert_eq!(policy.model_id, "codex-sol");
+        assert_eq!(policy.native_model_id, "gpt-5.6-sol");
         assert_eq!(
             policy
                 .reasoning_effort
                 .as_ref()
                 .map(|value| value.native_value.as_str()),
-            Some("high")
+            Some("low")
         );
         assert!(!state.is_open());
     }

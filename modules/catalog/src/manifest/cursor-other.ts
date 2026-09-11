@@ -3,11 +3,11 @@ import { cursor_native_speed, exceptional, standard } from "./options";
 
 export const cursor_other_models = [
 	{
-		id: "cursor-gemini-3-7-flash",
-		name: "Gemini 3.7 Flash",
-		native_model_id: "gemini-3.7-flash",
+		id: "cursor-gemini-3-8-flash",
+		name: "Gemini 3.8 Flash",
+		native_model_id: "gemini-3.8-flash",
 		description:
-			"Google's latest speed-tier model for high-throughput coding and large-context agent work.",
+			"Google's most intelligent Flash model for long-horizon software engineering and agentic work.",
 		harness: "cursor",
 		provider: "google",
 		routing: { kind: "default" },
@@ -17,7 +17,34 @@ export const cursor_other_models = [
 				availability: "supported",
 				default: "medium",
 				options: [
-					standard("light", "minimal"),
+					standard("light", "low"),
+					standard("medium", "medium"),
+					standard("high", "high"),
+				],
+			},
+			speed_options: [cursor_native_speed("Gemini 3.8 Flash", false)],
+			image_input: false,
+			local_tools: true,
+			mcp: true,
+			web_search: false,
+		},
+	},
+	{
+		id: "cursor-gemini-3-7-flash",
+		name: "Gemini 3.7 Flash",
+		native_model_id: "gemini-3.7-flash",
+		description:
+			"Google's token-efficient speed-tier model for high-throughput coding and large-context agent work.",
+		harness: "cursor",
+		provider: "google",
+		routing: { kind: "default" },
+		status: "prototype",
+		capabilities: {
+			thinking: {
+				availability: "supported",
+				default: "medium",
+				options: [
+					standard("light", "low"),
 					standard("medium", "medium"),
 					standard("high", "high"),
 				],
@@ -43,7 +70,7 @@ export const cursor_other_models = [
 				availability: "supported",
 				default: "high",
 				options: [
-					standard("light", "minimal"),
+					standard("light", "low"),
 					standard("medium", "medium"),
 					standard("high", "high"),
 				],
@@ -109,6 +136,35 @@ export const cursor_other_models = [
 			/** GLM streams raw chain-of-thought, with no summary layer over it. */
 			reasoning_display: "trace",
 			speed_options: [cursor_native_speed("GLM 5.2", false)],
+			image_input: false,
+			local_tools: true,
+			mcp: true,
+			web_search: false,
+		},
+	},
+	{
+		id: "cursor-muse-spark-1-3",
+		name: "Muse Spark 1.3",
+		native_model_id: "muse-spark-1.3",
+		description:
+			"Meta's flagship model for long tool-use chains, multi-step debugging, and large-repository work.",
+		harness: "cursor",
+		provider: "meta",
+		routing: { kind: "default" },
+		status: "prototype",
+		capabilities: {
+			thinking: {
+				availability: "supported",
+				default: "high",
+				options: [
+					standard("light", "minimal"),
+					standard("medium", "medium"),
+					standard("high", "high"),
+					standard("xhigh", "xhigh"),
+					exceptional("max", "max"),
+				],
+			},
+			speed_options: [cursor_native_speed("Muse Spark 1.3", false)],
 			image_input: false,
 			local_tools: true,
 			mcp: true,

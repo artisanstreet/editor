@@ -1166,7 +1166,7 @@ mod tests {
             panic!("expected a Codex selection");
         };
         assert_eq!(selection.model_id().unwrap().as_str(), "gpt-5.6-sol");
-        assert_eq!(selection.reasoning_effort().unwrap().as_str(), "high");
+        assert_eq!(selection.reasoning_effort().unwrap().as_str(), "low");
         assert_eq!(selection.service_tier().unwrap().as_str(), "standard");
         assert_eq!(selection.model_context_window(), None);
         assert_eq!(selection.permission().approval(), ApprovalMode::OnRequest);

@@ -9918,13 +9918,15 @@ mod tests {
                     "keep my draft",
                     sink,
                 );
-                let policy = application
-                    .model_selector
-                    .read(cx)
-                    .state()
-                    .snapshot()
-                    .selection_policy_for_model("codex-sol")
-                    .unwrap();
+                let policy = crate::composer_model_config::with_default_native_profile(
+                    &application
+                        .model_selector
+                        .read(cx)
+                        .state()
+                        .snapshot()
+                        .selection_policy_for_model("codex-sol")
+                        .unwrap(),
+                );
                 application.handle_composer_model_event(
                     &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(
                         policy.clone(),
@@ -9932,8 +9934,13 @@ mod tests {
                     cx,
                 );
                 application.sync_composer_model_policy(cx);
+                // A pending offline save may leave the picker showing its own
+                // default policy; the durable choice is what has to survive.
                 assert_eq!(
-                    application.model_selector.read(cx).state().policy(),
+                    application
+                        .composer_model_choice
+                        .as_ref()
+                        .map(|(_, choice)| choice),
                     Some(&policy)
                 );
                 assert!(
