@@ -43,12 +43,33 @@ pub(super) async fn discover_opencode2(program: Option<&str>) -> Option<Vec<Disc
     Some(
         identifiers
             .into_iter()
-            .map(|(provider, model)| {
+            .flat_map(|(provider, model)| {
                 let entry = metadata.get(&(provider.clone(), model.clone()));
-                row(provider, model, entry)
+                rows_for(provider, model, entry)
             })
             .collect(),
     )
+}
+
+/// Builds the base row plus one row per engine-reported effort variant.
+///
+/// OpenCode exposes reasoning levels as native variants (its own config sets
+/// `model.variant`), and the runtime path models each as its own identity
+/// row. The cache's `reasoning_options` effort values are exactly those
+/// variant ids; toggle and budget options are not derivable and stay out.
+fn rows_for(provider: String, model: String, entry: Option<&CacheEntry>) -> Vec<DiscoveredModel> {
+    let mut rows = vec![row(provider.clone(), model.clone(), entry, None)];
+    if let Some(entry) = entry {
+        for variant in &entry.variants {
+            rows.push(row(
+                provider.clone(),
+                model.clone(),
+                Some(entry),
+                Some(variant.clone()),
+            ));
+        }
+    }
+    rows
 }
 
 /// Parses `provider/model` lines, skipping anything that is not one bounded
@@ -92,6 +113,7 @@ struct CacheEntry {
     image: bool,
     tools: bool,
     cost: Option<(f64, f64)>,
+    variants: Vec<String>,
 }
 
 /// Locates the engine's catalogue cache under the user home or an explicit
@@ -169,7 +191,42 @@ fn cache_entry(model: &Value) -> CacheEntry {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         cost: cost_pair(model.get("cost")),
+        variants: reasoning_variants(model.get("reasoning_options")),
     }
+}
+
+/// Effort values reported as reasoning options; these are the native variant
+/// ids the engine accepts. Toggle/budget options are ignored, never guessed.
+fn reasoning_variants(value: Option<&Value>) -> Vec<String> {
+    /// Maximum retained variants for one model.
+    const MAX_VARIANTS: usize = 8;
+    let Some(options) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut variants = Vec::new();
+    for option in options {
+        if option.get("type").and_then(Value::as_str) != Some("effort") {
+            continue;
+        }
+        let Some(values) = option.get("values").and_then(Value::as_array) else {
+            continue;
+        };
+        for value in values {
+            let Some(value) = value
+                .as_str()
+                .filter(|value| !value.is_empty() && value.len() <= 32)
+            else {
+                continue;
+            };
+            if variants.len() >= MAX_VARIANTS {
+                return variants;
+            }
+            if !variants.iter().any(|existing| existing == value) {
+                variants.push(value.to_owned());
+            }
+        }
+    }
+    variants
 }
 
 fn text(value: Option<&Value>) -> Option<String> {
@@ -191,12 +248,18 @@ fn cost_pair(value: Option<&Value>) -> Option<(f64, f64)> {
         .then_some((input, output))
 }
 
-fn row(provider: String, model: String, entry: Option<&CacheEntry>) -> DiscoveredModel {
+fn row(
+    provider: String,
+    model: String,
+    entry: Option<&CacheEntry>,
+    variant_id: Option<String>,
+) -> DiscoveredModel {
     DiscoveredModel {
         engine_id: "opencode2",
         provider,
         native_model_id: model.clone(),
         upstream_model_id: Some(model.clone()),
+        variant_id,
         name: entry
             .and_then(|entry| entry.name.clone())
             .unwrap_or_else(|| humanized_model_name(&model)),
@@ -277,6 +340,7 @@ mod tests {
             "modalities": { "input": ["text", "image"] },
             "tool_call": true,
             "reasoning": true,
+            "reasoning_options": [{ "type": "effort", "values": ["low", "high", "max"] }],
             "cost": { "input": 0.95, "output": 4.0 },
         });
         let entry = cache_entry(&model);
@@ -286,6 +350,22 @@ mod tests {
         assert!(entry.image);
         assert!(entry.tools);
         assert_eq!(entry.cost, Some((0.95, 4.0)));
+        assert_eq!(entry.variants, vec!["low", "high", "max"]);
+    }
+
+    #[test]
+    fn variant_rows_expand_the_base_without_inventing_options() {
+        let entry = CacheEntry {
+            name: Some("Kimi K3".to_owned()),
+            variants: vec!["high".to_owned(), "max".to_owned()],
+            ..CacheEntry::default()
+        };
+        let rows = rows_for("opencode-go".to_owned(), "kimi-k3".to_owned(), Some(&entry));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].variant_id, None);
+        assert_eq!(rows[1].variant_id.as_deref(), Some("high"));
+        assert_eq!(rows[2].variant_id.as_deref(), Some("max"));
+        assert!(rows.iter().all(|row| row.native_model_id == "kimi-k3"));
     }
 
     #[test]

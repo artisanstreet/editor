@@ -305,6 +305,7 @@ fn map_row(row: RawCodexModel, context: &HashMap<String, (u64, u64)>) -> Discove
         provider: "openai".to_owned(),
         native_model_id: row.id.clone(),
         upstream_model_id: Some(row.id),
+        variant_id: None,
         name: row.display_name,
         description: row.description,
         hidden: row.hidden,

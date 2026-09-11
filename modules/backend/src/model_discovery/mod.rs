@@ -46,6 +46,8 @@ pub(crate) struct DiscoveredModel {
     pub(crate) native_model_id: String,
     /// Optional upstream provider model id when it differs from the native id.
     pub(crate) upstream_model_id: Option<String>,
+    /// Optional engine variant id (OpenCode2 reasoning level).
+    pub(crate) variant_id: Option<String>,
     /// Display name reported by the engine.
     pub(crate) name: String,
     /// Optional description reported by the engine.

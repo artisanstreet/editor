@@ -72,6 +72,7 @@ fn parse_models(output: &str) -> Vec<DiscoveredModel> {
             },
             native_model_id: id.to_owned(),
             upstream_model_id: None,
+            variant_id: None,
             name: if label.is_empty() {
                 title_case(id)
             } else {

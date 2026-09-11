@@ -344,6 +344,12 @@ fn discovery_revision_hash(discovery: &crate::model_discovery::DiscoveryBundle) 
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
+        if let Some(variant_id) = model.variant_id.as_deref() {
+            for byte in variant_id.bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
         hash ^= u64::from(model.hidden);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -495,9 +501,11 @@ fn apply_opencode2_rows(
         if row.hidden {
             continue;
         }
-        let Ok(id) =
-            artisan_catalog::wire::opencode2_catalog_id(&row.native_model_id, &row.provider, None)
-        else {
+        let Ok(id) = artisan_catalog::wire::opencode2_catalog_id(
+            &row.native_model_id,
+            &row.provider,
+            row.variant_id.as_deref(),
+        ) else {
             continue;
         };
         if !existing.insert(id.clone()) {
@@ -532,7 +540,7 @@ fn opencode2_definition(row: &DiscoveredModel, id: String) -> NativeModelDefinit
         native_selection: Some(NativeModelSelection {
             model_id: row.native_model_id.clone(),
             provider_route_id: row.provider.clone(),
-            variant_id: None,
+            variant_id: row.variant_id.clone(),
         }),
         status: "dynamic".to_owned(),
         upstream_model_id: row
@@ -1162,6 +1170,7 @@ mod tests {
             provider: provider.to_owned(),
             native_model_id: native_model_id.to_owned(),
             upstream_model_id: None,
+            variant_id: None,
             name: name.to_owned(),
             description: Some(format!("{name} description")),
             hidden: false,
@@ -1266,15 +1275,27 @@ mod tests {
 
     #[test]
     fn cli_discovered_opencode2_rows_carry_runnable_route_identity() {
+        let mut variant = discovered(
+            "opencode2",
+            "opencode-go",
+            "kimi-k3",
+            "Kimi K3",
+            Some(262_144),
+            Some(262_144),
+        );
+        variant.variant_id = Some("high".to_owned());
         let discovery = crate::model_discovery::DiscoveryBundle {
-            models: vec![discovered(
-                "opencode2",
-                "opencode-go",
-                "kimi-k3",
-                "Kimi K3",
-                Some(262_144),
-                Some(262_144),
-            )],
+            models: vec![
+                discovered(
+                    "opencode2",
+                    "opencode-go",
+                    "kimi-k3",
+                    "Kimi K3",
+                    Some(262_144),
+                    Some(262_144),
+                ),
+                variant,
+            ],
             probed_engines: vec!["opencode2"],
             missing_engines: Vec::new(),
         };
@@ -1291,6 +1312,22 @@ mod tests {
         let selection = model.native_selection.as_ref().expect("route selection");
         assert_eq!(selection.model_id, "kimi-k3");
         assert_eq!(selection.provider_route_id, "opencode-go");
+        assert_eq!(selection.variant_id, None);
+        let variant_id =
+            artisan_catalog::wire::opencode2_catalog_id("kimi-k3", "opencode-go", Some("high"))
+                .expect("variant identity");
+        let variant_row = catalog
+            .manifest
+            .model(&variant_id)
+            .expect("variant row is its own identity");
+        assert_eq!(
+            variant_row
+                .native_selection
+                .as_ref()
+                .and_then(|selection| selection.variant_id.as_deref()),
+            Some("high")
+        );
+        assert!(catalog.selectability(&variant_id).is_available());
         let route = catalog
             .routes
             .iter()

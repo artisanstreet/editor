@@ -151,6 +151,7 @@ fn map_model(value: &Value) -> Option<DiscoveredModel> {
         provider: "anthropic".to_owned(),
         native_model_id,
         upstream_model_id: None,
+        variant_id: None,
         name,
         description,
         hidden: false,
