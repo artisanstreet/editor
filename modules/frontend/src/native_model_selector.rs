@@ -2346,10 +2346,6 @@ impl NativeModelSelector {
             return preview;
         };
         let view = self.preview_view();
-        let context = model
-            .capabilities
-            .context_window_tokens
-            .map(format_context_tokens);
         let mut summary = div().flex().flex_col().gap(px(4.0)).child(
             div()
                 .flex()
@@ -2365,17 +2361,7 @@ impl NativeModelSelector {
                         .text_size(px(14.0))
                         .line_height(px(20.0))
                         .child(model.name.clone()),
-                )
-                .when_some(context, |title, context| {
-                    title.child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(px(10.0))
-                            .line_height(px(14.0))
-                            .text_color(self.theme.colors.muted_foreground.to_paint())
-                            .child(context),
-                    )
-                }),
+                ),
         );
         if let Some(description) = model.description.clone() {
             summary = summary.child(

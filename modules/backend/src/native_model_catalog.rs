@@ -432,11 +432,33 @@ fn apply_discovery(
     }
 }
 
+/// Converts an engine-reported display name into picker copy.
+///
+/// Engines commonly report hyphenated identifiers (`GPT-6-Astra`) where the
+/// product uses space-separated names (`GPT 6 Astra`); separator runs and
+/// repeated whitespace collapse to one space and the result is trimmed.
+fn readable_name(raw: &str) -> String {
+    let mut name = String::with_capacity(raw.len());
+    let mut pending_space = false;
+    for character in raw.chars() {
+        if character == '-' || character.is_whitespace() {
+            pending_space = !name.is_empty();
+            continue;
+        }
+        if pending_space {
+            name.push(' ');
+            pending_space = false;
+        }
+        name.push(character);
+    }
+    name
+}
+
 /// Replaces reported fields on a matched static row, retaining that row's
 /// harness policy (context options, speed economics, routing, MCP/search).
 fn overlay_reported(model: &mut NativeModelDefinition, row: &DiscoveredModel) {
     if !row.name.is_empty() {
-        model.name.clone_from(&row.name);
+        model.name = readable_name(&row.name);
     }
     if row.description.is_some() {
         model.description.clone_from(&row.description);
@@ -468,7 +490,7 @@ fn discovered_definition(
 ) -> NativeModelDefinition {
     NativeModelDefinition {
         id,
-        name: row.name.clone(),
+        name: readable_name(&row.name),
         native_model_id: row.native_model_id.clone(),
         description: row.description.clone(),
         harness: row.engine_id.to_owned(),
@@ -1111,6 +1133,47 @@ mod tests {
             .model("codex-gpt-5-5")
             .expect("static retired row");
         assert!(retired.disabled.is_some(), "absent codex rows are disabled");
+    }
+
+    #[test]
+    fn discovered_display_names_are_dehyphenated() {
+        let discovery = crate::model_discovery::DiscoveryBundle {
+            models: vec![
+                discovered(
+                    "codex",
+                    "openai",
+                    "gpt-5.6-sol",
+                    "GPT-5.6-Sol",
+                    Some(272_000),
+                    Some(872_000),
+                ),
+                discovered(
+                    "codex",
+                    "openai",
+                    "gpt-7-stealth",
+                    "GPT-7-Stealth",
+                    Some(272_000),
+                    Some(872_000),
+                ),
+            ],
+            probed_engines: vec!["codex"],
+        };
+        let catalog = from_catalog_result_with_discovery(
+            fixture_result(),
+            &discovery,
+            &ModelFavoritesSnapshot::empty(),
+        )
+        .expect("catalog builds");
+
+        let sol = catalog.manifest.model("codex-sol").expect("static sol row");
+        assert_eq!(sol.name, "GPT 5.6 Sol");
+        let stealth = catalog
+            .manifest
+            .models
+            .iter()
+            .find(|model| model.native_model_id == "gpt-7-stealth")
+            .expect("new discovered row");
+        assert_eq!(stealth.name, "GPT 7 Stealth");
     }
 
     #[test]
