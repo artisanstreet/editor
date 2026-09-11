@@ -30,3 +30,7 @@ path = "../../tests/domain/run_interaction.rs"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "conversation"
+path = "../../tests/domain/conversation.rs"

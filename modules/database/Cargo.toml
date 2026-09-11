@@ -133,3 +133,7 @@ path = "../../tests/database/run_interaction.rs"
 [[test]]
 name = "observation_ledger"
 path = "../../tests/database/observation_ledger.rs"
+
+[[test]]
+name = "conversation_projection"
+path = "../../tests/database/conversation_projection.rs"
