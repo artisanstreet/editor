@@ -617,7 +617,7 @@ fn source_message_id_correlates_receipt_to_echo_without_body_guessing() {
     let snapshot = ConversationSnapshot::new(
         thread_id(),
         ConversationCursor::default(),
-        vec![ConversationTurn {
+        vec![artisan_domain::ConversationTurn {
             turn_id: TurnId::parse("turn-echo").expect("fixture turn id is valid"),
             ordinal: TurnOrdinal::new(0),
             revision: Revision::default(),
@@ -634,6 +634,7 @@ fn source_message_id_correlates_receipt_to_echo_without_body_guessing() {
     .expect("echo snapshot is valid");
     let items = snapshot.items();
     assert_eq!(items.len(), 2);
+    let mut sources = Vec::with_capacity(items.len());
     for (item, expected_source) in items
         .iter()
         .zip(["message-echo-1", "message-echo-2"])
@@ -657,6 +658,13 @@ fn source_message_id_correlates_receipt_to_echo_without_body_guessing() {
             expected_source
         );
         assert_eq!(user.body.as_str(), "same repeated body");
+        sources.push(
+            user.source_message_id
+                .as_ref()
+                .expect("echo carries its source")
+                .as_str()
+                .to_owned(),
+        );
     }
     // The second echo resolves only through its own source id.
     assert_ne!(
