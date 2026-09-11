@@ -40,7 +40,9 @@ use artisan_ui::fade_arc::FadeArc;
 use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use artisan_ui::motion::{MotionCurve, MotionDuration, MotionPolicy};
 use artisan_ui::separator::{SeparatorAxis, separator};
-use artisan_ui::theme::{ArtisanTheme, DesktopTheme, RadiusStep, RadiusTokens, ThemeMode};
+use artisan_ui::theme::{
+    ArtisanTheme, DesktopTheme, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::Focusable as _;
 use gpui::{
@@ -105,8 +107,13 @@ use crate::onboarding_harness_presentation::{
     HarnessCatalog, HarnessSetupAction, HarnessSetupState,
 };
 use crate::onboarding_screen::{OnboardingHarnessEntry, OnboardingScreen};
+use crate::repository_mark::{RepositoryLogo, repository_mark_for};
 use crate::thread_environment_presentation::{HostIdentitySnapshot, ThreadEnvironmentInput};
 use crate::thread_screen::{ThreadScreen, ThreadScreenGate, shell_black};
+use crate::titlebar_header_presentation::{
+    TITLEBAR_HEADER_THREAD_SEPARATOR, TitlebarHeaderInput, TitlebarHeaderSegment,
+    TitlebarRepository, present_titlebar_header,
+};
 use crate::usage_meter::usage_segment_fraction;
 use crate::workspace_tab_state::EditorViewState;
 use crate::{
@@ -138,8 +145,26 @@ pub(crate) const WINDOW_TITLE: &str = "Artisan Editor";
 /// Stable selector for the real application root.
 pub(crate) const NATIVE_ROOT_SELECTOR: &str = "artisan-native-application";
 
-/// Debug selector prefix for the desktop header's centred route title.
+/// Debug selector prefix for the desktop header's route title.
 pub(crate) const TITLEBAR_ROUTE_TITLE_SELECTOR: &str = "artisan-desktop-route-title";
+
+/// Stable selector for the titlebar workspace-header cluster.
+pub(crate) const TITLEBAR_HEADER_SELECTOR: &str = "artisan-desktop-titlebar-header";
+
+/// Stable selector for the repository host mark in the workspace header.
+pub(crate) const TITLEBAR_REPOSITORY_MARK_SELECTOR: &str =
+    "artisan-desktop-titlebar-repository-mark";
+
+/// Stable selector prefix for the qualified repository label.
+pub(crate) const TITLEBAR_REPOSITORY_LABEL_SELECTOR: &str =
+    "artisan-desktop-titlebar-repository-label";
+
+/// Stable selector for the project-folder fallback in the workspace header.
+pub(crate) const TITLEBAR_PROJECT_FOLDER_SELECTOR: &str = "artisan-desktop-titlebar-project-folder";
+
+/// Stable selector for the darker separator before the thread subject.
+pub(crate) const TITLEBAR_THREAD_SEPARATOR_SELECTOR: &str =
+    "artisan-desktop-titlebar-thread-separator";
 
 /// Stable selector for the state panel.
 pub(crate) const NATIVE_STATUS_SELECTOR: &str = "artisan-native-status";
@@ -525,6 +550,15 @@ pub struct NativeApplication {
     home_picker_subscription: Option<Subscription>,
     project_options: Vec<ProjectOption>,
     selected_project: Option<ProjectId>,
+    /// Retained repository facts for the titlebar workspace header.
+    ///
+    /// No production source is wired: the Git read query that would inspect
+    /// the attached project's default remote is the missing upstream, so this
+    /// stays `None` in the running app and the header paints the project
+    /// folder. The field is the adapter seam that query will fill, and tests
+    /// inject real-shaped facts to prove the mark/link composition. Never
+    /// store synthesized repository data here.
+    titlebar_repository: Option<TitlebarRepository>,
     /// The latest authoritative thread listing for `selected_project`.
     thread_listing: Option<ThreadListing>,
     selected_thread: Option<ThreadId>,
@@ -761,6 +795,7 @@ impl NativeApplication {
             home_picker_subscription: None,
             project_options: Vec::new(),
             selected_project: None,
+            titlebar_repository: None,
             thread_listing: None,
             selected_thread: None,
             pending_thread: None,
@@ -1496,11 +1531,14 @@ impl NativeApplication {
         cx.notify();
     }
 
-    /// Native titlebar identity: the `Artisan Editor` wordmark. The wordmark
-    /// keeps the home navigation. The open conversation's own title is the
-    /// titlebar's centred header subject, not a breadcrumb on this end.
+    /// Native titlebar leading cluster: the `Artisan Editor` wordmark, which
+    /// keeps the home navigation, followed by the workspace header naming the
+    /// open project and conversation.
+    ///
+    /// This is the reference strip's leading line: the wordmark anchors the
+    /// home identity, and the workspace header follows it into the same row.
     fn desktop_identity(&self, cx: &Context<Self>) -> Div {
-        div()
+        let mut identity = div()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -1522,28 +1560,111 @@ impl NativeApplication {
                     .letter_spacing(px(-1.0))
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
-            )
+            );
+        if let Some(cluster) = self.desktop_header_cluster(cx) {
+            identity = identity.child(cluster);
+        }
+        identity
     }
 
-    /// The titlebar's centred header subject, when the route names a thread.
+    /// The titlebar workspace header, when the route names a conversation.
     ///
-    /// The reserved centre slot exists for exactly this header; an empty
-    /// element on subject-less routes leaves it bare above the wordmark.
-    fn desktop_center_title(&self, cx: &Context<Self>) -> AnyElement {
-        let Some(title) = self.desktop_header_title(cx) else {
-            return div().into_any_element();
-        };
-        let selector = format!("{TITLEBAR_ROUTE_TITLE_SELECTOR}:{title}");
-        div()
+    /// The line follows the reference strip: a repository host mark and its
+    /// qualified `owner/repository` link when inspected repository facts
+    /// exist, the project folder otherwise, then the darker `/` separator and
+    /// the conversation title. A route that names no conversation returns
+    /// `None`, leaving the bare wordmark.
+    fn desktop_header_cluster(&self, cx: &App) -> Option<AnyElement> {
+        let thread_title = self.desktop_header_title(cx)?;
+        let project_display_name = self.selected_project_name();
+        let presentation = present_titlebar_header(TitlebarHeaderInput::new(
+            project_display_name.as_deref(),
+            self.titlebar_repository.as_ref(),
+            Some(thread_title.as_str()),
+        ))?;
+        let mut cluster = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
             .min_w(px(0.0))
-            .truncate()
-            .whitespace_nowrap()
-            .text_size(px(13.0))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(self.desktop_theme.foreground)
-            .debug_selector(move || selector.clone())
-            .child(title)
-            .into_any_element()
+            .overflow_hidden()
+            .debug_selector(|| TITLEBAR_HEADER_SELECTOR.to_owned());
+        for segment in presentation.segments() {
+            cluster = cluster.child(self.render_titlebar_segment(segment));
+        }
+        Some(cluster.into_any_element())
+    }
+
+    /// Renders one titlebar workspace-header segment.
+    ///
+    /// The cluster carries the muted reference line, so only the repository
+    /// link, the separator, and monochrome marks override the inherited
+    /// color; the thread title is the elastic, truncating segment.
+    fn render_titlebar_segment(&self, segment: &TitlebarHeaderSegment<'_>) -> AnyElement {
+        let theme = self.theme;
+        match segment {
+            TitlebarHeaderSegment::RepositoryMark { host } => {
+                let mark = repository_mark_for(Some(*host));
+                let mut glyph = asset_glyph(repository_logo_asset(mark.logo)).size(px(14.0));
+                if mark.monochrome {
+                    // The reference inverts single-color marks with the
+                    // theme; the native tint does the same on the dark shell.
+                    glyph = glyph.text_color(theme.colors.foreground.to_paint());
+                }
+                div()
+                    .flex_shrink_0()
+                    .debug_selector(|| TITLEBAR_REPOSITORY_MARK_SELECTOR.to_owned())
+                    .child(glyph)
+                    .into_any_element()
+            }
+            TitlebarHeaderSegment::RepositoryLink { label, web_url } => {
+                let destination = SharedString::from((*web_url).to_owned());
+                let selector = format!("{TITLEBAR_REPOSITORY_LABEL_SELECTOR}:{label}");
+                div()
+                    .id("artisan-desktop-titlebar-repository-link")
+                    .cursor_pointer()
+                    // The reference keeps the repository label at its natural
+                    // width: only the thread subject ellipsizes.
+                    .flex_shrink_0()
+                    .text_color(theme.colors.banner_info.to_paint())
+                    .debug_selector(move || selector.clone())
+                    .on_click(move |_, _, cx| cx.open_url(destination.as_ref()))
+                    .child(SharedString::from(label.clone()))
+                    .into_any_element()
+            }
+            TitlebarHeaderSegment::ProjectFolder { label } => div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .flex_shrink_0()
+                .debug_selector(|| TITLEBAR_PROJECT_FOLDER_SELECTOR.to_owned())
+                .child(
+                    asset_glyph(AssetId::TABLER_FOLDER)
+                        .size(px(14.0))
+                        .flex_shrink_0(),
+                )
+                .child(SharedString::from((*label).to_owned()))
+                .into_any_element(),
+            TitlebarHeaderSegment::ThreadSeparator => div()
+                .flex_shrink_0()
+                // The reference paints the separator even darker than the
+                // muted line around it; S600 is two ramp steps below the
+                // muted-foreground S400 on this dark shell.
+                .text_color(SurfaceStep::S600.oklch().to_paint())
+                .debug_selector(|| TITLEBAR_THREAD_SEPARATOR_SELECTOR.to_owned())
+                .child(TITLEBAR_HEADER_THREAD_SEPARATOR)
+                .into_any_element(),
+            TitlebarHeaderSegment::ThreadTitle { title } => {
+                let selector = format!("{TITLEBAR_ROUTE_TITLE_SELECTOR}:{title}");
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .debug_selector(move || selector.clone())
+                    .child(SharedString::from((*title).to_owned()))
+                    .into_any_element()
+            }
+        }
     }
 
     fn desktop_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -8355,19 +8476,34 @@ fn message_status_detail(
     })
 }
 
+/// Maps a repository mark identity to its cataloged native asset.
+///
+/// Every vendored host mark the reference table can select has a catalog row;
+/// the plain Git mark is the fallback identity for local and unknown hosts.
+fn repository_logo_asset(logo: RepositoryLogo) -> AssetId {
+    match logo {
+        RepositoryLogo::Git => AssetId::SVGL_GIT,
+        RepositoryLogo::GitHub => AssetId::SVGL_GITHUB,
+        RepositoryLogo::GitLab => AssetId::SVGL_GITLAB,
+        RepositoryLogo::MicrosoftAzure => AssetId::SVGL_MICROSOFT_AZURE,
+        RepositoryLogo::Bitbucket => AssetId::SIMPLE_ICONS_BITBUCKET,
+        RepositoryLogo::Codeberg => AssetId::SIMPLE_ICONS_CODEBERG,
+        RepositoryLogo::Gitea => AssetId::SIMPLE_ICONS_GITEA,
+        RepositoryLogo::Sourcehut => AssetId::SIMPLE_ICONS_SOURCEHUT,
+    }
+}
+
 impl Render for NativeApplication {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_composer_controls(cx);
         let sidebar = self.desktop_sidebar(window, cx).into_any_element();
         let body = self.desktop_route_body(window, cx);
         let identity = self.desktop_identity(cx).into_any_element();
-        let title = self.desktop_center_title(cx);
         let search = self.command_menu.clone().into_any_element();
         let shell = desktop_shell(
             self.desktop_theme,
             self.sidebar_collapsed,
             identity,
-            title,
             search,
             sidebar,
             body,
@@ -9190,7 +9326,10 @@ mod tests {
         NativeApplication, NativeMessageFailure, NativeMessageFlight, NativeProjectIntakeOperation,
         NativeProjectIntakeStage, NativeTestCommandSink, NativeTransportCommand,
         NativeTransportEvent, NativeViewState, PendingFailedRecovery, PickerRoute, ServiceFailure, ServiceStopStatus,
-        ThreadSwitchFlight, ThreadSwitchPhase, WINDOW_TITLE, create_message_request_id,
+        TITLEBAR_HEADER_SELECTOR, TITLEBAR_PROJECT_FOLDER_SELECTOR,
+        TITLEBAR_REPOSITORY_LABEL_SELECTOR, TITLEBAR_REPOSITORY_MARK_SELECTOR,
+        TITLEBAR_ROUTE_TITLE_SELECTOR, TITLEBAR_THREAD_SEPARATOR_SELECTOR, ThreadSwitchFlight,
+        ThreadSwitchPhase, TitlebarRepository, WINDOW_TITLE, create_message_request_id,
         intake_command, message_status_detail, picker_route, project_options_from_listing,
         ready_membership_is_valid,
     };
@@ -9207,6 +9346,7 @@ mod tests {
         NativeUsageReport, NativeUsageWindow,
     };
     use crate::native_route::{NativeRoute, SettingsRoute};
+    use crate::repository_mark::RepositoryHost;
     use crate::{
         conversation_delivery_machine::ConversationDeliveryEffect,
         conversation_host::{ConversationHost, ConversationHostEffect},
@@ -9240,7 +9380,8 @@ mod tests {
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
     use gpui::{
-        Context, Focusable as _, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext,
+        Context, Focusable as _, KeyUpEvent, Keystroke, SharedString, TestAppContext,
+        VisualTestContext,
     };
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
@@ -12619,6 +12760,231 @@ mod tests {
                 assert_eq!(application.desktop_header_title(cx), None);
             });
         });
+    }
+
+    /// Installs one selected project option so the workspace header has a
+    /// project display label to paint.
+    fn install_project_option(application: &mut NativeApplication, name: &str) {
+        application.project_options.push(ProjectOption {
+            id: ProjectId::parse("message-project").expect("project"),
+            name: SharedString::from(name.to_owned()),
+        });
+    }
+
+    #[gpui::test]
+    fn titlebar_workspace_header_follows_the_wordmark_and_truncates_the_thread_name(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _commands) = command_sink([]);
+        let thread_id = cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let thread_id = install_unnamed_title_task(application, cx, "", sink);
+                install_project_option(application, "artisan-street");
+                thread_id
+            })
+        });
+        cx.run_until_parked();
+
+        let titlebar = cx
+            .debug_bounds(DESKTOP_TITLEBAR_SELECTOR)
+            .expect("titlebar");
+        let wordmark = cx.debug_bounds("artisan-brand-home").expect("wordmark");
+        let header = cx
+            .debug_bounds(TITLEBAR_HEADER_SELECTOR)
+            .expect("workspace header");
+        let folder = cx
+            .debug_bounds(TITLEBAR_PROJECT_FOLDER_SELECTOR)
+            .expect("folder fallback");
+        let separator = cx
+            .debug_bounds(TITLEBAR_THREAD_SEPARATOR_SELECTOR)
+            .expect("thread separator");
+        let short_title = cx
+            .debug_bounds(Box::leak(
+                format!(
+                    "{TITLEBAR_ROUTE_TITLE_SELECTOR}:{}",
+                    super::UNNAMED_THREAD_TITLE
+                )
+                .into_boxed_str(),
+            ))
+            .expect("thread title");
+        let controls = cx
+            .debug_bounds("artisan-desktop-titlebar-controls")
+            .expect("caption controls");
+
+        // The cluster follows the wordmark in source order and stays on the
+        // leading half of the strip: the reference header is anchored left,
+        // never centred.
+        assert!(
+            wordmark.origin.x + wordmark.size.width <= header.origin.x,
+            "the workspace header follows the wordmark"
+        );
+        assert!(
+            header.origin.x < titlebar.origin.x + titlebar.size.width / 2.0,
+            "the workspace header starts on the leading half of the strip"
+        );
+        assert!(folder.origin.x <= separator.origin.x);
+        assert!(separator.origin.x <= short_title.origin.x);
+
+        // With no inspected repository facts the folder fallback paints and
+        // the VCS mark/link never do.
+        assert!(
+            cx.debug_bounds(TITLEBAR_REPOSITORY_MARK_SELECTOR).is_none(),
+            "a repository mark without repository facts would be fabricated"
+        );
+        assert!(
+            cx.debug_bounds(Box::leak(
+                format!("{TITLEBAR_REPOSITORY_LABEL_SELECTOR}:artisanstreet/editor")
+                    .into_boxed_str()
+            ))
+            .is_none(),
+            "a repository link without repository facts would be fabricated"
+        );
+
+        // A long thread title grows elastically on the one line and then
+        // truncates: it never runs under the caption controls.
+        let long_title = format!("{} padding padding", "very long conversation title ".repeat(7));
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_summary_title(application, cx, &thread_id, &long_title);
+            });
+        });
+        cx.run_until_parked();
+        let truncated_title = cx
+            .debug_bounds(Box::leak(
+                format!("{TITLEBAR_ROUTE_TITLE_SELECTOR}:{long_title}").into_boxed_str(),
+            ))
+            .expect("long thread title");
+        assert!(
+            truncated_title.size.width > short_title.size.width,
+            "the thread name is elastic while the strip has room"
+        );
+        assert!(
+            truncated_title.origin.x + truncated_title.size.width <= controls.origin.x,
+            "the truncating thread name never crosses the caption controls"
+        );
+
+        // The shipping window opens at the 1024x720 surface; the header must
+        // keep the whole line seated there, left of the strip's midpoint.
+        cx.simulate_resize(gpui::size(
+            gpui::px(super::SURFACE_WIDTH),
+            gpui::px(super::SURFACE_HEIGHT),
+        ));
+        cx.run_until_parked();
+        let default_title = cx
+            .debug_bounds(Box::leak(
+                format!("{TITLEBAR_ROUTE_TITLE_SELECTOR}:{long_title}").into_boxed_str(),
+            ))
+            .expect("thread title at the shipping window size");
+        let default_titlebar = cx
+            .debug_bounds(DESKTOP_TITLEBAR_SELECTOR)
+            .expect("titlebar at the shipping window size");
+        let default_controls = cx
+            .debug_bounds("artisan-desktop-titlebar-controls")
+            .expect("caption controls at the shipping window size");
+        assert!(
+            default_title.size.width > gpui::px(0.0),
+            "the subject keeps visible width at the shipping window size"
+        );
+        assert!(
+            default_title.origin.x + default_title.size.width <= default_controls.origin.x,
+            "the subject stays inside the strip at the shipping window size"
+        );
+        assert!(
+            default_title.origin.x < default_titlebar.origin.x + default_titlebar.size.width / 2.0,
+            "the subject starts on the leading half at the shipping window size"
+        );
+    }
+
+    #[gpui::test]
+    fn titlebar_workspace_header_names_the_repository_when_facts_exist(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_unnamed_title_task(application, cx, "", sink);
+                install_project_option(application, "artisan-street");
+                // Injected fixture, not synthesized production data: the
+                // titlebar adapter has no repository source yet, and this is
+                // the exact remote shape the Git read query will supply.
+                application.titlebar_repository = Some(TitlebarRepository::new(
+                    RepositoryHost::GitHub,
+                    "https://github.com/artisanstreet/editor",
+                ));
+            });
+        });
+        cx.run_until_parked();
+
+        let mark = cx
+            .debug_bounds(TITLEBAR_REPOSITORY_MARK_SELECTOR)
+            .expect("repository mark");
+        let link = cx
+            .debug_bounds(Box::leak(
+                format!("{TITLEBAR_REPOSITORY_LABEL_SELECTOR}:artisanstreet/editor")
+                    .into_boxed_str(),
+            ))
+            .expect("qualified repository link");
+        let separator = cx
+            .debug_bounds(TITLEBAR_THREAD_SEPARATOR_SELECTOR)
+            .expect("thread separator");
+        let title = cx
+            .debug_bounds(Box::leak(
+                format!(
+                    "{TITLEBAR_ROUTE_TITLE_SELECTOR}:{}",
+                    super::UNNAMED_THREAD_TITLE
+                )
+                .into_boxed_str(),
+            ))
+            .expect("thread title");
+
+        assert!(mark.origin.x + mark.size.width <= link.origin.x);
+        assert!(link.origin.x <= separator.origin.x);
+        assert!(separator.origin.x <= title.origin.x);
+        assert!(
+            cx.debug_bounds(TITLEBAR_PROJECT_FOLDER_SELECTOR).is_none(),
+            "inspected repository facts replace the project-folder fallback"
+        );
+    }
+
+    #[gpui::test]
+    fn subject_less_routes_keep_the_bare_wordmark(cx: &mut TestAppContext) {
+        let (_view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("artisan-brand-home").is_some(),
+            "the wordmark keeps the home identity"
+        );
+        assert!(
+            cx.debug_bounds(TITLEBAR_HEADER_SELECTOR).is_none(),
+            "a route naming no conversation paints no workspace header"
+        );
+        assert!(
+            cx.debug_bounds(Box::leak(
+                format!(
+                    "{TITLEBAR_ROUTE_TITLE_SELECTOR}:{}",
+                    super::UNNAMED_THREAD_TITLE
+                )
+                .into_boxed_str(),
+            ))
+            .is_none(),
+            "the unnamed draft label never becomes a titlebar subject"
+        );
+    }
+
+    #[test]
+    fn thread_separator_is_darker_than_muted_foreground() {
+        let muted_foreground = ArtisanTheme::for_mode(ThemeMode::Dark)
+            .colors
+            .muted_foreground
+            .l;
+        assert!(
+            artisan_ui::theme::SurfaceStep::S600.oklch().l < muted_foreground,
+            "the separator ramp step must paint darker than the muted line"
+        );
     }
 
     #[gpui::test]

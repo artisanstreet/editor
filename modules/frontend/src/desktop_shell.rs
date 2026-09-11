@@ -130,12 +130,18 @@ pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
 /// transparent so the shell never restarts a background per pane; controls,
 /// composer, cards, and popovers keep their own glass/material fills for
 /// contrast.
+///
+/// `identity` owns the whole leading cluster: the wordmark and, following it,
+/// the workspace header naming the open project and conversation. It starts at
+/// the leading end of the strip, and the drag surface continues from its end
+/// to the caption controls, matching the reference desktop shell.
+/// `search` is the command menu, mounted without reserving space: it paints
+/// nothing in flow at rest and overlays its palette dialog when open.
 #[must_use]
 pub fn desktop_shell(
     theme: DesktopTheme,
     collapsed: bool,
     identity: AnyElement,
-    title: AnyElement,
     search: AnyElement,
     sidebar: AnyElement,
     body: AnyElement,
@@ -172,6 +178,11 @@ pub fn desktop_shell(
         .flex()
         .items_center()
         .child(
+            // The leading region owns the whole header cluster and then the
+            // window drag surface up to the caption controls, the native
+            // reading of the reference strip's leading workspace header. The
+            // cluster itself is not a drag area, so the wordmark and the
+            // workspace link keep their clicks.
             div()
                 .flex_1()
                 .min_w(px(0.0))
@@ -185,29 +196,11 @@ pub fn desktop_shell(
         )
         .child(
             div()
-                .w(px(360.0))
-                .max_w(gpui::relative(0.4))
                 .flex_shrink_0()
-                .min_w(px(0.0))
                 .h_full()
                 .flex()
                 .items_center()
-                .justify_center()
-                // The reserved centre slot carries the open conversation's
-                // title as the titlebar header; the unanchored command menu
-                // renders nothing in flow at rest and overlays its dialog when
-                // open, so the header is never displaced by it.
-                .child(title)
-                .child(search),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .h_full()
-                .flex()
                 .justify_end()
-                .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
                 .child(controls),
         );
 
@@ -222,6 +215,10 @@ pub fn desktop_shell(
         .border_color(theme.line)
         .debug_selector(|| DESKTOP_TITLEBAR_SELECTOR.to_string())
         .child(drag)
+        // The command menu is mounted without reserving a slot: it paints
+        // nothing in flow at rest and overlays its palette dialog when open,
+        // so the header stays flush against the controls' drag region.
+        .child(search)
         .child(
             // One-physical-pixel continuation of the sidebar's right rule
             // above the junction. The sidebar border paints the rightmost
@@ -229,8 +226,8 @@ pub fn desktop_shell(
             // inset), and the junction crosshair centers its vertical arm on
             // x = sw, so a rule at [sw-1dp, sw] extends exactly that line
             // through the full header height in the same `theme.line` paint.
-            // Absolute, so the drag/search/control flex layout is untouched;
-            // a plain element with no pointer listener, so like the
+            // Absolute, so the drag/command-menu/control flex layout is
+            // untouched; a plain element with no pointer listener, so like the
             // crosshair it cannot intercept drags or clicks.
             div()
                 .absolute()
