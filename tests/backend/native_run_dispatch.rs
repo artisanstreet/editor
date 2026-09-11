@@ -1305,7 +1305,12 @@ async fn dispatch_fixture_composes_claim_through_durable_settlement() {
     );
 
     let mut settled = false;
-    for _ in 0..2 {
+    // Four wakes at most: the launch itself publishes user admission,
+    // then the first batch, the terminal settlement, plus one spare for
+    // an intermediate commit. The launch wake is part of the
+    // visible-stream contract, not spare budget: without it this loop
+    // needed exactly two.
+    for _ in 0..4 {
         tokio::time::timeout(Duration::from_secs(10), subscription.wait())
             .await
             .expect("fixture commit wake should arrive")

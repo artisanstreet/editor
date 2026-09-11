@@ -47,6 +47,7 @@ use artisan_transport::{
 };
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use super::{
     ClaimExecution, ClaimIds, LoadedClaim, NativeRunDispatcherConfig,
@@ -813,6 +814,10 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
             let mut saw_burst_00 = false;
             let mut saw_burst_01 = false;
             let mut saw_observation = false;
+            // A terminal lifecycle here preserves its full identity for
+            // the post-loop diagnosis instead of failing blind: the run
+            // row, dispatch row, and patch position are read below.
+            let mut terminal_seen: Option<(ConversationLifecycle, String, u64)> = None;
             // Read until two DISTINCT chunk updates plus the reasoning
             // observation are observed. Remaining burst patches may
             // legitimately still be in flight (commits coalesce into
@@ -839,11 +844,19 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                                         saw_burst_01 = true;
                                     }
                                 }
-                                ConversationPatch::TurnLifecycle { lifecycle, .. } => {
-                                    assert!(
-                                        !lifecycle.is_terminal(),
-                                        "no terminal lifecycle while held"
-                                    );
+                                ConversationPatch::TurnLifecycle {
+                                    lifecycle,
+                                    turn_id,
+                                    sequence,
+                                    ..
+                                } => {
+                                    if lifecycle.is_terminal() && terminal_seen.is_none() {
+                                        terminal_seen = Some((
+                                            *lifecycle,
+                                            turn_id.as_str().to_owned(),
+                                            sequence.get(),
+                                        ));
+                                    }
                                 }
                                 _ => {}
                             }
@@ -869,9 +882,40 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                     }
                     _ => panic!("unexpected delivery frame"),
                 }
-                if saw_burst_00 && saw_burst_01 && saw_observation {
+                if terminal_seen.is_some()
+                    || (saw_burst_00 && saw_burst_01 && saw_observation)
+                {
                     break;
                 }
+            }
+            if let Some((lifecycle, turn_id, sequence)) = terminal_seen {
+                let run = artisan_database::entities::assistant_run::Entity::find_by_id(
+                    "run-stream-live",
+                )
+                .one(&database)
+                .await
+                .expect("run row should read");
+                let dispatch = artisan_database::entities::message_dispatch::Entity::find()
+                    .filter(
+                        artisan_database::entities::message_dispatch::Column::ThreadId
+                            .eq(thread_id.as_str()),
+                    )
+                    .all(&database)
+                    .await
+                    .expect("dispatch rows should read");
+                panic!(
+                    "terminal lifecycle while held: {lifecycle:?} turn {turn_id} patch sequence {sequence} after {} frames; run lifecycle {:?}; dispatches {:?}",
+                    frames.len(),
+                    run.map(|row| (row.run_id, format!("{:?}", row.lifecycle))),
+                    dispatch
+                        .iter()
+                        .map(|row| (
+                            row.message_id.clone(),
+                            format!("{:?}", row.state),
+                            row.last_error.clone(),
+                        ))
+                        .collect::<Vec<_>>(),
+                );
             }
             run_cancel.cancel();
             // Drain to the terminal close.
