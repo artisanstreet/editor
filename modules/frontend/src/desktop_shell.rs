@@ -46,6 +46,12 @@ pub const DESKTOP_COLLAPSE_SELECTOR: &str = "artisan-desktop-collapse";
 
 /// Native workspace titlebar height.
 pub const DESKTOP_TITLEBAR_HEIGHT_PX: f32 = 48.0;
+/// Horizontal inset of the titlebar's content section.
+///
+/// Matches the wordmark section's padding and the strip's vertical breathing
+/// room (the 48 px bar around a 20 px line), so the workspace header is
+/// centered in its section instead of flush against the sidebar rule.
+pub const DESKTOP_TITLEBAR_CONTENT_INSET_PX: f32 = 14.0;
 /// Expanded sidebar width.
 pub const DESKTOP_SIDEBAR_WIDTH_PX: f32 = 218.0;
 /// Compact sidebar width when labels are collapsed.
@@ -135,9 +141,10 @@ pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
 ///
 /// `brand` owns the leading sidebar section: the `Artisan Editor` wordmark,
 /// seated above the sidebar at exactly its width. `header` owns the titlebar's
-/// content section, which starts at the sidebar's right edge and runs toward
-/// the caption controls, so the workspace header is anchored to the primary
-/// card's left edge rather than the wordmark. The drag surface fills the rest
+/// content section, which starts at the sidebar's right edge inset by
+/// [`DESKTOP_TITLEBAR_CONTENT_INSET_PX`] and runs toward the caption controls,
+/// so the workspace header is anchored to the primary card's left edge rather
+/// than the wordmark. The drag surface fills the rest
 /// of the content section after the header. `search` is the command menu,
 /// mounted without reserving space: it paints nothing in flow at rest and
 /// overlays its palette dialog when open.
@@ -191,11 +198,12 @@ pub fn desktop_shell(
         .child(brand)
         .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag));
 
-    // The content section carries the workspace header at its leading end and
-    // the window drag surface up to the caption controls, the native reading
-    // of the reference strip's content region. The right inset keeps the
-    // elastic thread name from truncating flush against the controls, and the
-    // header itself is not a drag area, so its repository link keeps its
+    // The content section carries the workspace header at its leading end,
+    // inset from the sidebar rule by the same measure as the wordmark section,
+    // and the window drag surface up to the caption controls, the native
+    // reading of the reference strip's content region. The right inset keeps
+    // the elastic thread name from truncating flush against the controls, and
+    // the header itself is not a drag area, so its repository link keeps its
     // click.
     let content = div()
         .flex_1()
@@ -211,6 +219,7 @@ pub fn desktop_shell(
                 .h_full()
                 .flex()
                 .items_center()
+                .pl(px(DESKTOP_TITLEBAR_CONTENT_INSET_PX))
                 .pr(px(24.0))
                 .overflow_hidden()
                 .child(header)
@@ -408,6 +417,7 @@ mod tests {
     #[test]
     fn desktop_shell_keeps_compact_native_geometry() {
         assert_eq!(DESKTOP_TITLEBAR_HEIGHT_PX, 48.0);
+        assert_eq!(DESKTOP_TITLEBAR_CONTENT_INSET_PX, 14.0);
         assert_eq!(DESKTOP_SIDEBAR_WIDTH_PX, 218.0);
         assert_eq!(DESKTOP_CROSSHAIR_SIZE_PX, 12.0);
 

@@ -9442,7 +9442,7 @@ mod tests {
     use crate::composer::{ComposerState, DraftDisposition};
     use crate::desktop_shell::{
         DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, DESKTOP_OFFLINE_SELECTOR,
-        DESKTOP_SIDEBAR_SELECTOR, DESKTOP_TITLEBAR_SELECTOR,
+        DESKTOP_SIDEBAR_SELECTOR, DESKTOP_TITLEBAR_CONTENT_INSET_PX, DESKTOP_TITLEBAR_SELECTOR,
     };
     use crate::native_command_menu::{
         COMMAND_MENU_DROPDOWN_SELECTOR, COMMAND_MENU_INPUT_SELECTOR, COMMAND_MENU_LIST_SELECTOR,
@@ -12887,7 +12887,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn titlebar_workspace_header_starts_at_the_sidebar_edge_and_truncates_the_thread_name(
+    fn titlebar_workspace_header_starts_inset_from_the_sidebar_edge_and_truncates_the_thread_name(
         cx: &mut TestAppContext,
     ) {
         let (view, cx) =
@@ -12932,17 +12932,21 @@ mod tests {
             .expect("caption controls");
 
         // The wordmark owns the leading sidebar section above the sidebar;
-        // the workspace header lives in the titlebar's content section and is
-        // anchored to the primary card's left edge, never following the
-        // wordmark into the sidebar.
+        // the workspace header lives in the titlebar's content section,
+        // anchored to the primary card's left edge plus the section's inset,
+        // never following the wordmark into the sidebar.
         let sidebar_right = sidebar.origin.x + sidebar.size.width;
         assert!(
             wordmark.origin.x + wordmark.size.width <= sidebar_right,
             "the wordmark stays in the leading sidebar section"
         );
         assert!(
-            (f32::from(header.origin.x) - f32::from(sidebar_right)).abs() <= 1.0,
-            "the workspace header starts at the primary card's left edge"
+            (f32::from(header.origin.x)
+                - f32::from(sidebar_right)
+                - DESKTOP_TITLEBAR_CONTENT_INSET_PX)
+                .abs()
+                <= 1.0,
+            "the workspace header starts at the primary card's left edge plus the content inset"
         );
         assert!(
             header.origin.x < titlebar.origin.x + titlebar.size.width / 2.0,
