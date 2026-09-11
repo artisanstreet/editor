@@ -72,6 +72,7 @@ exports_files([
     "native_run_dispatch.rs",
     "run_interaction_dispatch.rs",
     "steer_drive.rs",
+    "visible_stream_delivery.rs",
 ])
 
 # TEST-ONLY protocol child fixture: one ordinary main, no libtest harness,

@@ -1792,10 +1792,20 @@ async fn launch_claim(
     )
     .await;
     let receipt = match classify_launch_result(&launch_result) {
-        LaunchAuthority::Started => match launch_result {
-            Ok(LaunchClaimedRunOutcome::Started(receipt)) => receipt,
-            _ => unreachable!("started launch authority has a started receipt"),
-        },
+        LaunchAuthority::Started => {
+            // The Started receipt durably projected the user turn/item:
+            // wake subscribers now so admission streams before provider
+            // startup, which can lag by seconds behind the launch.
+            let _ = loaded
+                .context
+                .config
+                .conversation_commit_notifier()
+                .publish(&loaded.payload.thread_id);
+            match launch_result {
+                Ok(LaunchClaimedRunOutcome::Started(receipt)) => receipt,
+                _ => unreachable!("started launch authority has a started receipt"),
+            }
+        }
         // `AlreadyStarted` is durable replay information, never authority to
         // contact OpenCode. Leave the launching run for the recovery path;
         // creating another provider session here could duplicate an unknown
@@ -5288,3 +5298,7 @@ mod activity_resequence_tests {
 #[cfg(test)]
 #[path = "../../../tests/backend/steer_drive.rs"]
 mod steer_drive_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/backend/visible_stream_delivery.rs"]
+mod visible_stream_delivery_tests;
