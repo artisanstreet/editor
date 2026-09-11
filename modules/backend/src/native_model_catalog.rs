@@ -325,7 +325,14 @@ fn apply_discovery(
     discovery: &crate::model_discovery::DiscoveryBundle,
 ) {
     for engine_id in &discovery.probed_engines {
-        let rows = discovery.for_engine(engine_id);
+        // Hidden rows are engine internals (Codex's `hide` visibility), not
+        // picker entries: they are never surfaced, overlaid, or counted as
+        // account availability.
+        let rows = discovery
+            .for_engine(engine_id)
+            .into_iter()
+            .filter(|row| !row.hidden)
+            .collect::<Vec<_>>();
         if rows.is_empty() {
             continue;
         }
@@ -1132,6 +1139,47 @@ mod tests {
             .find(|model| model.native_model_id == "claude-haiku-legacy")
             .expect("new haiku row");
         assert!(haiku.capabilities.context_window.is_none());
+    }
+
+    #[test]
+    fn hidden_discovered_rows_are_never_surfaced() {
+        let mut hidden = discovered(
+            "codex",
+            "openai",
+            "gpt-reserve",
+            "GPT-Reserve",
+            Some(272_000),
+            Some(872_000),
+        );
+        hidden.hidden = true;
+        let discovery = crate::model_discovery::DiscoveryBundle {
+            models: vec![
+                discovered(
+                    "codex",
+                    "openai",
+                    "gpt-5.6-sol",
+                    "Sol",
+                    Some(272_000),
+                    Some(872_000),
+                ),
+                hidden,
+            ],
+            probed_engines: vec!["codex"],
+        };
+        let catalog = from_catalog_result_with_discovery(
+            fixture_result(),
+            &discovery,
+            &ModelFavoritesSnapshot::empty(),
+        )
+        .expect("catalog builds");
+        assert!(
+            catalog
+                .manifest
+                .models
+                .iter()
+                .all(|model| model.native_model_id != "gpt-reserve"),
+            "engine-internal hidden rows must not reach the picker"
+        );
     }
 
     #[test]

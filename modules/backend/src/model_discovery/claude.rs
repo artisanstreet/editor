@@ -144,7 +144,8 @@ fn map_model(value: &Value) -> Option<DiscoveredModel> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let fast = value.get("fast_mode").is_some_and(|mode| !mode.is_null());
-    let hidden = value.get("confidential").and_then(Value::as_bool) == Some(true);
+    // Confidential rows are entitlement-scoped, not hidden: the CLI renders
+    // them for the accounts that are allowed to see them.
     Some(DiscoveredModel {
         engine_id: "claude",
         provider: "anthropic".to_owned(),
@@ -152,7 +153,7 @@ fn map_model(value: &Value) -> Option<DiscoveredModel> {
         upstream_model_id: None,
         name,
         description,
-        hidden,
+        hidden: false,
         default: false,
         thinking,
         fast,

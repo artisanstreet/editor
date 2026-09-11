@@ -49,6 +49,8 @@ pub(crate) struct DiscoveredModel {
     /// Optional description reported by the engine.
     pub(crate) description: Option<String>,
     /// Whether the engine hides this row from its own default picker.
+    /// Hidden rows are engine internals and are never surfaced in the
+    /// catalogue, but they still count as reported by the probe.
     pub(crate) hidden: bool,
     /// Whether the engine marks this row as its default.
     pub(crate) default: bool,
