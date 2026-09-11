@@ -653,23 +653,19 @@ fn seed_case(
 }
 
 /// Candidate navigator targets from a projected scene, in transcript
-/// order: user and assistant message identities, each tried as a domain
-/// item target first (the navigator marker form) and then as a scene
-/// target. Pure projection over real block identities — never invented.
+/// order: one domain item target per user message, mirroring
+/// `item_id_for_scene_id` (production turn matching keys the rail to user
+/// messages only). Pure projection over real block identities — never
+/// invented. A single user message yields a single candidate, which is
+/// exactly the collapsed-rail case the capture refuses.
 fn navigator_candidates(scene: &ConversationScene) -> Vec<ConversationSurfaceTarget> {
     let mut targets = Vec::new();
     for turn in scene.turn_scenes() {
         for block in turn.blocks() {
-            let id = match block {
-                TurnBlock::UserMessage(message) => Some(message.id.clone()),
-                TurnBlock::AssistantMessage(message) => Some(message.id.clone()),
-                _ => None,
-            };
-            if let Some(id) = id {
-                if let Ok(item) = ItemId::parse(id.as_str()) {
+            if let TurnBlock::UserMessage(message) = block {
+                if let Ok(item) = ItemId::parse(message.id.as_str()) {
                     targets.push(ConversationSurfaceTarget::Item(item));
                 }
-                targets.push(ConversationSurfaceTarget::Scene(id));
             }
         }
     }
@@ -1482,16 +1478,13 @@ mod tests {
     fn reference_navigator_has_two_turns_and_many_markers() {
         let scene = project(ProofSceneCase::ReferenceNavigator);
         assert_eq!(scene.turn_scenes().len(), 2);
-        let candidates = navigator_candidates(&scene);
-        assert!(
-            candidates.len() > 1,
-            "navigator rail needs more than one marker, got {candidates:?}"
-        );
-        let first_user = ItemId::parse("parity-proof-user-1").expect("item id parses");
+        let user = |id: &str| {
+            ConversationSurfaceTarget::Item(ItemId::parse(id).expect("item id parses"))
+        };
         assert_eq!(
-            candidates.first(),
-            Some(&ConversationSurfaceTarget::Item(first_user)),
-            "first candidate is the first user marker in domain form"
+            navigator_candidates(&scene),
+            vec![user("parity-proof-user-1"), user("parity-proof-user-4")],
+            "exactly the two user markers in transcript order"
         );
     }
 
@@ -1499,6 +1492,17 @@ mod tests {
     fn reference_settled_stays_single_turn() {
         let scene = project(ProofSceneCase::ReferenceSettled);
         assert_eq!(scene.turn_scenes().len(), 1);
+    }
+
+    #[test]
+    fn single_user_message_yields_one_collapsed_candidate() {
+        let scene = project(ProofSceneCase::ReferenceSettled);
+        let user = ItemId::parse("parity-proof-user-1").expect("item id parses");
+        assert_eq!(
+            navigator_candidates(&scene),
+            vec![ConversationSurfaceTarget::Item(user)],
+            "one user marker is the collapsed rail the capture refuses"
+        );
     }
 
     #[test]
