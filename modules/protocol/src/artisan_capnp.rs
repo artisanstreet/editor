@@ -45446,11 +45446,19 @@ pub mod user_message_item {
         pub fn get_updated_at_millis(self) -> i64 {
             self.reader.get_data_field::<i64>(4)
         }
+        #[inline]
+        pub fn get_source_message_id(self) -> ::capnp::Result<::capnp::text::Reader<'a>> {
+            ::capnp::traits::FromPointerReader::get_from_pointer(&self.reader.get_pointer_field(3), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn has_source_message_id(&self) -> bool {
+            !self.reader.get_pointer_field(3).is_null()
+        }
     }
 
     pub struct Builder<'a> { builder: ::capnp::private::layout::StructBuilder<'a> }
     impl <> ::capnp::traits::HasStructSize for Builder<'_,>  {
-        const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 5, pointers: 3 };
+        const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 5, pointers: 4 };
     }
     impl <> ::capnp::traits::HasTypeId for Builder<'_,>  {
         const TYPE_ID: u64 = _private::TYPE_ID;
@@ -45588,6 +45596,22 @@ pub mod user_message_item {
         pub fn set_updated_at_millis(&mut self, value: i64)  {
             self.builder.set_data_field::<i64>(4, value);
         }
+        #[inline]
+        pub fn get_source_message_id(self) -> ::capnp::Result<::capnp::text::Builder<'a>> {
+            ::capnp::traits::FromPointerBuilder::get_from_pointer(self.builder.get_pointer_field(3), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn set_source_message_id(&mut self, value: impl ::capnp::traits::SetterInput<::capnp::text::Owned>)  {
+            ::capnp::traits::SetterInput::set_pointer_builder(self.builder.reborrow().get_pointer_field(3), value, false).unwrap()
+        }
+        #[inline]
+        pub fn init_source_message_id(self, size: u32) -> ::capnp::text::Builder<'a> {
+            self.builder.get_pointer_field(3).init_text(size)
+        }
+        #[inline]
+        pub fn has_source_message_id(&self) -> bool {
+            !self.builder.is_pointer_field_null(3)
+        }
     }
 
     pub struct Pipeline { _typeless: ::capnp::any_pointer::Pipeline }
@@ -45599,18 +45623,18 @@ pub mod user_message_item {
     impl Pipeline  {
     }
     mod _private {
-        pub(crate) static ENCODED_NODE: [::capnp::Word; 143] = [
+        pub(crate) static ENCODED_NODE: [::capnp::Word; 159] = [
             ::capnp::word(0, 0, 0, 0, 6, 0, 6, 0),
             ::capnp::word(199, 247, 175, 120, 216, 127, 135, 151),
             ::capnp::word(14, 0, 0, 0, 1, 0, 5, 0),
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
-            ::capnp::word(3, 0, 7, 0, 0, 0, 0, 0),
+            ::capnp::word(4, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(37, 207, 0, 0, 231, 209, 0, 0),
+            ::capnp::word(37, 207, 0, 0, 194, 210, 0, 0),
             ::capnp::word(21, 0, 0, 0, 242, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(29, 0, 0, 0, 199, 1, 0, 0),
+            ::capnp::word(29, 0, 0, 0, 255, 1, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(97, 114, 116, 105, 115, 97, 110, 46),
@@ -45618,63 +45642,70 @@ pub mod user_message_item {
             ::capnp::word(101, 114, 77, 101, 115, 115, 97, 103),
             ::capnp::word(101, 73, 116, 101, 109, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 1, 0, 1, 0),
-            ::capnp::word(32, 0, 0, 0, 3, 0, 4, 0),
+            ::capnp::word(36, 0, 0, 0, 3, 0, 4, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(209, 0, 0, 0, 58, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(204, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(216, 0, 0, 0, 2, 0, 1, 0),
-            ::capnp::word(1, 0, 0, 0, 1, 0, 0, 0),
-            ::capnp::word(0, 0, 1, 0, 1, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(213, 0, 0, 0, 58, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(208, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(220, 0, 0, 0, 2, 0, 1, 0),
-            ::capnp::word(2, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(0, 0, 1, 0, 2, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(217, 0, 0, 0, 66, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(212, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(224, 0, 0, 0, 2, 0, 1, 0),
-            ::capnp::word(3, 0, 0, 0, 1, 0, 0, 0),
-            ::capnp::word(0, 0, 1, 0, 3, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(221, 0, 0, 0, 74, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(220, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(232, 0, 0, 0, 2, 0, 1, 0),
-            ::capnp::word(4, 0, 0, 0, 8, 0, 0, 0),
-            ::capnp::word(0, 0, 1, 0, 4, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(229, 0, 0, 0, 82, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(228, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(240, 0, 0, 0, 2, 0, 1, 0),
-            ::capnp::word(5, 0, 0, 0, 2, 0, 0, 0),
-            ::capnp::word(0, 0, 1, 0, 5, 0, 0, 0),
-            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(237, 0, 0, 0, 42, 0, 0, 0),
+            ::capnp::word(237, 0, 0, 0, 58, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(232, 0, 0, 0, 3, 0, 1, 0),
             ::capnp::word(244, 0, 0, 0, 2, 0, 1, 0),
-            ::capnp::word(6, 0, 0, 0, 3, 0, 0, 0),
-            ::capnp::word(0, 0, 1, 0, 6, 0, 0, 0),
+            ::capnp::word(1, 0, 0, 0, 1, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 1, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(241, 0, 0, 0, 130, 0, 0, 0),
+            ::capnp::word(241, 0, 0, 0, 58, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(236, 0, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(248, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(2, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 2, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(245, 0, 0, 0, 66, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(240, 0, 0, 0, 3, 0, 1, 0),
             ::capnp::word(252, 0, 0, 0, 2, 0, 1, 0),
-            ::capnp::word(7, 0, 0, 0, 4, 0, 0, 0),
-            ::capnp::word(0, 0, 1, 0, 7, 0, 0, 0),
+            ::capnp::word(3, 0, 0, 0, 1, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 3, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(249, 0, 0, 0, 130, 0, 0, 0),
+            ::capnp::word(249, 0, 0, 0, 74, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(248, 0, 0, 0, 3, 0, 1, 0),
             ::capnp::word(4, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(4, 0, 0, 0, 8, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 4, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(1, 1, 0, 0, 82, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(12, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(5, 0, 0, 0, 2, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 5, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(9, 1, 0, 0, 42, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(4, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(16, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(6, 0, 0, 0, 3, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 6, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(13, 1, 0, 0, 130, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(12, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(24, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(7, 0, 0, 0, 4, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 7, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(21, 1, 0, 0, 130, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(20, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(32, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(8, 0, 0, 0, 3, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 8, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(29, 1, 0, 0, 130, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(28, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(40, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(105, 116, 101, 109, 73, 100, 0, 0),
             ::capnp::word(12, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -45743,6 +45774,15 @@ pub mod user_message_item {
             ::capnp::word(5, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(115, 111, 117, 114, 99, 101, 77, 101),
+            ::capnp::word(115, 115, 97, 103, 101, 73, 100, 0),
+            ::capnp::word(12, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(12, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
         ];
         pub(crate) fn get_field_types(index: u16) -> ::capnp::introspect::Type {
             match index {
@@ -45754,6 +45794,7 @@ pub mod user_message_item {
                 5 => <::capnp::text::Owned as ::capnp::introspect::Introspect>::introspect(),
                 6 => <i64 as ::capnp::introspect::Introspect>::introspect(),
                 7 => <i64 as ::capnp::introspect::Introspect>::introspect(),
+                8 => <::capnp::text::Owned as ::capnp::introspect::Introspect>::introspect(),
                 _ => ::capnp::introspect::panic_invalid_field_index(index),
             }
         }
@@ -45767,9 +45808,9 @@ pub mod user_message_item {
             MEMBERS_BY_DISCRIMINANT,
             MEMBERS_BY_NAME
         );
-        pub(crate) static NONUNION_MEMBERS : &[u16] = &[0,1,2,3,4,5,6,7];
+        pub(crate) static NONUNION_MEMBERS : &[u16] = &[0,1,2,3,4,5,6,7,8];
         pub(crate) static MEMBERS_BY_DISCRIMINANT : &[u16] = &[];
-        pub(crate) static MEMBERS_BY_NAME : &[u16] = &[5,6,0,4,2,3,1,7];
+        pub(crate) static MEMBERS_BY_NAME : &[u16] = &[5,6,0,4,2,3,8,1,7];
         pub(crate) const TYPE_ID: u64 = 0x9787_7fd8_78af_f7c7;
     }
 }
@@ -45814,7 +45855,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 34] = [
     ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-    ::capnp::word(120, 211, 0, 0, 68, 212, 0, 0),
+    ::capnp::word(83, 212, 0, 0, 31, 213, 0, 0),
     ::capnp::word(21, 0, 0, 0, 34, 1, 0, 0),
     ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -46150,7 +46191,7 @@ pub mod assistant_message_item {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(4, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(152, 212, 0, 0, 83, 217, 0, 0),
+            ::capnp::word(115, 213, 0, 0, 46, 218, 0, 0),
             ::capnp::word(21, 0, 0, 0, 26, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -46602,7 +46643,7 @@ pub mod conversation_item {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(1, 0, 7, 0, 0, 0, 4, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(69, 219, 0, 0, 1, 222, 0, 0),
+            ::capnp::word(32, 220, 0, 0, 220, 222, 0, 0),
             ::capnp::word(21, 0, 0, 0, 250, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -46945,7 +46986,7 @@ pub mod conversation_snapshot {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(3, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(128, 224, 0, 0, 130, 227, 0, 0),
+            ::capnp::word(91, 225, 0, 0, 93, 228, 0, 0),
             ::capnp::word(21, 0, 0, 0, 26, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -47277,7 +47318,7 @@ pub mod item_append {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(2, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(194, 227, 0, 0, 223, 230, 0, 0),
+            ::capnp::word(157, 228, 0, 0, 186, 231, 0, 0),
             ::capnp::word(21, 0, 0, 0, 202, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -47572,7 +47613,7 @@ pub mod item_lifecycle_patch {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(1, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(30, 231, 0, 0, 186, 233, 0, 0),
+            ::capnp::word(249, 231, 0, 0, 149, 234, 0, 0),
             ::capnp::word(21, 0, 0, 0, 10, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -47869,7 +47910,7 @@ pub mod turn_lifecycle_patch {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(1, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(242, 233, 0, 0, 142, 236, 0, 0),
+            ::capnp::word(205, 234, 0, 0, 105, 237, 0, 0),
             ::capnp::word(21, 0, 0, 0, 10, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -48306,7 +48347,7 @@ pub mod conversation_patch {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(2, 0, 7, 0, 0, 0, 5, 0),
             ::capnp::word(4, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(145, 237, 0, 0, 174, 240, 0, 0),
+            ::capnp::word(108, 238, 0, 0, 137, 241, 0, 0),
             ::capnp::word(21, 0, 0, 0, 2, 1, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -48674,7 +48715,7 @@ pub mod patch_batch {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(2, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(137, 242, 0, 0, 100, 244, 0, 0),
+            ::capnp::word(100, 243, 0, 0, 63, 245, 0, 0),
             ::capnp::word(21, 0, 0, 0, 202, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -48926,7 +48967,7 @@ pub mod query_window {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(0, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(187, 245, 0, 0, 48, 246, 0, 0),
+            ::capnp::word(150, 246, 0, 0, 11, 247, 0, 0),
             ::capnp::word(21, 0, 0, 0, 210, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -49154,7 +49195,7 @@ pub mod query_range {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(0, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(103, 246, 0, 0, 77, 249, 0, 0),
+            ::capnp::word(66, 247, 0, 0, 40, 250, 0, 0),
             ::capnp::word(21, 0, 0, 0, 202, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -49663,7 +49704,7 @@ pub mod conversation_query_request {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(2, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(14, 250, 0, 0, 30, 251, 0, 0),
+            ::capnp::word(233, 250, 0, 0, 249, 251, 0, 0),
             ::capnp::word(21, 0, 0, 0, 58, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -50182,7 +50223,7 @@ pub mod conversation_subscribe_request {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(1, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(103, 251, 0, 0, 230, 252, 0, 0),
+            ::capnp::word(66, 252, 0, 0, 193, 253, 0, 0),
             ::capnp::word(21, 0, 0, 0, 90, 1, 0, 0),
             ::capnp::word(41, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -50656,7 +50697,7 @@ pub mod conversation_unsubscribe_request {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(1, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(45, 253, 0, 0, 169, 253, 0, 0),
+            ::capnp::word(8, 254, 0, 0, 132, 254, 0, 0),
             ::capnp::word(21, 0, 0, 0, 106, 1, 0, 0),
             ::capnp::word(41, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -50880,7 +50921,7 @@ pub mod conversation_resume_point {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(1, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(212, 253, 0, 0, 30, 255, 0, 0),
+            ::capnp::word(175, 254, 0, 0, 249, 255, 0, 0),
             ::capnp::word(21, 0, 0, 0, 50, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -51157,7 +51198,7 @@ pub mod conversation_subscription_started {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(1, 0, 7, 0, 0, 0, 2, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(115, 0, 1, 0, 119, 1, 1, 0),
+            ::capnp::word(78, 1, 1, 0, 82, 2, 1, 0),
             ::capnp::word(21, 0, 0, 0, 114, 1, 0, 0),
             ::capnp::word(41, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -51390,7 +51431,7 @@ pub mod conversation_subscription_stopped {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(1, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(195, 1, 1, 0, 57, 2, 1, 0),
+            ::capnp::word(158, 2, 1, 0, 20, 3, 1, 0),
             ::capnp::word(21, 0, 0, 0, 114, 1, 0, 0),
             ::capnp::word(41, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -51684,7 +51725,7 @@ pub mod protocol_error {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(2, 0, 7, 0, 0, 0, 2, 0),
             ::capnp::word(2, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(96, 2, 1, 0, 77, 4, 1, 0),
+            ::capnp::word(59, 3, 1, 0, 40, 5, 1, 0),
             ::capnp::word(21, 0, 0, 0, 226, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -52007,7 +52048,7 @@ pub mod envelope {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(2, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(46, 5, 1, 0, 71, 10, 1, 0),
+            ::capnp::word(9, 6, 1, 0, 34, 11, 1, 0),
             ::capnp::word(21, 0, 0, 0, 186, 0, 0, 0),
             ::capnp::word(29, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -52825,7 +52866,7 @@ pub mod image_attachment {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(3, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(48, 11, 1, 0, 130, 11, 1, 0),
+            ::capnp::word(11, 12, 1, 0, 93, 12, 1, 0),
             ::capnp::word(21, 0, 0, 0, 242, 0, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -53132,7 +53173,7 @@ pub mod queue_message_request {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(4, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(127, 12, 1, 0, 49, 13, 1, 0),
+            ::capnp::word(90, 13, 1, 0, 12, 14, 1, 0),
             ::capnp::word(21, 0, 0, 0, 18, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -53727,7 +53768,7 @@ pub mod queue_message_receipt {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(3, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(253, 13, 1, 0, 155, 14, 1, 0),
+            ::capnp::word(216, 14, 1, 0, 118, 15, 1, 0),
             ::capnp::word(21, 0, 0, 0, 18, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -53957,11 +53998,19 @@ pub mod multimodal_user_message_item {
         pub fn get_updated_at_millis(self) -> i64 {
             self.reader.get_data_field::<i64>(4)
         }
+        #[inline]
+        pub fn get_source_message_id(self) -> ::capnp::Result<::capnp::text::Reader<'a>> {
+            ::capnp::traits::FromPointerReader::get_from_pointer(&self.reader.get_pointer_field(4), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn has_source_message_id(&self) -> bool {
+            !self.reader.get_pointer_field(4).is_null()
+        }
     }
 
     pub struct Builder<'a> { builder: ::capnp::private::layout::StructBuilder<'a> }
     impl <> ::capnp::traits::HasStructSize for Builder<'_,>  {
-        const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 5, pointers: 4 };
+        const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 5, pointers: 5 };
     }
     impl <> ::capnp::traits::HasTypeId for Builder<'_,>  {
         const TYPE_ID: u64 = _private::TYPE_ID;
@@ -54109,6 +54158,22 @@ pub mod multimodal_user_message_item {
         pub fn set_updated_at_millis(&mut self, value: i64)  {
             self.builder.set_data_field::<i64>(4, value);
         }
+        #[inline]
+        pub fn get_source_message_id(self) -> ::capnp::Result<::capnp::text::Builder<'a>> {
+            ::capnp::traits::FromPointerBuilder::get_from_pointer(self.builder.get_pointer_field(4), ::core::option::Option::None)
+        }
+        #[inline]
+        pub fn set_source_message_id(&mut self, value: impl ::capnp::traits::SetterInput<::capnp::text::Owned>)  {
+            ::capnp::traits::SetterInput::set_pointer_builder(self.builder.reborrow().get_pointer_field(4), value, false).unwrap()
+        }
+        #[inline]
+        pub fn init_source_message_id(self, size: u32) -> ::capnp::text::Builder<'a> {
+            self.builder.get_pointer_field(4).init_text(size)
+        }
+        #[inline]
+        pub fn has_source_message_id(&self) -> bool {
+            !self.builder.is_pointer_field_null(4)
+        }
     }
 
     pub struct Pipeline { _typeless: ::capnp::any_pointer::Pipeline }
@@ -54123,18 +54188,18 @@ pub mod multimodal_user_message_item {
         }
     }
     mod _private {
-        pub(crate) static ENCODED_NODE: [::capnp::Word; 157] = [
+        pub(crate) static ENCODED_NODE: [::capnp::Word; 173] = [
             ::capnp::word(0, 0, 0, 0, 6, 0, 6, 0),
             ::capnp::word(63, 213, 33, 90, 196, 141, 58, 140),
             ::capnp::word(14, 0, 0, 0, 1, 0, 5, 0),
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
-            ::capnp::word(4, 0, 7, 0, 0, 0, 0, 0),
+            ::capnp::word(5, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(97, 15, 1, 0, 164, 16, 1, 0),
+            ::capnp::word(60, 16, 1, 0, 91, 18, 1, 0),
             ::capnp::word(21, 0, 0, 0, 66, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(33, 0, 0, 0, 255, 1, 0, 0),
+            ::capnp::word(33, 0, 0, 0, 55, 2, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(97, 114, 116, 105, 115, 97, 110, 46),
@@ -54143,70 +54208,77 @@ pub mod multimodal_user_message_item {
             ::capnp::word(85, 115, 101, 114, 77, 101, 115, 115),
             ::capnp::word(97, 103, 101, 73, 116, 101, 109, 0),
             ::capnp::word(0, 0, 0, 0, 1, 0, 1, 0),
-            ::capnp::word(36, 0, 0, 0, 3, 0, 4, 0),
+            ::capnp::word(40, 0, 0, 0, 3, 0, 4, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(237, 0, 0, 0, 58, 0, 0, 0),
+            ::capnp::word(9, 1, 0, 0, 58, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(232, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(244, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(4, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(16, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(1, 0, 0, 0, 1, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 1, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(241, 0, 0, 0, 58, 0, 0, 0),
+            ::capnp::word(13, 1, 0, 0, 58, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(236, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(248, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(8, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(20, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(2, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 2, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(245, 0, 0, 0, 66, 0, 0, 0),
+            ::capnp::word(17, 1, 0, 0, 66, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(240, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(252, 0, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(12, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(24, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(3, 0, 0, 0, 1, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 3, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(249, 0, 0, 0, 74, 0, 0, 0),
+            ::capnp::word(21, 1, 0, 0, 74, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(248, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(4, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(20, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(32, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(4, 0, 0, 0, 8, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 4, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(1, 1, 0, 0, 82, 0, 0, 0),
+            ::capnp::word(29, 1, 0, 0, 82, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(0, 1, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(12, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(28, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(40, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(5, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(1, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(32, 194, 236, 98, 9, 80, 205, 165),
-            ::capnp::word(9, 1, 0, 0, 42, 0, 0, 0),
+            ::capnp::word(37, 1, 0, 0, 42, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(6, 0, 0, 0, 3, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(241, 0, 0, 0, 98, 0, 0, 0),
+            ::capnp::word(13, 1, 0, 0, 98, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(240, 0, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(12, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(12, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(40, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(7, 0, 0, 0, 3, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 8, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(9, 1, 0, 0, 130, 0, 0, 0),
+            ::capnp::word(37, 1, 0, 0, 130, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(8, 1, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(20, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(36, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(48, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(8, 0, 0, 0, 4, 0, 0, 0),
             ::capnp::word(0, 0, 1, 0, 9, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(17, 1, 0, 0, 130, 0, 0, 0),
+            ::capnp::word(45, 1, 0, 0, 130, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(16, 1, 0, 0, 3, 0, 1, 0),
-            ::capnp::word(28, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(44, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(56, 1, 0, 0, 2, 0, 1, 0),
+            ::capnp::word(9, 0, 0, 0, 4, 0, 0, 0),
+            ::capnp::word(0, 0, 1, 0, 10, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(53, 1, 0, 0, 130, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(52, 1, 0, 0, 3, 0, 1, 0),
+            ::capnp::word(64, 1, 0, 0, 2, 0, 1, 0),
             ::capnp::word(105, 116, 101, 109, 73, 100, 0, 0),
             ::capnp::word(12, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -54281,6 +54353,15 @@ pub mod multimodal_user_message_item {
             ::capnp::word(5, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(115, 111, 117, 114, 99, 101, 77, 101),
+            ::capnp::word(115, 115, 97, 103, 101, 73, 100, 0),
+            ::capnp::word(12, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(12, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+            ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
         ];
         pub(crate) fn get_field_types(index: u16) -> ::capnp::introspect::Type {
             match index {
@@ -54293,6 +54374,7 @@ pub mod multimodal_user_message_item {
                 6 => <::capnp::struct_list::Owned<crate::artisan_capnp::image_attachment_ref::Owned> as ::capnp::introspect::Introspect>::introspect(),
                 7 => <i64 as ::capnp::introspect::Introspect>::introspect(),
                 8 => <i64 as ::capnp::introspect::Introspect>::introspect(),
+                9 => <::capnp::text::Owned as ::capnp::introspect::Introspect>::introspect(),
                 _ => ::capnp::introspect::panic_invalid_field_index(index),
             }
         }
@@ -54306,9 +54388,9 @@ pub mod multimodal_user_message_item {
             MEMBERS_BY_DISCRIMINANT,
             MEMBERS_BY_NAME
         );
-        pub(crate) static NONUNION_MEMBERS : &[u16] = &[0,1,2,3,4,5,6,7,8];
+        pub(crate) static NONUNION_MEMBERS : &[u16] = &[0,1,2,3,4,5,6,7,8,9];
         pub(crate) static MEMBERS_BY_DISCRIMINANT : &[u16] = &[];
-        pub(crate) static MEMBERS_BY_NAME : &[u16] = &[6,7,0,4,2,3,5,1,8];
+        pub(crate) static MEMBERS_BY_NAME : &[u16] = &[6,7,0,4,2,3,9,5,1,8];
         pub(crate) const TYPE_ID: u64 = 0x8c3a_8dc4_5a21_d53f;
     }
 
@@ -54400,7 +54482,7 @@ pub mod multimodal_user_message_item {
 
         pub struct Builder<'a> { builder: ::capnp::private::layout::StructBuilder<'a> }
         impl <> ::capnp::traits::HasStructSize for Builder<'_,>  {
-            const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 5, pointers: 4 };
+            const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 5, pointers: 5 };
         }
         impl <> ::capnp::traits::HasTypeId for Builder<'_,>  {
             const TYPE_ID: u64 = _private::TYPE_ID;
@@ -54501,7 +54583,7 @@ pub mod multimodal_user_message_item {
                 ::capnp::word(32, 194, 236, 98, 9, 80, 205, 165),
                 ::capnp::word(40, 0, 0, 0, 1, 0, 5, 0),
                 ::capnp::word(63, 213, 33, 90, 196, 141, 58, 140),
-                ::capnp::word(4, 0, 7, 0, 1, 0, 2, 0),
+                ::capnp::word(5, 0, 7, 0, 1, 0, 2, 0),
                 ::capnp::word(9, 0, 0, 0, 0, 0, 0, 0),
                 ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
                 ::capnp::word(21, 0, 0, 0, 106, 1, 0, 0),
@@ -54856,7 +54938,7 @@ pub mod image_attachment_ref {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(5, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(42, 17, 1, 0, 215, 17, 1, 0),
+            ::capnp::word(225, 18, 1, 0, 142, 19, 1, 0),
             ::capnp::word(21, 0, 0, 0, 10, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -55202,7 +55284,7 @@ pub mod read_message_image_request {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(2, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(111, 18, 1, 0, 208, 18, 1, 0),
+            ::capnp::word(38, 20, 1, 0, 135, 20, 1, 0),
             ::capnp::word(21, 0, 0, 0, 50, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -55473,7 +55555,7 @@ pub mod message_image_result {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(2, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(98, 19, 1, 0, 181, 19, 1, 0),
+            ::capnp::word(25, 21, 1, 0, 108, 21, 1, 0),
             ::capnp::word(21, 0, 0, 0, 10, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -55705,7 +55787,7 @@ pub mod read_account_usage_request {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(1, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(42, 23, 1, 0, 67, 24, 1, 0),
+            ::capnp::word(225, 24, 1, 0, 250, 25, 1, 0),
             ::capnp::word(21, 0, 0, 0, 50, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -56075,7 +56157,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 36] = [
     ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-    ::capnp::word(132, 24, 1, 0, 217, 24, 1, 0),
+    ::capnp::word(59, 26, 1, 0, 144, 26, 1, 0),
     ::capnp::word(21, 0, 0, 0, 34, 1, 0, 0),
     ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -56152,7 +56234,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 34] = [
     ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-    ::capnp::word(34, 25, 1, 0, 124, 25, 1, 0),
+    ::capnp::word(217, 26, 1, 0, 51, 27, 1, 0),
     ::capnp::word(21, 0, 0, 0, 66, 1, 0, 0),
     ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -56227,7 +56309,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 33] = [
     ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-    ::capnp::word(9, 26, 1, 0, 78, 26, 1, 0),
+    ::capnp::word(192, 27, 1, 0, 5, 28, 1, 0),
     ::capnp::word(21, 0, 0, 0, 218, 0, 0, 0),
     ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -56502,7 +56584,7 @@ pub mod engine_usage_window {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(3, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(62, 27, 1, 0, 226, 29, 1, 0),
+            ::capnp::word(245, 28, 1, 0, 153, 31, 1, 0),
             ::capnp::word(21, 0, 0, 0, 2, 1, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -56943,7 +57025,7 @@ pub mod engine_usage_report {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(6, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(228, 30, 1, 0, 0, 35, 1, 0),
+            ::capnp::word(155, 32, 1, 0, 183, 36, 1, 0),
             ::capnp::word(21, 0, 0, 0, 2, 1, 0, 0),
             ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -57542,7 +57624,7 @@ pub mod engine_usage_snapshot {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(2, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(153, 35, 1, 0, 149, 36, 1, 0),
+            ::capnp::word(80, 37, 1, 0, 76, 38, 1, 0),
             ::capnp::word(21, 0, 0, 0, 18, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -57833,7 +57915,7 @@ pub mod respond_approval_request {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(3, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(18, 40, 1, 0, 134, 40, 1, 0),
+            ::capnp::word(201, 41, 1, 0, 61, 42, 1, 0),
             ::capnp::word(21, 0, 0, 0, 42, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -58166,7 +58248,7 @@ pub mod respond_question_request {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(4, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(49, 41, 1, 0, 136, 42, 1, 0),
+            ::capnp::word(232, 42, 1, 0, 63, 44, 1, 0),
             ::capnp::word(21, 0, 0, 0, 42, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -58315,7 +58397,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 39] = [
     ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-    ::capnp::word(145, 43, 1, 0, 250, 43, 1, 0),
+    ::capnp::word(72, 45, 1, 0, 177, 45, 1, 0),
     ::capnp::word(21, 0, 0, 0, 66, 1, 0, 0),
     ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
     ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -58620,7 +58702,7 @@ pub mod respond_approval_receipt {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(4, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(196, 44, 1, 0, 157, 45, 1, 0),
+            ::capnp::word(123, 46, 1, 0, 84, 47, 1, 0),
             ::capnp::word(21, 0, 0, 0, 42, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -59051,7 +59133,7 @@ pub mod respond_question_receipt {
             ::capnp::word(96, 188, 173, 59, 139, 232, 73, 225),
             ::capnp::word(5, 0, 7, 0, 0, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-            ::capnp::word(80, 46, 1, 0, 46, 47, 1, 0),
+            ::capnp::word(7, 48, 1, 0, 229, 48, 1, 0),
             ::capnp::word(21, 0, 0, 0, 42, 1, 0, 0),
             ::capnp::word(37, 0, 0, 0, 7, 0, 0, 0),
             ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
