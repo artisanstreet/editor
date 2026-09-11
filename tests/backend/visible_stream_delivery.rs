@@ -47,7 +47,7 @@ use artisan_transport::{
 };
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::EntityTrait;
 
 use super::{
     ClaimExecution, ClaimIds, LoadedClaim, NativeRunDispatcherConfig,
@@ -811,8 +811,8 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                 .expect("delivery stream opens")
                 .expect("delivery stream accepts");
             let mut frames = Vec::new();
-            let mut saw_burst_00 = false;
             let mut saw_burst_01 = false;
+            let mut saw_burst_02 = false;
             let mut saw_observation = false;
             // A terminal lifecycle here preserves its full identity for
             // the post-loop diagnosis instead of failing blind: the run
@@ -838,11 +838,11 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                         for patch in batch.patches() {
                             match patch {
                                 ConversationPatch::ItemAppend { text, .. } => {
-                                    if text.as_str().contains("burst-00") {
-                                        saw_burst_00 = true;
-                                    }
                                     if text.as_str().contains("burst-01") {
                                         saw_burst_01 = true;
+                                    }
+                                    if text.as_str().contains("burst-02") {
+                                        saw_burst_02 = true;
                                     }
                                 }
                                 ConversationPatch::TurnLifecycle {
@@ -884,7 +884,7 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                     _ => panic!("unexpected delivery frame"),
                 }
                 if terminal_seen.is_some()
-                    || (saw_burst_00 && saw_burst_01 && saw_observation)
+                    || (saw_burst_01 && saw_burst_02 && saw_observation)
                 {
                     break;
                 }
@@ -896,16 +896,14 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                 .one(&database)
                 .await
                 .expect("run row should read");
+                // Isolated test database: read every dispatch row instead
+                // of filtering on a thread column the table does not have.
                 let dispatch = artisan_database::entities::message_dispatch::Entity::find()
-                    .filter(
-                        artisan_database::entities::message_dispatch::Column::ThreadId
-                            .eq(thread_id.as_str()),
-                    )
                     .all(&database)
                     .await
                     .expect("dispatch rows should read");
                 panic!(
-                    "terminal lifecycle while held: {lifecycle:?} turn {turn_id} patch sequence {sequence} after {} frames (burst-00 {saw_burst_00}, burst-01 {saw_burst_01}, reasoning {saw_observation}); run lifecycle {:?}; dispatches {:?}",
+                    "terminal lifecycle while held: {lifecycle:?} turn {turn_id} patch sequence {sequence} after {} frames (burst-01 {saw_burst_01}, burst-02 {saw_burst_02}, reasoning {saw_observation}); run lifecycle {:?}; dispatches {:?}",
                     frames.len(),
                     run.map(|row| (row.run_id, format!("{:?}", row.lifecycle))),
                     dispatch
@@ -1157,12 +1155,12 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
         .expect("endpoint shuts down");
 
         // Wire order on the collected delivery frames: user admission,
-        // assistant chunks (burst-00 and burst-01 prove two increments),
+        // assistant chunks (burst-01 and burst-02 prove two increments),
         // one observation event, terminal last after the cancel.
         assert!(!frames.is_empty(), "delivery must stream");
         let mut user_index = None;
-        let mut saw_burst_00 = false;
         let mut saw_burst_01 = false;
+        let mut saw_burst_02 = false;
         let mut observation_index = None;
         let mut terminal_index = None;
         for (index, frame) in frames.iter().enumerate() {
@@ -1180,11 +1178,14 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                             ConversationPatch::ItemAppend { text, .. } => {
                                 // Two DISTINCT cumulative updates: one frame
                                 // alone proves a single chunk.
-                                if text.as_str().contains("burst-00") {
-                                    saw_burst_00 = true;
-                                }
+                                // Two DISTINCT append updates (burst-01 at
+                                // sequence 7 and burst-02 at 8): burst-00
+                                // arrives as item patches, never an append.
                                 if text.as_str().contains("burst-01") {
                                     saw_burst_01 = true;
+                                }
+                                if text.as_str().contains("burst-02") {
+                                    saw_burst_02 = true;
                                 }
                             }
                             ConversationPatch::TurnLifecycle { lifecycle, .. } => {
@@ -1212,7 +1213,7 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
         }
         let user_index = user_index.expect("user admission must stream");
         assert!(
-            saw_burst_00 && saw_burst_01,
+            saw_burst_01 && saw_burst_02,
             "two distinct incremental chunks must stream"
         );
         let observation_index =
