@@ -148,10 +148,10 @@ impl SpeedGradient {
     }
 }
 
-/// `fast` glyph gradient: deep gold into bright gold, left to right.
-pub const FAST_GRADIENT: SpeedGradient = SpeedGradient::new(0xB8_86_0B, 0xFF_E0_66);
+/// `fast` glyph gradient: vibrant amber into electric yellow, left to right.
+pub const FAST_GRADIENT: SpeedGradient = SpeedGradient::new(0xFF_B3_00, 0xFF_EE_00);
 /// `superfast` glyph gradient: neon green into neon pink, left to right.
-pub const SUPERFAST_GRADIENT: SpeedGradient = SpeedGradient::new(0x39_FF_14, 0xFF_2B_D6);
+pub const SUPERFAST_GRADIENT: SpeedGradient = SpeedGradient::new(0x00_FF_66, 0xFF_00_C8);
 
 /// Returns the native glyph-gradient treatment for one speed id.
 ///
@@ -342,8 +342,8 @@ mod gradient_tests {
     #[test]
     #[allow(clippy::cast_precision_loss)]
     fn fast_gradient_interpolates_gold_from_left_to_right() {
-        assert_eq!(FAST_GRADIENT.start(), 0xB8_86_0B);
-        assert_eq!(FAST_GRADIENT.end(), 0xFF_E0_66);
+        assert_eq!(FAST_GRADIENT.start(), 0xFF_B3_00);
+        assert_eq!(FAST_GRADIENT.end(), 0xFF_EE_00);
         assert_eq!(FAST_GRADIENT.color_at(0.0), FAST_GRADIENT.start());
         assert_eq!(FAST_GRADIENT.color_at(1.0), FAST_GRADIENT.end());
 
@@ -362,8 +362,8 @@ mod gradient_tests {
 
     #[test]
     fn superfast_gradient_runs_neon_green_into_neon_pink() {
-        assert_eq!(SUPERFAST_GRADIENT.start(), 0x39_FF_14);
-        assert_eq!(SUPERFAST_GRADIENT.end(), 0xFF_2B_D6);
+        assert_eq!(SUPERFAST_GRADIENT.start(), 0x00_FF_66);
+        assert_eq!(SUPERFAST_GRADIENT.end(), 0xFF_00_C8);
         assert_eq!(SUPERFAST_GRADIENT.color_at(0.0), SUPERFAST_GRADIENT.start());
         assert_eq!(SUPERFAST_GRADIENT.color_at(1.0), SUPERFAST_GRADIENT.end());
 
