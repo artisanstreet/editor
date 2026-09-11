@@ -1275,6 +1275,10 @@ fn loaded_turn_navigator_suppresses_empty_labels(cx: &mut TestAppContext) {
 fn loaded_turn_navigator_pointer_activation_emits_exact_item_scroll_intent(
     cx: &mut TestAppContext,
 ) {
+    // The reveal tween is time-based and the harness pumps frames far faster
+    // than wall time, so the panel would still be animating when the click
+    // lands. Reduced motion paints the same controls without that race.
+    cx.update(|app| app.set_reduce_motion(true));
     let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
     // Real pointer path: hovering the rail swaps the rest-state ticks for
     // the label controls, so hover first and settle, then click whatever
@@ -1285,6 +1289,14 @@ fn loaded_turn_navigator_pointer_activation_emits_exact_item_scroll_intent(
     cx.simulate_mouse_move(tick.center(), None::<gpui::MouseButton>, Modifiers::none());
     cx.run_until_parked();
     let offset_before = cx.update(|_, app| surface.read(app).scroll_handle().offset());
+    // A real activation moves the pointer onto the control before pressing:
+    // the move refreshes the hit test and lets the reveal geometry settle,
+    // exactly as the pointer path in the app does.
+    let button = cx
+        .debug_bounds(NAV_FIRST_CONTROL)
+        .expect("hovered marker must keep a stable control");
+    cx.simulate_mouse_move(button.center(), None::<gpui::MouseButton>, Modifiers::none());
+    cx.run_until_parked();
     let button = cx
         .debug_bounds(NAV_FIRST_CONTROL)
         .expect("hovered marker must keep a stable control");
@@ -1299,6 +1311,7 @@ fn loaded_turn_navigator_pointer_activation_emits_exact_item_scroll_intent(
             _ => None,
         })
         .collect();
+    cx.update(|_, app| app.set_reduce_motion(false));
     assert_eq!(
         intents,
         [ConversationSurfaceTarget::Item(item_id("nav-first"))]

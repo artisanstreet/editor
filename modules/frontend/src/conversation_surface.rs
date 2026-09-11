@@ -4975,7 +4975,14 @@ impl ConversationSurface {
             .flex_col()
             .items_end()
             .gap(theme.spacing.steps(1.0))
-            .p(px(8.0));
+            .p(px(8.0))
+            // Hover is evaluated while painting, and a mouse move alone does
+            // not schedule a frame. The list is the hit target for the gaps
+            // and padding between rows, so it has to refresh from its own move
+            // events; rows already refresh the same way.
+            .on_mouse_move(move |_: &MouseMoveEvent, window: &mut Window, _| {
+                window.refresh();
+            });
         if metrics.viewport_px > 0.0 {
             list = list.max_h(px(metrics.viewport_px * 0.7));
         }
@@ -4983,11 +4990,29 @@ impl ConversationSurface {
         // bounds for pill-relative coordinates, mirroring the model picker.
         list = list.child(self.render_navigator_hover_pill(theme, cx.reduce_motion()));
         let hover_surface_bounds = Rc::clone(&self.navigator_hover_surface);
+        let list_bounds_surface = entity.downgrade();
+        // Height-change detection is window-local: two windows share one
+        // surface, and a shared last-measured value would make them notify
+        // each other about each other's layout.
+        let last_probe_height = window.use_state(cx, |_, _| None::<gpui::Pixels>);
         list = list.child(
             canvas(
                 |_, _, _| {},
-                move |bounds, (), _, _| {
+                move |bounds, (), window, app| {
+                    // The metrics listener reads this probe on the next frame,
+                    // so a height change here has to schedule that frame too:
+                    // otherwise an expanded rail keeps its collapsed top
+                    // offset until some unrelated repaint.
+                    let changed = last_probe_height.update(app, |height, _| {
+                        let changed = *height != Some(bounds.size.height);
+                        *height = Some(bounds.size.height);
+                        changed
+                    });
                     *hover_surface_bounds.borrow_mut() = Some(bounds);
+                    if changed {
+                        let _ = list_bounds_surface.update(app, |_, cx| cx.notify());
+                        window.defer(app, |window, _| window.refresh());
+                    }
                 },
             )
             .absolute()
@@ -5136,39 +5161,49 @@ impl ConversationSurface {
         // end space: measured per window, notified only on change.
         let metrics_state = navigator_metrics.clone();
         let metrics_hover_surface = Rc::clone(&self.navigator_hover_surface);
-        list = list.on_children_prepainted(move |_children_bounds, _window, app| {
-            let _ = navigator_surface.update(app, |surface, cx| {
-                let viewport = f64::from(surface.scroll_handle.bounds().size.height);
-                // Center the actually painted list box, read from its probe:
-                // row spans miscount once absolute overlays (pill, probe,
-                // glass) join the children.
-                let guard = metrics_hover_surface.borrow();
-                let Some(list_bounds) = guard.as_ref() else {
-                    return;
-                };
-                let height = f64::from(list_bounds.size.height);
-                // The capped list is what actually paints: clamp the measured
-                // height to the 70 % cap before centering, or a long list
-                // pins its top at zero instead of centering the cap.
-                let capped = if viewport > 0.0 {
-                    height.min(viewport * 0.7)
-                } else {
-                    height
-                };
-                let next = TurnNavigatorMetrics {
-                    top_px: (((viewport - capped) / 2.0).max(0.0)) as f32,
-                    viewport_px: viewport as f32,
-                };
-                let changed = metrics_state.update(cx, |metrics, _| {
-                    let changed =
-                        metrics.top_px != next.top_px || metrics.viewport_px != next.viewport_px;
-                    *metrics = next;
+        list = list.on_children_prepainted(move |_children_bounds, window, app| {
+            let changed = navigator_surface
+                .update(app, |surface, cx| {
+                    let viewport = f64::from(surface.scroll_handle.bounds().size.height);
+                    // Center the actually painted list box, read from its probe:
+                    // row spans miscount once absolute overlays (pill, probe,
+                    // glass) join the children.
+                    let guard = metrics_hover_surface.borrow();
+                    let Some(list_bounds) = guard.as_ref() else {
+                        return false;
+                    };
+                    let height = f64::from(list_bounds.size.height);
+                    // The capped list is what actually paints: clamp the measured
+                    // height to the 70 % cap before centering, or a long list
+                    // pins its top at zero instead of centering the cap.
+                    let capped = if viewport > 0.0 {
+                        height.min(viewport * 0.7)
+                    } else {
+                        height
+                    };
+                    let next = TurnNavigatorMetrics {
+                        top_px: (((viewport - capped) / 2.0).max(0.0)) as f32,
+                        viewport_px: viewport as f32,
+                    };
+                    let changed = metrics_state.update(cx, |metrics, _| {
+                        let changed = metrics.top_px != next.top_px
+                            || metrics.viewport_px != next.viewport_px;
+                        *metrics = next;
+                        changed
+                    });
+                    if changed {
+                        cx.notify();
+                    }
                     changed
-                });
-                if changed {
-                    cx.notify();
-                }
-            });
+                })
+                .unwrap_or(false);
+            if changed {
+                // A notification raised inside prepaint does not itself
+                // request a frame: without this the rail keeps its previous
+                // top until some unrelated repaint, which is exactly what a
+                // reduced-motion reveal would otherwise show.
+                window.defer(app, |window, _| window.refresh());
+            }
         });
         // Identity, scrolling, and width attach after the Div-phase
         // listener above: the rail owns gestures over its own rows, applying
@@ -6557,6 +6592,10 @@ mod tests {
         let maximum = cx.update(|_, app| surface.read(app).scroll_handle().max_offset().y);
         assert!(maximum > px(0.0), "the tall fixture must scroll");
         handle.set_offset(point(px(0.0), -maximum));
+        // `set_offset` writes the shared scroll state without scheduling a
+        // frame; production scroll paths notify, so request the repaint that
+        // the geometry-derived active marker rides on.
+        cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
         settle(cx);
         let first_tick = cx.debug_bounds(FIRST_TICK).expect("first tick paints");
         let second_tick = cx.debug_bounds(SECOND_TICK).expect("second tick paints");
@@ -6751,16 +6790,23 @@ mod tests {
             .collect();
         let scene = ConversationScene::build(turns, items, narrations, Vec::new())
             .expect("long navigator scene is valid");
-        let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
             ConversationSurface::new(scene, ThemeMode::Dark, surface_cx)
         });
         cx.simulate_resize(size(px(720.0), px(480.0)));
+        // The harness does not always repaint just because the window resized;
+        // notify once so the rail metrics measure the 480 px viewport before
+        // the pointer targets the rail. Without this the rail still carries
+        // its creation-frame position at the maximized window height.
+        cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
         settle(cx);
         let rail = cx
             .debug_bounds(TURN_NAVIGATOR_SELECTOR)
             .expect("rail paints");
         cx.simulate_mouse_move(rail.center(), None::<gpui::MouseButton>, Modifiers::none());
-        cx.run_until_parked();
+        // Two geometry passes follow the reveal: the probe reports the capped
+        // list height, then the metrics listener re-centers the rail from it.
+        settle(cx);
         let expanded = cx
             .debug_bounds(TURN_NAVIGATOR_SELECTOR)
             .expect("expanded rail paints");
