@@ -65,6 +65,19 @@ impl RunControlsState {
             && self.active.is_some()
             && matches!(self.status, Some(RunLiveStatus::Queued))
     }
+
+    /// Returns the observed live run and engine on the selected thread, if
+    /// any. Scope-fenced like [`Self::steer_candidate`] but status-agnostic.
+    pub(super) fn observed_run(
+        &self,
+        selected_thread: Option<&ThreadId>,
+    ) -> Option<(RunId, artisan_domain::EngineId)> {
+        if self.thread.as_ref() != selected_thread {
+            return None;
+        }
+        Some((self.active.clone()?, self.engine?))
+    }
+}
 }
 
 impl NativeApplication {

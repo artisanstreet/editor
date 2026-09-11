@@ -25,8 +25,9 @@ use std::collections::VecDeque;
 
 use artisan_assets::AssetId;
 use artisan_domain::{
-    CatalogRevision, ConversationSnapshot, EngineProfileId, MessageId, ModelFavoriteId, PatchBatch, ProjectId,
-    ProjectListing, QueueMessagePayload, RequestId, SetModelFavorite, ThreadId, ThreadListing,
+    CatalogRevision, ConversationItem, ConversationSnapshot, EngineProfileId, MessageId,
+    ModelFavoriteId, PatchBatch, ProjectId, ProjectListing, QueueMessagePayload, RequestId,
+    SetModelFavorite, ThreadId, ThreadListing, TurnId,
 };
 use artisan_protocol::{ConversationSubscriptionStarted, QueueMessageReceipt, ServerEvent};
 use artisan_ui::asset_seam::asset_glyph;
@@ -329,6 +330,10 @@ struct NativeMessageFlight {
     /// Observed-run steer target named at send time, preserved verbatim
     /// for the same-identity retry. `None` is a fresh send.
     steer_target: Option<artisan_domain::SteerTarget>,
+    /// Validated routed engine display label captured at send from the
+    /// authoritative config (never the picker). Preserved verbatim for the
+    /// retry and the Waiting narration; `None` renders the generic fallback.
+    engine_label: Option<String>,
     token: SubmissionToken,
 }
 
@@ -373,6 +378,9 @@ struct NativeMessageRetry {
     /// Original steer target from the failed send. A retry replays it
     /// verbatim and never re-resolves the current live run.
     steer_target: Option<artisan_domain::SteerTarget>,
+    /// Original engine label from the failed send. A retry replays it
+    /// verbatim and never re-resolves a changed picker after the send.
+    engine_label: Option<String>,
     draft_matches: bool,
 }
 
@@ -3518,6 +3526,21 @@ impl NativeApplication {
         Some(artisan_domain::SteerTarget::new(run_id))
     }
 
+    /// Captures the validated routed engine display label at send time.
+    ///
+    /// Resolved from the *authoritative* config only — never from the
+    /// picker/choice, which may change after the send. `None` (unconfigured
+    /// thread) renders the generic Waiting fallback. Provider-owned roster
+    /// names with id fallback, matching the existing user-facing copy.
+    fn send_engine_label(&self) -> Option<String> {
+        let engine = self
+            .engine_settings
+            .authoritative_config()?
+            .selection()
+            .engine_id();
+        Some(profile_usage_display_name(engine.as_str()).to_owned())
+    }
+
     fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
         if !self.message_submission_is_admissible(cx) || self.message_flight.is_some() {
             return;
@@ -3598,6 +3621,7 @@ impl NativeApplication {
             }
         };
         let steer_target = self.observed_steer_target();
+        let engine_label = self.send_engine_label();
         let mut queued =
             artisan_domain::QueueMessage::new(request_id.clone(), thread_id.clone(), body.clone());
         if let Some(target) = steer_target.clone() {
@@ -3611,6 +3635,7 @@ impl NativeApplication {
                     request_id,
                     payload: body,
                     steer_target,
+                    engine_label,
                     token,
                 });
             }
@@ -3684,6 +3709,7 @@ impl NativeApplication {
         // live run — a stale explicit target fails typed server-side with
         // the payload preserved, never a silent fresh run.
         let retry_target = retry.steer_target.clone();
+        let retry_label = retry.engine_label.clone();
         let submission = self
             .composer
             .update(cx, |composer, _| composer.begin_payload_submission());
@@ -3730,6 +3756,7 @@ impl NativeApplication {
                     request_id,
                     payload: retry_body,
                     steer_target: retry_target,
+                    engine_label: retry_label,
                     token,
                 });
             }
@@ -3823,8 +3850,50 @@ impl NativeApplication {
             .message_flight
             .take()
             .expect("flight was checked above");
+        let message_id = receipt.message_id.clone();
+        let steer_run_id = flight
+            .steer_target
+            .as_ref()
+            .map(|target| target.run_id().clone());
+        let engine_label = flight.engine_label;
         self.finish_composer_submission(flight.token, DraftDisposition::Accepted, cx);
         self.message_receipt = Some(receipt);
+        // Stage the echo watch now that the Forge message id is known: the
+        // lip retires and the engine label dispatches when the canonical
+        // user item carrying this source id projects (frozen correlation
+        // contract).
+        self.composer_queue
+            .state
+            .stage_echo_watch(message_id.clone(), steer_run_id, engine_label);
+        // The echo can already be projected (patch stream versus receipt
+        // race): scan the current canonical snapshot so an already-present
+        // echo retires immediately instead of waiting for the next batch.
+        if let Some(host) = self.conversation_host.clone()
+            && host.read(cx).controller_view().delivery.thread_id == flight.thread_id
+            && let Some(snapshot) = host.read(cx).canonical_snapshot()
+        {
+            for item in snapshot.items() {
+                let (source_id, turn_id) = match item {
+                    ConversationItem::UserMessage(message) => {
+                        (message.source_message_id.as_ref(), message.turn_id.clone())
+                    }
+                    ConversationItem::MultimodalUserMessage(message) => {
+                        (message.source_message_id.as_ref(), message.turn_id.clone())
+                    }
+                    // Non-user items (present or future variants) never echo.
+                    _ => continue,
+                };
+                if source_id == Some(&message_id) {
+                    self.retire_echo_matched(
+                        &flight.thread_id,
+                        &message_id,
+                        turn_id,
+                        &host,
+                        cx,
+                    );
+                }
+            }
+        }
         self.message_failure = None;
         self.message_failure_note = None;
         self.sync_composer_availability(cx);
@@ -3856,8 +3925,13 @@ impl NativeApplication {
             request_id: flight.request_id,
             payload: flight.payload,
             steer_target: flight.steer_target,
+            engine_label: flight.engine_label,
             draft_matches: false,
         });
+        // A failure matches only an active flight, which never staged a
+        // watch (watches stage at receipt, which ends the flight). A retry
+        // stages its own watch at its own receipt with the preserved
+        // original label.
         self.message_receipt = None;
         self.message_failure = Some(NativeMessageFailure::new(failure));
         self.message_failure_note = None;
@@ -4552,6 +4626,193 @@ impl NativeApplication {
         cx.notify();
     }
 
+    /// Resolves the Waiting-narration engine label at echo time.
+    ///
+    /// The send-time captured label stands UNLESS exact correlation proves
+    /// the observed run is ours: the watch named this run as its steer
+    /// target, or the canonical snapshot already holds an assistant item of
+    /// the echoed turn produced by the observed run. A merely same-thread
+    /// observed run proves nothing — an old poll can describe the previous
+    /// engine while a new cross-engine send just launched — so without
+    /// proof the captured label stands, and without any label the generic
+    /// fallback renders. The picker is never consulted after the send.
+    fn resolve_dispatch_engine_label(
+        &self,
+        thread_id: &ThreadId,
+        echo_turn_id: &TurnId,
+        send_label: Option<String>,
+        steer_run_id: Option<&artisan_domain::RunId>,
+        host: &Entity<ConversationHost>,
+        cx: &App,
+    ) -> Option<String> {
+        if let Some((observed_id, observed_engine)) =
+            self.run_controls.observed_run(Some(thread_id))
+        {
+            let exact = steer_run_id == Some(&observed_id)
+                || host.read(cx).canonical_snapshot().is_some_and(|snapshot| {
+                    snapshot.items().iter().any(|item| match item {
+                        ConversationItem::AssistantMessage(message) => {
+                            message.turn_id == *echo_turn_id && message.run_id == observed_id
+                        }
+                        _ => false,
+                    })
+                });
+            if exact {
+                return Some(profile_usage_display_name(observed_engine.as_str()).to_owned());
+            }
+        }
+        send_label
+    }
+
+    /// Retires the staged echo watch for one pre-matched source id.
+    ///
+    /// Take-up marks immediately (the echo was observed, so the lip retires
+    /// even while still listed), but the watch is kept until the label
+    /// dispatch succeeds: backpressure must not permanently lose the label.
+    /// A later echo re-attempts the dispatch; the lip marking and the
+    /// watch take stay idempotent.
+    fn retire_echo_matched(
+        &mut self,
+        thread_id: &ThreadId,
+        message_id: &MessageId,
+        turn_id: TurnId,
+        host: &Entity<ConversationHost>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_thread.as_ref() != Some(thread_id) {
+            return;
+        }
+        let (send_label, steer_run_id) = match self
+            .composer_queue
+            .state
+            .echo_watch_for(message_id)
+        {
+            Some(watch) => (
+                watch.engine_label().map(str::to_owned),
+                watch.steer_run_id().cloned(),
+            ),
+            None => return,
+        };
+        self.composer_queue.state.mark_taken_up(message_id);
+        let engine_label = self.resolve_dispatch_engine_label(
+            thread_id,
+            &turn_id,
+            send_label,
+            steer_run_id.as_ref(),
+            host,
+            cx,
+        );
+        let dispatch = host.update(cx, |host, host_cx| {
+            host.dispatch(
+                ConversationStateEvent::SetTurnEngineLabel {
+                    turn_id,
+                    engine_label,
+                },
+                host_cx,
+            )
+        });
+        if dispatch.is_ok() {
+            self.composer_queue.state.clear_echo_watch_for(message_id);
+            // Drain the invalidation the label dispatch raised (plus any
+            // sibling boundary work) so one effect does not accumulate per
+            // send.
+            self.pump_host_boundary(host, cx);
+        }
+        self.sync_composer_controls(cx);
+    }
+
+    /// Retires the staged echo watch when the canonical user item projects.
+    ///
+    /// Frozen native correlation contract: matches ONLY
+    /// `item.source_message_id == receipt.message_id`, never item-id
+    /// equality. An absent legacy source id matches nothing — no guessed
+    /// take-up or label; the forced queue refresh stays the fallback.
+    /// Take-up marks on first match so the lip cannot duplicate; the watch
+    /// clears only once the label dispatch succeeds, so a later duplicate
+    /// re-attempts a lost label idempotently.
+    fn retire_echo_for_item(
+        &mut self,
+        thread_id: &ThreadId,
+        item: &ConversationItem,
+        host: &Entity<ConversationHost>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_thread.as_ref() != Some(thread_id) {
+            return;
+        }
+        let (source_id, turn_id) = match item {
+            ConversationItem::UserMessage(message) => {
+                (message.source_message_id.as_ref(), message.turn_id.clone())
+            }
+            ConversationItem::MultimodalUserMessage(message) => {
+                (message.source_message_id.as_ref(), message.turn_id.clone())
+            }
+            // Non-user items (present or future variants) never echo a send.
+            _ => return,
+        };
+        let Some(source_id) = source_id else {
+            return;
+        };
+        if self
+            .composer_queue
+            .state
+            .echo_watch_for(source_id)
+            .is_none()
+        {
+            return;
+        }
+        self.retire_echo_matched(thread_id, source_id, turn_id, host, cx);
+    }
+
+    /// Re-scans the canonical snapshot for staged echo watches.
+    ///
+    /// A watch retained across a failed label dispatch (backpressure) must
+    /// not wait for another duplicate `ItemUpsert` that may never arrive:
+    /// every authoritative refresh re-resolves retained watches against
+    /// what is already projected. No-ops when no watch is staged.
+    fn rescan_retained_echo_watches(&mut self, cx: &mut Context<Self>) {
+        if self.composer_queue.state.echo_watch_count() == 0 {
+            return;
+        }
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let Some(host) = self.conversation_host.clone() else {
+            return;
+        };
+        if host.read(cx).controller_view().delivery.thread_id != thread_id {
+            return;
+        }
+        let Some(snapshot) = host.read(cx).canonical_snapshot() else {
+            return;
+        };
+        let mut matches = Vec::new();
+        for item in snapshot.items() {
+            let (source_id, turn_id) = match item {
+                ConversationItem::UserMessage(message) => {
+                    (message.source_message_id.as_ref(), message.turn_id.clone())
+                }
+                ConversationItem::MultimodalUserMessage(message) => {
+                    (message.source_message_id.as_ref(), message.turn_id.clone())
+                }
+                // Non-user items (present or future variants) never echo.
+                _ => continue,
+            };
+            if let Some(source_id) = source_id
+                && self
+                    .composer_queue
+                    .state
+                    .echo_watch_for(source_id)
+                    .is_some()
+            {
+                matches.push((source_id.clone(), turn_id));
+            }
+        }
+        for (message_id, turn_id) in matches {
+            self.retire_echo_matched(&thread_id, &message_id, turn_id, &host, cx);
+        }
+    }
+
     fn handle_patch_batch(&mut self, batch: &PatchBatch, cx: &mut Context<Self>) {
         if self.thread_switch_flight.is_some() {
             self.remember_patch_ids(batch);
@@ -4588,6 +4849,13 @@ impl NativeApplication {
         } else {
             self.acknowledge_host_cursor(&host, cx);
             self.pump_host_boundary(&host, cx);
+            for patch in batch.patches() {
+                let item = match patch {
+                    artisan_domain::ConversationPatch::ItemUpsert { item, .. } => item,
+                    _ => continue,
+                };
+                self.retire_echo_for_item(batch.thread_id(), item, &host, cx);
+            }
             cx.notify();
         }
     }
@@ -5718,6 +5986,35 @@ impl NativeApplication {
         snapshot: ConversationSnapshot,
         cx: &mut Context<Self>,
     ) {
+        // Collect echo candidates before the snapshot moves into the host:
+        // matching needs only watched source ids, so a small owned
+        // (message, turn) list suffices and no transcript data is cloned.
+        // Every staged watch is checked: several sends can await echo.
+        let mut echo_matches = Vec::new();
+        if self.selected_thread.as_ref() == Some(snapshot.thread_id()) {
+            for item in snapshot.items() {
+                let (source_id, turn_id) = match item {
+                    ConversationItem::UserMessage(message) => {
+                        (message.source_message_id.as_ref(), message.turn_id.clone())
+                    }
+                    ConversationItem::MultimodalUserMessage(message) => {
+                        (message.source_message_id.as_ref(), message.turn_id.clone())
+                    }
+                    // Non-user items (present or future variants) never echo.
+                    _ => continue,
+                };
+                if let Some(source_id) = source_id
+                    && self
+                        .composer_queue
+                        .state
+                        .echo_watch_for(source_id)
+                        .is_some()
+                {
+                    echo_matches.push((source_id.clone(), turn_id));
+                }
+            }
+        }
+        let thread_id = snapshot.thread_id().clone();
         let dispatch = host.update(cx, |host, host_cx| {
             host.dispatch(
                 ConversationStateEvent::Delivery(ConversationDeliveryEvent::SnapshotReceived(
@@ -5737,6 +6034,9 @@ impl NativeApplication {
             // The canonical turn may have arrived after retained observations;
             // replay them now that the snapshot exists.
             self.replay_observation_activity(cx);
+            for (message_id, turn_id) in echo_matches {
+                self.retire_echo_matched(&thread_id, &message_id, turn_id, host, cx);
+            }
             cx.notify();
         }
     }
@@ -8718,7 +9018,7 @@ mod tests {
     use crate::{
         conversation_delivery_machine::ConversationDeliveryEffect,
         conversation_host::{ConversationHost, ConversationHostEffect},
-        conversation_scene::SceneId,
+        conversation_scene::{SceneId, TurnBlock, TurnNarration, TurnScene},
         conversation_state_machine::ConversationStateEffect,
         conversation_surface::{
             CONVERSATION_SURFACE_MAX_SCROLL_TARGETS, ConversationSurfaceTarget,
@@ -8728,12 +9028,19 @@ mod tests {
     };
     use crate::native_composer_controls::NativeComposerControlsEvent;
     use artisan_domain::{
-        ConversationCursor, ConversationSnapshot, ConversationSubscriptionStart, DisplayName,
-        ObservationId, ProjectId, ProjectListing, ProjectSummary, ReceiptDisposition, RequestId,
-        RootPath, RunId, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
+        AssistantBody, AssistantMessageItem, AssistantMessagePhase, ConversationCursor,
+        ConversationItem, ConversationLifecycle, ConversationPatch, ConversationSnapshot,
+        ConversationSubscriptionStart, ConversationTurn, DisplayName,
+        EngineObservationAttribution, EngineObservationEvent, IncrementalText, ItemId,
+        ItemOrdinal, MessageBody, Observation, ObservationId, ObservationSequence,
+        PatchBatch, PatchId, PatchSequence, ProjectId, ProjectListing, ProjectSummary,
+        ReceiptDisposition, ReasoningSummaryDeltaObservation, RequestId, Revision, RootPath, RunId,
+        ThreadId, ThreadListing, ThreadSummary, ThreadTitle, TurnId, TurnOrdinal, UnixMillis,
+        UserMessageItem,
     };
     use artisan_protocol::{
-        ConversationSubscriptionStarted, ConversationSubscriptionStopped, QueueMessageReceipt,
+        ConversationSubscriptionStarted, ConversationSubscriptionStopped, EventCursor,
+        QueueMessageReceipt, ServerEvent,
     };
     use artisan_ui::button::{
         Button, ButtonContent, ButtonSize, ButtonStyle, ButtonVariant, FocusVisibility,
@@ -10202,6 +10509,1097 @@ mod tests {
         }
     }
 
+    /// Builds one contiguous echo batch carrying the canonical user item for
+    /// a watched send, with an item id deliberately different from the
+    /// Forge message id: echo matches ONLY on `source_message_id`.
+    /// Turn and item ordinals occupy one shared namespace.
+    fn echo_batch(
+        thread_id: &ThreadId,
+        from: u64,
+        item_id: &str,
+        source_message_id: Option<&str>,
+        turn: &str,
+        turn_ordinal: u64,
+        item_ordinal: u64,
+        body: &str,
+    ) -> PatchBatch {
+        let turn = ConversationTurn {
+            turn_id: TurnId::parse(turn).expect("turn"),
+            ordinal: TurnOrdinal::new(turn_ordinal),
+            revision: Revision::new(0),
+            lifecycle: ConversationLifecycle::Pending,
+            created_at: UnixMillis::EPOCH,
+            updated_at: UnixMillis::from_millis(10),
+        };
+        let item = ConversationItem::UserMessage(UserMessageItem {
+            item_id: ItemId::parse(item_id).expect("item"),
+            turn_id: turn.turn_id.clone(),
+            ordinal: ItemOrdinal::new(item_ordinal),
+            revision: Revision::new(0),
+            lifecycle: ConversationLifecycle::Pending,
+            body: MessageBody::parse(body.to_owned()).expect("user body"),
+            source_message_id: source_message_id.map(|value| {
+                artisan_domain::MessageId::parse(value).expect("source message")
+            }),
+            created_at: UnixMillis::EPOCH,
+            updated_at: UnixMillis::from_millis(10),
+        });
+        PatchBatch::new(
+            thread_id.clone(),
+            ConversationCursor::new(from),
+            ConversationCursor::new(from + 2),
+            vec![
+                ConversationPatch::TurnUpsert {
+                    patch_id: PatchId::parse(format!("patch-turn-{from}")).expect("patch"),
+                    sequence: PatchSequence::new(from + 1).expect("sequence"),
+                    turn,
+                },
+                ConversationPatch::ItemUpsert {
+                    patch_id: PatchId::parse(format!("patch-item-{from}")).expect("patch"),
+                    sequence: PatchSequence::new(from + 2).expect("sequence"),
+                    item,
+                },
+            ],
+        )
+        .expect("echo batch")
+    }
+
+    fn send_receipt_for_flight(
+        application: &NativeApplication,
+        thread_id: &ThreadId,
+        message_id: &str,
+    ) -> QueueMessageReceipt {
+        let request_id = application
+            .message_flight
+            .as_ref()
+            .expect("send flight")
+            .request_id
+            .as_str()
+            .to_owned();
+        first_receipt(
+            &request_id,
+            thread_id,
+            message_id,
+            ReceiptDisposition::Accepted,
+        )
+    }
+
+    #[gpui::test]
+    fn send_captures_routed_label_not_picker_or_stale_run(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("label-capture-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "label my engine",
+                    sink,
+                );
+                install_configured_engine_settings(application, cx);
+                // A stale observed run on another engine must not relabel
+                // this send: no exact correlation exists (unnamed fresh
+                // send, no assistant run on any turn yet).
+                application.seed_active_run_for_tests(
+                    thread_id.clone(),
+                    RunId::parse("run-stale").expect("run"),
+                    artisan_protocol::RunLiveStatus::Running,
+                    artisan_domain::EngineId::Claude,
+                );
+                application.begin_message_submission(cx);
+                let flight = application
+                    .message_flight
+                    .as_ref()
+                    .expect("unlabeled flight");
+                assert!(flight.steer_target.is_none());
+                assert_eq!(flight.engine_label.as_deref(), Some("Codex"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("echo-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "visible text here",
+                    sink,
+                );
+                install_configured_engine_settings(application, cx);
+                application.begin_message_submission(cx);
+                assert!(application.message_flight.is_some());
+                // Pending before ACK: no watch staged, no lip, no failure.
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    0
+                );
+                let receipt =
+                    send_receipt_for_flight(application, &thread_id, "message-echo");
+                application.handle_service_event(
+                    NativeTransportEvent::MessageQueued(receipt),
+                    cx,
+                );
+                // Accepted: composer cleared, watch staged with the
+                // send-time label.
+                assert!(application.message_flight.is_none());
+                assert_eq!(application.composer.read(cx).draft(), "");
+                let watch = application
+                    .composer_queue
+                    .state
+                    .echo_watch_for(
+                        &artisan_domain::MessageId::parse("message-echo").expect("message"),
+                    )
+                    .expect("staged watch");
+                assert_eq!(watch.message_id().as_str(), "message-echo");
+                assert_eq!(watch.engine_label(), Some("Codex"));
+                // Seed the listed row the forced refresh would return.
+                application
+                    .composer_queue
+                    .state
+                    .set_scope(Some(thread_id.clone()), 1);
+                application.composer_queue.state.cancel_queue_refresh();
+                let token = application
+                    .composer_queue
+                    .state
+                    .begin_queue_refresh(true, true, false, false, true)
+                    .expect("forced queue refresh");
+                let row = artisan_domain::QueuedMessageSummary {
+                    message_id: artisan_domain::MessageId::parse("message-echo")
+                        .expect("message"),
+                    thread_id: thread_id.clone(),
+                    original_request_id: artisan_domain::RequestId::parse("command-echo")
+                        .expect("request"),
+                    text: Some(
+                        artisan_domain::AuthoredText::parse("visible text here").expect("text"),
+                    ),
+                    attachments: Vec::new(),
+                    accepted_at: UnixMillis::EPOCH,
+                    last_error: None,
+                };
+                let page = artisan_domain::QueuedMessageListing::new(
+                    thread_id.clone(),
+                    artisan_domain::QueuedMessageListOrder::OldestFirst,
+                    1,
+                    1,
+                    vec![row],
+                )
+                .expect("queued page");
+                application
+                    .composer_queue
+                    .state
+                    .apply_queue_listing(&token, page)
+                    .expect("queue page");
+                application.sync_composer_controls(cx);
+                assert_eq!(
+                    application
+                        .composer_controls
+                        .read(cx)
+                        .snapshot()
+                        .pending_steering
+                        .len(),
+                    1
+                );
+                // Canonical snapshot baseline, then the echo: the item id
+                // differs from the message id on purpose.
+                application.handle_service_event(
+                    NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
+                    cx,
+                );
+                application.handle_service_event(
+                    NativeTransportEvent::PatchBatch(echo_batch(
+                        &thread_id,
+                        1,
+                        "item-echo",
+                        Some("message-echo"),
+                        "turn-echo",
+                        0,
+                        1,
+                        "visible text here",
+                    )),
+                    cx,
+                );
+                // Echo observed: watch retired exactly once, lip absent even
+                // though the row is still listed, canonical body present
+                // exactly once, no failure raised.
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    0
+                );
+                assert!(
+                    application
+                        .composer_controls
+                        .read(cx)
+                        .snapshot()
+                        .pending_steering
+                        .is_empty()
+                );
+                assert!(application.message_failure.is_none());
+                let canonical = application
+                    .conversation_host
+                    .clone()
+                    .expect("mounted host")
+                    .read(cx)
+                    .canonical_snapshot()
+                    .expect("canonical snapshot");
+                let bodies: Vec<_> = canonical
+                    .items()
+                    .iter()
+                    .filter_map(|item| match item {
+                        ConversationItem::UserMessage(message) => {
+                            Some(message.body.as_str().to_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(bodies, ["visible text here"]);
+                // A redelivered echo with fresh patch ids is a no-op: the
+                // watch is gone and the lip stays absent.
+                application.handle_service_event(
+                    NativeTransportEvent::PatchBatch(echo_batch(
+                        &thread_id,
+                        3,
+                        "item-echo",
+                        Some("message-echo"),
+                        "turn-echo",
+                        0,
+                        1,
+                        "visible text here",
+                    )),
+                    cx,
+                );
+                assert!(
+                    application
+                        .composer_controls
+                        .read(cx)
+                        .snapshot()
+                        .pending_steering
+                        .is_empty()
+                );
+                assert!(application.message_failure.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn legacy_echo_without_source_id_takes_no_take_up(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("legacy-echo-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "legacy text",
+                    sink,
+                );
+                install_configured_engine_settings(application, cx);
+                application.begin_message_submission(cx);
+                let receipt =
+                    send_receipt_for_flight(application, &thread_id, "message-legacy");
+                application.handle_service_event(
+                    NativeTransportEvent::MessageQueued(receipt),
+                    cx,
+                );
+                application.handle_service_event(
+                    NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
+                    cx,
+                );
+                // The item id equals the message id here, but without a
+                // source id that proves nothing: no take-up, no label, the
+                // forced queue refresh stays the fallback.
+                application.handle_service_event(
+                    NativeTransportEvent::PatchBatch(echo_batch(
+                        &thread_id,
+                        1,
+                        "message-legacy",
+                        None,
+                        "turn-legacy",
+                        0,
+                        1,
+                        "legacy text",
+                    )),
+                    cx,
+                );
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    1
+                );
+                assert!(application.message_failure.is_none());
+            });
+        });
+    }
+
+    /// Reads one turn scene without touching scene files.
+    fn staged_turn_scene(
+        application: &NativeApplication,
+        cx: &gpui::App,
+        turn: &str,
+    ) -> TurnScene {
+        application
+            .conversation_host
+            .clone()
+            .expect("mounted host")
+            .read(cx)
+            .controller_scene()
+            .expect("scene builds")
+            .turn_scene(&TurnId::parse(turn).expect("turn"))
+            .expect("staged turn scene")
+            .clone()
+    }
+
+    /// Painted user bodies on one turn scene, in block order.
+    fn staged_user_bodies(scene: &TurnScene) -> Vec<String> {
+        scene
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                TurnBlock::UserMessage(message) => Some(message.body.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Status narration and engine label on one turn scene, if a status row
+    /// paints.
+    fn staged_status(scene: &TurnScene) -> Option<(TurnNarration, Option<String>)> {
+        scene.blocks().iter().find_map(|block| match block {
+            TurnBlock::TurnStatus(status) => {
+                Some((status.narration, status.engine_label.clone()))
+            }
+            _ => None,
+        })
+    }
+
+    #[gpui::test]
+    fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("staged-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([Ok(())]);
+        // Stage 1: submit + receipt. Pending before ACK, accepted with the
+        // send-time routed label staged for its echo.
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "staged prompt",
+                    sink,
+                );
+                install_configured_engine_settings(application, cx);
+                application.begin_message_submission(cx);
+                assert_eq!(
+                    application
+                        .message_flight
+                        .as_ref()
+                        .expect("staged flight")
+                        .engine_label
+                        .as_deref(),
+                    Some("Codex")
+                );
+                let receipt =
+                    send_receipt_for_flight(application, &thread_id, "message-staged");
+                application.handle_service_event(
+                    NativeTransportEvent::MessageQueued(receipt),
+                    cx,
+                );
+                assert!(application.message_flight.is_none());
+                assert_eq!(application.composer.read(cx).draft(), "");
+                let watch = application
+                    .composer_queue
+                    .state
+                    .echo_watch_for(&artisan_domain::MessageId::parse("message-staged").expect("message"))
+                    .expect("staged watch");
+                assert_eq!(watch.engine_label(), Some("Codex"));
+            });
+        });
+        cx.run_until_parked();
+        // Stage 2: listing row, canonical snapshot, echo. The lip retires on
+        // the echo even though the row is still listed; the painted user
+        // body appears exactly once with the labeled provider wait.
+        let user_selector: String = cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                application
+                    .composer_queue
+                    .state
+                    .set_scope(Some(thread_id.clone()), 1);
+                application.composer_queue.state.cancel_queue_refresh();
+                let token = application
+                    .composer_queue
+                    .state
+                    .begin_queue_refresh(true, true, false, false, true)
+                    .expect("forced queue refresh");
+                let page = artisan_domain::QueuedMessageListing::new(
+                    thread_id.clone(),
+                    artisan_domain::QueuedMessageListOrder::OldestFirst,
+                    1,
+                    1,
+                    vec![artisan_domain::QueuedMessageSummary {
+                        message_id: artisan_domain::MessageId::parse("message-staged")
+                            .expect("message"),
+                        thread_id: thread_id.clone(),
+                        original_request_id: artisan_domain::RequestId::parse("command-staged")
+                            .expect("request"),
+                        text: Some(
+                            artisan_domain::AuthoredText::parse("staged prompt").expect("text"),
+                        ),
+                        attachments: Vec::new(),
+                        accepted_at: UnixMillis::EPOCH,
+                        last_error: None,
+                    }],
+                )
+                .expect("queued page");
+                application
+                    .composer_queue
+                    .state
+                    .apply_queue_listing(&token, page)
+                    .expect("queue page");
+                application.handle_service_event(
+                    NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
+                    cx,
+                );
+                application.handle_service_event(
+                    NativeTransportEvent::PatchBatch(echo_batch(
+                        &thread_id,
+                        1,
+                        "item-staged",
+                        Some("message-staged"),
+                        "turn-staged",
+                        0,
+                        1,
+                        "staged prompt",
+                    )),
+                    cx,
+                );
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    0
+                );
+                assert!(
+                    application
+                        .composer_controls
+                        .read(cx)
+                        .snapshot()
+                        .pending_steering
+                        .is_empty()
+                );
+                assert!(application.message_failure.is_none());
+                let scene = staged_turn_scene(application, cx, "turn-staged");
+                assert_eq!(staged_user_bodies(&scene), ["staged prompt"]);
+                assert_eq!(
+                    staged_status(&scene),
+                    Some((TurnNarration::ProviderWait, Some("Codex".to_owned())))
+                );
+                let user_block = scene
+                    .blocks()
+                    .iter()
+                    .find_map(|block| match block {
+                        TurnBlock::UserMessage(message) => Some(message.clone()),
+                        _ => None,
+                    })
+                    .expect("painted user block");
+                crate::conversation_surface::block_selector(
+                    &TurnId::parse("turn-staged").expect("turn"),
+                    &TurnBlock::UserMessage(user_block),
+                )
+            })
+        });
+        cx.run_until_parked();
+        let staged_turn = TurnId::parse("turn-staged").expect("turn");
+        assert!(
+            cx.debug_bounds(&crate::conversation_surface::turn_selector(
+                &staged_turn
+            ))
+            .is_some(),
+            "echoed turn paints"
+        );
+        assert!(
+            cx.debug_bounds(&user_selector).is_some(),
+            "echoed user body paints"
+        );
+        assert!(
+            cx.debug_bounds(&crate::conversation_surface::status_selector(
+                &staged_turn
+            ))
+            .is_some(),
+            "provider wait row paints"
+        );
+        // Stage 3: genuine attributed reasoning before any assistant text.
+        // The trace narrates Thinking; the user body stays exact-once.
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let delta = artisan_domain::ReasoningSummaryDeltaObservation::new(
+                    artisan_domain::ObservationId::parse("obs-1").expect("observation"),
+                    artisan_domain::ObservationSequence::new(0).expect("sequence"),
+                    artisan_domain::ObservationId::parse("obs-item-1")
+                        .expect("observation item"),
+                    0,
+                    "Considering options".to_owned(),
+                    None,
+                    artisan_domain::ObservationId::parse("obs-turn-1")
+                        .expect("observation turn"),
+                )
+                .expect("reasoning delta");
+                let observation = artisan_domain::EngineObservationEvent {
+                    thread_id: thread_id.clone(),
+                    observation: artisan_domain::Observation::ReasoningSummaryDelta(delta),
+                    attribution: Some(artisan_domain::EngineObservationAttribution {
+                        run_id: RunId::parse("run-staged").expect("run"),
+                        turn_id: TurnId::parse("turn-staged").expect("turn"),
+                        committed_at: UnixMillis::from_millis(11),
+                        delivery_sequence: 1,
+                    }),
+                };
+                application.handle_service_event(
+                    NativeTransportEvent::EngineObservation(artisan_protocol::ServerEvent {
+                        cursor: artisan_protocol::EventCursor::new(1).expect("cursor"),
+                        event: artisan_domain::Event::EngineObservation(observation),
+                    }),
+                    cx,
+                );
+                let scene = staged_turn_scene(application, cx, "turn-staged");
+                assert_eq!(
+                    staged_status(&scene).map(|(narration, _)| narration),
+                    Some(TurnNarration::Thinking)
+                );
+                assert_eq!(staged_user_bodies(&scene), ["staged prompt"]);
+                assert!(application.message_failure.is_none());
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(&crate::conversation_surface::status_selector(
+                &staged_turn
+            ))
+            .is_some(),
+            "thinking row paints"
+        );
+        // Stage 4: first streamed body on the SAME echoed turn.
+        let first_reply_selector: String = cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let assistant = ConversationItem::AssistantMessage(AssistantMessageItem {
+                    item_id: ItemId::parse("item-reply").expect("item"),
+                    turn_id: TurnId::parse("turn-staged").expect("turn"),
+                    run_id: RunId::parse("run-staged").expect("run"),
+                    ordinal: ItemOrdinal::new(2),
+                    revision: Revision::new(0),
+                    lifecycle: ConversationLifecycle::Streaming,
+                    body: AssistantBody::parse("Hel").expect("assistant body"),
+                    phase: AssistantMessagePhase::Final,
+                    created_at: UnixMillis::EPOCH,
+                    updated_at: UnixMillis::from_millis(12),
+                });
+                application.handle_service_event(
+                    NativeTransportEvent::PatchBatch(
+                        PatchBatch::new(
+                            thread_id.clone(),
+                            ConversationCursor::new(3),
+                            ConversationCursor::new(4),
+                            vec![ConversationPatch::ItemUpsert {
+                                patch_id: PatchId::parse("patch-reply-item").expect("patch"),
+                                sequence: PatchSequence::new(4).expect("sequence"),
+                                item: assistant,
+                            }],
+                        )
+                        .expect("reply batch"),
+                    ),
+                    cx,
+                );
+                let scene = staged_turn_scene(application, cx, "turn-staged");
+                let reply: Vec<_> = scene
+                    .blocks()
+                    .iter()
+                    .filter_map(|block| match block {
+                        TurnBlock::AssistantMessage(message) => Some(message.body.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(reply, ["Hel"]);
+                assert_eq!(staged_user_bodies(&scene), ["staged prompt"]);
+                scene
+                    .blocks()
+                    .iter()
+                    .find_map(|block| match block {
+                        TurnBlock::AssistantMessage(message) => Some(
+                            crate::conversation_surface::block_selector(
+                                &TurnId::parse("turn-staged").expect("turn"),
+                                &TurnBlock::AssistantMessage(message.clone()),
+                            ),
+                        ),
+                        _ => None,
+                    })
+                    .expect("painted first reply block")
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(&first_reply_selector).is_some(),
+            "first streamed body paints"
+        );
+        // Stage 5: two streamed bodies, one update each. "Hel" + "lo " +
+        // "world". Each fragment is asserted painted before the next lands.
+        let append_reply = |patch_id: &str,
+                            fragment: &str,
+                            from: u64,
+                            sequence: u64,
+                            revision: u64,
+                            stamp: i64,
+                            expected: &str| {
+            let assistant_selector: String = cx.update(|_, app| {
+                view.update(app, |application, cx| {
+                    application.handle_service_event(
+                        NativeTransportEvent::PatchBatch(
+                            PatchBatch::new(
+                                thread_id.clone(),
+                                ConversationCursor::new(from),
+                                ConversationCursor::new(from + 1),
+                                vec![ConversationPatch::ItemAppend {
+                                    patch_id: PatchId::parse(patch_id).expect("patch"),
+                                    sequence: PatchSequence::new(sequence)
+                                        .expect("sequence"),
+                                    item_id: ItemId::parse("item-reply").expect("item"),
+                                    revision: Revision::new(revision),
+                                    text: IncrementalText::parse(fragment).expect("fragment"),
+                                    updated_at: UnixMillis::from_millis(stamp),
+                                }],
+                            )
+                            .expect("append batch"),
+                        ),
+                        cx,
+                    );
+                    let scene = staged_turn_scene(application, cx, "turn-staged");
+                    let reply: Vec<_> = scene
+                        .blocks()
+                        .iter()
+                        .filter_map(|block| match block {
+                            TurnBlock::AssistantMessage(message) => Some(message.body.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(reply.len(), 1);
+                    assert_eq!(reply, [expected]);
+                    assert_eq!(staged_user_bodies(&scene), ["staged prompt"]);
+                    let assistant = scene
+                        .blocks()
+                        .iter()
+                        .find_map(|block| match block {
+                            TurnBlock::AssistantMessage(message) => Some(message.clone()),
+                            _ => None,
+                        })
+                        .expect("painted assistant block");
+                    crate::conversation_surface::block_selector(
+                        &TurnId::parse("turn-staged").expect("turn"),
+                        &TurnBlock::AssistantMessage(assistant),
+                    )
+                })
+            });
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds(&assistant_selector).is_some(),
+                "streamed reply paints after its own update"
+            );
+        };
+        append_reply("patch-append-one", "lo ", 4, 5, 1, 13, "Hello ");
+        append_reply("patch-append-two", "world", 5, 6, 2, 14, "Hello world");
+        // Stage 6: terminal. Exactly one user body, settled reply, no
+        // failures, no flights, no watches.
+        let terminal_reply: Vec<String> = cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                application.handle_service_event(
+                    NativeTransportEvent::PatchBatch(
+                        PatchBatch::new(
+                            thread_id.clone(),
+                            ConversationCursor::new(6),
+                            ConversationCursor::new(8),
+                            vec![
+                                ConversationPatch::TurnLifecycle {
+                                    patch_id: PatchId::parse("patch-terminal-turn")
+                                        .expect("patch"),
+                                    sequence: PatchSequence::new(7).expect("sequence"),
+                                    turn_id: TurnId::parse("turn-staged").expect("turn"),
+                                    revision: Revision::new(1),
+                                    lifecycle: ConversationLifecycle::Completed,
+                                    updated_at: UnixMillis::from_millis(15),
+                                },
+                                ConversationPatch::ItemLifecycle {
+                                    patch_id: PatchId::parse("patch-terminal-item")
+                                        .expect("patch"),
+                                    sequence: PatchSequence::new(8).expect("sequence"),
+                                    item_id: ItemId::parse("item-reply").expect("item"),
+                                    revision: Revision::new(3),
+                                    lifecycle: ConversationLifecycle::Completed,
+                                    updated_at: UnixMillis::from_millis(15),
+                                },
+                            ],
+                        )
+                        .expect("terminal batch"),
+                    ),
+                    cx,
+                );
+                let scene = staged_turn_scene(application, cx, "turn-staged");
+                assert_eq!(staged_user_bodies(&scene), ["staged prompt"]);
+                assert!(application.message_failure.is_none());
+                assert!(application.message_flight.is_none());
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    0
+                );
+                assert!(
+                    application
+                        .composer_controls
+                        .read(cx)
+                        .snapshot()
+                        .pending_steering
+                        .is_empty()
+                );
+                scene
+                    .blocks()
+                    .iter()
+                    .filter_map(|block| match block {
+                        TurnBlock::AssistantMessage(message) => Some(message.body.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(terminal_reply, ["Hello world"]);
+        assert!(
+            cx.debug_bounds(&crate::conversation_surface::turn_selector(
+                &staged_turn
+            ))
+            .is_some(),
+            "settled turn still paints"
+        );
+    }
+
+    #[gpui::test]
+    fn failed_send_preserves_label_across_retry(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("label-retry-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([Ok(()), Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "labeled draft",
+                    sink,
+                );
+                install_configured_engine_settings(application, cx);
+                application.begin_message_submission(cx);
+                let request_id = application
+                    .message_flight
+                    .as_ref()
+                    .expect("labeled flight")
+                    .request_id
+                    .clone();
+                assert_eq!(
+                    application
+                        .message_flight
+                        .as_ref()
+                        .expect("labeled flight")
+                        .engine_label
+                        .as_deref(),
+                    Some("Codex")
+                );
+                application.handle_message_failure(
+                    &thread_id,
+                    &request_id,
+                    message_failure(),
+                    cx,
+                );
+                // Failures match only active flights, which never staged a
+                // watch; the retry record keeps the original label.
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    0
+                );
+                let retry = application.message_retry.as_ref().expect("retry record");
+                assert_eq!(
+                    retry.engine_label.as_deref(),
+                    Some("Codex")
+                );
+                application.message_retry.as_mut().expect("retry").draft_matches = true;
+                application.activate_message_retry(cx);
+                let flight = application
+                    .message_flight
+                    .as_ref()
+                    .expect("replayed flight");
+                assert_eq!(flight.request_id, request_id);
+                assert_eq!(flight.engine_label.as_deref(), Some("Codex"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn send_label_ignores_changed_picker(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("picker-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "picker draft",
+                    sink,
+                );
+                install_configured_engine_settings(application, cx);
+                // A changed picker naming another engine must not relabel a
+                // send: capture reads the authoritative config only. (A send
+                // with this diverged choice would refuse at validation; the
+                // capture rule itself is what this pins.)
+                let mut policy = application
+                    .model_selector
+                    .read(cx)
+                    .state()
+                    .snapshot()
+                    .selection_policy_for_model("codex-sol")
+                    .expect("codex policy");
+                policy.engine_id = "claude".to_owned();
+                application.composer_model_choice =
+                    Some((Some(thread_id.clone()), policy));
+                assert_eq!(
+                    application.send_engine_label().as_deref(),
+                    Some("Codex")
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn two_sends_retire_their_echoes_independently(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("two-send-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([Ok(()), Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "first send",
+                    sink,
+                );
+                install_configured_engine_settings(application, cx);
+                application.begin_message_submission(cx);
+                let receipt_one =
+                    send_receipt_for_flight(application, &thread_id, "message-one");
+                application.handle_service_event(
+                    NativeTransportEvent::MessageQueued(receipt_one),
+                    cx,
+                );
+                // The accepted flight clears the composer, so the second
+                // send re-drafts before submitting.
+                application.composer.update(cx, |composer, composer_cx| {
+                    composer.set_draft("second send".to_owned());
+                    composer_cx.notify();
+                });
+                application.begin_message_submission(cx);
+                let receipt_two =
+                    send_receipt_for_flight(application, &thread_id, "message-two");
+                application.handle_service_event(
+                    NativeTransportEvent::MessageQueued(receipt_two),
+                    cx,
+                );
+                // Receipts end flights, so both accepted sends await echo.
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    2
+                );
+                application.handle_service_event(
+                    NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
+                    cx,
+                );
+                let batch = PatchBatch::new(
+                    thread_id.clone(),
+                    ConversationCursor::new(1),
+                    ConversationCursor::new(5),
+                    vec![
+                        ConversationPatch::TurnUpsert {
+                            patch_id: PatchId::parse("patch-turn-one").expect("patch"),
+                            sequence: PatchSequence::new(2).expect("sequence"),
+                            turn: ConversationTurn {
+                                turn_id: TurnId::parse("turn-one").expect("turn"),
+                                ordinal: TurnOrdinal::new(0),
+                                revision: Revision::new(0),
+                                lifecycle: ConversationLifecycle::Pending,
+                                created_at: UnixMillis::EPOCH,
+                                updated_at: UnixMillis::from_millis(10),
+                            },
+                        },
+                        ConversationPatch::ItemUpsert {
+                            patch_id: PatchId::parse("patch-item-one").expect("patch"),
+                            sequence: PatchSequence::new(3).expect("sequence"),
+                            item: ConversationItem::UserMessage(UserMessageItem {
+                                item_id: ItemId::parse("item-one").expect("item"),
+                                turn_id: TurnId::parse("turn-one").expect("turn"),
+                                ordinal: ItemOrdinal::new(1),
+                                revision: Revision::new(0),
+                                lifecycle: ConversationLifecycle::Pending,
+                                body: MessageBody::parse("first send".to_owned())
+                                    .expect("user body"),
+                                source_message_id: Some(
+                                    artisan_domain::MessageId::parse("message-one")
+                                        .expect("source message"),
+                                ),
+                                created_at: UnixMillis::EPOCH,
+                                updated_at: UnixMillis::from_millis(10),
+                            }),
+                        },
+                        ConversationPatch::TurnUpsert {
+                            patch_id: PatchId::parse("patch-turn-two").expect("patch"),
+                            sequence: PatchSequence::new(4).expect("sequence"),
+                            turn: ConversationTurn {
+                                turn_id: TurnId::parse("turn-two").expect("turn"),
+                                ordinal: TurnOrdinal::new(2),
+                                revision: Revision::new(0),
+                                lifecycle: ConversationLifecycle::Pending,
+                                created_at: UnixMillis::EPOCH,
+                                updated_at: UnixMillis::from_millis(10),
+                            },
+                        },
+                        ConversationPatch::ItemUpsert {
+                            patch_id: PatchId::parse("patch-item-two").expect("patch"),
+                            sequence: PatchSequence::new(5).expect("sequence"),
+                            item: ConversationItem::UserMessage(UserMessageItem {
+                                item_id: ItemId::parse("item-two").expect("item"),
+                                turn_id: TurnId::parse("turn-two").expect("turn"),
+                                ordinal: ItemOrdinal::new(3),
+                                revision: Revision::new(0),
+                                lifecycle: ConversationLifecycle::Pending,
+                                body: MessageBody::parse("second send".to_owned())
+                                    .expect("user body"),
+                                source_message_id: Some(
+                                    artisan_domain::MessageId::parse("message-two")
+                                        .expect("source message"),
+                                ),
+                                created_at: UnixMillis::EPOCH,
+                                updated_at: UnixMillis::from_millis(10),
+                            }),
+                        },
+                    ],
+                )
+                .expect("twin echo batch");
+                application.handle_service_event(
+                    NativeTransportEvent::PatchBatch(batch),
+                    cx,
+                );
+                // Both watches retired independently; both bodies exact-once.
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    0
+                );
+                assert!(application.message_failure.is_none());
+                let canonical = application
+                    .conversation_host
+                    .clone()
+                    .expect("mounted host")
+                    .read(cx)
+                    .canonical_snapshot()
+                    .expect("canonical snapshot");
+                let bodies: Vec<_> = canonical
+                    .items()
+                    .iter()
+                    .filter_map(|item| match item {
+                        ConversationItem::UserMessage(message) => {
+                            Some(message.body.as_str().to_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(bodies, ["first send", "second send"]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn echo_before_receipt_retires_from_canonical_scan(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("early-echo-task").expect("thread");
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, _) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    thread_id.clone(),
+                    "early echo",
+                    sink,
+                );
+                install_configured_engine_settings(application, cx);
+                application.begin_message_submission(cx);
+                application.handle_service_event(
+                    NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
+                    cx,
+                );
+                // The patch stream wins the race: no watch exists yet, so
+                // nothing retires, but the host still applies the echo.
+                application.handle_service_event(
+                    NativeTransportEvent::PatchBatch(echo_batch(
+                        &thread_id,
+                        1,
+                        "item-early",
+                        Some("message-early"),
+                        "turn-early",
+                        0,
+                        1,
+                        "early echo",
+                    )),
+                    cx,
+                );
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    0
+                );
+                // The receipt stages its watch, then the canonical scan
+                // finds the already-projected echo and retires immediately.
+                let receipt =
+                    send_receipt_for_flight(application, &thread_id, "message-early");
+                application.handle_service_event(
+                    NativeTransportEvent::MessageQueued(receipt),
+                    cx,
+                );
+                assert_eq!(
+                    application.composer_queue.state.echo_watch_count(),
+                    0
+                );
+                assert!(application.message_failure.is_none());
+                let canonical = application
+                    .conversation_host
+                    .clone()
+                    .expect("mounted host")
+                    .read(cx)
+                    .canonical_snapshot()
+                    .expect("canonical snapshot");
+                assert_eq!(
+                    canonical
+                        .items()
+                        .iter()
+                        .filter(|item| matches!(
+                            item,
+                            ConversationItem::UserMessage(_)
+                        ))
+                        .count(),
+                    1
+                );
+            });
+        });
+    }
+
     #[gpui::test]
     fn desktop_new_task_preserves_draft_and_blocks_repeat_creation(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
@@ -10323,6 +11721,7 @@ mod tests {
             request_id: request(request_id),
             payload: body,
             steer_target: None,
+            engine_label: None,
             token,
         });
     }
@@ -13395,6 +14794,7 @@ mod tests {
                     request_id: artisan_domain::RequestId::parse("request-first").expect("request"),
                     payload: body,
                     steer_target: None,
+                    engine_label: None,
                     token,
                 });
                 application.handle_service_event(
@@ -13430,6 +14830,7 @@ mod tests {
                         .expect("request"),
                     payload: body,
                     steer_target: None,
+                    engine_label: None,
                     token,
                 });
                 application.composer.update(application_cx, |composer, _| {
@@ -13482,6 +14883,7 @@ mod tests {
                     request_id: artisan_domain::RequestId::parse("request-newer").expect("request"),
                     payload: body,
                     steer_target: None,
+                    engine_label: None,
                     token,
                 });
                 application.handle_service_event(
@@ -13525,6 +14927,7 @@ mod tests {
                         .expect("request"),
                     payload: body,
                     steer_target: None,
+                    engine_label: None,
                     token,
                 });
                 application.handle_service_event(
@@ -13559,6 +14962,7 @@ mod tests {
                     request_id: artisan_domain::RequestId::parse("request-stop").expect("request"),
                     payload: body,
                     steer_target: None,
+                    engine_label: None,
                     token,
                 });
                 application.handle_service_event(
@@ -13599,6 +15003,7 @@ mod tests {
                         .expect("request"),
                     payload: body,
                     steer_target: None,
+                    engine_label: None,
                     token,
                 });
                 application.message_receipt = Some(first_receipt(
@@ -13637,6 +15042,7 @@ mod tests {
                         .expect("request"),
                     payload: body,
                     steer_target: None,
+                    engine_label: None,
                     token,
                 });
                 application.prepare_shutdown(application_cx);
@@ -13758,6 +15164,7 @@ mod tests {
             request_id: request("message-switch"),
             payload: body,
             steer_target: None,
+            engine_label: None,
             token,
         });
 
@@ -14085,6 +15492,7 @@ mod tests {
                     request_id: request("message-stopped"),
                     payload: body,
                     steer_target: None,
+                    engine_label: None,
                     token,
                 });
                 let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);

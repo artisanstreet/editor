@@ -389,10 +389,16 @@ impl NativeApplication {
                     token.thread_id() == &thread_id && token.generation() == generation
                 }) {
                     let token = self.composer_queue.refresh.take().unwrap();
-                    let _ = self
+                    if self
                         .composer_queue
                         .state
-                        .apply_queue_listing(&token, listing);
+                        .apply_queue_listing(&token, listing)
+                        .is_ok()
+                    {
+                        // Re-resolve watches retained across a failed label
+                        // dispatch against the fresh authoritative page.
+                        self.rescan_retained_echo_watches(cx);
+                    }
                 }
             }
             Event::QueuedMessagesFailed {

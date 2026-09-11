@@ -38,6 +38,18 @@ pub(crate) const COMPOSER_QUEUE_REFRESH_INTERVAL_MS: u64 = 5000;
 /// duplicate receipt harmless. They contain no payload bytes.
 const COMPLETED_WITHDRAWAL_HISTORY_LIMIT: usize = 8;
 
+/// Maximum staged echo watches. Receipts end the message flight, so several
+/// sends can await their echo at once; the bound keeps a pathological burst
+/// from growing the set without a scope change. Eviction drops the oldest
+/// watch, whose send falls back to the generic narration and the
+/// listing-driven lip.
+pub(crate) const ECHO_WATCH_LIMIT: usize = 8;
+
+/// Recently echoed message ids kept across listing prunes. A taken-up row
+/// that re-lists (dispatcher requeue after its echo projected) must not
+/// re-enter the lip and duplicate its transcript echo. Small and finite.
+const RETIRED_ECHO_HISTORY_LIMIT: usize = 32;
+
 /// Exact row identity used between the queue projection and controls.
 ///
 /// `command_id` is the original queue request id, not the newer withdrawal
@@ -748,6 +760,45 @@ struct QueueRefreshState {
     in_flight: Option<QueueRefreshToken>,
 }
 
+/// One accepted send awaiting its transcript echo.
+///
+/// Staged at receipt (the Forge message id is known only then) and retired
+/// exactly once when the canonical user item projects, or dropped on
+/// failure/scope change. Carries the send-time routed engine label for the
+/// projection lane's Waiting narration; never re-resolved from the picker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EchoWatch {
+    /// Forge-minted accepted message identity to match against echo items.
+    message_id: MessageId,
+    /// Named steer target run, if the send named one. Exact-correlation
+    /// proof: only an observed run equal to this id may override the
+    /// captured label.
+    steer_run_id: Option<RunId>,
+    /// Validated routed engine display label captured at send, if any.
+    /// `None` renders the generic fallback, never "Waiting for Other".
+    engine_label: Option<String>,
+}
+
+impl EchoWatch {
+    /// Returns the watched Forge message identity.
+    #[must_use]
+    pub(crate) const fn message_id(&self) -> &MessageId {
+        &self.message_id
+    }
+
+    /// Returns the named steer target run, if the send named one.
+    #[must_use]
+    pub(crate) const fn steer_run_id(&self) -> Option<&RunId> {
+        self.steer_run_id.as_ref()
+    }
+
+    /// Returns the send-time engine label, if one was captured.
+    #[must_use]
+    pub(crate) fn engine_label(&self) -> Option<&str> {
+        self.engine_label.as_deref()
+    }
+}
+
 /// Complete queue/usage projection owned by the native application.
 pub(crate) struct ComposerQueueState {
     current_thread: Option<ThreadId>,
@@ -766,6 +817,20 @@ pub(crate) struct ComposerQueueState {
     restore_candidate: Option<RecallRestoreCandidate>,
     completed_withdrawals: VecDeque<CompletedWithdrawal>,
     terminal_identity: Option<ComposerQueueIdentity>,
+    /// Forge message ids whose transcript echo was observed. Taken-up rows
+    /// leave the lip even while still listed: the lip yields to the
+    /// transcript exactly like the reference `TakeUp`, instead of blindly
+    /// mapping every authoritative entry. Pruned against each authoritative
+    /// listing (ids that cannot lip need no entry); see also
+    /// `retired_echoes` for re-listed echoes.
+    taken_up: HashSet<MessageId>,
+    /// Finite recently-echoed message ids. Survives listing prunes so a
+    /// requeued echo never re-enters the lip beside its transcript twin.
+    retired_echoes: VecDeque<MessageId>,
+    /// Accepted sends awaiting their echo, keyed by Forge message id (see
+    /// [`EchoWatch`]). A bounded collection: the flight ends at receipt, so
+    /// several sends can await echo at once.
+    echo_watches: Vec<EchoWatch>,
     status: QueueStatus,
     usage_scope: Option<UsageScope>,
     usage: Option<UsageSnapshot>,
@@ -833,6 +898,9 @@ impl ComposerQueueState {
             restore_candidate: None,
             completed_withdrawals: VecDeque::with_capacity(COMPLETED_WITHDRAWAL_HISTORY_LIMIT),
             terminal_identity: None,
+            taken_up: HashSet::new(),
+            retired_echoes: VecDeque::new(),
+            echo_watches: Vec::new(),
             status: QueueStatus::Idle,
             usage_scope: None,
             usage: None,
@@ -863,6 +931,13 @@ impl ComposerQueueState {
         self.failed_has_more = false;
         self.failed_refresh.in_flight = None;
         self.terminal_identity = None;
+        if thread_changed {
+            // Take-up and echo watches are thread-scoped: a new thread owns
+            // neither the old echoes nor their lip rows.
+            self.taken_up.clear();
+            self.retired_echoes.clear();
+            self.echo_watches.clear();
+        }
         if thread_changed {
             self.usage_scope = None;
             self.usage = None;
@@ -997,6 +1072,12 @@ impl ComposerQueueState {
         }) {
             self.terminal_identity = None;
         }
+        // Bound take-up growth against the authoritative listing: ids that
+        // left the page cannot lip, so they need no set entry. Echoes that
+        // re-list stay retired through the finite `retired_echoes` history
+        // instead (a dispatcher requeue after the echo projected).
+        self.taken_up
+            .retain(|message_id| self.entries.iter().any(|entry| entry.message_id() == message_id));
         self.status = if self.pending_withdrawal.is_some() {
             QueueStatus::WithdrawalPending
         } else if self.pending_recall_read.is_some() {
@@ -1170,10 +1251,18 @@ impl ComposerQueueState {
     }
 
     /// Projects rows into the existing controls contract.
+    ///
+    /// Taken-up and recently-echoed rows are omitted even while still
+    /// listed: their transcript echo owns the visual now. Queued-behind rows
+    /// (never echoed) stay.
     #[must_use]
     pub(crate) fn pending_lip_rows(&self) -> Vec<QueueLipRow> {
         self.entries
             .iter()
+            .filter(|entry| {
+                !self.taken_up.contains(entry.message_id())
+                    && !self.retired_echoes.contains(entry.message_id())
+            })
             .map(|entry| QueueLipRow {
                 command_id: entry.identity.command_id.clone(),
                 generation: entry.identity.generation,
@@ -1181,6 +1270,70 @@ impl ComposerQueueState {
                 editable: self.row_is_editable(entry),
             })
             .collect()
+    }
+
+    /// Stages one accepted send to watch for its transcript echo.
+    ///
+    /// Keyed by Forge message id: a replayed receipt for the same message
+    /// replaces its entry instead of duplicating it. Evicts the oldest
+    /// watch past [`ECHO_WATCH_LIMIT`].
+    pub(crate) fn stage_echo_watch(
+        &mut self,
+        message_id: MessageId,
+        steer_run_id: Option<RunId>,
+        engine_label: Option<String>,
+    ) {
+        self.echo_watches
+            .retain(|watch| watch.message_id() != &message_id);
+        if self.echo_watches.len() >= ECHO_WATCH_LIMIT {
+            self.echo_watches.remove(0);
+        }
+        self.echo_watches.push(EchoWatch {
+            message_id,
+            steer_run_id,
+            engine_label,
+        });
+    }
+
+    /// Returns the staged echo watch for one Forge message id, if any.
+    #[must_use]
+    pub(crate) fn echo_watch_for(&self, message_id: &MessageId) -> Option<EchoWatch> {
+        self.echo_watches
+            .iter()
+            .find(|watch| watch.message_id() == message_id)
+            .cloned()
+    }
+
+    /// Returns how many echo watches are staged.
+    #[must_use]
+    pub(crate) fn echo_watch_count(&self) -> usize {
+        self.echo_watches.len()
+    }
+
+    /// Drops one staged echo watch without retiring anything.
+    ///
+    /// Returns whether a watch was present.
+    pub(crate) fn clear_echo_watch_for(&mut self, message_id: &MessageId) -> bool {
+        let before = self.echo_watches.len();
+        self.echo_watches
+            .retain(|watch| watch.message_id() != message_id);
+        self.echo_watches.len() != before
+    }
+
+    /// Marks one Forge message taken up and records its echo in the finite
+    /// retired history.
+    ///
+    /// Returns whether the row was newly retired from the lip.
+    pub(crate) fn mark_taken_up(&mut self, message_id: &MessageId) -> bool {
+        let fresh = !self.taken_up.contains(message_id)
+            && !self.retired_echoes.contains(message_id);
+        self.taken_up.insert(message_id.clone());
+        self.retired_echoes.retain(|retired| retired != message_id);
+        self.retired_echoes.push_back(message_id.clone());
+        while self.retired_echoes.len() > RETIRED_ECHO_HISTORY_LIMIT {
+            self.retired_echoes.pop_front();
+        }
+        fresh
     }
 
     fn row_is_editable(&self, entry: &ComposerQueueEntry) -> bool {
@@ -2225,5 +2378,161 @@ mod tests {
         assert!(state.failed_entries().is_empty());
         assert_eq!(state.failed_total_count(), 0);
         assert!(!state.failed_refresh_in_flight());
+    }
+
+    #[test]
+    fn taken_up_rows_leave_the_lip_while_still_listed() {
+        let thread_id = thread("thread-a");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 4);
+        let token = state
+            .begin_queue_refresh(true, true, false, false, true)
+            .expect("forced refresh");
+        state
+            .apply_queue_listing(
+                &token,
+                listing(
+                    &thread_id,
+                    vec![
+                        summary(&thread_id, "message-a", Some("first")),
+                        summary(&thread_id, "message-b", Some("second")),
+                    ],
+                ),
+            )
+            .expect("queued page");
+        assert_eq!(state.pending_lip_rows().len(), 2);
+        // The transcript echo for the first row retires it even though the
+        // next listing still carries it: the lip yields to the transcript.
+        assert!(state.mark_taken_up(&message("message-a")));
+        assert!(!state.mark_taken_up(&message("message-a")));
+        let rows = state.pending_lip_rows();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.command_id.as_str())
+                .collect::<Vec<_>>(),
+            ["request-message-b"]
+        );
+        // A later listing that still carries the echoed row cannot revive it.
+        let token = state
+            .begin_queue_refresh(true, true, false, false, true)
+            .expect("forced refresh");
+        state
+            .apply_queue_listing(
+                &token,
+                listing(
+                    &thread_id,
+                    vec![
+                        summary(&thread_id, "message-a", Some("first")),
+                        summary(&thread_id, "message-b", Some("second")),
+                    ],
+                ),
+            )
+            .expect("queued page");
+        assert_eq!(state.pending_lip_rows().len(), 1);
+    }
+
+    #[test]
+    fn take_up_set_prunes_against_the_listing_while_retired_history_holds() {
+        let thread_id = thread("thread-a");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 4);
+        let token = state
+            .begin_queue_refresh(true, true, false, false, true)
+            .expect("forced refresh");
+        state
+            .apply_queue_listing(
+                &token,
+                listing(&thread_id, vec![summary(&thread_id, "message-a", Some("first"))]),
+            )
+            .expect("queued page");
+        assert!(state.mark_taken_up(&message("message-a")));
+        // The row leaves the page: the set entry is pruned because it
+        // cannot lip, while the finite history keeps the echo retired.
+        let token = state
+            .begin_queue_refresh(true, true, false, false, true)
+            .expect("forced refresh");
+        state
+            .apply_queue_listing(&token, listing(&thread_id, Vec::new()))
+            .expect("empty page");
+        assert!(state.pending_lip_rows().is_empty());
+        // A dispatcher requeue re-lists the echoed row: it must not re-lip
+        // beside its transcript twin.
+        let token = state
+            .begin_queue_refresh(true, true, false, false, true)
+            .expect("forced refresh");
+        state
+            .apply_queue_listing(
+                &token,
+                listing(&thread_id, vec![summary(&thread_id, "message-a", Some("first"))]),
+            )
+            .expect("queued page");
+        assert!(state.pending_lip_rows().is_empty());
+        assert!(!state.mark_taken_up(&message("message-a")));
+    }
+
+    #[test]
+    fn echo_watches_retire_per_source_id_and_clear_on_scope_change() {
+        let thread_id = thread("thread-a");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 4);
+        assert_eq!(state.echo_watch_count(), 0);
+        state.stage_echo_watch(
+            message("message-a"),
+            None,
+            Some("Codex".to_owned()),
+        );
+        state.stage_echo_watch(message("message-b"), None, None);
+        assert_eq!(state.echo_watch_count(), 2);
+        let watch = state
+            .echo_watch_for(&message("message-a"))
+            .expect("staged watch");
+        assert_eq!(watch.message_id(), &message("message-a"));
+        assert_eq!(watch.engine_label(), Some("Codex"));
+        // Unknown ids match nothing and change nothing.
+        assert!(state.echo_watch_for(&message("message-x")).is_none());
+        assert!(!state.clear_echo_watch_for(&message("message-x")));
+        // Retiring one watch leaves the other staged.
+        assert!(state.mark_taken_up(&message("message-a")));
+        assert!(!state.mark_taken_up(&message("message-a")));
+        assert!(state.clear_echo_watch_for(&message("message-a")));
+        assert!(!state.clear_echo_watch_for(&message("message-a")));
+        assert_eq!(state.echo_watch_count(), 1);
+        assert!(
+            state
+                .echo_watch_for(&message("message-b"))
+                .is_some()
+        );
+        // A fresh watch dies with its thread scope.
+        state.set_scope(Some(thread("thread-b")), 5);
+        assert_eq!(state.echo_watch_count(), 0);
+        assert!(state.pending_lip_rows().is_empty());
+    }
+
+    #[test]
+    fn echo_watch_replay_replaces_and_overflow_evicts_oldest() {
+        let thread_id = thread("thread-a");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 4);
+        state.stage_echo_watch(message("message-a"), None, Some("Old".to_owned()));
+        // A replayed receipt for the same message replaces, not duplicates.
+        state.stage_echo_watch(message("message-a"), None, Some("New".to_owned()));
+        assert_eq!(state.echo_watch_count(), 1);
+        assert_eq!(
+            state
+                .echo_watch_for(&message("message-a"))
+                .expect("replaced watch")
+                .engine_label(),
+            Some("New")
+        );
+        for index in 0..ECHO_WATCH_LIMIT {
+            state.stage_echo_watch(
+                message(&format!("message-{index}")),
+                None,
+                None,
+            );
+        }
+        assert_eq!(state.echo_watch_count(), ECHO_WATCH_LIMIT);
+        // The oldest entry (message-a, then message-0) evicted first.
+        assert!(state.echo_watch_for(&message("message-a")).is_none());
     }
 }
