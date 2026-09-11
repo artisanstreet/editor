@@ -300,6 +300,31 @@ pub(crate) fn from_catalog_result_with_discovery(
     Ok(next)
 }
 
+/// Builds the scope-free catalog: the bundled baseline plus live discovery,
+/// with no OpenCode2 profile or runtime routes. Used when a thread has no
+/// registered OpenCode2 profile, so the picker still shows static and
+/// discovered models instead of failing empty.
+pub(crate) fn from_discovery(
+    discovery: &crate::model_discovery::DiscoveryBundle,
+) -> Result<NativeModelCatalog, NativeModelCatalogBridgeError> {
+    let runtime = NativeCatalogRuntime {
+        catalog_revision: Some(format!("static+discovery-{:016x}", discovery_revision_hash(discovery))),
+        runnable_harness_ids: RUNNABLE_ENGINE_IDS
+            .iter()
+            .map(|harness| (*harness).to_owned())
+            .collect(),
+        ..NativeCatalogRuntime::default()
+    };
+    let mut manifest = NativeModelCatalog::offline()
+        .map_err(|_| NativeModelCatalogBridgeError::BundledManifest)?
+        .manifest;
+    apply_discovery(&mut manifest, discovery);
+    let catalog = NativeModelCatalog::from_manifest(manifest, runtime);
+    artisan_catalog::wire::encode_catalog(&catalog)
+        .map_err(|_| NativeModelCatalogBridgeError::InvalidCatalog)?;
+    Ok(catalog)
+}
+
 /// Stable revision contribution for one discovery bundle.
 fn discovery_revision_hash(discovery: &crate::model_discovery::DiscoveryBundle) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;

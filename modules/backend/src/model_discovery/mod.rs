@@ -115,7 +115,7 @@ pub(crate) struct DiscoveredThinkingOption {
 }
 
 /// One bounded discovery bundle.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct DiscoveryBundle {
     /// Rows from every engine that answered, in engine order.
     pub(crate) models: Vec<DiscoveredModel>,

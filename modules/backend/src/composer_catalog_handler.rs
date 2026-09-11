@@ -222,10 +222,14 @@ async fn current_catalog(
     profile: &EngineProfileId,
 ) -> Result<artisan_catalog::NativeModelCatalog, ComposerCatalogHandlerError> {
     let service = service.ok_or(ComposerCatalogHandlerError::CapabilityUnavailable)?;
-    let result = service
-        .discover(thread, profile)
-        .await
-        .map_err(service_error)?;
+    let result = match service.discover(thread, profile).await {
+        Ok(result) => Some(result),
+        // A thread without a registered OpenCode2 profile still gets a usable
+        // catalogue: the static baseline plus whatever discovery has warmed.
+        // This is the shape every non-OpenCode2 thread runs with.
+        Err(ComposerCatalogServiceError::ProfileUnavailable) => None,
+        Err(error) => return Err(service_error(error)),
+    };
     let favorites = repository
         .read_model_favorites()
         .await
@@ -234,13 +238,22 @@ async fn current_catalog(
     // response never wait on engine processes, and the next read merges the
     // discovered rows.
     crate::model_discovery::warm_discovery();
-    match crate::model_discovery::cached_bundle() {
-        Some(discovery) => crate::native_model_catalog::from_catalog_result_with_discovery(
-            result,
-            &discovery,
-            &favorites,
-        ),
-        None => crate::native_model_catalog::from_catalog_result(result, &favorites),
+    let discovery = crate::model_discovery::cached_bundle();
+    match result {
+        Some(result) => match discovery {
+            Some(discovery) => crate::native_model_catalog::from_catalog_result_with_discovery(
+                result,
+                &discovery,
+                &favorites,
+            ),
+            None => crate::native_model_catalog::from_catalog_result(result, &favorites),
+        },
+        None => match discovery {
+            Some(discovery) => crate::native_model_catalog::from_discovery(&discovery),
+            None => crate::native_model_catalog::from_discovery(
+                &crate::model_discovery::DiscoveryBundle::default(),
+            ),
+        },
     }
     .map_err(|_| ComposerCatalogHandlerError::InvalidCatalog)
 }
