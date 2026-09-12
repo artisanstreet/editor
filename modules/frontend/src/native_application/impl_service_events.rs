@@ -232,15 +232,14 @@ impl NativeApplication {
             }
             // The shipping composer uses QueueMessage. Legacy first-message
             // results cannot settle a flight from the newer command family.
-            // Answer receipts pair through the engine approve pairing in a
-            // later packet; the transport delivers them here but no gate
-            // consumes them yet.
             NativeTransportEvent::FirstMessageQueued(_)
-            | NativeTransportEvent::FirstMessageFailed { .. }
-            | NativeTransportEvent::ApprovalAnswered(_)
+            | NativeTransportEvent::FirstMessageFailed { .. } => {}
+            // Answer receipts and failures settle their row gates through the
+            // existing transport pairing policy.
+            NativeTransportEvent::ApprovalAnswered { .. }
             | NativeTransportEvent::ApprovalFailed { .. }
-            | NativeTransportEvent::QuestionAnswered(_)
-            | NativeTransportEvent::QuestionFailed { .. } => {}
+            | NativeTransportEvent::QuestionAnswered { .. }
+            | NativeTransportEvent::QuestionFailed { .. } => self.handle_answer_event(event, cx),
             NativeTransportEvent::MessageQueued(receipt) => {
                 self.handle_message_receipt(receipt, cx);
                 self.schedule_composer_queue(true, cx);

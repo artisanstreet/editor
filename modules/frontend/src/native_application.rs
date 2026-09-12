@@ -159,6 +159,9 @@ mod impl_message_flight;
 #[path = "native_application/impl_service_events.rs"]
 mod impl_service_events;
 
+#[path = "native_application/impl_answer_events.rs"]
+mod impl_answer_events;
+
 #[path = "native_application/impl_engine_settings.rs"]
 mod impl_engine_settings;
 

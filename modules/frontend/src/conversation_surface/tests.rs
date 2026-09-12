@@ -238,6 +238,9 @@ fn tall_navigator_scene() -> ConversationScene {
 #[path = "tests/approve_submit.rs"]
 mod approve_submit;
 
+#[path = "tests/answer_receipts.rs"]
+mod answer_receipts;
+
 #[path = "tests/status.rs"]
 mod status;
 

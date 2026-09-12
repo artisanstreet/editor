@@ -116,6 +116,11 @@ mod render_navigator;
 #[path = "conversation_surface/render_sections.rs"]
 mod render_sections;
 
+// Answer outcome settlement (see conversation_surface/).
+
+#[path = "conversation_surface/answer_settlement.rs"]
+mod answer_settlement;
+
 // Phase-3 split submodules (see conversation_surface/).
 
 #[path = "conversation_surface/disclosure.rs"]

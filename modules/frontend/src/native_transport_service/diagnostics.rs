@@ -10,6 +10,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use super::*;
+use artisan_protocol::{ErrorDetail, ProtocolFailure};
 
 /// Redacted stage of a service failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -433,6 +434,82 @@ impl From<RequestFailure> for ServiceFailure {
     }
 }
 
+/// Correlated failure settling one dispatched answer command.
+///
+/// Unlike a generic [`ServiceFailure`], this preserves the peer's exact
+/// rejection code and retryability when the peer answered, so the answer
+/// pairing policy can distinguish an idempotency conflict (the originally
+/// accepted intent stands; never retry) from a transient or local failure.
+/// The correlated request identity is deliberately absent: the transport
+/// event also carries the complete answer command, and the pairing layer
+/// joins the two, so they can never disagree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnswerFailure {
+    code: ErrorCode,
+    detail: ErrorDetail,
+    retryable: bool,
+}
+
+impl AnswerFailure {
+    /// Correlates this failure with the answer command that was dispatched.
+    #[must_use]
+    pub fn protocol_failure(&self, request_id: &RequestId) -> ProtocolFailure {
+        ProtocolFailure {
+            code: self.code,
+            detail: self.detail.clone(),
+            retryable: self.retryable,
+            request_id: Some(request_id.clone()),
+        }
+    }
+
+    /// Maps one redacted local failure that carries no peer classification.
+    fn local(failure: ServiceFailure, retryable_local_session_loss: bool) -> Self {
+        let retryable = retryable_local_session_loss
+            || matches!(
+                failure.category,
+                ServiceFailureCategory::Unavailable
+                    | ServiceFailureCategory::Backpressure
+                    | ServiceFailureCategory::LocalSession
+            );
+        let code = if failure.category == ServiceFailureCategory::InvalidConfiguration {
+            ErrorCode::InvalidInput
+        } else {
+            ErrorCode::Internal
+        };
+        Self {
+            code,
+            detail: ErrorDetail::parse(failure.to_string()).unwrap_or_default(),
+            retryable,
+        }
+    }
+}
+
+impl From<ServiceFailure> for AnswerFailure {
+    fn from(failure: ServiceFailure) -> Self {
+        Self::local(failure, false)
+    }
+}
+
+impl From<RequestFailure> for AnswerFailure {
+    fn from(error: RequestFailure) -> Self {
+        let Some(peer) = error.peer else {
+            return Self::local(error.failure, error.retryable_local_session_loss);
+        };
+        let detail = if peer.code == ErrorCode::IdempotencyConflict {
+            "the same request identity was already accepted for a different answer"
+        } else if peer.retryable {
+            "the answer was rejected; retry may succeed"
+        } else {
+            "the peer rejected the answer"
+        };
+        Self {
+            code: peer.code,
+            detail: ErrorDetail::parse(detail).unwrap_or_default(),
+            retryable: peer.retryable,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DurableSaveRetryClassification {
     LocalSessionLoss,
@@ -492,5 +569,60 @@ pub(super) fn local_session_request_loss_is_retryable(error: &ClientRequestError
                 ))
         ),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod answer_failure_tests {
+    use super::*;
+    use artisan_domain::RequestId;
+
+    fn request_id() -> RequestId {
+        RequestId::parse("answer-1").expect("fixture request id")
+    }
+
+    #[test]
+    fn peer_conflict_preserves_code_and_retryability() {
+        let failure: AnswerFailure = RequestFailure {
+            failure: ServiceFailure::new(
+                ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::IdempotencyConflict,
+                retryable: false,
+            }),
+            retryable_local_session_loss: false,
+        }
+        .into();
+        let protocol = failure.protocol_failure(&request_id());
+        assert_eq!(protocol.code, ErrorCode::IdempotencyConflict);
+        assert!(!protocol.retryable);
+        assert_eq!(protocol.request_id.as_ref(), Some(&request_id()));
+        assert!(
+            protocol.detail.as_str().contains("already accepted"),
+            "the conflict names the standing outcome: {}",
+            protocol.detail.as_str()
+        );
+    }
+
+    #[test]
+    fn transient_local_failure_stays_retryable() {
+        let failure: AnswerFailure = ServiceFailure {
+            stage: ServiceFailureStage::EventBridge,
+            category: ServiceFailureCategory::Backpressure,
+        }
+        .into();
+        let protocol = failure.protocol_failure(&request_id());
+        assert_eq!(protocol.code, ErrorCode::Internal);
+        assert!(protocol.retryable);
+    }
+
+    #[test]
+    fn invalid_local_failure_is_not_retryable() {
+        let failure: AnswerFailure = ServiceFailure::invalid(ServiceFailureStage::Request).into();
+        let protocol = failure.protocol_failure(&request_id());
+        assert_eq!(protocol.code, ErrorCode::InvalidInput);
+        assert!(!protocol.retryable);
     }
 }

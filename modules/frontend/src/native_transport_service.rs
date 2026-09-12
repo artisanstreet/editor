@@ -286,22 +286,38 @@ pub enum NativeTransportEvent {
     },
     /// One approval answer recorded by Forge with its correlated receipt.
     ///
-    /// The receipt-pairing packet binds these onto the answer gates; the
-    /// application retains delivery without consuming them yet.
-    ApprovalAnswered(artisan_protocol::RespondApprovalReceipt),
-    /// One approval answer failed with a redacted diagnostic; the complete
-    /// answer intent is retained for the pairing layer.
+    /// The complete answer intent travels with the receipt; the pairing layer
+    /// settles the exact command that was dispatched, never a derivation
+    /// from the receipt.
+    ApprovalAnswered {
+        /// Exact dispatched answer intent.
+        command: artisan_domain::RespondApproval,
+        /// Correlated Forge receipt.
+        receipt: artisan_protocol::RespondApprovalReceipt,
+    },
+    /// One approval answer failed with a correlated gate-pairing failure.
+    ///
+    /// The complete answer intent is retained for the pairing layer, and the
+    /// failure keeps the peer's exact classification when one answered.
     ApprovalFailed {
         command: artisan_domain::RespondApproval,
-        failure: ServiceFailure,
+        failure: AnswerFailure,
     },
     /// One question answer recorded by Forge with its correlated receipt.
-    QuestionAnswered(artisan_protocol::RespondQuestionReceipt),
-    /// One question answer failed with a redacted diagnostic; the complete
-    /// answer intent is retained for the pairing layer.
+    ///
+    /// Identity rules match [`Self::ApprovalAnswered`].
+    QuestionAnswered {
+        /// Exact dispatched answer intent.
+        command: artisan_domain::RespondQuestion,
+        /// Correlated Forge receipt.
+        receipt: artisan_protocol::RespondQuestionReceipt,
+    },
+    /// One question answer failed with a correlated gate-pairing failure.
+    ///
+    /// Identity rules match [`Self::ApprovalFailed`].
     QuestionFailed {
         command: artisan_domain::RespondQuestion,
-        failure: ServiceFailure,
+        failure: AnswerFailure,
     },
     /// Original image data loaded for an exact history reference.
     MessageImageLoaded {
@@ -666,11 +682,11 @@ mod profile_usage_operations;
 mod diagnostics;
 
 pub use diagnostics::{
-    CommandSendError, EventReceiveError, NativeProjectIntakeOperation, NativeProjectIntakeStage,
-    PrivateDelivery, ReadinessValidationError, ServiceFailure, ServiceFailureCategory,
-    ServiceFailureStage, ServiceJoinError, ServiceSpawnError, ServiceStopStatus, StartupError,
-    SubscriptionFailureDisposition, SubscriptionRequestKind, subscription_failure_disposition,
-    validate_readiness,
+    AnswerFailure, CommandSendError, EventReceiveError, NativeProjectIntakeOperation,
+    NativeProjectIntakeStage, PrivateDelivery, ReadinessValidationError, ServiceFailure,
+    ServiceFailureCategory, ServiceFailureStage, ServiceJoinError, ServiceSpawnError,
+    ServiceStopStatus, StartupError, SubscriptionFailureDisposition, SubscriptionRequestKind,
+    subscription_failure_disposition, validate_readiness,
 };
 #[cfg(test)]
 use diagnostics::{
@@ -743,11 +759,15 @@ use project_intake::{begin_project_intake, create_task_in_project, retry_project
 #[path = "native_transport_service/handlers.rs"]
 mod handlers;
 
+#[path = "native_transport_service/answer_handlers.rs"]
+mod answer_handlers;
+
+use answer_handlers::{respond_approval, respond_question};
 use handlers::{
     durable_save_request, known_thread_for_queue, list_registered_profiles, load_initial_catalog,
     load_thread_engine_settings, query_project_repository, queue_first_message, queue_message,
-    read_message_image, request_snapshot, resolve_rich_link, respond_approval, respond_question,
-    select_project, set_thread_engine_config,
+    read_message_image, request_snapshot, resolve_rich_link, select_project,
+    set_thread_engine_config,
 };
 
 #[cfg(test)]
