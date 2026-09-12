@@ -537,6 +537,10 @@ fn settled_toolbar_stays_in_the_message_column_and_short_chat_does_not_scroll(
     ));
     let (surface, cx) =
         cx.add_window_view(|_, cx| ConversationSurface::new(transcript, ThemeMode::Dark, cx));
+    surface.update(cx, |surface, cx| {
+        surface.set_footer_relative_age(&turn_id("turn_a"), "1h ago".to_owned(), cx);
+        surface.set_footer_speed(&turn_id("turn_a"), Some("51.2 tok/s".to_owned()), cx);
+    });
     cx.simulate_resize(size(px(720.0), px(600.0)));
     settle(cx);
     settle(cx);
@@ -554,6 +558,10 @@ fn settled_toolbar_stays_in_the_message_column_and_short_chat_does_not_scroll(
         .unwrap();
     assert_eq!(copy.left(), body.left());
     assert_eq!(copy.size, size(px(16.0), px(16.0)));
+    let metadata = cx
+        .debug_bounds("artisan-conversation-surface-turn-turn_a-footer-time-99")
+        .unwrap();
+    assert_eq!(metadata.left() - copy.right(), px(10.0));
     assert_eq!(footer.left(), body.left());
     assert_eq!(footer.top() - body.bottom(), px(4.0));
     assert!(footer.bottom() <= turn.bottom());

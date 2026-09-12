@@ -82,6 +82,11 @@ pub enum ConversationHostEffect {
         /// Canonical absolute HTTP(S) URLs that need a resolve attempt.
         urls: Vec<String>,
     },
+    /// Read exact durable usage for a revealed settled footer.
+    ReadFooterUsage {
+        /// Exact immutable thread and run scope.
+        query: artisan_domain::ReadRunUsage,
+    },
     /// A typed refusal that could be observed by the outer adapter.
     Refused {
         /// Redacted refusal diagnosis.
@@ -199,6 +204,8 @@ pub struct ConversationHost {
     footer_policies: HashMap<TurnId, ConversationTurnFooterPolicy>,
     /// Whether the bounded clock task is currently running.
     clock_running: bool,
+    /// Cached reads for visible snapshot runs; a missing report never becomes zero.
+    footer_usage: HashMap<artisan_domain::RunId, Option<artisan_domain::RunUsageReport>>,
     /// Retained clock task; dropping the host drops the task with it.
     clock_task: Option<gpui::Task<()>>,
 }
@@ -267,6 +274,7 @@ impl ConversationHost {
             pending_extent_changes: 0,
             footer_policies: HashMap::new(),
             clock_running: false,
+            footer_usage: HashMap::new(),
             clock_task: None,
         };
         host.flush_controller_effects();
@@ -430,6 +438,14 @@ impl ConversationHost {
                     });
                     self.footer_policies
                         .retain(|turn_id, _| live_turns.contains(turn_id));
+                    if let Some(snapshot) = self.canonical_snapshot() {
+                        self.footer_usage.retain(|run, _| snapshot.items().iter().any(|item| {
+                            matches!(item, artisan_domain::ConversationItem::AssistantMessage(message) if &message.run_id == run)
+                        }));
+                    }
+                    for turn in &live_turns {
+                        self.sync_footer_speed(turn, false, cx);
+                    }
                     self.reconcile_clock(clock_wanted, cx);
                 }
                 if requires_extent_change {
@@ -656,6 +672,67 @@ impl ConversationHost {
         })
     }
 
+    /// Installs usage only for a run this host requested.
+    pub(crate) fn accept_footer_usage(
+        &mut self,
+        query: &artisan_domain::ReadRunUsage,
+        result: Option<artisan_domain::RunUsageResult>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.controller_view().delivery.thread_id != query.thread_id
+            || !self.footer_usage.contains_key(&query.run_id)
+        {
+            return;
+        }
+        let Some(result) = result else {
+            self.footer_usage.remove(&query.run_id);
+            return;
+        };
+        if result.thread_id != query.thread_id || result.run_id != query.run_id {
+            return;
+        }
+        self.footer_usage
+            .insert(query.run_id.clone(), result.report);
+        let Some(snapshot) = self.canonical_snapshot() else {
+            return;
+        };
+        let turns: Vec<_> = snapshot
+            .turns()
+            .iter()
+            .map(|turn| turn.turn_id.clone())
+            .collect();
+        for turn in turns {
+            self.sync_footer_speed(&turn, false, cx);
+        }
+    }
+
+    fn sync_footer_speed(&mut self, turn: &TurnId, request: bool, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.controller.snapshot() else {
+            return;
+        };
+        let scene = self.surface.read(cx).scene();
+        let query = crate::conversation_token_speed::footer_usage_query(snapshot, scene, turn);
+        let speed = query
+            .as_ref()
+            .and_then(|query| self.footer_usage.get(&query.run_id))
+            .and_then(Option::as_ref)
+            .and_then(|report| {
+                crate::conversation_token_speed::footer_speed(snapshot, scene, turn, report)
+            });
+        self.surface
+            .update(cx, |surface, cx| surface.set_footer_speed(turn, speed, cx));
+        if request
+            && let Some(query) = query
+            && !self.footer_usage.contains_key(&query.run_id)
+            && self.effects.len() < CONVERSATION_HOST_MAX_EFFECTS
+        {
+            self.footer_usage.insert(query.run_id.clone(), None);
+            self.effects
+                .push(ConversationHostEffect::ReadFooterUsage { query });
+            cx.notify();
+        }
+    }
+
     /// Serves one footer reveal through the existing footer policy.
     ///
     /// The scene settlement supplies the timestamp and response bytes; the
@@ -668,6 +745,7 @@ impl ConversationHost {
         surface: &Entity<ConversationSurface>,
         cx: &mut Context<Self>,
     ) -> SurfaceRouteDecision {
+        self.sync_footer_speed(turn, true, cx);
         let staged: Option<(String, String)> = settled_footer_for(surface.read(cx).scene(), turn);
         let Some((settled_at, response_text)) = staged else {
             return SurfaceRouteDecision::Accepted;

@@ -41,6 +41,7 @@ pub mod conversation_scene;
 pub mod conversation_scroll_position;
 pub mod conversation_state_machine;
 pub mod conversation_surface;
+mod conversation_token_speed;
 pub mod conversation_turn_footer_policy;
 pub mod conversation_turn_machine;
 pub mod conversation_turn_navigator;

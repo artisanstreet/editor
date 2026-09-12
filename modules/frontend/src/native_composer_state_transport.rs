@@ -30,6 +30,11 @@ pub(crate) const COMPOSER_STATE_READ_LIMIT: usize = artisan_domain::QUEUED_MESSA
 /// One bounded command sent from the application thread to the service child.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ComposerStateCommand {
+    /// Read usage for a settled footer, independently of the composer model.
+    ReadFooterUsage {
+        /// Exact immutable thread and run scope.
+        query: artisan_domain::ReadRunUsage,
+    },
     /// Read one bounded, byte-free queue page for the mounted scope.
     ListQueuedMessages {
         /// Thread whose still-queued rows are requested.
@@ -79,6 +84,13 @@ pub enum ComposerStateCommand {
 /// One bounded event returned by the service child.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ComposerStateEvent {
+    /// Optional exact-run footer measurement; failures remain absent.
+    FooterUsage {
+        /// Immutable requested scope.
+        query: artisan_domain::ReadRunUsage,
+        /// No result means the read failed.
+        result: Option<RunUsageResult>,
+    },
     /// Authoritative byte-free queue listing.
     QueuedMessages {
         /// Thread requested by the application.
@@ -208,6 +220,10 @@ pub(super) async fn handle_composer_state_command(
         } => withdraw_queued_message(runtime, frames, events, generation, *command).await,
         ComposerStateCommand::ReadRecalledMessage { generation, query } => {
             read_recalled_message(runtime, frames, events, generation, query).await
+        }
+        ComposerStateCommand::ReadFooterUsage { query } => {
+            let result = query_run_usage(runtime, frames, &query).await.ok();
+            publish_composer_event(events, ComposerStateEvent::FooterUsage { query, result })
         }
         ComposerStateCommand::ReadRunUsage {
             generation,
@@ -588,20 +604,31 @@ async fn read_run_usage(
     sequence: u64,
     query: artisan_domain::ReadRunUsage,
 ) -> Result<(), ServiceFailure> {
-    let thread_id = query.thread_id.clone();
-    let query_for_event = query.clone();
-    if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
-        return publish_composer_event(
-            events,
-            ComposerStateEvent::RunUsageFailed {
-                generation,
-                sequence,
-                query: query_for_event,
-                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-            },
-        );
-    }
-    let payload = match runtime
+    let event = match query_run_usage(runtime, frames, &query).await {
+        Ok(result) => ComposerStateEvent::RunUsage {
+            generation,
+            sequence,
+            query,
+            result,
+        },
+        Err(failure) => ComposerStateEvent::RunUsageFailed {
+            generation,
+            sequence,
+            query,
+            failure,
+        },
+    };
+    publish_composer_event(events, event)
+}
+
+async fn query_run_usage(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    query: &artisan_domain::ReadRunUsage,
+) -> Result<RunUsageResult, ServiceFailure> {
+    known_thread_for_queue(&runtime.known_threads, &query.thread_id)
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let payload = runtime
         .request(
             frames,
             query_request(Query::ReadRunUsage(query.clone())),
@@ -611,54 +638,17 @@ async fn read_run_usage(
             },
         )
         .await
-    {
-        Ok(payload) => payload,
-        Err(error) => {
-            return publish_composer_event(
-                events,
-                ComposerStateEvent::RunUsageFailed {
-                    generation,
-                    sequence,
-                    query: query_for_event,
-                    failure: error.into(),
-                },
-            );
-        }
-    };
+        .map_err(ServiceFailure::from)?;
     let ResponsePayload::RunUsage(result) = payload else {
-        return publish_composer_event(
-            events,
-            ComposerStateEvent::RunUsageFailed {
-                generation,
-                sequence,
-                query: query_for_event,
-                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-            },
-        );
+        return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
     };
     if result.thread_id != query.thread_id || result.run_id != query.run_id {
-        return publish_composer_event(
-            events,
-            ComposerStateEvent::RunUsageFailed {
-                generation,
-                sequence,
-                query: query_for_event,
-                failure: ServiceFailure::new(
-                    ServiceFailureStage::Request,
-                    ServiceFailureCategory::Integrity,
-                ),
-            },
-        );
+        return Err(ServiceFailure::new(
+            ServiceFailureStage::Request,
+            ServiceFailureCategory::Integrity,
+        ));
     }
-    publish_composer_event(
-        events,
-        ComposerStateEvent::RunUsage {
-            generation,
-            sequence,
-            query,
-            result,
-        },
-    )
+    Ok(result)
 }
 
 fn composer_state_stable_mutation(
