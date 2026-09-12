@@ -744,7 +744,7 @@ impl RadiusTokens {
 
 /// One outer shadow layer, exactly what pinned GPUI can represent:
 /// `BoxShadow { color: Hsla, offset: Point<Pixels>, blur_radius: Pixels,
-/// spread_radius: Pixels, inset: bool }` (`vendor/gpui-ce/crates/gpui/src/style.rs`).
+/// spread_radius: Pixels, inset: bool }` (`artisanstreet/gpui-ce` crates/gpui/src/style.rs).
 #[derive(Clone, Copy, Debug)]
 pub struct ShadowLayer {
     /// Shadow color including alpha.

@@ -6,7 +6,7 @@ rust_test(
     crate_name = "inline_code_text_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -58,7 +58,7 @@ rust_test(
     crate_name = "theme_tokens_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -73,7 +73,7 @@ rust_test(
     deps = [
         "//modules/assets:assets",
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -87,7 +87,7 @@ rust_test(
     crate_name = "accordion_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -101,7 +101,7 @@ rust_test(
     crate_name = "alert_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -115,7 +115,7 @@ rust_test(
     crate_name = "alert_dialog_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -128,7 +128,7 @@ rust_test(
     srcs = ["gpui_harness.rs"],
     crate_name = "gpui_harness_test",
     deps = [
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -153,7 +153,7 @@ rust_test(
     crate_name = "input_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -167,7 +167,7 @@ rust_test(
     crate_name = "input_group_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -192,7 +192,7 @@ rust_test(
     crate_name = "button_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -206,7 +206,7 @@ rust_test(
     crate_name = "switch_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -220,7 +220,7 @@ rust_test(
     crate_name = "shimmer_text_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -234,7 +234,7 @@ rust_test(
     crate_name = "collapsible_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -248,7 +248,7 @@ rust_test(
     crate_name = "context_menu_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -262,7 +262,7 @@ rust_test(
     crate_name = "dialog_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -276,7 +276,7 @@ rust_test(
     crate_name = "dropdown_menu_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -290,7 +290,7 @@ rust_test(
     crate_name = "fade_arc_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -304,7 +304,7 @@ rust_test(
     crate_name = "tabs_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -318,7 +318,7 @@ rust_test(
     crate_name = "textarea_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -332,7 +332,7 @@ rust_test(
     crate_name = "toggle_group_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -346,7 +346,7 @@ rust_test(
     crate_name = "toggle_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -360,7 +360,7 @@ rust_test(
     crate_name = "card_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -374,7 +374,7 @@ rust_test(
     crate_name = "lip_card_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -388,7 +388,7 @@ rust_test(
     crate_name = "link_preview_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -402,7 +402,7 @@ rust_test(
     crate_name = "avatar_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -416,7 +416,7 @@ rust_test(
     crate_name = "badge_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -430,7 +430,7 @@ rust_test(
     crate_name = "scroll_area_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -444,7 +444,7 @@ rust_test(
     crate_name = "select_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -458,7 +458,7 @@ rust_test(
     crate_name = "separator_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -472,7 +472,7 @@ rust_test(
     crate_name = "sheet_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -486,7 +486,7 @@ rust_test(
     crate_name = "tooltip_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -500,7 +500,7 @@ rust_test(
     crate_name = "popover_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -514,7 +514,7 @@ rust_test(
     crate_name = "progress_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -528,7 +528,7 @@ rust_test(
     crate_name = "skeleton_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -542,7 +542,7 @@ rust_test(
     crate_name = "slider_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -556,7 +556,7 @@ rust_test(
     crate_name = "icon_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -570,7 +570,7 @@ rust_test(
     crate_name = "list_row_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -584,7 +584,7 @@ rust_test(
     crate_name = "native_select_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -598,7 +598,7 @@ rust_test(
     crate_name = "selectable_text_test",
     deps = [
         "//modules/ui:ui",
-        "@crates//:gpui",
+        "@crates//:gpui-ce",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
