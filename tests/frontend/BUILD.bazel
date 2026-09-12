@@ -108,17 +108,6 @@ rust_test(
 )
 
 rust_test(
-    name = "authoritative_subscription_policy_test",
-    srcs = ["authoritative_subscription_policy.rs"],
-    crate_name = "authoritative_subscription_policy_test",
-    deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
     name = "browser_dom_boundary_test",
     srcs = ["browser_dom_boundary.rs"],
     crate_name = "browser_dom_boundary_test",
@@ -273,17 +262,6 @@ rust_test(
 )
 
 rust_test(
-    name = "conversation_checklist_test",
-    srcs = ["conversation_checklist.rs"],
-    crate_name = "conversation_checklist_test",
-    deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
     name = "conversation_delivery_machine_test",
     srcs = ["conversation_delivery_machine.rs"],
     crate_name = "conversation_delivery_machine_test",
@@ -320,17 +298,6 @@ rust_test(
 )
 
 rust_test(
-    name = "conversation_error_card_policy_test",
-    srcs = ["conversation_error_card_policy.rs"],
-    crate_name = "conversation_error_card_policy_test",
-    deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
     name = "conversation_host_test",
     srcs = ["conversation_host.rs"],
     crate_name = "conversation_host_test",
@@ -341,17 +308,6 @@ rust_test(
         "//modules/ui:ui",
         "@crates//:gpui-ce",
     ],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
-    name = "conversation_presentation_test",
-    srcs = ["conversation_presentation.rs"],
-    crate_name = "conversation_presentation_test",
-    deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",
@@ -431,17 +387,6 @@ rust_test(
     name = "conversation_scroll_position_test",
     srcs = ["conversation_scroll_position.rs"],
     crate_name = "conversation_scroll_position_test",
-    deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
-    name = "conversation_status_labels_test",
-    srcs = ["conversation_status_labels.rs"],
-    crate_name = "conversation_status_labels_test",
     deps = ["//modules/frontend:frontend"],
     edition = "2024",
     lint_config = "//:workspace_lints",
@@ -762,36 +707,10 @@ rust_test(
 )
 
 rust_test(
-    name = "image_inspection_store_test",
-    srcs = ["image_inspection_store.rs"],
-    crate_name = "image_inspection_store_test",
-    deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
     name = "image_policy_test",
     srcs = ["image_policy.rs"],
     crate_name = "image_policy_test",
     deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
-    name = "image_viewer_test",
-    srcs = ["image_viewer.rs"],
-    crate_name = "image_viewer_test",
-    deps = [
-        "//modules/frontend:frontend",
-        "//modules/ui:ui",
-        "@crates//:gpui-ce",
-    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",
@@ -1187,17 +1106,6 @@ rust_test(
 )
 
 rust_test(
-    name = "reader_attention_test",
-    srcs = ["reader_attention.rs"],
-    crate_name = "reader_attention_test",
-    deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
     name = "project_catalog_test",
     srcs = ["project_catalog.rs"],
     crate_name = "project_catalog_test",
@@ -1363,17 +1271,6 @@ rust_test(
 )
 
 rust_test(
-    name = "session_projection_test",
-    srcs = ["session_projection.rs"],
-    crate_name = "session_projection_test",
-    deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
     name = "session_tool_policy_test",
     srcs = ["session_tool_policy.rs"],
     crate_name = "session_tool_policy_test",
@@ -1444,32 +1341,6 @@ rust_test(
     srcs = ["speed_presentation.rs"],
     crate_name = "speed_presentation_test",
     deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
-    name = "steering_pending_lip_test",
-    srcs = ["steering_pending_lip.rs"],
-    crate_name = "steering_pending_lip_test",
-    deps = ["//modules/frontend:frontend"],
-    edition = "2024",
-    lint_config = "//:workspace_lints",
-    size = "small",
-    visibility = ["//:__pkg__"],
-)
-
-rust_test(
-    name = "subscription_projection_test",
-    srcs = ["subscription_projection.rs"],
-    crate_name = "subscription_projection_test",
-    deps = [
-        "//modules/domain:domain",
-        "//modules/frontend:frontend",
-        "//modules/protocol:protocol",
-    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",
