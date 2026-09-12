@@ -23,6 +23,14 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const QUICK_CHECK_FINDING_LIMIT: u32 = 100;
 /// The single verdict `PRAGMA quick_check` reports for a usable database.
 const VERIFICATION_OK: &str = "ok";
+/// Lowest SQLite version the schema relies on.
+///
+/// The down paths of the engine-run-config and message-steer-target
+/// migrations use `ALTER TABLE ... DROP COLUMN`, which SQLite only supports
+/// from 3.35.0. The bundled runtime satisfies this; the open-time check keeps
+/// a system-linked SQLite from silently accepting migrations the schema
+/// cannot later reverse.
+pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 35, 0);
 
 /// The physical SQLite location opened by [`SqliteConfig`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,6 +238,19 @@ pub enum ConnectError {
         #[source]
         source: DbErr,
     },
+
+    /// The linked SQLite is older than the schema's migration floor.
+    #[error(
+        "sqlite database `{location}` runs sqlite {found}, but {minimum} is required for reversible migrations"
+    )]
+    UnsupportedSqliteVersion {
+        /// Human-readable database location.
+        location: String,
+        /// Version reported by the linked SQLite, when readable.
+        found: String,
+        /// Lowest supported version, rendered `major.minor.patch`.
+        minimum: String,
+    },
 }
 
 /// Opens a configured SQLite database through `SeaORM`.
@@ -261,11 +282,75 @@ pub async fn connect(config: SqliteConfig) -> Result<DatabaseConnection, Connect
             source,
         })?;
 
+    verify_version(&connection, &location).await?;
+
     if matches!(config.location, Location::File { .. }) {
         verify_image(&connection, &location).await?;
     }
 
     Ok(connection)
+}
+
+/// Rejects a SQLite older than the schema's reversible-migration floor.
+///
+/// # Errors
+///
+/// Returns [`ConnectError::VerificationFailed`] when the version query
+/// cannot run, and [`ConnectError::UnsupportedSqliteVersion`] when the
+/// reported version is missing, unparseable, or below
+/// [`MIN_SQLITE_VERSION`].
+async fn verify_version(database: &DatabaseConnection, location: &str) -> Result<(), ConnectError> {
+    let row = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT sqlite_version()".to_owned(),
+        ))
+        .await
+        .map_err(|source| ConnectError::VerificationFailed {
+            location: location.to_owned(),
+            source,
+        })?;
+
+    let found = row
+        .ok_or_else(|| ConnectError::UnsupportedSqliteVersion {
+            location: location.to_owned(),
+            found: "unknown".to_owned(),
+            minimum: format_version(MIN_SQLITE_VERSION),
+        })?
+        .try_get_by_index::<String>(0)
+        .map_err(|source| ConnectError::VerificationFailed {
+            location: location.to_owned(),
+            source,
+        })?;
+
+    let supported = parse_sqlite_version(&found).is_some_and(|version| version >= MIN_SQLITE_VERSION);
+    if supported {
+        return Ok(());
+    }
+
+    Err(ConnectError::UnsupportedSqliteVersion {
+        location: location.to_owned(),
+        found,
+        minimum: format_version(MIN_SQLITE_VERSION),
+    })
+}
+
+/// Parses a SQLite `major.minor.patch` version string.
+///
+/// A missing patch component counts as zero so short forms like `3.45` are
+/// accepted; any other shape returns `None` and is treated as unsupported.
+fn parse_sqlite_version(raw: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = raw.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().map_or(Some(0), |part| part.parse().ok())?;
+    Some((major, minor, patch))
+}
+
+/// Renders a parsed version back to `major.minor.patch`.
+fn format_version(version: (u32, u32, u32)) -> String {
+    let (major, minor, patch) = version;
+    format!("{major}.{minor}.{patch}")
 }
 
 /// Verifies an opened file database image with SQLite's `quick_check`.
@@ -329,5 +414,56 @@ fn is_missing_or_empty_file(path: &Path) -> bool {
     match path.metadata() {
         Ok(metadata) => metadata.is_file() && metadata.len() == 0,
         Err(error) => error.kind() == ErrorKind::NotFound,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_version_parser_accepts_release_shapes() {
+        assert_eq!(parse_sqlite_version("3.35.0"), Some((3, 35, 0)));
+        assert_eq!(parse_sqlite_version(" 3.45.1\n"), Some((3, 45, 1)));
+        assert_eq!(parse_sqlite_version("3.45"), Some((3, 45, 0)));
+        assert_eq!(parse_sqlite_version("4.0.0"), Some((4, 0, 0)));
+    }
+
+    #[test]
+    fn sqlite_version_parser_rejects_malformed_input() {
+        assert_eq!(parse_sqlite_version(""), None);
+        assert_eq!(parse_sqlite_version("3"), None);
+        assert_eq!(parse_sqlite_version("3.x.0"), None);
+        assert_eq!(parse_sqlite_version("3.35.0-beta"), None);
+    }
+
+    #[test]
+    fn version_floor_is_the_drop_column_floor() {
+        // `ALTER TABLE ... DROP COLUMN` needs 3.35.0; keep the gate and the
+        // documented floor in one place.
+        assert_eq!(format_version(MIN_SQLITE_VERSION), "3.35.0");
+    }
+
+    #[tokio::test]
+    async fn linked_sqlite_meets_the_reversible_migration_floor() {
+        // A system-linked SQLite below the floor must fail the open instead
+        // of surfacing later as an unreversible down migration.
+        let connection = connect(SqliteConfig::in_memory())
+            .await
+            .expect("bundled sqlite meets the migration floor");
+        let row = connection
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT sqlite_version()".to_owned(),
+            ))
+            .await
+            .expect("version query runs")
+            .expect("version query returns a row");
+        let raw = row.try_get_by_index::<String>(0).expect("version is text");
+        let parsed = parse_sqlite_version(&raw).expect("reported version parses");
+        assert!(
+            parsed >= MIN_SQLITE_VERSION,
+            "linked sqlite {raw} is below the migration floor"
+        );
     }
 }
