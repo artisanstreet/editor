@@ -318,8 +318,8 @@ impl NativeApplication {
             .weight(&thread.thread_id, Instant::now());
         let glyph_color = self
             .desktop_theme
-            .secondary
-            .blend(&self.desktop_theme.foreground.opacity(weight));
+            .foreground
+            .blend(&self.desktop_theme.secondary.opacity(weight));
         let title = self
             .listed_thread_display_title(&thread.thread_id, cx)
             .unwrap_or_else(|| thread.title.as_str().to_owned());
@@ -362,15 +362,8 @@ impl NativeApplication {
             .focus_visible(move |style| style.bg(color))
             .debug_selector(move || selector.clone())
             .child(
-                desktop_nav_glyph(
-                    if thread.has_active_work {
-                        AssetId::TABLER_LOADER_2
-                    } else {
-                        AssetId::TABLER_MESSAGE_CIRCLE
-                    },
-                    self.desktop_theme,
-                )
-                .text_color(glyph_color),
+                desktop_nav_glyph(AssetId::TABLER_MESSAGE_CIRCLE, self.desktop_theme)
+                    .text_color(glyph_color),
             )
             .child(div().flex_1().min_w(px(0.0)).truncate().child(title))
             .on_click(cx.listener(move |app, _, window, cx| {
