@@ -15,6 +15,7 @@ impl ConversationSurface {
         let mut surface = Self {
             scene,
             navigator_markers,
+            transcript_window: RefCell::new(TranscriptWindowState::default()),
             message_images: None,
             message_images_observation: None,
             theme_mode,
@@ -172,16 +173,9 @@ impl ConversationSurface {
     pub fn replace_scene(&mut self, scene: ConversationScene, cx: &mut Context<Self>) {
         self.navigator_markers = Rc::new(loaded_turn_navigator_markers(&scene));
         self.scene = scene;
-        let live_keys: Vec<String> = self
-            .scene
-            .turn_scenes()
-            .iter()
-            .map(|turn| footer_key(&turn.turn_id))
-            .collect();
-        self.footer_mirrors
-            .retain(|key, _| live_keys.iter().any(|live| live == key));
-        self.footer_focus
-            .retain(|key, _| live_keys.iter().any(|live| live == key));
+        // Scene-keyed presentation state is pruned once here instead of on
+        // every render, so a windowed render never scans the whole transcript.
+        self.scene_replaced();
         self.sync_question_focus(cx);
         cx.notify();
     }
@@ -244,37 +238,6 @@ impl ConversationSurface {
         if mirror.copy_message != message {
             mirror.copy_message = message;
             cx.notify();
-        }
-    }
-
-    /// Ensures per-turn footer focus handles and prunes handles whose turns
-    /// left the scene, returning focus to the transcript when a focused
-    /// control disappears.
-    pub(super) fn sync_footer_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for turn in self.scene.turn_scenes() {
-            let key = footer_key(&turn.turn_id);
-            self.footer_focus
-                .entry(key)
-                .or_insert_with(|| cx.focus_handle().tab_stop(true));
-        }
-        let live_keys: Vec<String> = self
-            .scene
-            .turn_scenes()
-            .iter()
-            .map(|turn| footer_key(&turn.turn_id))
-            .collect();
-        let stale_keys: Vec<String> = self
-            .footer_focus
-            .keys()
-            .filter(|key| !live_keys.iter().any(|live| live == *key))
-            .cloned()
-            .collect();
-        for key in stale_keys {
-            if let Some(handle) = self.footer_focus.remove(&key)
-                && handle.is_focused(window)
-            {
-                self.transcript_focus.focus(window, cx);
-            }
         }
     }
 
@@ -804,12 +767,14 @@ impl ConversationSurface {
 
     /// Selects the reader's current marker from painted turn geometry.
     ///
-    /// Pure over its inputs: turn roots arrive in scene order with the
-    /// spacer last. A turn counts as reached once its top passes the
-    /// reference 96 px threshold below the viewport top; the last reached
-    /// marker-bearing turn wins, else the first marker. Callers keep the
-    /// result in window-local state with a change guard, so two windows
-    /// sharing one surface converge independently and never ping-pong.
+    /// Pure over its inputs: markers carry their owning turn index from the
+    /// scene-derived cache, so this touches only marker-bearing turns instead
+    /// of walking every turn and block per frame. A turn counts as reached
+    /// once its top passes the reference 96 px threshold below the viewport
+    /// top; the last reached marker-bearing turn wins, else the first marker.
+    /// Callers keep the result in window-local state with a change guard, so
+    /// two windows sharing one surface converge independently and never
+    /// ping-pong.
     ///
     /// Turn tops resolve to viewport coordinates through
     /// [`navigator_turn_top_viewport`]: content origin in window coordinates
@@ -819,7 +784,6 @@ impl ConversationSurface {
     /// offsets in the full app.
     pub(super) fn navigator_active_for_geometry(
         markers: &[NavigatorMarker],
-        scene: &ConversationScene,
         scroll_handle: &ScrollHandle,
         children_bounds: &[gpui::Bounds<gpui::Pixels>],
         window: &Window,
@@ -830,35 +794,26 @@ impl ConversationSurface {
         let scroll_top = -f64::from(scroll_handle.offset().y);
         let element_offset = f64::from(window.element_offset().y);
         let viewport_top = f64::from(scroll_handle.bounds().origin.y);
-        let mut reached: Vec<(String, f64)> = Vec::new();
-        for (index, turn) in scene.turn_scenes().iter().enumerate() {
-            let Some(bounds) = children_bounds.get(index) else {
-                continue;
-            };
-            let marker = turn.blocks().iter().find_map(|block| match block {
-                TurnBlock::UserMessage(message) => {
-                    item_id_for_scene_id(&message.id).map(|id| id.as_str().to_owned())
-                }
-                _ => None,
-            });
-            let Some(slug) = marker else { continue };
-            if !markers
-                .iter()
-                .any(|marker| navigator_target_slug(&marker.target) == slug)
-            {
+        let mut reached: Vec<ConversationTurnOffset<'_>> = Vec::with_capacity(markers.len());
+        // Markers arrive in ordinal order, so a turn's markers are adjacent;
+        // the first marker per turn reproduces the previous per-turn walk.
+        let mut last_turn: Option<usize> = None;
+        for marker in markers {
+            if last_turn == Some(marker.turn_index) {
                 continue;
             }
+            last_turn = Some(marker.turn_index);
+            let Some(bounds) = children_bounds.get(marker.turn_index) else {
+                continue;
+            };
             let content_top = f64::from(bounds.origin.y) - element_offset;
-            reached.push((
-                slug,
-                Self::navigator_turn_top_viewport(content_top, scroll_top, viewport_top),
+            let top = Self::navigator_turn_top_viewport(content_top, scroll_top, viewport_top);
+            reached.push(ConversationTurnOffset::new(
+                navigator_target_slug(&marker.target),
+                top,
             ));
         }
-        let offsets: Vec<ConversationTurnOffset<'_>> = reached
-            .iter()
-            .map(|(id, top)| ConversationTurnOffset::new(id.as_str(), *top))
-            .collect();
-        active_conversation_turn(&offsets).map(str::to_owned)
+        active_conversation_turn(&reached).map(str::to_owned)
     }
 
     /// Rebases one content top onto the viewport origin.

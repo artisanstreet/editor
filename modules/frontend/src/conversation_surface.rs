@@ -11,6 +11,14 @@
 //! local disclosure state never becomes a second source of truth. A
 //! replacement scene is the only source of truth after a disclosure request
 //! has been emitted.
+//!
+//! Per-frame cost is bounded by construction: the render loop builds only the
+//! visible turn rows plus a bounded overscan (see
+//! [`render_budget`](self::render_budget) and
+//! [`transcript_window`](self::transcript_window)), and off-window turns paint
+//! from remembered heights as placeholders. Rows are measured on the frame
+//! they enter the window, and the FIFO head of the scroll-target queue is
+//! force-built so scrolling to a far turn still resolves.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -115,8 +123,18 @@ mod disclosure;
 #[path = "conversation_surface/scroll_anchor.rs"]
 mod scroll_anchor;
 
+// Windowed transcript rendering (see conversation_surface/).
+
+#[path = "conversation_surface/render_budget.rs"]
+mod render_budget;
+#[path = "conversation_surface/transcript_window.rs"]
+mod transcript_window;
+
+pub use transcript_window::{TranscriptShapeLedger, TranscriptWindowReport};
+
 use disclosure::disclosure_flight_panel;
 use scroll_anchor::{RenderedScrollAnchor, ScrollAnchorRegistry, ViewportGeometry};
+use transcript_window::TranscriptWindowState;
 
 /// Native GPUI transcript surface over one immutable replacement scene.
 #[expect(
@@ -130,6 +148,13 @@ pub struct ConversationSurface {
     /// Render and the per-frame prepaint geometry both read this cache, so a
     /// frame never re-walks the transcript to rebuild navigator labels.
     navigator_markers: Rc<Vec<NavigatorMarker>>,
+    /// Windowed transcript build state: remembered heights, cached offsets,
+    /// and the latest frame diagnostics.
+    ///
+    /// Render-local and never authoritative: the accepted scene remains the
+    /// only source of truth, and the height table is a bounded estimate used
+    /// to place placeholders for off-window turns.
+    transcript_window: RefCell<TranscriptWindowState>,
     message_images: Option<Entity<crate::native_message_images::NativeMessageImages>>,
     message_images_observation: Option<gpui::Subscription>,
     theme_mode: ThemeMode,
@@ -386,7 +411,11 @@ impl Render for ConversationSurface {
             });
         let previous_anchors = std::mem::take(&mut self.scroll_anchors);
         let mut rendered_anchors = Vec::new();
-        self.sync_footer_focus(&mut *window, cx);
+        // Plan the build window before anything renders: only visible rows
+        // plus bounded overscan build real subtrees, and footer focus handles
+        // are ensured for exactly those rows.
+        let built = self.plan_transcript_build();
+        self.sync_footer_focus(&built, cx);
         {
             let mut anchors = ScrollAnchorRegistry {
                 handle: &self.scroll_handle,
@@ -394,17 +423,24 @@ impl Render for ConversationSurface {
                 next_element_id: 0,
                 rendered: &mut rendered_anchors,
             };
-            for turn in self.scene.turn_scenes() {
-                transcript = transcript.child(self.render_turn(
-                    turn,
-                    &entity,
-                    &theme,
-                    &mut anchors,
-                    &mut *window,
-                    status_motion,
-                    cx,
-                ));
+            for (index, turn) in self.scene.turn_scenes().iter().enumerate() {
+                if built.contains(index) {
+                    transcript = transcript.child(self.render_turn(
+                        turn,
+                        &entity,
+                        &theme,
+                        &mut anchors,
+                        &mut *window,
+                        status_motion,
+                        cx,
+                    ));
+                } else {
+                    // One placeholder per off-window turn keeps the child
+                    // count and order stable for every prepaint listener.
+                    transcript = transcript.child(self.render_turn_placeholder(index));
+                }
             }
+            self.finish_transcript_window(&built);
             // Base end space keeps scrollable room after the last turn so an
             // anchored turn can reach the viewport top inset. The height
             // grows from live measurement via [`end_space_height`] once the
@@ -438,82 +474,19 @@ impl Render for ConversationSurface {
         // Painted custody comes from the real prepaint boundary. GPUI writes
         // each retained anchor origin during Div prepaint, and this listener
         // runs after the transcript children are prepainted. A defer marker
-        // is not paint evidence and must never mint painted custody.
+        // is not paint evidence and must never mint painted custody. The
+        // handler also records measured heights for the built rows, feeding
+        // the next frame's window plan.
         transcript = transcript.on_children_prepainted(move |children_bounds, window, app| {
             let _ = surface.update(app, |surface, cx| {
-                let current = surface
-                    .scroll_anchor_paint_token
-                    .as_ref()
-                    .is_some_and(|current| Rc::ptr_eq(current, &paint_token));
-                if !current {
-                    return;
-                }
-
-                // End-space measurement is window-local state, written only
-                // by the current frame: two windows sharing one surface
-                // converge independently, and an unchanged value never
-                // notifies, so neither window can loop the other.
-                let viewport_height = f64::from(surface.scroll_handle.bounds().size.height);
-                let offset = f64::from(window.element_offset().y);
-                if let Some(measured) = ConversationSurface::measured_end_space_height(
+                surface.handle_transcript_prepaint(
                     &children_bounds,
-                    viewport_height,
-                    offset,
-                ) {
-                    let changed = end_space_state.update(cx, |value, _| {
-                        #[expect(
-                            clippy::float_cmp,
-                            reason = "the loop guard only notifies when the measurement changes at all; an epsilon would skip sub-pixel re-layout and could strand the end space"
-                        )]
-                        let changed = *value != measured;
-                        *value = measured;
-                        changed
-                    });
-                    if changed {
-                        cx.notify();
-                    }
-                }
-
-                // Reader-position tracking rides the same prepaint boundary
-                // into the same window-local state discipline: per-window
-                // geometry in, change-guarded notify out.
-                let active = ConversationSurface::navigator_active_for_geometry(
-                    &surface.navigator_markers,
-                    &surface.scene,
-                    &surface.scroll_handle,
-                    &children_bounds,
+                    &paint_token,
+                    &end_space_state,
+                    &navigator_active_state,
                     window,
+                    cx,
                 );
-                let active_changed = navigator_active_state.update(cx, |value, _| {
-                    let changed = *value != active;
-                    *value = active;
-                    changed
-                });
-                if active_changed {
-                    cx.notify();
-                }
-
-                let mut newly_painted = false;
-                for anchor in &mut surface.scroll_anchors {
-                    if !anchor.painted {
-                        anchor.painted = true;
-                        newly_painted = true;
-                    }
-                }
-                if newly_painted && !surface.pending_scroll_targets.is_empty() {
-                    cx.notify();
-                }
-                // Turn roots are the transcript's direct children in scene
-                // order, so executed turn targets resolve here exactly like
-                // block and item targets resolve one level down.
-                if !surface.executed_scroll_targets.is_empty() {
-                    let turn_identities = surface.turn_scroll_identities();
-                    surface.apply_executed_scroll_targets(
-                        &turn_identities,
-                        &children_bounds,
-                        window,
-                    );
-                }
             });
         });
 

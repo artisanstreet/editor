@@ -331,14 +331,13 @@ impl ConversationSurface {
         // Parity with conversation-message.svelte assistant branch: chromeless
         // markdown at prose width, no card, no title. The reply body reads in
         // the foreground token per product direction; detail prose keeps the
-        // reference muted body.
-        let rich_link_titles = self.rich_link_probe(crate::conversation_host::host_now_millis());
-        let rendered_body = self.markdown_renderer.render_source_with_tone_and_titles(
+        // reference muted body. Shaping stays inside the per-row render
+        // budget so one pathological body cannot parse every frame.
+        let rendered_body = self.render_budgeted_markdown(
             &block.body,
-            *theme,
+            theme,
             selector.clone(),
             MarkdownBodyTone::Foreground,
-            &rich_link_titles,
         );
         div()
             .w_full()
@@ -875,14 +874,11 @@ impl ConversationSurface {
             row => {
                 let content: AnyElement = match &row {
                     DetailRow::Assistant { body, .. } => {
-                        let rich_link_titles =
-                            self.rich_link_probe(crate::conversation_host::host_now_millis());
-                        let rendered = self.markdown_renderer.render_source_with_tone_and_titles(
+                        let rendered = self.render_budgeted_markdown(
                             body,
-                            *theme,
+                            theme,
                             format!("{selector}-markdown"),
                             MarkdownBodyTone::Muted,
-                            &rich_link_titles,
                         );
                         div()
                             .w_full()

@@ -9,6 +9,11 @@ pub(super) struct NavigatorMarker {
     pub(super) label: String,
     /// Exact scroll target; identity only, never body text.
     pub(super) target: ConversationSurfaceTarget,
+    /// Index of the owning turn in the accepted scene order.
+    ///
+    /// Carried so painted-geometry lookups touch marker-bearing turns only
+    /// instead of walking every turn and block each frame.
+    pub(super) turn_index: usize,
 }
 
 /// Window-local rail geometry for the turn navigator.
@@ -360,8 +365,9 @@ pub(super) fn navigator_target_slug(target: &ConversationSurfaceTarget) -> &str 
 pub(super) fn loaded_turn_navigator_markers(scene: &ConversationScene) -> Vec<NavigatorMarker> {
     let mut turns = Vec::new();
     let mut items = Vec::new();
+    let mut item_turn_indices: HashMap<&str, usize> = HashMap::new();
     let mut ordinal: u64 = 0;
-    for turn_scene in scene.turn_scenes() {
+    for (turn_index, turn_scene) in scene.turn_scenes().iter().enumerate() {
         turns.push(ConversationTurnInput::new(
             turn_scene.turn_id.as_str(),
             turn_scene.ordinal,
@@ -374,6 +380,7 @@ pub(super) fn loaded_turn_navigator_markers(scene: &ConversationScene) -> Vec<Na
                     ordinal,
                     message.body.clone(),
                 ));
+                item_turn_indices.insert(message.id.as_str(), turn_index);
                 ordinal = ordinal.saturating_add(1);
             }
         }
@@ -390,9 +397,17 @@ pub(super) fn loaded_turn_navigator_markers(scene: &ConversationScene) -> Vec<Na
                         .ok()
                         .map(ConversationSurfaceTarget::Scene)
                 })?;
+            // Every marker in a loaded snapshot is a loaded user message, so
+            // its owning turn index is present; an unresolvable identity keeps
+            // index zero and only affects which bound it measures against.
+            let turn_index = item_turn_indices
+                .get(marker.id.as_str())
+                .copied()
+                .unwrap_or(0);
             Some(NavigatorMarker {
                 label: marker.label,
                 target,
+                turn_index,
             })
         })
         .collect()

@@ -244,5 +244,8 @@ mod status;
 #[path = "tests/transcript.rs"]
 mod transcript;
 
+#[path = "tests/windowing.rs"]
+mod windowing;
+
 #[path = "tests/work_groups.rs"]
 mod work_groups;
