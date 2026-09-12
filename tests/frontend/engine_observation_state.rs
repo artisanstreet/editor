@@ -15,8 +15,7 @@ use artisan_domain::{
     SearchObservation, SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
     SubagentTranscriptObservation, TerminalActivityInput, TerminalActivityObservation,
     TerminalActivityState, ThreadId, ToolAction, ToolObservation, TranscriptContent,
-    TranscriptTool, TurnState, TurnStateObservation, UnixMillis, UsageBasis, UsageInput,
-    UsageObservation,
+    TranscriptTool, TurnState, TurnStateObservation, UnixMillis,
 };
 use artisan_frontend::engine_observation_state::{
     ApplyOutcome, EngineObservationState, TimelineRow,
@@ -165,36 +164,8 @@ fn question_resolved() -> Observation {
     )
 }
 
-fn usage_report(
-    id: &str,
-    basis: UsageBasis,
-    input: u64,
-    output: u64,
-    context: u64,
-    cost: f64,
-) -> Observation {
-    Observation::Usage(
-        UsageObservation::new(
-            observation_id(id),
-            sequence(20),
-            UsageInput {
-                basis,
-                input_tokens: Some(input),
-                cached_input_tokens: None,
-                output_tokens: Some(output),
-                context_tokens: Some(context),
-                context_window_tokens: Some(200_000),
-                cost_usd: Some(cost),
-                provider_route_id: None,
-                turn_id: None,
-            },
-        )
-        .expect("fixture usage is valid"),
-    )
-}
-
 #[test]
-fn message_deltas_accumulate_and_completion_settles() {
+fn plain_message_events_apply_without_retaining_a_transcript() {
     let mut presentation = state();
     let first = presentation.apply(
         1,
@@ -222,10 +193,6 @@ fn message_deltas_accumulate_and_completion_settles() {
         )),
     );
     assert!(matches!(second, ApplyOutcome::Applied { .. }));
-    let row = presentation.message("item-1").expect("delta row pairs");
-    assert_eq!(row.text(), "hello");
-    assert_eq!(row.phase(), MessagePhase::Commentary);
-    assert!(!row.completed());
 
     let settled = presentation.apply(
         3,
@@ -242,11 +209,10 @@ fn message_deltas_accumulate_and_completion_settles() {
             settled_in_place: true
         }
     ));
-    let row = presentation.message("item-1").expect("completed row pairs");
-    assert_eq!(row.text(), "settled reply");
-    assert_eq!(row.phase(), MessagePhase::Final);
-    assert!(row.completed());
-    assert_eq!(presentation.messages_in_order().len(), 1);
+    // The durable snapshot is the one authoritative message copy; the
+    // observation state retains no parallel transcript.
+    assert!(presentation.is_empty());
+    assert_eq!(presentation.row_count(), 0);
 }
 
 #[test]
@@ -488,58 +454,6 @@ fn question_requested_resolves_in_place_by_request_id() {
         .expect("resolved question carries answers");
     assert_eq!(answers, &vec![String::from("tokio")]);
 }
-
-#[test]
-fn usage_reports_fold_by_basis_and_gauge_replaces() {
-    let mut presentation = state();
-    presentation.apply(
-        1,
-        &event(usage_report(
-            "obs-usage-1",
-            UsageBasis::Delta,
-            1_000,
-            150,
-            1_350,
-            0.5,
-        )),
-    );
-    presentation.apply(
-        2,
-        &event(usage_report(
-            "obs-usage-2",
-            UsageBasis::Delta,
-            500,
-            100,
-            1_400,
-            0.25,
-        )),
-    );
-    let totals = presentation.usage();
-    assert_eq!(totals.reports(), 2);
-    assert_eq!(totals.input_tokens(), 1_500);
-    assert_eq!(totals.output_tokens(), 250);
-    assert_eq!(totals.context_tokens(), Some(1_400));
-    assert!((totals.cost_usd() - 0.75).abs() < 0.001);
-
-    presentation.apply(
-        3,
-        &event(usage_report(
-            "obs-usage-3",
-            UsageBasis::Cumulative,
-            2_000,
-            300,
-            1_500,
-            1.0,
-        )),
-    );
-    let totals = presentation.usage();
-    assert_eq!(totals.basis(), UsageBasis::Cumulative);
-    assert_eq!(totals.input_tokens(), 2_000);
-    assert_eq!(totals.output_tokens(), 300);
-    assert_eq!(totals.context_tokens(), Some(1_500));
-    assert!((totals.cost_usd() - 1.0).abs() < 0.001);
-}
-
 #[test]
 fn reconnect_replay_applies_in_cursor_order_with_dedup() {
     let mut presentation = state();
@@ -725,10 +639,6 @@ fn turn_run_and_terminal_states_pair() {
         TurnState::Completed,
     ));
     presentation.apply(2, &event(turn_completed));
-    assert_eq!(
-        presentation.turn_state("turn-1"),
-        Some(TurnState::Completed)
-    );
 
     let run_state = Observation::RunState(RunStateObservation::new(
         observation_id("obs-run-state"),
