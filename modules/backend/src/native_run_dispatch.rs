@@ -1,13 +1,8 @@
-//! Durable first-message execution for configured `OpenCode2` profiles.
+//! Durable execution for configured native engine profiles.
 //!
-//! This module is the one production dispatcher for the native first-turn
-//! workflow. It claims a queued message, carries the immutable settings
-//! snapshot through the launch fence, retains the certified profile
-//! capability until the single owner spawns, binds the created provider
-//! session before authorizing one prompt, and commits bounded observations
-//! before issuing a wake hint. Network transcript delivery remains inside the
-//! owner; this module owns only durable orchestration and its injected
-//! scheduler policy.
+//! Claims queued messages, binds provider sessions before prompt authorization,
+//! and persists bounded observations before notifying subscribers. The engine
+//! owner handles process lifecycle and network transcript delivery.
 
 #![forbid(unsafe_code)]
 
@@ -44,10 +39,14 @@ use crate::{
     run_interaction::RunInteractionRegistry,
 };
 
+#[path = "native_run_dispatch/assistant_commit.rs"]
+mod assistant_commit;
 #[path = "native_run_dispatch/claim.rs"]
 mod claim;
 #[path = "native_run_dispatch/commit_retry.rs"]
 mod commit_retry;
+#[path = "native_run_dispatch/delta_coalescer.rs"]
+mod delta_coalescer;
 #[path = "native_run_dispatch/dispatch_policy.rs"]
 mod dispatch_policy;
 #[path = "native_run_dispatch/dispatch_support.rs"]
@@ -65,6 +64,8 @@ mod text_projection;
 #[path = "native_run_dispatch/turn.rs"]
 mod turn;
 
+#[cfg(test)]
+use assistant_commit::flush_pending_deltas;
 #[cfg(test)]
 use claim::launch_claim;
 use claim::{execute_claim, fail_claim, requeue_claim};

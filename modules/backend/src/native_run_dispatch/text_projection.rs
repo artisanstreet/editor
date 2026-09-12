@@ -26,6 +26,17 @@ struct AssistantTextPart {
     text: String,
 }
 
+/// One accepted append: the rebuilt aggregate body plus whether the fragment
+/// landed as a byte-exact suffix of the previous body.
+///
+/// `appended_exactly` is what lets the delta handler buffer a fragment for
+/// coalesced commit: true means `previous + delta == body` with no inserted
+/// separator, so the buffered bytes can be replayed as one durable append.
+pub(super) struct AssistantTextAppend {
+    pub(super) body: String,
+    pub(super) appended_exactly: bool,
+}
+
 #[derive(Default)]
 pub(super) struct OrderedAssistantText {
     parts: Vec<AssistantTextPart>,
@@ -50,7 +61,7 @@ impl OrderedAssistantText {
             .count()
     }
 
-    pub(super) fn append_delta(&mut self, delta: &TextDelta) -> Option<String> {
+    pub(super) fn append_delta(&mut self, delta: &TextDelta) -> Option<AssistantTextAppend> {
         self.append(
             delta.part_id().unwrap_or(FIXTURE_TEXT_PART_ID),
             delta.delta(),
@@ -69,8 +80,11 @@ impl OrderedAssistantText {
     /// contribution that makes a new part nonempty earns exactly one separator
     /// when another nonempty part already exists; empty contributions earn
     /// none, so empty parts can never produce leading, trailing, or doubled
-    /// separators.
-    fn append(&mut self, part_id: &str, text: &str) -> Option<String> {
+    /// separators. The returned outcome reports whether the appended text
+    /// landed as a byte-exact body suffix (`added == text.len()`), which is
+    /// exactly the condition the delta handler needs to buffer the fragment
+    /// for one coalesced replay append.
+    fn append(&mut self, part_id: &str, text: &str) -> Option<AssistantTextAppend> {
         if part_id.is_empty() {
             return None;
         }
@@ -91,7 +105,10 @@ impl OrderedAssistantText {
                 text: text.to_owned(),
             });
             self.total_bytes = next_total;
-            return Some(self.body());
+            return Some(AssistantTextAppend {
+                body: self.body(),
+                appended_exactly: added == text.len(),
+            });
         };
         let mut added = text.len();
         if self.parts[index].text.is_empty() && !text.is_empty() && self.nonempty_part_count() > 0 {
@@ -103,7 +120,14 @@ impl OrderedAssistantText {
         }
         self.parts[index].text.push_str(text);
         self.total_bytes = next_total;
-        Some(self.body())
+        Some(AssistantTextAppend {
+            body: self.body(),
+            appended_exactly: added == text.len()
+                && (text.is_empty()
+                    || self.parts[index + 1..]
+                        .iter()
+                        .all(|part| part.text.is_empty())),
+        })
     }
 
     /// Replaces one logical provider part wholesale.
@@ -189,6 +213,31 @@ mod text_projection_tests {
     use super::OrderedAssistantText;
     use crate::engine_owner::observation::{TextSnapshot, chunk_text};
 
+    use super::AssistantTextAppend;
+
+    #[test]
+    fn returning_to_an_earlier_part_requires_replacement() {
+        let mut parts = OrderedAssistantText::default();
+        parts.append("a", "A").expect("first part");
+        parts.append("b", "B").expect("second part");
+        let earlier = parts.append("a", "!").expect("earlier part update");
+        assert_eq!(earlier.body, "A!\n\nB");
+        assert!(!earlier.appended_exactly);
+        let last = parts.append("b", "!").expect("last part update");
+        assert_eq!(last.body, "A!\n\nB!");
+        assert!(last.appended_exactly);
+    }
+
+    /// The rebuilt body of one append outcome, for concise assertions.
+    fn body(outcome: Option<&AssistantTextAppend>) -> Option<&str> {
+        outcome.map(|append| append.body.as_str())
+    }
+
+    /// Whether one append landed as a byte-exact body suffix.
+    fn exact(outcome: Option<&AssistantTextAppend>) -> Option<bool> {
+        outcome.map(|append| append.appended_exactly)
+    }
+
     #[test]
     fn multipart_byte_bound_tracks_all_parts_separators_and_replacements() {
         let mut parts = OrderedAssistantText::default();
@@ -201,7 +250,9 @@ mod text_projection_tests {
         assert!(parts.append("c", "c").is_none());
         assert!(parts.replace("b", "bb").is_none());
         assert!(parts.replace("a", "a").is_some());
-        assert_eq!(parts.append("c", "c").as_deref(), Some("a\n\nb\n\nc"));
+        let appended = parts.append("c", "c");
+        assert_eq!(body(appended.as_ref()), Some("a\n\nb\n\nc"));
+        assert_eq!(exact(appended.as_ref()), Some(false));
         assert_eq!(parts.total_bytes, 7);
     }
 
@@ -213,14 +264,18 @@ mod text_projection_tests {
             .pop()
             .expect("part A delta")
             .with_part_id("part-a".to_owned());
-        assert_eq!(parts.append_delta(&part_a_delta), Some("A-1".to_owned()));
+        let first = parts.append_delta(&part_a_delta);
+        assert_eq!(body(first.as_ref()), Some("A-1"));
+        assert_eq!(exact(first.as_ref()), Some(true));
         let part_a_delta = chunk_text(&run_id, 2, "event-a-2", "A-2")
             .pop()
             .expect("part A second delta")
             .with_part_id("part-a".to_owned());
         // Same logical part stays byte-exact: no separator may enter streamed
         // token chunks.
-        assert_eq!(parts.append_delta(&part_a_delta), Some("A-1A-2".to_owned()));
+        let second = parts.append_delta(&part_a_delta);
+        assert_eq!(body(second.as_ref()), Some("A-1A-2"));
+        assert_eq!(exact(second.as_ref()), Some(true));
         assert_eq!(
             parts.replace_snapshot(&TextSnapshot::new(
                 run_id.clone(),
@@ -235,11 +290,11 @@ mod text_projection_tests {
             .expect("part B delta")
             .with_part_id("part-b".to_owned());
         // A distinct nonempty provider part earns paragraph separation instead
-        // of rejoining the previous part's sentence.
-        assert_eq!(
-            parts.append_delta(&second_part_delta),
-            Some("A-1A-2\n\nB-1".to_owned())
-        );
+        // of rejoining the previous part's sentence, so it is not an exact
+        // append and cannot enter a coalesced append batch.
+        let third = parts.append_delta(&second_part_delta);
+        assert_eq!(body(third.as_ref()), Some("A-1A-2\n\nB-1"));
+        assert_eq!(exact(third.as_ref()), Some(false));
         assert_eq!(
             parts.replace_snapshot(&TextSnapshot::new(
                 run_id,
@@ -255,17 +310,29 @@ mod text_projection_tests {
     #[test]
     fn empty_parts_contribute_no_text_and_no_separator() {
         let mut parts = OrderedAssistantText::default();
-        assert_eq!(parts.append("a", "A").as_deref(), Some("A"));
+        let first = parts.append("a", "A");
+        assert_eq!(body(first.as_ref()), Some("A"));
+        assert_eq!(exact(first.as_ref()), Some(true));
         // An empty part is retained without text and without separators.
-        assert_eq!(parts.append("b", "").as_deref(), Some("A"));
-        assert_eq!(parts.append("c", "C").as_deref(), Some("A\n\nC"));
+        let empty = parts.append("b", "");
+        assert_eq!(body(empty.as_ref()), Some("A"));
+        assert_eq!(exact(empty.as_ref()), Some(true));
+        // A first nonempty contributor beside an existing part earns a
+        // separator, so it stays on the full-body replacement path.
+        let separated = parts.append("c", "C");
+        assert_eq!(body(separated.as_ref()), Some("A\n\nC"));
+        assert_eq!(exact(separated.as_ref()), Some(false));
         // Emptying a part withdraws its separator share as well.
         assert_eq!(parts.replace("c", "").as_deref(), Some("A"));
         assert_eq!(parts.replace("a", "").as_deref(), Some(""));
         assert_eq!(parts.body(), "");
         assert_eq!(parts.total_bytes, 0);
         // Refilling from empty re-earns separators in part order.
-        assert_eq!(parts.append("c", "C").as_deref(), Some("C"));
-        assert_eq!(parts.append("a", "A").as_deref(), Some("A\n\nC"));
+        let refill = parts.append("c", "C");
+        assert_eq!(body(refill.as_ref()), Some("C"));
+        assert_eq!(exact(refill.as_ref()), Some(true));
+        let rejoined = parts.append("a", "A");
+        assert_eq!(body(rejoined.as_ref()), Some("A\n\nC"));
+        assert_eq!(exact(rejoined.as_ref()), Some(false));
     }
 }

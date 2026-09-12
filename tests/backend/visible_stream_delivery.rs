@@ -666,17 +666,28 @@ fn batch_has_assistant(batch: &artisan_domain::PatchBatch) -> bool {
     })
 }
 
+#[tokio::test]
+async fn live_connection_streams_admission_chunks_and_observation_before_terminal() {
+    assert_live_stream_before_terminal("steer_burst").await;
+}
+
+#[tokio::test]
+async fn short_burst_flushes_while_provider_is_held_below_count_threshold() {
+    // Three deltas cannot reach the count or byte threshold. With no terminal
+    // event, only the timer can deliver the pending suffix to the subscriber.
+    assert_live_stream_before_terminal("steer_short").await;
+}
+
 #[expect(
     clippy::too_many_lines,
     clippy::large_futures,
     reason = "single linear fixture body; extraction would duplicate the shared test wiring and its timeout wrapper"
 )]
-#[tokio::test]
-async fn live_connection_streams_admission_chunks_and_observation_before_terminal() {
+async fn assert_live_stream_before_terminal(scenario: &str) {
     tokio::time::timeout(Duration::from_secs(150), async {
         let fixture = stream_fixture_program();
         let temp = StreamTempRoot::new("live");
-        let program = stream_scenario_program(&fixture, &temp.dir, "steer_burst");
+        let program = stream_scenario_program(&fixture, &temp.dir, scenario);
         let database = connect(SqliteConfig::file(&temp.db_path).sqlx_logging(false))
             .await
             .expect("file database should open");
@@ -1109,6 +1120,37 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
             assert!(
                 !custody_unresolved,
                 "cancelled turn must settle without retained custody"
+            );
+            // Coalescing bounds the durable write count for the live burst
+            // while the wire already observed two distinct chunk updates
+            // above; the assembled prefix proves the buffered bytes were
+            // committed in order.
+            let receipts = artisan_database::entities::run_batch_receipt::Entity::find()
+                .all(&database)
+                .await
+                .expect("batch receipts should read");
+            assert!(
+                receipts.len() <= 12,
+                "coalesced live stream must stay bounded, saw {} receipts",
+                receipts.len()
+            );
+            let items = artisan_database::entities::conversation_item::Entity::find()
+                .all(&database)
+                .await
+                .expect("conversation items should read");
+            let assistant = items
+                .iter()
+                .find(|item| {
+                    matches!(
+                        item.item_kind,
+                        artisan_database::entities::ConversationItemKind::AssistantMessage
+                    )
+                })
+                .expect("assistant item must exist");
+            assert!(
+                assistant.body.starts_with("hello wire\n\nburst-00 burst-01 "),
+                "the first coalesced threshold run must be durable, got {:?}",
+                assistant.body
             );
             let message_id = tokio::time::timeout(TEST_DEADLINE, message_rx)
                 .await

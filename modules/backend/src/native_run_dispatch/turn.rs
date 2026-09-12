@@ -11,9 +11,8 @@ use artisan_database::{
     ResolveInteractionOutcome, RunBatchScope, RunErrorCode, RunErrorMessage,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, EngineId, IncrementalText, ItemId, Observation,
-    ObservationId, ObservationSequence, PatchId, RespondApproval, RespondQuestion, Revision, RunId,
-    UnixMillis,
+    AssistantBody, AssistantMessagePhase, EngineId, ItemId, Observation, ObservationId,
+    ObservationSequence, PatchId, RespondApproval, RespondQuestion, Revision, RunId, UnixMillis,
 };
 
 use artisan_transport::CancelHandle;
@@ -29,7 +28,11 @@ use crate::{
     run_interaction::{OwnedInteractionCommand, RunInteractionAck, RunInteractionEnvelope},
 };
 
+use super::assistant_commit::{
+    ensure_assistant_item, flush_pending_deltas, replace_assistant_body, start_assistant_item,
+};
 use super::claim::drain_interactions;
+use super::delta_coalescer::DeltaCoalescer;
 use super::dispatch_support::{at_or_after, mint_item_id, mint_patch_id};
 use super::interaction_intent::command_request_intent;
 use super::observation_commit::{
@@ -70,6 +73,8 @@ pub(super) struct TurnConsumptionState<'a> {
     pub(super) assistant_revision: Revision,
     pub(super) assistant_parts: OrderedAssistantText,
     pub(super) assistant_body: String,
+    /// Byte-exact append fragments waiting for one coalesced batch commit.
+    pub(super) coalescer: DeltaCoalescer,
     pub(super) batch_sequence: i64,
     pub(super) forced_interrupted: bool,
     pub(super) forced_cancelled: bool,
@@ -86,6 +91,7 @@ impl<'a> TurnConsumptionState<'a> {
             assistant_revision: Revision::new(0),
             assistant_parts: OrderedAssistantText::default(),
             assistant_body: String::new(),
+            coalescer: DeltaCoalescer::default(),
             batch_sequence: 1,
             forced_interrupted: false,
             forced_cancelled: false,
@@ -125,6 +131,7 @@ pub(super) async fn consume_turn(
             };
             handle_observation(&context, &mut state, &mut turn, observation).await;
         } else {
+            let flush_deadline = state.coalescer.deadline();
             tokio::select! {
                 biased;
                 () = context.stop.wait() => {
@@ -141,6 +148,16 @@ pub(super) async fn consume_turn(
                     cancel_signalled = true;
                     state.forced_cancelled = true;
                     turn.cancel();
+                }
+                () = async {
+                    match flush_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if !flush_pending_deltas(&context, &mut state, &mut turn).await {
+                        cancel_signalled = true;
+                    }
                 }
                 interaction = async {
                     match inbox.as_mut() {
@@ -169,6 +186,10 @@ pub(super) async fn consume_turn(
             break;
         }
     }
+    // Persist the coalesced tail before ownership resolution and terminal
+    // settlement: an abort, an owner failure, or a held stream must not drop
+    // bytes that a per-delta commit would already have written.
+    let _ = flush_pending_deltas(&context, &mut state, &mut turn).await;
     let owner_result = turn.finish().await;
     if is_unresolved_reap(&owner_result) {
         return true;
@@ -200,7 +221,7 @@ pub(super) async fn consume_turn(
     false
 }
 
-fn mark_interrupted(
+pub(super) fn mark_interrupted(
     state: &mut TurnConsumptionState<'_>,
     turn: &AcceptedTurn,
     progress_uncertain: bool,
@@ -515,7 +536,7 @@ async fn commit_resolution_observation(
         mark_interrupted(state, turn, false);
         return false;
     };
-    if let Some(item_id) = state.assistant_item.clone() {
+    let committed = if let Some(item_id) = state.assistant_item.clone() {
         commit_resolution_replace(
             context,
             state,
@@ -538,7 +559,13 @@ async fn commit_resolution_observation(
             &patch_id,
         )
         .await
+    };
+    if committed {
+        // The replace/start persisted the whole assembled body, including
+        // any buffered append fragments, so the buffer is now redundant.
+        state.coalescer.clear();
     }
+    committed
 }
 
 /// Commits a resolution checkpoint beside a content-neutral body replace.
@@ -764,6 +791,9 @@ async fn handle_subagent_row(
     state.batch_sequence = sequence;
     state.assistant_item = item;
     state.assistant_body = body;
+    // The content-neutral replace persisted the whole assembled body,
+    // including any buffered append fragments.
+    state.coalescer.clear();
 }
 
 /// Commits one validated rich activity row through the shared S1b checkpoint
@@ -815,6 +845,9 @@ async fn handle_activity_observation(
     state.batch_sequence = sequence;
     state.assistant_item = item;
     state.assistant_body = body;
+    // The content-neutral replace persisted the whole assembled body,
+    // including any buffered append fragments.
+    state.coalescer.clear();
 }
 
 async fn handle_usage(
@@ -852,6 +885,12 @@ async fn handle_text_snapshot(
         mark_interrupted(state, turn, true);
         return;
     }
+    // A snapshot rewrites the assembled body, so the buffered append run must
+    // reach durable state first; otherwise the snapshot's replace would
+    // silently drop the uncommitted suffix from the append history.
+    if !flush_pending_deltas(context, state, turn).await {
+        return;
+    }
     let current = state.assistant_body.clone();
     let Some(next_body) = state.assistant_parts.replace_snapshot(&snapshot) else {
         mark_interrupted(state, turn, true);
@@ -883,197 +922,40 @@ async fn handle_text_delta(
         }
         return;
     }
-    let previous = state.assistant_body.clone();
-    let Some(next_body) = state.assistant_parts.append_delta(&delta) else {
+    let Some(appended) = state.assistant_parts.append_delta(&delta) else {
         mark_interrupted(state, turn, true);
         return;
     };
-    state.assistant_body = next_body.clone();
-    if state.assistant_item.is_none() {
-        start_assistant_item(context, state, turn).await;
-    } else {
-        let mut append_body = previous;
-        append_body.push_str(delta.delta());
-        if append_body == next_body {
-            append_assistant_delta(context, state, turn, delta).await;
+    let appended_exactly = appended.appended_exactly;
+    state.assistant_body = appended.body;
+    if !appended_exactly {
+        // A separator entered the assembled body (a new provider part), so
+        // the delta is not a byte-exact append: persist the whole body as one
+        // replacement, which also covers any buffered fragments.
+        if state.assistant_item.is_none() {
+            start_assistant_item(context, state, turn).await;
         } else {
             replace_assistant_body(context, state, turn).await;
         }
+        return;
     }
-}
-
-async fn replace_assistant_body(
-    context: &TurnConsumptionContext<'_>,
-    state: &mut TurnConsumptionState<'_>,
-    turn: &mut AcceptedTurn,
-) {
-    let Ok(body) = AssistantBody::parse(state.assistant_body.clone()) else {
-        mark_interrupted(state, turn, true);
+    if state.assistant_item.is_none() {
+        // The first durable body commits on arrival: a held stream's first
+        // bytes must be readable without waiting for a coalescing threshold.
+        start_assistant_item(context, state, turn).await;
         return;
-    };
-    let Some(item_id) = state.assistant_item.clone() else {
-        mark_interrupted(state, turn, true);
-        return;
-    };
-    let Ok(next_revision) = state.assistant_revision.checked_next() else {
-        mark_interrupted(state, turn, true);
-        return;
-    };
-    let Some(patch_id) = mint_patch_id(context.origin) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    let changes = [AssistantChange::Replace {
-        item_id: &item_id,
-        expected_revision: state.assistant_revision,
-        body: &body,
-        phase: AssistantMessagePhase::Unspecified,
-        patch_id: &patch_id,
-    }];
-    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    if commit_batch_with_retry(CommitBatchRequest {
-        repository: context.repository,
-        notifier: &context.config.notifier,
-        scope: &state.scope,
-        batch_sequence: state.batch_sequence,
-        operated_at,
-        activate_turn_patch_id: None,
-        changes: &changes,
-        checkpoint: artisan_database::CheckpointUpdate::Keep,
-        retries: context.config.max_command_retries,
-    })
-    .await
-    .is_err()
+    }
+    // Byte-exact appends coalesce in memory. The buffered run commits on a
+    // structural byte/count threshold, at every full-body persistence path,
+    // and at turn end, so subscribers still observe every byte in order.
+    if state.coalescer.would_overflow(delta.delta())
+        && !flush_pending_deltas(context, state, turn).await
     {
-        mark_interrupted(state, turn, true);
         return;
     }
-    state.assistant_revision = next_revision;
-    state.scope.expected_updated_at = operated_at;
-    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
-        mark_interrupted(state, turn, true);
-        return;
-    };
-    state.batch_sequence = next_sequence;
-}
-
-async fn start_assistant_item(
-    context: &TurnConsumptionContext<'_>,
-    state: &mut TurnConsumptionState<'_>,
-    turn: &mut AcceptedTurn,
-) {
-    let Some(item_id) = mint_item_id(context.origin) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    let Ok(body) = AssistantBody::parse(state.assistant_body.clone()) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    let Some(patch_id) = mint_patch_id(context.origin) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    let Some(activation_patch_id) = mint_patch_id(context.origin) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    let changes = [AssistantChange::Start {
-        item_id: &item_id,
-        phase: AssistantMessagePhase::Unspecified,
-        body: &body,
-        patch_id: &patch_id,
-    }];
-    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    if commit_batch_with_retry(CommitBatchRequest {
-        repository: context.repository,
-        notifier: &context.config.notifier,
-        scope: &state.scope,
-        batch_sequence: state.batch_sequence,
-        operated_at,
-        activate_turn_patch_id: Some(&activation_patch_id),
-        changes: &changes,
-        checkpoint: artisan_database::CheckpointUpdate::Keep,
-        retries: context.config.max_command_retries,
-    })
-    .await
-    .is_err()
-    {
-        mark_interrupted(state, turn, true);
-        return;
+    if state.coalescer.push(delta.delta()) {
+        let _ = flush_pending_deltas(context, state, turn).await;
     }
-    state.assistant_item = Some(item_id);
-    state.assistant_revision = Revision::new(0);
-    state.scope.expected_updated_at = operated_at;
-    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
-        mark_interrupted(state, turn, true);
-        return;
-    };
-    state.batch_sequence = next_sequence;
-}
-
-async fn append_assistant_delta(
-    context: &TurnConsumptionContext<'_>,
-    state: &mut TurnConsumptionState<'_>,
-    turn: &mut AcceptedTurn,
-    delta: TextDelta,
-) {
-    let Some(item_id) = state.assistant_item.as_ref() else {
-        mark_interrupted(state, turn, true);
-        return;
-    };
-    let Ok(fragment) = IncrementalText::parse(delta.delta().to_owned()) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    let Some(patch_id) = mint_patch_id(context.origin) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    let changes = [AssistantChange::Append {
-        item_id,
-        expected_revision: state.assistant_revision,
-        text: &fragment,
-        patch_id: &patch_id,
-    }];
-    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
-        mark_interrupted(state, turn, false);
-        return;
-    };
-    if commit_batch_with_retry(CommitBatchRequest {
-        repository: context.repository,
-        notifier: &context.config.notifier,
-        scope: &state.scope,
-        batch_sequence: state.batch_sequence,
-        operated_at,
-        activate_turn_patch_id: None,
-        changes: &changes,
-        checkpoint: artisan_database::CheckpointUpdate::Keep,
-        retries: context.config.max_command_retries,
-    })
-    .await
-    .is_err()
-    {
-        mark_interrupted(state, turn, true);
-        return;
-    }
-    let Ok(next_revision) = state.assistant_revision.checked_next() else {
-        mark_interrupted(state, turn, true);
-        return;
-    };
-    state.assistant_revision = next_revision;
-    state.scope.expected_updated_at = operated_at;
-    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
-        mark_interrupted(state, turn, true);
-        return;
-    };
-    state.batch_sequence = next_sequence;
 }
 
 fn resolve_terminal(
@@ -1111,56 +993,6 @@ pub(super) fn is_unresolved_reap(result: &TurnResult) -> bool {
         Err(EngineOperationError::ReapUnresolved
             | EngineOperationError::UnresolvedReapDuring { .. })
     )
-}
-
-async fn ensure_assistant_item(
-    context: &TurnConsumptionContext<'_>,
-    state: &mut TurnConsumptionState<'_>,
-) -> bool {
-    if state.assistant_item.is_some() {
-        return true;
-    }
-    let Some(item_id) = mint_item_id(context.origin) else {
-        return false;
-    };
-    let Ok(body) = AssistantBody::parse(state.assistant_body.clone()) else {
-        return false;
-    };
-    let Some(patch_id) = mint_patch_id(context.origin) else {
-        return false;
-    };
-    let Some(activation_patch_id) = mint_patch_id(context.origin) else {
-        return false;
-    };
-    let changes = [AssistantChange::Start {
-        item_id: &item_id,
-        phase: AssistantMessagePhase::Unspecified,
-        body: &body,
-        patch_id: &patch_id,
-    }];
-    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
-        return false;
-    };
-    if commit_batch_with_retry(CommitBatchRequest {
-        repository: context.repository,
-        notifier: &context.config.notifier,
-        scope: &state.scope,
-        batch_sequence: state.batch_sequence,
-        operated_at,
-        activate_turn_patch_id: Some(&activation_patch_id),
-        changes: &changes,
-        checkpoint: artisan_database::CheckpointUpdate::Keep,
-        retries: context.config.max_command_retries,
-    })
-    .await
-    .is_err()
-    {
-        return false;
-    }
-    state.assistant_item = Some(item_id);
-    state.assistant_revision = Revision::new(0);
-    state.scope.expected_updated_at = operated_at;
-    true
 }
 
 struct TerminalSettlement<'a> {

@@ -232,12 +232,36 @@ fn main() {
                             "delta": DELTA_TEXT,
                         }}),
                     );
+                    // The terminating burst scenario streams a bounded chunk
+                    // run on a second provider part and then closes normally:
+                    // the coalesced transcript is provable with no cancel and
+                    // no held stream.
+                    if scenario == "burst_terminal" {
+                        let burst_count = if scenario == "steer_short" {
+                            3
+                        } else {
+                            STEER_BURST_COUNT
+                        };
+                        for index in 0..burst_count {
+                            emit(
+                                &mut output,
+                                &serde_json::json!({"method": "item/agentMessage/delta", "params": {
+                                    "itemId": STEER_BURST_ITEM_ID,
+                                    "turnId": TURN_ID,
+                                    "threadId": THREAD_ID,
+                                    "delta": format!("burst-{index:02} "),
+                                }}),
+                            );
+                        }
+                    }
                     // The steer scenarios stay live after the opening delta:
                     // no terminal event here. `steer_burst` drives its burst
                     // off `turn/steer` and closes on `turn/interrupt` (or
                     // EOF); every other accepted scenario still completes
                     // inline exactly as before.
-                    if scenario != "steer_burst" && scenario != "steer_reject" {
+                    if !matches!(scenario.as_str(), "steer_burst" | "steer_short")
+                        && scenario != "steer_reject"
+                    {
                         emit(
                             &mut output,
                             &serde_json::json!({"method": "turn/completed", "params": {
@@ -252,7 +276,9 @@ fn main() {
                 // Steer handling exists only in the steer scenarios; every
                 // other scenario keeps its historical no-reply behavior via
                 // the catch-all below.
-                if scenario != "steer_burst" && scenario != "steer_reject" {
+                if !matches!(scenario.as_str(), "steer_burst" | "steer_short")
+                    && scenario != "steer_reject"
+                {
                     continue;
                 }
                 let params = value
@@ -299,7 +325,12 @@ fn main() {
                         "delta": "thinking trace ",
                     }}),
                 );
-                for index in 0..STEER_BURST_COUNT {
+                let burst_count = if scenario == "steer_short" {
+                    3
+                } else {
+                    STEER_BURST_COUNT
+                };
+                for index in 0..burst_count {
                     emit(
                         &mut output,
                         &serde_json::json!({"method": "item/agentMessage/delta", "params": {
@@ -319,7 +350,7 @@ fn main() {
                 // Only `steer_burst` answers interrupts: the ack plus a
                 // cancelled terminal close the live turn. Every other
                 // scenario keeps its historical no-reply behavior.
-                if scenario != "steer_burst" {
+                if !matches!(scenario.as_str(), "steer_burst" | "steer_short") {
                     continue;
                 }
                 emit(
@@ -414,7 +445,9 @@ fn scenario_from_basename(argv0: &str) -> Option<String> {
     let scenario = stem.strip_prefix(SCENARIO_PREFIX)?;
     match scenario {
         "strict" | "reject_always" | "interleave" | "resume_interleave" | "resume_mismatch"
-        | "steer_burst" | "steer_reject" => Some(scenario.to_owned()),
+        | "steer_burst" | "steer_short" | "steer_reject" | "burst_terminal" => {
+            Some(scenario.to_owned())
+        }
         _ => None,
     }
 }

@@ -25,6 +25,7 @@
 //! preflight unit tests at the end pin the nonmutating contract the arm
 //! relies on.
 
+use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -53,7 +54,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use super::{
     NativeRunDispatcherConfig, NativeRunDispatcherConfigInput, TurnConsumptionContext,
-    TurnConsumptionState, handle_observation, handle_steer,
+    TurnConsumptionState, flush_pending_deltas, handle_observation, handle_steer,
 };
 use crate::{
     SystemCommandOrigin,
@@ -541,12 +542,49 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
             "recorded steer must carry the verbatim input text"
         );
 
-        // All 64 burst deltas plus the initial one commit as patches: 64
-        // frames through a 4-slot channel proves the production drain.
+        // The coalesced tail is still buffered until a flush point; the
+        // production post-loop flush runs at turn end, which this direct
+        // `handle_steer` harness never reaches.
+        assert!(
+            flush_pending_deltas(&context, &mut state, &mut turn).await,
+            "explicit flush must commit the buffered burst tail"
+        );
+        assert!(
+            !state.forced_interrupted,
+            "the coalesced flush must commit against the live lease"
+        );
+
+        // All 65 deltas persist through a bounded number of coalesced
+        // batches (opening body, part-transition replace, threshold flush,
+        // tail flush): draining 64 through a 4-slot channel is proven by the
+        // bounded write count plus the in-order prefix, not by one patch per
+        // delta. The exact full transcript is proven by the terminating
+        // `burst_terminal` scenario below, where no cancel can truncate the
+        // stream.
         let patches = patch_count(&database, &thread_id).await;
         assert!(
-            patches >= 64,
-            "burst deltas must persist, saw {patches} patches"
+            patches <= 16,
+            "coalesced burst must stay bounded, saw {patches} patches"
+        );
+        let items = database_entities::conversation_item::Entity::find()
+            .all(&database)
+            .await
+            .expect("conversation items should read");
+        let assistant = items
+            .iter()
+            .find(|item| {
+                matches!(
+                    item.item_kind,
+                    database_entities::ConversationItemKind::AssistantMessage
+                )
+            })
+            .expect("assistant item must exist");
+        assert!(
+            assistant
+                .body
+                .starts_with("hello wire\n\nburst-00 burst-01 "),
+            "the coalesced threshold run must persist in order, got {:?}",
+            assistant.body
         );
 
         // The projection links the same run: no second spawn happened.
@@ -634,6 +672,164 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
     })
     .await
     .expect("burst steer settles inside budget");
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
+#[tokio::test]
+async fn codex_burst_terminal_coalesces_to_exact_transcript_with_bounded_commits() {
+    tokio::time::timeout(STEER_DEADLINE, async {
+        let fixture = steer_fixture_program();
+        let temp = SteerTempRoot::new("burst-terminal");
+        let program = steer_scenario_program(&fixture, &temp.dir, "burst_terminal");
+        let database = connect(SqliteConfig::file(&temp.db_path).sqlx_logging(false))
+            .await
+            .expect("file database should open");
+        migrate_to_current(&database)
+            .await
+            .expect("migrations should apply");
+        let repository = Repository::new(database.clone());
+        let thread_id = ThreadId::parse("thread-fixture-1").expect("thread id");
+        let seed = seed_steer_run(
+            &repository,
+            &thread_id,
+            "burst-terminal",
+            "run-burst-terminal",
+            "turn-burst-terminal",
+        )
+        .await;
+
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch_with_executable(
+                &temp.db_path,
+                &EngineProfileId::parse("codex-fixture").expect("profile id"),
+                &program,
+                "codex-cli 0.145.0",
+            )
+            .expect("wire launch resolves");
+        let mut owner = EngineOwner::start_configured(
+            NonZeroUsize::new(1).expect("one slot"),
+            &tokio::runtime::Handle::current(),
+        );
+        let mut turn = owner
+            .admit_codex_turn(
+                EngineCodexTurnInput {
+                    run_id: seed.run_id.clone(),
+                    thread_id: thread_id.clone(),
+                    project_root: temp.root.clone(),
+                    prompt_id: "prompt-burst-terminal".to_owned(),
+                    prompt: QueueMessagePayload::text_only("hello steer").expect("payload"),
+                    settings: seed.settings.clone(),
+                    launch,
+                    continuation: None,
+                    prompt_delivery: "immediate".to_owned(),
+                    stream_after: 0,
+                    control_capacity: 1,
+                },
+                Duration::from_secs(50),
+            )
+            .expect("wire turn admits");
+        turn.prepare().await.expect("wire turn prepares");
+        turn.authorize().expect("wire turn authorizes once");
+
+        let config = test_dispatcher_config();
+        let origin = SystemCommandOrigin;
+        let stop = CancelHandle::new();
+        let process_cancel = CancelHandle::new();
+        let run_cancel = CancelHandle::new();
+        let context = TurnConsumptionContext {
+            repository: &repository,
+            config: &config,
+            origin: &origin,
+            stop: &stop,
+            process_cancel: &process_cancel,
+            run_cancel: &run_cancel,
+        };
+        let mut state = TurnConsumptionState::new(
+            RunBatchScope {
+                claimed: &seed.claimed,
+                launched: &seed.launched,
+                bound: &seed.bound,
+                run_start_key: &seed.run_start_key,
+                credentials: &seed.credentials,
+                expected_launch_at: UnixMillis::from_millis(seed.launch_op_ms),
+                expected_updated_at: UnixMillis::from_millis(seed.bound_op_ms),
+            },
+            EngineId::Codex,
+        );
+
+        // Drain the terminating burst in arrival order through the real
+        // observation handler; the scenario closes its stream after the
+        // completion event, so no cancel can truncate the transcript.
+        let mut observations = 0_usize;
+        while let Some(observation) =
+            tokio::time::timeout(OBSERVE_DEADLINE, turn.next_observation())
+                .await
+                .expect("burst observation settles")
+        {
+            handle_observation(&context, &mut state, &mut turn, observation).await;
+            observations += 1;
+            assert!(
+                observations <= 256,
+                "burst observation stream must stay bounded"
+            );
+        }
+        assert!(
+            !state.forced_interrupted,
+            "a clean burst must never interrupt"
+        );
+
+        // No flush point was reached after the final threshold run, so the
+        // production post-loop flush is reproduced here before finish.
+        assert!(
+            flush_pending_deltas(&context, &mut state, &mut turn).await,
+            "the buffered tail must flush before finish"
+        );
+
+        let receipts = database_entities::run_batch_receipt::Entity::find()
+            .all(&database)
+            .await
+            .expect("batch receipts should read");
+        assert!(
+            receipts.len() <= 6,
+            "65 deltas must coalesce into a bounded commit count, saw {}",
+            receipts.len()
+        );
+        let items = database_entities::conversation_item::Entity::find()
+            .all(&database)
+            .await
+            .expect("conversation items should read");
+        let assistant = items
+            .iter()
+            .find(|item| {
+                matches!(
+                    item.item_kind,
+                    database_entities::ConversationItemKind::AssistantMessage
+                )
+            })
+            .expect("assistant item must exist");
+        let mut bursts = String::new();
+        for index in 0..64 {
+            write!(bursts, "burst-{index:02} ").expect("writing to a String cannot fail");
+        }
+        assert_eq!(
+            assistant.body,
+            format!("hello wire\n\n{bursts}"),
+            "the coalesced transcript must equal the uncoalesced concatenation"
+        );
+
+        let finished = turn.finish().await.expect("turn finishes");
+        assert_eq!(
+            finished.terminal(),
+            TerminalState::Completed,
+            "terminating burst must finish completed"
+        );
+        assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    })
+    .await
+    .expect("burst terminal settles inside budget");
 }
 
 #[expect(
