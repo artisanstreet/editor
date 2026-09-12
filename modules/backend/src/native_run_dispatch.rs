@@ -38,7 +38,7 @@ use crate::{
     engine_owner::cursor::CursorLaunch,
     engine_owner::grok::GrokLaunch,
     engine_owner::operation::{AcceptedTurn, PreparedSession},
-    engine_owner::{EngineContinuation, hermes::VerifiedHermesLaunch},
+    engine_owner::EngineContinuation,
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
     run_cancellation::{RunCancellationLease, RunCancellationRegistry},
@@ -325,7 +325,6 @@ enum ResolvedLaunch {
     Claude(Box<VerifiedClaudeLaunch>),
     Cursor(Box<CursorLaunch>),
     Grok(Box<GrokLaunch>),
-    Hermes(Box<VerifiedHermesLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }

@@ -178,12 +178,8 @@ fn state_with_offline_catalog() -> NativeModelSelectorState {
 fn hidden_harnesses_are_skipped_by_the_picker() {
     let snapshot = NativeModelCatalog::offline().expect("bundled catalog");
     assert!(
-        snapshot
-            .manifest
-            .harness("hermes")
-            .expect("hermes stays decodable")
-            .hidden,
-        "hermes is hidden by the bundled manifest"
+        snapshot.manifest.harness("hermes").is_none(),
+        "hermes is not part of the bundled manifest"
     );
 
     // Hiding the first harness must move the default tab to the next

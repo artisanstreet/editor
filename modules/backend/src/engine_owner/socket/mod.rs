@@ -18,7 +18,6 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
 pub(crate) mod grok;
-pub(crate) mod hermes;
 pub(crate) mod opencode;
 
 use artisan_domain::EngineSocket;
@@ -40,7 +39,6 @@ pub(crate) fn adapter_for(launch: &InternalLaunch) -> Box<dyn EngineSocket + '_>
         InternalLaunch::Claude(verified) => Box::new(claude::ClaudeSocketAdapter::new(verified)),
         InternalLaunch::Grok(launch) => Box::new(grok::GrokSocketAdapter::new(launch)),
         InternalLaunch::Cursor(launch) => Box::new(cursor::CursorSocketAdapter::new(launch)),
-        InternalLaunch::Hermes(verified) => Box::new(hermes::HermesSocketAdapter::new(verified)),
         #[cfg(test)]
         InternalLaunch::Fixture(_) => Box::new(FixtureSocketAdapter),
     }

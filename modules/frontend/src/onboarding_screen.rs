@@ -157,7 +157,7 @@ pub fn harness_setup_button_selector(harness_id: &str) -> String {
 ///
 /// The mapping mirrors `EngineMarkFor` (`lib/engine/presentation.ts`):
 /// Codex wears the `OpenAI` mark, Claude/Cursor/Grok wear their product marks,
-/// and `OpenCode`/`Hermes` wear their brand marks. Unknown ids fall back to
+/// and `OpenCode` wears its brand mark. Unknown ids fall back to
 /// the neutral question-mark placeholder, matching `unknown_engine_mark`.
 #[must_use]
 pub fn brand_asset_for(harness_id: &str) -> AssetId {
@@ -167,7 +167,6 @@ pub fn brand_asset_for(harness_id: &str) -> AssetId {
         "cursor" => AssetId::SVGL_CURSOR,
         "grok" => AssetId::SVGL_GROK,
         "opencode2" => AssetId::BRANDS_OPENCODE,
-        "hermes" => AssetId::BRANDS_HERMES,
         _ => AssetId::TABLER_QUESTION_MARK,
     }
 }
@@ -580,7 +579,6 @@ mod tests {
         assert_eq!(brand_asset_for("cursor"), AssetId::SVGL_CURSOR);
         assert_eq!(brand_asset_for("grok"), AssetId::SVGL_GROK);
         assert_eq!(brand_asset_for("opencode2"), AssetId::BRANDS_OPENCODE);
-        assert_eq!(brand_asset_for("hermes"), AssetId::BRANDS_HERMES);
         assert_eq!(brand_asset_for("unknown"), AssetId::TABLER_QUESTION_MARK);
     }
 

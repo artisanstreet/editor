@@ -532,7 +532,6 @@ struct EngineSelectionV2 {
     claude @2 :ClaudeEngineSelection;
     grok @3 :GrokEngineSelection;
     cursor @4 :CursorEngineSelection;
-    hermes @5 :HermesEngineSelection;
   }
 }
 
@@ -570,15 +569,6 @@ struct CursorEngineSelection {
   speed @3 :Text;
   permissionMode @4 :Text;
   permission @5 :EnginePermissionPolicy;
-}
-
-struct HermesEngineSelection {
-  profileId @0 :Text;
-  modelId @1 :Text;
-  routeId @2 :Text;
-  reasoningEffort @3 :Text;
-  permissionMode @4 :Text;
-  fast @5 :Bool;
 }
 
 struct SetThreadEngineConfigResult {

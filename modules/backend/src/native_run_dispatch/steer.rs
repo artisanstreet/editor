@@ -251,10 +251,7 @@ pub(super) async fn handle_steer(
     // wired, so they fail here — deterministically, without provider
     // contact and without prompt-state plumbing. Waiting-session
     // follow-up delivery is a named follow-up packet, not this one.
-    if !matches!(
-        state.engine,
-        EngineId::Codex | EngineId::Claude | EngineId::Hermes
-    ) {
+    if !matches!(state.engine, EngineId::Codex | EngineId::Claude) {
         fail_steered_row(
             context,
             &message_id,

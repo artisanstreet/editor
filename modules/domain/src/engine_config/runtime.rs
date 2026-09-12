@@ -436,11 +436,7 @@ impl EngineRunConfig {
     pub const fn storage_codec_version(&self) -> u16 {
         match self.selection.engine_id() {
             EngineId::OpenCode2 => 1,
-            EngineId::Codex
-            | EngineId::Claude
-            | EngineId::Grok
-            | EngineId::Cursor
-            | EngineId::Hermes => 2,
+            EngineId::Codex | EngineId::Claude | EngineId::Grok | EngineId::Cursor => 2,
         }
     }
 

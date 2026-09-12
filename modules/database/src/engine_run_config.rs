@@ -15,8 +15,8 @@ use artisan_domain::{
     ENGINE_CONFIG_MAX_ENCODED_BYTES, EngineAgentId, EngineConfigError, EngineId, EngineModelId,
     EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
-    GrokPermissionMode, GrokReasoningEffort, GrokSelection, HermesPermissionMode,
-    HermesReasoningEffort, HermesSelection, NetworkAccess, OpenCode2Selection, PermissionId,
+    GrokPermissionMode, GrokReasoningEffort, GrokSelection, NetworkAccess, OpenCode2Selection,
+    PermissionId,
     WebSearchAccess,
 };
 
@@ -493,22 +493,12 @@ struct StoredCursorDetails<'a> {
 }
 
 #[derive(Serialize)]
-struct StoredHermesDetails<'a> {
-    model_id: &'a str,
-    route_id: &'a str,
-    reasoning_effort: Option<&'a str>,
-    permission_mode: &'static str,
-    fast: bool,
-}
-
-#[derive(Serialize)]
 #[serde(untagged)]
 enum StoredDetails<'a> {
     Codex(StoredCodexDetails<'a>),
     Claude(StoredClaudeDetails<'a>),
     Grok(StoredGrokDetails<'a>),
     Cursor(StoredCursorDetails<'a>),
-    Hermes(StoredHermesDetails<'a>),
 }
 
 #[derive(Serialize)]
@@ -569,16 +559,6 @@ struct RawCursorDetails {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawHermesDetails {
-    model_id: String,
-    route_id: String,
-    reasoning_effort: Option<String>,
-    permission_mode: String,
-    fast: bool,
-}
-
-#[derive(Deserialize)]
 struct VersionPeek {
     version: u16,
 }
@@ -607,11 +587,6 @@ fn into_domain_v2(raw: RawConfigV2) -> Result<EngineRunConfig, EngineRunConfigCo
         .as_ref()
         .map(convert_permission)
         .transpose()?;
-    if engine == EngineId::Hermes && permission.is_some() {
-        return Err(EngineRunConfigCodecError::InvalidField {
-            field: "permission",
-        });
-    }
     let runtime = convert_runtime(&raw.runtime)?;
     let selection = match engine {
         EngineId::OpenCode2 => {
@@ -728,26 +703,6 @@ fn into_domain_v2(raw: RawConfigV2) -> Result<EngineRunConfig, EngineRunConfigCo
                     .map(CursorPermissionMode::parse)
                     .transpose()
                     .map_err(domain_error)?,
-            ))
-        }
-        EngineId::Hermes => {
-            let details: RawHermesDetails = serde_json::from_value(raw.details)
-                .map_err(|_| EngineRunConfigCodecError::Malformed)?;
-            let model_id = EngineModelId::parse(details.model_id)
-                .map_err(|_| EngineRunConfigCodecError::InvalidField { field: "model_id" })?;
-            let route_id = EngineRouteId::parse(details.route_id)
-                .map_err(|_| EngineRunConfigCodecError::InvalidField { field: "route_id" })?;
-            EngineSelection::Hermes(HermesSelection::new(
-                profile_id,
-                model_id,
-                route_id,
-                HermesPermissionMode::parse(&details.permission_mode).map_err(domain_error)?,
-                details
-                    .reasoning_effort
-                    .map(HermesReasoningEffort::parse)
-                    .transpose()
-                    .map_err(domain_error)?,
-                details.fast,
             ))
         }
     };
@@ -886,21 +841,6 @@ pub(crate) fn encode(config: &EngineRunConfig) -> Result<Vec<u8>, EngineRunConfi
                 permission_mode: selection
                     .permission_mode()
                     .map(CursorPermissionMode::as_str),
-            }),
-        )?,
-        EngineSelection::Hermes(selection) => encode_v2(
-            EngineId::Hermes,
-            selection.profile_id().as_str(),
-            None,
-            config.runtime(),
-            StoredDetails::Hermes(StoredHermesDetails {
-                model_id: selection.model_id().as_str(),
-                route_id: selection.route_id().as_str(),
-                reasoning_effort: selection
-                    .reasoning_effort()
-                    .map(HermesReasoningEffort::as_str),
-                permission_mode: selection.permission_mode().as_str(),
-                fast: selection.fast(),
             }),
         )?,
     };

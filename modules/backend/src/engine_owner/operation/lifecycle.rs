@@ -32,8 +32,6 @@ use super::core::LaunchResult;
 use super::cursor::execute_cursor_turn;
 use super::failures::map_readiness_error;
 use super::grok::execute_grok_turn;
-use super::hermes::execute_hermes_turn;
-use super::hermes::map_hermes_turn_error;
 use super::opencode::execute_configured_turn;
 use super::turn_common::ConfiguredTurnRequest;
 use super::turn_common::configured_runtime;
@@ -137,35 +135,6 @@ pub(super) async fn execute_legacy_job(
     handle_health_phase(parts, generation, endpoint, secret, respond, ctx).await
 }
 
-/// Per-engine image-attachment applicability enforced at owner intake.
-///
-/// Mirrors the TypeScript `image_input` evidence
-/// (`docs/plans/native-engines/README.md` section 1): Codex data-URL images,
-/// Claude base64 blocks, `OpenCode2` per-model data-URI, Grok embedded
-/// resources, and Cursor native blocks are provider-supported, so those turns
-/// pass intake unchanged here. Hermes reports `image_input: false`, so any
-/// image fails the turn closed with the existing typed
-/// [`HermesTurnError::ImagesUnsupported`](super::super::hermes::HermesTurnError)
-/// reject instead of sending a degraded text-only prompt. Runnable catalog
-/// support never implies an installed binary: executable resolution and the
-/// readiness handshake stay the live gate in each per-engine executor.
-pub(super) fn check_turn_attachment_applicability(
-    engine: artisan_domain::EngineId,
-    prompt: &artisan_domain::QueueMessagePayload,
-) -> Result<(), EngineOperationError> {
-    match engine {
-        artisan_domain::EngineId::Hermes => {
-            super::super::hermes::reject_image_attachments(prompt)
-                .map_err(|error| map_hermes_turn_error(&error))
-        }
-        artisan_domain::EngineId::OpenCode2
-        | artisan_domain::EngineId::Codex
-        | artisan_domain::EngineId::Claude
-        | artisan_domain::EngineId::Grok
-        | artisan_domain::EngineId::Cursor => Ok(()),
-    }
-}
-
 /// Executes one configured `OpenCode2` turn.  The profile capability and the
 /// settings snapshot are moved into this owner call and are never reread from
 /// durable state or ambient process configuration.
@@ -205,16 +174,9 @@ pub(super) async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle
         artisan_domain::EngineSelection::Claude(selection) => selection.profile_id().as_str(),
         artisan_domain::EngineSelection::Grok(selection) => selection.profile_id().as_str(),
         artisan_domain::EngineSelection::Cursor(selection) => selection.profile_id().as_str(),
-        artisan_domain::EngineSelection::Hermes(selection) => selection.profile_id().as_str(),
     };
     if request.input.launch.profile_id() != selected_profile {
         return request.fail(EngineOperationError::Configuration);
-    }
-    if let Err(error) = check_turn_attachment_applicability(
-        request.input.settings.config().selection().engine_id(),
-        &request.input.prompt,
-    ) {
-        return request.fail(error);
     }
     if shutdown.is_cancelled() {
         return request.fail(EngineOperationError::Shutdown);
@@ -242,9 +204,6 @@ pub(super) async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle
         }
         super::super::consts::CURSOR_ENGINE_ID => {
             Box::pin(execute_cursor_turn(request, runtime, shutdown)).await
-        }
-        super::super::consts::HERMES_ENGINE_ID => {
-            Box::pin(execute_hermes_turn(request, runtime, shutdown)).await
         }
         // `OpenCode2` and the test-only fixture lane share the configured
         // executor, exactly as before.

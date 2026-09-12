@@ -415,12 +415,11 @@ impl ProfileUsageGeneration {
 ///
 /// Display names are the provider-owned names from the engine-usage adapter
 /// contract. The adapter never invents rows outside this roster.
-pub const PROFILE_USAGE_ROSTER: [(&str, &str); 6] = [
+pub const PROFILE_USAGE_ROSTER: [(&str, &str); 5] = [
     ("codex", "Codex"),
     ("claude", "Claude"),
     ("cursor", "Cursor"),
     ("grok", "Grok Build"),
-    ("hermes", "Hermes"),
     ("opencode2", "OpenCode"),
 ];
 
@@ -524,8 +523,8 @@ pub fn narrowed_report_position(engine_ids: &[&str], requested_engine_id: &str) 
 /// These engines get a usage verdict for account state: `codex` reads
 /// `account/rateLimits/read`, `claude` parses `claude -p /usage`, and
 /// `cursor` posts its dashboard endpoint. This mirrors the backend roster
-/// contract in `modules/backend/src/account_usage_service.rs`: `grok`,
-/// `hermes`, and `opencode2` expose no account-usage surface. Admission to
+/// contract in `modules/backend/src/account_usage_service.rs`: `grok`
+/// and `opencode2` expose no account-usage surface. Admission to
 /// run is narrower (see [`CLI_PROBED_ENGINES`]): the dashboard read proves
 /// a Cursor account, never a local CLI installation.
 pub const ACCOUNT_GATED_ENGINES: [&str; 3] = ["codex", "claude", "cursor"];
@@ -637,7 +636,7 @@ pub fn engine_refresh_failure(state: &NativeProfileUsageState, engine_id: &str) 
 /// Only a fresh backend-authenticated usage report admits them, and only
 /// for the CLI-probed subset ([`CLI_PROBED_ENGINES`]): a dashboard read
 /// (Cursor) never proves a local installation. Engines without an account
-/// surface (`grok`, `hermes`, `opencode2`) never qualify here either; the
+/// surface (`grok`, `opencode2`) never qualify here either; the
 /// overlay preserves their snapshot marking instead.
 #[must_use]
 pub fn engine_static_models_admittable(

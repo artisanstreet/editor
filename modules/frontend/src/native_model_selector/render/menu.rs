@@ -653,7 +653,6 @@ pub(crate) fn engine_asset(engine_id: &str) -> AssetId {
         "cursor" => AssetId::SVGL_CURSOR,
         "grok" => AssetId::SVGL_GROK,
         "opencode2" => AssetId::BRANDS_OPENCODE,
-        "hermes" => AssetId::BRANDS_HERMES,
         _ => AssetId::TABLER_QUESTION_MARK,
     }
 }
@@ -667,7 +666,6 @@ pub(crate) fn engine_accent(engine_id: &str) -> Option<u32> {
         "claude" => Some(0x00d9_7757),
         "codex" => Some(0x0010_a37f),
         "cursor" | "grok" | "opencode2" => Some(0x006b_7280),
-        "hermes" => Some(0x008b_5cf6),
         _ => None,
     }
 }

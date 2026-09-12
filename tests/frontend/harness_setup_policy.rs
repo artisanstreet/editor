@@ -534,7 +534,7 @@ fn external_auth_is_exact_true_and_precedes_managed_sign_in() {
             false,
             None,
             Some("configuration unavailable"),
-            "Configure Hermes",
+            "Configure",
             false,
             HarnessSetupStatus::SignIn,
         );

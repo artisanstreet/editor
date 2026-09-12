@@ -3,12 +3,12 @@ use artisan_catalog::{
     NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeOptionValue,
     NativePermissionOption,
 };
-use artisan_domain::{EngineRunConfig, EngineSelection, EngineProfileId, CodexReasoningEffort, CodexServiceTier, EngineModelId, CodexSelection, ClaudePermissionMode, ClaudeEffort, ClaudeSelection, GrokReasoningEffort, GrokSelection, CursorReasoningEffort, CursorSpeed, CursorSelection, EngineRouteId, HermesPermissionMode, HermesReasoningEffort, HermesSelection, EngineVariantId, ApprovalMode, FilesystemAccess, NetworkAccess, WebSearchAccess, EnginePermissionPolicy, PermissionId, EngineAgentId, OpenCode2Selection, GrokPermissionMode, CursorPermissionMode, CodexModelContextWindow, EngineRuntimeControls, FiniteMillis, ByteLimit, CountLimit, EngineRuntimeControlsInput};
+use artisan_domain::{EngineRunConfig, EngineSelection, EngineProfileId, CodexReasoningEffort, CodexServiceTier, EngineModelId, CodexSelection, ClaudePermissionMode, ClaudeEffort, ClaudeSelection, GrokReasoningEffort, GrokSelection, CursorReasoningEffort, CursorSpeed, CursorSelection, EngineRouteId, EngineVariantId, ApprovalMode, FilesystemAccess, NetworkAccess, WebSearchAccess, EnginePermissionPolicy, PermissionId, EngineAgentId, OpenCode2Selection, GrokPermissionMode, CursorPermissionMode, CodexModelContextWindow, EngineRuntimeControls, FiniteMillis, ByteLimit, CountLimit, EngineRuntimeControlsInput};
 
 /// Default profile identity persisted for native engine selections that
 /// carry no explicit profile.
 ///
-/// The Codex/Claude/Grok/Cursor/Hermes launch authorities resolve their
+/// The Codex/Claude/Grok/Cursor launch authorities resolve their
 /// installed executables without consulting the managed `OpenCode` profile
 /// registry, so an unconfigured thread persists a native selection under
 /// this supported default instead of blocking on registry state. `OpenCode`
@@ -16,7 +16,7 @@ use artisan_domain::{EngineRunConfig, EngineSelection, EngineProfileId, CodexRea
 pub(crate) const NATIVE_DEFAULT_PROFILE_ID: &str = "default";
 
 /// Engines whose selections may use [`NATIVE_DEFAULT_PROFILE_ID`].
-const NATIVE_DEFAULT_PROFILE_ENGINES: [&str; 5] = ["codex", "claude", "grok", "cursor", "hermes"];
+const NATIVE_DEFAULT_PROFILE_ENGINES: [&str; 4] = ["codex", "claude", "grok", "cursor"];
 
 /// Attaches the default profile to a native choice without one.
 ///
@@ -61,7 +61,7 @@ pub(crate) fn config_for_policy(
         .validate_policy(policy)
         .map_err(|_| "Model selection is no longer available")?;
     let selection = match policy.engine_id.as_str() {
-        "codex" | "claude" | "grok" | "cursor" | "hermes" => {
+        "codex" | "claude" | "grok" | "cursor" => {
             native_selection_config(catalog, policy, previous)?
         }
         _ => opencode2_selection_config(policy, previous)?,
@@ -73,7 +73,7 @@ pub(crate) fn config_for_policy(
     Ok(EngineRunConfig::new(selection, runtime))
 }
 
-/// Builds the durable selection for the five fixture-proven native engines.
+/// Builds the durable selection for the four fixture-proven native engines.
 ///
 /// Every arm mirrors the backend TypeScript resolver
 /// (`modules/backend/src/orchestration/session-policy.ts`): the canonical
@@ -82,8 +82,8 @@ pub(crate) fn config_for_policy(
 /// and effort/speed/window choices travel only where the durable selection
 /// has a field for them. A validated choice the selection cannot represent
 /// is an honest error, never a silent downgrade — except where the resolver
-/// itself drops the axis (Hermes context, neutral standard speed), which is
-/// documented at the call site.
+/// itself drops the axis (neutral standard speed), which is documented at
+/// the call site.
 #[expect(
     clippy::too_many_lines,
     reason = "one resolver per engine keeps each capability-to-selection mapping reviewable beside its engine's option vocabulary"
@@ -214,49 +214,6 @@ fn native_selection_config(
                 permission_mode,
             )))
         }
-        "hermes" => {
-            let native = policy
-                .native_selection
-                .as_ref()
-                .ok_or("Model routing is unavailable")?;
-            if native.variant_id.is_some() {
-                return Err("This provider does not support these configuration overrides");
-            }
-            let model = EngineModelId::parse(native.model_id.clone())
-                .map_err(|_| "Invalid model identity")?;
-            let route = EngineRouteId::parse(native.provider_route_id.clone())
-                .map_err(|_| "Invalid model route")?;
-            let option = harness_option(catalog, policy)?;
-            let permission_mode = HermesPermissionMode::parse(&option.native_value)
-                .map_err(|_| "Unsupported permission mode")?;
-            let reasoning_effort = policy
-                .reasoning_effort
-                .as_ref()
-                .map(|value| {
-                    HermesReasoningEffort::parse(value.native_value.clone())
-                        .map_err(|_| "This provider does not support these configuration overrides")
-                })
-                .transpose()?;
-            // The resolver carries no Hermes context axis: Hermes authorization
-            // and routing own the session, so a validated window choice stays
-            // unrepresented rather than failing a runnable Hermes policy.
-            let fast = match policy.speed.as_ref() {
-                None => false,
-                Some(value) if value.native_value == "standard" => false,
-                Some(value) if value.native_value == "fast" => true,
-                Some(_) => {
-                    return Err("This provider does not support these configuration overrides");
-                }
-            };
-            Ok(EngineSelection::Hermes(HermesSelection::new(
-                profile,
-                model,
-                route,
-                permission_mode,
-                reasoning_effort,
-                fast,
-            )))
-        }
         _ => Err("This engine is not available in the native app yet"),
     }
 }
@@ -264,12 +221,12 @@ fn native_selection_config(
 /// Projects a saved native engine selection back onto a displayable catalog
 /// policy.
 ///
-/// This is the reverse of [`config_for_policy`] for the five native engines:
+/// This is the reverse of [`config_for_policy`] for the four native engines:
 /// given the durable selection inside a saved [`EngineRunConfig`], it
 /// recovers the exact catalog model plus the reasoning/speed/context/
 /// permission option values that rebuild it, so a configured thread restored
 /// from storage (reload, switch-back) displays and validates its saved
-/// Codex/Claude/Grok/Cursor/Hermes model instead of drifting to no
+/// Codex/Claude/Grok/Cursor model instead of drifting to no
 /// selection. Every axis is recovered from live catalog options by native
 /// value; the candidate is then verified by rebuilding through
 /// [`config_for_policy`] against the saved configuration, so only an exact
@@ -292,7 +249,6 @@ pub(crate) fn policy_for_selection(
         EngineSelection::Claude(selection) => policy_for_claude(catalog, saved, selection),
         EngineSelection::Grok(selection) => policy_for_grok(catalog, saved, selection),
         EngineSelection::Cursor(selection) => policy_for_cursor(catalog, saved, selection),
-        EngineSelection::Hermes(selection) => policy_for_hermes(catalog, saved, selection),
     }
 }
 
@@ -632,54 +588,6 @@ fn policy_for_cursor(
     Err("Saved Cursor model is no longer available")
 }
 
-/// Projects a saved Hermes selection onto its catalog policy.
-fn policy_for_hermes(
-    catalog: &NativeModelCatalog,
-    saved: &EngineRunConfig,
-    selection: &HermesSelection,
-) -> Result<NativeModelPolicy, &'static str> {
-    let wanted_model = selection.model_id().as_str().to_owned();
-    let wanted_route = selection.route_id().as_str().to_owned();
-    let effort = selection
-        .reasoning_effort()
-        .map(|effort| effort.as_str().to_owned());
-    let fast = selection.fast();
-    let profile = selection.profile_id().as_str().to_owned();
-    for model in catalog.manifest.models.iter().filter(|model| {
-        model.harness == "hermes"
-            && model.native_selection.as_ref().is_some_and(|native| {
-                native.model_id == wanted_model
-                    && native.provider_route_id == wanted_route
-                    && native.variant_id.is_none()
-            })
-    }) {
-        let Ok(mut policy) = catalog.preview_policy_for_model(&model.id) else {
-            continue;
-        };
-        policy.profile_id = Some(profile.clone());
-        policy.reasoning_effort = match effort.as_deref() {
-            None => None,
-            Some(wanted) => match thinking_option(model, wanted) {
-                Some(option) => Some(option),
-                None => continue,
-            },
-        };
-        policy.speed = if fast {
-            match speed_option(model, "fast") {
-                Some(option) => Some(option),
-                None => continue,
-            }
-        } else {
-            None
-        };
-        // The resolver carries no Hermes context axis: the preview value
-        // displays while the rebuild ignores it.
-        if let Ok(verified) = permission_by_rebuild(catalog, "hermes", &mut policy, saved) {
-            return Ok(verified);
-        }
-    }
-    Err("Saved Hermes model is no longer available")
-}
 /// Builds the durable selection for the incumbent `OpenCode` 2 engine.
 ///
 /// This is the original `config_for_policy` body, unchanged apart from
@@ -842,7 +750,7 @@ fn inherited_network_web(
     let permission = previous
         .map(EngineRunConfig::selection)
         .filter(|selection| selection.engine_id().as_str() == engine_id)
-        .and_then(EngineSelection::permission);
+        .map(EngineSelection::permission);
     (
         permission.map_or(NetworkAccess::Disabled, artisan_domain::EnginePermissionPolicy::network),
         permission.map_or(WebSearchAccess::Disabled, artisan_domain::EnginePermissionPolicy::web_search),
@@ -1105,10 +1013,7 @@ fn default_runtime() -> Result<EngineRuntimeControls, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artisan_catalog::{
-        NativeContextConfig, NativeContextSelection, NativeModelDefinition, NativeModelRoute,
-        NativeModelRouteGroup, NativeModelRouteStatus, NativeModelSelection, NativeOptionValue,
-    };
+    use artisan_catalog::{NativeContextConfig, NativeContextSelection, NativeOptionValue};
 
     fn profiled_policy(catalog: &NativeModelCatalog, model_id: &str) -> NativeModelPolicy {
         let mut policy = catalog.selection_policy_for_model(model_id).unwrap();
@@ -1121,7 +1026,7 @@ mod tests {
     /// direct models need no route, so runnable harnesses admit them.
     fn runnable_catalog() -> NativeModelCatalog {
         let mut catalog = NativeModelCatalog::offline().unwrap();
-        for engine_id in ["codex", "claude", "grok", "cursor", "hermes"] {
+        for engine_id in ["codex", "claude", "grok", "cursor"] {
             catalog.runnable_harness_ids.push(engine_id.to_owned());
         }
         catalog
@@ -1304,95 +1209,6 @@ mod tests {
         assert_eq!(selection.speed(), Some(CursorSpeed::Fast));
     }
 
-    /// Extends the runnable snapshot with a routed Hermes model plus a direct
-    /// one, mirroring the live dynamic rows the backend merges at runtime.
-    /// The routed row requires its provider route, so the helper seats that
-    /// route Available the way the catalog test helpers do.
-    fn catalog_with_hermes_models() -> NativeModelCatalog {
-        let mut catalog = runnable_catalog();
-        let template = catalog.manifest.model("codex-sol").cloned().unwrap();
-        let routed = NativeModelDefinition {
-            id: "hermes-test-route".to_owned(),
-            native_model_id: "openai/gpt-test".to_owned(),
-            harness: "hermes".to_owned(),
-            provider: "openai".to_owned(),
-            native_selection: Some(NativeModelSelection {
-                model_id: "openai/gpt-test".to_owned(),
-                provider_route_id: "openai-codex".to_owned(),
-                variant_id: None,
-            }),
-            ..template.clone()
-        };
-        let direct = NativeModelDefinition {
-            id: "hermes-test-direct".to_owned(),
-            native_model_id: "openai/gpt-direct".to_owned(),
-            harness: "hermes".to_owned(),
-            provider: "openai".to_owned(),
-            native_selection: None,
-            ..template
-        };
-        catalog.manifest.models.push(routed);
-        catalog.manifest.models.push(direct);
-        catalog.routes.push(NativeModelRoute {
-            engine_id: "hermes".to_owned(),
-            group: NativeModelRouteGroup {
-                id: "openai-codex".to_owned(),
-                label: "OpenAI Codex".to_owned(),
-                order: 0,
-                show_route_labels: false,
-            },
-            id: "openai-codex".to_owned(),
-            label: "OpenAI Codex".to_owned(),
-            status: NativeModelRouteStatus::Available,
-            unavailable_reason: None,
-        });
-        catalog
-    }
-
-    fn hermes_policy(catalog: &NativeModelCatalog, model_id: &str) -> NativeModelPolicy {
-        let model = catalog.manifest.model(model_id).unwrap();
-        NativeModelPolicy {
-            catalog_revision: catalog.catalog_revision.clone(),
-            profile_id: Some("default".to_owned()),
-            engine_id: model.harness.clone(),
-            model_id: model.id.clone(),
-            native_model_id: model.native_model_id.clone(),
-            native_selection: model.native_selection.clone(),
-            reasoning_effort: None,
-            speed: None,
-            context_window: None,
-            permission: Some(NativeOptionValue {
-                id: "autonomous".to_owned(),
-                native_value: "profile".to_owned(),
-            }),
-        }
-    }
-
-    #[test]
-    fn hermes_routed_choice_builds_a_hermes_selection() {
-        let catalog = catalog_with_hermes_models();
-        let policy = hermes_policy(&catalog, "hermes-test-route");
-        let config = config_for_policy(&catalog, &policy, None).unwrap();
-        let EngineSelection::Hermes(selection) = config.selection() else {
-            panic!("expected a Hermes selection");
-        };
-        assert_eq!(selection.model_id().as_str(), "openai/gpt-test");
-        assert_eq!(selection.route_id().as_str(), "openai-codex");
-        assert_eq!(selection.permission_mode(), HermesPermissionMode::Profile);
-        assert!(!selection.fast());
-        assert!(validate_run_choice(&catalog, &policy, Some(&config)).is_ok());
-    }
-
-    #[test]
-    fn hermes_choice_without_routing_is_an_honest_error() {
-        let catalog = catalog_with_hermes_models();
-        let policy = hermes_policy(&catalog, "hermes-test-direct");
-        assert_eq!(
-            config_for_policy(&catalog, &policy, None).unwrap_err(),
-            "Model routing is unavailable"
-        );
-    }
-
     #[test]
     fn unknown_registry_engine_stays_unavailable() {
         let mut catalog = NativeModelCatalog::offline().unwrap();
@@ -1434,13 +1250,6 @@ mod tests {
                 config_for_policy(&catalog, &explicit, None).unwrap()
             );
         }
-        let routed = catalog_with_hermes_models();
-        let mut hermes = hermes_policy(&routed, "hermes-test-route");
-        hermes.profile_id = None;
-        assert_eq!(
-            with_default_native_profile(&hermes).profile_id.as_deref(),
-            Some("default")
-        );
     }
 
     #[test]
@@ -1513,20 +1322,6 @@ mod tests {
         let catalog = runnable_catalog();
         assert_selection_round_trip(&catalog, "grok-4-6");
         assert_selection_round_trip(&catalog, "cursor-composer-2-5");
-    }
-
-    #[test]
-    fn saved_hermes_selection_projects_back_exactly() {
-        let catalog = catalog_with_hermes_models();
-        let policy = hermes_policy(&catalog, "hermes-test-route");
-        let config = config_for_policy(&catalog, &policy, None).unwrap();
-        let projected = policy_for_selection(&catalog, &config).unwrap();
-        assert_eq!(
-            config_for_policy(&catalog, &projected, Some(&config)).unwrap(),
-            config
-        );
-        assert_eq!(projected.model_id, "hermes-test-route");
-        assert_eq!(projected.profile_id, Some("default".to_owned()));
     }
 
     #[test]

@@ -29,4 +29,3 @@ pub(crate) const CODEX_ENGINE_ID: &str = "codex";
 pub(crate) const CLAUDE_ENGINE_ID: &str = "claude";
 pub(crate) const GROK_ENGINE_ID: &str = "grok";
 pub(crate) const CURSOR_ENGINE_ID: &str = "cursor";
-pub(crate) const HERMES_ENGINE_ID: &str = "hermes";

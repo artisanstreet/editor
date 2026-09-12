@@ -12,8 +12,8 @@ use artisan_domain::{
     EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EngineModelId,
     EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
-    GrokPermissionMode, GrokReasoningEffort, GrokSelection, HermesPermissionMode,
-    HermesReasoningEffort, HermesSelection, NetworkAccess, OpenCode2Selection, PermissionId,
+    GrokPermissionMode, GrokReasoningEffort, GrokSelection, NetworkAccess, OpenCode2Selection,
+    PermissionId,
     ProjectId, ReceiptDisposition, RequestId, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
@@ -588,20 +588,6 @@ fn cursor_config() -> EngineRunConfig {
     )
 }
 
-fn hermes_config() -> EngineRunConfig {
-    EngineRunConfig::new(
-        EngineSelection::Hermes(HermesSelection::new(
-            EngineProfileId::parse("profile-hermes").expect("profile id is valid"),
-            EngineModelId::parse("model-hermes").expect("model id is valid"),
-            EngineRouteId::parse("route-hermes").expect("route id is valid"),
-            HermesPermissionMode::Yolo,
-            Some(HermesReasoningEffort::parse("medium").expect("effort is valid")),
-            true,
-        )),
-        test_runtime(),
-    )
-}
-
 async fn stored_version(
     database: &sea_orm::DatabaseConnection,
     thread_id: &ThreadId,
@@ -623,7 +609,6 @@ async fn every_engine_kind_persists_with_its_codec_version_and_round_trips() {
         (claude_config(), EngineId::Claude, Some(2)),
         (grok_config(), EngineId::Grok, Some(2)),
         (cursor_config(), EngineId::Cursor, Some(2)),
-        (hermes_config(), EngineId::Hermes, Some(2)),
     ];
     let mut precondition = EngineConfigUpdatePrecondition::Unconfigured;
     for (index, (expected, engine, version)) in cases.into_iter().enumerate() {

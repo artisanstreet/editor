@@ -9,8 +9,8 @@ mod onboarding_harness_presentation;
 
 use onboarding_harness_presentation::{
     CONTINUE_FOOTER_LABEL, CompletionAction, CompletionOutcome, CompletionSaveToken,
-    CompletionTransition, HERMES_SETUP_URL, HarnessCard, HarnessCatalog, HarnessRefreshAction,
-    HarnessSetupAction, HarnessSetupIcon, HarnessSetupState, ONBOARDING_COMPLETION_FAILURE_MESSAGE,
+    CompletionTransition, HarnessCard, HarnessCatalog, HarnessRefreshAction, HarnessSetupAction,
+    HarnessSetupIcon, HarnessSetupState, ONBOARDING_COMPLETION_FAILURE_MESSAGE,
     ONBOARDING_COMPLETION_ROUTE, OnboardingCompletionController, SAVING_FOOTER_LABEL,
     forced_refresh_actions, forced_refresh_actions_for, harness_catalog, present_harness_card,
     setup_icon_for, setup_is_actionable,
@@ -45,7 +45,7 @@ fn save_token(transition: &CompletionTransition) -> CompletionSaveToken {
 fn catalog_has_the_exact_legacy_order_and_every_exact_field() {
     let catalog = harness_catalog();
     assert_eq!(catalog, HarnessCatalog::new());
-    assert_eq!(catalog.len(), 6);
+    assert_eq!(catalog.len(), 5);
     assert!(!catalog.is_empty());
 
     let expected = [
@@ -104,17 +104,6 @@ fn catalog_has_the_exact_legacy_order_and_every_exact_field() {
             -0.25,
             false,
         ),
-        (
-            "hermes",
-            "Hermes",
-            "Nous Research's terminal agent with tools, subagents, and provider profiles.",
-            "#0000F2",
-            true,
-            15.8,
-            0.4,
-            -0.45,
-            true,
-        ),
     ];
 
     for (card, expected) in catalog.cards().iter().zip(expected) {
@@ -134,11 +123,10 @@ fn catalog_has_the_exact_legacy_order_and_every_exact_field() {
 fn catalog_lookup_is_exact_and_missing_ids_return_none() {
     let catalog = harness_catalog();
 
-    let hermes = catalog.lookup("hermes").expect("Hermes is catalogued");
-    assert_eq!(hermes.title, "Hermes");
-    assert_eq!(catalog.lookup_ref("hermes"), Some(&hermes));
+    assert_eq!(catalog.lookup("hermes"), None, "hermes is removed");
+    assert_eq!(catalog.lookup_ref("hermes"), None);
 
-    for missing in ["", " Hermes", "HERMES", "missing", "hermes ", "🚀"] {
+    for missing in ["", " Codex", "CODEX", "missing", "codex ", "🚀"] {
         assert_eq!(
             catalog.lookup(missing),
             None,
@@ -156,22 +144,12 @@ fn catalog_lookup_is_exact_and_missing_ids_return_none() {
             .title,
         "Codex"
     );
-    assert_eq!(catalog.into_cards().len(), 6);
+    assert_eq!(catalog.into_cards().len(), 5);
 }
 
 #[test]
-fn hermes_external_auth_and_setup_url_are_exact() {
+fn no_catalogued_harness_uses_external_auth() {
     let catalog = harness_catalog();
-    assert_eq!(
-        HERMES_SETUP_URL,
-        "https://hermes-agent.nousresearch.com/docs/user-guide/configuring-models"
-    );
-    assert!(
-        catalog
-            .lookup("hermes")
-            .expect("Hermes is catalogued")
-            .external_auth
-    );
     for id in ["codex", "claude", "cursor", "grok", "opencode2"] {
         assert!(
             !catalog
@@ -330,8 +308,8 @@ fn presentation_separates_ready_experimental_and_button_interaction_facts() {
 #[test]
 fn presentation_owns_and_preserves_labels_email_failure_and_empty_values() {
     let card = harness_catalog()
-        .lookup("hermes")
-        .expect("Hermes is catalogued");
+        .lookup("codex")
+        .expect("Codex is catalogued");
     let state = HarnessSetupState::new(
         HarnessSetupAction::OpenExternalSetup,
         false,
@@ -360,7 +338,7 @@ fn presentation_owns_and_preserves_labels_email_failure_and_empty_values() {
 #[test]
 fn forced_refresh_actions_are_installation_first_then_catalog_order() {
     let actions = forced_refresh_actions();
-    assert_eq!(actions.len(), 7);
+    assert_eq!(actions.len(), 6);
     assert_eq!(actions[0], HarnessRefreshAction::RefreshInstallations);
 
     let ids = actions
@@ -378,7 +356,7 @@ fn forced_refresh_actions_are_installation_first_then_catalog_order() {
         .collect::<Vec<_>>();
     assert_eq!(
         ids,
-        ["codex", "claude", "cursor", "grok", "opencode2", "hermes"]
+        ["codex", "claude", "cursor", "grok", "opencode2"]
     );
 }
 

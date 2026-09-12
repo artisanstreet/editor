@@ -60,14 +60,3 @@ path = "../../tests/native_engine/cursor_discovery.rs"
 name = "cursor_probe"
 path = "../../tests/native_engine/cursor_probe.rs"
 
-[[test]]
-name = "hermes_resolve"
-path = "../../tests/native_engine/hermes_resolve.rs"
-
-[[test]]
-name = "hermes_version"
-path = "../../tests/native_engine/hermes_version.rs"
-
-[[test]]
-name = "hermes_probe"
-path = "../../tests/native_engine/hermes_probe.rs"

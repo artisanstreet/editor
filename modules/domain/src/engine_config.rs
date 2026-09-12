@@ -17,7 +17,7 @@ pub use providers::{
     ClaudeEffort, ClaudePermissionMode, ClaudeSelection, CodexModelContextWindow,
     CodexReasoningEffort, CodexSelection, CodexServiceTier, CursorPermissionMode,
     CursorReasoningEffort, CursorSelection, CursorSpeed, GrokPermissionMode, GrokReasoningEffort,
-    GrokSelection, HermesPermissionMode, HermesReasoningEffort, HermesSelection,
+    GrokSelection,
 };
 pub use runtime::{
     ApprovalMode, EngineConfigRevision, EngineConfigUpdatePrecondition, EnginePermissionPolicy,
@@ -253,27 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn hermes_selection_has_no_canonical_permission_and_requires_model_route() {
-        let hermes = EngineSelection::Hermes(HermesSelection::new(
-            test_profile(),
-            test_model(),
-            EngineRouteId::parse("route-test").expect("route id is valid"),
-            HermesPermissionMode::Profile,
-            None,
-            false,
-        ));
-        assert_eq!(hermes.engine_id(), EngineId::Hermes);
-        assert!(hermes.permission().is_none());
-        assert!(hermes.as_opencode2().is_err());
-        assert!(hermes.as_hermes().is_ok());
-        assert_eq!(
-            HermesPermissionMode::parse("yolo"),
-            Ok(HermesPermissionMode::Yolo)
-        );
-        assert!(HermesPermissionMode::parse("other").is_err());
-    }
-
-    #[test]
     fn codex_permission_relationships_reject_adapter_violations() {
         let hostile = EnginePermissionPolicy::new(
             PermissionId::parse("permission-test").expect("permission id is valid"),
@@ -347,8 +326,6 @@ mod tests {
         assert!(GrokReasoningEffort::parse("has space").is_err());
         assert!(CursorReasoningEffort::parse("high").is_ok());
         assert!(CursorReasoningEffort::parse("").is_err());
-        assert!(HermesReasoningEffort::parse("medium").is_ok());
-        assert!(HermesReasoningEffort::parse("").is_err());
         assert_eq!(
             GrokPermissionMode::parse("always-approve"),
             Ok(GrokPermissionMode::AlwaysApprove)

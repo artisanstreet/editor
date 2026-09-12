@@ -238,8 +238,8 @@ pub(crate) enum Job {
     /// A fully immutable configured turn handed to the owner after durable
     /// launch. Carries the single internal input so production and `#[cfg(test)]`
     /// fixture admissions share exactly one queued type and one executor.
-    /// `steer_rx` is `Some` only for steer-capable engines (codex/claude/
-    /// hermes); every other engine carries `None` and every steer attempt on
+    /// `steer_rx` is `Some` only for steer-capable engines (codex/claude);
+    /// every other engine carries `None` and every steer attempt on
     /// it resolves [`SteerError::Unsupported`] without prompt-state plumbing.
     Turn {
         input: Box<InternalTurnInput>,
@@ -598,9 +598,9 @@ impl AcceptedTurn {
     /// alone never counts as success.
     ///
     /// Progress invariant (no drain-coupled deadlock): the ack waits for
-    /// the actual provider outcome — the correlated `turn/steer` result
-    /// for codex, the gateway round-trip for hermes, the fold write for
-    /// claude — and progress while it is outstanding comes from split
+    /// the actual provider outcome - the correlated `turn/steer` result
+    /// for codex, the fold write for
+    /// claude - and progress while it is outstanding comes from split
     /// ownership: the dispatch Steer arm keeps draining
     /// `next_observation()` through the existing `handle_observation`
     /// while awaiting the returned future, and the pump polls the steer

@@ -65,10 +65,10 @@ query per engine.
 
 | Field            | Type             | Required | Notes |
 | ---------------- | ---------------- | -------- | ----- |
-| `engines`        | array            | yes      | 0–16 reports in backend roster order: `codex`, `claude`, `cursor`, `grok`, `hermes`, `opencode2`, or exactly one report when `engine_id` narrows (even for unknown ids). |
+| `engines`        | array            | yes      | 0–16 reports in backend roster order: `codex`, `claude`, `cursor`, `grok`, `opencode2`, or exactly one report when `engine_id` narrows (even for unknown ids). |
 | `fetched_at`     | ISO-8601 string  | yes      | Shared fetch instant for every report in the snapshot. |
-| `engine_id`      | string           | yes      | Stable id (`codex`, `claude`, `cursor`, `grok`, `hermes`, `opencode2`, or the echoed unknown id). |
-| `display_name`   | string           | yes      | `Codex`, `Claude`, `Cursor`, `Grok Build`, `Hermes`, `OpenCode`. |
+| `engine_id`      | string           | yes      | Stable id (`codex`, `claude`, `cursor`, `grok`, `opencode2`, or the echoed unknown id). |
+| `display_name`   | string           | yes      | `Codex`, `Claude`, `Cursor`, `Grok Build`, `OpenCode`. |
 | `authentication` | enum             | yes      | `authenticated` \| `unauthenticated` \| `unknown`. |
 | `auth_reason`    | string \| null   | no       | Artisan-owned reason (≤1024 bytes), e.g. `Sign in to Cursor from Settings.` Never a provider payload. |
 | `account_email`  | string \| null   | no       | Provider account email when disclosed (Codex ChatGPT accounts). |
@@ -107,7 +107,7 @@ Window fields:
    `Cursor sign-in is no longer valid.`, `Codex account sign-in is
    required.`). Offer the provider's normal sign-in entry, never a token
    input: this surface performs no login, token write, or key creation.
-3. `quota_surface == "unsupported"` (Grok Build, Hermes, OpenCode) → render
+3. `quota_surface == "unsupported"` (Grok Build, OpenCode) → render
    the honest unsupported state with `failure`
    (`<Display> exposes no account-usage surface.`). Never hide the row and
    never show zeroed meters.

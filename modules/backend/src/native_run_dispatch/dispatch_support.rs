@@ -91,12 +91,11 @@ pub(super) fn mint_patch_id(origin: &SystemCommandOrigin) -> Option<PatchId> {
 /// Builds the raw engine-tagged binding document with format 1 and the exact
 /// native thread identity from the app-server contract.
 ///
-/// The `engine` tag is `opencode2`, `codex`, `claude`, `grok`, `cursor`, or
-/// `hermes`; the session id is the native thread id returned by
-/// `thread/start` (Codex), `CreateSession` session (`OpenCode2`), `system/init`
-/// session (Claude), `session/new` session (Grok), the ACP `session/new`
-/// result (Cursor), or the durable stored session (Hermes). Empty identities
-/// reject so a corrupt bind never persists.
+/// The `engine` tag is `opencode2`, `codex`, `claude`, `grok`, or `cursor`;
+/// the session id is the native thread id returned by `thread/start` (Codex),
+/// `CreateSession` session (`OpenCode2`), `system/init` session (Claude),
+/// `session/new` session (Grok), or the ACP `session/new` result (Cursor).
+/// Empty identities reject so a corrupt bind never persists.
 ///
 /// Split from the [`ProviderBindingBytes`] wrap so the tag/format/profile
 /// round trip is provable over plain bytes: [`ProviderBindingBytes`]

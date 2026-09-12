@@ -134,7 +134,7 @@
         assert_eq!(catalog.catalog_revision, result.catalog_revision);
         assert_eq!(
             catalog.runnable_harness_ids,
-            vec!["opencode2", "codex", "claude", "grok", "cursor", "hermes"]
+            vec!["opencode2", "codex", "claude", "grok", "cursor"]
         );
         assert_eq!(catalog.favorite_ids, vec![favorite_id.clone()]);
         assert_eq!(
@@ -287,7 +287,7 @@
             .expect("typed result converts");
         assert_eq!(
             catalog.runnable_harness_ids,
-            vec!["opencode2", "codex", "claude", "grok", "cursor", "hermes"]
+            vec!["opencode2", "codex", "claude", "grok", "cursor"]
         );
         for model_id in [
             "codex-sol",
@@ -562,7 +562,7 @@
     }
 
     #[test]
-    fn missing_engine_harnesses_are_hidden_and_hermes_is_static_hidden() {
+    fn missing_engine_harnesses_are_hidden() {
         let discovery = crate::model_discovery::DiscoveryBundle {
             models: Vec::new(),
             probed_engines: Vec::new(),
@@ -572,7 +572,10 @@
         let hidden = |id: &str| catalog.manifest.harness(id).expect("harness exists").hidden;
         assert!(hidden("cursor"));
         assert!(hidden("grok"));
-        assert!(hidden("hermes"), "hermes is hidden by the bundled manifest");
+        assert!(
+            catalog.manifest.harness("hermes").is_none(),
+            "hermes is not part of the bundled manifest"
+        );
         assert!(!hidden("codex"));
         assert!(!hidden("claude"));
         assert!(!hidden("opencode2"));

@@ -21,10 +21,10 @@
 //!
 //! Engine coverage mirrors the TypeScript adapters: Codex reads
 //! `account/rateLimits/read`, Claude parses `claude -p /usage`, Cursor posts
-//! its dashboard endpoint, and Grok Build, Hermes, and `OpenCode` report
+//! its dashboard endpoint, and Grok Build and `OpenCode` report
 //! unsupported-with-reason because their adapters expose no account-usage
 //! surface (`Engine.Usage` is optional in `modules/engines/src/engine.ts`
-//! and absent from those three adapters).
+//! and absent from those two adapters).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -60,13 +60,11 @@ const READ_FAILED: &str = "engine usage read failed";
 const UNREPRESENTABLE_READ: &str = "provider usage could not be represented";
 const UNKNOWN_ENGINE: &str = "unknown engine id";
 const GROK_UNSUPPORTED: &str = "Grok Build exposes no account-usage surface.";
-const HERMES_UNSUPPORTED: &str = "Hermes exposes no account-usage surface.";
 const OPENCODE2_UNSUPPORTED: &str = "OpenCode exposes no account-usage surface.";
 const CODEX_DISPLAY: &str = "Codex";
 const CLAUDE_DISPLAY: &str = "Claude";
 const CURSOR_DISPLAY: &str = "Cursor";
 const GROK_DISPLAY: &str = "Grok Build";
-const HERMES_DISPLAY: &str = "Hermes";
 const OPENCODE2_DISPLAY: &str = "OpenCode";
 
 /// Typed failure of one engine read with its honest report states.
@@ -386,7 +384,7 @@ struct CachedUsage {
 
 impl AccountUsageService {
     /// Creates the production roster: Codex, Claude, Cursor, then the
-    /// unsupported Grok Build, Hermes, and `OpenCode` entries.
+    /// unsupported Grok Build and `OpenCode` entries.
     #[must_use]
     pub fn with_defaults(codex: &CliLaunch, claude: &CliLaunch, cursor: CursorUsageConfig) -> Self {
         Self::with_readers(
@@ -402,11 +400,6 @@ impl AccountUsageService {
                     "grok",
                     GROK_DISPLAY,
                     GROK_UNSUPPORTED,
-                )) as Arc<dyn AccountUsageReader>,
-                Arc::new(UnsupportedAccountUsageReader::new(
-                    "hermes",
-                    HERMES_DISPLAY,
-                    HERMES_UNSUPPORTED,
                 )) as Arc<dyn AccountUsageReader>,
                 Arc::new(UnsupportedAccountUsageReader::new(
                     "opencode2",

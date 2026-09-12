@@ -112,11 +112,11 @@ fn non_runnable_unknown_harness_falls_back_to_its_id() {
     let models = [];
     let runnable = [];
     let catalog = catalog(&harnesses, &models, &runnable);
-    let selected = policy("hermes", Some("hermes-model"));
+    let selected = policy("unknown-harness", Some("unknown-model"));
 
     assert_eq!(
         composer_send_blocked_reason(true, &catalog, Some(&selected), no_provisioning().as_ref()),
-        Some("hermes models are preview-only — this engine cannot run in Artisan yet".to_owned())
+        Some("unknown-harness models are preview-only - this engine cannot run in Artisan yet".to_owned())
     );
 }
 
@@ -507,13 +507,12 @@ fn first_exact_duplicate_model_wins_in_manifest_order() {
 
 /// Every fixture-proven native engine plus the incumbent, with the labels the
 /// catalog carries for them.
-fn native_engines() -> [(&'static str, &'static str); 6] {
+fn native_engines() -> [(&'static str, &'static str); 5] {
     [
         ("codex", "Codex"),
         ("claude", "Claude"),
         ("grok", "Grok"),
         ("cursor", "Cursor"),
-        ("hermes", "Hermes"),
         ("opencode2", "OpenCode"),
     ]
 }
@@ -616,20 +615,20 @@ fn every_engine_unrunnable_without_signals_stays_preview_only() {
 
 #[test]
 fn unavailable_routes_surface_their_reason_even_when_runnable() {
-    let harnesses = [HarnessDefinition::new("hermes", "Hermes")];
+    let harnesses = [HarnessDefinition::new("grok", "Grok")];
     let models = [];
-    let runnable = ["hermes"];
+    let runnable = ["grok"];
     let routes = [CatalogRoute::new(
-        "hermes",
+        "grok",
         CatalogRouteStatus::Unavailable,
-        Some("Hermes reports this route is disabled."),
+        Some("Grok reports this route is disabled."),
     )];
     let catalog = catalog_with_routes(&harnesses, &models, &runnable, &routes);
-    let selected = policy("hermes", Some("model"));
+    let selected = policy("grok", Some("model"));
 
     assert_eq!(
         composer_send_blocked_reason(true, &catalog, Some(&selected), None),
-        Some("Hermes reports this route is disabled.".to_owned())
+        Some("Grok reports this route is disabled.".to_owned())
     );
 }
 

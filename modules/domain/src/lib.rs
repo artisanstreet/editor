@@ -77,7 +77,7 @@ pub use engine_config::{
     EngineConfigReason, EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId,
     EnginePermissionPolicy, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, FilesystemAccess, FiniteMillis, GrokPermissionMode, GrokReasoningEffort,
-    GrokSelection, HermesPermissionMode, HermesReasoningEffort, HermesSelection, NetworkAccess,
+    GrokSelection, NetworkAccess,
     OpenCode2Selection, WebSearchAccess,
 };
 pub use engine_socket::{

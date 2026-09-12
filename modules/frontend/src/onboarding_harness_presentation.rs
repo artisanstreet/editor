@@ -9,10 +9,6 @@
 #![allow(clippy::module_name_repetitions)]
 #![forbid(unsafe_code)]
 
-/// The exact external setup documentation opened for Hermes.
-pub const HERMES_SETUP_URL: &str =
-    "https://hermes-agent.nousresearch.com/docs/user-guide/configuring-models";
-
 /// The exact visible error used when the onboarding completion save fails.
 pub const ONBOARDING_COMPLETION_FAILURE_MESSAGE: &str = "Onboarding could not be saved. Try again.";
 
@@ -50,7 +46,7 @@ pub struct HarnessCard {
     pub x: f64,
     /// The ray Y offset.
     pub y: f64,
-    /// Whether setup uses the external Hermes authorization page.
+    /// Whether setup uses an external authorization page.
     pub external_auth: bool,
 }
 
@@ -101,7 +97,7 @@ pub struct HarnessCatalog {
 }
 
 impl HarnessCatalog {
-    /// Creates the exact six-card catalog in legacy presentation order.
+    /// Creates the exact five-card catalog in legacy presentation order.
     #[must_use = "use the constructed harness catalog"]
     pub fn new() -> Self {
         Self {
@@ -160,17 +156,6 @@ impl HarnessCatalog {
                     -0.5,
                     -0.25,
                     false,
-                ),
-                HarnessCard::new(
-                    "hermes",
-                    "Hermes",
-                    "Nous Research's terminal agent with tools, subagents, and provider profiles.",
-                    "#0000F2",
-                    true,
-                    15.8,
-                    0.4,
-                    -0.45,
-                    true,
                 ),
             ],
         }

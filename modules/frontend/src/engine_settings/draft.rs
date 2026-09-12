@@ -331,10 +331,7 @@ impl EngineSettingsDraft {
     ///
     /// The manual settings surface stays `OpenCode` 2-shaped in this packet.
     /// Any other engine contributes its shared profile/model identity and
-    /// its canonical policy when it has one. Hermes carries its own
-    /// profile-owned permission mode instead of a canonical policy, so the
-    /// draft shows the restrictive sentinel there until per-engine
-    /// settings UI lands.
+    /// its canonical policy.
     #[must_use]
     pub fn from_config(config: &EngineRunConfig) -> Self {
         let selection = config.selection();
@@ -361,24 +358,12 @@ impl EngineSettingsDraft {
             model_id,
             route_id,
             variant_id,
-            permission_id: permission
-                .map_or("hermes-managed", |policy| policy.permission_id().as_str())
-                .to_owned(),
-            agent_id: permission
-                .map_or("hermes-managed-agent", |policy| policy.agent_id().as_str())
-                .to_owned(),
-            approval: permission
-                .map_or("never", |policy| policy.approval().as_str())
-                .to_owned(),
-            filesystem: permission
-                .map_or("none", |policy| policy.filesystem().as_str())
-                .to_owned(),
-            network: permission
-                .map_or("disabled", |policy| policy.network().as_str())
-                .to_owned(),
-            web_search: permission
-                .map_or("disabled", |policy| policy.web_search().as_str())
-                .to_owned(),
+            permission_id: permission.permission_id().as_str().to_owned(),
+            agent_id: permission.agent_id().as_str().to_owned(),
+            approval: permission.approval().as_str().to_owned(),
+            filesystem: permission.filesystem().as_str().to_owned(),
+            network: permission.network().as_str().to_owned(),
+            web_search: permission.web_search().as_str().to_owned(),
             attempt_budget: runtime.attempt_budget().get().to_string(),
             readiness_budget: runtime.readiness_budget().get().to_string(),
             health_budget: runtime.health_budget().get().to_string(),

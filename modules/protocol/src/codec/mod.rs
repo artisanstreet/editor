@@ -39,7 +39,7 @@ use artisan_domain::{
     EngineUsageError, EngineUsageReport, EngineUsageSnapshot, EngineUsageWindow,
     EngineUsageWindowKind, EngineVariantId, Event, FilesystemAccess, FiniteMillis,
     FirstMessageQueued, GrokPermissionMode, GrokReasoningEffort, GrokSelection,
-    HermesPermissionMode, HermesReasoningEffort, HermesSelection, IdentifierError, ImageAttachment,
+    IdentifierError, ImageAttachment,
     ImageAttachmentError, ImageAttachmentRef, ImageAttachmentRefError, IncrementalText,
     IncrementalTextError, ItemId, ItemOrdinal, ListAttachedProjects, ListDirectories,
     ListProjectThreads, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,

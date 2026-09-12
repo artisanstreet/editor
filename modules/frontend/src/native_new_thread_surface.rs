@@ -264,7 +264,7 @@ pub fn render_activity_grid(theme: ArtisanTheme, days: &[CalendarActivityDay]) -
 ///
 /// The mapping mirrors `EngineMarkFor` (`lib/engine/presentation.ts`): Codex
 /// wears the `OpenAI` mark, Claude/Cursor/Grok wear their product marks, and
-/// `OpenCode`/`Hermes` wear their brand marks. Unknown ids fall back to the
+/// `OpenCode` wears its brand mark. Unknown ids fall back to the
 /// neutral question-mark placeholder, matching `unknown_engine_mark`. The
 /// table itself lives in [`brand_asset_for`] so the two surfaces can never
 /// diverge; this alias names the recent-row slot.
@@ -589,7 +589,6 @@ mod tests {
         assert_eq!(engine_mark_asset("cursor"), AssetId::SVGL_CURSOR);
         assert_eq!(engine_mark_asset("grok"), AssetId::SVGL_GROK);
         assert_eq!(engine_mark_asset("opencode2"), AssetId::BRANDS_OPENCODE);
-        assert_eq!(engine_mark_asset("hermes"), AssetId::BRANDS_HERMES);
         assert_eq!(engine_mark_asset("unknown"), AssetId::TABLER_QUESTION_MARK);
     }
 

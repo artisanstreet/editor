@@ -176,9 +176,6 @@ async fn prepare_configured_process(
         crate::engine_owner::InternalLaunch::Cursor(_) => {
             return Err(request.fail(EngineOperationError::Configuration));
         }
-        crate::engine_owner::InternalLaunch::Hermes(_) => {
-            return Err(request.fail(EngineOperationError::Configuration));
-        }
     }) else {
         return Err(request.fail(EngineOperationError::SpawnFailed));
     };
@@ -452,7 +449,6 @@ async fn authorize_configured_session(
         super::super::InternalLaunch::Claude(_) => Err(StreamError::InvalidSession),
         super::super::InternalLaunch::Grok(_) => Err(StreamError::InvalidSession),
         super::super::InternalLaunch::Cursor(_) => Err(StreamError::InvalidSession),
-        super::super::InternalLaunch::Hermes(_) => Err(StreamError::InvalidSession),
         #[cfg(test)]
         super::super::InternalLaunch::Fixture(_) => Ok(StreamState::new(stream_after)),
     };

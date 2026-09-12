@@ -40,7 +40,7 @@ mod tests {
         assert_eq!(catalog.provenance.revision, NATIVE_MODEL_CATALOG_REVISION);
         assert_eq!(catalog.manifest.revision, NATIVE_MODEL_CATALOG_REVISION);
         assert_eq!(catalog.manifest.providers.len(), 16);
-        assert_eq!(catalog.manifest.harnesses.len(), 6);
+        assert_eq!(catalog.manifest.harnesses.len(), 5);
         assert_eq!(catalog.manifest.models.len(), 38);
         assert!(catalog.runnable_harness_ids.is_empty());
         assert!(catalog.routes.is_empty());

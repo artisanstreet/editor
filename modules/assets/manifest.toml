@@ -85,20 +85,6 @@ sha256 = "d06c33503d746e5d62c9a30f09f70e6cbfb6ff593cd61019eb5b6833c499b2db"
 notes = "Legacy CSS stroke-draw animation is reimplemented natively."
 
 [[asset]]
-id = "brands.hermes"
-family = "brands"
-name = "hermes"
-origin_kind = "local"
-origin_path = "modules/frontend/src/lib/assets/brands/hermes/logo.svg"
-license_spdx = "LicenseRef-Brand-Mark"
-license_file = "licenses/svgl-brand-marks-NOTES.md"
-view_box = "0 0 24 24"
-monochrome = true
-source_path = "svg/brands/hermes.svg"
-sha256 = "1920389adfd0a6b68d96905c8d2be0dbce751288594c9e54ad1760bf473bd1ab"
-notes = "Nous Research Hermes mark; root title element NousResearch preserved verbatim. Resembles the Lobe Icons nousresearch glyph but no in-tree license statement attests it; treated as brand mark."
-
-[[asset]]
 id = "brands.kimi"
 family = "brands"
 name = "kimi"
@@ -2202,7 +2188,7 @@ channel = "brand-component"
 reachability = "shipped"
 classification = "static-vendored"
 sites = ["modules/frontend/src/lib/engine/presentation.ts"]
-assets = ["brands.hermes", "brands.kimi", "brands.opencode", "brands.zai"]
+assets = ["brands.kimi", "brands.opencode", "brands.zai"]
 
 [[use]]
 id = "conversation.file-icons"

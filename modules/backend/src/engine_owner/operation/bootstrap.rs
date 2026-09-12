@@ -210,10 +210,6 @@ fn prepare_preflight_context(request: PreflightRequest) -> Result<PreflightConte
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
         }
-        super::super::InternalLaunch::Hermes(_) => {
-            let _ = respond.send(Err(EngineOperationError::Configuration));
-            return Err(Execution::Completed);
-        }
     };
     let Ok(mut child) = child_result else {
         let _ = respond.send(Err(EngineOperationError::SpawnFailed));
@@ -497,10 +493,6 @@ fn prepare_catalog_context(request: CatalogRequest) -> Result<CatalogContext, Ex
             return Err(Execution::Completed);
         }
         super::super::InternalLaunch::Cursor(_) => {
-            let _ = respond.send(Err(EngineOperationError::Configuration));
-            return Err(Execution::Completed);
-        }
-        super::super::InternalLaunch::Hermes(_) => {
             let _ = respond.send(Err(EngineOperationError::Configuration));
             return Err(Execution::Completed);
         }

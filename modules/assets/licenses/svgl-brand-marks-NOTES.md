@@ -1,7 +1,7 @@
 # SVGL and brand-mark logos — licensing position
 
 Scope: `modules/assets/svg/svgl/*` (12 entries) and
-`modules/assets/svg/brands/*` (hermes, kimi, opencode, zai).
+`modules/assets/svg/brands/*` (kimi, opencode, zai).
 
 ## What is attested
 
@@ -24,7 +24,7 @@ Each svgl/brand asset in `manifest.toml` carries
 This records precisely what is known: these are the trademarked brand marks of
 their respective owners (GitHub, GitLab, Git, Microsoft Azure, Anthropic
 Claude, Cursor, DeepSeek, Google Gemini, xAI Grok, Meta, OpenAI, Alibaba Qwen,
-Nous Research Hermes, Moonshot AI Kimi, OpenCode, Z.ai). Use to identify the
+Moonshot AI Kimi, OpenCode, Z.ai). Use to identify the
 corresponding product/service (nominative use) is how the legacy frontend used
 them; nothing here claims a copyright license from the owner. Brand-resource
 URLs published by svgl are preserved as attribution evidence.
@@ -34,11 +34,8 @@ external distribution is explicit rather than assumed.
 
 ## Legacy brands directory
 
-`src/lib/assets/brands/{hermes,kimi,opencode,zai}/logo.svg` were checked into
+`src/lib/assets/brands/{kimi,opencode,zai}/logo.svg` were checked into
 the legacy repository without license statements. `LICENSE.lobe-icons.txt`
 attests Lobe Icons MIT for the four *inline* mark components only (minimax,
-nvidia, tencent, xiaomi — each carrying an in-file doc comment), not for these
-four files. They are recorded under the same brand-mark policy above;
-`hermes/logo.svg` additionally embeds `<title>NousResearch</title>` and matches
-Lobe Icons' Nous Research glyph, which is noted per-entry but not upgraded into
-a license claim.
+nvidia, tencent, xiaomi - each carrying an in-file doc comment), not for these
+three files. They are recorded under the same brand-mark policy above.

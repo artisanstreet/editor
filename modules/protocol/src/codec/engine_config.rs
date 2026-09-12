@@ -275,36 +275,6 @@ pub(crate) fn encode_engine_run_config(
             );
             encode_engine_permission(arm.reborrow().init_permission(), selection.permission());
         }
-        EngineSelection::Hermes(selection) => {
-            builder.set_schema_version(2);
-            builder.set_engine(EngineId::Hermes.as_str());
-            builder.set_profile_id(selection.profile_id().as_str());
-            builder.set_model_id(selection.model_id().as_str());
-            builder.set_route_id(selection.route_id().as_str());
-            encode_engine_variant(builder.reborrow().init_variant(), None);
-            // Hermes authorization is profile-owned; the legacy mirror
-            // carries a restrictive sentinel that old readers reject along
-            // with the unknown engine instead of misreading it.
-            let mut permission = builder.reborrow().init_permission();
-            permission.set_permission_id("hermes-managed");
-            permission.set_agent_id("hermes-managed-agent");
-            permission.set_approval(ApprovalMode::Never.as_str());
-            permission.set_filesystem(FilesystemAccess::None.as_str());
-            permission.set_network(NetworkAccess::Disabled.as_str());
-            permission.set_web_search(WebSearchAccess::Disabled.as_str());
-            encode_engine_runtime(builder.reborrow().init_runtime(), value.runtime());
-            let mut arm = builder.reborrow().init_selection_v2().init_hermes();
-            arm.set_profile_id(selection.profile_id().as_str());
-            arm.set_model_id(selection.model_id().as_str());
-            arm.set_route_id(selection.route_id().as_str());
-            arm.set_reasoning_effort(
-                selection
-                    .reasoning_effort()
-                    .map_or("", HermesReasoningEffort::as_str),
-            );
-            arm.set_permission_mode(selection.permission_mode().as_str());
-            arm.set_fast(selection.fast());
-        }
     }
 }
 
@@ -516,15 +486,6 @@ pub(crate) fn decode_engine_run_config_v2(
             }
             EngineSelection::Cursor(decode_cursor_selection(arm?)?)
         }
-        engine_selection_v2::Which::Hermes(arm) => {
-            if engine != EngineId::Hermes {
-                return Err(engine_config_error(
-                    "request.setThreadEngineConfig.config.selectionV2",
-                    EngineConfigReason::Inconsistent,
-                ));
-            }
-            EngineSelection::Hermes(decode_hermes_selection(arm?)?)
-        }
         engine_selection_v2::Which::Unset(()) => {
             return Err(engine_config_error(
                 "request.setThreadEngineConfig.config.selectionV2",
@@ -566,34 +527,6 @@ pub(crate) fn parse_optional_setting<T>(
             .map(Some)
             .map_err(|error| engine_config_error(field, error.reason()))
     }
-}
-
-pub(crate) fn parse_required_model_id(
-    value: String,
-    field: &'static str,
-) -> Result<EngineModelId, ProtocolDecodeError> {
-    if value.is_empty() {
-        return Err(engine_config_error(
-            field,
-            EngineConfigReason::InvalidIdentifier,
-        ));
-    }
-    EngineModelId::parse(value)
-        .map_err(|_| engine_config_error(field, EngineConfigReason::InvalidIdentifier))
-}
-
-pub(crate) fn parse_required_route_id(
-    value: String,
-    field: &'static str,
-) -> Result<EngineRouteId, ProtocolDecodeError> {
-    if value.is_empty() {
-        return Err(engine_config_error(
-            field,
-            EngineConfigReason::InvalidIdentifier,
-        ));
-    }
-    EngineRouteId::parse(value)
-        .map_err(|_| engine_config_error(field, EngineConfigReason::InvalidIdentifier))
 }
 
 pub(crate) fn decode_codex_selection(
@@ -790,58 +723,6 @@ pub(crate) fn decode_cursor_selection(
         reasoning_effort,
         speed,
         permission_mode,
-    ))
-}
-
-pub(crate) fn decode_hermes_selection(
-    arm: artisan_capnp::hermes_engine_selection::Reader<'_>,
-) -> Result<HermesSelection, ProtocolDecodeError> {
-    let profile_id = parse_profile_id(
-        read_text(
-            arm.get_profile_id(),
-            "request.setThreadEngineConfig.config.selectionV2.profileId",
-        )?,
-        "request.setThreadEngineConfig.config.selectionV2.profileId",
-    )?;
-    let model_id = parse_required_model_id(
-        read_text(
-            arm.get_model_id(),
-            "request.setThreadEngineConfig.config.selectionV2.modelId",
-        )?,
-        "request.setThreadEngineConfig.config.selectionV2.modelId",
-    )?;
-    let route_id = parse_required_route_id(
-        read_text(
-            arm.get_route_id(),
-            "request.setThreadEngineConfig.config.selectionV2.routeId",
-        )?,
-        "request.setThreadEngineConfig.config.selectionV2.routeId",
-    )?;
-    let reasoning_effort = parse_optional_setting(
-        &read_text(
-            arm.get_reasoning_effort(),
-            "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
-        )?,
-        "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
-        |text| HermesReasoningEffort::parse(text),
-    )?;
-    let permission_mode = HermesPermissionMode::parse(&read_text(
-        arm.get_permission_mode(),
-        "request.setThreadEngineConfig.config.selectionV2.permissionMode",
-    )?)
-    .map_err(|error| {
-        engine_config_error(
-            "request.setThreadEngineConfig.config.selectionV2.permissionMode",
-            error.reason(),
-        )
-    })?;
-    Ok(HermesSelection::new(
-        profile_id,
-        model_id,
-        route_id,
-        permission_mode,
-        reasoning_effort,
-        arm.get_fast(),
     ))
 }
 

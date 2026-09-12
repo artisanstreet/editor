@@ -345,12 +345,8 @@ mod tests {
             "the opencode2 CLI is expected on this development host"
         );
         assert!(
-            catalog
-                .manifest
-                .harness("hermes")
-                .expect("hermes stays decodable")
-                .hidden,
-            "hermes is hidden by the bundled manifest"
+            catalog.manifest.harness("hermes").is_none(),
+            "hermes is not part of the bundled manifest"
         );
     }
 }

@@ -15,7 +15,6 @@ ASSET_SOURCES = [
     "svg/artisan/logo-gradient.svg",
     "svg/artisan/star.svg",
     "svg/artisan/success-check.svg",
-    "svg/brands/hermes.svg",
     "svg/brands/kimi.svg",
     "svg/brands/opencode.svg",
     "svg/brands/zai.svg",

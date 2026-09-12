@@ -175,7 +175,7 @@ Import sites:
 - `lib/engine/presentation.ts`: `SvglClaudeAILogo`, `SvglCursorLogo`,
   `SvglDeepSeekLogo`, `SvglGeminiLogo`, `SvglGrokLogo`, `SvglMetaLogo`,
   `SvglOpenAILogo`, `SvglQwenLogo` — consumed through `engine_marks`
-  (`claude/codex/cursor/grok/hermes/opencode2`) and `provider_marks`
+  (`claude/codex/cursor/grok/opencode2`) and `provider_marks`
   (17 provider ids; regex-based inference over raw model ids can select any
   provider mark even when the catalog lacks the model).
 
@@ -212,7 +212,6 @@ Byte-preserving copies (verified by sha256 in the manifest):
 | `artisan.app-icon` | src/lib/assets/barekey/artisan-app-icon.svg | lib/notifications/web-presenter.ts (system-notification icon) | shipped |
 | `artisan.star` | src/lib/assets/barekey/artisan-star.svg | routes/components/settings/compaction-model.svelte (CSS luminance mask) | shipped |
 | `artisan.logo-gradient` | src/lib/assets/barekey/logo-gradient.svg | routes/components/sectioned-panel.svelte (`--artisan-logo-gradient` background); routes/debug/applogo/+page.svelte (dev-only page) | shipped |
-| `brands.hermes` | src/lib/assets/brands/hermes/logo.svg | brands/hermes/logo.svelte (`<img>` wrapper) → engine presentation `hermes` | shipped |
 | `brands.kimi` | src/lib/assets/brands/kimi/logo.svg | brands/kimi/logo.svelte → `moonshot` | shipped |
 | `brands.opencode` | src/lib/assets/brands/opencode/logo.svg | brands/opencode/logo.svelte → `opencode2`, `opencode`, `opencode-go` | shipped |
 | `brands.zai` | src/lib/assets/brands/zai/logo.svg | brands/zai/logo.svelte → `zai`, `zhipu` | shipped |
@@ -324,7 +323,7 @@ element present. The Bazel test re-derives and compares.
 Legacy call sites record a *different* predicate: `EngineMark.monochrome` /
 `RepositoryMark.monochrome` mean "single-color logo that must invert with the
 theme" (rendering policy). Artwork-mono therefore matches the call-site flag for
-github/gitlab/azure/openai/cursor/grok/hermes/kimi/opencode/zai, and diverges —
+github/gitlab/azure/openai/cursor/grok/kimi/opencode/zai, and diverges —
 correctly — where colored or chip-whitened marks are policy-flagged false while
 their artwork is single-paint: `simple-icons.*` and `lobe.*` (currentColor marks
 always whitened on brand-colored chips), `svgl.claude-ai` (#d97757),
@@ -344,7 +343,7 @@ away.
 | jetbrains (text/ts-test/typescript) | Apache-2.0, © 2000–2024 JetBrains s.r.o.; headers retained in each file; README attests curated subset of ziishaned/zed-jetbrains-icons | licenses/jetbrains-file-icons-README.md |
 | jetbrains.svelte (dual provenance) | artwork sourced from MIT-licensed svgl-svelte package per the jetbrains README; the Svelte mark remains a brand asset of Svelte | licenses/svgl-svelte-LICENSE.txt + note |
 | artisan (4) | first-party product artwork (720×720 app icon, star, gradient, success-check path); origin local, needs human provenance attestation (no in-tree statement exists today) | licenses/artisan-first-party-NOTES.md |
-| brands (hermes/kimi/opencode/zai) | checked-in legacy brand marks without in-tree license statements; treated like svgl logos: owner trademark/attribution, needs_review=true | licenses/svgl-brand-marks-NOTES.md (same policy section) |
+| brands (kimi/opencode/zai) | checked-in legacy brand marks without in-tree license statements; treated like svgl logos: owner trademark/attribution, needs_review=true | licenses/svgl-brand-marks-NOTES.md (same policy section) |
 
 `anyhow` prohibition: unaffected; no first-party asset code or validation code
 declares or imports `anyhow`.

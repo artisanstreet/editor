@@ -319,7 +319,7 @@ fn installation_progress_label(report: &InstallationReport) -> String {
 ///
 /// The branch order intentionally mirrors `ProjectManagedHarnessSetup`:
 /// availability, active installation/pending unmanaged work, authenticating,
-/// failed, ready credentials, unmanaged download, external Hermes setup, and
+/// failed, ready credentials, unmanaged download, external setup, and
 /// managed sign-in. Optional strings are moved or cloned without trimming,
 /// normalizing, or otherwise changing their presence or contents, and the
 /// returned state owns every string it exposes.
@@ -444,7 +444,7 @@ pub fn project_managed_harness_setup(input: HarnessSetupInput) -> HarnessSetupSt
             busy: false,
             email: None,
             failure: input.error,
-            label: String::from("Configure Hermes"),
+            label: String::from("Configure"),
             ready: false,
             status: HarnessSetupStatus::SignIn,
         };

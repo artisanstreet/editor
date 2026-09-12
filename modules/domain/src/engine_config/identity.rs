@@ -6,7 +6,7 @@ use crate::bounds::{
 use crate::identifiers::{EngineModelId, EngineProfileId, EngineRouteId, EngineVariantId};
 
 use super::providers::{
-    ClaudeSelection, CodexSelection, CursorSelection, GrokSelection, HermesSelection,
+    ClaudeSelection, CodexSelection, CursorSelection, GrokSelection,
 };
 
 use super::runtime::EnginePermissionPolicy;
@@ -171,19 +171,16 @@ pub enum EngineId {
     Grok,
     /// Cursor through the shared ACP stdio transport.
     Cursor,
-    /// Hermes private-service gateway over WebSocket JSON-RPC.
-    Hermes,
 }
 
 impl EngineId {
     /// Every stable engine identity.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::OpenCode2,
         Self::Codex,
         Self::Claude,
         Self::Grok,
         Self::Cursor,
-        Self::Hermes,
     ];
 
     /// Returns the stable storage and wire spelling.
@@ -195,7 +192,6 @@ impl EngineId {
             Self::Claude => "claude",
             Self::Grok => "grok",
             Self::Cursor => "cursor",
-            Self::Hermes => "hermes",
         }
     }
 
@@ -213,7 +209,6 @@ impl EngineId {
             "claude" => Ok(Self::Claude),
             "grok" => Ok(Self::Grok),
             "cursor" => Ok(Self::Cursor),
-            "hermes" => Ok(Self::Hermes),
             _ => Err(EngineConfigError::new(
                 "engine",
                 EngineConfigReason::Unsupported,
@@ -245,8 +240,6 @@ pub enum EngineSelection {
     Grok(GrokSelection),
     /// Cursor selection (shared ACP transport).
     Cursor(CursorSelection),
-    /// Hermes gateway selection.
-    Hermes(HermesSelection),
 }
 
 impl EngineSelection {
@@ -259,7 +252,6 @@ impl EngineSelection {
             Self::Claude(_) => EngineId::Claude,
             Self::Grok(_) => EngineId::Grok,
             Self::Cursor(_) => EngineId::Cursor,
-            Self::Hermes(_) => EngineId::Hermes,
         }
     }
 
@@ -272,24 +264,18 @@ impl EngineSelection {
             Self::Claude(selection) => selection.profile_id(),
             Self::Grok(selection) => selection.profile_id(),
             Self::Cursor(selection) => selection.profile_id(),
-            Self::Hermes(selection) => selection.profile_id(),
         }
     }
 
-    /// Returns the canonical permission policy when the engine uses one.
-    ///
-    /// Hermes owns authorization through its installed profile and carries
-    /// its own [`HermesPermissionMode`] instead, so this is `None` for
-    /// Hermes and `Some` for every other engine.
+    /// Returns the canonical permission policy.
     #[must_use]
-    pub const fn permission(&self) -> Option<&EnginePermissionPolicy> {
+    pub const fn permission(&self) -> &EnginePermissionPolicy {
         match self {
-            Self::OpenCode2(selection) => Some(selection.permission()),
-            Self::Codex(selection) => Some(selection.permission()),
-            Self::Claude(selection) => Some(selection.permission()),
-            Self::Grok(selection) => Some(selection.permission()),
-            Self::Cursor(selection) => Some(selection.permission()),
-            Self::Hermes(_) => None,
+            Self::OpenCode2(selection) => selection.permission(),
+            Self::Codex(selection) => selection.permission(),
+            Self::Claude(selection) => selection.permission(),
+            Self::Grok(selection) => selection.permission(),
+            Self::Cursor(selection) => selection.permission(),
         }
     }
 
@@ -302,7 +288,6 @@ impl EngineSelection {
             Self::Claude(selection) => selection.model_id(),
             Self::Grok(selection) => selection.model_id(),
             Self::Cursor(selection) => selection.model_id(),
-            Self::Hermes(selection) => Some(selection.model_id()),
         }
     }
 
@@ -327,8 +312,7 @@ impl EngineSelection {
             Self::Codex(_)
             | Self::Claude(_)
             | Self::Grok(_)
-            | Self::Cursor(_)
-            | Self::Hermes(_) => Err(EngineConfigError::new(
+            | Self::Cursor(_) => Err(EngineConfigError::new(
                 "engine",
                 EngineConfigReason::Unsupported,
             )),
@@ -347,8 +331,7 @@ impl EngineSelection {
             Self::OpenCode2(_)
             | Self::Claude(_)
             | Self::Grok(_)
-            | Self::Cursor(_)
-            | Self::Hermes(_) => Err(EngineConfigError::new(
+            | Self::Cursor(_) => Err(EngineConfigError::new(
                 "engine",
                 EngineConfigReason::Unsupported,
             )),
@@ -367,8 +350,7 @@ impl EngineSelection {
             Self::OpenCode2(_)
             | Self::Codex(_)
             | Self::Grok(_)
-            | Self::Cursor(_)
-            | Self::Hermes(_) => Err(EngineConfigError::new(
+            | Self::Cursor(_) => Err(EngineConfigError::new(
                 "engine",
                 EngineConfigReason::Unsupported,
             )),
@@ -387,8 +369,7 @@ impl EngineSelection {
             Self::OpenCode2(_)
             | Self::Codex(_)
             | Self::Claude(_)
-            | Self::Cursor(_)
-            | Self::Hermes(_) => Err(EngineConfigError::new(
+            | Self::Cursor(_) => Err(EngineConfigError::new(
                 "engine",
                 EngineConfigReason::Unsupported,
             )),
@@ -407,28 +388,7 @@ impl EngineSelection {
             Self::OpenCode2(_)
             | Self::Codex(_)
             | Self::Claude(_)
-            | Self::Grok(_)
-            | Self::Hermes(_) => Err(EngineConfigError::new(
-                "engine",
-                EngineConfigReason::Unsupported,
-            )),
-        }
-    }
-
-    /// Borrows the Hermes selection.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EngineConfigError`] with [`EngineConfigReason::Unsupported`]
-    /// when the selection names another engine.
-    pub const fn as_hermes(&self) -> Result<&HermesSelection, EngineConfigError> {
-        match self {
-            Self::Hermes(selection) => Ok(selection),
-            Self::OpenCode2(_)
-            | Self::Codex(_)
-            | Self::Claude(_)
-            | Self::Grok(_)
-            | Self::Cursor(_) => Err(EngineConfigError::new(
+            | Self::Grok(_) => Err(EngineConfigError::new(
                 "engine",
                 EngineConfigReason::Unsupported,
             )),

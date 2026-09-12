@@ -14,7 +14,7 @@
 
 ### Every harness in one place
 
-Use Codex, Claude Code, Grok, OpenCode, and Hermes all in one place—with your own subscription.
+Use Codex, Claude Code, Grok, and OpenCode all in one place—with your own subscription.
 
 <br>
 

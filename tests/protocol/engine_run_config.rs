@@ -9,9 +9,9 @@ use artisan_domain::{
     EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EngineModelId,
     EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
-    GrokPermissionMode, GrokReasoningEffort, GrokSelection, HermesPermissionMode,
-    HermesReasoningEffort, HermesSelection, NetworkAccess, OpenCode2Selection, PermissionId,
-    ReceiptDisposition, RequestId, SetThreadEngineConfig, ThreadId, UnixMillis, WebSearchAccess,
+    GrokPermissionMode, GrokReasoningEffort, GrokSelection, NetworkAccess, OpenCode2Selection,
+    PermissionId, ReceiptDisposition, RequestId, SetThreadEngineConfig, ThreadId, UnixMillis,
+    WebSearchAccess,
 };
 use artisan_protocol::artisan_capnp::{
     engine_permission_policy, engine_selection_v2, envelope, request, response,
@@ -940,20 +940,6 @@ fn cursor_config() -> EngineRunConfig {
     )
 }
 
-fn hermes_config() -> EngineRunConfig {
-    EngineRunConfig::new(
-        EngineSelection::Hermes(HermesSelection::new(
-            EngineProfileId::parse("profile-hermes").expect("profile id is valid"),
-            EngineModelId::parse("model-hermes").expect("model id is valid"),
-            EngineRouteId::parse("route-hermes").expect("route id is valid"),
-            HermesPermissionMode::Yolo,
-            Some(HermesReasoningEffort::parse("medium").expect("effort is valid")),
-            true,
-        )),
-        test_runtime(),
-    )
-}
-
 fn request_for(
     frame_id: &str,
     precondition: EngineConfigUpdatePrecondition,
@@ -1009,7 +995,6 @@ fn wire_selection_arm(value: &WireEnvelope) -> String {
         engine_selection_v2::Which::Claude(_) => "claude",
         engine_selection_v2::Which::Grok(_) => "grok",
         engine_selection_v2::Which::Cursor(_) => "cursor",
-        engine_selection_v2::Which::Hermes(_) => "hermes",
     };
     format!("v{version}:{arm}")
 }
@@ -1023,7 +1008,6 @@ fn every_engine_kind_round_trips_through_the_owned_envelope_with_its_wire_genera
         (EngineId::Claude, claude_config(), "v2:claude"),
         (EngineId::Grok, grok_config(), "v2:grok"),
         (EngineId::Cursor, cursor_config(), "v2:cursor"),
-        (EngineId::Hermes, hermes_config(), "v2:hermes"),
     ];
     for (engine, expected, wire) in cases {
         let frame_id = format!("engine-{}-wire", engine.as_str());
@@ -1154,15 +1138,6 @@ fn raw_v2_engine_config_frame(
             arm.set_permission_mode("");
             set_test_permission(arm.reborrow().init_permission());
         }
-        "hermes" => {
-            let mut arm = selection.init_hermes();
-            arm.set_profile_id(arm_profile);
-            arm.set_model_id(arm_model);
-            arm.set_route_id("route-protocol");
-            arm.set_reasoning_effort("");
-            arm.set_permission_mode(arm_option);
-            arm.set_fast(false);
-        }
         other => panic!("unknown test arm {other}"),
     }
     serialize::write_message_to_words(&message)
@@ -1232,19 +1207,6 @@ fn v2_frames_reject_unknown_mismatched_and_invalid_selections() {
             "profile-protocol",
             "model-protocol",
             "turbo"
-        )),
-        Err(ProtocolDecodeError::EngineConfig { .. })
-    ));
-    // Hermes requires a model identity.
-    assert!(matches!(
-        decode_envelope(&raw_v2_engine_config_frame(
-            2,
-            "hermes",
-            "profile-protocol",
-            "hermes",
-            "profile-protocol",
-            "",
-            "yolo"
         )),
         Err(ProtocolDecodeError::EngineConfig { .. })
     ));

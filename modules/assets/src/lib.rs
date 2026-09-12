@@ -179,8 +179,8 @@ impl fmt::Display for Family {
 ///   `deepseek`.
 ///
 /// Everything else follows the monochrome-derived default. Notably,
-/// currentColor artwork (`svgl.qwen`, `lobe.*`, `simple-icons.*`,
-/// `brands.hermes`) stays [`Presentation::Tinted`]: painting with text color
+/// currentColor artwork (`svgl.qwen`, `lobe.*`, `simple-icons.*`) stays
+/// [`Presentation::Tinted`]: painting with text color
 /// is the native equivalent of its theme-adaptive or chip-whitened legacy
 /// rendering, whereas full-color raster would pin the glyph to black.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -267,7 +267,6 @@ catalog! {
     (ARTISAN_LOGO_GRADIENT, "artisan.logo-gradient", Family::Artisan, Some("0 0 720 720"), false, "svg/artisan/logo-gradient.svg"),
     (ARTISAN_STAR, "artisan.star", Family::Artisan, Some("0 0 100 100"), true, "svg/artisan/star.svg"),
     (ARTISAN_SUCCESS_CHECK, "artisan.success-check", Family::Artisan, Some("0 0 16 16"), true, "svg/artisan/success-check.svg"),
-    (BRANDS_HERMES, "brands.hermes", Family::Brand, Some("0 0 24 24"), true, "svg/brands/hermes.svg"),
     (BRANDS_KIMI, "brands.kimi", Family::Brand, Some("0 0 24 25"), false, "svg/brands/kimi.svg"),
     (BRANDS_OPENCODE, "brands.opencode", Family::Brand, Some("0 0 240 300"), false, "svg/brands/opencode.svg"),
     (BRANDS_ZAI, "brands.zai", Family::Brand, Some("0 0 30 30"), false, "svg/brands/zai.svg"),

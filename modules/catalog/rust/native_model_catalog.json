@@ -135,37 +135,6 @@
       }
     },
     {
-      "id": "hermes",
-      "gateways": [],
-      "hidden": true,
-      "label": "Hermes",
-      "permissions": {
-        "default": "autonomous",
-        "options": [
-          {
-            "approval_behavior": "prompts",
-            "availability": "always",
-            "description": "Use the selected Hermes profile's approval rules. Hermes tools run with host filesystem and network access unless that profile configures an isolated backend.",
-            "edit_scope": "host",
-            "id": "autonomous",
-            "label": "Auto",
-            "native_value": "profile",
-            "safety_boundary": "rules"
-          },
-          {
-            "approval_behavior": "none",
-            "availability": "dynamic",
-            "description": "Enable Hermes YOLO for this session. Host-level tools proceed without ordinary approval prompts; Hermes hardline deny rules may still apply.",
-            "edit_scope": "host",
-            "id": "unrestricted",
-            "label": "Unrestricted",
-            "native_value": "yolo",
-            "safety_boundary": "bypassed"
-          }
-        ]
-      }
-    },
-    {
       "compaction_default_model_id": "grok-composer-2-5",
       "id": "grok",
       "gateways": [],

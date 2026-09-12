@@ -28,8 +28,7 @@ use crate::engine_owner::catalog::{
     CatalogAvailability, CatalogModel, CatalogResult, CatalogRoute,
 };
 use crate::engine_owner::consts::{
-    CLAUDE_ENGINE_ID, CODEX_ENGINE_ID, CURSOR_ENGINE_ID, GROK_ENGINE_ID, HERMES_ENGINE_ID,
-    OPENCODE2_ENGINE_ID,
+    CLAUDE_ENGINE_ID, CODEX_ENGINE_ID, CURSOR_ENGINE_ID, GROK_ENGINE_ID, OPENCODE2_ENGINE_ID,
 };
 use crate::model_discovery::DiscoveredModel;
 
@@ -40,13 +39,12 @@ use crate::model_discovery::DiscoveredModel;
 /// installed binary. Executable resolution and the readiness handshake stay
 /// the live gate in each per-engine executor and probe path: a missing CLI
 /// still yields unavailable-with-reason at runtime, never a false ready.
-const RUNNABLE_ENGINE_IDS: [&str; 6] = [
+const RUNNABLE_ENGINE_IDS: [&str; 5] = [
     OPENCODE2_ENGINE_ID,
     CODEX_ENGINE_ID,
     CLAUDE_ENGINE_ID,
     GROK_ENGINE_ID,
     CURSOR_ENGINE_ID,
-    HERMES_ENGINE_ID,
 ];
 
 /// Payload-free failure while combining the typed runtime result with the
@@ -78,7 +76,7 @@ pub(crate) enum NativeModelCatalogBridgeError {
 ///
 /// Only the discovered `opencode2` rows are added to the manifest. Static
 /// rows for the other fixture-proven harnesses are readable and runnable
-/// through [`RUNNABLE_ENGINE_IDS`]; Hermes and `OpenCode2` rows arrive only
+/// through [`RUNNABLE_ENGINE_IDS`]; `OpenCode2` rows arrive only
 /// through live discovery. No thinking, speed, MCP, web-search, permission,
 /// or cost value is inferred when `OpenCode2` did not report it.
 pub(crate) fn from_catalog_result(

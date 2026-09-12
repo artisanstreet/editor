@@ -27,7 +27,6 @@ mod core;
 mod cursor;
 mod failures;
 mod grok;
-mod hermes;
 mod lifecycle;
 mod opencode;
 mod owner;
@@ -53,76 +52,7 @@ pub(crate) use self::codex::{
     ack_codex_steer_response, codex_response_id_matches, codex_resumed_thread_id, codex_thread_id,
     codex_turn_id, is_codex_result_for, service_codex_steer_delivery,
 };
-#[allow(unused_imports)]
-pub(crate) use self::hermes::service_hermes_steer_delivery;
-
 // Owner entry points re-exported for `engine_owner::mod` and the seeded owner
 // tests.
 #[allow(unused_imports)]
 pub(crate) use self::owner::{run_configured_owner, run_owner, run_owner_with_allocator};
-
-// Intake helpers used only by the tests below.
-#[allow(unused_imports)]
-use self::hermes::map_hermes_turn_error;
-#[allow(unused_imports)]
-use self::lifecycle::check_turn_attachment_applicability;
-
-#[cfg(test)]
-mod intake_attachment_tests {
-    use artisan_domain::{AuthoredText, EngineId, ImageAttachment, QueueMessagePayload};
-
-    use super::*;
-
-    fn text_prompt() -> QueueMessagePayload {
-        QueueMessagePayload::text_only("hello").expect("text prompt builds")
-    }
-
-    fn image_prompt() -> QueueMessagePayload {
-        let attachment = ImageAttachment::new("image/png", vec![1, 2, 3, 4], "shot.png")
-            .expect("image attachment builds");
-        QueueMessagePayload::new(
-            Some(AuthoredText::parse("see this").expect("authored text parses")),
-            vec![attachment],
-        )
-        .expect("image prompt builds")
-    }
-
-    #[test]
-    fn text_prompts_pass_intake_for_every_engine() {
-        for engine in EngineId::ALL {
-            assert!(
-                check_turn_attachment_applicability(engine, &text_prompt()).is_ok(),
-                "{engine:?} admits a text-only turn"
-            );
-        }
-    }
-
-    #[test]
-    fn image_prompts_pass_except_hermes() {
-        for engine in [
-            EngineId::OpenCode2,
-            EngineId::Codex,
-            EngineId::Claude,
-            EngineId::Grok,
-            EngineId::Cursor,
-        ] {
-            assert!(
-                check_turn_attachment_applicability(engine, &image_prompt()).is_ok(),
-                "{engine:?} supports provider images at intake"
-            );
-        }
-    }
-
-    #[test]
-    fn hermes_images_fail_closed_with_the_typed_reject() {
-        assert_eq!(
-            check_turn_attachment_applicability(EngineId::Hermes, &image_prompt()),
-            Err(EngineOperationError::Configuration)
-        );
-        assert_eq!(
-            map_hermes_turn_error(&crate::engine_owner::hermes::HermesTurnError::ImagesUnsupported),
-            EngineOperationError::Configuration
-        );
-        assert!(check_turn_attachment_applicability(EngineId::Hermes, &text_prompt()).is_ok());
-    }
-}

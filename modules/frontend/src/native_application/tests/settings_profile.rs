@@ -33,7 +33,7 @@ fn settings_rail_lists_real_engines_without_a_thread(cx: &mut TestAppContext) {
                 .collect();
             // Every real catalog engine is reachable; the mock fixture
             // identity never enters production navigation.
-            for expected in ["codex", "claude", "cursor", "grok", "hermes", "opencode2"] {
+            for expected in ["codex", "claude", "cursor", "grok", "opencode2"] {
                 assert!(
                     ids.iter().any(|id| id == expected),
                     "rail must enumerate {expected}: {ids:?}"
