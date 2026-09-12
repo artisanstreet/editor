@@ -123,21 +123,21 @@ impl MarkdownRenderer {
         let selector = selector.into();
         let markdown_selector = format!("{}-markdown", selector.as_ref());
         let Ok(document) = self.engine.parse_document(source) else {
-            return plain_source(source, theme, markdown_selector, tone);
+            return plain_source(source, &theme, markdown_selector, tone);
         };
 
         if (!source.is_empty() && document.blocks().is_empty())
             || document.blocks().iter().any(block_needs_plain_fallback)
         {
-            return plain_source(source, theme, markdown_selector, tone);
+            return plain_source(source, &theme, markdown_selector, tone);
         }
 
-        let mut root = markdown_root(markdown_selector.clone(), theme, tone);
+        let mut root = markdown_root(markdown_selector.clone(), &theme, tone);
         let blocks = document.blocks();
         let gaps = block_gaps(blocks, BlockScope::Root);
         for (index, block) in blocks.iter().enumerate() {
             root = root.child(with_block_margins(
-                render_block(index, block, theme, &markdown_selector, tone, titles),
+                render_block(index, block, &theme, &markdown_selector, tone, titles),
                 gaps[index],
             ));
         }
@@ -176,7 +176,7 @@ fn block_needs_plain_fallback(block: &Block) -> bool {
     matches!(block, Block::Code(fence) if !fence.closed || fence.tokens.is_none())
 }
 
-fn markdown_root(selector: String, theme: ArtisanTheme, tone: MarkdownBodyTone) -> Div {
+fn markdown_root(selector: String, theme: &ArtisanTheme, tone: MarkdownBodyTone) -> Div {
     // No container gap: inter-block spacing lives in per-block margins so
     // collapsing behavior matches the reference.
     let mut root = body_container(theme, tone).flex().flex_col();
@@ -186,7 +186,7 @@ fn markdown_root(selector: String, theme: ArtisanTheme, tone: MarkdownBodyTone) 
 
 fn plain_source(
     source: &str,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     selector: String,
     tone: MarkdownBodyTone,
 ) -> AnyElement {
@@ -196,7 +196,7 @@ fn plain_source(
     root.child(SelectableText::retained(
         id,
         source.to_owned(),
-        theme,
+        *theme,
         Vec::new(),
     ))
     .into_any_element()
@@ -227,7 +227,7 @@ pub fn markdown_body_text_color(tone: MarkdownBodyTone, theme: ArtisanTheme) -> 
     }
 }
 
-fn body_container(theme: ArtisanTheme, tone: MarkdownBodyTone) -> Div {
+fn body_container(theme: &ArtisanTheme, tone: MarkdownBodyTone) -> Div {
     div()
         .w_full()
         .min_w_0()
@@ -235,7 +235,7 @@ fn body_container(theme: ArtisanTheme, tone: MarkdownBodyTone) -> Div {
         .line_height(px(ProseTypography::BODY_LINE_PX))
         .font_weight(ProseTypography::BODY_WEIGHT)
         .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
-        .text_color(markdown_body_text_color(tone, theme).to_paint())
+        .text_color(markdown_body_text_color(tone, *theme).to_paint())
         .whitespace_normal()
 }
 
@@ -322,7 +322,7 @@ pub fn block_gaps(blocks: &[Block], scope: BlockScope) -> Vec<f32> {
         };
         gaps.push(gap);
         previous_bottom = margin_bottom;
-        previous_zeroes_follower = matches!(block, Block::Heading { level: 2 | 3 | 4, .. });
+        previous_zeroes_follower = matches!(block, Block::Heading { level: 2..=4, .. });
     }
     gaps
 }
@@ -330,7 +330,7 @@ pub fn block_gaps(blocks: &[Block], scope: BlockScope) -> Vec<f32> {
 fn render_block(
     index: usize,
     block: &Block,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     parent_selector: &str,
     tone: MarkdownBodyTone,
     titles: &dyn RichLinkTitleSource,
@@ -341,7 +341,7 @@ fn render_block(
 fn render_block_at_depth(
     index: usize,
     block: &Block,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     parent_selector: &str,
     depth: u32,
     tone: MarkdownBodyTone,
@@ -375,7 +375,7 @@ fn render_block_at_depth(
             element = element.child(SelectableText::retained(
                 id,
                 source.clone(),
-                theme,
+                *theme,
                 Vec::new(),
             ));
         }
@@ -399,12 +399,17 @@ fn render_block_at_depth(
 /// collapse with the item-scope recipe and zero outer margins, so a tight
 /// single-paragraph item reads exactly its row pitch. Nested lists recurse
 /// with the reference 26 px list indent.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "list rendering threads selector, kind, start, items, theme, depth, tone, and titles; \
+              a parameter struct would only rename the same fields without changing ownership"
+)]
 fn render_list(
     parent_selector: &str,
     ordered: bool,
     start: Option<u64>,
     items: &[ListItem],
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     depth: u32,
     tone: MarkdownBodyTone,
     titles: &dyn RichLinkTitleSource,
@@ -484,10 +489,10 @@ fn item_marker(ordered: bool, base: u64, position: usize, task: Option<bool>) ->
 fn render_inline(
     selector: &str,
     spans: &[Span],
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     titles: &dyn RichLinkTitleSource,
 ) -> AnyElement {
-    let presentation = present_inline_with_titles(spans, theme, titles);
+    let presentation = present_inline_with_titles(spans, *theme, titles);
     let id = SharedString::from(selector.to_owned());
     let text = SharedString::from(presentation.source);
     // Inline code rides the frozen text-run contract: mono family plus
@@ -502,7 +507,7 @@ fn render_inline(
             letter_spacing: Some(px(0.0)),
         })
         .collect::<Vec<_>>();
-    let element = SelectableText::retained(id, text, theme, presentation.highlights)
+    let element = SelectableText::retained(id, text, *theme, presentation.highlights)
         .with_text_run_overrides(overrides);
     if presentation.links.is_empty() {
         return element.into_any_element();
@@ -529,7 +534,7 @@ fn render_inline(
         .into_any_element()
 }
 
-fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) -> AnyElement {
+fn render_code(parent_selector: &str, fence: &CodeFence, theme: &ArtisanTheme) -> AnyElement {
     let source = SharedString::from(fence.source.clone());
     let highlights = fence
         .tokens
@@ -558,7 +563,7 @@ fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) ->
         .elevation
         .card_lg_shadow
         .into_iter()
-        .map(|layer| layer.to_box_shadow())
+        .map(super::theme::ShadowLayer::to_box_shadow)
         .collect::<Vec<_>>();
     let mut code = body_container(theme, MarkdownBodyTone::Muted)
         .font_family(theme.typography.mono.family)
@@ -574,7 +579,7 @@ fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) ->
         .rounded(RadiusTokens::value(RadiusStep::X3l))
         .shadow(card_lg)
         .p(px(ProseTypography::CODE_PAD_PX))
-        .child(SelectableText::retained(id, source, theme, highlights));
+        .child(SelectableText::retained(id, source, *theme, highlights));
     code = code.debug_selector(move || selector);
     code.into_any_element()
 }
@@ -669,7 +674,7 @@ pub fn present_inline_with_titles(
     titles: &dyn RichLinkTitleSource,
 ) -> InlinePresentation {
     let mut accumulator = InlineAccumulator::default();
-    flatten_spans(spans, HighlightStyle::default(), &mut accumulator, theme, titles);
+    flatten_spans(spans, HighlightStyle::default(), &mut accumulator, &theme, titles);
     InlinePresentation {
         source: accumulator.source,
         highlights: accumulator.runs,
@@ -692,12 +697,11 @@ fn emit_run(accumulator: &mut InlineAccumulator, start: usize, end: usize, style
     if start >= end || style == HighlightStyle::default() {
         return;
     }
-    if let Some((last_range, last_style)) = accumulator.runs.last_mut() {
-        if *last_style == style && last_range.end == start {
+    if let Some((last_range, last_style)) = accumulator.runs.last_mut()
+        && *last_style == style && last_range.end == start {
             last_range.end = end;
             return;
         }
-    }
     accumulator.runs.push((start..end, style));
 }
 
@@ -705,7 +709,7 @@ fn flatten_spans(
     spans: &[Span],
     inherited: HighlightStyle,
     accumulator: &mut InlineAccumulator,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     titles: &dyn RichLinkTitleSource,
 ) {
     flatten_spans_in_link(spans, inherited, accumulator, theme, titles, false);
@@ -718,7 +722,7 @@ fn flatten_spans_in_link(
     spans: &[Span],
     inherited: HighlightStyle,
     accumulator: &mut InlineAccumulator,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     titles: &dyn RichLinkTitleSource,
     in_link: bool,
 ) {
@@ -826,7 +830,7 @@ fn is_rich_link_destination(destination: &str) -> bool {
     lower.starts_with("https://") || lower.starts_with("http://")
 }
 
-fn code_style(theme: ArtisanTheme, in_link: bool) -> HighlightStyle {
+fn code_style(theme: &ArtisanTheme, in_link: bool) -> HighlightStyle {
     // Reference inline code reads 400 muted with no wash (`prose.css`
     // inline-code over plugin `code`), except inside a link where `a code`
     // inherits the link color. The 400 weight rides here; mono face and
@@ -846,7 +850,7 @@ fn code_style(theme: ArtisanTheme, in_link: bool) -> HighlightStyle {
     }
 }
 
-fn strong_style(theme: ArtisanTheme, in_link: bool) -> HighlightStyle {
+fn strong_style(theme: &ArtisanTheme, in_link: bool) -> HighlightStyle {
     // Plugin `strong` 600 in the headings/bold foreground token
     // (`prose.css` bold rule); body inheritance would dim it to muted.
     // Inside a link, `a strong` inherits the link color instead.
@@ -868,7 +872,7 @@ fn emphasis_style() -> HighlightStyle {
     }
 }
 
-fn link_style(theme: ArtisanTheme) -> HighlightStyle {
+fn link_style(theme: &ArtisanTheme) -> HighlightStyle {
     // Conversation links always render through the anchor component
     // (`ProseA`), i.e. the `conversation-link` class: blue with no
     // underline (`prose.css` links/conversation-link rules), never the
@@ -881,7 +885,7 @@ fn link_style(theme: ArtisanTheme) -> HighlightStyle {
     }
 }
 
-fn code_token_style(theme: ArtisanTheme, kind: CodeTokenKind) -> HighlightStyle {
+fn code_token_style(theme: &ArtisanTheme, kind: CodeTokenKind) -> HighlightStyle {
     let color = match kind {
         CodeTokenKind::Comment => theme.colors.muted_foreground,
         CodeTokenKind::Str => theme.colors.banner_success,
@@ -960,7 +964,7 @@ mod tests {
             "Resolved Page"
         );
         assert!(presentation.highlights.iter().any(|(range, style)| {
-            range == &presentation.links[0].range && *style == link_style(theme)
+            range == &presentation.links[0].range && *style == link_style(&theme)
         }));
         assert!(presentation.code_ranges.is_empty());
     }

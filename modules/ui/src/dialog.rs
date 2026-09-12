@@ -26,7 +26,7 @@ use gpui::{
 use crate::button::{
     AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonStyle, ButtonVariant,
 };
-use crate::motion::MotionPolicy;
+use crate::motion::{DIALOG_OPEN, MotionPolicy};
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 
 /// The opacity of the legacy `bg-black/80` modal backdrop.
@@ -46,7 +46,7 @@ pub const DEFAULT_CLOSE_LABEL: &str = "Close";
 pub const DIALOG_ROLE: &str = "dialog";
 
 /// The legacy dialog open transition duration.
-pub const OPEN_ANIMATION_DURATION: Duration = Duration::from_millis(100);
+pub const OPEN_ANIMATION_DURATION: Duration = DIALOG_OPEN;
 
 /// Why a caller-owned dialog was asked to close.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

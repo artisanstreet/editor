@@ -198,7 +198,7 @@ pub fn merge_selection_highlight(
         merged.push((covered..selection.end, *wash));
     }
 
-    merged.sort_by(|left, right| left.0.start.cmp(&right.0.start));
+    merged.sort_by_key(|left| left.0.start);
     merged
 }
 
@@ -289,9 +289,9 @@ impl SelectableTextState {
     #[must_use]
     pub fn selection_range(&self) -> Option<Range<usize>> {
         let inner = self.inner.borrow();
-        if inner.dragging {
-            if let (Some(anchor), Some(head)) = (inner.anchor, inner.head) {
-                if anchor != head {
+        if inner.dragging
+            && let (Some(anchor), Some(head)) = (inner.anchor, inner.head)
+                && anchor != head {
                     let (start, end) = if anchor < head {
                         (anchor, head)
                     } else {
@@ -299,8 +299,6 @@ impl SelectableTextState {
                     };
                     return Some(start..end);
                 }
-            }
-        }
         inner.selection.map(|(start, end)| start..end)
     }
 
@@ -361,6 +359,7 @@ impl SelectableTextState {
     }
 
     /// Moves the drag head; returns whether the head actually changed.
+    #[must_use]
     pub fn update_drag(&self, index: usize) -> bool {
         if let Ok(mut inner) = self.inner.try_borrow_mut() {
             if !inner.dragging {
@@ -382,6 +381,7 @@ impl SelectableTextState {
     /// native click-clears-selection behavior. A release with no latched
     /// press leaves the retained selection untouched. Returns whether a
     /// non-empty selection is retained afterward.
+    #[must_use]
     pub fn end_drag(&self, text: &str) -> bool {
         if let Ok(mut inner) = self.inner.try_borrow_mut() {
             inner.dragging = false;
@@ -456,19 +456,10 @@ enum SelectionSource {
 /// id, so it persists across frames exactly while the element keeps
 /// painting and is discarded when it stops — no caller cache, no transcript
 /// authority.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct RetainedSelection {
     state: SelectableTextState,
     focus: Option<FocusHandle>,
-}
-
-impl Default for RetainedSelection {
-    fn default() -> Self {
-        Self {
-            state: SelectableTextState::default(),
-            focus: None,
-        }
-    }
 }
 
 /// Per-frame paint inputs resolved during `request_layout`.
@@ -484,6 +475,14 @@ struct PaintFrame {
     /// controlled mode when the caller supplied one through `.focus()`.
     register_focus: bool,
 }
+
+/// Merged highlight runs, the retained selection range, and the prepared
+/// paint frame resolved from element state.
+type RetainedFramePaint = (
+    Vec<(Range<usize>, HighlightStyle)>,
+    Option<Range<usize>>,
+    PaintFrame,
+);
 
 /// Read-only selectable text element for transcript bodies.
 ///
@@ -524,7 +523,7 @@ impl SelectableText {
         Self::build(
             id,
             text,
-            theme,
+            &theme,
             base_highlights,
             SelectionSource::Controlled {
                 state: state.clone(),
@@ -548,13 +547,13 @@ impl SelectableText {
         theme: ArtisanTheme,
         base_highlights: Vec<(Range<usize>, HighlightStyle)>,
     ) -> Self {
-        Self::build(id, text, theme, base_highlights, SelectionSource::Retained)
+        Self::build(id, text, &theme, base_highlights, SelectionSource::Retained)
     }
 
     fn build(
         id: impl Into<ElementId>,
         text: impl Into<SharedString>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         base_highlights: Vec<(Range<usize>, HighlightStyle)>,
         source: SelectionSource,
     ) -> Self {
@@ -563,7 +562,7 @@ impl SelectableText {
             text: text.into(),
             base_highlights,
             text_run_overrides: Vec::new(),
-            selection_style: selection_style_for_theme(theme),
+            selection_style: selection_style_for_theme(*theme),
             source,
             link_ranges: Vec::new(),
             on_link: None,
@@ -641,7 +640,7 @@ impl SelectableText {
         global_id: Option<&GlobalElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> (Vec<(Range<usize>, HighlightStyle)>, Option<Range<usize>>, PaintFrame) {
+    ) -> RetainedFramePaint {
         let (merged, snapshot, frame, needs_focus) = window.with_optional_element_state(
             global_id,
             |stored: Option<Option<RetainedSelection>>, _: &mut Window| {
@@ -789,19 +788,22 @@ impl Element for SelectableText {
             let _ = styled.request_layout(None, inspector_id, window, cx);
             self.styled = Some(styled);
         }
-        if let Some(frame) = self.frame.as_ref() {
-            if frame.register_focus {
-                if let Some(focus) = frame.focus.as_ref() {
+        if let Some(frame) = self.frame.as_ref()
+            && frame.register_focus
+                && let Some(focus) = frame.focus.as_ref() {
                     window.set_focus_handle(focus, cx);
                 }
-            }
-        }
         if let Some(styled) = self.styled.as_mut() {
             styled.prepaint(None, inspector_id, bounds, state, window, cx);
         }
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "paint keeps retained/controlled selection, hover, and link handling in one \
+                  sequential pass sharing one frame snapshot; extraction would thread frame locals"
+    )]
     fn paint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -913,7 +915,7 @@ impl Element for SelectableText {
                         Ok(exact) | Err(exact) => exact,
                     },
                 );
-                state.update_drag(index);
+                let _ = state.update_drag(index);
                 if state.end_drag(&up_text) {
                     state.clear_press();
                     cx.stop_propagation();
@@ -951,13 +953,12 @@ impl Element for SelectableText {
                         cx.stop_propagation();
                         window.refresh();
                         cx.notify(current_view);
-                    } else if is_copy_keystroke(key, modifiers) {
-                        if let Some(copied) = state.copy_text(&key_text) {
+                    } else if is_copy_keystroke(key, modifiers)
+                        && let Some(copied) = state.copy_text(&key_text) {
                             cx.write_to_clipboard(ClipboardItem::new_string(copied));
                             window.prevent_default();
                             cx.stop_propagation();
                         }
-                    }
                 },
             );
         }

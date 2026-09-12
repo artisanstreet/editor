@@ -23,6 +23,7 @@ use gpui::{
 };
 
 use crate::icon::{IconSize, IconStyle, IconTint, icon};
+use crate::motion::SELECT_TYPEAHEAD;
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
 
 /// Stable selector for an unprefixed select trigger.
@@ -33,7 +34,7 @@ pub const SELECT_CONTENT_SELECTOR: &str = "artisan-select-content";
 pub const SELECT_VIEWPORT_SELECTOR: &str = "artisan-select-viewport";
 
 /// Printable typeahead remains active for this long between keystrokes.
-pub const TYPEAHEAD_TIMEOUT: Duration = Duration::from_secs(1);
+pub const TYPEAHEAD_TIMEOUT: Duration = SELECT_TYPEAHEAD;
 
 const DISABLED_OPACITY: f32 = 0.5;
 

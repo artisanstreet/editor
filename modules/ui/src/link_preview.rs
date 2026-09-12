@@ -17,15 +17,18 @@ use gpui::{
     transparent_black,
 };
 
-use crate::motion::{MotionAnimation, MotionPlan, MotionPolicy, MotionRecipe};
+use crate::motion::{
+    HOVER_PREVIEW_CLOSE, HOVER_PREVIEW_EXIT, MotionAnimation, MotionPlan, MotionPolicy,
+    MotionRecipe,
+};
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 
 /// The zero-delay opening contract reached by the direct `LinkPreview` import.
 pub const LINK_PREVIEW_OPEN_DELAY: Duration = Duration::ZERO;
 /// The grace period after the pointer leaves an open trigger or card.
-pub const LINK_PREVIEW_CLOSE_DELAY: Duration = Duration::from_millis(120);
+pub const LINK_PREVIEW_CLOSE_DELAY: Duration = HOVER_PREVIEW_CLOSE;
 /// The shared short exit used while a closing presence remains mounted.
-pub const LINK_PREVIEW_EXIT_DURATION: Duration = Duration::from_millis(50);
+pub const LINK_PREVIEW_EXIT_DURATION: Duration = HOVER_PREVIEW_EXIT;
 /// The spacing between the trigger and the card on its selected side.
 pub const LINK_PREVIEW_SIDE_OFFSET_PX: f32 = 8.0;
 /// The reached w-72 card width at the default 16 px root size.

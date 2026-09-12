@@ -19,7 +19,7 @@ use gpui::{
     SharedString, Styled, StyledText, combine_highlights, div,
 };
 
-use crate::motion::MotionPolicy;
+use crate::motion::{MotionPolicy, SHIMMER_CYCLE, SHIMMER_DELAY};
 use crate::selectable_text::{SelectableText, TextRunOverride};
 use crate::theme::ArtisanTheme;
 
@@ -151,10 +151,10 @@ pub type ShimmerPalette = ShimmerTextStyle;
 
 /// Default active animation duration, matching the audited three-second CSS
 /// treatment.
-pub const DEFAULT_DURATION: Duration = Duration::from_secs(3);
+pub const DEFAULT_DURATION: Duration = SHIMMER_CYCLE;
 
 /// Default initial animation delay, matching the audited 1.5-second treatment.
-pub const DEFAULT_DELAY: Duration = Duration::from_millis(1_500);
+pub const DEFAULT_DELAY: Duration = SHIMMER_DELAY;
 
 /// Default travelling-band spread as a percentage of the text width.
 pub const DEFAULT_SPREAD: f32 = 50.0;
@@ -492,6 +492,14 @@ pub struct ShimmerText {
     run_overrides: Vec<TextRunOverride>,
 }
 
+/// Borrowed styled-runs inputs: stable id, highlight ranges, and text-run
+/// overrides, in paint order.
+pub type TextRunsValue<'a> = (
+    &'a SharedString,
+    &'a [(Range<usize>, HighlightStyle)],
+    &'a [TextRunOverride],
+);
+
 impl ShimmerText {
     /// Creates a default-variant shimmer text with the audited timing values.
     #[must_use]
@@ -710,12 +718,14 @@ impl ShimmerText {
 
     /// Returns the styled-runs inputs, if a caller supplied them.
     #[must_use]
-    pub fn text_runs_value(
-        &self,
-    ) -> Option<(&SharedString, &[(Range<usize>, HighlightStyle)], &[TextRunOverride])> {
-        self.run_id
-            .as_ref()
-            .map(|id| (id, self.run_highlights.as_slice(), self.run_overrides.as_slice()))
+    pub fn text_runs_value(&self) -> Option<TextRunsValue<'_>> {
+        self.run_id.as_ref().map(|id| {
+            (
+                id,
+                self.run_highlights.as_slice(),
+                self.run_overrides.as_slice(),
+            )
+        })
     }
 }
 
@@ -746,9 +756,7 @@ impl IntoElement for ShimmerText {
         let plan = ShimmerMotionPlan::for_active_policy(motion, timing, active);
 
         let text = match (plan, run_id) {
-            (ShimmerMotionPlan::Immediate, None) => {
-                StyledText::new(content).into_any_element()
-            }
+            (ShimmerMotionPlan::Immediate, None) => StyledText::new(content).into_any_element(),
             (ShimmerMotionPlan::Immediate, Some(id)) => {
                 SelectableText::retained(id, content, theme, run_highlights)
                     .with_text_run_overrides(run_overrides)
@@ -780,7 +788,7 @@ impl IntoElement for ShimmerText {
                 let initial = styled_runs_for_phase(
                     id.clone(),
                     content.clone(),
-                    theme,
+                    &theme,
                     palette.highlight,
                     animation.phase_for_progress(0.0),
                     timing.spread(),
@@ -795,7 +803,7 @@ impl IntoElement for ShimmerText {
                             styled_runs_for_phase(
                                 id.clone(),
                                 content.clone(),
-                                theme,
+                                &theme,
                                 palette.highlight,
                                 animation.phase_for_progress(progress),
                                 timing.spread(),
@@ -866,10 +874,15 @@ fn styled_text_for_phase(
 /// combine semantic; family and zero-tracking overrides compile at layout
 /// from the inherited window text style, so selection retains per stable id
 /// with identical metrics while selected or not.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the phase frame needs id, content, theme, band, phase, spread, and the caller's \
+              highlight/override slices; a struct would just rename the same fields"
+)]
 fn styled_runs_for_phase(
     id: SharedString,
     content: SharedString,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     band: Hsla,
     phase: f32,
     spread: f32,
@@ -878,8 +891,7 @@ fn styled_runs_for_phase(
 ) -> SelectableText {
     let sweep = highlighted_ranges(content.as_ref(), phase, spread);
     let merged = merge_sweep_highlights(base_highlights, &sweep, band);
-    SelectableText::retained(id, content, theme, merged)
-        .with_text_run_overrides(overrides.to_vec())
+    SelectableText::retained(id, content, *theme, merged).with_text_run_overrides(overrides.to_vec())
 }
 
 fn phase_from_seconds(elapsed: f32, duration: f32, delay: f32) -> f32 {

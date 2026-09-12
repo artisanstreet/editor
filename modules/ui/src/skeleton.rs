@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use gpui::{Animation, AnimationExt, AnyElement, Div, Hsla, IntoElement, Pixels, Styled, div, px};
 
-use crate::motion::MotionPolicy;
+use crate::motion::{MotionPolicy, SKELETON_PULSE};
 use crate::theme::ArtisanTheme;
 
-const PULSE_DURATION: Duration = Duration::from_secs(2);
+const PULSE_DURATION: Duration = SKELETON_PULSE;
 const PULSE_MIN_OPACITY: f32 = 0.5;
 const PULSE_MAX_OPACITY: f32 = 1.0;
 const ROUNDED_XL_PX: f32 = 12.0;

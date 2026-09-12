@@ -38,6 +38,10 @@ use crate::theme::{ArtisanTheme, ProseTypography};
 /// Ranges are subsumed into owned text because callers concatenate fragments
 /// before painting; byte offsets below always address that concatenation.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the four mark flags map one-to-one onto Markdown run kinds and stay public data"
+)]
 pub struct InlineFragment {
     /// Visible text with all marks removed.
     pub text: String,
@@ -138,11 +142,10 @@ pub fn flatten_fragments(fragments: &[InlineFragment]) -> String {
 pub fn summary_line(text: &str) -> Option<String> {
     let sections = split_sections(text);
     for section in sections.iter().rev() {
-        if let Some(headline) = parse_headline(section) {
-            if !headline.is_empty() {
+        if let Some(headline) = parse_headline(section)
+            && !headline.is_empty() {
                 return Some(headline);
             }
-        }
     }
     for section in sections.iter().rev() {
         let unstarred = section.replace("**", "");
@@ -168,14 +171,16 @@ pub fn summary_line(text: &str) -> Option<String> {
 /// keeps code on the vendored 400 static. Ranges come out sorted,
 /// non-overlapping, and on character boundaries, exactly as both GPUI calls
 /// require.
-#[must_use]
-pub fn fragment_runs(
-    fragments: &[InlineFragment],
-) -> (
+/// Paint inputs for one fragment list: flattened text, highlight runs, and
+/// code ranges, in the order the inline renderer consumes them.
+pub type FragmentRuns = (
     String,
     Vec<(Range<usize>, HighlightStyle)>,
     Vec<Range<usize>>,
-) {
+);
+
+#[must_use]
+pub fn fragment_runs(fragments: &[InlineFragment]) -> FragmentRuns {
     let mut flat = String::new();
     let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
@@ -469,7 +474,7 @@ fn find_emphasis_close(text: &str, from: usize, mark: &str) -> Option<usize> {
         if text[index..].starts_with(mark) && closes_emphasis(text, index, mark) {
             return Some(index);
         }
-        index += text[index..].chars().next().map_or(1, |next| next.len_utf8());
+        index += text[index..].chars().next().map_or(1, char::len_utf8);
     }
     None
 }
@@ -525,7 +530,7 @@ fn emphasis_fragments(text: &str, strong: bool, em: bool, strike: bool) -> Vec<I
         if plain_start.is_none() {
             plain_start = Some(index);
         }
-        index += text[index..].chars().next().map_or(1, |next| next.len_utf8());
+        index += text[index..].chars().next().map_or(1, char::len_utf8);
     }
     if let Some(start) = plain_start {
         let plain = &text[start..];

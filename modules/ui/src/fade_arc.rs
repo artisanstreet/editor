@@ -27,14 +27,14 @@ use gpui::{
     linear_gradient, point, px,
 };
 
-use crate::motion::MotionPolicy;
+use crate::motion::{FADE_ARC_ROTATION, MotionPolicy};
 use crate::theme::ArtisanTheme;
 
 /// The default square edge, matching the reached route-gate `size-6` use.
 pub const DEFAULT_SIZE: Pixels = px(24.0);
 
 /// The default CSS variable fallback from the audited wrapper.
-pub const DEFAULT_DURATION: Duration = Duration::from_secs(1);
+pub const DEFAULT_DURATION: Duration = FADE_ARC_ROTATION;
 
 /// The semantic label retained by a default loading arc.
 pub const DEFAULT_STATUS_LABEL: &str = "Loading";

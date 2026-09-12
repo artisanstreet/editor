@@ -89,6 +89,10 @@ impl Element for FullColorSvg {
         self.interactivity.source_location()
     }
 
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "intrinsic device-pixel dimensions are small and exactly representable in f32"
+    )]
     fn request_layout(
         &mut self,
         global_id: Option<&GlobalElementId>,
@@ -354,17 +358,21 @@ impl FullColorSvgCache {
     }
 
     fn insert_raster(&mut self, key: RasterKey, image: Arc<RenderImage>) {
-        self.raster_bytes += image.as_bytes(0).map_or(0, |bytes| bytes.len());
+        self.raster_bytes += image.as_bytes(0).map_or(0, <[u8]>::len);
         self.rasters.push_front(RasterEntry { key, image });
         while self.rasters.len() > RASTER_CACHE_CAPACITY || self.raster_bytes > RASTER_CACHE_BYTES {
             if let Some(entry) = self.rasters.pop_back() {
-                self.raster_bytes -= entry.image.as_bytes(0).map_or(0, |bytes| bytes.len());
+                self.raster_bytes -= entry.image.as_bytes(0).map_or(0, <[u8]>::len);
                 self.evicted.push(entry.image);
             }
         }
     }
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "intrinsic device-pixel dimensions are small and exactly representable in f32"
+)]
 fn contain_size(bounds: Size<Pixels>, intrinsic: Size<DevicePixels>) -> Size<Pixels> {
     let width = f32::from(bounds.width).max(0.0);
     let height = f32::from(bounds.height).max(0.0);
@@ -383,6 +391,11 @@ fn contain_size(bounds: Size<Pixels>, intrinsic: Size<DevicePixels>) -> Size<Pix
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "raster dimensions are clamped to at least 1.0 before the rounding cast to u32"
+)]
 fn raster_target(display_size: Size<Pixels>, scale_factor: f32) -> Size<DevicePixels> {
     let physical_scale = (scale_factor.max(0.01) * SUPERSAMPLE_FACTOR).max(1.0);
     let width = (f32::from(display_size.width) * physical_scale)
@@ -394,6 +407,15 @@ fn raster_target(display_size: Size<Pixels>, scale_factor: f32) -> Size<DevicePi
     capped_size(width, height)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "raster dimensions are bounded by MAX_RASTER_DIMENSION, far inside f32's exact range"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the capped scale is in (0, 1] and dimensions stay >= 1, so the rounded cast is exact"
+)]
 fn capped_size(width: u32, height: u32) -> Size<DevicePixels> {
     let width = width.max(1);
     let height = height.max(1);
@@ -406,8 +428,8 @@ fn capped_size(width: u32, height: u32) -> Size<DevicePixels> {
     let capped_width = ((width as f32 * scale).round() as u32).max(1);
     let capped_height = ((height as f32 * scale).round() as u32).max(1);
     Size::new(
-        DevicePixels(capped_width as i32),
-        DevicePixels(capped_height as i32),
+        DevicePixels(capped_width.cast_signed()),
+        DevicePixels(capped_height.cast_signed()),
     )
 }
 
@@ -424,7 +446,7 @@ mod tests {
         image
             .as_bytes(0)
             .into_iter()
-            .flat_map(|bytes| bytes.chunks_exact(4))
+            .flat_map(|bytes| bytes.as_chunks::<4>().0)
             .any(|pixel| {
                 pixel[3] > 0 && pixel[3] < 255 && (pixel[0] != pixel[1] || pixel[1] != pixel[2])
             })
@@ -435,7 +457,7 @@ mod tests {
         let renderer = renderer();
         let mut cache = FullColorSvgCache::default();
         for asset_id in [AssetId::SVGL_CLAUDE_AI, AssetId::SVGL_GITLAB] {
-            let rendered = cache
+            let rendered_image = cache
                 .render_for(
                     asset_id,
                     size(px(20.0), px(20.0)),
@@ -445,17 +467,19 @@ mod tests {
                 )
                 .expect("catalog full-colour SVG should render");
             assert!(
-                has_authored_colour_and_alpha(&rendered.image),
+                has_authored_colour_and_alpha(&rendered_image.image),
                 "{asset_id} must retain authored chroma and antialiased alpha"
             );
             if asset_id == AssetId::SVGL_CLAUDE_AI {
                 assert!(
-                    rendered
+                    rendered_image
                         .image
                         .as_bytes(0)
                         .unwrap()
-                        .chunks_exact(4)
-                        .any(|pixel| pixel == [0x57, 0x77, 0xd9, 0xff]),
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|pixel| pixel == &[0x57, 0x77, 0xd9, 0xff]),
                     "Claude's authored clay colour must survive BGRA conversion"
                 );
             }
@@ -475,6 +499,14 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "RASTER_CACHE_CAPACITY is a tiny capacity constant that fits u32"
+    )]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "loop edges are small raster dimensions, exact in f32"
+    )]
     fn same_asset_and_physical_size_reuses_cached_raster_and_eviction_is_bounded() {
         let renderer = renderer();
         let mut cache = FullColorSvgCache::default();
@@ -523,6 +555,10 @@ mod tests {
     }
 
     #[gpui::test]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "test loop edges are small logical widths in pixels, exactly representable in f32"
+    )]
     fn real_element_preserves_auto_height_reuses_rasters_and_releases_evicted_gpu_images(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -554,7 +590,7 @@ mod tests {
                     .front()
                     .unwrap()
                     .image
-            ))
+            ));
         });
         for edge in 30..170 {
             draw(cx, edge as f32);

@@ -73,6 +73,29 @@ impl MotionDuration {
     }
 }
 
+/// Exact single-component durations outside the shared [`MotionDuration`]
+/// scale.
+///
+/// Each token records the audited timing of one component recipe. The values
+/// are behavioral: changing a token is a visual change, not a cleanup.
+pub const DIALOG_OPEN: Duration = Duration::from_millis(100);
+/// The sheet panel's open transition retained from `duration-200`.
+pub const SHEET_OPEN: Duration = Duration::from_millis(200);
+/// Link-preview grace period after the pointer leaves the trigger or card.
+pub const HOVER_PREVIEW_CLOSE: Duration = Duration::from_millis(120);
+/// The short link-preview exit played while a closing presence stays mounted.
+pub const HOVER_PREVIEW_EXIT: Duration = Duration::from_millis(50);
+/// One skeleton pulse cycle from the legacy `animate-pulse` recipe.
+pub const SKELETON_PULSE: Duration = Duration::from_secs(2);
+/// The shimmer band's active travel duration.
+pub const SHIMMER_CYCLE: Duration = Duration::from_secs(3);
+/// The shimmer band's initial delay before its first cycle.
+pub const SHIMMER_DELAY: Duration = Duration::from_millis(1_500);
+/// One full fade-arc rotation.
+pub const FADE_ARC_ROTATION: Duration = Duration::from_secs(1);
+/// How long a select keeps an unexpired printable typeahead buffer.
+pub const SELECT_TYPEAHEAD: Duration = Duration::from_secs(1);
+
 /// The selected visual easing curves, sampled independently from GPUI's clock.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MotionCurve {

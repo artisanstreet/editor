@@ -26,7 +26,7 @@ use gpui::{
 };
 
 use crate::button::{AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant};
-use crate::motion::MotionPolicy;
+use crate::motion::{MotionPolicy, SHEET_OPEN};
 use crate::theme::ArtisanTheme;
 
 /// Opacity of the legacy `bg-black/80` sheet backdrop.
@@ -57,7 +57,7 @@ pub const SHEET_CLOSE_LABEL: &str = "Close";
 pub const SHEET_ROLE: &str = "dialog";
 
 /// Open transition duration retained from the frontend `duration-200`.
-pub const SHEET_OPEN_ANIMATION_DURATION: Duration = Duration::from_millis(200);
+pub const SHEET_OPEN_ANIMATION_DURATION: Duration = SHEET_OPEN;
 
 /// Explicit side placement for the sheet panel.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

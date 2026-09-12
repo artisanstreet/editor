@@ -1272,22 +1272,23 @@ pub struct DesktopTheme {
 
 impl DesktopTheme {
     /// The accepted neutral-dark native workspace palette.
+    #[must_use]
     pub fn neutral_dark() -> Self {
         Self {
-            chrome: desktop_color(0x0a0a0a),
-            workspace: desktop_color(0x0a0a0a),
-            sidebar: desktop_color(0x111111),
-            line: desktop_color(0x292929),
-            foreground: desktop_color(0xededed),
-            secondary: desktop_color(0xa1a1a1),
-            selected: desktop_color(0x242424),
-            primary_action: desktop_color(0xededed),
-            primary_action_foreground: desktop_color(0x0a0a0a),
-            field: desktop_color(0x171717),
-            field_line: desktop_color(0x333333),
-            popover_line: desktop_color(0x383838),
-            shortcut_line: desktop_color(0x3a3a3a),
-            crosshair: desktop_color(0x666666),
+            chrome: desktop_color(0x000a_0a0a),
+            workspace: desktop_color(0x000a_0a0a),
+            sidebar: desktop_color(0x0011_1111),
+            line: desktop_color(0x0029_2929),
+            foreground: desktop_color(0x00ed_eded),
+            secondary: desktop_color(0x00a1_a1a1),
+            selected: desktop_color(0x0024_2424),
+            primary_action: desktop_color(0x00ed_eded),
+            primary_action_foreground: desktop_color(0x000a_0a0a),
+            field: desktop_color(0x0017_1717),
+            field_line: desktop_color(0x0033_3333),
+            popover_line: desktop_color(0x0038_3838),
+            shortcut_line: desktop_color(0x003a_3a3a),
+            crosshair: desktop_color(0x0066_6666),
         }
     }
 }
@@ -1298,6 +1299,10 @@ impl Default for DesktopTheme {
     }
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "each sRGB channel is a masked byte, so the i32-to-f32 conversion is exact"
+)]
 fn desktop_color(hex: u32) -> Hsla {
     srgb_to_hsla(SrgbComponents {
         r: ((hex >> 16) & 0xff) as f32 / 255.0,

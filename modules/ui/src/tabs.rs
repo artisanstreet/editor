@@ -150,12 +150,10 @@ impl TabsStyle {
         orientation: TabsOrientation,
     ) -> Self {
         let list_corner_radius = match (variant, orientation) {
-            (TabsVariant::Default, TabsOrientation::Horizontal)
-            | (TabsVariant::Card, TabsOrientation::Horizontal) => {
+            (TabsVariant::Default | TabsVariant::Card, TabsOrientation::Horizontal) => {
                 RadiusTokens::value(RadiusStep::X4l)
             }
-            (TabsVariant::Default, TabsOrientation::Vertical)
-            | (TabsVariant::Card, TabsOrientation::Vertical) => {
+            (TabsVariant::Default | TabsVariant::Card, TabsOrientation::Vertical) => {
                 RadiusTokens::value(RadiusStep::X2l)
             }
             (TabsVariant::Line, _) => px(0.0),
@@ -548,7 +546,7 @@ fn render_trigger(tab: &TabSpec, index: usize, context: &TriggerContext<'_>) -> 
                 .elevation
                 .card_shadow
                 .into_iter()
-                .map(|layer| layer.to_box_shadow())
+                .map(super::theme::ShadowLayer::to_box_shadow)
                 .collect(),
         );
     }

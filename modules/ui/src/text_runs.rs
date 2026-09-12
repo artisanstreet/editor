@@ -82,23 +82,21 @@ pub fn compile_text_runs(
     }
     let sanitized: Vec<(Range<usize>, HighlightStyle)> = highlights
         .iter()
-        .filter_map(|(range, style)| {
-            is_usable_range(text, range).then(|| (range.clone(), *style))
-        })
+        .filter(|(range, _)| is_usable_range(text, range))
+        .map(|(range, style)| (range.clone(), *style))
         .collect();
     let normalized: Vec<(Range<usize>, HighlightStyle)> =
         combine_highlights(sanitized, Vec::new()).collect();
 
     let mut cleaned: Vec<(Range<usize>, Option<SharedString>, Option<Pixels>)> = overrides
         .iter()
-        .filter_map(|override_range| {
-            is_usable_range(text, &override_range.range).then(|| {
-                (
-                    override_range.range.clone(),
-                    override_range.font_family.clone(),
-                    override_range.letter_spacing,
-                )
-            })
+        .filter(|override_value| is_usable_range(text, &override_value.range))
+        .map(|override_value| {
+            (
+                override_value.range.clone(),
+                override_value.font_family.clone(),
+                override_value.letter_spacing,
+            )
         })
         .collect();
     cleaned.sort_by(|left, right| {
@@ -118,10 +116,8 @@ pub fn compile_text_runs(
         }
     }
 
-    let mut bounds: Vec<usize> =
-        Vec::with_capacity(normalized.len() * 2 + disjoint.len() * 2 + 2);
-    bounds.push(0);
-    bounds.push(text.len());
+    let mut bounds = Vec::with_capacity(normalized.len() * 2 + disjoint.len() * 2 + 2);
+    bounds.extend([0, text.len()]);
     for (range, _) in &normalized {
         bounds.push(range.start);
         bounds.push(range.end);
@@ -176,12 +172,11 @@ pub fn compile_text_runs(
             style.letter_spacing = Some(spacing);
         }
         let run = style.to_run(end - start);
-        if let Some(last) = runs.last_mut() {
-            if runs_equal(last, &run) {
+        if let Some(last) = runs.last_mut()
+            && runs_equal(last, &run) {
                 last.len += run.len;
                 continue;
             }
-        }
         runs.push(run);
     }
     runs
