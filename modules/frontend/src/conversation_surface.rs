@@ -41,6 +41,7 @@ use artisan_ui::collapsible::Collapsible;
 use artisan_ui::gradient::{hover_fill_gradient, vertical_gradient};
 use artisan_ui::inline_code_text::{inline_runs, summary_line};
 use artisan_ui::input_state::TextInputState;
+use artisan_ui::markdown_cache::MarkdownParseReport;
 use artisan_ui::markdown_renderer::{MarkdownBodyTone, MarkdownRenderer, RichLinkTitleSource};
 use artisan_ui::motion::{MotionCurve, MotionDuration, MotionPlan, MotionPolicy, MotionRecipe};
 use artisan_ui::scroll_area::ScrollArea;

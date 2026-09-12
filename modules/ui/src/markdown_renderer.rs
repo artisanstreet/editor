@@ -1,9 +1,10 @@
 //! Synchronous native rendering for an accepted Markdown message body.
 //!
 //! [`MarkdownRenderer`] is intentionally a small presentation seam over the
-//! owned vocabulary in [`crate::markdown`]. It parses during the render pass
-//! and immediately turns the resulting blocks into ordinary GPUI elements;
-//! it does not retain message or document state.
+//! owned vocabulary in [`crate::markdown`]. It parses through the bounded
+//! [`MarkdownParseCache`](crate::markdown_cache) and immediately turns the
+//! resulting blocks into ordinary GPUI elements; the only retained state is
+//! the engine and its bounded parse cache, never message state.
 //!
 //! Every text leaf — paragraph and heading runs, code blocks, HTML carried
 //! as inert text, and the plain-source fallback — renders through retained
@@ -32,14 +33,19 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+use std::cell::RefCell;
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
     AnyElement, Div, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement,
     SharedString, Styled, div, prelude::InteractiveElement as _, px,
 };
 
-use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownEngine, Span};
+use crate::markdown::{
+    Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownDocument, MarkdownEngine, Span,
+};
+use crate::markdown_cache::{MarkdownParseCache, MarkdownParseReport};
 use crate::selectable_text::{SelectableText, TextRunOverride};
 use crate::theme::{
     ArtisanTheme, Oklch, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode,
@@ -47,11 +53,14 @@ use crate::theme::{
 
 /// Synchronous renderer for accepted Markdown message bodies.
 ///
-/// The engine is the only retained state. Source text, parsed documents, and
-/// syntax ranges are all owned only for the duration of one render call.
+/// The engine and its bounded parse cache are the only retained state. Source
+/// text and syntax ranges are owned only for the duration of one render call;
+/// a parsed document stays cached under its exact body identity until the
+/// cache evicts it.
 #[derive(Debug)]
 pub struct MarkdownRenderer {
     engine: MarkdownEngine,
+    cache: RefCell<MarkdownParseCache>,
 }
 
 impl MarkdownRenderer {
@@ -70,7 +79,25 @@ impl MarkdownRenderer {
         Self {
             engine: MarkdownEngine::new()
                 .expect("the built-in Markdown classifier selectors must remain valid"),
+            cache: RefCell::new(MarkdownParseCache::default()),
         }
+    }
+
+    /// Parses one body through the bounded parse cache.
+    ///
+    /// Repeated calls for the same body identity borrow the same parsed
+    /// document; a changed body parses once and becomes the newest cache
+    /// entry. Returns `None` when the engine rejects the source, exactly like
+    /// the render fallback path.
+    #[must_use]
+    pub fn cached_document(&self, source: &str) -> Option<Rc<MarkdownDocument>> {
+        self.cache.borrow_mut().document(&self.engine, source)
+    }
+
+    /// Returns the parse-cache counters for tests and review.
+    #[must_use]
+    pub fn parse_report(&self) -> MarkdownParseReport {
+        self.cache.borrow().report()
     }
 
     /// Parses and renders one source body as inert native GPUI elements.
@@ -122,7 +149,7 @@ impl MarkdownRenderer {
     ) -> AnyElement {
         let selector = selector.into();
         let markdown_selector = format!("{}-markdown", selector.as_ref());
-        let Ok(document) = self.engine.parse_document(source) else {
+        let Some(document) = self.cached_document(source) else {
             return plain_source(source, &theme, markdown_selector, tone);
         };
 
@@ -910,153 +937,5 @@ fn code_token_style(theme: &ArtisanTheme, kind: CodeTokenKind) -> HighlightStyle
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::theme::ThemeMode;
-    use std::collections::HashMap;
-
-    struct TestTitles(HashMap<&'static str, &'static str>);
-
-    impl RichLinkTitleSource for TestTitles {
-        fn resolved_title(&self, destination: &str) -> Option<SharedString> {
-            self.0
-                .get(destination)
-                .map(|title| SharedString::from(*title))
-        }
-    }
-
-    fn link_spans(destination: &str, label: &str) -> Vec<Span> {
-        vec![
-            Span::Text("see ".to_owned()),
-            Span::Link {
-                label: vec![Span::Text(label.to_owned())],
-                destination: destination.to_owned(),
-            },
-            Span::Text(" end".to_owned()),
-        ]
-    }
-
-    #[test]
-    fn reply_body_tone_is_foreground_detail_body_stays_muted() {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        assert_eq!(
-            markdown_body_text_color(MarkdownBodyTone::Foreground, theme),
-            theme.colors.foreground
-        );
-        assert_eq!(
-            markdown_body_text_color(MarkdownBodyTone::Muted, theme),
-            theme.colors.muted_foreground
-        );
-    }
-
-    #[test]
-    fn resolved_title_replaces_label_and_keeps_destination_openable() {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let titles = TestTitles(HashMap::from([(
-            "https://example.com/page",
-            "Resolved Page",
-        )]));
-        let presentation = present_inline_with_titles(
-            &link_spans("https://example.com/page", "authored label"),
-            theme,
-            &titles,
-        );
-        assert_eq!(presentation.source, "see Resolved Page end");
-        assert_eq!(presentation.links.len(), 1);
-        assert_eq!(
-            presentation.links[0].destination,
-            "https://example.com/page"
-        );
-        assert_eq!(
-            &presentation.source[presentation.links[0].range.clone()],
-            "Resolved Page"
-        );
-        assert!(presentation.highlights.iter().any(|(range, style)| {
-            range == &presentation.links[0].range && *style == link_style(&theme)
-        }));
-        assert!(presentation.code_ranges.is_empty());
-    }
-
-    #[test]
-    fn unresolved_or_failed_links_keep_the_authored_label() {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let spans = link_spans("https://example.com/pending", "authored label");
-
-        // Pending and failed resolutions are simply absent from the lookup.
-        let empty = TestTitles(HashMap::new());
-        let presentation = present_inline_with_titles(&spans, theme, &empty);
-        assert_eq!(presentation.source, "see authored label end");
-        assert_eq!(
-            presentation.links[0].destination,
-            "https://example.com/pending"
-        );
-        assert_eq!(
-            &presentation.source[presentation.links[0].range.clone()],
-            "authored label"
-        );
-
-        // A title for a different URL never leaks into this link.
-        let unrelated = TestTitles(HashMap::from([("https://example.com/other", "Other Page")]));
-        let presentation = present_inline_with_titles(&spans, theme, &unrelated);
-        assert_eq!(presentation.source, "see authored label end");
-
-        // mailto stays an openable authored label even when a lookup names it.
-        let mailto = TestTitles(HashMap::from([("mailto:user@example.com", "Email")]));
-        let presentation = present_inline_with_titles(
-            &link_spans("mailto:user@example.com", "user@example.com"),
-            theme,
-            &mailto,
-        );
-        assert_eq!(presentation.source, "see user@example.com end");
-        assert_eq!(presentation.links.len(), 1);
-    }
-
-    #[test]
-    fn resolved_title_replaces_a_formatted_label_wholesale() {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let titles = TestTitles(HashMap::from([(
-            "https://example.com/page",
-            "Resolved Page",
-        )]));
-        let spans = vec![
-            Span::Text("read ".to_owned()),
-            Span::Link {
-                label: vec![Span::Strong(vec![Span::Text("bold label".to_owned())])],
-                destination: "https://example.com/page".to_owned(),
-            },
-        ];
-        let presentation = present_inline_with_titles(&spans, theme, &titles);
-        assert_eq!(presentation.source, "read Resolved Page");
-        assert_eq!(
-            &presentation.source[presentation.links[0].range.clone()],
-            "Resolved Page"
-        );
-
-        // Relative links stay inert labels and never consult the lookup.
-        let relative =
-            present_inline_with_titles(&link_spans("/docs/page", "relative label"), theme, &titles);
-        assert_eq!(relative.source, "see relative label end");
-        assert!(relative.links.is_empty());
-    }
-
-    #[test]
-    fn blank_resolved_title_never_erases_the_authored_label() {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let titles = TestTitles(HashMap::from([("https://example.com/page", "   ")]));
-        let presentation = present_inline_with_titles(
-            &link_spans("https://example.com/page", "authored label"),
-            theme,
-            &titles,
-        );
-        assert_eq!(presentation.source, "see authored label end");
-    }
-
-    #[test]
-    fn empty_lookup_matches_plain_presentation() {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let spans = link_spans("https://example.com/page", "authored label");
-        let plain = present_inline(&spans, theme);
-        let empty = present_inline_with_titles(&spans, theme, &NoRichLinkTitles);
-        assert_eq!(plain, empty);
-    }
-}
+#[path = "markdown_renderer_tests.rs"]
+mod tests;

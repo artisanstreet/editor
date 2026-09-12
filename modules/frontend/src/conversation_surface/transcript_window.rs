@@ -339,6 +339,16 @@ impl ConversationSurface {
         self.transcript_window.borrow().shape_ledger()
     }
 
+    /// Returns the Markdown parse-cache counters for this surface's renderer.
+    ///
+    /// Test and review seam: repeated renders of the same body must report one
+    /// parse and a growing hit count, while a changed body reports a fresh
+    /// parse. The cache stays inside its entry and byte bounds.
+    #[must_use]
+    pub fn markdown_parse_report(&self) -> MarkdownParseReport {
+        self.markdown_renderer.parse_report()
+    }
+
     /// Plans this frame's built rows from remembered heights and scroll state.
     ///
     /// The window is the viewport plus bounded overscan, capped by the row

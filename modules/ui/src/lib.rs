@@ -25,6 +25,7 @@ pub mod link_preview;
 pub mod lip_card;
 pub mod list_row;
 pub mod markdown;
+pub mod markdown_cache;
 pub mod markdown_renderer;
 pub mod motion;
 pub mod native_select;

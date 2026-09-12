@@ -3,6 +3,10 @@
 //! Every assertion here is structural: built-row sets, placeholder selectors,
 //! and shaping ledgers. No test times a frame or depends on wall-clock work.
 
+use artisan_ui::markdown_cache::{
+    MARKDOWN_PARSE_CACHE_MAX_BYTES, MARKDOWN_PARSE_CACHE_MAX_ENTRIES,
+};
+
 use super::*;
 use crate::conversation_scene::SCENE_MAX_MESSAGE_BODY_BYTES;
 use crate::conversation_surface::render_budget::{
@@ -268,6 +272,65 @@ fn over_budget_bodies_skip_markdown_shaping(cx: &mut TestAppContext) {
             assert_eq!(ledger.rows, 1);
             assert_eq!(ledger.bytes, TRANSCRIPT_MAX_MARKDOWN_BYTES_PER_ROW + 1);
             assert_eq!(ledger.over_budget_rows, 1);
+        });
+    });
+}
+
+#[gpui::test]
+fn markdown_parse_cache_serves_unchanged_bodies_once_and_stays_bounded(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(scene(Vec::new()), ThemeMode::Dark, surface_cx)
+    });
+    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    cx.update(|_, app| {
+        surface.update(app, |surface, _| {
+            let body = "# heading\n\nA cached reply body.";
+            let _ = surface.render_budgeted_markdown(
+                body,
+                &theme,
+                "cache-one".to_owned(),
+                MarkdownBodyTone::Foreground,
+            );
+            let _ = surface.render_budgeted_markdown(
+                body,
+                &theme,
+                "cache-two".to_owned(),
+                MarkdownBodyTone::Foreground,
+            );
+            let report = surface.markdown_parse_report();
+            assert_eq!(
+                report.parses, 1,
+                "an unchanged body parses once: {report:?}"
+            );
+            assert_eq!(
+                report.hits, 1,
+                "the repeated frame hits the cache: {report:?}"
+            );
+
+            let _ = surface.render_budgeted_markdown(
+                "# heading\n\nA revised reply body.",
+                &theme,
+                "cache-three".to_owned(),
+                MarkdownBodyTone::Foreground,
+            );
+            assert_eq!(
+                surface.markdown_parse_report().parses,
+                2,
+                "a changed body re-parses exactly once"
+            );
+
+            for index in 0..(MARKDOWN_PARSE_CACHE_MAX_ENTRIES + 8) {
+                let body = format!("distinct cached body {index}");
+                let _ = surface.render_budgeted_markdown(
+                    &body,
+                    &theme,
+                    format!("cache-{index}"),
+                    MarkdownBodyTone::Muted,
+                );
+            }
+            let report = surface.markdown_parse_report();
+            assert_eq!(report.entries, MARKDOWN_PARSE_CACHE_MAX_ENTRIES);
+            assert!(report.bytes <= MARKDOWN_PARSE_CACHE_MAX_BYTES);
         });
     });
 }
