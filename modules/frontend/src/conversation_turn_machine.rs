@@ -277,14 +277,6 @@ impl TurnEvent {
     }
 }
 
-/// Ordered typed effects emitted by the controller, if any.
-///
-/// The current chart is effect-free for the renderer: all facts are derived
-/// from the immutable view. The type remains so callers can match exhaustively
-/// without special-casing `()`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TurnEffect {}
-
 /// Typed refusal reasons. The prior state/view is left unchanged on error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnError {
@@ -993,8 +985,8 @@ impl ConversationTurnController {
     /// Dispatches one typed event, enforcing monotonic time/revision and
     /// sealed-state semantics atomically.
     ///
-    /// On error the prior state/view is left unchanged. Ordered typed effects
-    /// are returned on success (currently none; the view is authoritative).
+    /// On error the prior state/view is left unchanged. The immutable view is
+    /// authoritative; dispatch emits no effects.
     ///
     /// # Errors
     ///
@@ -1002,7 +994,7 @@ impl ConversationTurnController {
     /// [`TurnError::StaleRevision`] when monotonic input validation fails, or
     /// [`TurnError::Sealed`] when a sealed terminal state rejects a different
     /// event.
-    pub fn dispatch(&mut self, event: TurnEvent) -> Result<Vec<TurnEffect>, TurnError> {
+    pub fn dispatch(&mut self, event: TurnEvent) -> Result<(), TurnError> {
         let at = event.at();
         let revision = event.revision();
         let event_name = event.name();
@@ -1043,7 +1035,7 @@ impl ConversationTurnController {
                     // without changing terminal evidence.
                     self.machine.handle(&event);
                 }
-                return Ok(vec![]);
+                return Ok(());
             }
             return Err(TurnError::Sealed {
                 state: state_kind,
@@ -1052,6 +1044,6 @@ impl ConversationTurnController {
         }
 
         self.machine.handle(&event);
-        Ok(vec![])
+        Ok(())
     }
 }
