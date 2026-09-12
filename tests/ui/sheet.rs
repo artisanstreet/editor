@@ -13,8 +13,7 @@ use artisan_ui::sheet::{
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::{
     Bounds, ColorExt as _, Context, FocusHandle, Hsla, InteractiveElement, IntoElement, Modifiers,
-    ParentElement,
-    Render, Styled, TestAppContext, Window, div, point, px, size,
+    ParentElement, Render, Styled, TestAppContext, Window, div, point, px, size,
 };
 
 const ROOT_SELECTOR: &str = "native-sheet-under-test";

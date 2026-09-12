@@ -13,8 +13,7 @@ use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::{
     Bounds, ColorExt as _, Context, FocusHandle, Hsla, InteractiveElement, IntoElement,
-    ParentElement as _,
-    Render, Styled, TestAppContext, Window, div, point, px, size,
+    ParentElement as _, Render, Styled, TestAppContext, Window, div, point, px, size,
 };
 
 const ROOT_SELECTOR: &str = "native-alert-dialog-under-test";
