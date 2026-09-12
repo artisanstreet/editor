@@ -13,7 +13,7 @@
 //! executor
 //! [`execute_codex_turn`](super::super::operation::execute_codex_turn)
 //! (`modules/backend/src/engine_owner/operation.rs`) and replaces the
-//! [`EngineSocket::open`] stub. Nothing calls this adapter yet.
+//! [`EngineSocket::open`] stub. The live configured-turn dispatch constructs this adapter through `socket::adapter_for`; `open` stays unimplemented until the per-engine open/drive split lands.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
@@ -48,19 +48,19 @@ const CODEX_TRANSPORT: &str = "stdio-jsonl";
 /// executor receives through `InternalLaunch::Codex`; the launch is neither
 /// cloned nor re-resolved here. Construct one per admitted Codex run once
 /// the wiring packet lands.
-pub(crate) struct CodexSocketAdapter {
-    launch: VerifiedCodexLaunch,
+pub(crate) struct CodexSocketAdapter<'a> {
+    launch: &'a VerifiedCodexLaunch,
 }
 
-impl CodexSocketAdapter {
+impl<'a> CodexSocketAdapter<'a> {
     /// Wraps one verified Codex launch capability for the socket seam.
     #[must_use]
-    pub(crate) fn new(launch: VerifiedCodexLaunch) -> Self {
+    pub(crate) fn new(launch: &'a VerifiedCodexLaunch) -> Self {
         Self { launch }
     }
 }
 
-impl EngineSocket for CodexSocketAdapter {
+impl EngineSocket for CodexSocketAdapter<'_> {
     /// Returns the exact Codex descriptor, including every capability state
     /// declared by the TypeScript adapter.
     fn descriptor(&self) -> EngineDescriptor {

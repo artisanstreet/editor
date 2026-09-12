@@ -13,7 +13,7 @@
 //! executor
 //! [`execute_cursor_turn`](super::super::operation::execute_cursor_turn)
 //! (`modules/backend/src/engine_owner/operation.rs`) and replaces the
-//! [`EngineSocket::open`] stub. Nothing calls this adapter yet.
+//! [`EngineSocket::open`] stub. The live configured-turn dispatch constructs this adapter through `socket::adapter_for`; `open` stays unimplemented until the per-engine open/drive split lands.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
@@ -45,19 +45,19 @@ const CURSOR_TRANSPORT: &str = "cursor-acp-stdio";
 /// executor receives through `InternalLaunch::Cursor`; the launch is neither
 /// cloned nor re-resolved here. Construct one per admitted Cursor run once
 /// the wiring packet lands.
-pub(crate) struct CursorSocketAdapter {
-    launch: CursorLaunch,
+pub(crate) struct CursorSocketAdapter<'a> {
+    launch: &'a CursorLaunch,
 }
 
-impl CursorSocketAdapter {
+impl<'a> CursorSocketAdapter<'a> {
     /// Wraps one finite C1 cursor launch capability for the socket seam.
     #[must_use]
-    pub(crate) fn new(launch: CursorLaunch) -> Self {
+    pub(crate) fn new(launch: &'a CursorLaunch) -> Self {
         Self { launch }
     }
 }
 
-impl EngineSocket for CursorSocketAdapter {
+impl EngineSocket for CursorSocketAdapter<'_> {
     /// Returns the exact Cursor descriptor, including every capability state
     /// declared by the TypeScript adapter
     /// (`CursorEngineDescriptor.capabilities`,

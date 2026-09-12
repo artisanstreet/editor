@@ -223,31 +223,33 @@ pub(super) async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle
         return request.fail(EngineOperationError::Cancelled);
     }
 
-    if matches!(request.input.launch, super::super::InternalLaunch::Codex(_)) {
-        return Box::pin(execute_codex_turn(request, runtime, shutdown)).await;
+    // The live dispatch asks the provider-neutral socket seam for the engine
+    // identity instead of matching `InternalLaunch` variants directly. The
+    // adapters borrow the admitted capability, so the launch is neither
+    // cloned nor re-resolved and the executor keeps custody.
+    let dispatch_engine = super::super::socket::adapter_for(&request.input.launch)
+        .descriptor()
+        .id;
+    match dispatch_engine.as_str() {
+        super::super::consts::CODEX_ENGINE_ID => {
+            Box::pin(execute_codex_turn(request, runtime, shutdown)).await
+        }
+        super::super::consts::CLAUDE_ENGINE_ID => {
+            Box::pin(execute_claude_turn(request, runtime, shutdown)).await
+        }
+        super::super::consts::GROK_ENGINE_ID => {
+            Box::pin(execute_grok_turn(request, runtime, shutdown)).await
+        }
+        super::super::consts::CURSOR_ENGINE_ID => {
+            Box::pin(execute_cursor_turn(request, runtime, shutdown)).await
+        }
+        super::super::consts::HERMES_ENGINE_ID => {
+            Box::pin(execute_hermes_turn(request, runtime, shutdown)).await
+        }
+        // `OpenCode2` and the test-only fixture lane share the configured
+        // executor, exactly as before.
+        _ => Box::pin(execute_configured_turn(request, runtime, shutdown)).await,
     }
-    if matches!(
-        request.input.launch,
-        super::super::InternalLaunch::Claude(_)
-    ) {
-        return Box::pin(execute_claude_turn(request, runtime, shutdown)).await;
-    }
-    if matches!(request.input.launch, super::super::InternalLaunch::Grok(_)) {
-        return Box::pin(execute_grok_turn(request, runtime, shutdown)).await;
-    }
-    if matches!(
-        request.input.launch,
-        super::super::InternalLaunch::Cursor(_)
-    ) {
-        return Box::pin(execute_cursor_turn(request, runtime, shutdown)).await;
-    }
-    if matches!(
-        request.input.launch,
-        super::super::InternalLaunch::Hermes(_)
-    ) {
-        return Box::pin(execute_hermes_turn(request, runtime, shutdown)).await;
-    }
-    Box::pin(execute_configured_turn(request, runtime, shutdown)).await
 }
 
 /// Runs the fixed cleanup for an aborted or faulted launch and settles the

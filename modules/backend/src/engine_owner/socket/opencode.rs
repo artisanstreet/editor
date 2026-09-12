@@ -15,7 +15,7 @@
 //! with
 //! [`create_configured_session`](super::super::operation::create_configured_session)
 //! (`modules/backend/src/engine_owner/operation.rs`) and replaces the
-//! [`EngineSocket::open`] stub. Nothing calls this adapter yet.
+//! [`EngineSocket::open`] stub. The live configured-turn dispatch constructs this adapter through `socket::adapter_for`; `open` stays unimplemented until the per-engine open/drive split lands.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
@@ -49,20 +49,20 @@ const OPENCODE2_TRANSPORT: &str = "opencode2-http-sse";
 /// `InternalLaunch::Verified`; the launch is neither cloned nor re-resolved
 /// here. Construct one per admitted `OpenCode2` run once the wiring packet
 /// lands.
-pub(crate) struct OpenCode2SocketAdapter {
-    launch: VerifiedOpenCode2ProfileLaunch,
+pub(crate) struct OpenCode2SocketAdapter<'a> {
+    launch: &'a VerifiedOpenCode2ProfileLaunch,
 }
 
-impl OpenCode2SocketAdapter {
+impl<'a> OpenCode2SocketAdapter<'a> {
     /// Wraps one verified `OpenCode2` profile launch capability for the socket
     /// seam.
     #[must_use]
-    pub(crate) fn new(launch: VerifiedOpenCode2ProfileLaunch) -> Self {
+    pub(crate) fn new(launch: &'a VerifiedOpenCode2ProfileLaunch) -> Self {
         Self { launch }
     }
 }
 
-impl EngineSocket for OpenCode2SocketAdapter {
+impl EngineSocket for OpenCode2SocketAdapter<'_> {
     /// Returns the exact `OpenCode2` descriptor, including every capability
     /// state declared by the TypeScript adapter
     /// (`OpenCode2EngineDescriptor.capabilities`,

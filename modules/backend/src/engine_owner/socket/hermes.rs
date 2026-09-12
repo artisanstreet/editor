@@ -13,7 +13,7 @@
 //! executor
 //! [`execute_hermes_turn`](super::super::operation::execute_hermes_turn)
 //! (`modules/backend/src/engine_owner/operation.rs`) and replaces the
-//! [`EngineSocket::open`] stub. Nothing calls this adapter yet.
+//! [`EngineSocket::open`] stub. The live configured-turn dispatch constructs this adapter through `socket::adapter_for`; `open` stays unimplemented until the per-engine open/drive split lands.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
@@ -46,20 +46,20 @@ const HERMES_TRANSPORT: &str = "hermes-jsonrpc-websocket";
 /// executor receives through `InternalLaunch::Hermes`; the launch is neither
 /// cloned nor re-resolved here. Construct one per admitted Hermes run once
 /// the wiring packet lands.
-pub(crate) struct HermesSocketAdapter {
-    launch: VerifiedHermesLaunch,
+pub(crate) struct HermesSocketAdapter<'a> {
+    launch: &'a VerifiedHermesLaunch,
 }
 
-impl HermesSocketAdapter {
+impl<'a> HermesSocketAdapter<'a> {
     /// Wraps one verified Hermes service launch capability for the socket
     /// seam.
     #[must_use]
-    pub(crate) fn new(launch: VerifiedHermesLaunch) -> Self {
+    pub(crate) fn new(launch: &'a VerifiedHermesLaunch) -> Self {
         Self { launch }
     }
 }
 
-impl EngineSocket for HermesSocketAdapter {
+impl EngineSocket for HermesSocketAdapter<'_> {
     /// Returns the exact Hermes descriptor, including every capability state
     /// declared by the TypeScript adapter
     /// (`HermesEngineDescriptor.capabilities`,

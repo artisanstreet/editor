@@ -13,7 +13,7 @@
 //! executor
 //! [`execute_claude_turn`](super::super::operation::execute_claude_turn)
 //! (`modules/backend/src/engine_owner/operation.rs`) and replaces the
-//! [`EngineSocket::open`] stub. Nothing calls this adapter yet.
+//! [`EngineSocket::open`] stub. The live configured-turn dispatch constructs this adapter through `socket::adapter_for`; `open` stays unimplemented until the per-engine open/drive split lands.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
@@ -45,19 +45,19 @@ const CLAUDE_TRANSPORT: &str = "claude-cli-stream-json";
 /// executor receives through `InternalLaunch::Claude`; the launch is neither
 /// cloned nor re-resolved here. Construct one per admitted Claude run once
 /// the wiring packet lands.
-pub(crate) struct ClaudeSocketAdapter {
-    launch: VerifiedClaudeLaunch,
+pub(crate) struct ClaudeSocketAdapter<'a> {
+    launch: &'a VerifiedClaudeLaunch,
 }
 
-impl ClaudeSocketAdapter {
+impl<'a> ClaudeSocketAdapter<'a> {
     /// Wraps one verified Claude launch capability for the socket seam.
     #[must_use]
-    pub(crate) fn new(launch: VerifiedClaudeLaunch) -> Self {
+    pub(crate) fn new(launch: &'a VerifiedClaudeLaunch) -> Self {
         Self { launch }
     }
 }
 
-impl EngineSocket for ClaudeSocketAdapter {
+impl EngineSocket for ClaudeSocketAdapter<'_> {
     /// Returns the exact Claude descriptor, including every capability state
     /// declared by the TypeScript adapter
     /// (`ClaudeEngineDescriptor.capabilities`,

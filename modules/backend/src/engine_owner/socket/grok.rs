@@ -13,7 +13,7 @@
 //! executor
 //! [`execute_grok_turn`](super::super::operation::execute_grok_turn)
 //! (`modules/backend/src/engine_owner/operation.rs`) and replaces the
-//! [`EngineSocket::open`] stub. Nothing calls this adapter yet.
+//! [`EngineSocket::open`] stub. The live configured-turn dispatch constructs this adapter through `socket::adapter_for`; `open` stays unimplemented until the per-engine open/drive split lands.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
@@ -45,19 +45,19 @@ const GROK_TRANSPORT: &str = "grok-acp-stdio";
 /// receives through `InternalLaunch::Grok`; the launch is neither cloned nor
 /// re-resolved here. Construct one per admitted Grok run once the wiring
 /// packet lands.
-pub(crate) struct GrokSocketAdapter {
-    launch: GrokLaunch,
+pub(crate) struct GrokSocketAdapter<'a> {
+    launch: &'a GrokLaunch,
 }
 
-impl GrokSocketAdapter {
+impl<'a> GrokSocketAdapter<'a> {
     /// Wraps one probe-certified Grok launch capability for the socket seam.
     #[must_use]
-    pub(crate) fn new(launch: GrokLaunch) -> Self {
+    pub(crate) fn new(launch: &'a GrokLaunch) -> Self {
         Self { launch }
     }
 }
 
-impl EngineSocket for GrokSocketAdapter {
+impl EngineSocket for GrokSocketAdapter<'_> {
     /// Returns the exact Grok descriptor, including every capability state
     /// declared by the TypeScript adapter
     /// (`GrokEngineDescriptor.capabilities`,
