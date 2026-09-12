@@ -14,7 +14,7 @@
 990 modules/backend/src/listener.rs
 884 modules/backend/src/native_run_dispatch.rs
 1313 modules/backend/src/native_run_dispatch/claim.rs
-1352 modules/backend/src/native_run_dispatch/turn.rs
+1184 modules/backend/src/native_run_dispatch/turn.rs
 1359 modules/backend/src/request_handler.rs
 1071 modules/catalog/rust/policy.rs
 1280 modules/cli/rust/commands.rs
@@ -38,7 +38,6 @@
 990 modules/domain/src/conversation.rs
 962 modules/domain/src/observation/conversation.rs
 861 modules/domain/src/observation/lifecycle.rs
-819 modules/frontend/src/authoritative_subscription_policy.rs
 1384 modules/frontend/src/composer_model_config.rs
 1161 modules/frontend/src/composer_queue_state/state.rs
 974 modules/frontend/src/conversation_host.rs
@@ -81,7 +80,6 @@
 1498 modules/frontend/src/parity_visual_proof.rs
 1357 modules/frontend/src/project_picker.rs
 1600 modules/frontend/src/shell.rs
-1023 modules/frontend/src/subscription_projection.rs
 802 modules/frontend/src/thread_environment_presentation.rs
 863 modules/frontend/src/thread_screen.rs
 888 modules/installer/rust/install/workflow.rs
@@ -99,7 +97,7 @@
 1386 modules/ui/src/dropdown_menu.rs
 848 modules/ui/src/input_group.rs
 1551 modules/ui/src/link_preview.rs
-1062 modules/ui/src/markdown_renderer.rs
+941 modules/ui/src/markdown_renderer.rs
 1040 modules/ui/src/markdown.rs
 1026 modules/ui/src/popover.rs
 980 modules/ui/src/selectable_text.rs
