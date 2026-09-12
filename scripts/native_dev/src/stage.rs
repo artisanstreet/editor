@@ -104,6 +104,7 @@ impl DevLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(paths.lock_path())
             .map_err(|_| DevError::Stage {
                 stage: "stage",

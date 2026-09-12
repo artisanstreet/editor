@@ -35,7 +35,7 @@ impl DevArgs {
     ///
     /// Returns [`DevError::Usage`] for unknown flags or missing values.
     pub fn parse(argv: &[OsString]) -> Result<Action, DevError> {
-        let mut args = Self {
+        let mut options = Self {
             dev_dir: None,
             bin_dir: None,
             stage_only: false,
@@ -45,18 +45,18 @@ impl DevArgs {
             let flag = flag.to_string_lossy();
             match flag.as_ref() {
                 "-h" | "--help" => return Ok(Action::Help),
-                "--stage-only" => args.stage_only = true,
+                "--stage-only" => options.stage_only = true,
                 "--dev-dir" => {
                     let value = rest.next().ok_or_else(|| DevError::Usage {
                         reason: "--dev-dir requires a path value".to_owned(),
                     })?;
-                    args.dev_dir = Some(PathBuf::from(value));
+                    options.dev_dir = Some(PathBuf::from(value));
                 }
                 "--bin-dir" => {
                     let value = rest.next().ok_or_else(|| DevError::Usage {
                         reason: "--bin-dir requires a path value".to_owned(),
                     })?;
-                    args.bin_dir = Some(PathBuf::from(value));
+                    options.bin_dir = Some(PathBuf::from(value));
                 }
                 unknown => {
                     return Err(DevError::Usage {
@@ -65,7 +65,7 @@ impl DevArgs {
                 }
             }
         }
-        Ok(Action::Run(args))
+        Ok(Action::Run(options))
     }
 }
 

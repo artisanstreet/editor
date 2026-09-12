@@ -39,6 +39,10 @@ enum Outcome {
     Failure,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear stage-by-stage runbook; each stage's error hint stays adjacent to its call"
+)]
 fn run() -> Result<u8, Outcome> {
     let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let action = DevArgs::parse(&argv).map_err(|error| {
@@ -46,11 +50,11 @@ fn run() -> Result<u8, Outcome> {
         eprintln!("{}", usage());
         Outcome::Usage
     })?;
-    let Action::Run(args) = action else {
+    let Action::Run(options) = action else {
         println!("{}", usage());
         return Ok(0);
     };
-    let total = if args.stage_only {
+    let total = if options.stage_only {
         STAGE_ONLY_STAGES
     } else {
         FULL_STAGES
@@ -60,7 +64,7 @@ fn run() -> Result<u8, Outcome> {
         Outcome::Failure
     };
 
-    let dev_dir = resolve_dev_dir(args.dev_dir.as_deref()).map_err(fail)?;
+    let dev_dir = resolve_dev_dir(options.dev_dir.as_deref()).map_err(fail)?;
     let paths = DevPaths::new(&dev_dir).map_err(fail)?;
     println!(
         "{}",
@@ -72,7 +76,7 @@ fn run() -> Result<u8, Outcome> {
         )
     );
 
-    let binaries = locate_binaries(args.bin_dir.as_deref()).map_err(fail)?;
+    let binaries = locate_binaries(options.bin_dir.as_deref()).map_err(fail)?;
     println!(
         "{}",
         stage_line(2, total, "binaries", &binaries.forge.display().to_string())
@@ -109,7 +113,7 @@ fn run() -> Result<u8, Outcome> {
         stage_line(6, total, "manifest", "verified by shipping loader")
     );
 
-    if args.stage_only {
+    if options.stage_only {
         println!(
             "dev: staged without launch; run with ARTISAN_HOME={} {}",
             paths.home.display(),

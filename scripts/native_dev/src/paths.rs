@@ -142,16 +142,15 @@ pub fn default_base_dir(workspace: Option<&Path>, current_dir: &Path) -> PathBuf
 /// Returns [`DevError::NotAbsolute`] when the resolved directory is not
 /// absolute.
 pub fn resolve_dev_dir(explicit: Option<&Path>) -> Result<PathBuf, DevError> {
-    let dev_dir = match explicit {
-        Some(path) => path.to_path_buf(),
-        None => {
-            let workspace = std::env::var_os(WORKSPACE_ENV).map(PathBuf::from);
-            let current = std::env::current_dir().map_err(|_| DevError::Stage {
-                stage: "resolve",
-                reason: "working directory is unavailable".to_owned(),
-            })?;
-            default_base_dir(workspace.as_deref(), &current)
-        }
+    let dev_dir = if let Some(path) = explicit {
+        path.to_path_buf()
+    } else {
+        let workspace = std::env::var_os(WORKSPACE_ENV).map(PathBuf::from);
+        let current = std::env::current_dir().map_err(|_| DevError::Stage {
+            stage: "resolve",
+            reason: "working directory is unavailable".to_owned(),
+        })?;
+        default_base_dir(workspace.as_deref(), &current)
     };
     if !dev_dir.is_absolute() {
         return Err(DevError::NotAbsolute { path: dev_dir });

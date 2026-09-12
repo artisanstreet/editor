@@ -34,6 +34,7 @@ pub struct BinarySet {
 
 impl BinarySet {
     /// Iterates `(payload-relative-name, source-path)` pairs.
+    #[must_use]
     pub fn entries(&self) -> [(String, PathBuf); 4] {
         [
             (format!("bin/{}", exe_name("ae")), self.ae.clone()),
@@ -198,7 +199,6 @@ pub fn locate_binaries(explicit: Option<&Path>) -> Result<BinarySet, DevError> {
             hint: "expected bazel run runfiles or --bin-dir".to_owned(),
         });
     }
-    let mut found = found;
     let mut take = |stem: &str| {
         found
             .remove(stem)

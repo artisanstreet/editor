@@ -672,6 +672,7 @@ pub fn wait_for_startup(child: &mut Child, receipt_path: &Path, timeout: Duratio
 /// Best-effort: killing the Editor releases its owned Forge through the
 /// Editor's lease and Job Object containment. Returns the Editor's exit
 /// code when the wait completes.
+#[must_use]
 pub fn stop_editor(mut child: Child) -> Option<i32> {
     let _ = child.kill();
     child.wait().ok().and_then(|status| status.code())
