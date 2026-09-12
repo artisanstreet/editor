@@ -464,7 +464,7 @@ fn silent_idle_child_command() -> Option<(OsString, Vec<OsString>)> {
 #[cfg(not(windows))]
 fn silent_idle_child_command() -> Option<(OsString, Vec<OsString>)> {
     for candidate in ["/bin/sleep", "/usr/bin/sleep"] {
-        if Path::new(candidate).is_file() {
+        if std::path::Path::new(candidate).is_file() {
             return Some((OsString::from(candidate), vec![OsString::from("60")]));
         }
     }
@@ -820,9 +820,9 @@ fn exit_classification_matrix() {
 #[cfg(unix)]
 #[test]
 fn real_exit_status_converts() {
-    let candidate = if Path::new("/bin/true").is_file() {
+    let candidate = if std::path::Path::new("/bin/true").is_file() {
         "/bin/true"
-    } else if Path::new("/usr/bin/true").is_file() {
+    } else if std::path::Path::new("/usr/bin/true").is_file() {
         "/usr/bin/true"
     } else {
         eprintln!("SKIP: no true(1) for exit conversion");
