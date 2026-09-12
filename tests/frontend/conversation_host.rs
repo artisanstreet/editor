@@ -9,13 +9,12 @@ use artisan_domain::{
     AssistantBody, AssistantMessageItem, AssistantMessagePhase, ConversationCursor,
     ConversationItem, ConversationLifecycle, ConversationPatch, ConversationSnapshot,
     ConversationTurn, IncrementalText, ItemId, ItemOrdinal, MessageBody, PatchBatch, PatchId,
-    PatchSequence, RequestId, Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis,
-    UserMessageItem,
+    PatchSequence, Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
 use artisan_frontend::{
     conversation_delivery_machine, conversation_host, conversation_scene,
-    conversation_state_machine, conversation_steering_machine, conversation_surface,
-    conversation_turn_machine, conversation_view_machine,
+    conversation_state_machine, conversation_surface, conversation_turn_machine,
+    conversation_view_machine,
 };
 use artisan_ui::theme::ThemeMode;
 use conversation_delivery_machine::{
@@ -28,9 +27,6 @@ use conversation_scene::{SceneDisclosure, SceneId, SessionDetail, TurnBlock};
 use conversation_state_machine::{
     ConversationStateEffect, ConversationStateError, ConversationStateEvent, SceneFact,
     SceneFactCommand, SceneFactKind,
-};
-use conversation_steering_machine::{
-    SourceReference, SteeringEffect, SteeringEvent, SteeringLabelKind,
 };
 use conversation_surface::{
     ConversationSurfaceAction, ConversationSurfaceTarget, JUMP_TO_LATEST_SELECTOR,
@@ -59,10 +55,6 @@ fn item_id(value: &str) -> ItemId {
 
 fn scene_id(value: &str) -> SceneId {
     SceneId::parse(value).expect("test scene id is valid")
-}
-
-fn request_id(value: &str) -> RequestId {
-    RequestId::parse(value).expect("test request id is valid")
 }
 
 fn stamp(millis: i64) -> UnixMillis {
@@ -321,20 +313,11 @@ fn snapshot_replaces_the_surface_from_pure_scene_order(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn generic_delivery_and_steering_invalidations_are_retained(cx: &mut TestAppContext) {
+fn generic_delivery_invalidations_are_retained(cx: &mut TestAppContext) {
     let (host, cx) = add_host(cx);
-    let command_id = request_id("command_host");
-    let source_reference = SourceReference::parse("source_host").expect("test source is valid");
     let snapshot = baseline_snapshot();
     cx.update(|_, app| {
         host.update(app, |host, host_cx| {
-            host.dispatch(
-                ConversationStateEvent::RegisterTurn {
-                    turn_id: turn_id(TURN_A),
-                },
-                host_cx,
-            )
-            .expect("turn registration succeeds");
             host.dispatch(
                 ConversationStateEvent::Delivery(ConversationDeliveryEvent::SnapshotReceived(
                     snapshot,
@@ -342,26 +325,6 @@ fn generic_delivery_and_steering_invalidations_are_retained(cx: &mut TestAppCont
                 host_cx,
             )
             .expect("snapshot dispatch succeeds");
-            host.dispatch(
-                ConversationStateEvent::RegisterSteering {
-                    command_id: command_id.clone(),
-                    generation: 1,
-                    source_reference,
-                    started_at_ms: 0,
-                    label_kind: SteeringLabelKind::Steering,
-                },
-                host_cx,
-            )
-            .expect("steering registration succeeds");
-            host.dispatch(
-                ConversationStateEvent::Steering(SteeringEvent::DispatchStarted {
-                    command_id,
-                    generation: 1,
-                    at_ms: 1,
-                }),
-                host_cx,
-            )
-            .expect("steering dispatch succeeds");
         });
     });
     cx.run_until_parked();
@@ -377,13 +340,6 @@ fn generic_delivery_and_steering_invalidations_are_retained(cx: &mut TestAppCont
             ConversationHostEffect::Controller(ConversationStateEffect::Delivery(
                 ConversationDeliveryEffect::Invalidate
             ))
-        )));
-        assert!(host.pending_effects().iter().any(|effect| matches!(
-            effect,
-            ConversationHostEffect::Controller(ConversationStateEffect::Steering {
-                effect: SteeringEffect::RenderInvalidation { generation: 1, .. },
-                ..
-            })
         )));
     });
 }
@@ -662,8 +618,9 @@ fn extent_changed_is_dispatched_once_for_render_invalidations_and_not_for_viewpo
     cx.update(|_, app| {
         host.update(app, |host, host_cx| {
             host.dispatch(
-                ConversationStateEvent::RegisterTurn {
-                    turn_id: turn_id("extent-following"),
+                ConversationStateEvent::RegisterDisclosure {
+                    scene_id: scene_id("extent-following"),
+                    initially_working: false,
                 },
                 host_cx,
             )
@@ -702,8 +659,9 @@ fn extent_changed_is_dispatched_once_for_render_invalidations_and_not_for_viewpo
     cx.update(|_, app| {
         host.update(app, |host, host_cx| {
             host.dispatch(
-                ConversationStateEvent::RegisterTurn {
-                    turn_id: turn_id("extent-detached"),
+                ConversationStateEvent::RegisterDisclosure {
+                    scene_id: scene_id("extent-detached"),
+                    initially_working: false,
                 },
                 host_cx,
             )
@@ -1033,13 +991,6 @@ fn streaming_narration_is_projected_by_the_controller_scene(cx: &mut TestAppCont
                 host_cx,
             )
             .expect("streaming snapshot dispatch succeeds");
-            host.dispatch(
-                ConversationStateEvent::RegisterTurn {
-                    turn_id: turn_id(TURN_A),
-                },
-                host_cx,
-            )
-            .expect("streaming turn registration succeeds");
             host.dispatch(
                 ConversationStateEvent::Turn {
                     turn_id: turn_id(TURN_A),

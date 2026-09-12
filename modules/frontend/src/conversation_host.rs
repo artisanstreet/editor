@@ -31,7 +31,6 @@ use crate::conversation_state_machine::{
     ConversationStateController, ConversationStateEffect, ConversationStateError,
     ConversationStateEvent, ConversationStateView, MAX_PENDING_EFFECTS,
 };
-use crate::conversation_steering_machine::SteeringEffect;
 use crate::conversation_surface::{
     ConversationSurface, ConversationSurfaceAction, ConversationSurfaceTarget,
 };
@@ -776,10 +775,6 @@ fn effect_invalidates_render(effect: &ConversationStateEffect) -> bool {
         effect,
         ConversationStateEffect::SceneInvalidated
             | ConversationStateEffect::Delivery(ConversationDeliveryEffect::Invalidate)
-            | ConversationStateEffect::Steering {
-                effect: SteeringEffect::RenderInvalidation { .. },
-                ..
-            }
             | ConversationStateEffect::Viewport(ViewportEffect::InvalidateRender)
     )
 }
@@ -789,10 +784,6 @@ fn effect_requires_extent_change(effect: &ConversationStateEffect) -> bool {
         effect,
         ConversationStateEffect::SceneInvalidated
             | ConversationStateEffect::Delivery(ConversationDeliveryEffect::Invalidate)
-            | ConversationStateEffect::Steering {
-                effect: SteeringEffect::RenderInvalidation { .. },
-                ..
-            }
     )
 }
 

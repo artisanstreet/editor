@@ -10,10 +10,6 @@ use super::*;
 /// Maximum registered turn controllers retained by one conversation owner.
 pub const MAX_TURN_CONTROLLERS: usize = crate::conversation_scene::SCENE_MAX_TURNS;
 
-/// Maximum steering controllers retained by one conversation owner.
-pub const MAX_STEERING_CONTROLLERS: usize =
-    crate::conversation_scene::SCENE_MAX_STEERING_PLACEMENTS;
-
 /// Maximum disclosure controllers retained by one conversation owner.
 pub const MAX_DISCLOSURE_CONTROLLERS: usize = crate::conversation_scene::SCENE_MAX_ITEMS;
 
@@ -24,7 +20,6 @@ pub const MAX_SCENE_FACTS: usize = crate::conversation_scene::SCENE_MAX_ITEMS;
 pub const MAX_PENDING_EFFECTS: usize = 4_096;
 
 pub(super) const MAX_DELIVERY_EFFECTS_PER_EVENT: usize = 2;
-pub(super) const MAX_STEERING_EFFECTS_PER_EVENT: usize = 3;
 pub(super) const MAX_VIEWPORT_EFFECTS_PER_EVENT: usize = 4;
 pub(super) const MAX_DISCLOSURE_EFFECTS_PER_EVENT: usize = 2;
 pub(super) const MAX_CLOSE_EFFECTS: usize = 2;
@@ -386,9 +381,7 @@ pub enum SceneFactCommand {
 pub enum ConversationStateEvent {
     /// Route one delivery event to the fixed-thread delivery controller.
     Delivery(ConversationDeliveryEvent),
-    /// Register one turn state machine.
-    RegisterTurn { turn_id: TurnId },
-    /// Route one event to an already registered turn.
+    /// Route one event to a delivery-derived turn.
     Turn { turn_id: TurnId, event: TurnEvent },
     /// Set or clear one turn's send-time engine display label.
     ///
@@ -401,21 +394,6 @@ pub enum ConversationStateEvent {
         /// Display label, or `None` to clear.
         engine_label: Option<String>,
     },
-    /// Register one exact `(RequestId, generation)` steering machine.
-    RegisterSteering {
-        /// Client command identity.
-        command_id: RequestId,
-        /// Command generation.
-        generation: u64,
-        /// Validated bounded Forge source reference.
-        source_reference: crate::conversation_steering_machine::SourceReference,
-        /// Caller-supplied start timestamp.
-        started_at_ms: i64,
-        /// Redacted label kind.
-        label_kind: SteeringLabelKind,
-    },
-    /// Route one fenced event to a steering machine.
-    Steering(SteeringEvent),
     /// Register one disclosure controller keyed by stable scene identity.
     RegisterDisclosure {
         /// Stable scene identity.
@@ -469,10 +447,6 @@ impl fmt::Debug for ConversationStateEvent {
             Self::Delivery(ConversationDeliveryEvent::Closed) => {
                 formatter.write_str("DeliveryClosed")
             }
-            Self::RegisterTurn { turn_id } => formatter
-                .debug_struct("RegisterTurn")
-                .field("turn_id", turn_id)
-                .finish(),
             Self::Turn { turn_id, event } => formatter
                 .debug_struct("Turn")
                 .field("turn_id", turn_id)
@@ -486,21 +460,6 @@ impl fmt::Debug for ConversationStateEvent {
                 .field("turn_id", turn_id)
                 .field("engine_label", engine_label)
                 .finish(),
-            Self::RegisterSteering {
-                command_id,
-                generation,
-                source_reference,
-                started_at_ms,
-                label_kind,
-            } => formatter
-                .debug_struct("RegisterSteering")
-                .field("command_id", command_id)
-                .field("generation", generation)
-                .field("source_reference", source_reference)
-                .field("started_at_ms", started_at_ms)
-                .field("label_kind", label_kind)
-                .finish(),
-            Self::Steering(event) => formatter.debug_tuple("Steering").field(event).finish(),
             Self::RegisterDisclosure {
                 scene_id,
                 initially_working,
@@ -525,9 +484,6 @@ impl PartialEq for ConversationStateEvent {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Delivery(left), Self::Delivery(right)) => delivery_event_eq(left, right),
-            (Self::RegisterTurn { turn_id: left }, Self::RegisterTurn { turn_id: right }) => {
-                left == right
-            }
             (
                 Self::Turn {
                     turn_id: left_id,
@@ -548,29 +504,6 @@ impl PartialEq for ConversationStateEvent {
                     engine_label: right_label,
                 },
             ) => left_id == right_id && left_label == right_label,
-            (
-                Self::RegisterSteering {
-                    command_id: left_command,
-                    generation: left_generation,
-                    source_reference: left_source,
-                    started_at_ms: left_started,
-                    label_kind: left_label,
-                },
-                Self::RegisterSteering {
-                    command_id: right_command,
-                    generation: right_generation,
-                    source_reference: right_source,
-                    started_at_ms: right_started,
-                    label_kind: right_label,
-                },
-            ) => {
-                left_command == right_command
-                    && left_generation == right_generation
-                    && left_source == right_source
-                    && left_started == right_started
-                    && left_label == right_label
-            }
-            (Self::Steering(left), Self::Steering(right)) => left == right,
             (
                 Self::RegisterDisclosure {
                     scene_id: left_id,
@@ -636,32 +569,12 @@ pub type ConversationEvent = ConversationStateEvent;
 /// Why a bounded aggregate registry or outbox could not accept a mutation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CapacityResource {
-    /// Turn-controller registry.
-    Turns,
-    /// Steering-controller registry.
-    Steerings,
     /// Disclosure-controller registry.
     Disclosures,
     /// Non-durable fact registry.
     SceneFacts,
     /// Aggregate pending-effect outbox.
     PendingEffects,
-}
-
-/// Redacted steering-construction failure exposed by the aggregate.
-///
-/// The child constructor has defensive error variants that may carry rejected
-/// input text. The aggregate accepts already validated IDs and source
-/// references, so it deliberately maps those details to this closed, payload-
-/// free error before they can cross the aggregate boundary.
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-pub enum SteeringConstructionError {
-    /// The generation is reserved for an unregistered controller.
-    #[error("steering generation must be nonzero")]
-    InvalidGeneration,
-    /// A defensive child validation rejected an already typed input.
-    #[error("steering input was rejected")]
-    InvalidInput,
 }
 
 /// Typed aggregate refusal and composition error.
@@ -680,28 +593,9 @@ pub enum ConversationStateError {
         /// Configured ceiling.
         maximum: usize,
     },
-    /// A turn was registered twice.
-    #[error("turn {turn_id} is already registered")]
-    DuplicateTurn { turn_id: TurnId },
-    /// A turn event targeted no registered turn.
+    /// A turn event targeted no known turn.
     #[error("turn {turn_id} is not registered")]
     UnknownTurn { turn_id: TurnId },
-    /// A steering key was registered twice.
-    #[error("steering {command_id}/{generation} is already registered")]
-    DuplicateSteering {
-        /// Command identity.
-        command_id: RequestId,
-        /// Command generation.
-        generation: u64,
-    },
-    /// A steering event targeted no registered exact key.
-    #[error("steering {command_id}/{generation} is not registered")]
-    UnknownSteering {
-        /// Command identity.
-        command_id: RequestId,
-        /// Command generation.
-        generation: u64,
-    },
     /// A disclosure key was registered twice.
     #[error("disclosure {scene_id} is already registered")]
     DuplicateDisclosure { scene_id: SceneId },
@@ -720,18 +614,6 @@ pub enum ConversationStateError {
     /// A fact would collide with durable identity or global ordinal.
     #[error("scene fact {id} conflicts with durable scene state")]
     SceneConflict { id: SceneId },
-    /// A steering anchor is not present in the last-good durable snapshot.
-    #[error("steering anchor {anchor} is unknown")]
-    UnknownSteeringAnchor { anchor: ItemId },
-    /// A steering anchor is durable but is not a user-message item.
-    #[error("steering anchor {anchor} is not a user message")]
-    NonUserSteeringAnchor { anchor: ItemId },
-    /// A previously anchored label would disappear from an accepted snapshot.
-    #[error("anchored steering item {anchor} is unavailable in the snapshot")]
-    SteeringAnchorUnavailable { anchor: ItemId },
-    /// A synthetic steering scene identity exceeded the scene identity bound.
-    #[error("steering scene identity is invalid: {error}")]
-    InvalidSceneIdentity { error: SceneIdError },
     /// A known turn received an event that its child chart deliberately does
     /// not accept.
     #[error("turn {turn_id} in {state:?} cannot accept this event")]
@@ -739,7 +621,7 @@ pub enum ConversationStateError {
     /// The delivery child rejected a request-generation allocation.
     #[error("delivery child refused the event: {0}")]
     Delivery(#[source] ConversationDeliveryError),
-    /// A registered turn child rejected the event.
+    /// A turn child rejected the event.
     #[error("turn {turn_id} refused its event: {error}")]
     Turn {
         /// Turn identity.
@@ -747,19 +629,6 @@ pub enum ConversationStateError {
         /// Child refusal.
         error: TurnError,
     },
-    /// A steering child rejected the event.
-    #[error("steering {command_id}/{generation} refused its event: {error}")]
-    Steering {
-        /// Command identity.
-        command_id: RequestId,
-        /// Command generation.
-        generation: u64,
-        /// Child refusal.
-        error: SteeringRejection,
-    },
-    /// Steering construction failed before registry mutation.
-    #[error("steering construction failed: {0}")]
-    SteeringConstruction(#[source] SteeringConstructionError),
     /// The pure scene builder rejected the combined bounded inputs.
     #[error("conversation scene projection failed: {0}")]
     Scene(#[source] SceneBuildError),
@@ -775,15 +644,6 @@ pub struct ConversationTurnView {
     pub turn_id: TurnId,
     /// Child-derived turn view.
     pub view: ChildTurnView,
-}
-
-/// One immutable steering view with its aggregate scene identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConversationSteeringView {
-    /// Synthetic stable scene identity for this steering generation.
-    pub scene_id: SceneId,
-    /// Child-derived steering view.
-    pub view: SteeringView,
 }
 
 /// One immutable disclosure view with its stable scene key.
@@ -811,10 +671,6 @@ pub struct ConversationStateView {
     pub delivery_status: crate::conversation_projection::ProjectionStatus,
     /// Registered turn views in deterministic turn-id order.
     pub turn_views: Vec<ConversationTurnView>,
-    /// Registered steering views in deterministic command/generation order.
-    pub steering_views: Vec<ConversationSteeringView>,
-    /// Active composer-lip steering views in deterministic order.
-    pub pending_lip_steering_views: Vec<SteeringView>,
     /// Registered disclosure views in deterministic scene-id order.
     pub disclosure_views: Vec<ConversationDisclosureView>,
     /// Exact sole viewport state.
@@ -840,8 +696,6 @@ impl PartialEq for ConversationStateView {
             && self.delivery_phase == other.delivery_phase
             && self.delivery_status == other.delivery_status
             && self.turn_views == other.turn_views
-            && self.steering_views == other.steering_views
-            && self.pending_lip_steering_views == other.pending_lip_steering_views
             && self.disclosure_views == other.disclosure_views
             && self.viewport_state == other.viewport_state
             && self.viewport_generation == other.viewport_generation
@@ -858,15 +712,6 @@ impl Eq for ConversationStateView {}
 pub enum ConversationStateEffect {
     /// Effect drained from the delivery child.
     Delivery(ConversationDeliveryEffect),
-    /// Effect drained from one exact steering child.
-    Steering {
-        /// Command identity of the child.
-        command_id: RequestId,
-        /// Generation of the child.
-        generation: u64,
-        /// Child effect.
-        effect: crate::conversation_steering_machine::SteeringEffect,
-    },
     /// A disclosure child reached its explicit retired leaf.
     Disclosure {
         /// Stable scene key.

@@ -4,7 +4,7 @@
 
 use artisan_frontend::{
     conversation_delivery_machine, conversation_scene, conversation_state_machine,
-    conversation_steering_machine, conversation_turn_machine, conversation_view_machine,
+    conversation_turn_machine, conversation_view_machine,
 };
 
 use artisan_domain::{
@@ -24,9 +24,6 @@ use conversation_scene::{
 use conversation_state_machine::{
     CapacityResource, ConversationStateController, ConversationStateEffect, ConversationStateError,
     ConversationStateEvent, MAX_PENDING_EFFECTS, SceneFact, SceneFactKind,
-};
-use conversation_steering_machine::{
-    SourceReference, SteeringEffect, SteeringEvent, SteeringLabelKind, SteeringPlacement,
 };
 use conversation_turn_machine::{TurnError, TurnEvent};
 use conversation_view_machine::{
@@ -174,26 +171,6 @@ fn scene_status(
         })
         .collect();
     (statuses[0], statuses.len())
-}
-
-fn steering_source(value: &str) -> SourceReference {
-    SourceReference::parse(value.to_owned()).expect("valid source reference")
-}
-
-fn register_steering(controller: &mut ConversationStateController, command: &str, generation: u64) {
-    controller
-        .register_steering(
-            artisan_domain::RequestId::parse(command).expect("valid request id"),
-            generation,
-            &steering_source(command),
-            0,
-            SteeringLabelKind::Steering,
-        )
-        .expect("steering registration succeeds");
-}
-
-fn steering_request(command: &str) -> artisan_domain::RequestId {
-    artisan_domain::RequestId::parse(command).expect("valid request id")
 }
 
 fn scene_id(value: &str) -> SceneId {
@@ -364,269 +341,6 @@ fn resumed_delivery_event_debug_equality_and_routing_preserve_scene_boundary() {
         "status-only delivery does not cross the scene/effect boundary"
     );
 }
-
-#[test]
-fn turn_progression_has_one_narration_and_exact_terminal_copy() {
-    let mut controller = ConversationStateController::new(thread_id());
-    let _ = controller.drain_effects();
-    controller
-        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
-            1,
-            vec![
-                make_turn(TURN_A, 0, ConversationLifecycle::Active),
-                make_turn(TURN_B, 3, ConversationLifecycle::Active),
-            ],
-            vec![make_user(USER_A, TURN_A, 1, "hello")],
-        )))
-        .expect("snapshot delivery succeeds");
-    let _ = controller.drain_effects();
-    controller
-        .register_turn(turn_id(TURN_A))
-        .expect("turn A registration");
-    controller
-        .register_turn(turn_id(TURN_B))
-        .expect("turn B registration");
-    let _ = controller.drain_effects();
-
-    let progression = [
-        (
-            TurnEvent::Compacting {
-                at: 10,
-                revision: 1,
-            },
-            SceneTurnNarration::Compacting,
-        ),
-        (
-            TurnEvent::Thinking {
-                at: 11,
-                revision: 2,
-            },
-            SceneTurnNarration::Thinking,
-        ),
-        (
-            TurnEvent::Working {
-                at: 12,
-                revision: 3,
-            },
-            SceneTurnNarration::Working,
-        ),
-        (
-            TurnEvent::StreamingReply {
-                at: 13,
-                revision: 4,
-            },
-            SceneTurnNarration::StreamingSuppression,
-        ),
-        (
-            TurnEvent::Completed {
-                at: 14,
-                revision: 5,
-            },
-            SceneTurnNarration::WorkedFor { millis: 4 },
-        ),
-    ];
-    for (event, expected) in progression {
-        controller
-            .on_turn(turn_id(TURN_A), event)
-            .expect("turn event succeeds");
-        let (actual, count) = scene_status(&controller, TURN_A);
-        assert_eq!(actual, expected);
-        assert_eq!(count, 1);
-        assert_one_narration(actual);
-        let _ = controller.drain_effects();
-    }
-
-    for event in [
-        TurnEvent::Thinking {
-            at: 10,
-            revision: 1,
-        },
-        TurnEvent::StreamingReply {
-            at: 11,
-            revision: 2,
-        },
-        TurnEvent::Completed {
-            at: 12,
-            revision: 3,
-        },
-    ] {
-        controller
-            .on_turn(turn_id(TURN_B), event)
-            .expect("thought-only event succeeds");
-        let (actual, count) = scene_status(&controller, TURN_B);
-        assert_eq!(count, 1);
-        assert_one_narration(actual);
-        if matches!(actual, SceneTurnNarration::ThoughtFor { .. }) {
-            assert_eq!(actual, SceneTurnNarration::ThoughtFor { millis: 2 });
-        }
-        let _ = controller.drain_effects();
-    }
-}
-
-#[test]
-fn simultaneous_steering_views_keep_their_own_anchors_generations_and_effects() {
-    let mut controller = ConversationStateController::new(thread_id());
-    let _ = controller.drain_effects();
-    controller
-        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
-            1,
-            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
-            vec![
-                make_user(USER_A, TURN_A, 1, "first"),
-                make_user(USER_B, TURN_A, 2, "second"),
-            ],
-        )))
-        .expect("snapshot delivery succeeds");
-    let _ = controller.drain_effects();
-    register_steering(&mut controller, "cmd_a", 1);
-    register_steering(&mut controller, "cmd_b", 7);
-    let _ = controller.drain_effects();
-
-    for (command, generation) in [("cmd_a", 1), ("cmd_b", 7)] {
-        controller
-            .on_steering(SteeringEvent::DispatchStarted {
-                command_id: steering_request(command),
-                generation,
-                at_ms: 1,
-            })
-            .expect("dispatch starts");
-        controller
-            .on_steering(SteeringEvent::DispatchAccepted {
-                command_id: steering_request(command),
-                generation,
-                at_ms: 2,
-            })
-            .expect("dispatch accepts");
-    }
-    let pending = controller.view().pending_lip_steering_views;
-    assert_eq!(pending.len(), 2);
-    assert!(pending.iter().any(|view| view.generation == 1));
-    assert!(pending.iter().any(|view| view.generation == 7));
-    let _ = controller.drain_effects();
-
-    controller
-        .on_steering(SteeringEvent::DurableItemAnchored {
-            command_id: steering_request("cmd_a"),
-            generation: 1,
-            item_id: item_id(USER_A),
-            at_ms: 3,
-        })
-        .expect("A anchors");
-    controller
-        .on_steering(SteeringEvent::DurableItemAnchored {
-            command_id: steering_request("cmd_b"),
-            generation: 7,
-            item_id: item_id(USER_B),
-            at_ms: 3,
-        })
-        .expect("B anchors");
-    let effects = controller.drain_effects();
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        ConversationStateEffect::Steering {
-            command_id,
-            generation: 1,
-            effect: SteeringEffect::WatchAcknowledgement { anchor, .. },
-        } if command_id.as_str() == "cmd_a" && anchor.as_str() == USER_A
-    )));
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        ConversationStateEffect::Steering {
-            command_id,
-            generation: 7,
-            effect: SteeringEffect::WatchAcknowledgement { anchor, .. },
-        } if command_id.as_str() == "cmd_b" && anchor.as_str() == USER_B
-    )));
-
-    let view = controller.view();
-    assert!(view.pending_lip_steering_views.is_empty());
-    assert!(view.steering_views.iter().any(|entry| {
-        entry.view.generation == 1
-            && matches!(
-                &entry.view.placement,
-                SteeringPlacement::AnchoredAfter { anchor } if anchor.as_str() == USER_A
-            )
-    }));
-    assert!(view.steering_views.iter().any(|entry| {
-        entry.view.generation == 7
-            && matches!(
-                &entry.view.placement,
-                SteeringPlacement::AnchoredAfter { anchor } if anchor.as_str() == USER_B
-            )
-    }));
-}
-
-#[test]
-fn only_an_exact_durable_user_item_can_anchor_a_steering_label() {
-    let mut controller = ConversationStateController::new(thread_id());
-    let _ = controller.drain_effects();
-    controller
-        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(
-            baseline_snapshot(),
-        ))
-        .expect("snapshot delivery succeeds");
-    let _ = controller.drain_effects();
-    register_steering(&mut controller, "cmd_anchor", 1);
-    let _ = controller.drain_effects();
-    controller
-        .on_steering(SteeringEvent::DispatchStarted {
-            command_id: steering_request("cmd_anchor"),
-            generation: 1,
-            at_ms: 1,
-        })
-        .expect("dispatch starts");
-    controller
-        .on_steering(SteeringEvent::DispatchAccepted {
-            command_id: steering_request("cmd_anchor"),
-            generation: 1,
-            at_ms: 2,
-        })
-        .expect("dispatch accepts");
-    let _ = controller.drain_effects();
-
-    let before_view = controller.view();
-    let before_effects = controller.pending_effects().to_vec();
-    let non_user = controller.on_steering(SteeringEvent::DurableItemAnchored {
-        command_id: steering_request("cmd_anchor"),
-        generation: 1,
-        item_id: item_id(ASSISTANT_A),
-        at_ms: 3,
-    });
-    assert!(matches!(
-        non_user,
-        Err(ConversationStateError::NonUserSteeringAnchor { .. })
-    ));
-    assert_eq!(controller.view(), before_view);
-    assert_eq!(controller.pending_effects(), before_effects.as_slice());
-
-    let unknown = controller.on_steering(SteeringEvent::DurableItemAnchored {
-        command_id: steering_request("cmd_anchor"),
-        generation: 1,
-        item_id: item_id("not_durable"),
-        at_ms: 3,
-    });
-    assert!(matches!(
-        unknown,
-        Err(ConversationStateError::UnknownSteeringAnchor { .. })
-    ));
-    assert_eq!(controller.view(), before_view);
-
-    controller
-        .on_steering(SteeringEvent::DurableItemAnchored {
-            command_id: steering_request("cmd_anchor"),
-            generation: 1,
-            item_id: item_id(USER_A),
-            at_ms: 3,
-        })
-        .expect("durable user anchors");
-    let scene = controller.scene().expect("scene builds");
-    let blocks = &scene.turn_scenes()[0].blocks;
-    assert!(matches!(
-        &blocks[1],
-        TurnBlock::SteeringLabel(label) if label.anchor.as_str() == USER_A && label.label == "steering"
-    ));
-}
-
 #[test]
 fn changed_file_fact_is_projected_by_the_pure_scene_builder() {
     let mut controller = ConversationStateController::new(thread_id());
@@ -763,41 +477,27 @@ fn viewport_scroll_completion_is_fenced_by_generation() {
 }
 
 #[test]
-fn duplicate_unknown_and_refused_events_are_atomic() {
+fn unknown_and_refused_events_are_atomic() {
     let mut controller = ConversationStateController::new(thread_id());
     let _ = controller.drain_effects();
     controller
-        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(
-            baseline_snapshot(),
-        ))
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            1,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+            vec![make_user(USER_A, TURN_A, 1, "hi")],
+        )))
         .expect("snapshot delivery succeeds");
-    let _ = controller.drain_effects();
-    controller
-        .register_turn(turn_id(TURN_A))
-        .expect("turn registration succeeds");
     let _ = controller.drain_effects();
 
     let before_view = controller.view();
     let before_scene = controller.scene().expect("scene builds");
     let before_effects = controller.pending_effects().to_vec();
     assert!(matches!(
-        controller.register_turn(turn_id(TURN_A)),
-        Err(ConversationStateError::DuplicateTurn { .. })
-    ));
-    assert!(matches!(
         controller.on_turn(
             turn_id("unknown_turn"),
             TurnEvent::Thinking { at: 1, revision: 1 }
         ),
         Err(ConversationStateError::UnknownTurn { .. })
-    ));
-    assert!(matches!(
-        controller.on_steering(SteeringEvent::DispatchStarted {
-            command_id: steering_request("unknown_command"),
-            generation: 1,
-            at_ms: 1,
-        }),
-        Err(ConversationStateError::UnknownSteering { .. })
     ));
     assert!(matches!(
         controller.on_disclosure(scene_id("unknown_disclosure"), DisclosureEvent::UserOpen),
@@ -847,17 +547,7 @@ fn closed_owner_registration_is_atomic() {
     let closed_view = closed.view();
     let closed_effects = closed.pending_effects().to_vec();
     assert!(matches!(
-        closed.register_turn(turn_id(TURN_A)),
-        Err(ConversationStateError::OwnerClosed)
-    ));
-    assert!(matches!(
-        closed.register_steering(
-            steering_request("closed_command"),
-            1,
-            &steering_source("closed_command"),
-            0,
-            SteeringLabelKind::Steering,
-        ),
+        closed.on_turn_engine_label(turn_id(TURN_A), Some("Claude".to_owned())),
         Err(ConversationStateError::OwnerClosed)
     ));
     assert!(matches!(
@@ -1287,54 +977,60 @@ fn streamed_append_preserves_segment_bytes_without_spacing_heuristics() {
 fn active_elapsed_basis_survives_snapshot_refresh_without_reset() {
     let mut controller = ConversationStateController::new(thread_id());
     let _ = controller.drain_effects();
-    controller
-        .register_turn(turn_id(TURN_A))
-        .expect("turn registration succeeds");
-    controller
-        .on_turn(
-            turn_id(TURN_A),
-            TurnEvent::Thinking {
-                at: 1000,
-                revision: 1,
-            },
-        )
-        .expect("thinking event succeeds");
-    controller
-        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
-            1,
-            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
-            vec![make_user(USER_A, TURN_A, 1, "hi")],
-        )))
-        .expect("snapshot delivery succeeds");
-    let _ = controller.drain_effects();
+    // The first delivery for an active turn with no work evidence waits on
+    // the provider and plants the turn's own creation time as the live basis.
+    delivered_snapshot(
+        &mut controller,
+        1,
+        1000,
+        vec![make_turn_full(
+            TURN_A,
+            0,
+            0,
+            ConversationLifecycle::Active,
+            1000,
+            1000,
+        )],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
     let (narration, _) = scene_status(&controller, TURN_A);
-    assert_eq!(narration, SceneTurnNarration::Thinking);
+    assert_eq!(narration, SceneTurnNarration::ProviderWait);
     assert_eq!(turn_status_basis(&controller, TURN_A), Some(1000));
 
     // A refresh carrying the same durable turn must not reset the basis.
-    controller
-        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
-            2,
-            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
-            vec![make_user(USER_A, TURN_A, 1, "hi")],
-        )))
-        .expect("refresh delivery succeeds");
-    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        2,
+        1000,
+        vec![make_turn_full(
+            TURN_A,
+            0,
+            0,
+            ConversationLifecycle::Active,
+            1000,
+            1000,
+        )],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
     assert_eq!(turn_status_basis(&controller, TURN_A), Some(1000));
 
     // Settlement drops the live basis and carries its own terminal duration.
-    // Thinking-only work completes as ThoughtFor: no Working event ever set
+    // Waiting-only work completes as ThoughtFor: no Working event ever set
     // work_seen, so the chart correctly reports thought rather than work.
-    controller
-        .on_turn(
-            turn_id(TURN_A),
-            TurnEvent::Completed {
-                at: 1005,
-                revision: 2,
-            },
-        )
-        .expect("completion succeeds");
-    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        3,
+        1005,
+        vec![make_turn_full(
+            TURN_A,
+            0,
+            1,
+            ConversationLifecycle::Completed,
+            1000,
+            1005,
+        )],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
     let (settled, _) = scene_status(&controller, TURN_A);
     assert_eq!(settled, SceneTurnNarration::ThoughtFor { millis: 5 });
     assert_eq!(turn_status_basis(&controller, TURN_A), None);
@@ -1346,8 +1042,8 @@ fn active_elapsed_basis_survives_snapshot_refresh_without_reset() {
     reason = "one end-to-end scenario drives every delivery-derived status; splitting it would hide the causal ordering the test asserts"
 )]
 fn delivery_drives_pending_waiting_work_stream_and_completed_without_manual_drive() {
-    // Production path only: snapshots, batches, and facts. No register_turn,
-    // no on_turn. Every status below comes from delivery-derived chart drive.
+    // Production path only: snapshots, batches, and facts. No manual turn
+    // drive. Every status below comes from delivery-derived chart drive.
     let mut controller = ConversationStateController::new(thread_id());
     let _ = controller.drain_effects();
 
@@ -2035,79 +1731,6 @@ fn explicit_final_newer_promotes_and_settles() {
         .collect();
     assert_eq!(replies, vec!["final answer"]);
 }
-
-#[test]
-fn steering_boundary_keeps_post_steer_work_top_level() {
-    let mut controller = ConversationStateController::new(thread_id());
-    let _ = controller.drain_effects();
-    controller
-        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
-            1,
-            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
-            vec![
-                make_user(USER_A, TURN_A, 1, "go"),
-                make_user(USER_B, TURN_A, 5, "actually, stop"),
-            ],
-        )))
-        .expect("snapshot delivery succeeds");
-    let _ = controller.drain_effects();
-    register_steering(&mut controller, "cmd_steer", 1);
-    controller
-        .on_steering(SteeringEvent::DispatchStarted {
-            command_id: steering_request("cmd_steer"),
-            generation: 1,
-            at_ms: 1,
-        })
-        .expect("dispatch starts");
-    controller
-        .on_steering(SteeringEvent::DispatchAccepted {
-            command_id: steering_request("cmd_steer"),
-            generation: 1,
-            at_ms: 2,
-        })
-        .expect("dispatch accepts");
-    controller
-        .on_steering(SteeringEvent::DurableItemAnchored {
-            command_id: steering_request("cmd_steer"),
-            generation: 1,
-            item_id: item_id(USER_B),
-            at_ms: 3,
-        })
-        .expect("steer anchors");
-    controller
-        .register_fact(
-            activity_fact_with_run("tool_pre", TURN_A, 3, "ran", "run_controller")
-                .with_activity_lifecycle(ConversationLifecycle::Completed),
-        )
-        .expect("pre-steer tool registers");
-    controller
-        .register_fact(
-            activity_fact_with_run("tool_post", TURN_A, 8, "stopping", "run_controller")
-                .with_activity_lifecycle(ConversationLifecycle::Active),
-        )
-        .expect("post-steer tool registers");
-    let _ = controller.drain_effects();
-
-    // Pre-steer work joins the session; post-steer work stays top-level
-    // below the steering label and supersedes the session. The live tool
-    // chain carries progress, so no status row renders.
-    assert_eq!(
-        turn_blocks(&controller, TURN_A),
-        vec!["user", "session", "user", "steer-label", "work", "footer"]
-    );
-    let scene = controller.scene().expect("scene builds");
-    let group = scene.turn_scenes()[0]
-        .blocks
-        .iter()
-        .find_map(|block| match block {
-            TurnBlock::WorkGroup(group) if group.session.is_some() => Some(group),
-            _ => None,
-        })
-        .expect("session group");
-    assert!(group.superseded);
-    assert_eq!(group.session_details.len(), 1);
-}
-
 #[test]
 fn live_to_settled_disclosure_reconcile_respects_user_choice() {
     let mut controller = ConversationStateController::new(thread_id());
@@ -2599,25 +2222,12 @@ fn failed_after_completed_is_refused_without_state_change() {
         ))
         .expect("snapshot delivery succeeds");
     let _ = controller.drain_effects();
-    controller
-        .register_turn(turn_id(TURN_A))
-        .expect("turn registration succeeds");
-    controller
-        .on_turn(
-            turn_id(TURN_A),
-            TurnEvent::Completed {
-                at: 14,
-                revision: 1,
-            },
-        )
-        .expect("completion succeeds");
-    let _ = controller.drain_effects();
     let before_view = controller.view();
     let before_scene = controller.scene().expect("scene builds");
     let before_effects = controller.pending_effects().to_vec();
 
-    // A terminal state is sealed: a later failure is refused and changes
-    // nothing, instead of rewriting history.
+    // The delivery-derived terminal state is sealed: a later failure is
+    // refused and changes nothing, instead of rewriting history.
     assert!(matches!(
         controller.on_turn(
             turn_id(TURN_A),
@@ -2703,10 +2313,20 @@ fn engine_label_names_waiting_row_and_clears() {
 fn invalid_engine_label_is_rejected_without_state_change() {
     let mut controller = ConversationStateController::new(thread_id());
     let _ = controller.drain_effects();
-    controller
-        .register_turn(turn_id(TURN_A))
-        .expect("turn registration succeeds");
-    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        1,
+        100,
+        vec![make_turn_full(
+            TURN_A,
+            0,
+            0,
+            ConversationLifecycle::Pending,
+            90,
+            95,
+        )],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
     let before_effects = controller.pending_effects().to_vec();
 
     assert!(matches!(
