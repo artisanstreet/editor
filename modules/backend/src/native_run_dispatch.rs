@@ -533,15 +533,12 @@ impl NativeRunDispatcher {
             return NativeRunDispatcherShutdown::Joined;
         };
         let outcome = match tokio::time::timeout(self.shutdown_budget, &mut join).await {
-            Ok(Ok(DispatchLoopExit {
-                owner: EngineOwnerShutdown::Joined,
-            })) => NativeRunDispatcherShutdown::Joined,
-            Ok(Ok(DispatchLoopExit {
-                owner: EngineOwnerShutdown::Quarantined,
-            })) => NativeRunDispatcherShutdown::Quarantined,
-            Ok(Ok(DispatchLoopExit {
-                owner: EngineOwnerShutdown::TaskLost,
-            }) | Err(_)) => NativeRunDispatcherShutdown::TaskLost,
+            Ok(Ok(DispatchLoopExit { owner })) => match owner {
+                EngineOwnerShutdown::Joined => NativeRunDispatcherShutdown::Joined,
+                EngineOwnerShutdown::Quarantined => NativeRunDispatcherShutdown::Quarantined,
+                EngineOwnerShutdown::TaskLost => NativeRunDispatcherShutdown::TaskLost,
+            },
+            Ok(Err(_)) => NativeRunDispatcherShutdown::TaskLost,
             Err(_) => NativeRunDispatcherShutdown::BudgetExceeded,
         };
         self.observed = Some(outcome);
