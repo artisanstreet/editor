@@ -28,9 +28,7 @@
 1047 modules/cli/rust/process.rs
 884 modules/database/src/engine_run_config.rs
 809 modules/database/src/repository/conversation_patch_replay.rs
-1490 modules/database/src/repository/message_dispatch.rs
 804 modules/database/src/repository/queue_message.rs
-1530 modules/database/src/repository/queued_message.rs
 1442 modules/database/src/repository/run_interaction.rs
 1102 modules/database/src/repository/run_observation/codec/decode.rs
 837 modules/database/src/repository/run_observation/codec/encode.rs
@@ -92,14 +90,11 @@
 863 modules/frontend/src/thread_screen.rs
 969 modules/installer/rust/install/workflow.rs
 1158 modules/migrations/src/m20260824_000003_conversation_execution.rs
-1635 modules/native_engine/src/profile.rs
-1495 modules/protocol/src/codec/composer_state.rs
 834 modules/protocol/src/codec/conversation.rs
 1032 modules/protocol/src/codec/engine_config.rs
 962 modules/protocol/src/codec/envelope.rs
 1143 modules/protocol/src/codec/observation/decode.rs
 807 modules/protocol/src/codec/server.rs
-1673 modules/protocol/src/types.rs
 847 modules/transport/src/client_session.rs
 939 modules/ui/src/accordion.rs
 806 modules/ui/src/alert_dialog.rs
@@ -111,7 +106,6 @@
 1060 modules/ui/src/markdown_renderer.rs
 1031 modules/ui/src/markdown.rs
 1026 modules/ui/src/popover.rs
-1781 modules/ui/src/select.rs
 978 modules/ui/src/selectable_text.rs
 1031 modules/ui/src/sheet.rs
 937 modules/ui/src/shimmer_text.rs
