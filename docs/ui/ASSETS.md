@@ -274,10 +274,8 @@ all modules, no node_modules) return zero references outside this document:
 | routes/components/opencode-icon.svelte | hand-drawn OpenCode glyph; zero consumers (superseded by `brands/opencode/logo.svelte`); dormant duplicate |
 
 None is a packaging resource: the cross-module sweep found
-`modules/broker/build.rs` embedding
-`barekey/runtime-app-icons/foreground-gradient-symbol.ico`, and
 `modules/desktop/src/app-icon.ts` resolving packaged filenames
-`foreground-gradient-symbol.{png,ico}` / `plastic-jaw-shading.{png,ico}` — all
+`foreground-gradient-symbol.{png,ico}` / `plastic-jaw-shading.{png,ico}` - all
 PNG/ICO, no SVG. Exclusion is reversible if product scope later wants these.
 
 ## 8. Raw / data-URL SVG findings
@@ -304,13 +302,12 @@ PNG/ICO, no SVG. Exclusion is reversible if product scope later wants these.
 
 | Edge | Consumer | Resource |
 | --- | --- | --- |
-| modules/broker/build.rs | Windows executable icon embed (build-time reach into the frontend asset tree) | barekey/runtime-app-icons/foreground-gradient-symbol.ico |
 | modules/desktop/src/app-icon.ts | packaged runtime app-icon materialization from `packaged_root` | foreground-gradient-symbol.{png,ico}, plastic-jaw-shading.{png,ico} |
 | routes/components/settings/appearance.svelte | preference previews | the two PNGs above |
 | static/barekey-logo.png via string-keyed map | routes/debug/components/component-preview.svelte `image_sources["gallery-artisan-mark"]` | static/barekey-logo.png |
 
 Consequence: any future cleanup of `src/lib/assets/**` must keep
-`runtime-app-icons/*`; the broker build breaks silently otherwise.
+`runtime-app-icons/*` while the desktop app icon materialization consumes them.
 
 ## 10. Monochrome derivation and call-site flag semantics
 

@@ -60,8 +60,6 @@ const WORKSPACE_MANIFESTS: &[(&str, &str)] = &[
         "scripts/native_dev/Cargo.toml",
         include_str!("../../scripts/native_dev/Cargo.toml"),
     ),
-    // `modules/broker/Cargo.toml` is intentionally absent: broker is not a
-    // member of the root workspace (see `workspace.members` in `Cargo.toml`).
 ];
 
 #[test]
