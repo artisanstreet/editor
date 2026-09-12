@@ -37,6 +37,7 @@ use super::{
         ordinary_metadata, ordinary_path_identity, owned_file_identity, remove_owned_file,
         require_identity, sync_owned_file,
     },
+    path_registry,
     state::{
         persist_protocol_record, persist_shortcut_records, read_existing_protocol,
         read_installed_state, recover_activation_pointer_swap, remove_path_in_root,
@@ -141,46 +142,15 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         Ok(_) | Err(_) => return Err(InstallerError::UnsafeOwnedPath),
     };
     if let Some(existing_release) = existing_release {
-        let lifecycle_ae = release_cli(&existing_release)?;
-        let existing_protocol = read_existing_protocol(&options.install_root)?;
-        let bootstrap = versioned_installer_path(&existing_release);
-        if !ordinary_file_exists(&bootstrap)? {
-            return Err(InstallerError::MissingInstaller(bootstrap));
-        }
-        root_lock.fence()?;
-        let retirement = retire_for(&options, &existing_release, &lifecycle_ae)?;
-        let stable_ae = install_stable_cli(&root_lock, &options.install_root, &existing_release)?;
-        let protocol = if options.integrations.register_protocol {
-            prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
-        } else {
-            None
-        };
-        let launchers = planned_shortcuts(&options, &stable_ae, &existing_release);
-        root_lock.fence()?;
-        let activation_launchers = shortcut_records(&launchers)?;
-        activate(
+        return verify_and_activate_existing(
             &root_lock,
-            &options.install_root,
-            &existing_release,
-            &manifest,
+            &client,
             &options,
-            &ActivationIntegrations {
-                stable_ae: &stable_ae,
-                protocol: protocol.as_ref(),
-                launchers: &activation_launchers,
-            },
-        )?;
-        root_lock.fence()?;
-        if options.integrations.register_protocol {
-            apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
-        }
-        root_lock.fence()?;
-        shortcuts::apply(&launchers)?;
-        root_lock.fence()?;
-        restore_retired_forge(&options, &existing_release, retirement)?;
-        root_lock.fence()?;
-        invoke_ae(&existing_release, &["--version"])?;
-        return Ok(());
+            &manifest,
+            &artifact_base_url,
+            existing_release,
+        )
+        .await;
     }
     let stage = options.install_root.join(format!(
         ".stage-{}-{}",
@@ -191,22 +161,8 @@ pub async fn install(options: InstallOptions) -> Result<()> {
     let mut stage_lease = StageLease::acquire(stage.clone(), &manifest.product_version)?;
 
     let result = async {
-        let artifact = manifest
-            .artifacts
-            .iter()
-            .find(|artifact| {
-                artifact.platform == options.platform.os
-                    && artifact.architecture == options.platform.arch
-                    && (options.platform.os != "linux"
-                        || artifact.libc.as_deref() == Some(platform_libc()))
-            })
-            .ok_or_else(|| InstallerError::MissingArtifact {
-                component: NATIVE_PAYLOAD_LABEL.to_owned(),
-                target: options.platform.target(),
-            })?;
-        let artifact_url = artifact_base_url
-            .join(&artifact.file_name)
-            .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))?;
+        let artifact = native_artifact(&manifest, &options.platform)?;
+        let artifact_url = artifact_url(&artifact_base_url, artifact)?;
         install_artifact(&client, artifact, artifact_url, &stage).await?;
         // The tree is final: record per-file digests so `ae doctor` can
         // detect payload drift after activation.
@@ -224,41 +180,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             Err(_) => return Err(InstallerError::UnsafeOwnedPath),
         }
         stage_lease.transfer_to(&release)?;
-        let lifecycle_ae = release_cli(&release)?;
-        let existing_protocol = read_existing_protocol(&options.install_root)?;
-        let bootstrap = versioned_installer_path(&release);
-        if !ordinary_file_exists(&bootstrap)? {
-            return Err(InstallerError::MissingInstaller(bootstrap));
-        }
-        root_lock.fence()?;
-        let retirement = retire_for(&options, &release, &lifecycle_ae)?;
-        let stable_ae = install_stable_cli(&root_lock, &options.install_root, &release)?;
-        let protocol = if options.integrations.register_protocol {
-            prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
-        } else {
-            None
-        };
-        let launchers = planned_shortcuts(&options, &stable_ae, &release);
-        root_lock.fence()?;
-        let activation_launchers = shortcut_records(&launchers)?;
-        activate(
-            &root_lock,
-            &options.install_root,
-            &release,
-            &manifest,
-            &options,
-            &ActivationIntegrations {
-                stable_ae: &stable_ae,
-                protocol: protocol.as_ref(),
-                launchers: &activation_launchers,
-            },
-        )?;
-        root_lock.fence()?;
-        if options.integrations.register_protocol {
-            apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
-        }
-        root_lock.fence()?;
-        shortcuts::apply(&launchers)?;
+        let retirement = activate_release(&root_lock, &options, &manifest, &release)?;
         if options.run_setup {
             root_lock.fence()?;
             run_setup_sequence(&release)?;
@@ -270,6 +192,119 @@ pub async fn install(options: InstallOptions) -> Result<()> {
     }
     .await;
     complete_install_locked(&root_lock, &mut stage_lease, result)
+}
+
+/// Adopts an existing `versions/<v>` tree only after the signed release
+/// artifact has been re-downloaded, its checksum verified, and its extracted
+/// tree compared byte for byte with the tree on disk. The tree has no signed
+/// provenance of its own, so re-deriving it is the only sound way to activate
+/// it; an unverifiable or dev-staged tree is refused instead.
+async fn verify_and_activate_existing(
+    root_lock: &InstallerLock,
+    client: &reqwest::Client,
+    options: &InstallOptions,
+    manifest: &crate::manifest::ReleaseManifest,
+    artifact_base_url: &Url,
+    existing_release: PathBuf,
+) -> Result<()> {
+    let stage = options.install_root.join(format!(
+        ".stage-verify-{}-{}",
+        manifest.product_version,
+        std::process::id()
+    ));
+    root_lock.fence()?;
+    let mut stage_lease = StageLease::acquire(stage.clone(), &manifest.product_version)?;
+    let result = async {
+        let artifact = native_artifact(manifest, &options.platform)?;
+        let artifact_url = artifact_url(artifact_base_url, artifact)?;
+        install_artifact(client, artifact, artifact_url, &stage).await?;
+        root_lock.fence()?;
+        crate::payload::verify_existing_against_stage(
+            &existing_release,
+            &stage,
+            artifact,
+            &manifest.product_version,
+        )?;
+        stage_lease.cleanup()?;
+        let retirement = activate_release(root_lock, options, manifest, &existing_release)?;
+        root_lock.fence()?;
+        restore_retired_forge(options, &existing_release, retirement)?;
+        root_lock.fence()?;
+        invoke_ae(&existing_release, &["--version"])
+    }
+    .await;
+    complete_install_locked(root_lock, &mut stage_lease, result)
+}
+
+fn native_artifact<'a>(
+    manifest: &'a crate::manifest::ReleaseManifest,
+    platform: &Platform,
+) -> Result<&'a Artifact> {
+    manifest
+        .artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.platform == platform.os
+                && artifact.architecture == platform.arch
+                && (platform.os != "linux" || artifact.libc.as_deref() == Some(platform_libc()))
+        })
+        .ok_or_else(|| InstallerError::MissingArtifact {
+            component: NATIVE_PAYLOAD_LABEL.to_owned(),
+            target: platform.target(),
+        })
+}
+
+fn artifact_url(base: &Url, artifact: &Artifact) -> Result<Url> {
+    base.join(&artifact.file_name)
+        .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))
+}
+
+/// Performs the shared activation steps for a release tree that has already
+/// been verified: stable CLI installation, protocol and shortcut preparation,
+/// the activation pointer swap, and integration application. Returns the
+/// retirement result so the caller can restore Forge after the final step.
+fn activate_release(
+    root_lock: &InstallerLock,
+    options: &InstallOptions,
+    manifest: &crate::manifest::ReleaseManifest,
+    release: &Path,
+) -> Result<Retirement> {
+    let lifecycle_ae = release_cli(release)?;
+    let existing_protocol = read_existing_protocol(&options.install_root)?;
+    let bootstrap = versioned_installer_path(release);
+    if !ordinary_file_exists(&bootstrap)? {
+        return Err(InstallerError::MissingInstaller(bootstrap));
+    }
+    root_lock.fence()?;
+    let retirement = retire_for(options, release, &lifecycle_ae)?;
+    let stable_ae = install_stable_cli(root_lock, &options.install_root, release)?;
+    let protocol = if options.integrations.register_protocol {
+        prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
+    } else {
+        None
+    };
+    let launchers = planned_shortcuts(options, &stable_ae, release);
+    root_lock.fence()?;
+    let activation_launchers = shortcut_records(&launchers)?;
+    activate(
+        root_lock,
+        &options.install_root,
+        release,
+        manifest,
+        options,
+        &ActivationIntegrations {
+            stable_ae: &stable_ae,
+            protocol: protocol.as_ref(),
+            launchers: &activation_launchers,
+        },
+    )?;
+    root_lock.fence()?;
+    if options.integrations.register_protocol {
+        apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
+    }
+    root_lock.fence()?;
+    shortcuts::apply(&launchers)?;
+    Ok(retirement)
 }
 
 async fn install_artifact(
@@ -544,7 +579,7 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
                 require_identity(&temporary, EntryKind::File, temporary_identity)?;
                 remove_owned_file(&temporary)?;
                 lock.fence()?;
-                integrate_path(&bin)?;
+                path_registry::integrate_path(&bin)?;
                 return Ok(stable);
             }
             require_identity(&stable, EntryKind::File, stable_identity)?;
@@ -560,7 +595,7 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
                         stable_identity,
                     )?;
                     lock.fence()?;
-                    integrate_path(&bin)?;
+                    path_registry::integrate_path(&bin)?;
                     return Ok(stable);
                 }
                 #[cfg(not(windows))]
@@ -578,7 +613,7 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
     }
     std::fs::rename(&temporary, &stable).map_err(io(&stable))?;
     lock.fence()?;
-    integrate_path(&bin)?;
+    path_registry::integrate_path(&bin)?;
     Ok(stable)
 }
 
@@ -635,72 +670,6 @@ fn schedule_stable_cli_replacement(
         .spawn()
         .map_err(|_| InstallerError::LifecycleHelper)?;
     Ok(())
-}
-
-#[cfg(windows)]
-fn integrate_path(bin: &Path) -> Result<()> {
-    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "development build guard: leaving the user PATH untouched instead of registering {}",
-            bin.display()
-        );
-        return Ok(());
-    }
-    let environment = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags(
-            "Environment",
-            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
-        )
-        .map_err(io("HKCU\\Environment"))?;
-    let current: String = environment.get_value("Path").unwrap_or_default();
-    let candidate = bin.display().to_string();
-    let next = prepend_windows_path_entry(&current, &candidate);
-    if next != current {
-        environment
-            .set_value("Path", &next)
-            .map_err(io("HKCU\\Environment\\Path"))?;
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-pub(crate) fn prepend_windows_path_entry(current: &str, candidate: &str) -> String {
-    std::iter::once(candidate)
-        .chain(
-            current
-                .split(';')
-                .filter(|entry| !entry.is_empty() && !entry.eq_ignore_ascii_case(candidate)),
-        )
-        .collect::<Vec<_>>()
-        .join(";")
-}
-
-#[cfg(unix)]
-fn integrate_path(bin: &Path) -> Result<()> {
-    use std::os::unix::fs::symlink;
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "development build guard: leaving ~/.local/bin untouched instead of linking {}",
-            bin.display()
-        );
-        return Ok(());
-    }
-    let home = std::env::var_os("HOME").ok_or(InstallerError::MissingHome)?;
-    let command_bin = PathBuf::from(home).join(".local").join("bin");
-    std::fs::create_dir_all(&command_bin).map_err(io(&command_bin))?;
-    let link = command_bin.join("ae");
-    let target = bin.join("ae");
-    if link.symlink_metadata().is_ok() {
-        if std::fs::read_link(&link).ok().as_deref() == Some(target.as_path()) {
-            return Ok(());
-        }
-        return Err(InstallerError::InvalidInstallation(format!(
-            "refusing to replace existing command at {}",
-            link.display()
-        )));
-    }
-    symlink(target, &link).map_err(io(&link))
 }
 
 pub fn repair(root: &Path) -> Result<()> {
@@ -841,7 +810,7 @@ pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
         }
     }
     root_lock.fence()?;
-    remove_path_integration(&root.join("bin"))?;
+    path_registry::remove_path_integration(&root.join("bin"))?;
     root_lock.fence()?;
     remove_path_in_root(root, &root.join("bin"))?;
     root_lock.fence()?;
@@ -894,56 +863,6 @@ pub fn prepare_update(root: &Path, retirement: Option<RetirementPolicy>) -> Resu
             "prepared update: closed {} editor, stopped {} forge",
             retirement.editors_closed, retirement.forges_stopped
         );
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn remove_path_integration(bin: &Path) -> Result<()> {
-    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "development build guard: leaving the user PATH untouched instead of removing {}",
-            bin.display()
-        );
-        return Ok(());
-    }
-    let environment = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags(
-            "Environment",
-            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
-        )
-        .map_err(io("HKCU\\Environment"))?;
-    let current: String = environment.get_value("Path").unwrap_or_default();
-    let candidate = bin.display().to_string();
-    let next = current
-        .split(';')
-        .filter(|entry| !entry.eq_ignore_ascii_case(&candidate))
-        .collect::<Vec<_>>()
-        .join(";");
-    if next != current {
-        environment
-            .set_value("Path", &next)
-            .map_err(io("HKCU\\Environment\\Path"))?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn remove_path_integration(bin: &Path) -> Result<()> {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "development build guard: leaving ~/.local/bin untouched instead of unlinking {}",
-            bin.display()
-        );
-        return Ok(());
-    }
-    let home = std::env::var_os("HOME").ok_or(InstallerError::MissingHome)?;
-    let link = PathBuf::from(home).join(".local").join("bin").join("ae");
-    if link.symlink_metadata().is_ok()
-        && std::fs::read_link(&link).ok().as_deref() == Some(bin.join("ae").as_path())
-    {
-        std::fs::remove_file(&link).map_err(io(&link))?;
     }
     Ok(())
 }

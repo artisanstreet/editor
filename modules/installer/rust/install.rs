@@ -12,6 +12,7 @@
 //!   recovery, integration records, and validated root cleanup.
 
 mod authority;
+mod path_registry;
 mod state;
 mod workflow;
 
@@ -41,7 +42,7 @@ use {
 };
 
 #[cfg(all(test, windows))]
-use self::workflow::prepend_windows_path_entry;
+use self::path_registry::prepend_windows_path_entry;
 
 #[cfg(test)]
 mod tests {

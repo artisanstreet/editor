@@ -9,6 +9,24 @@ pub enum InstallerError {
     MissingHome,
     #[error("invalid trust key: {0}")]
     InvalidTrustKey(String),
+    #[error(
+        "this development installer build has no embedded trust anchor; pass --public-key or ARTISAN_INSTALLER_PUBLIC_KEY"
+    )]
+    MissingDevelopmentTrustKey,
+    #[error(
+        "this release installer build is pinned to its embedded release key and refuses --public-key/ARTISAN_INSTALLER_PUBLIC_KEY"
+    )]
+    ReleaseTrustOverride,
+    #[error(
+        "this release installer build has no embedded release trust anchor; rebuild with ARTISAN_RELEASE_KEY_ID and ARTISAN_RELEASE_PUBLIC_KEY_HEX"
+    )]
+    MissingReleaseTrustAnchor,
+    #[error("release manifest key id {actual} does not match the pinned release key id {expected}")]
+    UntrustedSigningKey { expected: String, actual: String },
+    #[error("existing release {version} is not verifiable against the signed manifest: {reason}")]
+    UnverifiedRelease { version: String, reason: String },
+    #[error("existing release {version} does not match the signed release artifact")]
+    TamperedRelease { version: String },
     #[error("release manifest request failed: {0}")]
     ManifestRequest(#[source] reqwest::Error),
     #[error("release manifest exceeded the {0}-byte limit")]

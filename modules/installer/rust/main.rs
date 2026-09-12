@@ -79,7 +79,8 @@ struct Arguments {
     #[arg(long, global = true)]
     signature_url: Option<Url>,
 
-    /// Ed25519 public key as 32-byte hexadecimal. Overrides embedded release trust.
+    /// Ed25519 public key as 32-byte hexadecimal. Development builds only:
+    /// release builds refuse this override and use their embedded release key.
     #[arg(long, env = "ARTISAN_INSTALLER_PUBLIC_KEY", global = true)]
     public_key: Option<String>,
 

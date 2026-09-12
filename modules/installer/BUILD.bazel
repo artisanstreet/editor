@@ -8,6 +8,16 @@ load(
 
 exports_files(["Cargo.toml"])
 
+# Release artifact trust: `-c opt` builds select the checked-in pinned release
+# anchor and refuse runtime key overrides. Default (fastbuild/dbg) builds are
+# explicitly development builds with no embedded anchor. See
+# release/trust_anchor.env and RELEASE_TRUST.md.
+config_setting(
+    name = "release_trust",
+    values = {"compilation_mode": "opt"},
+    visibility = ["//visibility:private"],
+)
+
 rust_binary(
     name = "installer",
     srcs = [
@@ -16,6 +26,7 @@ rust_binary(
         "rust/error.rs",
         "rust/install.rs",
         "rust/install/authority.rs",
+        "rust/install/path_registry.rs",
         "rust/install/state.rs",
         "rust/install/workflow.rs",
         "rust/integrations.rs",
@@ -58,7 +69,18 @@ rust_binary(
         "CARGO_PKG_DESCRIPTION": "Standalone cross-platform installer and manager for Artisan Editor",
         "CARGO_PKG_NAME": "ae-installer",
         "CARGO_PKG_VERSION": "0.0.0",
-    },
+    } | select({
+        ":release_trust": {
+            "ARTISAN_INSTALLER_RELEASE": "1",
+        },
+        "//conditions:default": {
+            "ARTISAN_INSTALLER_DEVELOPMENT": "1",
+        },
+    }),
+    rustc_env_files = select({
+        ":release_trust": ["release/trust_anchor.env"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 

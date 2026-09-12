@@ -14,14 +14,17 @@
 //! `modules/cli/rust/payload.rs`; both sides must stay format-compatible.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     path::{Component, Path},
 };
 
+use serde::Deserialize;
+
 use crate::{
     error::{InstallerError, Result, io},
     install::hash_file,
+    manifest::Artifact,
 };
 
 pub const PAYLOAD_MANIFEST_NAME: &str = "payload-manifest.json";
@@ -75,6 +78,157 @@ pub fn write_manifest(root: &Path) -> Result<()> {
     .map_err(InstallerError::InvalidPayload)?;
     file.sync_all().map_err(io(&path))?;
     Ok(())
+}
+
+/// The parsed form of a payload manifest written by [`write_manifest`].
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PayloadManifestDocument {
+    format_version: u8,
+    files: BTreeMap<String, String>,
+}
+
+fn read_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
+    let path = root.join(PAYLOAD_MANIFEST_NAME);
+    let bytes = std::fs::read(&path).map_err(io(&path))?;
+    let document: PayloadManifestDocument =
+        serde_json::from_slice(&bytes).map_err(InstallerError::InvalidPayload)?;
+    if document.format_version != PAYLOAD_MANIFEST_FORMAT_VERSION {
+        return Err(InstallerError::Archive(format!(
+            "unsupported payload manifest format {}",
+            document.format_version
+        )));
+    }
+    for relative in document.files.keys() {
+        if !is_safe_relative(relative) || !is_payload_member(relative) {
+            return Err(invalid_layout(relative));
+        }
+    }
+    Ok(document.files)
+}
+
+/// Proves an existing `versions/<v>` tree is the tree the signed release
+/// artifact produces.
+///
+/// A version directory on disk carries no signature of its own, so it is only
+/// trusted after the signed artifact has been downloaded, its archive checksum
+/// verified, and its extracted stage compared file by file with the existing
+/// tree. The tree's own `payload-manifest.json` must cover exactly the signed
+/// archive entries; any extra, missing, or modified file is refused.
+pub(crate) fn verify_existing_against_stage(
+    existing: &Path,
+    verified_stage: &Path,
+    artifact: &Artifact,
+    version: &str,
+) -> Result<()> {
+    if !artifact
+        .archive_entries
+        .iter()
+        .any(|entry| entry == PAYLOAD_MANIFEST_NAME)
+    {
+        return Err(unverified(
+            version,
+            "the signed artifact does not declare a payload manifest",
+        ));
+    }
+    let expected: BTreeSet<&str> = artifact
+        .archive_entries
+        .iter()
+        .map(String::as_str)
+        .filter(|entry| *entry != PAYLOAD_MANIFEST_NAME)
+        .collect();
+    if expected.is_empty() {
+        return Err(unverified(
+            version,
+            "the signed artifact declares no payload files",
+        ));
+    }
+    let recorded =
+        read_manifest(existing).map_err(|error| unverified(version, error.to_string()))?;
+    if recorded.len() != expected.len()
+        || !recorded.keys().all(|key| expected.contains(key.as_str()))
+    {
+        return Err(tampered(version));
+    }
+    for relative in &expected {
+        let Some(recorded_digest) = recorded.get(*relative) else {
+            return Err(tampered(version));
+        };
+        let actual = hash_file(&existing.join(relative)).map_err(|_| tampered(version))?;
+        if !actual.eq_ignore_ascii_case(recorded_digest) {
+            return Err(tampered(version));
+        }
+        let staged = hash_file(&verified_stage.join(relative))?;
+        if actual != staged {
+            return Err(tampered(version));
+        }
+    }
+    if tree_has_unexpected_files(existing, &expected)
+        .map_err(|error| unverified(version, error.to_string()))?
+    {
+        return Err(tampered(version));
+    }
+    Ok(())
+}
+
+fn unverified(version: &str, reason: impl Into<String>) -> InstallerError {
+    InstallerError::UnverifiedRelease {
+        version: version.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+fn tampered(version: &str) -> InstallerError {
+    InstallerError::TamperedRelease {
+        version: version.to_owned(),
+    }
+}
+
+fn is_payload_member(relative: &str) -> bool {
+    REQUIRED_PAYLOAD_FILES.contains(&relative)
+        || relative.split_once('/').is_some_and(|(directory, member)| {
+            !member.is_empty() && OPTIONAL_PAYLOAD_DIRECTORIES.contains(&directory)
+        })
+}
+
+/// Reports whether the tree contains anything that is neither the payload
+/// manifest nor one of the signed archive entries. Directories are allowed
+/// only when they can contain a signed entry, so an injected namespace or
+/// symlink is refused.
+fn tree_has_unexpected_files(existing: &Path, expected: &BTreeSet<&str>) -> Result<bool> {
+    fn walk(directory: &Path, prefix: &str, expected: &BTreeSet<&str>) -> Result<bool> {
+        for entry in std::fs::read_dir(directory).map_err(io(directory))? {
+            let entry = entry.map_err(io(directory))?;
+            let Ok(name) = entry.file_name().into_string() else {
+                return Ok(true);
+            };
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let file_type = entry.file_type().map_err(io(&entry.path()))?;
+            if file_type.is_symlink() {
+                return Ok(true);
+            }
+            if file_type.is_dir() {
+                let nested_prefix = format!("{relative}/");
+                if !expected
+                    .iter()
+                    .any(|candidate| candidate.starts_with(&nested_prefix))
+                    || walk(&entry.path(), &relative, expected)?
+                {
+                    return Ok(true);
+                }
+            } else if !file_type.is_file()
+                || (relative != PAYLOAD_MANIFEST_NAME && !expected.contains(relative.as_str()))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    walk(existing, "", expected)
 }
 
 fn collect(root: &Path, files: &mut BTreeMap<String, String>) -> Result<()> {
@@ -196,7 +350,14 @@ mod tests {
     use serde::Deserialize;
     use tempfile::tempdir;
 
-    use super::{PAYLOAD_MANIFEST_NAME, REQUIRED_PAYLOAD_FILES, write_manifest};
+    use super::{
+        PAYLOAD_MANIFEST_NAME, REQUIRED_PAYLOAD_FILES, verify_existing_against_stage,
+        write_manifest,
+    };
+    use crate::{
+        error::InstallerError,
+        manifest::{ArchiveFormat, Artifact},
+    };
 
     #[derive(Deserialize)]
     struct Manifest {
@@ -317,5 +478,137 @@ mod tests {
         write_valid_payload(root.path());
         std::fs::create_dir(root.path().join("forge")).expect("empty legacy directory");
         assert!(write_manifest(root.path()).is_err());
+    }
+
+    fn signed_artifact(extra_entries: &[&str]) -> Artifact {
+        let mut archive_entries: Vec<String> = REQUIRED_PAYLOAD_FILES
+            .iter()
+            .map(|entry| (*entry).to_owned())
+            .collect();
+        archive_entries.extend(extra_entries.iter().map(|entry| (*entry).to_owned()));
+        archive_entries.push(PAYLOAD_MANIFEST_NAME.to_owned());
+        Artifact {
+            id: "windows-x64".to_owned(),
+            platform: "windows".to_owned(),
+            architecture: "x64".to_owned(),
+            libc: None,
+            format: ArchiveFormat::Zip,
+            file_name: "artisan-editor-versioned-payload.zip".to_owned(),
+            size: 1,
+            sha256: "0".repeat(64),
+            archive_entries,
+        }
+    }
+
+    fn write_verified_pair(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let existing = root.join("existing");
+        let stage = root.join("stage");
+        write_valid_payload(&existing);
+        write_valid_payload(&stage);
+        write_manifest(&existing).expect("existing manifest");
+        write_manifest(&stage).expect("stage manifest");
+        (existing, stage)
+    }
+
+    #[test]
+    fn existing_tree_matching_the_signed_stage_is_accepted() {
+        let directory = tempdir().expect("temp");
+        let (existing, stage) = write_verified_pair(directory.path());
+        verify_existing_against_stage(&existing, &stage, &signed_artifact(&[]), "1.2.3")
+            .expect("verified existing release");
+    }
+
+    #[test]
+    fn optional_payload_members_are_compared_too() {
+        let directory = tempdir().expect("temp");
+        let (existing, stage) = write_verified_pair(directory.path());
+        for root in [&existing, &stage] {
+            add_member(root, "resources/nested/config.json", b"config");
+            write_manifest(root).expect("manifest with resource");
+        }
+        verify_existing_against_stage(
+            &existing,
+            &stage,
+            &signed_artifact(&["resources/nested/config.json"]),
+            "1.2.3",
+        )
+        .expect("verified optional member");
+    }
+
+    #[test]
+    fn tampered_existing_tree_is_refused_even_with_a_refreshed_manifest() {
+        let directory = tempdir().expect("temp");
+        let (existing, stage) = write_verified_pair(directory.path());
+        std::fs::write(existing.join(REQUIRED_PAYLOAD_FILES[0]), b"tampered")
+            .expect("tamper binary");
+        // A dev-staged or hostile tree can refresh its own manifest. It still
+        // cannot match the tree extracted from the signed artifact.
+        write_manifest(&existing).expect("refreshed manifest");
+
+        let error =
+            verify_existing_against_stage(&existing, &stage, &signed_artifact(&[]), "1.2.3")
+                .expect_err("tampered tree");
+        assert!(matches!(
+            error,
+            InstallerError::TamperedRelease { version } if version == "1.2.3"
+        ));
+    }
+
+    #[test]
+    fn added_file_in_existing_tree_is_refused() {
+        let directory = tempdir().expect("temp");
+        let (existing, stage) = write_verified_pair(directory.path());
+        add_member(&existing, "bin/injected.dll", b"payload");
+
+        let error =
+            verify_existing_against_stage(&existing, &stage, &signed_artifact(&[]), "1.2.3")
+                .expect_err("extra file");
+        assert!(matches!(error, InstallerError::TamperedRelease { .. }));
+    }
+
+    #[test]
+    fn missing_payload_manifest_is_unverifiable() {
+        let directory = tempdir().expect("temp");
+        let (existing, stage) = write_verified_pair(directory.path());
+        std::fs::remove_file(existing.join(PAYLOAD_MANIFEST_NAME)).expect("remove manifest");
+
+        let error =
+            verify_existing_against_stage(&existing, &stage, &signed_artifact(&[]), "1.2.3")
+                .expect_err("missing manifest");
+        assert!(matches!(
+            error,
+            InstallerError::UnverifiedRelease { version, .. } if version == "1.2.3"
+        ));
+    }
+
+    #[test]
+    fn payload_manifest_must_cover_exactly_the_signed_entries() {
+        let directory = tempdir().expect("temp");
+        let (existing, stage) = write_verified_pair(directory.path());
+
+        let error = verify_existing_against_stage(
+            &existing,
+            &stage,
+            &signed_artifact(&["resources/not-installed.json"]),
+            "1.2.3",
+        )
+        .expect_err("manifest that misses a signed entry");
+        assert!(matches!(error, InstallerError::TamperedRelease { .. }));
+    }
+
+    #[test]
+    fn unsafe_payload_manifest_entries_are_unverifiable() {
+        let directory = tempdir().expect("temp");
+        let (existing, stage) = write_verified_pair(directory.path());
+        std::fs::write(
+            existing.join(PAYLOAD_MANIFEST_NAME),
+            br#"{"format_version":1,"files":{"../ae":"00"}}"#,
+        )
+        .expect("unsafe manifest");
+
+        let error =
+            verify_existing_against_stage(&existing, &stage, &signed_artifact(&[]), "1.2.3")
+                .expect_err("unsafe manifest");
+        assert!(matches!(error, InstallerError::UnverifiedRelease { .. }));
     }
 }
