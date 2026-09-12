@@ -31,6 +31,7 @@ use crate::{
 
 use super::claim::drain_interactions;
 use super::dispatch_support::{at_or_after, mint_item_id, mint_patch_id};
+use super::interaction_intent::command_request_intent;
 use super::observation_commit::{
     SubagentCommitCursor, commit_activity_observation, commit_subagent_observation,
 };
@@ -173,6 +174,12 @@ pub(super) async fn consume_turn(
         return true;
     }
     if state.progress_uncertain {
+        // A turn whose durable commit path already failed must not be left
+        // for late lease-expiry recovery: settle the known-incomplete turn
+        // as interrupted now so the failed output is durably surfaced. If
+        // the same unavailable database rejects this settlement too, the
+        // recovery sweep still owns the run.
+        settle_terminal(&context, state, TerminalState::Interrupted).await;
         return false;
     }
     if context.run_cancel.is_cancelled() {
@@ -446,51 +453,6 @@ async fn deliver_applied_response(
     let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
 }
 
-/// Rebuilds the exact intent fingerprint for one delivered envelope command.
-///
-/// Reads nothing but the envelope: the fingerprint must equal the one the
-/// resolve transaction stored.
-fn command_request_intent(
-    state: &TurnConsumptionState<'_>,
-    command: &OwnedInteractionCommand,
-) -> Option<String> {
-    match command {
-        OwnedInteractionCommand::RespondApproval {
-            request_id,
-            approval_id,
-            approved,
-        } => Some(
-            RespondApproval::new(
-                request_id.clone(),
-                state.scope.launched.thread_id.clone(),
-                state.scope.launched.run_id.clone(),
-                approval_id.clone(),
-                *approved,
-            )
-            .intent_key(),
-        ),
-        OwnedInteractionCommand::RespondQuestion {
-            request_id,
-            question_id,
-            answers,
-        } => RespondQuestion::new(
-            request_id.clone(),
-            state.scope.launched.thread_id.clone(),
-            state.scope.launched.run_id.clone(),
-            question_id.clone(),
-            answers.clone(),
-        )
-        .ok()
-        .map(|question| question.intent_key()),
-        OwnedInteractionCommand::Steer { message_id, .. } => {
-            // Stable per message: redelivery under the same request id
-            // reproduces this fingerprint, so ledger dedup holds without
-            // ever consulting provider state.
-            Some(format!("steer:{}", message_id.as_str()))
-        }
-    }
-}
-
 /// Commits one applied resolution as an S1b observation checkpoint batch.
 ///
 /// Encodes the resolved observation under the run's binding with the
@@ -604,7 +566,7 @@ async fn commit_resolution_replace(
         phase: AssistantMessagePhase::Unspecified,
         patch_id,
     }];
-    if !commit_batch_with_retry(CommitBatchRequest {
+    if commit_batch_with_retry(CommitBatchRequest {
         repository: context.repository,
         notifier: &context.config.notifier,
         scope: &state.scope,
@@ -616,6 +578,7 @@ async fn commit_resolution_replace(
         retries: context.config.max_command_retries,
     })
     .await
+    .is_err()
     {
         return false;
     }
@@ -661,7 +624,7 @@ async fn commit_resolution_start(
         body,
         patch_id,
     }];
-    if !commit_batch_with_retry(CommitBatchRequest {
+    if commit_batch_with_retry(CommitBatchRequest {
         repository: context.repository,
         notifier: &context.config.notifier,
         scope: &state.scope,
@@ -673,6 +636,7 @@ async fn commit_resolution_start(
         retries: context.config.max_command_retries,
     })
     .await
+    .is_err()
     {
         return false;
     }
@@ -970,7 +934,7 @@ async fn replace_assistant_body(
         mark_interrupted(state, turn, false);
         return;
     };
-    if !commit_batch_with_retry(CommitBatchRequest {
+    if commit_batch_with_retry(CommitBatchRequest {
         repository: context.repository,
         notifier: &context.config.notifier,
         scope: &state.scope,
@@ -982,6 +946,7 @@ async fn replace_assistant_body(
         retries: context.config.max_command_retries,
     })
     .await
+    .is_err()
     {
         mark_interrupted(state, turn, true);
         return;
@@ -1026,7 +991,7 @@ async fn start_assistant_item(
         mark_interrupted(state, turn, false);
         return;
     };
-    if !commit_batch_with_retry(CommitBatchRequest {
+    if commit_batch_with_retry(CommitBatchRequest {
         repository: context.repository,
         notifier: &context.config.notifier,
         scope: &state.scope,
@@ -1038,6 +1003,7 @@ async fn start_assistant_item(
         retries: context.config.max_command_retries,
     })
     .await
+    .is_err()
     {
         mark_interrupted(state, turn, true);
         return;
@@ -1080,7 +1046,7 @@ async fn append_assistant_delta(
         mark_interrupted(state, turn, false);
         return;
     };
-    if !commit_batch_with_retry(CommitBatchRequest {
+    if commit_batch_with_retry(CommitBatchRequest {
         repository: context.repository,
         notifier: &context.config.notifier,
         scope: &state.scope,
@@ -1092,6 +1058,7 @@ async fn append_assistant_delta(
         retries: context.config.max_command_retries,
     })
     .await
+    .is_err()
     {
         mark_interrupted(state, turn, true);
         return;
@@ -1174,7 +1141,7 @@ async fn ensure_assistant_item(
     let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
         return false;
     };
-    if !commit_batch_with_retry(CommitBatchRequest {
+    if commit_batch_with_retry(CommitBatchRequest {
         repository: context.repository,
         notifier: &context.config.notifier,
         scope: &state.scope,
@@ -1186,6 +1153,7 @@ async fn ensure_assistant_item(
         retries: context.config.max_command_retries,
     })
     .await
+    .is_err()
     {
         return false;
     }

@@ -6,8 +6,11 @@
 //! repository failures, and continuation refusal diagnostics. None of these
 //! touch the database, provider, or dispatcher state.
 
+use std::time::Duration;
+
+use artisan_database::sqlite_write_retry;
 use artisan_database::{
-    LaunchClaimedRunOutcome, RunLaunchError, SessionContinuationIncompatibility,
+    LaunchClaimedRunOutcome, RepositoryError, RunLaunchError, SessionContinuationIncompatibility,
     SessionContinuationIncompatible, SessionContinuationUnavailable,
     SessionContinuationUnavailableReason,
 };
@@ -153,6 +156,159 @@ pub(super) fn is_permanent_configuration_error(error: &artisan_database::Reposit
             | artisan_database::RepositoryError::ProjectNotFound { .. }
             | artisan_database::RepositoryError::ThreadNotFound { .. }
     )
+}
+
+/// Classified disposition of one failed dispatch-claim attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClaimFailureDisposition {
+    /// SQLite writer-lock contention; retry on the shared bounded schedule.
+    WriterContention,
+    /// Any other database failure; retry on the dispatcher backoff interval.
+    Database,
+}
+
+/// Classifies one failed claim attempt.
+///
+/// A database failure can never be mistaken for an empty queue: both
+/// dispositions schedule a bounded retry and the caller surfaces the exact
+/// error, but only writer-lock contention follows the shared exponential
+/// write-retry schedule.
+pub(crate) fn classify_claim_failure(error: &RepositoryError) -> ClaimFailureDisposition {
+    match error {
+        RepositoryError::Database { source, .. }
+            if sqlite_write_retry::is_retryable_write_error(source) =>
+        {
+            ClaimFailureDisposition::WriterContention
+        }
+        _ => ClaimFailureDisposition::Database,
+    }
+}
+
+/// Returns the bounded delay before the next claim attempt.
+///
+/// `completed_failures` is the number of consecutive failures already
+/// observed. Writer contention follows the shared write-retry schedule until
+/// it is exhausted and then keeps retrying on the dispatcher's configured
+/// backoff; every other failure retries on that configured backoff.
+pub(crate) fn claim_failure_backoff(
+    disposition: ClaimFailureDisposition,
+    completed_failures: u32,
+    fallback: Duration,
+) -> Duration {
+    match disposition {
+        ClaimFailureDisposition::WriterContention => {
+            sqlite_write_retry::retry_delay_for(completed_failures).unwrap_or(fallback)
+        }
+        ClaimFailureDisposition::Database => fallback,
+    }
+}
+
+#[cfg(test)]
+mod claim_failure_tests {
+    use std::borrow::Cow;
+    use std::error::Error as StdError;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use sea_orm::sqlx::error::{DatabaseError, ErrorKind};
+    use sea_orm::{DbErr, RuntimeErr};
+
+    use super::{
+        ClaimFailureDisposition, RepositoryError, claim_failure_backoff, classify_claim_failure,
+    };
+
+    #[derive(Debug)]
+    struct FakeDatabaseError {
+        code: i32,
+    }
+
+    impl std::fmt::Display for FakeDatabaseError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "(code: {}) database is locked", self.code)
+        }
+    }
+
+    impl StdError for FakeDatabaseError {}
+
+    impl DatabaseError for FakeDatabaseError {
+        fn message(&self) -> &'static str {
+            "database is locked"
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Owned(self.code.to_string()))
+        }
+
+        fn as_error(&self) -> &(dyn StdError + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn StdError + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn StdError + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
+
+    fn driver_error(code: i32) -> RepositoryError {
+        RepositoryError::Database {
+            operation: "claim next message dispatch",
+            source: DbErr::Exec(RuntimeErr::SqlxError(Arc::new(
+                sea_orm::sqlx::Error::Database(Box::new(FakeDatabaseError { code })),
+            ))),
+        }
+    }
+
+    #[test]
+    fn writer_contention_follows_the_shared_schedule_then_the_fallback() {
+        let fallback = Duration::from_millis(250);
+        let error = driver_error(517);
+
+        assert_eq!(
+            classify_claim_failure(&error),
+            ClaimFailureDisposition::WriterContention
+        );
+        assert_eq!(
+            claim_failure_backoff(ClaimFailureDisposition::WriterContention, 0, fallback),
+            Duration::from_millis(5)
+        );
+        assert_eq!(
+            claim_failure_backoff(ClaimFailureDisposition::WriterContention, 7, fallback),
+            Duration::from_millis(640)
+        );
+        assert_eq!(
+            claim_failure_backoff(ClaimFailureDisposition::WriterContention, 8, fallback),
+            fallback
+        );
+    }
+
+    #[test]
+    fn other_database_failures_use_the_configured_fallback() {
+        let fallback = Duration::from_millis(250);
+
+        for error in [
+            driver_error(19),
+            RepositoryError::Database {
+                operation: "claim next message dispatch",
+                source: DbErr::Query(RuntimeErr::Internal("syntax error".to_owned())),
+            },
+        ] {
+            assert_eq!(
+                classify_claim_failure(&error),
+                ClaimFailureDisposition::Database
+            );
+            assert_eq!(
+                claim_failure_backoff(ClaimFailureDisposition::Database, 0, fallback),
+                fallback
+            );
+        }
+    }
 }
 
 #[cfg(test)]

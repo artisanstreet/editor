@@ -554,7 +554,11 @@ rust_test(
     name = "sqlite_write_retry_policy_test",
     srcs = ["sqlite_write_retry_policy.rs"],
     crate_name = "sqlite_write_retry_policy_test",
-    deps = ["//modules/backend:backend"],
+    deps = [
+        "//modules/backend:backend",
+        "//modules/database:database",
+        "@crates//:sea-orm",
+    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",

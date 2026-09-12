@@ -1,27 +1,22 @@
-//! Dependency-free SQLite write-retry classification and schedule policy.
+//! SQLite write-retry classification and the shared retry schedule.
 //!
-//! The TypeScript persistence boundary owns the concrete Effect SQL and
-//! Drizzle error values. This module receives only typed observations of
-//! those values and returns deterministic decisions. It never sleeps,
-//! executes an operation, performs database I/O, or depends on either
-//! JavaScript library.
+//! The module receives typed observations of database failures and returns
+//! deterministic decisions. It never sleeps, executes an operation, or
+//! performs database I/O. The concrete bounded schedule is owned by the
+//! database crate's [`artisan_database::sqlite_write_retry`] module and
+//! re-exported here so the dispatcher's retry boundary and the repository's
+//! transaction boundary share exactly one policy.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
 use std::time::Duration;
 
-const INITIAL_RETRY_DELAY_MILLIS: u64 = 5;
-const MAX_RETRY_DELAY_MILLIS: u64 = 1_000;
+use sea_orm::DbErr;
 
-/// The initial delay for the first scheduled SQLite write retry.
-pub const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(INITIAL_RETRY_DELAY_MILLIS);
-
-/// The largest delay produced by the exponential retry schedule.
-pub const MAX_RETRY_DELAY: Duration = Duration::from_millis(MAX_RETRY_DELAY_MILLIS);
-
-/// The number of retry repetitions admitted by the bounded schedule.
-pub const MAX_RETRY_REPETITIONS: u32 = 8;
+pub use artisan_database::sqlite_write_retry::{
+    INITIAL_RETRY_DELAY, MAX_RETRY_DELAY, MAX_RETRY_REPETITIONS, exponential_retry_delay,
+};
 
 /// An observation supplied by the concrete database boundary.
 ///
@@ -67,6 +62,16 @@ impl SqliteWriteErrorObservation {
     /// Creates an observation for an ordinary unrelated error.
     pub const fn ordinary() -> Self {
         Self::Ordinary
+    }
+
+    /// Observes a database failure raised by the Rust persistence boundary.
+    ///
+    /// The driver's extended SQLite result code is reduced to its primary
+    /// code, so every `SQLITE_BUSY` shape (including `SQLITE_BUSY_SNAPSHOT`)
+    /// and every `SQLITE_LOCKED` shape is retryable while every other failure
+    /// is not.
+    pub fn from_db_error(error: &DbErr) -> Self {
+        Self::direct_sql(artisan_database::sqlite_write_retry::is_retryable_write_error(error))
     }
 
     /// Returns whether this observation is retryable under the SQL seam.
@@ -173,35 +178,18 @@ impl CauseReasonObservation {
     }
 }
 
-/// Returns the capped exponential delay for a zero-based schedule repetition.
-///
-/// Repetition zero is five milliseconds. Each following repetition doubles
-/// the delay until the one-second cap. The calculation remains bounded even
-/// for a repetition value greater than the retry schedule admits.
-#[must_use]
-pub const fn exponential_retry_delay(repetition: u32) -> Duration {
-    let exponent = if repetition > 8 { 8 } else { repetition };
-    let uncapped_milliseconds = INITIAL_RETRY_DELAY_MILLIS << exponent;
-    let milliseconds = if uncapped_milliseconds > MAX_RETRY_DELAY_MILLIS {
-        MAX_RETRY_DELAY_MILLIS
-    } else {
-        uncapped_milliseconds
-    };
-    Duration::from_millis(milliseconds)
-}
-
 /// Returns the delay for an admitted retry repetition.
 ///
 /// The schedule admits exactly [`MAX_RETRY_REPETITIONS`] repetitions, indexed
 /// from zero. Once that bound is reached, no delay is scheduled and `None` is
 /// returned.
+///
+/// The concrete schedule is owned by the database crate's
+/// [`artisan_database::sqlite_write_retry`] module and re-exported here so
+/// this policy and the repository transaction boundary share one schedule.
 #[must_use]
 pub const fn retry_delay_for(repetition: u32) -> Option<Duration> {
-    if repetition < MAX_RETRY_REPETITIONS {
-        Some(exponential_retry_delay(repetition))
-    } else {
-        None
-    }
+    artisan_database::sqlite_write_retry::retry_delay_for(repetition)
 }
 
 /// The deterministic result of classifying one failure at one retry boundary.

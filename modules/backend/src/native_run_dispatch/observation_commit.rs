@@ -112,7 +112,7 @@ pub(crate) async fn commit_subagent_observation(
             phase: AssistantMessagePhase::Unspecified,
             patch_id: &patch_id,
         }];
-        if !commit_batch_with_retry(CommitBatchRequest {
+        if commit_batch_with_retry(CommitBatchRequest {
             repository,
             notifier: &config.notifier,
             scope: &cursor.scope,
@@ -124,6 +124,7 @@ pub(crate) async fn commit_subagent_observation(
             retries: config.max_command_retries,
         })
         .await
+        .is_err()
         {
             return false;
         }
@@ -144,7 +145,7 @@ pub(crate) async fn commit_subagent_observation(
             body: &body,
             patch_id: &patch_id,
         }];
-        if !commit_batch_with_retry(CommitBatchRequest {
+        if commit_batch_with_retry(CommitBatchRequest {
             repository,
             notifier: &config.notifier,
             scope: &cursor.scope,
@@ -156,6 +157,7 @@ pub(crate) async fn commit_subagent_observation(
             retries: config.max_command_retries,
         })
         .await
+        .is_err()
         {
             return false;
         }
@@ -284,7 +286,7 @@ pub(crate) async fn commit_activity_observation(
             phase: AssistantMessagePhase::Unspecified,
             patch_id: &patch_id,
         }];
-        if !commit_batch_with_retry(CommitBatchRequest {
+        if commit_batch_with_retry(CommitBatchRequest {
             repository,
             notifier: &config.notifier,
             scope: &cursor.scope,
@@ -296,6 +298,7 @@ pub(crate) async fn commit_activity_observation(
             retries: config.max_command_retries,
         })
         .await
+        .is_err()
         {
             return false;
         }
@@ -316,7 +319,7 @@ pub(crate) async fn commit_activity_observation(
             body: &body,
             patch_id: &patch_id,
         }];
-        if !commit_batch_with_retry(CommitBatchRequest {
+        if commit_batch_with_retry(CommitBatchRequest {
             repository,
             notifier: &config.notifier,
             scope: &cursor.scope,
@@ -328,6 +331,7 @@ pub(crate) async fn commit_activity_observation(
             retries: config.max_command_retries,
         })
         .await
+        .is_err()
         {
             return false;
         }

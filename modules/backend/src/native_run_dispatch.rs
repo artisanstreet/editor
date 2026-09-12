@@ -18,9 +18,8 @@ use std::{
 };
 
 use artisan_database::{
-    AssistantChange, ClaimMessageDispatch, ClaimedMessageDispatch, CommitRunBatch,
-    CommitRunBatchOutcome, LaunchedRunReceipt, Repository, RunBatchScope, RunLaunchCredentials,
-    RunStartKey,
+    ClaimMessageDispatch, ClaimedMessageDispatch, LaunchedRunReceipt, Repository,
+    RunLaunchCredentials, RunStartKey,
 };
 use artisan_domain::{EngineId, ItemId, PatchId, RootPath, RunId, TurnId, UnixMillis};
 use artisan_native_engine::{
@@ -47,10 +46,14 @@ use crate::{
 
 #[path = "native_run_dispatch/claim.rs"]
 mod claim;
+#[path = "native_run_dispatch/commit_retry.rs"]
+mod commit_retry;
 #[path = "native_run_dispatch/dispatch_policy.rs"]
 mod dispatch_policy;
 #[path = "native_run_dispatch/dispatch_support.rs"]
 mod dispatch_support;
+#[path = "native_run_dispatch/interaction_intent.rs"]
+mod interaction_intent;
 #[path = "native_run_dispatch/observation_commit.rs"]
 mod observation_commit;
 #[path = "native_run_dispatch/recovery.rs"]
@@ -65,12 +68,15 @@ mod turn;
 #[cfg(test)]
 use claim::launch_claim;
 use claim::{execute_claim, fail_claim, requeue_claim};
+pub(crate) use commit_retry::{CommitBatchRequest, commit_batch_with_retry};
+#[cfg(test)]
 pub(crate) use dispatch_policy::notify_after_commit;
 #[cfg(test)]
 pub(crate) use dispatch_policy::{
     LaunchAuthority, PromptAuthorization, SettingsLoadDecision, classify_launch_result,
     classify_settings_load, prompt_authorization_after_binding,
 };
+use dispatch_policy::{claim_failure_backoff, classify_claim_failure};
 use dispatch_support::{
     add_duration, at_or_after, claim_renew_interval, mint_dispatch_owner, mint_item_id,
     mint_patch_id, wait_for_next_claim, wall_clock,
@@ -602,6 +608,7 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
     // quarantines a retained child. Keep its activity lease until owner
     // shutdown proves that custody has resolved.
     let mut retained_activity = Vec::new();
+    let mut claim_failures = 0_u32;
     loop {
         if stop.is_cancelled() || process_cancel.is_cancelled() {
             break;
@@ -658,12 +665,31 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
             claimed_at,
             lease_expires_at,
         };
-        let Ok(Some(claimed)) = repository.claim_next_message_dispatch(claim).await else {
-            drop(activity_lease);
-            if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
-                break;
+        let claimed = match repository.claim_next_message_dispatch(claim).await {
+            Ok(Some(claimed)) => {
+                claim_failures = 0;
+                claimed
             }
-            continue;
+            Ok(None) => {
+                claim_failures = 0;
+                drop(activity_lease);
+                if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
+                    break;
+                }
+                continue;
+            }
+            Err(error) => {
+                drop(activity_lease);
+                let disposition = classify_claim_failure(&error);
+                let backoff =
+                    claim_failure_backoff(disposition, claim_failures, config.retry_backoff);
+                claim_failures = claim_failures.saturating_add(1);
+                eprintln!("native run dispatch claim attempt failed ({disposition:?}): {error}");
+                if !wait_for_next_claim(&stop, &process_cancel, backoff).await {
+                    break;
+                }
+                continue;
+            }
         };
         if let Some(lease) = Box::pin(execute_claim(
             ClaimExecution {
@@ -847,65 +873,6 @@ enum ClaimCustody {
 struct RetainedActivity {
     _activity: ActivityLease,
     _cancellation: RunCancellationLease,
-}
-
-struct CommitBatchRequest<'a> {
-    repository: &'a Repository,
-    notifier: &'a ConversationCommitNotifier,
-    scope: &'a RunBatchScope<'a>,
-    batch_sequence: i64,
-    operated_at: UnixMillis,
-    activate_turn_patch_id: Option<&'a PatchId>,
-    changes: &'a [AssistantChange<'a>],
-    checkpoint: artisan_database::CheckpointUpdate<'a>,
-    retries: std::num::NonZeroUsize,
-}
-
-async fn commit_batch_with_retry(request: CommitBatchRequest<'_>) -> bool {
-    let CommitBatchRequest {
-        repository,
-        notifier,
-        scope,
-        batch_sequence,
-        operated_at,
-        activate_turn_patch_id,
-        changes,
-        checkpoint,
-        retries,
-    } = request;
-    for _ in 0..retries.get() {
-        let result = repository
-            .commit_run_batch(CommitRunBatch {
-                scope: RunBatchScope {
-                    claimed: scope.claimed,
-                    launched: scope.launched,
-                    bound: scope.bound,
-                    run_start_key: scope.run_start_key,
-                    credentials: scope.credentials,
-                    expected_launch_at: scope.expected_launch_at,
-                    expected_updated_at: scope.expected_updated_at,
-                },
-                batch_sequence,
-                operated_at,
-                activate_turn_patch_id,
-                changes,
-                checkpoint,
-            })
-            .await;
-        if notify_after_commit(
-            matches!(
-                result,
-                Ok(CommitRunBatchOutcome::Committed(_)
-                    | CommitRunBatchOutcome::AlreadyCommitted(_))
-            ),
-            || {
-                let _ = notifier.publish(&scope.launched.thread_id);
-            },
-        ) {
-            return true;
-        }
-    }
-    false
 }
 
 #[cfg(test)]
