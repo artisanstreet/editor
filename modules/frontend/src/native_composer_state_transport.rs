@@ -30,6 +30,11 @@ pub(crate) const COMPOSER_STATE_READ_LIMIT: usize = artisan_domain::QUEUED_MESSA
 /// One bounded command sent from the application thread to the service child.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ComposerStateCommand {
+    /// Read usage for a settled footer, independently of the composer model.
+    ReadFooterUsage {
+        /// Exact immutable thread and run scope.
+        query: artisan_domain::ReadRunUsage,
+    },
     /// Read one bounded, byte-free queue page for the mounted scope.
     ListQueuedMessages {
         /// Thread whose still-queued rows are requested.
@@ -79,6 +84,13 @@ pub enum ComposerStateCommand {
 /// One bounded event returned by the service child.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ComposerStateEvent {
+    /// Optional exact-run footer measurement; failures remain absent.
+    FooterUsage {
+        /// Immutable requested scope.
+        query: artisan_domain::ReadRunUsage,
+        /// No result means the read failed.
+        result: Option<RunUsageResult>,
+    },
     /// Authoritative byte-free queue listing.
     QueuedMessages {
         /// Thread requested by the application.
@@ -208,6 +220,10 @@ pub(super) async fn handle_composer_state_command(
         } => withdraw_queued_message(runtime, frames, events, generation, *command).await,
         ComposerStateCommand::ReadRecalledMessage { generation, query } => {
             read_recalled_message(runtime, frames, events, generation, query).await
+        }
+        ComposerStateCommand::ReadFooterUsage { query } => {
+            let result = query_run_usage(runtime, frames, &query).await.ok();
+            publish_composer_event(events, ComposerStateEvent::FooterUsage { query, result })
         }
         ComposerStateCommand::ReadRunUsage {
             generation,

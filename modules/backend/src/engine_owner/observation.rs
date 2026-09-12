@@ -37,10 +37,15 @@ pub(crate) struct TextDelta {
     chunk_id: String,
     part_id: Option<String>,
     delta: String,
+    received_at: std::time::Instant,
 }
 
 #[allow(dead_code)]
 impl TextDelta {
+    pub(crate) fn received_at(&self) -> std::time::Instant {
+        self.received_at
+    }
+
     #[must_use]
     pub(crate) fn run_id(&self) -> &RunId {
         &self.run_id
@@ -95,6 +100,7 @@ pub(crate) fn chunk_text(
     if text.is_empty() {
         return Vec::new();
     }
+    let received_at = std::time::Instant::now();
     let mut out = Vec::new();
     let mut chunk_start = 0usize;
     let mut current_len = 0usize;
@@ -111,6 +117,7 @@ pub(crate) fn chunk_text(
                 chunk_id,
                 part_id: None,
                 delta,
+                received_at,
             });
             chunk_index += 1;
             chunk_start = byte_idx;
@@ -128,6 +135,7 @@ pub(crate) fn chunk_text(
             chunk_id,
             part_id: None,
             delta,
+            received_at,
         });
     }
     out

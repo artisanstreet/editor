@@ -107,6 +107,10 @@ fn encode_run_usage_report(
         value.context_window_tokens(),
     );
     builder.set_observed_at_millis(value.observed_at().as_millis());
+    encode_optional_u64(
+        builder.reborrow().init_streaming_millitokens_per_second(),
+        value.streaming_millitokens_per_second().map(u64::from),
+    );
 }
 
 fn decode_run_usage_report(
@@ -165,6 +169,15 @@ fn decode_run_usage_report(
         value.get_context_window_tokens()?,
         "response.runUsage.report.contextWindowTokens",
     )?;
+    let speed = decode_optional_u64(
+        value.get_streaming_millitokens_per_second()?,
+        "response.runUsage.report.streamingMillitokensPerSecond",
+    )?
+    .map(u32::try_from)
+    .transpose()
+    .map_err(|_| ComposerStateCodecError::Usage {
+        field: "response.runUsage.report.streamingMillitokensPerSecond",
+    })?;
     RunUsageReport::new(RunUsageReportInput {
         run_id: run_id.clone(),
         thread_id: thread_id.clone(),
@@ -182,6 +195,7 @@ fn decode_run_usage_report(
         context_window_tokens,
         observed_at: UnixMillis::from_millis(value.get_observed_at_millis()),
     })
+    .map(|report| report.with_streaming_speed(speed))
     .map_err(|_| ComposerStateCodecError::Usage {
         field: "response.runUsage.report",
     })

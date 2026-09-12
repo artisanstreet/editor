@@ -341,6 +341,15 @@ fn usage_result() -> RunUsageResult {
 }
 
 #[test]
+fn observed_streaming_speed_round_trips_separately_from_provider_counts() {
+    let mut original = usage_result();
+    original.report = original
+        .report
+        .map(|report| report.with_streaming_speed(Some(51_234)));
+    assert_eq!(round_trip_usage(&original), original);
+}
+
+#[test]
 fn usage_round_trip_preserves_absent_vs_zero_and_optional_identity_fields() {
     let original = usage_result();
     let received = round_trip_usage(&original);

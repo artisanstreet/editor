@@ -75,6 +75,8 @@ pub(super) struct TurnConsumptionState<'a> {
     pub(super) assistant_body: String,
     /// Byte-exact append fragments waiting for one coalesced batch commit.
     pub(super) coalescer: DeltaCoalescer,
+    pub(super) last_usage: Option<artisan_domain::RunUsageReport>,
+    pub(super) streaming_speed: super::streaming_speed::StreamingSpeed,
     pub(super) batch_sequence: i64,
     pub(super) forced_interrupted: bool,
     pub(super) forced_cancelled: bool,
@@ -92,6 +94,8 @@ impl<'a> TurnConsumptionState<'a> {
             assistant_parts: OrderedAssistantText::default(),
             assistant_body: String::new(),
             coalescer: DeltaCoalescer::default(),
+            last_usage: None,
+            streaming_speed: super::streaming_speed::StreamingSpeed::default(),
             batch_sequence: 1,
             forced_interrupted: false,
             forced_cancelled: false,
@@ -217,6 +221,14 @@ pub(super) async fn consume_turn(
     if !ensure_assistant_item(&context, &mut state).await {
         return false;
     }
+    if let Some(report) = &state.last_usage {
+        // Optional display metadata must never turn a successful response into
+        // a failed run. The provider counters were already committed above.
+        let _ = context
+            .repository
+            .record_run_streaming_speed(report, state.streaming_speed.rate())
+            .await;
+    }
     settle_terminal(&context, state, terminal).await;
     false
 }
@@ -239,9 +251,13 @@ pub(super) async fn handle_observation(
 ) {
     match observation {
         EngineObservation::TextDelta(delta) => {
+            if delta.run_id() == &state.scope.launched.run_id {
+                state.streaming_speed.push(&delta);
+            }
             handle_text_delta(context, state, turn, delta).await;
         }
         EngineObservation::TextSnapshot(snapshot) => {
+            state.streaming_speed.end_interval();
             handle_text_snapshot(context, state, turn, snapshot).await;
         }
         EngineObservation::Usage(usage) => {
@@ -260,6 +276,7 @@ pub(super) async fn handle_observation(
             handle_subagent_transcript_row(context, state, turn, row).await;
         }
         EngineObservation::Activity(observation) => {
+            state.streaming_speed.end_interval();
             handle_activity_observation(context, state, turn, observation).await;
         }
     }
@@ -857,6 +874,7 @@ async fn handle_usage(
     usage: UsageObservation,
 ) {
     let report = usage.report();
+    state.last_usage = Some(report.clone());
     if report.run_id() != &state.scope.launched.run_id
         || report.thread_id() != &state.scope.launched.thread_id
         || context
@@ -899,6 +917,7 @@ async fn handle_text_snapshot(
     if next_body == current {
         return;
     }
+    state.streaming_speed = super::streaming_speed::StreamingSpeed::default();
     state.assistant_body = next_body;
     if state.assistant_item.is_none() {
         // An ended-only part is a first durable body, not a text delta. Start

@@ -34,6 +34,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 zeroize.workspace = true
 command-group.workspace = true
+tiktoken-rs = "0.12.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 native-dialog.workspace = true

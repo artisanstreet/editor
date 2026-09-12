@@ -539,6 +539,7 @@ fn settled_toolbar_stays_in_the_message_column_and_short_chat_does_not_scroll(
         cx.add_window_view(|_, cx| ConversationSurface::new(transcript, ThemeMode::Dark, cx));
     surface.update(cx, |surface, cx| {
         surface.set_footer_relative_age(&turn_id("turn_a"), "1h ago".to_owned(), cx);
+        surface.set_footer_speed(&turn_id("turn_a"), Some("51.2 tok/s".to_owned()), cx);
     });
     cx.simulate_resize(size(px(720.0), px(600.0)));
     settle(cx);

@@ -80,6 +80,7 @@ rust_library(
         "src/lifecycle_control.rs",
         "src/listener.rs",
         "src/native_run_dispatch.rs",
+        "src/native_run_dispatch/streaming_speed.rs",
         "src/composer_catalog_service.rs",
         "src/native_model_catalog.rs",
         "src/orchestration_intake_policy.rs",
@@ -204,6 +205,7 @@ rust_library(
         "@crates//:sea-orm",
         "@crates//:serde_json",
         "@crates//:thiserror",
+        "@crates//:tiktoken-rs",
         "@crates//:tokio",
         "@crates//:zeroize",
     ] + select({

@@ -686,6 +686,8 @@ pub fn footer_settlement(block: &TurnFooterBlock) -> Option<&TurnFooterSettlemen
 pub struct TurnFooterMirror {
     /// Adapter-formatted relative age; empty until the host samples a clock.
     pub relative_age: String,
+    /// Conservative throughput estimate; absent when measurement is unreliable.
+    pub token_speed: Option<String>,
     /// Reader-facing copy status; empty unless a clipboard write failed.
     pub copy_message: String,
     /// Local feedback starts only after the clipboard adapter reports success.

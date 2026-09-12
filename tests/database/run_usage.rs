@@ -312,6 +312,14 @@ async fn usage_survives_restart_and_returns_the_highest_sequence() {
         matches!(second_result, Ok(RecordRunUsageOutcome::Replaced(_))),
         "{second_result:?}"
     );
+    repository
+        .record_run_streaming_speed(&second, Some(51_234))
+        .await
+        .expect("final sample writes after provider usage");
+    repository
+        .record_run_streaming_speed(&first, Some(9_999))
+        .await
+        .expect("stale sample is a no-op");
     drop(repository);
     database.close().await.expect("close SQLite before restart");
 
@@ -323,6 +331,7 @@ async fn usage_survives_restart_and_returns_the_highest_sequence() {
         .expect("usage should exist after restart");
     assert_eq!(latest.source_sequence(), 5);
     assert_eq!(latest.input_tokens(), Some(11));
+    assert_eq!(latest.streaming_millitokens_per_second(), Some(51_234));
     drop(reopened);
     reopened_database
         .close()

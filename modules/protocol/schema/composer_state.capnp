@@ -173,6 +173,8 @@ struct RunUsageReport {
   contextTokens @10 :OptionalUInt64;
   contextWindowTokens @11 :OptionalUInt64;
   observedAtMillis @12 :Int64;
+  # Observed o200k visible-text estimate; absent for historical/unmeasurable output.
+  streamingMillitokensPerSecond @13 :OptionalUInt64;
 }
 
 struct RunUsageResult {

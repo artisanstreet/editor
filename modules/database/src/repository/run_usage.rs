@@ -17,11 +17,11 @@ use crate::entities;
 
 use super::{Repository, RepositoryError, database_error};
 
-const SELECT_USAGE_SQL: &str = "SELECT thread_id, generation, provider_session_id, source_sequence, basis, provider_turn_id, model_id, provider_route_id, variant_id, input_tokens, cached_input_tokens, output_tokens, context_tokens, context_window_tokens, observed_at_ms FROM run_usage WHERE run_id = ?";
+const SELECT_USAGE_SQL: &str = "SELECT thread_id, generation, provider_session_id, source_sequence, basis, provider_turn_id, model_id, provider_route_id, variant_id, input_tokens, cached_input_tokens, output_tokens, context_tokens, context_window_tokens, observed_at_ms, streaming_millitokens_per_second FROM run_usage WHERE run_id = ?";
 
-const INSERT_USAGE_SQL: &str = "INSERT INTO run_usage (run_id, thread_id, generation, provider_session_id, source_sequence, basis, provider_turn_id, model_id, provider_route_id, variant_id, input_tokens, cached_input_tokens, output_tokens, context_tokens, context_window_tokens, observed_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING";
+const INSERT_USAGE_SQL: &str = "INSERT INTO run_usage (run_id, thread_id, generation, provider_session_id, source_sequence, basis, provider_turn_id, model_id, provider_route_id, variant_id, input_tokens, cached_input_tokens, output_tokens, context_tokens, context_window_tokens, observed_at_ms, streaming_millitokens_per_second) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING";
 
-const UPDATE_USAGE_SQL: &str = "UPDATE run_usage SET provider_session_id = ?, source_sequence = ?, basis = ?, provider_turn_id = ?, model_id = ?, provider_route_id = ?, variant_id = ?, input_tokens = ?, cached_input_tokens = ?, output_tokens = ?, context_tokens = ?, context_window_tokens = ?, observed_at_ms = ? WHERE run_id = ? AND thread_id = ? AND generation = ? AND provider_session_id = ? AND source_sequence = ? AND source_sequence < ?";
+const UPDATE_USAGE_SQL: &str = "UPDATE run_usage SET provider_session_id = ?, source_sequence = ?, basis = ?, provider_turn_id = ?, model_id = ?, provider_route_id = ?, variant_id = ?, input_tokens = ?, cached_input_tokens = ?, output_tokens = ?, context_tokens = ?, context_window_tokens = ?, observed_at_ms = ?, streaming_millitokens_per_second = ? WHERE run_id = ? AND thread_id = ? AND generation = ? AND provider_session_id = ? AND source_sequence = ? AND source_sequence < ?";
 
 /// Borrowed input for one provider usage write.
 pub struct RecordRunUsage<'a> {
@@ -174,6 +174,30 @@ impl Repository {
             }
             Err(error) => rollback_with_error(transaction, error).await,
         }
+    }
+
+    /// Attaches the final observed text rate without changing provider counters.
+    /// The exact run, thread, session and source sequence must still match.
+    ///
+    /// # Errors
+    /// Returns a repository error if the bounded update fails.
+    pub async fn record_run_streaming_speed(
+        &self,
+        report: &RunUsageReport,
+        rate: Option<u32>,
+    ) -> Result<(), RunUsageRepositoryError> {
+        self.database.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE run_usage SET streaming_millitokens_per_second = ? WHERE run_id = ? AND thread_id = ? AND provider_session_id = ? AND source_sequence = ? AND generation = (SELECT generation FROM assistant_runs WHERE run_id = ?)",
+            vec![
+                Value::BigInt(rate.filter(|rate| *rate > 0).map(i64::from)),
+                report.run_id().as_str().into(), report.thread_id().as_str().into(),
+                report.provider_session_id().into(),
+                Value::BigInt(i64::try_from(report.source_sequence()).ok()),
+                report.run_id().as_str().into(),
+            ],
+        )).await.map_err(|source| repository_error(database_error("record observed streaming speed", source)))?;
+        Ok(())
     }
 
     /// Reads the current (highest accepted provider sequence) usage for an
@@ -494,6 +518,12 @@ fn decode_usage_row(
     let context_window_tokens = raw_optional_i64(row, 13, run_id)?;
     let observed_at = UnixMillis::from_millis(raw_i64(row, 14, run_id)?);
 
+    let speed = raw_optional_i64(row, 15, run_id)?
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| RunUsageRepositoryError::CorruptUsageRow {
+            run_id: run_id.clone(),
+        })?;
     RunUsageReport::new(RunUsageReportInput {
         run_id: run_id.clone(),
         thread_id: thread_id.clone(),
@@ -511,6 +541,7 @@ fn decode_usage_row(
         context_window_tokens: bounded_token(context_window_tokens, run_id)?,
         observed_at,
     })
+    .map(|report| report.with_streaming_speed(speed))
     .map_err(|_| RunUsageRepositoryError::CorruptUsageRow {
         run_id: run_id.clone(),
     })
@@ -538,6 +569,7 @@ fn insert_values(
         optional_token_value(report.context_tokens(), run_id)?,
         optional_token_value(report.context_window_tokens(), run_id)?,
         Value::BigInt(Some(report.observed_at().as_millis())),
+        Value::BigInt(report.streaming_millitokens_per_second().map(i64::from)),
     ])
 }
 
@@ -563,6 +595,7 @@ fn update_values(
         optional_token_value(report.context_tokens(), run_id)?,
         optional_token_value(report.context_window_tokens(), run_id)?,
         Value::BigInt(Some(report.observed_at().as_millis())),
+        Value::BigInt(report.streaming_millitokens_per_second().map(i64::from)),
         string_value(run_id.as_str()),
         string_value(thread_id.as_str()),
         Value::BigInt(Some(generation)),

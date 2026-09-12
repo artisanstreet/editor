@@ -1,5 +1,5 @@
 {
-  "checksum": "8e6018bdfd21cd9f9965b230526c79e59a47502d7ee4fb02cd701e07bb7df5fb",
+  "checksum": "aa13549854a118b08bdf27e7f9ea590ee922f6daae67daf2997be8443497f6c6",
   "crates": {
     "accesskit 0.24.1": {
       "name": "accesskit",
@@ -2730,6 +2730,10 @@
             {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
+            },
+            {
+              "id": "tiktoken-rs 0.12.0",
+              "target": "tiktoken_rs"
             },
             {
               "id": "tokio 1.53.1",
@@ -7069,6 +7073,67 @@
       "license": "Apache-2.0",
       "license_ids": [
         "Apache-2.0"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "bstr 1.13.1": {
+      "name": "bstr",
+      "version": "1.13.1",
+      "package_url": "https://github.com/BurntSushi/bstr",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/bstr/1.13.1/download",
+          "sha256": "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "bstr",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "bstr",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "alloc",
+            "default",
+            "std",
+            "unicode"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "memchr 2.8.3",
+              "target": "memchr"
+            },
+            {
+              "id": "regex-automata 0.4.18",
+              "target": "regex_automata"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "1.13.1"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
       ],
       "license_file": "LICENSE-APACHE"
     },
@@ -14440,6 +14505,71 @@
         },
         "edition": "2018",
         "version": "0.16.2"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
+    },
+    "fancy-regex 0.17.0": {
+      "name": "fancy-regex",
+      "version": "0.17.0",
+      "package_url": "https://github.com/fancy-regex/fancy-regex",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/fancy-regex/0.17.0/download",
+          "sha256": "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "fancy_regex",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "fancy_regex",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "default",
+            "perf",
+            "std",
+            "unicode",
+            "variable-lookbehinds"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "bit-set 0.8.0",
+              "target": "bit_set"
+            },
+            {
+              "id": "regex-automata 0.4.18",
+              "target": "regex_automata"
+            },
+            {
+              "id": "regex-syntax 0.8.11",
+              "target": "regex_syntax"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.17.0"
       },
       "license": "MIT",
       "license_ids": [
@@ -46516,6 +46646,77 @@
       ],
       "license_file": "LICENSE"
     },
+    "tiktoken-rs 0.12.0": {
+      "name": "tiktoken-rs",
+      "version": "0.12.0",
+      "package_url": "https://github.com/zurawiki/tiktoken-rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/tiktoken-rs/0.12.0/download",
+          "sha256": "027853bbf8c7763b77c5c595f1c271c7d536ced7d6f83452911b944621e57fc2"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "tiktoken_rs",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "tiktoken_rs",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "anyhow 1.0.104",
+              "target": "anyhow"
+            },
+            {
+              "id": "base64 0.22.1",
+              "target": "base64"
+            },
+            {
+              "id": "bstr 1.13.1",
+              "target": "bstr"
+            },
+            {
+              "id": "fancy-regex 0.17.0",
+              "target": "fancy_regex"
+            },
+            {
+              "id": "lazy_static 1.5.0",
+              "target": "lazy_static"
+            },
+            {
+              "id": "regex 1.13.1",
+              "target": "regex"
+            },
+            {
+              "id": "rustc-hash 2.1.3",
+              "target": "rustc_hash"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.12.0"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": null
+    },
     "time 0.3.55": {
       "name": "time",
       "version": "0.3.55",
@@ -61532,6 +61733,7 @@
     "tar 0.4.46",
     "tempfile 3.27.0",
     "thiserror 2.0.20",
+    "tiktoken-rs 0.12.0",
     "tokio 1.53.1",
     "url 2.5.8",
     "winapi-util 0.1.11",

@@ -46,6 +46,7 @@ mod claim;
 mod commit_retry;
 #[path = "native_run_dispatch/delta_coalescer.rs"]
 mod delta_coalescer;
+mod streaming_speed;
 #[path = "native_run_dispatch/dispatch_policy.rs"]
 mod dispatch_policy;
 #[path = "native_run_dispatch/dispatch_support.rs"]

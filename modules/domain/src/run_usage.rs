@@ -113,9 +113,24 @@ pub struct RunUsageReport {
     context_tokens: Option<u64>,
     context_window_tokens: Option<u64>,
     observed_at: UnixMillis,
+    streaming_millitokens_per_second: Option<u32>,
 }
 
 impl RunUsageReport {
+    /// Adds a backend-observed visible-text rate using the o200k reference
+    /// tokenizer. This estimate is independent of provider billing counters.
+    #[must_use]
+    pub fn with_streaming_speed(mut self, rate: Option<u32>) -> Self {
+        self.streaming_millitokens_per_second = rate.filter(|rate| *rate > 0);
+        self
+    }
+
+    /// Observed reference tokens per second, multiplied by 1000.
+    #[must_use]
+    pub const fn streaming_millitokens_per_second(&self) -> Option<u32> {
+        self.streaming_millitokens_per_second
+    }
+
     /// Builds a report after validating provider identities and bounded
     /// integer fields. `Some(0)` is deliberately distinct from `None`.
     ///
@@ -168,6 +183,7 @@ impl RunUsageReport {
             context_tokens: input.context_tokens,
             context_window_tokens: input.context_window_tokens,
             observed_at: input.observed_at,
+            streaming_millitokens_per_second: None,
         })
     }
 
