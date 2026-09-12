@@ -49,6 +49,7 @@ use artisan_domain::{
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
+use std::fmt::Write as _;
 
 const OWNER_BYTES: [u8; 32] = [0xa1; 32];
 const LEASE_BYTES: [u8; 32] = [0xb2; 32];
@@ -143,6 +144,11 @@ struct SeededPair {
     credentials: RunLaunchCredentials,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture seeds one complete project/thread/dispatch/run aggregate in a single \
+              linear sequence before test bodies reuse it"
+)]
 async fn seeded_pair() -> SeededPair {
     let (database, repository) = memory_database().await;
     entities::attached_project::ActiveModel {
@@ -683,6 +689,11 @@ async fn all_variants_commit_through_existing_batch_path_without_migration() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end scenario walks encode, commit, reject, and decode in order; splitting \
+              it would rebuild the same fixture state"
+)]
 async fn continuation_batch_enforces_monotonic_sequences() {
     let pair = seeded_pair().await;
     let first = all_variant_observations();
@@ -965,15 +976,16 @@ fn malformed_format_and_canonicality_rejection() {
     crowded.push_str(
         "\",\"version\":1,\"engine\":\"opencode2\",\"binding_version\":1,\"observations\":[",
     );
-    for index in 0..OBSERVATION_BATCH_MAX_OBSERVATIONS + 1 {
+    for index in 0..=OBSERVATION_BATCH_MAX_OBSERVATIONS {
         if index > 0 {
             crowded.push(',');
         }
-        crowded.push_str(&format!(
+        let _ = write!(
+            crowded,
             "{{\"tag\":\"tool\",\"id\":\"o-{index}\",\"sequence\":{},\"tool_id\":\"t-{index}\",\
              \"tool_name\":\"bash\",\"action\":\"started\",\"detail\":null}}",
             index + 1
-        ));
+        );
     }
     crowded.push_str("]}");
     assert_eq!(

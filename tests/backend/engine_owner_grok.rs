@@ -88,7 +88,7 @@ fn grok_selection() -> GrokSelection {
 }
 
 fn argv_strings(settings: &GrokSettings) -> Vec<String> {
-    let definition = settings.definition();
+    let definition = GrokSettings::definition();
     (definition.build_args)(&settings.launch_args())
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -105,7 +105,7 @@ fn grok_settings_map_selection_onto_grok_row() {
     assert_eq!(args.permission.as_deref(), Some("auto"));
     assert!(!args.speed_fast);
     assert!(args.write_access);
-    let definition = settings.definition();
+    let definition = GrokSettings::definition();
     assert_eq!(definition.engine_id, "grok");
     assert_eq!(definition.executable, "grok");
     assert_eq!(definition.image_mode, ImageMode::Embedded);
@@ -190,7 +190,7 @@ fn grok_args_permission_modes_and_minimal_shape() {
 
 #[test]
 fn grok_version_parser_matrix() {
-    let definition = GrokSettings::from_selection(&grok_selection()).definition();
+    let definition = GrokSettings::definition();
     assert_eq!(
         (definition.parse_version)("grok 1.2.3"),
         Some("1.2.3".to_owned())
@@ -205,7 +205,7 @@ fn grok_version_parser_matrix() {
 
 #[test]
 fn grok_auth_classifier_matrix() {
-    let definition = GrokSettings::from_selection(&grok_selection()).definition();
+    let definition = GrokSettings::definition();
     let available = ["xai.api_key", "cached_token"];
     assert_eq!(
         (definition.select_auth_method)(&available, true),
@@ -226,7 +226,7 @@ fn grok_auth_classifier_matrix() {
 
 #[test]
 fn grok_image_mode_embeds_attachments() {
-    let definition = GrokSettings::from_selection(&grok_selection()).definition();
+    let definition = GrokSettings::definition();
     let image = PromptPart::Image(ImageBlock {
         id: "a1".to_owned(),
         name: "shot.png".to_owned(),
@@ -477,6 +477,10 @@ fn run_id() -> RunId {
     RunId::parse("grok-run-1").expect("run id")
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn fixture_grok_start_deltas_approval_question_cancel_close() {
     let settings = GrokSettings::from_selection(&grok_selection());
@@ -655,7 +659,7 @@ async fn fixture_grok_start_deltas_approval_question_cancel_close() {
         let _ignored = eof_seen_tx.send(true);
     });
 
-    let definition = settings.definition();
+    let definition = GrokSettings::definition();
     let mut driver = AcpTransport::new(driver_read, driver_write, bounds);
     let init = driver.initialize().await.expect("handshake");
     assert_eq!(init.protocol_version, 1);
@@ -753,6 +757,10 @@ async fn fixture_grok_start_deltas_approval_question_cancel_close() {
     agent.await.expect("agent joins");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn fixture_grok_resume_via_session_load() {
     let bounds = strict_bounds();
@@ -1181,6 +1189,10 @@ async fn acp_zero_budget_settles_the_quarantine_path_bounded() {
 // G3: sweep replay of the durable prefix after kill, same conversation id
 // ---------------------------------------------------------------------------
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn fixture_restart_after_kill_replays_prefix_on_the_same_conversation() {
     // Attempt 1: the durable prefix lands, then the peer dies before the

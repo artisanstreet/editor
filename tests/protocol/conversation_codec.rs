@@ -797,7 +797,9 @@ fn source_message_id_roundtrips_when_present() -> Result<(), Box<dyn Error>> {
         panic!("expected one user echo item");
     };
     assert_eq!(
-        user.source_message_id.as_ref().map(|id| id.as_str()),
+        user.source_message_id
+            .as_ref()
+            .map(artisan_domain::MessageId::as_str),
         Some(MESSAGE_ID),
         "source identity survives the wire"
     );

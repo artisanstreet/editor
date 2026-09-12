@@ -280,7 +280,7 @@ fn report(sequence: u64, input_tokens: Option<u64>, observed_at: i64) -> RunUsag
     .expect("usage report should validate")
 }
 
-fn record_command<'a>(report: &'a RunUsageReport) -> RecordRunUsage<'a> {
+fn record_command(report: &RunUsageReport) -> RecordRunUsage<'_> {
     RecordRunUsage {
         run_id: report.run_id(),
         thread_id: report.thread_id(),
@@ -466,6 +466,11 @@ async fn unknown_run_is_rejected_without_creating_a_usage_row() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one negative scenario walks config promotion, a second run insert, and the rejected \
+              report in order; splitting it would rebuild the same fixture rows"
+)]
 async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
     let (database, repository, run_id, thread_id) = seeded(None).await;
     // Promote the thread to a Codex configuration, then snapshot that exact
@@ -594,7 +599,37 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
     drop(run_id);
 }
 
+fn codex_report_with(
+    model: &str,
+    route: &str,
+    variant: Option<EngineVariantId>,
+) -> RunUsageReport {
+    RunUsageReport::new(RunUsageReportInput {
+        run_id: RunId::parse("run-codex-2").expect("run id"),
+        thread_id: ThreadId::parse(THREAD_ID).expect("thread id"),
+        provider_session_id: "provider-session-codex-2".to_owned(),
+        source_sequence: 4,
+        model_id: EngineModelId::parse(model).expect("model id"),
+        provider_route_id: EngineRouteId::parse(route).expect("route id"),
+        variant_id: variant,
+        basis: RunUsageBasis::Delta,
+        provider_turn_id: Some("assistant-codex-2".to_owned()),
+        input_tokens: Some(10),
+        cached_input_tokens: Some(2),
+        output_tokens: Some(3),
+        context_tokens: None,
+        context_window_tokens: None,
+        observed_at: UnixMillis::from_millis(10),
+    })
+    .expect("codex usage report should validate")
+}
+
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario seeds a Codex snapshot, records legitimate usage, and replays mismatched \
+              scopes; splitting it would rebuild the same fixture rows"
+)]
 async fn codex_snapshot_authorizes_exact_usage_and_rejects_scope_mismatch() {
     let (database, repository, _run_id, thread_id) = seeded(None).await;
     repository
@@ -682,32 +717,7 @@ async fn codex_snapshot_authorizes_exact_usage_and_rejects_scope_mismatch() {
     .await
     .expect("codex run should insert");
 
-    fn codex_report_with(
-        model: &str,
-        route: &str,
-        variant: Option<EngineVariantId>,
-    ) -> RunUsageReport {
-        RunUsageReport::new(RunUsageReportInput {
-            run_id: RunId::parse("run-codex-2").expect("run id"),
-            thread_id: ThreadId::parse(THREAD_ID).expect("thread id"),
-            provider_session_id: "provider-session-codex-2".to_owned(),
-            source_sequence: 4,
-            model_id: EngineModelId::parse(model).expect("model id"),
-            provider_route_id: EngineRouteId::parse(route).expect("route id"),
-            variant_id: variant,
-            basis: RunUsageBasis::Delta,
-            provider_turn_id: Some("assistant-codex-2".to_owned()),
-            input_tokens: Some(10),
-            cached_input_tokens: Some(2),
-            output_tokens: Some(3),
-            context_tokens: None,
-            context_window_tokens: None,
-            observed_at: UnixMillis::from_millis(10),
-        })
-        .expect("codex usage report should validate")
-    }
-
-    // Legitimate Codex usage: exact immutable model on the exact `codex`
+        // Legitimate Codex usage: exact immutable model on the exact `codex`
     // route with no variant. Usage persists and reads back.
     let legitimate = codex_report_with("model-usage", "codex", None);
     assert!(matches!(

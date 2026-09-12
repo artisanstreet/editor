@@ -113,6 +113,11 @@ struct RunningPair {
 
 /// Seeds one thread with engine configuration, then claims, launches, and
 /// binds one running run the interaction rows can fence against.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture seeds a complete project/thread/run aggregate before the test body; \
+              extraction would just re-thread the same setup locals"
+)]
 async fn running_pair(database: DatabaseConnection, repository: Repository) -> RunningPair {
     use artisan_database::entities;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set};
@@ -228,7 +233,7 @@ fn approval_request<'a>(
         run_id: run,
         approval_id: approval,
         description: description.to_owned(),
-        request: &approval_command_request(),
+        request: approval_command_request(),
         requested_at: UnixMillis::from_millis(requested_at_ms),
         binding_version: 1,
     }
@@ -775,7 +780,7 @@ async fn requested_state_survives_restart_and_stays_resolvable() {
     std::fs::create_dir_all(&directory).expect("temporary directory should be created");
     let path = directory.join("forge.sqlite3");
 
-    let requested_at = {
+    {
         let database = connect(
             SqliteConfig::file(&path)
                 .min_connections(1)

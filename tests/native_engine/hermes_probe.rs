@@ -128,9 +128,7 @@ fn error_display_redacts_child_output() {
 /// Fixture process shell for spawn-path tests (Windows native gate only).
 #[cfg(windows)]
 fn fixture_shell() -> PathBuf {
-    std::env::var_os("COMSPEC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cmd.exe"))
+    std::env::var_os("COMSPEC").map_or_else(|| PathBuf::from("cmd.exe"), PathBuf::from)
 }
 
 #[test]

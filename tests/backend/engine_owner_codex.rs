@@ -8,7 +8,7 @@
 //! real `codex` binary, no catalog flag, no frontend selection.
 
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,12 +17,12 @@ use artisan_database::{
 };
 use artisan_domain::{
     ApprovalMode, ByteLimit, CodexModelContextWindow, CodexReasoningEffort, CodexSelection,
-    CodexServiceTier, CountLimit, DirectoryId, DisplayName, EngineAgentId, EngineConfigUpdatePrecondition,
-    EngineId, EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRunConfig,
-    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
-    FiniteMillis, NetworkAccess, ObservationId, ObservationSequence, PermissionId, ProjectId,
-    QueueMessagePayload, RequestId, RootPath, RunId, RunUsageBasis, ThreadId, ThreadTitle,
-    UnixMillis, WebSearchAccess,
+    CodexServiceTier, CountLimit, DirectoryId, DisplayName, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
+    EngineProfileId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, NetworkAccess, ObservationId,
+    ObservationSequence, PermissionId, ProjectId, QueueMessagePayload, RequestId, RootPath, RunId,
+    RunUsageBasis, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_native_engine::NativeCodexAuthority;
@@ -34,14 +34,14 @@ use tokio::time::Instant;
 use super::codex::{
     CODEX_MAX_FRAME_BYTES, CodexContinuationDecision, CodexContinuationGateInput, CodexEvent,
     CodexPendingTracker, CodexQuotaWindowKind, CodexSettings, CodexTerminalLifecycle,
-    CodexToolAction, CodexTurnState, CodexUsageAttribution, CodexUsageContext, CodexUsageScope, answer_approval, answer_questions,
-    apply_event, check_codex_native_continuation, clamp_codex_percent_used,
-    classify_codex_quota_window_kind, classify_exit, codex_account_read_line,
-    codex_cli_meets_minimum, codex_rate_limits_read_line, codex_requires_group_termination,
-    codex_reset_at_iso, codex_usage_report, has_stalled, initialize_params, interrupt_live_turn,
-    is_codex_error_response, map_codex_rate_limit_windows, notification_line, parse_frame,
-    parse_thread_token_usage, request_line, steer_live_turn, terminal_observation,
-    thread_resume_params, write_line,
+    CodexToolAction, CodexTurnState, CodexUsageAttribution, CodexUsageContext, CodexUsageScope,
+    answer_approval, answer_questions, apply_event, check_codex_native_continuation,
+    clamp_codex_percent_used, classify_codex_quota_window_kind, classify_exit,
+    codex_account_read_line, codex_cli_meets_minimum, codex_rate_limits_read_line,
+    codex_requires_group_termination, codex_reset_at_iso, codex_usage_report, has_stalled,
+    initialize_params, interrupt_live_turn, is_codex_error_response, map_codex_rate_limit_windows,
+    notification_line, parse_frame, parse_thread_token_usage, request_line, steer_live_turn,
+    terminal_observation, thread_resume_params, write_line,
 };
 use super::observation::{EngineObservation, TerminalState};
 use super::operation::{
@@ -214,7 +214,8 @@ fn strict_server_rejects_turn_start_without_thread_id() {
 
     // The pre-fix shape (`input` without `threadId`) is rejected with the
     // exact real-CLI error and yields no turn identity to pump.
-    let unbound = serde_json::json!({"input": [{"text": "hello", "text_elements": [], "type": "text"}]});
+    let unbound =
+        serde_json::json!({"input": [{"text": "hello", "text_elements": [], "type": "text"}]});
     let rejected = strict_turn_start_result(3, &unbound);
     let rejected_value: serde_json::Value =
         serde_json::from_str(&rejected).expect("error envelope is valid json");
@@ -234,8 +235,14 @@ fn turn_start_error_response_fails_fast() {
     // response, never a result, and never a turn identity.
     assert!(is_codex_error_response(TURN_MISSING_THREAD_ID_ERROR_LINE));
     assert!(!is_codex_result_for(TURN_MISSING_THREAD_ID_ERROR_LINE, 3));
-    assert!(!codex_response_id_matches(TURN_MISSING_THREAD_ID_ERROR_LINE, 2));
-    assert!(codex_response_id_matches(TURN_MISSING_THREAD_ID_ERROR_LINE, 3));
+    assert!(!codex_response_id_matches(
+        TURN_MISSING_THREAD_ID_ERROR_LINE,
+        2
+    ));
+    assert!(codex_response_id_matches(
+        TURN_MISSING_THREAD_ID_ERROR_LINE,
+        3
+    ));
     assert_eq!(codex_turn_id(TURN_MISSING_THREAD_ID_ERROR_LINE, 3), None);
 
     // The success envelope is the opposite on every discriminant.
@@ -264,7 +271,8 @@ async fn interrupt_live_turn_saturates_max_sentinel_id() {
         .await
         .expect("sentinel interrupt must send without overflow");
     assert_eq!(
-        request_id, u64::MAX,
+        request_id,
+        u64::MAX,
         "sentinel id saturates instead of wrapping"
     );
     let line = String::from_utf8(sink).expect("interrupt line is utf8");
@@ -648,18 +656,14 @@ async fn steer_servicing_rejects_missing_turn_id_without_inventing_one() {
 async fn steer_text_without_channel_is_typed_unsupported() {
     // Cursor/grok/opencode2 turns never carry a sender: the attempt
     // resolves `Unsupported` without touching any pump or hanging.
-    let (_prepared_tx, prepared_rx) =
-        tokio::sync::oneshot::channel::<Result<
-            super::operation::PreparedSession,
-            EngineOperationError,
-        >>();
+    let (_prepared_tx, prepared_rx) = tokio::sync::oneshot::channel::<
+        Result<super::operation::PreparedSession, EngineOperationError>,
+    >();
     let (authorize_tx, authorize_rx) = tokio::sync::oneshot::channel::<()>();
     let (_obs_tx, obs_rx) = mpsc::channel(8);
-    let (_respond_tx, respond_rx) =
-        tokio::sync::oneshot::channel::<Result<
-            super::operation::EngineTurnResult,
-            EngineOperationError,
-        >>();
+    let (_respond_tx, respond_rx) = tokio::sync::oneshot::channel::<
+        Result<super::operation::EngineTurnResult, EngineOperationError>,
+    >();
     let control = Arc::new(CancelHandle::new());
     let turn = AcceptedTurn::from_parts(
         run_id(),
@@ -670,7 +674,7 @@ async fn steer_text_without_channel_is_typed_unsupported() {
         control,
         None,
     );
-    let _ = authorize_rx;
+    drop(authorize_rx);
     assert_eq!(
         turn.steer_text("req-unsupported", "follow up").await,
         Err(SteerError::Unsupported)
@@ -688,18 +692,14 @@ async fn steer_text_future_holds_no_turn_borrow() {
     fn require_send_static<T: Send + 'static>(value: T) -> T {
         value
     }
-    let (_prepared_tx, prepared_rx) =
-        tokio::sync::oneshot::channel::<Result<
-            super::operation::PreparedSession,
-            EngineOperationError,
-        >>();
+    let (_prepared_tx, prepared_rx) = tokio::sync::oneshot::channel::<
+        Result<super::operation::PreparedSession, EngineOperationError>,
+    >();
     let (authorize_tx, _authorize_rx) = tokio::sync::oneshot::channel::<()>();
     let (_obs_tx, obs_rx) = mpsc::channel(8);
-    let (_respond_tx, respond_rx) =
-        tokio::sync::oneshot::channel::<Result<
-            super::operation::EngineTurnResult,
-            EngineOperationError,
-        >>();
+    let (_respond_tx, respond_rx) = tokio::sync::oneshot::channel::<
+        Result<super::operation::EngineTurnResult, EngineOperationError>,
+    >();
     let control = Arc::new(CancelHandle::new());
     let mut turn = AcceptedTurn::from_parts(
         run_id(),
@@ -889,7 +889,8 @@ impl Drop for FixtureScript {
 const INIT_LINE: &str = r#"{"id":1,"result":{"codexHome":"C:\\x","platformFamily":"windows","platformOs":"windows","userAgent":"test"}}"#;
 const THREAD_LINE: &str = r#"{"id":2,"result":{"thread":{"id":"thread-fixture-1"}}}"#;
 const TURN_LINE: &str = r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#;
-const TURN_MISSING_THREAD_ID_ERROR_LINE: &str = r#"{"id":3,"error":{"code":-32600,"message":"Invalid request: missing field threadId"}}"#;
+const TURN_MISSING_THREAD_ID_ERROR_LINE: &str =
+    r#"{"id":3,"error":{"code":-32600,"message":"Invalid request: missing field threadId"}}"#;
 
 struct FixtureOutcome {
     terminal: Option<TerminalState>,
@@ -902,6 +903,10 @@ struct FixtureOutcome {
 /// initialize, the `initialized` notification, thread/start, the id-bound
 /// `turn/start` (with its synchronously awaited result), and the streaming
 /// pump with stall/cancel/EOF mapping.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 async fn run_fixture_turn(
     responses: &str,
     tail: &str,
@@ -1014,17 +1019,13 @@ async fn run_fixture_turn(
                     last_activity = Instant::now();
                     sequence += 1;
                     let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
-                    match parse_frame(&trimmed, sequence) {
-                        Ok(event) => {
-                            if let Some(state) = apply_event(
-                                event, &run, &mut tracker, &mut active, &sender, sequence, None,
-                            )
-                            .await
-                            {
-                                break Some(state);
-                            }
-                        }
-                        Err(_) => continue,
+                    if let Ok(event) = parse_frame(&trimmed, sequence)
+                        && let Some(state) = apply_event(
+                            event, &run, &mut tracker, &mut active, &sender, sequence, None,
+                        )
+                        .await
+                    {
+                        break Some(state);
                     }
                 }
                 Err(_) => break None,
@@ -1306,7 +1307,7 @@ async fn seed_binding_run(
         run_start_key: Set(artisan_database::entities::OpaqueBytes::new({
             // Distinct per seeded run: the column is unique, so the shared
             // fixture constant would collide on the second insert.
-            let mut key = [created_at_ms as u8; 32];
+            let mut key = [u8::try_from(created_at_ms.rem_euclid(256)).unwrap_or_default(); 32];
             for (index, byte) in run_id.bytes().enumerate() {
                 let slot = index % key.len();
                 key[slot] = key[slot].wrapping_add(byte);
@@ -1557,7 +1558,7 @@ fn token_usage_frames_decode_to_a_cumulative_sample() {
     assert_eq!(sample.output, Some(9));
     assert_eq!(sample.cached_input, Some(12));
     assert_eq!(sample.context, Some(41));
-    assert_eq!(sample.context_window, Some(200000));
+    assert_eq!(sample.context_window, Some(200_000));
 
     // An empty measurement stays observable without a report.
     let empty = parse_frame(
@@ -1611,7 +1612,7 @@ fn codex_usage_report_is_cumulative_with_a_replacing_gauge() {
     assert_eq!(report.cached_input_tokens(), Some(12));
     // The window gauge is the last request only, never the running total.
     assert_eq!(report.context_tokens(), Some(41));
-    assert_eq!(report.context_window_tokens(), Some(200000));
+    assert_eq!(report.context_window_tokens(), Some(200_000));
 
     // Absent gauge stays absent rather than becoming a wrong zero.
     let no_gauge = token_usage_params(
@@ -1835,23 +1836,19 @@ async fn fixture_kill_reports_interruption_with_durable_prefix() {
                         let _ = child.kill().await;
                     }
                     let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
-                    match parse_frame(&trimmed, sequence) {
-                        Ok(event) => {
-                            if let Some(state) = apply_event(
-                                event,
-                                &run,
-                                &mut tracker,
-                                &mut active,
-                                &sender,
-                                sequence,
-                                None,
-                            )
-                            .await
-                            {
-                                break Some(state);
-                            }
-                        }
-                        Err(_) => continue,
+                    if let Ok(event) = parse_frame(&trimmed, sequence)
+                        && let Some(state) = apply_event(
+                            event,
+                            &run,
+                            &mut tracker,
+                            &mut active,
+                            &sender,
+                            sequence,
+                            None,
+                        )
+                        .await
+                    {
+                        break Some(state);
                     }
                 }
                 Err(_) => break None,
@@ -1980,10 +1977,15 @@ fn codex_wire_fixture_program() -> PathBuf {
         }
     }
     let test_executable = std::env::current_exe().expect("test executable path");
-    let cargo_example = test_executable.parent().and_then(|deps| deps.parent())
+    let cargo_example = test_executable
+        .parent()
+        .and_then(|deps| deps.parent())
         .expect("Cargo target directory")
         .join("examples")
-        .join(format!("codex-wire-fixture{}", std::env::consts::EXE_SUFFIX));
+        .join(format!(
+            "codex-wire-fixture{}",
+            std::env::consts::EXE_SUFFIX
+        ));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for candidate in [
         cargo_example,
@@ -1999,7 +2001,7 @@ fn codex_wire_fixture_program() -> PathBuf {
 
 /// Copies the built fixture to a per-test executable whose basename names
 /// the scenario (`strict`, `reject_always`, or `interleave`).
-fn codex_wire_scenario_program(fixture: &PathBuf, dir: &PathBuf, scenario: &str) -> PathBuf {
+fn codex_wire_scenario_program(fixture: &Path, dir: &Path, scenario: &str) -> PathBuf {
     let named = dir.join(format!(
         "codex-wire-{scenario}{}",
         std::env::consts::EXE_SUFFIX
@@ -2081,10 +2083,7 @@ async fn codex_wire_settings(
     root: &RootPath,
     thread_id: &ThreadId,
 ) -> artisan_database::ThreadEngineSettings {
-    let config = EngineRunConfig::new(
-        EngineSelection::Codex(selection),
-        codex_wire_runtime(),
-    );
+    let config = EngineRunConfig::new(EngineSelection::Codex(selection), codex_wire_runtime());
     let db = connect(
         SqliteConfig::in_memory()
             .min_connections(1)
@@ -2147,12 +2146,14 @@ async fn drive_codex_wire_turn(mut turn: AcceptedTurn) -> WireTurnOutcome {
     turn.authorize().expect("wire turn authorizes once");
     let mut text = String::new();
     let mut observed_terminal = None;
-    while let Some(observation) = tokio::time::timeout(
-        Duration::from_secs(20), turn.next_observation(),
-    ).await.expect("wire observation settles") {
+    while let Some(observation) =
+        tokio::time::timeout(Duration::from_secs(20), turn.next_observation())
+            .await
+            .expect("wire observation settles")
+    {
         match observation {
             EngineObservation::TextDelta(delta) => text.push_str(delta.delta()),
-            EngineObservation::Usage(_) => {},
+            EngineObservation::Usage(_) => {}
             EngineObservation::Terminal(terminal) => observed_terminal = Some(terminal.state()),
             _ => panic!("unexpected wire observation"),
         }
@@ -2179,20 +2180,21 @@ async fn admit_codex_wire_turn(
     prompt: &str,
 ) -> AcceptedTurn {
     admit_codex_wire_resume_turn(
-        owner,
-        settings,
-        launch,
-        thread_id,
-        run_id,
-        root,
-        prompt,
-        None,
+        owner, settings, launch, thread_id, run_id, root, prompt, None,
     )
     .await
 }
 
 /// Admits one wire turn with an optional gated provider continuation, so
 /// resume paths drive `thread/resume` instead of `thread/start`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "fixture admission helper mirrors the turn-input fields one-for-one; a wrapper struct would only rename them"
+)]
+#[expect(
+    clippy::unused_async,
+    reason = "kept async so every wire-turn admission helper awaits uniformly at call sites"
+)]
 async fn admit_codex_wire_resume_turn(
     owner: &EngineOwner,
     settings: artisan_database::ThreadEngineSettings,
@@ -2230,7 +2232,12 @@ async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
         let temp = WireTempRoot::new("accept");
         let program = codex_wire_scenario_program(&fixture, &temp.dir, "strict");
         let thread_id = ThreadId::parse("thread-wire-accept").expect("thread id");
-        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let settings = codex_wire_settings(
+            codex_wire_selection("codex-fixture", true),
+            &temp.root,
+            &thread_id,
+        )
+        .await;
         let launch = NativeCodexAuthority::new()
             .resolve_launch_with_executable(
                 &temp.db_path,
@@ -2243,7 +2250,7 @@ async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
             NonZeroUsize::new(1).expect("one slot"),
             &tokio::runtime::Handle::current(),
         );
-        let mut turn = admit_codex_wire_turn(
+        let turn = admit_codex_wire_turn(
             &owner,
             settings,
             launch,
@@ -2285,7 +2292,12 @@ async fn codex_wire_owner_fails_fast_on_turn_start_rejection() {
         let temp = WireTempRoot::new("reject");
         let program = codex_wire_scenario_program(&fixture, &temp.dir, "reject_always");
         let thread_id = ThreadId::parse("thread-wire-reject").expect("thread id");
-        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let settings = codex_wire_settings(
+            codex_wire_selection("codex-fixture", true),
+            &temp.root,
+            &thread_id,
+        )
+        .await;
         let launch = NativeCodexAuthority::new()
             .resolve_launch_with_executable(
                 &temp.db_path,
@@ -2309,8 +2321,11 @@ async fn codex_wire_owner_fails_fast_on_turn_start_rejection() {
         )
         .await;
         let started = std::time::Instant::now();
-        turn.prepare().await.expect("thread prepared before turn authorization");
-        turn.authorize().expect("authorize the rejected turn request");
+        turn.prepare()
+            .await
+            .expect("thread prepared before turn authorization");
+        turn.authorize()
+            .expect("authorize the rejected turn request");
         let result = turn.finish().await;
         assert!(
             matches!(result, Err(EngineOperationError::ProviderRequestFailed)),
@@ -2330,7 +2345,12 @@ async fn codex_wire_owner_survives_interleaved_thread_started() {
         let temp = WireTempRoot::new("interleave");
         let program = codex_wire_scenario_program(&fixture, &temp.dir, "interleave");
         let thread_id = ThreadId::parse("thread-wire-interleave").expect("thread id");
-        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let settings = codex_wire_settings(
+            codex_wire_selection("codex-fixture", true),
+            &temp.root,
+            &thread_id,
+        )
+        .await;
         let launch = NativeCodexAuthority::new()
             .resolve_launch_with_executable(
                 &temp.db_path,
@@ -2343,7 +2363,7 @@ async fn codex_wire_owner_survives_interleaved_thread_started() {
             NonZeroUsize::new(1).expect("one slot"),
             &tokio::runtime::Handle::current(),
         );
-        let mut turn = admit_codex_wire_turn(
+        let turn = admit_codex_wire_turn(
             &owner,
             settings,
             launch,
@@ -2373,7 +2393,12 @@ async fn codex_wire_owner_resumes_through_interleaved_notifications() {
         let temp = WireTempRoot::new("resume-interleave");
         let program = codex_wire_scenario_program(&fixture, &temp.dir, "resume_interleave");
         let thread_id = ThreadId::parse("thread-wire-resume").expect("thread id");
-        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let settings = codex_wire_settings(
+            codex_wire_selection("codex-fixture", true),
+            &temp.root,
+            &thread_id,
+        )
+        .await;
         let launch = NativeCodexAuthority::new()
             .resolve_launch_with_executable(
                 &temp.db_path,
@@ -2418,7 +2443,12 @@ async fn codex_wire_owner_rejects_foreign_resume_thread_without_fresh_start() {
         let temp = WireTempRoot::new("resume-mismatch");
         let program = codex_wire_scenario_program(&fixture, &temp.dir, "resume_mismatch");
         let thread_id = ThreadId::parse("thread-wire-resume-foreign").expect("thread id");
-        let settings = codex_wire_settings(codex_wire_selection("codex-fixture", true), &temp.root, &thread_id).await;
+        let settings = codex_wire_settings(
+            codex_wire_selection("codex-fixture", true),
+            &temp.root,
+            &thread_id,
+        )
+        .await;
         let launch = NativeCodexAuthority::new()
             .resolve_launch_with_executable(
                 &temp.db_path,
@@ -2448,10 +2478,7 @@ async fn codex_wire_owner_rejects_foreign_resume_thread_without_fresh_start() {
         let started = std::time::Instant::now();
         let prepared = turn.prepare().await;
         assert!(
-            matches!(
-                prepared,
-                Err(EngineOperationError::ProviderRequestFailed)
-            ),
+            matches!(prepared, Err(EngineOperationError::ProviderRequestFailed)),
             "foreign resume thread must fail preparation fast: {prepared:?}"
         );
         let result = turn.finish().await;
@@ -2504,7 +2531,8 @@ async fn codex_live_owner_completes_real_turn_within_budget() {
             .unwrap_or_else(|_| "codex-live-probe".to_owned());
         let temp = WireTempRoot::new("live");
         let thread_id = ThreadId::parse("thread-live-probe").expect("thread id");
-        let settings = codex_wire_settings(codex_live_selection(&profile_name), &temp.root, &thread_id).await;
+        let settings =
+            codex_wire_settings(codex_live_selection(&profile_name), &temp.root, &thread_id).await;
         let launch = NativeCodexAuthority::new()
             .resolve_launch(
                 &temp.db_path,
@@ -2516,7 +2544,7 @@ async fn codex_live_owner_completes_real_turn_within_budget() {
             NonZeroUsize::new(1).expect("one slot"),
             &tokio::runtime::Handle::current(),
         );
-        let mut turn = admit_codex_wire_turn(
+        let turn = admit_codex_wire_turn(
             &owner,
             settings,
             launch,
@@ -2612,7 +2640,10 @@ fn reasoning_summary_delta_and_boundary_decode_with_scope() {
     .expect("boundary decodes");
     assert!(matches!(
         boundary,
-        CodexEvent::ReasoningSummaryBoundary { summary_index: 1, .. }
+        CodexEvent::ReasoningSummaryBoundary {
+            summary_index: 1,
+            ..
+        }
     ));
 
     // The section-zero opener and private reasoning content stay silent.
@@ -2637,7 +2668,10 @@ fn reasoning_summary_delta_and_boundary_decode_with_scope() {
         r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"x","itemId":"item-r1","summaryIndex":-1,"threadId":"t-1","turnId":"turn-1"}}"#,
     ] {
         assert!(
-            matches!(parse_frame(line, 11).expect("frame parses"), CodexEvent::UnknownMethod),
+            matches!(
+                parse_frame(line, 11).expect("frame parses"),
+                CodexEvent::UnknownMethod
+            ),
             "malformed summary frame stays observable: {line}"
         );
     }
@@ -2656,7 +2690,11 @@ async fn reasoning_summary_emits_published_text_only() {
     .expect("summary delta decodes");
     let (terminal, rows) = apply_activity(event, &run, &mut tracker, &mut active, 7).await;
     assert_eq!(terminal, None, "activity never settles the turn");
-    assert_eq!(active.as_deref(), Some("turn-1"), "turn adopted like deltas");
+    assert_eq!(
+        active.as_deref(),
+        Some("turn-1"),
+        "turn adopted like deltas"
+    );
     assert_eq!(rows.len(), 1);
     let artisan_domain::Observation::ReasoningSummaryDelta(row) = &rows[0] else {
         panic!("expected a reasoning summary delta");
@@ -2857,19 +2895,29 @@ async fn foreign_child_and_malformed_frames_never_reach_root() {
     let (terminal, rows) = apply_activity(foreign, &run, &mut tracker, &mut active, 30).await;
     assert_eq!(terminal, None);
     assert!(rows.is_empty(), "foreign turn activity never emits");
-    assert_eq!(active.as_deref(), Some("turn-1"), "foreign turn never adopts");
+    assert_eq!(
+        active.as_deref(),
+        Some("turn-1"),
+        "foreign turn never adopts"
+    );
 
     // Child-thread activity is never coerced into the root channel.
     tracker.note_subagent("child-9", "t-1");
     assert!(tracker.is_known_child_thread("child-9"));
-    assert!(!tracker.is_known_child_thread("t-1"), "root thread is not a child");
+    assert!(
+        !tracker.is_known_child_thread("t-1"),
+        "root thread is not a child"
+    );
     let child = parse_frame(
         r#"{"method":"item/reasoning/summaryTextDelta","params":{"delta":"child text","itemId":"item-c1","summaryIndex":0,"threadId":"child-9","turnId":"turn-1"}}"#,
         31,
     )
     .expect("child frame parses");
     let (_, rows) = apply_activity(child, &run, &mut tracker, &mut active, 31).await;
-    assert!(rows.is_empty(), "child activity never becomes root activity");
+    assert!(
+        rows.is_empty(),
+        "child activity never becomes root activity"
+    );
 
     // A provider identity outside the wire identifier rule fails closed.
     let spaced = parse_frame(
@@ -2952,7 +3000,10 @@ async fn activity_ids_are_stable_and_fragments_are_bounded() {
         let artisan_domain::Observation::TerminalActivity(activity) = row else {
             panic!("expected terminal output rows");
         };
-        assert_eq!(activity.state(), artisan_domain::TerminalActivityState::Output);
+        assert_eq!(
+            activity.state(),
+            artisan_domain::TerminalActivityState::Output
+        );
         let output = activity.output().expect("output chunk present");
         assert!(
             output.len() <= artisan_domain::OBSERVATION_OUTPUT_MAX_BYTES,
@@ -2984,6 +3035,10 @@ async fn activity_ids_are_stable_and_fragments_are_bounded() {
     assert_eq!(row.text(), None, "oversize text omitted, never truncated");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn command_search_plan_and_file_frames_normalize() {
     let run = run_id();
@@ -3027,7 +3082,10 @@ async fn command_search_plan_and_file_frames_normalize() {
     let artisan_domain::Observation::TerminalActivity(row) = &rows[0] else {
         panic!("expected terminal completion");
     };
-    assert_eq!(row.state(), artisan_domain::TerminalActivityState::Completed);
+    assert_eq!(
+        row.state(),
+        artisan_domain::TerminalActivityState::Completed
+    );
     assert_eq!(row.exit_code(), Some(3));
     assert_eq!(row.output(), Some("hi\n"));
 
@@ -3083,7 +3141,10 @@ async fn command_search_plan_and_file_frames_normalize() {
     let entries = row.entries();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].id().as_str(), "turn-1:plan:0");
-    assert_eq!(entries[1].status(), artisan_domain::PlanEntryStatus::InProgress);
+    assert_eq!(
+        entries[1].status(),
+        artisan_domain::PlanEntryStatus::InProgress
+    );
     assert_eq!(entries[2].text(), "verify");
 
     // A plan the durable vocabulary cannot hold fails closed as a unit.
@@ -3092,7 +3153,11 @@ async fn command_search_plan_and_file_frames_normalize() {
         if index > 0 {
             steps.push(',');
         }
-        steps.push_str(&format!(r#"{{"status":"pending","step":"step {index}"}}"#));
+        std::fmt::Write::write_fmt(
+            &mut steps,
+            format_args!(r#"{{"status":"pending","step":"step {index}"}}"#),
+        )
+        .expect("string write cannot fail");
     }
     let oversize = parse_frame(
         &format!(
@@ -3130,7 +3195,10 @@ async fn command_search_plan_and_file_frames_normalize() {
     };
     assert_eq!(created.path(), "new.txt");
     assert_eq!(created.action(), artisan_domain::FileAction::Created);
-    assert_eq!((created.lines_added(), created.lines_deleted()), (Some(2), Some(0)));
+    assert_eq!(
+        (created.lines_added(), created.lines_deleted()),
+        (Some(2), Some(0))
+    );
     let artisan_domain::Observation::File(deleted) = &rows[1] else {
         panic!("expected the deleted file");
     };
@@ -3139,7 +3207,10 @@ async fn command_search_plan_and_file_frames_normalize() {
     // segments, so "gone\nstill here\n" is ["gone", "still here", ""] with
     // length 3 — the trailing newline contributes a trailing empty segment
     // rather than vanishing, and the Rust port counts identically.
-    assert_eq!((deleted.lines_added(), deleted.lines_deleted()), (Some(0), Some(3)));
+    assert_eq!(
+        (deleted.lines_added(), deleted.lines_deleted()),
+        (Some(0), Some(3))
+    );
     let artisan_domain::Observation::File(modified) = &rows[2] else {
         panic!("expected the modified file");
     };
@@ -3157,7 +3228,10 @@ async fn command_search_plan_and_file_frames_normalize() {
         r#"{"method":"item/fileChange/outputDelta","params":{"delta":"stale","itemId":"file-1","threadId":"t-1","turnId":"turn-1"}}"#,
     ] {
         assert!(
-            matches!(parse_frame(line, 60).expect("frame parses"), CodexEvent::UnknownMethod),
+            matches!(
+                parse_frame(line, 60).expect("frame parses"),
+                CodexEvent::UnknownMethod
+            ),
             "unfinished file frames stay observable: {line}"
         );
     }
@@ -3186,7 +3260,10 @@ async fn plain_message_and_terminal_paths_stay_unchanged() {
         let (sender, mut receiver) = mpsc::channel(8);
         let terminal = apply_event(event, &run, &mut tracker, &mut active, &sender, 70, None).await;
         assert_eq!(terminal, None);
-        assert!(receiver.try_recv().is_err(), "no observation for non-activity envelopes");
+        assert!(
+            receiver.try_recv().is_err(),
+            "no observation for non-activity envelopes"
+        );
     }
 
     // The plain delta and terminal shapes behave exactly as before.
@@ -3209,7 +3286,16 @@ async fn plain_message_and_terminal_paths_stay_unchanged() {
     )
     .expect("turn completion decodes");
     let (sender, _) = mpsc::channel(8);
-    let terminal = apply_event(completed, &run, &mut tracker, &mut active, &sender, 72, None).await;
+    let terminal = apply_event(
+        completed,
+        &run,
+        &mut tracker,
+        &mut active,
+        &sender,
+        72,
+        None,
+    )
+    .await;
     assert_eq!(terminal, Some(TerminalState::Completed));
 }
 
@@ -3272,7 +3358,11 @@ async fn activity_requires_exact_bound_root_thread() {
     let event = parse_frame(&summary("t-1", "turn-1"), 84).expect("root parses");
     let (terminal, rows) = apply_activity(event, &run, &mut tracker, &mut first, 84).await;
     assert_eq!(terminal, None);
-    assert_eq!(rows.len(), 1, "interleaved root frames normalize pre-result");
+    assert_eq!(
+        rows.len(),
+        1,
+        "interleaved root frames normalize pre-result"
+    );
     assert_eq!(first.as_deref(), Some("turn-1"));
     // ... and after it.
     let event = parse_frame(&summary("t-1", "turn-1"), 85).expect("root parses");
@@ -3290,6 +3380,10 @@ async fn activity_requires_exact_bound_root_thread() {
     assert!(rows.is_empty(), "empty binds stay unbound");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[test]
 fn malformed_lifecycle_status_never_fabricates_success() {
     // Unknown lifecycle spellings violate the provider schema (command:
@@ -3418,6 +3512,9 @@ fn malformed_lifecycle_status_never_fabricates_success() {
     ));
 }
 
+/// One line-count case: wire kind, diff payload, expected `(added, deleted)`.
+type CountWrittenLinesCase = (u64, &'static str, &'static str, (Option<u64>, Option<u64>));
+
 #[tokio::test]
 async fn file_line_counts_follow_split_segment_semantics() {
     let run = run_id();
@@ -3429,12 +3526,12 @@ async fn file_line_counts_follow_split_segment_semantics() {
     // count split("\n") segments, so a trailing newline contributes one
     // trailing empty segment; modified content without a diff stays
     // uncounted rather than zero.
-    let cases: &[(u64, &str, &str, (Option<u64>, Option<u64>))] = &[
-        (110, "add", r#"a\nb"#, (Some(2), Some(0))),
-        (111, "add", r#"a\n"#, (Some(2), Some(0))),
-        (112, "delete", r#"gone\nstill here\n"#, (Some(0), Some(3))),
-        (113, "delete", r#""#, (Some(0), Some(0))),
-        (114, "update", r#"whole content\n"#, (None, None)),
+    let cases: &[CountWrittenLinesCase] = &[
+        (110, "add", r"a\nb", (Some(2), Some(0))),
+        (111, "add", r"a\n", (Some(2), Some(0))),
+        (112, "delete", r"gone\nstill here\n", (Some(0), Some(3))),
+        (113, "delete", r"", (Some(0), Some(0))),
+        (114, "update", r"whole content\n", (None, None)),
     ];
     for (sequence, kind, diff, expected) in cases {
         let line = format!(
@@ -3455,4 +3552,3 @@ async fn file_line_counts_follow_split_segment_semantics() {
         );
     }
 }
-

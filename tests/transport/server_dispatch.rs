@@ -68,11 +68,11 @@ async fn image_batch_sized_frame_crosses_production_transport() {
             .expect("acknowledgement deadline")
             .expect("read acknowledgement");
     assert_eq!(acknowledgement, b"received");
-    let received = tokio::time::timeout(TEST_DEADLINE, receiver)
+    let delivered = tokio::time::timeout(TEST_DEADLINE, receiver)
         .await
         .expect("receiver deadline")
         .expect("receiver joins");
-    assert_eq!(received, payload);
+    assert_eq!(delivered, payload);
     drop(send);
     drop(recv);
     drop(client);

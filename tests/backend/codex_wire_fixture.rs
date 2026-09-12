@@ -90,6 +90,10 @@ const STEER_BURST_ITEM_ID: &str = "item-steer-1";
 /// reading the ack causally requires draining the burst first.
 const STEER_BURST_COUNT: usize = 64;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture binary is one linear scripted app-server session; splitting would duplicate the JSONL wiring"
+)]
 fn main() {
     std::thread::Builder::new()
         .name("codex-wire-fixture-watchdog".to_owned())

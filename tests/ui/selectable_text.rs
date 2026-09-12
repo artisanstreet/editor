@@ -29,6 +29,10 @@ fn base_style() -> HighlightStyle {
     }
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the helper mirrors the four GPUI modifier axes explicitly at each test call site"
+)]
 fn modifiers(control: bool, platform: bool, shift: bool, alt: bool) -> Modifiers {
     Modifiers {
         control,
@@ -95,7 +99,7 @@ fn reverse_drag_normalizes_and_unicode_slices_safely() {
     state.validate_for_text(EMOJI_BODY);
 
     state.begin_drag(5);
-    state.update_drag(0);
+    let _ = state.update_drag(0);
     assert!(state.end_drag(EMOJI_BODY));
     assert_eq!(state.selection_range(), Some(0..5));
     assert_eq!(state.selected_text(EMOJI_BODY), "a💡");
@@ -253,7 +257,7 @@ fn live_selection_tracks_drag_head_before_release() {
     state.begin_drag(2);
     assert_eq!(state.selection_range(), None);
 
-    state.update_drag(8);
+    let _ = state.update_drag(8);
     assert!(state.is_dragging());
     assert_eq!(state.selection_range(), Some(2..8));
     assert_eq!(state.selected_text(BODY), "llo wo");
@@ -825,7 +829,7 @@ fn compiler_normalizes_unsorted_highlights() {
     assert_eq!(offset, text.len());
 }
 
-/// Conflicting overlap (BOLD vs EXTRA_BOLD) stays fail-closed: exact
+/// Conflicting overlap (BOLD vs `EXTRA_BOLD`) stays fail-closed: exact
 /// coverage, deterministic outer regions, and the overlap winner is one
 /// of the two inputs — which one wins is unspecified by contract, so no
 /// winner is asserted.
@@ -881,6 +885,10 @@ fn compiler_conflicting_overlap_resolves_without_shift() {
 /// mid-emoji and out-of-bounds markers must not clamp onto the emoji,
 /// and the overlapping override loses to the earliest range.
 #[test]
+#[expect(
+    clippy::reversed_empty_ranges,
+    reason = "reversed and empty ranges are deliberate invalid inputs for the fail-closed compiler"
+)]
 fn compiler_drops_invalid_ranges_entirely() {
     let body_family: SharedString = "Body".into();
     let mono_family: SharedString = "Mono".into();

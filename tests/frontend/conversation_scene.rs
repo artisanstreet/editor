@@ -7,13 +7,13 @@ use artisan_domain::{
 };
 use artisan_frontend::conversation_scene;
 use artisan_frontend::conversation_scene::{
-    AssistantPhase, FileChangeStatus, ItemProvenance, ProgressPhase, SCENE_MAX_CHANGED_FILES_PER_CARD,
-    SCENE_MAX_DISPLAY_PATH_BYTES, SCENE_MAX_ITEMS, SCENE_MAX_MESSAGE_BODY_BYTES,
-    SCENE_MAX_NARRATIONS, SCENE_MAX_NATIVE_FACT_BYTES, SCENE_MAX_PLAN_ENTRIES,
-    SCENE_MAX_STEERING_PLACEMENTS, SCENE_MAX_TURNS, SCENE_MAX_WORK_GROUP_ITEMS, SceneBuildError,
-    SceneDisclosure, SceneFileChange, SceneId, SceneItem, SceneItemKind, SceneTurn,
-    SessionDetail, SteeringPlacement, TurnBlock, TurnNarration, TurnNarrationEntry, WorkGroupBlock,
-    WorkGroupLabel, WorkItem,
+    AssistantPhase, FileChangeStatus, ItemProvenance, ProgressPhase,
+    SCENE_MAX_CHANGED_FILES_PER_CARD, SCENE_MAX_DISPLAY_PATH_BYTES, SCENE_MAX_ITEMS,
+    SCENE_MAX_MESSAGE_BODY_BYTES, SCENE_MAX_NARRATIONS, SCENE_MAX_NATIVE_FACT_BYTES,
+    SCENE_MAX_PLAN_ENTRIES, SCENE_MAX_STEERING_PLACEMENTS, SCENE_MAX_TURNS,
+    SCENE_MAX_WORK_GROUP_ITEMS, SceneBuildError, SceneDisclosure, SceneFileChange, SceneId,
+    SceneItem, SceneItemKind, SceneTurn, SteeringPlacement, TurnBlock,
+    TurnNarration, TurnNarrationEntry, WorkGroupBlock, WorkGroupLabel, WorkItem,
 };
 
 fn scene_id(value: &str) -> SceneId {
@@ -77,11 +77,7 @@ fn provenance(run: &str, lifecycle: ConversationLifecycle) -> ItemProvenance {
 }
 
 /// Attaches run/lifecycle provenance to one scene item.
-fn provenanced(
-    item: SceneItem,
-    run: &str,
-    lifecycle: ConversationLifecycle,
-) -> SceneItem {
+fn provenanced(item: SceneItem, run: &str, lifecycle: ConversationLifecycle) -> SceneItem {
     item.with_provenance(provenance(run, lifecycle))
 }
 
@@ -456,7 +452,13 @@ fn streaming_reply_suppresses_quiet_status_row_only() {
             ConversationLifecycle::Active,
         ),
         provenanced(
-            assistant_item("assist", "turn_a", 2, "partial", AssistantPhase::Unspecified),
+            assistant_item(
+                "assist",
+                "turn_a",
+                2,
+                "partial",
+                AssistantPhase::Unspecified,
+            ),
             "run_a",
             ConversationLifecycle::Streaming,
         ),
@@ -487,7 +489,13 @@ fn streaming_reply_does_not_remove_message_or_work_group_when_not_suppressing() 
     let items = vec![
         activity_item("a1", "turn_a", 1, "tool"),
         provenanced(
-            assistant_item("assist", "turn_a", 2, "partial", AssistantPhase::Unspecified),
+            assistant_item(
+                "assist",
+                "turn_a",
+                2,
+                "partial",
+                AssistantPhase::Unspecified,
+            ),
             "run_a",
             ConversationLifecycle::Streaming,
         ),
@@ -1159,24 +1167,11 @@ fn footers_start_unsettled_and_settle_only_the_exact_turn() {
     ];
     let items = vec![
         user_item("user_a", "turn_a", 1, "hi"),
-        assistant_item(
-            "assist_a",
-            "turn_a",
-            2,
-            "hello",
-            AssistantPhase::Final,
-        ),
+        assistant_item("assist_a", "turn_a", 2, "hello", AssistantPhase::Final),
         user_item("user_b", "turn_b", 11, "who are you"),
-        assistant_item(
-            "assist_b",
-            "turn_b",
-            12,
-            "artisan",
-            AssistantPhase::Final,
-        ),
+        assistant_item("assist_b", "turn_b", 12, "artisan", AssistantPhase::Final),
     ];
-    let mut scene =
-        ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect("builds");
+    let mut scene = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect("builds");
     for turn_scene in scene.turn_scenes() {
         let footer = turn_scene
             .blocks
@@ -1189,15 +1184,12 @@ fn footers_start_unsettled_and_settle_only_the_exact_turn() {
         assert!(footer.settlement.is_none());
     }
 
-    let settlement =
-        TurnFooterSettlement::new("hello".to_owned(), 99).expect("valid settlement");
+    let settlement = TurnFooterSettlement::new("hello".to_owned(), 99).expect("valid settlement");
     assert!(scene.set_turn_footer_settlement(&turn_id("turn_a"), settlement));
-    assert!(
-        !scene.set_turn_footer_settlement(
-            &turn_id("turn_missing"),
-            TurnFooterSettlement::new("x".to_owned(), 1).expect("valid")
-        )
-    );
+    assert!(!scene.set_turn_footer_settlement(
+        &turn_id("turn_missing"),
+        TurnFooterSettlement::new("x".to_owned(), 1).expect("valid")
+    ));
 
     let settled = scene
         .turn_scene(&turn_id("turn_a"))
@@ -1283,7 +1275,10 @@ fn active_clock_basis_flows_to_status_only_for_active_work() {
         )
         .expect_err("basis without active work is refused");
         assert!(
-            matches!(err, SceneBuildError::ActiveBasisWithoutActiveNarration { .. }),
+            matches!(
+                err,
+                SceneBuildError::ActiveBasisWithoutActiveNarration { .. }
+            ),
             "unexpected error for {narration:?}: {err:?}"
         );
     }
@@ -1299,7 +1294,13 @@ fn adjacent_assistant_segments_keep_exact_bytes_and_block_boundaries() {
     let scene = ConversationScene::build(
         vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
         vec![
-            assistant_item("seg_a", "turn_a", 1, "naturally", AssistantPhase::Unspecified),
+            assistant_item(
+                "seg_a",
+                "turn_a",
+                1,
+                "naturally",
+                AssistantPhase::Unspecified,
+            ),
             assistant_item("seg_b", "turn_a", 2, "I'm", AssistantPhase::Unspecified),
         ],
         Vec::new(),
@@ -1319,9 +1320,7 @@ fn adjacent_assistant_segments_keep_exact_bytes_and_block_boundaries() {
 
 // ---- 12. session-anchored details (R1/H): late work joins the session ----
 
-fn session_group<'a>(
-    blocks: &'a [TurnBlock],
-) -> &'a conversation_scene::WorkGroupBlock {
+fn session_group(blocks: &[TurnBlock]) -> &conversation_scene::WorkGroupBlock {
     blocks
         .iter()
         .find_map(|block| match block {
@@ -1333,7 +1332,7 @@ fn session_group<'a>(
 
 #[test]
 fn session_groups_late_reasoning_before_final_reply() {
-    use conversation_scene::{ConversationScene, WorkGroupBlock};
+    use conversation_scene::ConversationScene;
 
     // Screenshot shape: the reply settled first, reasoning landed later at a
     // higher ordinal. The late work joins the session trace in place; the
@@ -1344,7 +1343,13 @@ fn session_groups_late_reasoning_before_final_reply() {
         vec![
             user_item("user_a", "turn_a", 1, "Whoopty"),
             provenanced(
-                assistant_item("reply", "turn_a", 2, "Whoopty! What's up?", AssistantPhase::Final),
+                assistant_item(
+                    "reply",
+                    "turn_a",
+                    2,
+                    "Whoopty! What's up?",
+                    AssistantPhase::Final,
+                ),
                 "run_a",
                 ConversationLifecycle::Completed,
             ),
@@ -1354,7 +1359,10 @@ fn session_groups_late_reasoning_before_final_reply() {
                 ConversationLifecycle::Completed,
             ),
         ],
-        vec![narration("turn_a", TurnNarration::ThoughtFor { millis: 6_000 })],
+        vec![narration(
+            "turn_a",
+            TurnNarration::ThoughtFor { millis: 6_000 },
+        )],
         Vec::new(),
     )
     .expect("builds");
@@ -1443,12 +1451,19 @@ fn commentary_folds_into_session_details_without_suppressing() {
     .expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
     assert!(blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
-    assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::AssistantMessage(_))));
+    assert!(
+        !blocks
+            .iter()
+            .any(|b| matches!(b, TurnBlock::AssistantMessage(_)))
+    );
     let group = session_group(blocks);
     assert_eq!(group.session_details.len(), 1);
     assert!(matches!(
         &group.session_details[0],
-        conversation_scene::SessionDetail::Assistant { phase: AssistantPhase::Commentary, .. }
+        conversation_scene::SessionDetail::Assistant {
+            phase: AssistantPhase::Commentary,
+            ..
+        }
     ));
 }
 
@@ -1488,7 +1503,9 @@ fn settled_last_promotes_completed_reply_without_final_phase() {
         .collect();
     assert_eq!(replies, vec!["settled"]);
     assert_eq!(
-        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        scene
+            .promoted_reply_id(&turn_id("turn_a"))
+            .map(|id| id.as_str().to_owned()),
         Some("m2".to_owned())
     );
     assert!(
@@ -1520,7 +1537,9 @@ fn progress_reply_promotes_phaseless_prose_while_current() {
     )
     .expect("builds");
     assert_eq!(
-        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        scene
+            .promoted_reply_id(&turn_id("turn_a"))
+            .map(|id| id.as_str().to_owned()),
         Some("m1".to_owned())
     );
 }
@@ -1551,7 +1570,11 @@ fn newer_work_returns_prose_to_session_details() {
     )
     .expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
-    assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::AssistantMessage(_))));
+    assert!(
+        !blocks
+            .iter()
+            .any(|b| matches!(b, TurnBlock::AssistantMessage(_)))
+    );
     let group = session_group(blocks);
     assert_eq!(group.progress, ProgressPhase::Work);
     // The one ordered detail list carries both, prose first in ordinal
@@ -1676,10 +1699,7 @@ fn session_anchor_overlong_is_typed_error() {
         Vec::new(),
     )
     .expect_err("overlong session anchor is refused");
-    assert!(matches!(
-        err,
-        SceneBuildError::SessionAnchorTooLong { .. }
-    ));
+    assert!(matches!(err, SceneBuildError::SessionAnchorTooLong { .. }));
 }
 
 #[test]
@@ -1702,10 +1722,7 @@ fn legacy_positional_layout_without_provenance_is_unchanged() {
     let blocks = &scene.turn_scenes()[0].blocks;
     assert!(matches!(
         &blocks[0],
-        TurnBlock::WorkGroup(WorkGroupBlock {
-            session: None,
-            ..
-        })
+        TurnBlock::WorkGroup(WorkGroupBlock { session: None, .. })
     ));
     assert!(matches!(&blocks[1], TurnBlock::AssistantMessage(_)));
     assert!(blocks.iter().any(|b| matches!(
@@ -1775,7 +1792,11 @@ fn engine_handoff_folds_into_session_header() {
     )
     .expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
-    assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::ModelTransition(_))));
+    assert!(
+        !blocks
+            .iter()
+            .any(|b| matches!(b, TurnBlock::ModelTransition(_)))
+    );
     let group = session_group(blocks);
     assert!(group.transition.is_some());
     let status = blocks.iter().find_map(|block| match block {
@@ -1830,7 +1851,9 @@ fn unattributed_assistant_renders_top_level_in_session_turn() {
         .collect();
     assert_eq!(bodies, vec!["second"]);
     assert_eq!(
-        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        scene
+            .promoted_reply_id(&turn_id("turn_a"))
+            .map(|id| id.as_str().to_owned()),
         Some("m2".to_owned())
     );
 }
@@ -1867,7 +1890,9 @@ fn explicit_final_beats_newer_unspecified_while_work_is_newest() {
     )
     .expect("builds");
     assert_eq!(
-        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        scene
+            .promoted_reply_id(&turn_id("turn_a"))
+            .map(|id| id.as_str().to_owned()),
         Some("fin".to_owned())
     );
     let bodies: Vec<&str> = scene.turn_scenes()[0]
@@ -1908,10 +1933,12 @@ fn cancelled_turn_with_later_work_promotes_nothing() {
     )
     .expect("builds");
     assert_eq!(scene.promoted_reply_id(&turn_id("turn_a")), None);
-    assert!(!scene.turn_scenes()[0].blocks.iter().any(|block| matches!(
-        block,
-        TurnBlock::AssistantMessage(_)
-    )));
+    assert!(
+        !scene.turn_scenes()[0]
+            .blocks
+            .iter()
+            .any(|block| matches!(block, TurnBlock::AssistantMessage(_)))
+    );
 }
 
 #[test]
@@ -1936,7 +1963,9 @@ fn failed_turn_keeps_explicit_final_reply() {
     )
     .expect("builds");
     assert_eq!(
-        scene.promoted_reply_id(&turn_id("turn_a")).map(|id| id.as_str().to_owned()),
+        scene
+            .promoted_reply_id(&turn_id("turn_a"))
+            .map(|id| id.as_str().to_owned()),
         Some("fin".to_owned())
     );
     let bodies: Vec<&str> = scene.turn_scenes()[0]
@@ -2043,14 +2072,14 @@ fn later_reasoning_retires_tool_wait() {
     assert!(blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
 }
 
-fn turn_statuses(scene: &conversation_scene::ConversationScene) -> Vec<(TurnNarration, Option<String>)> {
+fn turn_statuses(
+    scene: &conversation_scene::ConversationScene,
+) -> Vec<(TurnNarration, Option<String>)> {
     scene.turn_scenes()[0]
         .blocks
         .iter()
         .filter_map(|block| match block {
-            TurnBlock::TurnStatus(status) => {
-                Some((status.narration, status.engine_label.clone()))
-            }
+            TurnBlock::TurnStatus(status) => Some((status.narration, status.engine_label.clone())),
             _ => None,
         })
         .collect()
@@ -2087,7 +2116,11 @@ fn explicit_engine_label_wins_outside_session_mode() {
     )
     .expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
-    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::ModelTransition(_))));
+    assert!(
+        blocks
+            .iter()
+            .any(|b| matches!(b, TurnBlock::ModelTransition(_)))
+    );
     assert_eq!(
         turn_statuses(&scene),
         vec![(TurnNarration::ProviderWait, Some("Claude".to_owned()))]

@@ -154,7 +154,7 @@ fn partially_changed_update_stages_only_differences() {
     std::fs::create_dir_all(&second_root).expect("second sources");
     let second = fixture_set("same", &second_root);
     std::fs::write(
-        &second_root.join(native_dev::exe_name("forge")),
+        second_root.join(native_dev::exe_name("forge")),
         b"new-forge-bytes",
     )
     .expect("change forge");

@@ -634,7 +634,7 @@ async fn every_engine_kind_persists_with_its_codec_version_and_round_trips() {
                 &thread_id,
                 precondition,
                 expected.clone(),
-                100 + index as i64,
+                100 + i64::try_from(index).expect("case index fits i64"),
             ))
             .await
             .unwrap_or_else(|error| panic!("{engine:?} configuration should persist: {error:?}"));

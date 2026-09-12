@@ -526,6 +526,10 @@ async fn approval_deny_then_allow_resolves_without_side_effect() {
     assert_eq!(value["response"]["response"]["behavior"], "allow");
 }
 
+#[expect(
+    clippy::assertions_on_constants,
+    reason = "documents the domain answer ceiling against the engine constant"
+)]
 #[tokio::test]
 async fn question_answer_and_steer_verbs_shape_lines() {
     let mut tracker = ClaudePendingTracker::new();
@@ -580,6 +584,10 @@ async fn question_answer_and_steer_verbs_shape_lines() {
     assert!(CLAUDE_MAX_ANSWERS <= 16);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn subagent_and_child_frames_never_adopt_the_root_turn() {
     let run = run_id();
@@ -995,6 +1003,10 @@ struct FixtureOutcome {
 /// Drives one fixture script turn through the first user message, the init
 /// gate, and the streaming pump with stall/cancel/EOF mapping, mirroring the
 /// owner executor without spawning the real CLI.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 async fn run_fixture_turn(
     responses: &str,
     tail: &str,
@@ -1010,11 +1022,13 @@ async fn run_fixture_turn(
     let control = Arc::new(CancelHandle::new());
     let deadline = Instant::now() + Duration::from_secs(20);
 
-    let settings = ClaudeSettings::from_selection(&claude_selection()).expect("settings");
     let session = ClaudeSession::Start(SESSION.to_owned());
-    write_line(&mut stdin, &settings.user_message_line(&session, "hello"))
-        .await
-        .expect("prompt writes");
+    write_line(
+        &mut stdin,
+        &ClaudeSettings::user_message_line(&session, "hello"),
+    )
+    .await
+    .expect("prompt writes");
     let mut stdin = Some(stdin);
 
     if let Some(after) = cancel_after {
@@ -1075,32 +1089,29 @@ async fn run_fixture_turn(
                     last_activity = Instant::now();
                     sequence += 1;
                     let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
-                    match parse_frame(&trimmed, sequence) {
-                        Ok(event) => {
-                            if let ClaudeEvent::Init { session_id } = &event {
-                                session_seen = Some(session_id.clone());
-                            }
-                            if let ClaudeEvent::TextDelta { phase, .. } = &event {
-                                phases.push(*phase);
-                            }
-                            match apply_event(
-                                event, &run, SESSION, &mut tracker, &mut active, &sender, sequence,
-                                None,
-                            )
-                            .await
-                            {
-                                ClaudeApplyOutcome::Continue { end_input } => {
-                                    if end_input {
-                                        drop(stdin.take());
-                                    }
-                                }
-                                ClaudeApplyOutcome::Terminal(state) => break Some(state),
-                            }
-                            // Drain beside the text channel, mirroring the live
-                            // pump: rows traverse the loop in emission order.
-                            subagent_rows.extend(tracker.take_subagent_rows());
+                    if let Ok(event) = parse_frame(&trimmed, sequence) {
+                        if let ClaudeEvent::Init { session_id } = &event {
+                            session_seen = Some(session_id.clone());
                         }
-                        Err(_) => continue,
+                        if let ClaudeEvent::TextDelta { phase, .. } = &event {
+                            phases.push(*phase);
+                        }
+                        match apply_event(
+                            event, &run, SESSION, &mut tracker, &mut active, &sender, sequence,
+                            None,
+                        )
+                        .await
+                        {
+                            ClaudeApplyOutcome::Continue { end_input } => {
+                                if end_input {
+                                    drop(stdin.take());
+                                }
+                            }
+                            ClaudeApplyOutcome::Terminal(state) => break Some(state),
+                        }
+                        // Drain beside the text channel, mirroring the live
+                        // pump: rows traverse the loop in emission order.
+                        subagent_rows.extend(tracker.take_subagent_rows());
                     }
                 }
                 Err(_) => break None,
@@ -1509,6 +1520,10 @@ fn subagent_test_dispatcher_config() -> NativeRunDispatcherConfig {
 /// wrapped into channel events, cross a real channel in order, commit
 /// through the real S1b batch path against a real repository with
 /// sequencing, and leave root text durably untouched.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
     let database = connect(
@@ -2094,7 +2109,7 @@ fn claude_usage_report_is_cumulative_with_a_replacing_gauge() {
     assert_eq!(report.output_tokens(), Some(0));
 
     // Empty measurements are never reports.
-    let empty: serde_json::Value = serde_json::from_str(r#"{}"#).expect("empty json");
+    let empty: serde_json::Value = serde_json::from_str(r"{}").expect("empty json");
     assert_eq!(parse_claude_result_usage(&empty), Ok(None));
     assert_eq!(parse_claude_assistant_usage(&empty), Ok(None));
 }
@@ -2485,24 +2500,20 @@ async fn fixture_kill_reports_interruption_with_durable_prefix() {
                         let _ = child.kill().await;
                     }
                     let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
-                    match parse_frame(&trimmed, sequence) {
-                        Ok(event) => {
-                            if let ClaudeApplyOutcome::Terminal(state) = apply_event(
-                                event,
-                                &run,
-                                SESSION,
-                                &mut tracker,
-                                &mut active,
-                                &sender,
-                                sequence,
-                                None,
-                            )
-                            .await
-                            {
-                                break Some(state);
-                            }
-                        }
-                        Err(_) => continue,
+                    if let Ok(event) = parse_frame(&trimmed, sequence)
+                        && let ClaudeApplyOutcome::Terminal(state) = apply_event(
+                            event,
+                            &run,
+                            SESSION,
+                            &mut tracker,
+                            &mut active,
+                            &sender,
+                            sequence,
+                            None,
+                        )
+                        .await
+                    {
+                        break Some(state);
                     }
                 }
                 Err(_) => break None,

@@ -960,10 +960,8 @@ fn serve_p4_log_hold_phase(listener: &TcpListener, expected_auth: &str) {
     let mut buf = [0_u8; 1];
     loop {
         match stream.read(&mut buf) {
-            Ok(0) => return,
-            Ok(_) => return,
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
-            Err(_) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
+            Ok(_) | Err(_) => return,
         }
     }
 }

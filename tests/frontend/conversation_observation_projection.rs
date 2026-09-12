@@ -207,7 +207,7 @@ fn upsert_all(controller: &mut ConversationStateController, facts: Vec<SceneFact
 }
 
 fn work_bodies(controller: &ConversationStateController, turn: &str) -> Vec<String> {
-    use artisan_frontend::conversation_scene::SessionDetail;
+    
 
     let scene = controller.scene().expect("scene builds");
     let turn_scene = scene.turn_scene(&turn_id(turn)).expect("turn scene exists");
@@ -231,8 +231,7 @@ fn work_bodies(controller: &ConversationStateController, turn: &str) -> Vec<Stri
             // list instead; legacy groups leave it empty. Never both.
             for detail in &group.session_details {
                 if let artisan_frontend::conversation_scene::SessionDetail::Activity {
-                    body,
-                    ..
+                    body, ..
                 } = detail
                 {
                     bodies.push(body.clone());
@@ -280,7 +279,7 @@ fn attributed_tool_event_projects_stable_fact_into_scene() {
 #[test]
 fn tool_detail_is_the_displayed_body_without_machine_prefix() {
     let mut state = EngineObservationState::new(thread_id());
-    state.apply(
+    let _ = state.apply(
         1,
         &attributed_event(
             Observation::Tool(
@@ -610,7 +609,7 @@ fn successive_tool_progress_updates_keep_card_and_settle_elapsed() {
                 tool_observation(&format!("obs-tool-{delivery}"), seq, "tool-1", action),
                 RUN_A,
                 TURN_A,
-                2_000 + delivery as i64 * 10,
+                2_000 + delivery.cast_signed() * 10,
                 delivery,
             ),
         );
@@ -991,7 +990,7 @@ fn stale_batch_with_colliding_ordinal_rolls_back_without_side_effects() {
     // A stale batch (cursor 5 names a superseded tail) reuses ordinal 2.
     // Delivery reports refusal as `Ok` plus `ReportRefusal`; the speculative
     // rebase must roll back with no invented invalidation.
-    let stale = PatchBatch::new(
+    let superseded_batch = PatchBatch::new(
         thread_id(),
         ConversationCursor::new(5),
         ConversationCursor::new(6),
@@ -1003,7 +1002,7 @@ fn stale_batch_with_colliding_ordinal_rolls_back_without_side_effects() {
     )
     .expect("valid stale batch envelope");
     controller
-        .on_delivery(ConversationDeliveryEvent::BatchReceived(stale))
+        .on_delivery(ConversationDeliveryEvent::BatchReceived(superseded_batch))
         .expect("stale delivery stays Ok with ReportRefusal");
     let effects = controller.drain_effects();
     assert_eq!(
@@ -1069,8 +1068,8 @@ fn stale_batch_with_colliding_ordinal_rolls_back_without_side_effects() {
     assert!(
         matches!(
             controller.upsert_fact(conflict),
-            Err(ConversationStateError::SceneConflict { .. })
-                | Err(ConversationStateError::DuplicateFact { .. })
+            Err(ConversationStateError::SceneConflict { .. } |
+ConversationStateError::DuplicateFact { .. })
         ),
         "ordinal 2 is still owned after rollback"
     );
@@ -1090,7 +1089,7 @@ fn capacity_blocked_delivery_mutates_neither_ordinals_nor_effects() {
     let mut i = 1_u64;
     loop {
         let event = TurnEvent::Working {
-            at: 6_000 + i as i64,
+            at: 6_000 + i.cast_signed(),
             revision: 1_000 + i,
         };
         match controller.on_turn(turn_id(TURN_A), event) {
@@ -1173,7 +1172,12 @@ fn late_reasoning_joins_the_session_without_a_visible_row() {
     state.apply(
         7,
         &attributed_event(
-            reasoning_completed("obs-reason-late", 2, "item-late", Some("Planning playful ambiguous response")),
+            reasoning_completed(
+                "obs-reason-late",
+                2,
+                "item-late",
+                Some("Planning playful ambiguous response"),
+            ),
             RUN_A,
             TURN_A,
             4_900,
@@ -1193,7 +1197,10 @@ fn late_reasoning_joins_the_session_without_a_visible_row() {
     let mut controller = controller_with_snapshot(snapshot);
     upsert_all(&mut controller, projection.facts);
     let scene = controller.scene().expect("scene builds");
-    let blocks = scene.turn_scene(&turn_id(TURN_A)).expect("turn present").blocks();
+    let blocks = scene
+        .turn_scene(&turn_id(TURN_A))
+        .expect("turn present")
+        .blocks();
     let kinds: Vec<&str> = blocks
         .iter()
         .map(|block| match block {

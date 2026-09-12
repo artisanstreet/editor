@@ -9,6 +9,14 @@ const WORKSPACE_MANIFESTS: &[(&str, &str)] = &[
         include_str!("../../modules/backend/Cargo.toml"),
     ),
     (
+        "modules/catalog/Cargo.toml",
+        include_str!("../../modules/catalog/Cargo.toml"),
+    ),
+    (
+        "modules/cli/Cargo.toml",
+        include_str!("../../modules/cli/Cargo.toml"),
+    ),
+    (
         "modules/database/Cargo.toml",
         include_str!("../../modules/database/Cargo.toml"),
     ),
@@ -21,8 +29,16 @@ const WORKSPACE_MANIFESTS: &[(&str, &str)] = &[
         include_str!("../../modules/frontend/Cargo.toml"),
     ),
     (
+        "modules/installer/Cargo.toml",
+        include_str!("../../modules/installer/Cargo.toml"),
+    ),
+    (
         "modules/migrations/Cargo.toml",
         include_str!("../../modules/migrations/Cargo.toml"),
+    ),
+    (
+        "modules/native_engine/Cargo.toml",
+        include_str!("../../modules/native_engine/Cargo.toml"),
     ),
     (
         "modules/protocol/Cargo.toml",
@@ -36,6 +52,16 @@ const WORKSPACE_MANIFESTS: &[(&str, &str)] = &[
         "modules/ui/Cargo.toml",
         include_str!("../../modules/ui/Cargo.toml"),
     ),
+    (
+        "scripts/capnp_codegen/Cargo.toml",
+        include_str!("../../scripts/capnp_codegen/Cargo.toml"),
+    ),
+    (
+        "scripts/native_dev/Cargo.toml",
+        include_str!("../../scripts/native_dev/Cargo.toml"),
+    ),
+    // `modules/broker/Cargo.toml` is intentionally absent: broker is not a
+    // member of the root workspace (see `workspace.members` in `Cargo.toml`).
 ];
 
 #[test]

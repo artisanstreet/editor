@@ -355,7 +355,7 @@ async fn fresh_activation_reads_empty_observation_history_from_zero() {
         OBSERVATION_HISTORY_PAGE_LIMIT, read_activated_observation_history,
     };
 
-    assert!(
+    const _: () = assert!(
         OBSERVATION_HISTORY_PAGE_LIMIT > 0 && OBSERVATION_HISTORY_PAGE_LIMIT <= 64,
         "observation history pages stay bounded"
     );
@@ -409,8 +409,7 @@ async fn observation_history_pages_stay_bounded_ascending() {
     let after = first
         .last()
         .and_then(|event| event.attribution.as_ref())
-        .map(|attribution| attribution.delivery_sequence)
-        .unwrap_or(0);
+        .map_or(0, |attribution| attribution.delivery_sequence);
     let second = read_activated_observation_history(&repository, &subscription, after, 1)
         .await
         .expect("second history page should read");

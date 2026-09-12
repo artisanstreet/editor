@@ -621,7 +621,7 @@ async fn all_five_variants_round_trip() {
                     assert_eq!(u.item_id.as_str(), "item-5var");
                     assert_eq!(u.body.as_str(), "first body");
                     assert_eq!(
-                        u.source_message_id.as_ref().map(|id| id.as_str()),
+                        u.source_message_id.as_ref().map(artisan_domain::MessageId::as_str),
                         Some("msg-5var"),
                         "replay projects the queued source identity"
                     );

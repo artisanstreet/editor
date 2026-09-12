@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use artisan_database::{
-    RecordApprovalRequest, Repository, ResolveScope, SqliteConfig, StoredInteractionReceipt,
+    RecordApprovalRequest, Repository, SqliteConfig, StoredInteractionReceipt,
     connect, decode_observation_checkpoint,
 };
 use artisan_domain::{
@@ -263,8 +263,7 @@ async fn await_live_turn(database: &sea_orm::DatabaseConnection, dispatcher: &Na
             let routed = dispatcher
                 .interaction_registry()
                 .route(&thread_id(), &run_id())
-                .map(|route| route.is_some())
-                .unwrap_or(false);
+                .is_ok_and(|route| route.is_some());
             if delta && routed {
                 return;
             }
@@ -308,6 +307,10 @@ fn resolved_approval(decoded: &artisan_database::DecodedObservationBatch) -> (bo
     found.expect("a resolved approval observation should be committed")
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn hold_turn_answers_deny_then_allow_and_settles_clean() {
     let fixture = registered_fixture_program();

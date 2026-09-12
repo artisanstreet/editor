@@ -829,6 +829,10 @@ async fn read_http_head(
     String::from_utf8(head).ok()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 async fn run_fixture_connection(
     stream: TcpStream,
     state: Arc<Mutex<FixtureState>>,
@@ -902,7 +906,7 @@ async fn run_fixture_connection(
                 let mut ok = true;
                 for (index, part) in parts.iter().enumerate() {
                     let last = index + 1 == parts.len();
-                    let base: u8 = if index == 0 { 0x01 } else { 0x00 };
+                    let base: u8 = u8::from(index == 0);
                     let fin: u8 = if last { 0x80 } else { 0 };
                     let first = base | fin;
                     let length = u8::try_from(part.len()).unwrap_or(u8::MAX);
@@ -920,16 +924,14 @@ async fn run_fixture_connection(
     if mode.blackhole {
         loop {
             match read_ws_frame(&mut reader, HERMES_MAX_FRAME_BYTES).await {
-                Ok(super::hermes::WsFrame::Close) => return,
+                Ok(super::hermes::WsFrame::Close) | Err(_) => return,
                 Ok(_) => {}
-                Err(_) => return,
             }
         }
     }
     loop {
-        let frame = match read_ws_frame(&mut reader, HERMES_MAX_FRAME_BYTES).await {
-            Ok(frame) => frame,
-            Err(_) => return,
+        let Ok(frame) = read_ws_frame(&mut reader, HERMES_MAX_FRAME_BYTES).await else {
+            return;
         };
         match frame {
             super::hermes::WsFrame::Text(bytes, finished) => {
@@ -940,7 +942,7 @@ async fn run_fixture_connection(
                     Ok(value) => value,
                     Err(_) => return,
                 };
-                let id = value.get("id").and_then(|id| id.as_u64()).unwrap_or(0);
+                let id = value.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
                 let method = value
                     .get("method")
                     .and_then(|method| method.as_str())
@@ -955,14 +957,13 @@ async fn run_fixture_connection(
                     guarded.received.push((method.clone(), params.clone()));
                     fixture_reply(&mut guarded, id, &method, &params)
                 };
-                if let Some(reply) = reply {
-                    if write_server_text(&mut writer, reply.as_bytes(), HERMES_MAX_FRAME_BYTES)
+                if let Some(reply) = reply
+                    && write_server_text(&mut writer, reply.as_bytes(), HERMES_MAX_FRAME_BYTES)
                         .await
                         .is_err()
                     {
                         return;
                     }
-                }
                 if method == "prompt.submit" {
                     let events = {
                         let guarded = state.lock().await;
@@ -999,6 +1000,10 @@ async fn run_fixture_connection(
     }
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the fixture reply contract mirrors the wire response shape used by the caller; Option keeps the seam shaped for error replies"
+)]
 fn fixture_reply(
     state: &mut FixtureState,
     id: u64,
@@ -1138,6 +1143,10 @@ async fn connect_fixture(
 // Gateway lifecycle over the fixture
 // ---------------------------------------------------------------------------
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn hermes_turn_flows_through_fixture_gateway() {
     let (address, state, server) = spawn_fixture(FixtureMode::scripted(), fixture_script()).await;
@@ -1288,8 +1297,8 @@ async fn hermes_turn_flows_through_fixture_gateway() {
         .await
         .expect("interrupt sends");
 
-    let received = &state.lock().await.received;
-    let methods = received
+    let wire_log = &state.lock().await.received;
+    let methods = wire_log
         .iter()
         .map(|(method, _)| method.as_str())
         .collect::<Vec<_>>();
@@ -1305,7 +1314,7 @@ async fn hermes_turn_flows_through_fixture_gateway() {
     ] {
         assert!(methods.contains(&expected), "gateway saw {expected}");
     }
-    let deny = received
+    let deny = wire_log
         .iter()
         .find(|(method, _)| method == "approval.respond")
         .expect("deny recorded");
@@ -1853,9 +1862,8 @@ async fn hermes_kill_reports_interruption_with_durable_prefix() {
     let mut normalizer = HermesNormalizer::new();
     let mut tracker = HermesPendingTracker::new();
     let mut active_turn: Option<String> = None;
-    let mut frame_sequence: u64 = 0;
     // Stream the durable prefix, then lose the transport mid-turn.
-    for _ in 0..2 {
+    for frame_sequence in 1..=2u64 {
         let event = tokio::time::timeout(
             Duration::from_secs(10),
             client.next_event(&cancel, &shutdown),
@@ -1863,7 +1871,6 @@ async fn hermes_kill_reports_interruption_with_durable_prefix() {
         .await
         .expect("event arrives")
         .expect("event streams");
-        frame_sequence += 1;
         let terminal = apply_observations(
             &mut normalizer,
             &event,
@@ -1885,7 +1892,7 @@ async fn hermes_kill_reports_interruption_with_durable_prefix() {
     let terminal_error = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match client.next_event(&cancel, &shutdown).await {
-                Ok(_) => continue,
+                Ok(_) => {}
                 Err(error) => break error,
             }
         }
@@ -1907,6 +1914,10 @@ async fn hermes_kill_reports_interruption_with_durable_prefix() {
     server.abort();
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn hermes_restart_after_kill_replays_prefix_on_the_same_session() {
     let (address, state, server) = spawn_fixture(FixtureMode::scripted(), fixture_script()).await;
@@ -2060,9 +2071,9 @@ async fn hermes_restart_after_kill_replays_prefix_on_the_same_session() {
 
     // Exactly one session was ever created and exactly one resume reopened it:
     // the restart never duplicated provider effects.
-    let received = &state.lock().await.received;
+    let wire_log = &state.lock().await.received;
     assert_eq!(
-        received
+        wire_log
             .iter()
             .filter(|(method, _)| method.as_str() == "session.create")
             .count(),
@@ -2070,7 +2081,7 @@ async fn hermes_restart_after_kill_replays_prefix_on_the_same_session() {
         "no second provider session may be created"
     );
     assert_eq!(
-        received
+        wire_log
             .iter()
             .filter(|(method, _)| method.as_str() == "session.resume")
             .count(),

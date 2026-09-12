@@ -544,9 +544,8 @@ async fn representative_user_and_assistant_values_round_trip_from_entities() {
         .await
         .expect("projection should be readable");
 
-    let user = match &snapshot.items()[0] {
-        ConversationItem::UserMessage(item) => item,
-        _ => panic!("first item should be a user message"),
+    let ConversationItem::UserMessage(user) = &snapshot.items()[0] else {
+        panic!("first item should be a user message");
     };
     assert_eq!(user.item_id.as_str(), "item-1");
     assert_eq!(user.turn_id.as_str(), "turn-1");
@@ -555,7 +554,7 @@ async fn representative_user_and_assistant_values_round_trip_from_entities() {
     assert_eq!(user.lifecycle, ConversationLifecycle::Completed);
     assert_eq!(user.body.as_str(), "hello");
     assert_eq!(
-        user.source_message_id.as_ref().map(|id| id.as_str()),
+        user.source_message_id.as_ref().map(artisan_domain::MessageId::as_str),
         Some("message-1"),
         "snapshot projects the queued source identity"
     );
@@ -570,9 +569,8 @@ async fn representative_user_and_assistant_values_round_trip_from_entities() {
     assert_eq!(user.created_at, UnixMillis::from_millis(100));
     assert_eq!(user.updated_at, UnixMillis::from_millis(110));
 
-    let assistant = match &snapshot.items()[1] {
-        ConversationItem::AssistantMessage(item) => item,
-        _ => panic!("second item should be an assistant message"),
+    let ConversationItem::AssistantMessage(assistant) = &snapshot.items()[1] else {
+        panic!("second item should be an assistant message");
     };
     assert_eq!(assistant.item_id.as_str(), "item-2");
     assert_eq!(assistant.turn_id.as_str(), "turn-2");
@@ -887,7 +885,7 @@ async fn multimodal_item_carries_source_message_id() {
         panic!("expected multimodal echo item");
     };
     assert_eq!(
-        item.source_message_id.as_ref().map(|id| id.as_str()),
+        item.source_message_id.as_ref().map(artisan_domain::MessageId::as_str),
         Some("message-mm-1"),
         "multimodal variant keeps its source identity"
     );

@@ -239,7 +239,6 @@ fn listing_rejects_inconsistent_has_more_flag() {
     let mut listing = message.init_root::<composer_state_capnp::queued_message_listing::Builder>();
     encode_queued_message_listing(listing.reborrow(), &original).expect("encode listing");
     listing.set_has_more(false);
-    drop(listing);
     let words = serialize::write_message_to_words(&message);
     let mut encoded = words.as_slice();
     let decoded = serialize::read_message_from_flat_slice(&mut encoded, ReaderOptions::new())
@@ -263,7 +262,7 @@ fn oversized_image_payload_is_rejected_before_copying_bytes() {
         result.set_thread_id(thread().as_str());
         result.set_message_id(message_id().as_str());
         result.set_original_request_id(request_id("original-request").as_str());
-        let mut payload = result.init_payload();
+        let payload = result.init_payload();
         let mut attachments = payload.init_attachments(1);
         let mut image = attachments.reborrow().get(0);
         image.set_mime_type("image/png");
@@ -294,7 +293,7 @@ fn aggregate_image_budget_is_rejected_before_copying_bytes() {
         result.set_thread_id(thread().as_str());
         result.set_message_id(message_id().as_str());
         result.set_original_request_id(request_id("original-request").as_str());
-        let mut payload = result.init_payload();
+        let payload = result.init_payload();
         let mut attachments = payload.init_attachments(3);
         for index in 0..3 {
             let mut image = attachments.reborrow().get(index);
@@ -701,7 +700,6 @@ fn failed_listing_rejects_missing_reason_and_inconsistent_counts() {
     let mut listing = message.init_root::<composer_state_capnp::failed_message_listing::Builder>();
     encode_failed_message_listing(listing.reborrow(), &original).expect("encode listing");
     listing.set_has_more(!original.has_more());
-    drop(listing);
     let words = serialize::write_message_to_words(&message);
     let mut encoded = words.as_slice();
     let decoded = serialize::read_message_from_flat_slice(&mut encoded, ReaderOptions::new())

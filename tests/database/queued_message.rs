@@ -1355,7 +1355,7 @@ async fn steer_target_persists_and_claim_payload_returns_it() {
         .expect("dispatch payload should load")
         .expect("dispatch payload should exist");
     assert_eq!(
-        payload.steer_target.as_ref().map(|target| target.run_id()),
+        payload.steer_target.as_ref().map(artisan_domain::SteerTarget::run_id),
         Some(&run_id("run-steer-1")),
     );
     let snapshot = repository
@@ -1604,8 +1604,8 @@ async fn launch_uses_captured_snapshot_across_selection_change() {
         .expect("accept receipt should read")
         .expect("accept receipt should exist");
     assert_eq!(
-        run.engine_run_config.as_ref().map(|bytes| bytes.as_slice()),
-        receipt.engine_run_config.as_ref().map(|bytes| bytes.as_slice()),
+        run.engine_run_config.as_ref().map(artisan_database::entities::OpaqueBytes::as_slice),
+        receipt.engine_run_config.as_ref().map(artisan_database::entities::OpaqueBytes::as_slice),
         "launched run must store the captured snapshot, not current settings"
     );
 }

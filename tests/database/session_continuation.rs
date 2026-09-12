@@ -105,6 +105,14 @@ async fn seed_thread(database: &DatabaseConnection) {
     .expect("conversation state should insert");
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seed helper exposes each run column axis explicitly so call sites read as fixtures"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture writes one linked message/turn/run aggregate in a single linear sequence"
+)]
 async fn seed_run_with_snapshot(
     database: &DatabaseConnection,
     run_id: &str,
@@ -172,7 +180,7 @@ async fn seed_run_with_snapshot(
             .expect("binding should serialize")
         }
     });
-    let mut run_start_key = [created_at_ms as u8; 32];
+    let mut run_start_key = [created_at_ms.to_le_bytes()[0]; 32];
     for (index, byte) in run_id.bytes().enumerate() {
         let slot = index % run_start_key.len();
         run_start_key[slot] = run_start_key[slot].wrapping_add(byte);
@@ -187,7 +195,7 @@ async fn seed_run_with_snapshot(
         origin_message_id: Set(message_id),
         origin_turn_id: Set(turn_id),
         lifecycle: Set(lifecycle),
-        generation: Set(if active || settled { 1 } else { 0 }),
+        generation: Set(i64::from(active || settled)),
         owner: Set(active.then(|| OpaqueBytes::new(vec![0xa1; 32]))),
         lease: Set(active.then(|| OpaqueBytes::new(vec![0xb2; 32]))),
         claim_token: Set(None),

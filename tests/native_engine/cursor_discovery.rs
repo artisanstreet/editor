@@ -42,7 +42,7 @@ fn explicit_override_wins_verbatim_with_spaces() {
     let resolved = resolve_cursor_binary(
         Some(&format!("  {configured}  ")),
         Some(&path_var(&["C:\\Tools"])),
-        &exists(&map),
+        exists(&map),
     )
     .unwrap();
     assert_eq!(resolved.path(), Path::new(configured));
@@ -64,7 +64,7 @@ fn blank_override_falls_through_to_path_lookup() {
         } else {
             "/opt/cursor"
         }])),
-        &exists(&map),
+        exists(&map),
     )
     .unwrap();
     assert_eq!(resolved.path(), Path::new(candidate));
@@ -90,7 +90,7 @@ fn cursor_agent_is_preferred_over_agent_names() {
     };
     let map = existence(&[preferred, fallback]);
     let resolved =
-        resolve_cursor_binary(None, Some(&path_var(&[directory])), &exists(&map)).unwrap();
+        resolve_cursor_binary(None, Some(&path_var(&[directory])), exists(&map)).unwrap();
     assert_eq!(resolved.path(), Path::new(preferred));
 }
 
@@ -103,7 +103,7 @@ fn typescript_default_agent_names_resolve_as_fallback() {
     };
     let map = existence(&[fallback]);
     let resolved =
-        resolve_cursor_binary(None, Some(&path_var(&[directory])), &exists(&map)).unwrap();
+        resolve_cursor_binary(None, Some(&path_var(&[directory])), exists(&map)).unwrap();
     assert_eq!(resolved.path(), Path::new(fallback));
     assert_eq!(resolved.source(), CursorResolveSource::PathLookup);
 }
@@ -120,17 +120,17 @@ fn paths_containing_spaces_resolve_without_quoting() {
     };
     let map = existence(&[candidate]);
     let resolved =
-        resolve_cursor_binary(None, Some(&path_var(&[directory])), &exists(&map)).unwrap();
+        resolve_cursor_binary(None, Some(&path_var(&[directory])), exists(&map)).unwrap();
     assert_eq!(resolved.path(), Path::new(candidate));
 }
 
 #[test]
 fn missing_everything_reports_no_binary() {
     let map = existence(&[]);
-    assert!(resolve_cursor_binary(None, Some(&path_var(&["C:\\Tools"])), &exists(&map)).is_none());
-    assert!(resolve_cursor_binary(None, None, &exists(&map)).is_none());
-    assert!(resolve_cursor_binary(None, Some("   "), &exists(&map)).is_none());
-    assert!(find_cursor_on_path(Some(&path_var(&["C:\\Tools"])), &exists(&map)).is_none());
+    assert!(resolve_cursor_binary(None, Some(&path_var(&["C:\\Tools"])), exists(&map)).is_none());
+    assert!(resolve_cursor_binary(None, None, exists(&map)).is_none());
+    assert!(resolve_cursor_binary(None, Some("   "), exists(&map)).is_none());
+    assert!(find_cursor_on_path(Some(&path_var(&["C:\\Tools"])), exists(&map)).is_none());
 }
 
 #[test]

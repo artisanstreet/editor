@@ -1295,7 +1295,11 @@ fn loaded_turn_navigator_pointer_activation_emits_exact_item_scroll_intent(
     let button = cx
         .debug_bounds(NAV_FIRST_CONTROL)
         .expect("hovered marker must keep a stable control");
-    cx.simulate_mouse_move(button.center(), None::<gpui::MouseButton>, Modifiers::none());
+    cx.simulate_mouse_move(
+        button.center(),
+        None::<gpui::MouseButton>,
+        Modifiers::none(),
+    );
     cx.run_until_parked();
     let button = cx
         .debug_bounds(NAV_FIRST_CONTROL)

@@ -524,17 +524,11 @@ fn provisioning(
     previous_version: Option<&'static str>,
     failure: Option<&'static str>,
     busy: bool,
-) -> Option<EngineProvisioning<'static>> {
-    Some(EngineProvisioning::new(
-        managed,
-        active_version,
-        previous_version,
-        failure,
-        busy,
-    ))
+) -> EngineProvisioning<'static> {
+    EngineProvisioning::new(managed, active_version, previous_version, failure, busy)
 }
 
-fn managed_provisioning() -> Option<EngineProvisioning<'static>> {
+fn managed_provisioning() -> EngineProvisioning<'static> {
     provisioning(true, Some("1.0.0"), None, None, false)
 }
 
@@ -557,7 +551,7 @@ fn every_engine_runnable_and_ready_sends() {
                 true,
                 &catalog,
                 Some(&selected),
-                managed_provisioning().as_ref()
+                Some(&managed_provisioning())
             ),
             None,
             "{engine_id} runnable with a managed binary must send"
@@ -579,7 +573,7 @@ fn every_engine_runnable_but_missing_binary_stays_blocked() {
                 true,
                 &catalog,
                 Some(&selected),
-                provisioning(false, None, None, None, false).as_ref()
+                Some(&provisioning(false, None, None, None, false))
             ),
             Some(format!(
                 "{label} is not set up on this machine yet — install it to send"
@@ -591,7 +585,7 @@ fn every_engine_runnable_but_missing_binary_stays_blocked() {
                 true,
                 &catalog,
                 Some(&selected),
-                provisioning(false, None, Some("0.9.0"), None, false).as_ref()
+                Some(&provisioning(false, None, Some("0.9.0"), None, false))
             ),
             Some(format!(
                 "{label}'s installed binary is missing — repair it to send"
@@ -690,14 +684,13 @@ fn failed_provisioning_blocks_with_its_failure() {
             true,
             &catalog,
             Some(&selected),
-            provisioning(
+            Some(&provisioning(
                 false,
                 None,
                 None,
                 Some("The managed installation did not complete."),
                 false
-            )
-            .as_ref()
+            ))
         ),
         Some("Codex could not start — The managed installation did not complete.".to_owned())
     );
@@ -716,7 +709,7 @@ fn busy_provisioning_blocks_until_the_install_finishes() {
             true,
             &catalog,
             Some(&selected),
-            provisioning(false, None, None, None, true).as_ref()
+            Some(&provisioning(false, None, None, None, true))
         ),
         Some("Claude is still installing — try again when it finishes".to_owned())
     );

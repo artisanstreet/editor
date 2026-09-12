@@ -234,7 +234,7 @@ async fn failed_receipt_insert_rolls_back_state_and_cardinality_is_bounded()
                 &format!("request-boundary-{index}"),
                 &format!("model-boundary-{index}"),
                 true,
-                index as i64,
+                i64::try_from(index).expect("model index fits i64"),
             ))
             .await?;
     }

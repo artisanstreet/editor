@@ -17,7 +17,7 @@
 
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -33,18 +33,18 @@ use artisan_domain::{
     ConversationRequest, ConversationSubscribe, CountLimit, DirectoryId, DisplayName,
     EngineAgentId, EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
     EngineProfileId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody, MessageId,
-    NetworkAccess, PatchId, PermissionId, ProjectId, QueueMessage, QueueMessagePayload, RequestId, RootPath,
+    EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody, MessageId, NetworkAccess,
+    PatchId, PermissionId, ProjectId, QueueMessage, QueueMessagePayload, RequestId, RootPath,
     RunId, SteerTarget, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_native_engine::{NativeCodexAuthority, NativeOpenCode2Authority};
 use artisan_protocol::{
-    APPLICATION_PROTOCOL_VERSION, ClientRequest, FrameId, Hello, HelloCredential,
-    LocalCapability, ProtocolVersion, ResponsePayload, VersionOffer, WireEnvelope, WireEnvelopeBody,
+    APPLICATION_PROTOCOL_VERSION, ClientRequest, FrameId, Hello, HelloCredential, LocalCapability,
+    ProtocolVersion, ResponsePayload, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
-    CancelHandle, DeadlineError, OperationKind, PinnedIdentity, LOOPBACK_SERVER_NAME,
+    CancelHandle, DeadlineError, LOOPBACK_SERVER_NAME, OperationKind, PinnedIdentity,
 };
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -52,7 +52,8 @@ use sea_orm::EntityTrait;
 
 use super::{
     ClaimExecution, ClaimIds, LoadedClaim, NativeRunDispatcherConfig,
-    NativeRunDispatcherConfigInput, ResolvedLaunch, consume_turn, launch_claim,
+    NativeRunDispatcherConfigInput, ResolvedLaunch, TurnConsumptionContext, consume_turn,
+    launch_claim,
 };
 use crate::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, ForgeListener,
@@ -178,7 +179,10 @@ fn stream_fixture_program() -> PathBuf {
             let runfiles = runfiles::Runfiles::create().expect("runfiles discovery");
             runfiles::rlocation!(runfiles, path.as_str()).expect("wire fixture runfile")
         };
-        assert!(path.is_file(), "declared wire fixture must be a regular file");
+        assert!(
+            path.is_file(),
+            "declared wire fixture must be a regular file"
+        );
         return path;
     }
     panic!("wire fixture binary not found; set ARTISAN_CODEX_WIRE_FIXTURE");
@@ -186,7 +190,7 @@ fn stream_fixture_program() -> PathBuf {
 
 /// Copies the built fixture to a per-test executable whose basename names
 /// the frozen scenario.
-fn stream_scenario_program(fixture: &PathBuf, dir: &PathBuf, scenario: &str) -> PathBuf {
+fn stream_scenario_program(fixture: &Path, dir: &Path, scenario: &str) -> PathBuf {
     let named = dir.join(format!(
         "codex-wire-{scenario}{}",
         std::env::consts::EXE_SUFFIX
@@ -247,9 +251,7 @@ fn stream_codex_config() -> EngineRunConfig {
     )
 }
 
-fn stream_dispatcher_config(
-    notifier: ConversationCommitNotifier,
-) -> NativeRunDispatcherConfig {
+fn stream_dispatcher_config(notifier: ConversationCommitNotifier) -> NativeRunDispatcherConfig {
     NativeRunDispatcherConfig::new(
         NativeOpenCode2Authority::new(),
         notifier,
@@ -336,6 +338,11 @@ async fn seed_stream_thread(
     base
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::large_futures,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring and its timeout wrapper"
+)]
 #[tokio::test]
 async fn launch_claim_streams_user_admission_before_provider_startup() {
     tokio::time::timeout(Duration::from_secs(90), async {
@@ -382,16 +389,11 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             handshake_stream_client(&connection).await;
             // Subscribe before anything is projected: the activation
             // replay is Current, so no delivery stream opens yet.
-            let (mut subscribe_send, mut subscribe_recv) = connection
-                .open_bi()
+            let (mut subscribe_send, mut subscribe_recv) =
+                connection.open_bi().await.expect("subscribe stream opens");
+            artisan_transport::send_envelope(&mut subscribe_send, &subscribe_envelope(&thread_id))
                 .await
-                .expect("subscribe stream opens");
-            artisan_transport::send_envelope(
-                &mut subscribe_send,
-                &subscribe_envelope(&thread_id),
-            )
-            .await
-            .expect("subscribe sends");
+                .expect("subscribe sends");
             drop(subscribe_send);
             let subscribed = tokio::time::timeout(
                 TEST_DEADLINE,
@@ -401,10 +403,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             .expect("subscribe response settles")
             .expect("subscribe response decodes");
             assert!(
-                matches!(
-                    subscribed.body,
-                    WireEnvelopeBody::Response(_)
-                ),
+                matches!(subscribed.body, WireEnvelopeBody::Response(_)),
                 "subscribe must answer with a response",
             );
             // Barrier: the subscribe response is written before activation
@@ -413,10 +412,8 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             // activation (replay drain included) completes, hence this
             // re-subscribe response proves the subscription is active and
             // the launch below cannot slip into activation replay.
-            let (mut barrier_send, mut barrier_recv) = connection
-                .open_bi()
-                .await
-                .expect("barrier stream opens");
+            let (mut barrier_send, mut barrier_recv) =
+                connection.open_bi().await.expect("barrier stream opens");
             let mut barrier = subscribe_envelope(&thread_id);
             barrier.frame_id = FrameId::parse("stream-subscribe-again").expect("frame id");
             artisan_transport::send_envelope(&mut barrier_send, &barrier)
@@ -431,10 +428,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             .expect("barrier response settles")
             .expect("barrier response decodes");
             assert!(
-                matches!(
-                    barriered.body,
-                    WireEnvelopeBody::Response(_)
-                ),
+                matches!(barriered.body, WireEnvelopeBody::Response(_)),
                 "barrier must answer with a response",
             );
             subscribed_tx.send(()).expect("driver waits for subscribe");
@@ -457,13 +451,11 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             assert_eq!(batch.thread_id(), &thread_id);
             let mut saw_user = false;
             for patch in batch.patches() {
-                if let ConversationPatch::ItemUpsert { item, .. } = patch {
-                    if let ConversationItem::UserMessage(user) = item {
-                        if user.body.as_str() == "hello stream" {
+                if let ConversationPatch::ItemUpsert { item, .. } = patch
+                    && let ConversationItem::UserMessage(user) = item
+                        && user.body.as_str() == "hello stream" {
                             saw_user = true;
                         }
-                    }
-                }
             }
             assert!(saw_user, "launch must stream the user admission");
             // Nothing else can commit: no provider was ever admitted, so
@@ -481,9 +473,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
         };
 
         let drive = async {
-            subscribed_rx
-                .await
-                .expect("wire subscribes before launch");
+            subscribed_rx.await.expect("wire subscribes before launch");
             let claimed = repository
                 .claim_next_message_dispatch(ClaimMessageDispatch {
                     owner: DispatchLeaseOwner::new([0x11; 32]),
@@ -547,8 +537,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
                 turn_id: TurnId::parse("turn-stream-launch").expect("turn id"),
                 item_id: ItemId::parse("item-stream-launch").expect("item id"),
                 first_patch_id: PatchId::parse("patch-stream-launch-first").expect("patch id"),
-                second_patch_id: PatchId::parse("patch-stream-launch-second")
-                    .expect("patch id"),
+                second_patch_id: PatchId::parse("patch-stream-launch-second").expect("patch id"),
                 operated_at: UnixMillis::from_millis(base + 490),
                 run_start_key: RunStartKey::new([0x44; 32]),
                 credentials: RunLaunchCredentials::new([0xa1; 32], [0xb2; 32], [0xc3; 32]),
@@ -596,10 +585,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
     .expect("launch admission streams inside budget");
 }
 
-async fn connect_stream_client(
-    endpoint: &Endpoint,
-    address: SocketAddr,
-) -> Connection {
+async fn connect_stream_client(endpoint: &Endpoint, address: SocketAddr) -> Connection {
     let connecting = endpoint
         .connect(address, LOOPBACK_SERVER_NAME)
         .expect("loopback connect");
@@ -610,10 +596,8 @@ async fn connect_stream_client(
 }
 
 async fn handshake_stream_client(connection: &Connection) {
-    let (mut control_send, mut control_recv) = connection
-        .open_bi()
-        .await
-        .expect("control stream opens");
+    let (mut control_send, mut control_recv) =
+        connection.open_bi().await.expect("control stream opens");
     let _welcome = tokio::time::timeout(
         TEST_DEADLINE,
         artisan_transport::client_handshake(&mut control_send, &mut control_recv, hello_envelope()),
@@ -659,6 +643,10 @@ fn steer_send_envelope(
 }
 
 /// Frames collected from the server delivery stream, in arrival order.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "fixture frame vocabulary mirrors the wire variants; boxing would only add indirection in tests"
+)]
 #[derive(Debug)]
 enum StreamFrame {
     PatchBatch(artisan_domain::PatchBatch),
@@ -677,6 +665,11 @@ fn batch_has_assistant(batch: &artisan_domain::PatchBatch) -> bool {
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::large_futures,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring and its timeout wrapper"
+)]
 #[tokio::test]
 async fn live_connection_streams_admission_chunks_and_observation_before_terminal() {
     tokio::time::timeout(Duration::from_secs(150), async {
@@ -755,11 +748,10 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                         .read_conversation_patch_replay(&thread_id, ConversationCursor::default())
                         .await
                         .expect("replay should read");
-                    if let artisan_database::ConversationPatchReplay::Batch(batch) = replay {
-                        if batch_has_assistant(&batch) {
+                    if let artisan_database::ConversationPatchReplay::Batch(batch) = replay
+                        && batch_has_assistant(&batch) {
                             return;
                         }
-                    }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             })
@@ -851,15 +843,14 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                                     turn_id,
                                     sequence,
                                     ..
-                                } => {
-                                    if lifecycle.is_terminal() && terminal_seen.is_none() {
+                                }
+                                    if lifecycle.is_terminal() && terminal_seen.is_none() => {
                                         terminal_seen = Some((
                                             *lifecycle,
                                             turn_id.as_str().to_owned(),
                                             sequence.get(),
                                         ));
                                     }
-                                }
                                 _ => {}
                             }
                         }
@@ -1092,12 +1083,14 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
             turn.authorize().expect("wire turn authorizes once");
             let run_cancel_ref: &CancelHandle = &run_cancel;
             let custody_unresolved = consume_turn(
-                &repository,
-                &config,
-                &origin,
-                &stop,
-                &process_cancel,
-                run_cancel_ref,
+                TurnConsumptionContext {
+                    repository: &repository,
+                    config: &config,
+                    origin: &origin,
+                    stop: &stop,
+                    process_cancel: &process_cancel,
+                    run_cancel: run_cancel_ref,
+                },
                 turn,
                 RunBatchScope {
                     claimed: &launched.context.claimed,
@@ -1170,11 +1163,10 @@ async fn live_connection_streams_admission_chunks_and_observation_before_termina
                     for patch in batch.patches() {
                         match patch {
                             ConversationPatch::ItemUpsert { item, .. } => {
-                                if let ConversationItem::UserMessage(user) = item {
-                                    if user.body.as_str() == "hello stream" {
+                                if let ConversationItem::UserMessage(user) = item
+                                    && user.body.as_str() == "hello stream" {
                                         user_index = Some(index);
                                     }
-                                }
                             }
                             ConversationPatch::ItemAppend { text, .. } => {
                                 // Two DISTINCT cumulative updates: one frame

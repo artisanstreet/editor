@@ -314,7 +314,9 @@ fn oversized_collections_are_rejected_before_allocation() {
             u32::try_from(ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE + 1).expect("fixture count fits");
         let mut windows = engine.reborrow().init_windows(count);
         for index in 0..=ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE {
-            let mut window = windows.reborrow().get(index as u32);
+            let mut window = windows
+                .reborrow()
+                .get(u32::try_from(index).expect("fixture index fits"));
             window.set_id(format!("window-{index}").as_str());
             window.set_percent_used(1.0);
         }
@@ -330,7 +332,9 @@ fn oversized_collections_are_rejected_before_allocation() {
         let count = u32::try_from(ENGINE_USAGE_ENGINES_MAX + 1).expect("fixture count fits");
         let mut engines = snapshot.init_engines(count);
         for index in 0..=ENGINE_USAGE_ENGINES_MAX {
-            let mut engine = engines.reborrow().get(index as u32);
+            let mut engine = engines
+                .reborrow()
+                .get(u32::try_from(index).expect("fixture index fits"));
             engine.set_engine_id(format!("engine-{index}").as_str());
             engine.set_display_name("Engine");
             engine.set_authentication(

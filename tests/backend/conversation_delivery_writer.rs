@@ -1239,9 +1239,7 @@ fn assert_observation_frame(
                     assert_eq!(&delivered.thread_id, thread_id);
                     let sequence = delivered
                         .attribution
-                        .as_ref()
-                        .map(|attribution| attribution.delivery_sequence)
-                        .unwrap_or_else(|| delivered.observation.sequence().get());
+                        .as_ref().map_or_else(|| delivered.observation.sequence().get(), |attribution| attribution.delivery_sequence);
                     assert_eq!(sequence, delivery_sequence);
                     delivered.observation
                 }
@@ -1259,6 +1257,10 @@ fn assert_observation_frame(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn observation_batch_publishes_in_sequence_order_with_cursor_dedup() {
     let (_database, repository) = memory_repository().await;

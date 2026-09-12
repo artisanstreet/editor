@@ -10,6 +10,11 @@
 //! arm runs against real migrated storage. No real credentials, providers,
 //! or network endpoints are touched.
 
+#![expect(
+    clippy::float_cmp,
+    reason = "usage fixture values are exact provider numbers asserted literally for contract parity"
+)]
+
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -64,6 +69,10 @@ fn child_watchdog() {
         .expect("fixture watchdog should spawn");
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "fixture helper takes the JSON result by value for call-site symmetry with serde_json::json!"
+)]
 fn child_respond(id: &serde_json::Value, result: serde_json::Value) {
     let mut stdout = std::io::stdout().lock();
     writeln!(
@@ -165,9 +174,7 @@ fn run_codex_child(mode: &str) -> ! {
                     stdout.flush().expect("flood should flush");
                     process::exit(0);
                 }
-                "codex-hang" => {}
-                "codex-inherit" => {}
-                "codex-inherit-stuck" => {}
+                "codex-hang" | "codex-inherit" | "codex-inherit-stuck" => {}
                 _ => process::exit(CHILD_FAILURE_EXIT),
             },
             (_, "account/rateLimits/read") => match mode {
@@ -245,6 +252,10 @@ fn engine_usage_fixture_child() {
     process::exit(CHILD_FAILURE_EXIT);
 }
 
+#[expect(
+    clippy::zombie_processes,
+    reason = "the grandchild is deliberately left running to hold the inherited pipe until the test binary exits"
+)]
 fn spawn_pipe_holder(mode: &str) {
     let exe = env::current_exe().expect("current test executable should be available");
     Command::new(exe)

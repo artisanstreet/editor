@@ -132,8 +132,7 @@ fn carries_raw_html_as_inert_data() {
             Span::Html(_) => None,
             visible => Some(visible.text_content()),
         })
-        .collect::<Vec<_>>()
-        .join("");
+        .collect::<String>();
     assert!(!rendered_text.contains("alert"));
     assert!(!rendered_text.contains('<'));
     assert_eq!(rendered_text, "plain kept tail");
@@ -303,9 +302,9 @@ fn paragraph_texts(blocks: &[Block]) -> Vec<String> {
         .collect()
 }
 
-fn lists<'a>(
-    blocks: &'a [Block],
-) -> Vec<(&'a bool, &'a Option<u64>, &'a Vec<artisan_ui::markdown::ListItem>)> {
+fn lists(
+    blocks: &[Block],
+) -> Vec<(&bool, &Option<u64>, &Vec<artisan_ui::markdown::ListItem>)> {
     blocks
         .iter()
         .filter_map(|block| match block {
@@ -420,7 +419,7 @@ fn ordered_loose_nested_and_task_lists_preserve_every_row() {
     assert_eq!(
         items
             .iter()
-            .map(|item| item.text_content())
+            .map(artisan_ui::markdown::ListItem::text_content)
             .collect::<Vec<_>>(),
         vec!["one".to_owned(), "two".to_owned()]
     );
@@ -432,7 +431,7 @@ fn ordered_loose_nested_and_task_lists_preserve_every_row() {
     assert_eq!(loose_lists.len(), 1);
     let loose = &loose_lists[0].2;
     assert_eq!(loose.len(), 2);
-    for item in loose.iter() {
+    for item in *loose {
         assert!(
             item.blocks.iter().any(|block| matches!(
                 block,
@@ -881,6 +880,10 @@ fn two_paragraphs_collapse_to_a_single_gap() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "block gaps are computed from exact token constants; equality is the asserted contract"
+)]
 fn heading_follower_keeps_the_heading_bottom_gap() {
     // `h2 + *` zeroes only the follower's top margin; the collapse still
     // reads the heading's own 1 em bottom (24 px), so the pair gaps 24.
@@ -918,6 +921,10 @@ fn item_blocks_collapse_with_item_scope_margins() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the test freezes exact reference token constants; approximate comparison would hide drift"
+)]
 fn prose_helper_freezes_reference_metrics() {
     assert_eq!(ProseTypography::BODY_SIZE_PX, 16.0);
     assert_eq!(ProseTypography::BODY_LINE_PX, 28.0);
@@ -984,6 +991,10 @@ fn prose_reference_weights_request_exact_static_faces() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "shadow layer alphas are exact authored constants; equality pins the verbatim stack"
+)]
 fn fence_card_lg_shadow_matches_reference_stack() {
     // `card-lg` (`utilities.css:48–54`) is four ordinary outer layers; the
     // fence paints them through the shared recipe with no new machinery.

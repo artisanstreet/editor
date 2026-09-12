@@ -26,7 +26,7 @@
 //! relies on.
 
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use artisan_database::{
@@ -123,7 +123,7 @@ fn steer_fixture_program() -> PathBuf {
 
 /// Copies the built fixture to a per-test executable whose basename names
 /// the frozen scenario (`steer_burst`, `steer_reject`).
-fn steer_scenario_program(fixture: &PathBuf, dir: &PathBuf, scenario: &str) -> PathBuf {
+fn steer_scenario_program(fixture: &Path, dir: &Path, scenario: &str) -> PathBuf {
     let named = dir.join(format!(
         "codex-wire-{scenario}{}",
         std::env::consts::EXE_SUFFIX
@@ -212,6 +212,10 @@ struct SteerLaunch {
     bound_op_ms: i64,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 async fn seed_steer_run(
     repository: &Repository,
     thread_id: &ThreadId,
@@ -359,7 +363,7 @@ fn test_dispatcher_config() -> NativeRunDispatcherConfig {
 }
 
 /// Counts appended `steer-requests.jsonl` lines in the fixture cwd.
-fn steer_request_lines(dir: &PathBuf) -> Vec<String> {
+fn steer_request_lines(dir: &Path) -> Vec<String> {
     let path = dir.join("steer-requests.jsonl");
     let Ok(body) = std::fs::read_to_string(&path) else {
         return Vec::new();
@@ -377,6 +381,10 @@ async fn patch_count(database: &sea_orm::DatabaseConnection, thread_id: &ThreadI
         .len() as u64
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
     tokio::time::timeout(STEER_DEADLINE, async {
@@ -542,16 +550,19 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
         );
 
         // The projection links the same run: no second spawn happened.
-        use database_entities::assistant_run;
-        let runs = assistant_run::Entity::find()
-            .filter(assistant_run::Column::ThreadId.eq(thread_id.as_str()))
+        let runs = database_entities::assistant_run::Entity::find()
+            .filter(
+                database_entities::assistant_run::Column::ThreadId.eq(thread_id.as_str()),
+            )
             .all(&database)
             .await
             .expect("runs should read");
         assert_eq!(runs.len(), 1, "steer must not spawn a second run");
-        use database_entities::conversation_item;
-        let item = conversation_item::Entity::find()
-            .filter(conversation_item::Column::SourceMessageId.eq(message_id.as_str()))
+        let item = database_entities::conversation_item::Entity::find()
+            .filter(
+                database_entities::conversation_item::Column::SourceMessageId
+                    .eq(message_id.as_str()),
+            )
             .one(&database)
             .await
             .expect("projected item should read")
@@ -627,6 +638,10 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
     .expect("burst steer settles inside budget");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn codex_steer_reject_fails_typed_with_payload_preserved() {
     tokio::time::timeout(STEER_DEADLINE, async {
@@ -802,6 +817,10 @@ async fn codex_steer_reject_fails_typed_with_payload_preserved() {
     .expect("reject steer settles inside budget");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
     tokio::time::timeout(STEER_DEADLINE, async {
@@ -997,6 +1016,10 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
     .expect("cancel steer settles inside budget");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn codex_steer_known_acked_retry_replays_projection_without_provider() {
     tokio::time::timeout(STEER_DEADLINE, async {
@@ -1226,13 +1249,10 @@ fn steer_ledger_preflight_records_only_post_ack() {
         Ok(TurnInteractionOutcome::Duplicate)
     );
     // Same command id with a changed intent conflicts in both paths.
-    assert!(matches!(
-        ledger.preflight(
+    assert!(ledger.preflight(
             "request-ledger",
             &target,
             InteractionTarget::Steer,
             "steer:other"
-        ),
-        Err(_)
-    ));
+        ).is_err());
 }

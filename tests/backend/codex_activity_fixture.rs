@@ -30,6 +30,10 @@ fn notification(method: &str, params: &str) -> String {
     format!(r#"{{"method":"{method}","params":{params}}}"#)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
     let lines = [
@@ -108,8 +112,16 @@ async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
     for line in &lines {
         sequence += 1;
         let event = parse_frame(line, sequence).expect("fixture frame decodes");
-        if let Some(state) =
-            apply_event(event, &run, &mut tracker, &mut active, &sender, sequence, None).await
+        if let Some(state) = apply_event(
+            event,
+            &run,
+            &mut tracker,
+            &mut active,
+            &sender,
+            sequence,
+            None,
+        )
+        .await
         {
             terminal = Some(state);
         }
@@ -157,7 +169,10 @@ async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
 
     assert_eq!(terminal, Some(TerminalState::Completed));
     assert_eq!(text, "hello ", "plain delta path untouched");
-    assert_eq!(reasoning, "checking the plan", "foreign turn text never lands");
+    assert_eq!(
+        reasoning, "checking the plan",
+        "foreign turn text never lands"
+    );
     assert_eq!(
         tags,
         vec![

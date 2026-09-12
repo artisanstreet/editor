@@ -277,7 +277,13 @@ async fn collect_happy_path_observations(turn: &mut AcceptedTurn) -> (bool, bool
                 saw_text = true;
                 text_deltas.push(delta.delta().to_owned());
             }
-            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+            EngineObservation::TextSnapshot(_)
+            | EngineObservation::Usage(_)
+            | EngineObservation::Activity(_)
+            | EngineObservation::Subagent(_)
+            | EngineObservation::SubagentTranscript(_) => {
+                panic!("unexpected production observation in fixture")
+            }
             EngineObservation::Terminal(term) => {
                 assert_eq!(term.run_id().as_str(), "fixture-run");
                 assert_eq!(term.sequence(), 2);

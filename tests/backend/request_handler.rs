@@ -4348,6 +4348,10 @@ fn queued_message_of(response: ServerResponse) -> QueueMessageReceipt {
     receipt
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
     let (_temporary, storage) = opened_storage("steer-identity").await;

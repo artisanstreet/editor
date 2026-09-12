@@ -918,31 +918,7 @@ fn upgrade_fixture_engine_config() -> EngineRunConfig {
 async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<(), Box<dyn Error>> {
     let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
     Migrator::up(&database, Some(11)).await?;
-    database
-        .execute_unprepared(
-            "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/work/p1', 'Project', 1)",
-        )
-        .await?;
-    database
-        .execute_unprepared(
-            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'Thread', 2, 2)",
-        )
-        .await?;
-    database
-        .execute_unprepared(
-            "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m1', 't1', 0, 'legacy bytes', 3)",
-        )
-        .await?;
-    database
-        .execute_unprepared(
-            "INSERT INTO message_dispatches (message_id, correlation_id, state, attempt_count, queued_at_ms, available_at_ms, updated_at_ms) VALUES ('m1', 'queue-legacy', 'queued', 0, 3, 3, 3)",
-        )
-        .await?;
-    database
-        .execute_unprepared(
-            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, body, accepted_at_ms) VALUES ('queue-legacy', 'queue_message', 't1', 'm1', 'legacy bytes', 3)",
-        )
-        .await?;
+    seed_legacy_queue_database(&database).await?;
     migrate_to_current(&database).await?;
     assert_eq!(
         scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
@@ -1026,6 +1002,37 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
         "profile-upgrade"
     );
     database.close().await?;
+    Ok(())
+}
+
+async fn seed_legacy_queue_database(
+    database: &sea_orm_migration::sea_orm::DatabaseConnection,
+) -> Result<(), Box<dyn Error>> {
+    database
+        .execute_unprepared(
+            "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/work/p1', 'Project', 1)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'Thread', 2, 2)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m1', 't1', 0, 'legacy bytes', 3)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO message_dispatches (message_id, correlation_id, state, attempt_count, queued_at_ms, available_at_ms, updated_at_ms) VALUES ('m1', 'queue-legacy', 'queued', 0, 3, 3, 3)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, body, accepted_at_ms) VALUES ('queue-legacy', 'queue_message', 't1', 'm1', 'legacy bytes', 3)",
+        )
+        .await?;
     Ok(())
 }
 

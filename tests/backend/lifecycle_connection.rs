@@ -721,12 +721,12 @@ async fn configured_stop(require_idle: bool, label: &str) {
 
 #[tokio::test]
 async fn configured_stop_preserves_require_idle_true() {
-    configured_stop(true, "stop-true").await;
+    Box::pin(configured_stop(true, "stop-true")).await;
 }
 
 #[tokio::test]
 async fn configured_stop_preserves_require_idle_false() {
-    configured_stop(false, "stop-false").await;
+    Box::pin(configured_stop(false, "stop-false")).await;
 }
 
 #[tokio::test]

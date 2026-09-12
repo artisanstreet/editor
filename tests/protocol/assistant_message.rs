@@ -87,7 +87,7 @@ fn image_reference(message: &str, index: u32) -> ImageAttachmentRef {
         "image/png",
         format!("capture-{index}.png"),
         3,
-        [index as u8; 32],
+        [u8::try_from(index).expect("fixture index fits a byte"); 32],
     )
     .expect("fixture image reference is valid")
 }
@@ -735,7 +735,7 @@ fn raw_empty_run_engine_returns_a_typed_error() {
 #[test]
 fn raw_invalid_steer_run_id_returns_a_typed_identifier_error() {
     let mut message = raw_message();
-    let mut request = init_raw_envelope(&mut message, "client-steer-raw")
+    let request = init_raw_envelope(&mut message, "client-steer-raw")
         .init_body()
         .init_request();
     {

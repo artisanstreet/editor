@@ -112,7 +112,7 @@ fn manifest_lookup_supports_bzlmod_main_and_spaces() {
         "_main/modules/backend/forge /opt/artisan dir/forge\n\
          artisan_editor/modules/backend/forge /other/forge\n"
     };
-    let found = find_prefixed_in_manifest(&manifest, "modules/backend/forge")
+    let found = find_prefixed_in_manifest(manifest, "modules/backend/forge")
         .expect("bzlmod entry resolves");
     assert_eq!(
         found,
@@ -128,11 +128,11 @@ fn manifest_lookup_supports_bzlmod_main_and_spaces() {
 fn manifest_lookup_falls_back_through_prefixes() {
     let manifest = "artisan_editor/modules/backend/forge /fallback/forge\n";
     assert_eq!(
-        find_prefixed_in_manifest(&manifest, "modules/backend/forge"),
+        find_prefixed_in_manifest(manifest, "modules/backend/forge"),
         Some(PathBuf::from("/fallback/forge"))
     );
     assert_eq!(
-        find_prefixed_in_manifest(&manifest, "modules/backend/editor"),
+        find_prefixed_in_manifest(manifest, "modules/backend/editor"),
         None
     );
 }

@@ -218,7 +218,8 @@ fn auth_state_classification_keeps_states_distinct() {
 #[test]
 fn auth_method_selection_mirrors_typescript() {
     assert_eq!(
-        select_auth_method(&["cursor_login"]).map(|method| method.as_str()),
+        select_auth_method(&["cursor_login"])
+            .map(artisan_native_engine::cursor::CursorAuthMethod::as_str),
         Some("cursor_login")
     );
     assert_eq!(select_auth_method(&[]), None);
@@ -253,7 +254,7 @@ enum FixtureKind {
 }
 
 #[cfg(unix)]
-fn fixture_command(kind: FixtureKind) -> (PathBuf, Vec<String>) {
+fn fixture_command(kind: &FixtureKind) -> (PathBuf, Vec<String>) {
     let script = match kind {
         FixtureKind::Normal => r#"printf 'cursor-agent 2025.09.06-fixture01\n'"#,
         FixtureKind::StdoutFlood => "cat /dev/zero | head -c 300000",
@@ -268,10 +269,8 @@ fn fixture_command(kind: FixtureKind) -> (PathBuf, Vec<String>) {
 }
 
 #[cfg(windows)]
-fn fixture_command(kind: FixtureKind) -> (PathBuf, Vec<String>) {
-    let shell = std::env::var_os("COMSPEC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cmd.exe"));
+fn fixture_command(kind: &FixtureKind) -> (PathBuf, Vec<String>) {
+    let shell = std::env::var_os("COMSPEC").map_or_else(|| PathBuf::from("cmd.exe"), PathBuf::from);
     let script = match kind {
         FixtureKind::Normal => "echo cursor-agent 2025.09.06-fixture01".to_owned(),
         FixtureKind::StdoutFlood => format!("for /L %i in (1,1,2000) do @echo {}", "x".repeat(100)),
@@ -285,7 +284,7 @@ fn fixture_command(kind: FixtureKind) -> (PathBuf, Vec<String>) {
 }
 
 fn run_fixture(
-    kind: FixtureKind,
+    kind: &FixtureKind,
     timeout: Duration,
     max_bytes: usize,
     phase: CursorProbePhase,
@@ -298,7 +297,7 @@ fn run_fixture(
 #[test]
 fn bounded_spawn_reports_real_child_output() {
     let output = run_fixture(
-        FixtureKind::Normal,
+        &FixtureKind::Normal,
         Duration::from_secs(15),
         1_048_576,
         CursorProbePhase::Version,
@@ -316,7 +315,7 @@ fn bounded_spawn_enforces_output_bounds_without_deadlock() {
     for kind in [FixtureKind::StdoutFlood, FixtureKind::StderrFlood] {
         let started = Instant::now();
         let outcome = run_fixture(
-            kind,
+            &kind,
             Duration::from_secs(30),
             16 * 1024,
             CursorProbePhase::Auth,
@@ -335,7 +334,7 @@ fn bounded_spawn_enforces_output_bounds_without_deadlock() {
 fn bounded_spawn_kills_long_running_child_on_deadline() {
     let started = Instant::now();
     let outcome = run_fixture(
-        FixtureKind::Slow,
+        &FixtureKind::Slow,
         Duration::from_millis(500),
         1_048_576,
         CursorProbePhase::Version,
@@ -352,7 +351,7 @@ fn bounded_spawn_kills_long_running_child_on_deadline() {
 #[test]
 fn bounded_spawn_maps_exit_and_spawn_failures() {
     let outcome = run_fixture(
-        FixtureKind::NonZero,
+        &FixtureKind::NonZero,
         Duration::from_secs(15),
         1_048_576,
         CursorProbePhase::Version,

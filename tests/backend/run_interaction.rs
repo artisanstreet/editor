@@ -138,14 +138,14 @@ async fn respond(
 /// abort) unregisters the run.
 fn spawn_owner_drainer(
     repository: Repository,
-    registry: RunInteractionRegistry,
+    registry: &RunInteractionRegistry,
     binding_version: i64,
 ) -> tokio::task::JoinHandle<()> {
-    let (_lease, mut inbox) = registry
+    let (lease, mut inbox) = registry
         .register(thread("approve-thread"), run("approve-run"))
         .expect("scripted owner should register");
     tokio::spawn(async move {
-        let _lease = _lease;
+        let _lease = lease;
         let scope = ResolveScope {
             binding_version,
             responded_at: UnixMillis::from_millis(1_100),
@@ -168,11 +168,9 @@ fn spawn_owner_drainer(
                         Ok(artisan_database::ResolveInteractionOutcome::Applied(applied)) => {
                             RunInteractionAck::Settled(applied.receipt)
                         }
-                        Ok(artisan_database::ResolveInteractionOutcome::Duplicate(stored))
-                        | Ok(artisan_database::ResolveInteractionOutcome::UnknownTarget(stored))
-                        | Ok(artisan_database::ResolveInteractionOutcome::AlreadyResolved(
-                            stored,
-                        )) => RunInteractionAck::Settled(stored),
+                        Ok(artisan_database::ResolveInteractionOutcome::Duplicate(stored) |
+artisan_database::ResolveInteractionOutcome::UnknownTarget(stored) |
+artisan_database::ResolveInteractionOutcome::AlreadyResolved(stored)) => RunInteractionAck::Settled(stored),
                         Ok(artisan_database::ResolveInteractionOutcome::Conflict(_)) => {
                             RunInteractionAck::Conflict
                         }
@@ -187,28 +185,23 @@ fn spawn_owner_drainer(
                     answers,
                     ..
                 } => {
-                    let command = match RespondQuestion::new(
+                    let Ok(command) = RespondQuestion::new(
                         envelope.command.request_id().clone(),
                         envelope.thread_id.clone(),
                         envelope.run_id.clone(),
                         question_id.clone(),
                         answers.clone(),
-                    ) {
-                        Ok(command) => command,
-                        Err(_) => {
-                            let _ = envelope.respond.send(RunInteractionAck::Unavailable);
-                            continue;
-                        }
+                    ) else {
+                        let _ = envelope.respond.send(RunInteractionAck::Unavailable);
+                        continue;
                     };
                     match repository.resolve_question_response(&command, &scope).await {
                         Ok(artisan_database::ResolveInteractionOutcome::Applied(applied)) => {
                             RunInteractionAck::Settled(applied.receipt)
                         }
-                        Ok(artisan_database::ResolveInteractionOutcome::Duplicate(stored))
-                        | Ok(artisan_database::ResolveInteractionOutcome::UnknownTarget(stored))
-                        | Ok(artisan_database::ResolveInteractionOutcome::AlreadyResolved(
-                            stored,
-                        )) => RunInteractionAck::Settled(stored),
+                        Ok(artisan_database::ResolveInteractionOutcome::Duplicate(stored) |
+artisan_database::ResolveInteractionOutcome::UnknownTarget(stored) |
+artisan_database::ResolveInteractionOutcome::AlreadyResolved(stored)) => RunInteractionAck::Settled(stored),
                         Ok(artisan_database::ResolveInteractionOutcome::Conflict(_)) => {
                             RunInteractionAck::Conflict
                         }
@@ -442,7 +435,7 @@ async fn unknown_target_stores_receipt_and_replays_duplicate() {
     let registry = RunInteractionRegistry::new(1).expect("registry capacity is valid");
     let handler =
         RequestHandler::new(repository.clone()).with_run_interaction_registry(registry.clone());
-    let _drainer = spawn_owner_drainer(repository.clone(), registry, 1);
+    let _drainer = spawn_owner_drainer(repository.clone(), &registry, 1);
 
     let command = approval_command("respond-ghost-route", true);
     let response = respond(&handler, command)
@@ -479,7 +472,7 @@ async fn reused_request_id_with_changed_intent_conflicts() {
     let registry = RunInteractionRegistry::new(1).expect("registry capacity is valid");
     let handler =
         RequestHandler::new(repository.clone()).with_run_interaction_registry(registry.clone());
-    let _drainer = spawn_owner_drainer(repository.clone(), registry, 1);
+    let _drainer = spawn_owner_drainer(repository.clone(), &registry, 1);
 
     let command = approval_command("respond-clash-route", true);
     respond(&handler, command)
@@ -496,6 +489,8 @@ async fn reused_request_id_with_changed_intent_conflicts() {
 
 #[tokio::test]
 async fn approval_applies_through_the_owning_loop_without_side_effects() {
+    static REQUEST: std::sync::OnceLock<ApprovalRequest> = std::sync::OnceLock::new();
+
     let (_temporary, storage) = opened_storage("route-applied").await;
     let repository = storage.repository().clone();
     seed_running_run(&repository).await;
@@ -503,7 +498,6 @@ async fn approval_applies_through_the_owning_loop_without_side_effects() {
     let handler =
         RequestHandler::new(repository.clone()).with_run_interaction_registry(registry.clone());
 
-    static REQUEST: std::sync::OnceLock<ApprovalRequest> = std::sync::OnceLock::new();
     let asked = REQUEST.get_or_init(approval_request_fixture);
     repository
         .record_approval_request(RecordApprovalRequest {
@@ -517,7 +511,7 @@ async fn approval_applies_through_the_owning_loop_without_side_effects() {
         })
         .await
         .expect("request should store");
-    let _drainer = spawn_owner_drainer(repository.clone(), registry, 1);
+    let _drainer = spawn_owner_drainer(repository.clone(), &registry, 1);
 
     let command = approval_command("respond-apply-route", false);
     let response = respond(&handler, command)
@@ -577,7 +571,7 @@ async fn question_applies_and_replays_through_the_owning_loop() {
         })
         .await
         .expect("question should store");
-    let _drainer = spawn_owner_drainer(repository.clone(), registry, 1);
+    let _drainer = spawn_owner_drainer(repository.clone(), &registry, 1);
 
     let command = question_command("respond-answer-route", vec!["fast".to_owned()]);
     let response = respond(&handler, command)

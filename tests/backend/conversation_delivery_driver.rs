@@ -904,6 +904,10 @@ fn activity_tool_observation(id: &str, tool_id: &str, tool_name: &str, detail: &
 /// Commits one activity row through the canonical S1b batch path the
 /// dispatcher uses: fresh run-local base, checkpoint encode under the run
 /// bind, content-neutral assistant rewrite, existing fencing and notifier.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "fixture commit helper mirrors the batch request fields one-for-one; a wrapper struct would only rename them"
+)]
 async fn commit_activity_batch(
     repository: &Repository,
     run: &SeededRun,
@@ -964,6 +968,10 @@ async fn commit_activity_batch(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "fixture activation helper threads the exact identity fields under test; a wrapper struct would only rename them"
+)]
 async fn commit_assistant_start_at(
     repository: &Repository,
     run: &SeededRun,
@@ -1176,6 +1184,9 @@ fn frame_kind(body: &WireEnvelopeBody) -> &'static str {
 }
 
 struct DeliveredActivity {
+    /// Exact owning thread of the delivered envelope; retained for fixture
+    /// diagnostics even when a given assertion reads only the observation.
+    #[allow(dead_code)]
     thread_id: ThreadId,
     observation: Observation,
     run_id: String,
@@ -1255,6 +1266,10 @@ async fn serve_activity_delivery(
 /// Both durable rows restart at run-local sequence 1 while their
 /// `delivery_sequence` values strictly increase (1, 2) with Forge-persisted
 /// run/turn/committed-at attribution — the exact live-plus-reconnect route.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test]
 async fn activity_history_drives_live_delivery_and_reconnect_replay(
 ) -> Result<(), Box<dyn Error>> {

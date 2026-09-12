@@ -78,9 +78,9 @@ fn scoped_catalog_with_long_native_id() -> NativeModelCatalog {
         .cloned()
         .expect("bundled catalog has a model without a native selection");
     dynamic.id = "dynamic-long-native-model-".to_owned() + &"x".repeat(128);
-    dynamic.name = "Dynamic long native model".to_owned();
-    dynamic.native_model_id = "native-model".to_owned();
-    dynamic.status = "dynamic".to_owned();
+    "Dynamic long native model".clone_into(&mut dynamic.name);
+    "native-model".clone_into(&mut dynamic.native_model_id);
+    "dynamic".clone_into(&mut dynamic.status);
     assert!(dynamic.id.len() > 128);
     catalog.manifest.models.push(dynamic);
 
@@ -137,7 +137,10 @@ fn raw_oversized_favorites_frame(count: usize) -> Vec<u8> {
     let mut ids = snapshot.init_model_ids(u32::try_from(count).expect("fixture count fits"));
     for index in 0..count {
         let value = format!("model-{index}");
-        ids.set(index as u32, value.as_str());
+        ids.set(
+            u32::try_from(index).expect("fixture index fits"),
+            value.as_str(),
+        );
     }
 
     serialize::write_message_to_words(&message)

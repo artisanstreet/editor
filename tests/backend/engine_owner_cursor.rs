@@ -228,6 +228,10 @@ fn update_text(update: &SessionUpdate) -> &str {
         .expect("text content")
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn cursor_resume_reopens_the_same_session_id() {
     let bounds = strict_bounds();
@@ -770,6 +774,7 @@ impl CursorFixtureScript {
         Self { directory }
     }
 
+    #[cfg_attr(windows, allow(clippy::unused_self))]
     fn program(&self) -> OsString {
         #[cfg(windows)]
         {
@@ -823,12 +828,9 @@ async fn fixture_kill_reports_interruption_with_durable_prefix() {
     let script = CursorFixtureScript::new(&responses, tail);
     let program = script.program();
     let args = script.args();
-    let mut child = match spawn_acp_child(program.as_os_str(), &args, None) {
-        Ok(child) => child,
-        Err(_) => {
-            eprintln!("SKIP: fixture child spawn unavailable");
-            return;
-        }
+    let Ok(mut child) = spawn_acp_child(program.as_os_str(), &args, None) else {
+        eprintln!("SKIP: fixture child spawn unavailable");
+        return;
     };
     assert!(child.id().is_some(), "spawned child reports a pid");
     let pipes = child.take_pipes().expect("piped stdio");
@@ -870,12 +872,15 @@ async fn fixture_kill_reports_interruption_with_durable_prefix() {
     let eof = tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut rest)).await;
     let terminal = match eof {
         Ok(Ok(0)) => Some(TerminalState::Interrupted),
-        Ok(Ok(_)) => None,
         _ => None,
     };
     assert_eq!(terminal, Some(TerminalState::Interrupted));
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn fixture_restart_after_kill_replays_prefix_on_the_same_session() {
     let interrupted = tokio::time::timeout(Duration::from_secs(60), fixture_kill_prefix_run())
@@ -1034,7 +1039,7 @@ async fn fixture_kill_prefix_run() -> String {
     let script = CursorFixtureScript::new(&responses, tail);
     let program = script.program();
     let args = script.args();
-    let mut child = spawn_acp_child(program.as_os_str(), &args, None).expect("fixture spawns");
+    let _child = spawn_acp_child(program.as_os_str(), &args, None).expect("fixture spawns");
     let script = CursorFixtureScript::new(&responses, tail);
     let program = script.program();
     let args = script.args();

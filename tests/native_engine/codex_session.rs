@@ -86,8 +86,8 @@ fn ambiguous_and_malformed_envelopes_are_protocol_errors() {
         br#"{"id":true,"result":{}}"#.as_slice(),
         br#"{"id":1,"method":""}"#.as_slice(),
         br#"{"id":1,"method":42}"#.as_slice(),
-        br#"[]"#.as_slice(),
-        br#"not json"#.as_slice(),
+        br"[]".as_slice(),
+        br"not json".as_slice(),
     ] {
         assert_eq!(
             decode_server_envelope(line),

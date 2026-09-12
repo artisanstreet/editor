@@ -34,23 +34,27 @@ fn bounds(cx: &mut gpui::VisualTestContext, selector: &'static str) -> Bounds<Pi
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the assert pins the shared constant to its exact reference width; an epsilon would not verify the literal"
+)]
 fn caption_cluster_width_is_three_windows_buttons() {
     assert_eq!(LEGACY_TITLE_BAR_CONTROL_WIDTH_PX, 46.0);
 }
 
 #[gpui::test]
 fn rendered_title_bar_keeps_drag_and_controls_as_siblings(cx: &mut gpui::TestAppContext) {
-    let (_, mut cx) = cx.add_window_view(|_window, _cx| TitleBarHost {
+    let (_, cx) = cx.add_window_view(|_window, _cx| TitleBarHost {
         theme: ArtisanTheme::for_mode(ThemeMode::Dark),
         inspector_width_px: None,
     });
 
-    let strip = bounds(&mut cx, LEGACY_SHELL_TITLE_BAR_SELECTOR);
-    let drag = bounds(&mut cx, LEGACY_SHELL_TITLE_DRAG_SELECTOR);
-    let controls = bounds(&mut cx, LEGACY_SHELL_TITLE_CONTROLS_SELECTOR);
-    let minimize = bounds(&mut cx, LEGACY_SHELL_TITLE_MINIMIZE_SELECTOR);
-    let maximize = bounds(&mut cx, LEGACY_SHELL_TITLE_MAXIMIZE_SELECTOR);
-    let close = bounds(&mut cx, LEGACY_SHELL_TITLE_CLOSE_SELECTOR);
+    let strip = bounds(cx, LEGACY_SHELL_TITLE_BAR_SELECTOR);
+    let drag = bounds(cx, LEGACY_SHELL_TITLE_DRAG_SELECTOR);
+    let controls = bounds(cx, LEGACY_SHELL_TITLE_CONTROLS_SELECTOR);
+    let minimize = bounds(cx, LEGACY_SHELL_TITLE_MINIMIZE_SELECTOR);
+    let maximize = bounds(cx, LEGACY_SHELL_TITLE_MAXIMIZE_SELECTOR);
+    let close = bounds(cx, LEGACY_SHELL_TITLE_CLOSE_SELECTOR);
 
     assert_eq!(strip.size.height, px(40.0));
 
@@ -93,9 +97,9 @@ fn rendered_title_bar_light_mode_keeps_chrome_geometry(cx: &mut gpui::TestAppCon
         inspector_width_px: None,
     });
 
-    let strip = bounds(&mut cx, LEGACY_SHELL_TITLE_BAR_SELECTOR);
-    let controls = bounds(&mut cx, LEGACY_SHELL_TITLE_CONTROLS_SELECTOR);
-    let close = bounds(&mut cx, LEGACY_SHELL_TITLE_CLOSE_SELECTOR);
+    let strip = bounds(cx, LEGACY_SHELL_TITLE_BAR_SELECTOR);
+    let controls = bounds(cx, LEGACY_SHELL_TITLE_CONTROLS_SELECTOR);
+    let close = bounds(cx, LEGACY_SHELL_TITLE_CLOSE_SELECTOR);
 
     assert_eq!(strip.size.height, px(40.0));
     assert_eq!(

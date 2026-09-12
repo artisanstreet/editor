@@ -309,6 +309,10 @@ fn tool_file_search_terminal_rows_validate() {
         Err(ObservationError::UnknownValue { field: "state" })
     );
 
+    terminal_activity_rows_validate();
+}
+
+fn terminal_activity_rows_validate() {
     let terminal = TerminalActivityObservation::new(
         oid("obs-4"),
         seq(4),
@@ -419,7 +423,7 @@ fn question_requested_and_resolved_follow_s0_shapes() {
         &vec!["it timed out".to_owned()]
     );
 
-    let many: Vec<QuestionOption> = (0..OBSERVATION_QUESTION_MAX_OPTIONS + 1)
+    let many: Vec<QuestionOption> = (0..=OBSERVATION_QUESTION_MAX_OPTIONS)
         .map(|index| QuestionOption::new(format!("option-{index}"), None).expect("option is valid"))
         .collect();
     assert_eq!(
@@ -492,7 +496,7 @@ fn plan_compaction_retry_run_and_turn_states_validate() {
             .expect_err("plans carry at least one entry"),
         ObservationError::Empty { field: "entries" }
     );
-    let crowded: Vec<PlanEntry> = (0..OBSERVATION_PLAN_MAX_ENTRIES + 1)
+    let crowded: Vec<PlanEntry> = (0..=OBSERVATION_PLAN_MAX_ENTRIES)
         .map(|index| {
             PlanEntry::new(
                 oid(&format!("step-{index}")),

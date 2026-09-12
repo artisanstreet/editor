@@ -168,12 +168,11 @@ fn per_connection_budget_survives_normal_dev_use() {
             >= u64::from(DEV_REQUESTS_PER_CONNECTION),
         "lifetime budget must not disconnect normal use"
     );
-    assert!(
-        DEV_REQUESTS_PER_CONNECTION > 32,
-        "32 requests is a disconnect budget, not a dev budget"
-    );
     cleanup(&dev_dir);
 }
+
+// Compile-time guard: 32 requests is a disconnect budget, not a dev budget.
+const _: () = assert!(native_dev::DEV_REQUESTS_PER_CONNECTION > 32);
 
 #[test]
 fn prompt_delivery_accepts_the_dev_value_and_rejects_control_text() {

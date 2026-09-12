@@ -800,7 +800,13 @@ fn terminal_observation_preserves_all_four_states_and_fields() {
         // EngineObservation wrapper preserves.
         let wrapped = EngineObservation::Terminal(obs.clone());
         match wrapped {
-            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+            EngineObservation::TextSnapshot(_)
+            | EngineObservation::Usage(_)
+            | EngineObservation::Activity(_)
+            | EngineObservation::Subagent(_)
+            | EngineObservation::SubagentTranscript(_) => {
+                panic!("unexpected production observation in fixture")
+            }
             EngineObservation::Terminal(t) => {
                 assert_eq!(t.state(), state);
                 assert_eq!(t.sequence(), seq);
@@ -1731,7 +1737,13 @@ fn event_text_single_chunk_with_sse_id() {
             assert_eq!(delta.run_id().as_str(), "run-event-aaaa");
             assert_eq!(delta.chunk_id(), "sse-1:7:0");
         }
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
@@ -1746,7 +1758,13 @@ fn event_text_fallback_uses_run_id_when_no_sse_id() {
         EngineObservation::TextDelta(delta) => {
             assert_eq!(delta.chunk_id(), "run-event-bbbb:42:0");
         }
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
@@ -1761,7 +1779,13 @@ fn event_text_empty_sse_id_falls_back_to_run_id() {
         EngineObservation::TextDelta(delta) => {
             assert_eq!(delta.chunk_id(), "run-event-cccc:3:0");
         }
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
@@ -1783,7 +1807,13 @@ fn event_multiline_json_via_framer() {
             assert_eq!(delta.delta(), "hello multiline");
             assert_eq!(delta.chunk_id(), "mid-1:11:0");
         }
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
@@ -1808,7 +1838,13 @@ fn event_text_unicode_and_chunking_over_4096() {
                 assert_eq!(delta.sequence(), 99);
                 assert!(delta.chunk_id().starts_with("uid99:99:"));
             }
-            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+            EngineObservation::TextSnapshot(_)
+            | EngineObservation::Usage(_)
+            | EngineObservation::Activity(_)
+            | EngineObservation::Subagent(_)
+            | EngineObservation::SubagentTranscript(_) => {
+                panic!("unexpected production observation in fixture")
+            }
             EngineObservation::Terminal(_) => panic!("expected text"),
         }
     }
@@ -1816,7 +1852,13 @@ fn event_text_unicode_and_chunking_over_4096() {
         .iter()
         .map(|o| match o {
             EngineObservation::TextDelta(d) => d.delta(),
-            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+            EngineObservation::TextSnapshot(_)
+            | EngineObservation::Usage(_)
+            | EngineObservation::Activity(_)
+            | EngineObservation::Subagent(_)
+            | EngineObservation::SubagentTranscript(_) => {
+                panic!("unexpected production observation in fixture")
+            }
             EngineObservation::Terminal(_) => "",
         })
         .collect();
@@ -1829,7 +1871,13 @@ fn event_text_unicode_and_chunking_over_4096() {
         EngineObservation::TextDelta(d) => {
             assert_eq!(d.chunk_id(), "run-unicode-event:99:0");
         }
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
 
@@ -1845,7 +1893,13 @@ fn event_text_unicode_and_chunking_over_4096() {
     assert_eq!(obs_small.len(), 1);
     match &obs_small[0] {
         EngineObservation::TextDelta(d) => assert_eq!(d.delta(), unicode_small),
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
@@ -1886,12 +1940,24 @@ fn event_text_exact_4096_and_4097_chunking() {
     assert_eq!(obs2.len(), 2);
     match &obs2[0] {
         EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "cid2:2:0"),
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
     match &obs2[1] {
         EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "cid2:2:1"),
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
@@ -1915,7 +1981,13 @@ fn event_terminal_all_four_states() {
         let obs = decode_sse_event(&event).unwrap();
         assert_eq!(obs.len(), 1);
         match &obs[0] {
-            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+            EngineObservation::TextSnapshot(_)
+            | EngineObservation::Usage(_)
+            | EngineObservation::Activity(_)
+            | EngineObservation::Subagent(_)
+            | EngineObservation::SubagentTranscript(_) => {
+                panic!("unexpected production observation in fixture")
+            }
             EngineObservation::Terminal(term) => {
                 assert_eq!(term.state(), expected);
                 assert_eq!(term.sequence(), 100);
@@ -1941,7 +2013,13 @@ fn event_terminal_optional_fields() {
     let event = event_from_data(&json, None);
     let obs = decode_sse_event(&event).unwrap();
     match &obs[0] {
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(term) => {
             assert_eq!(term.reason(), Some("something broke"));
             assert_eq!(term.error_ref(), Some("err-123"));
@@ -1960,7 +2038,13 @@ fn event_terminal_optional_fields() {
     let event_null = event_from_data(&json_null, None);
     let obs_null = decode_sse_event(&event_null).unwrap();
     match &obs_null[0] {
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(term) => {
             assert_eq!(term.reason(), None);
             assert_eq!(term.error_ref(), None);
@@ -1977,7 +2061,13 @@ fn event_terminal_optional_fields() {
     let event_missing = event_from_data(&json_missing, None);
     let obs_missing = decode_sse_event(&event_missing).unwrap();
     match &obs_missing[0] {
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(term) => {
             assert_eq!(term.reason(), None);
             assert_eq!(term.error_ref(), None);
@@ -1995,7 +2085,13 @@ fn event_terminal_optional_fields() {
     let event_only = event_from_data(&json_only_reason, None);
     let obs_only = decode_sse_event(&event_only).unwrap();
     match &obs_only[0] {
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(term) => {
             assert_eq!(term.reason(), Some("only reason"));
             assert_eq!(term.error_ref(), None);
@@ -2020,7 +2116,13 @@ fn event_extra_fields_ignored() {
     assert_eq!(obs.len(), 1);
     match &obs[0] {
         EngineObservation::TextDelta(d) => assert_eq!(d.delta(), "extra ok"),
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
 
@@ -2303,7 +2405,13 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
             assert_eq!(d.sequence(), 12345);
             assert_eq!(d.chunk_id(), "stable-id:12345:0");
         }
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
 
@@ -2319,18 +2427,36 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
     assert_eq!(obs_large.len(), 2);
     match &obs_large[0] {
         EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "det-id:77:0"),
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
     match &obs_large[1] {
         EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "det-id:77:1"),
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
     for obs in &obs_large {
         match obs {
             EngineObservation::TextDelta(d) => assert_eq!(d.sequence(), 77),
-            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+            EngineObservation::TextSnapshot(_)
+            | EngineObservation::Usage(_)
+            | EngineObservation::Activity(_)
+            | EngineObservation::Subagent(_)
+            | EngineObservation::SubagentTranscript(_) => {
+                panic!("unexpected production observation in fixture")
+            }
             EngineObservation::Terminal(_) => panic!("expected text"),
         }
     }
@@ -2505,12 +2631,24 @@ async fn stream_fragmented_multiline_text_then_terminal() {
     let first = rx.recv().await.unwrap();
     match first {
         EngineObservation::TextDelta(d) => assert_eq!(d.delta(), "hello world"),
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(_) => panic!("expected text"),
     }
     let second = rx.recv().await.unwrap();
     match second {
-        EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+        EngineObservation::TextSnapshot(_)
+        | EngineObservation::Usage(_)
+        | EngineObservation::Activity(_)
+        | EngineObservation::Subagent(_)
+        | EngineObservation::SubagentTranscript(_) => {
+            panic!("unexpected production observation in fixture")
+        }
         EngineObservation::Terminal(t) => assert_eq!(t.state(), TerminalState::Completed),
         EngineObservation::TextDelta(_) => panic!("expected terminal"),
     }

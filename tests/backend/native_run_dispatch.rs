@@ -262,8 +262,7 @@ impl TempDatabase {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |elapsed| elapsed.as_nanos());
         let dir = std::env::temp_dir().join(format!(
             "artisan-dispatch-{label}-{pid}-{nanos}-{seq}",
             pid = std::process::id(),
@@ -321,10 +320,6 @@ async fn temp_repository(label: &str) -> (DatabaseConnection, Repository, TempDa
     .expect("temp db");
     migrate_to_current(&database).await.expect("migrate");
     (database.clone(), Repository::new(database), temp)
-}
-
-fn fixture_engine_config() -> EngineRunConfig {
-    fixture_engine_config_with_budgets("profile-reconcile", 100, 1, 1)
 }
 
 fn fixture_engine_config_with_budgets(
@@ -780,6 +775,10 @@ async fn dispatch_recovers_65_expired_across_bounded_pages() {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_unexpired_candidate_remains_byte_stable_until_expiry() {
     let (database, repository, _temp) = temp_repository("dispatch-unexpired").await;
@@ -3214,6 +3213,10 @@ async fn live_dispatch_snapshot(database: &DatabaseConnection, message_id: &str)
 /// (`resolve_codex_launch` has no narrow executable injection; it reads the
 /// installed `NativeCodexAuthority` directly). Without an installed CLI the
 /// claim requeues before continuation, so this stays ignored.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires installed codex CLI for the configured Codex launch probe; proves real continuation rejection without provider inference"]
 async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
@@ -3287,8 +3290,8 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
             .dispatches
             .iter()
             .find(|d| d.message_id == "msg-codex-retry");
-        if let Some(dispatch) = retry {
-            if dispatch.state == DispatchState::Failed
+        if let Some(dispatch) = retry
+            && dispatch.state == DispatchState::Failed
                 && dispatch
                     .last_error
                     .as_deref()
@@ -3297,7 +3300,6 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
                 settled = true;
                 break;
             }
-        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(
@@ -3352,6 +3354,11 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
 ///
 /// Root runs this explicitly after the build gate; it performs real
 /// provider inference.
+#[expect(
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring and its local helper"
+)]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "live scratch probe through the configured dispatcher; requires installed authenticated codex CLI and performs real inference"]
 async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
@@ -3480,18 +3487,14 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
             if dispatch.state == DispatchState::Completed {
                 return;
             }
-            if dispatch.state == DispatchState::Failed {
-                panic!(
-                    "live dispatch {message_id} failed: {}",
-                    live_dispatch_snapshot(database, message_id).await
-                );
-            }
-            if tokio::time::Instant::now() >= deadline {
-                panic!(
-                    "live dispatch {message_id} timed out: {}",
-                    live_dispatch_snapshot(database, message_id).await
-                );
-            }
+            assert!(dispatch.state != DispatchState::Failed, 
+                "live dispatch {message_id} failed: {}",
+                live_dispatch_snapshot(database, message_id).await
+            );
+            assert!(tokio::time::Instant::now() < deadline, 
+                "live dispatch {message_id} timed out: {}",
+                live_dispatch_snapshot(database, message_id).await
+            );
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
@@ -3606,6 +3609,10 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
 ///
 /// Root runs this explicitly after the build gate; it performs real provider
 /// inference against the installed authenticated codex CLI.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "live activity proof through the configured dispatcher; requires installed authenticated codex CLI and performs real inference"]
 async fn dispatch_codex_live_activity_proof_persists_command_history() {
@@ -3737,18 +3744,14 @@ async fn dispatch_codex_live_activity_proof_persists_command_history() {
         if dispatch.state == DispatchState::Completed {
             break;
         }
-        if dispatch.state == DispatchState::Failed {
-            panic!(
-                "live activity dispatch failed: {}",
-                live_dispatch_snapshot(&database, "msg-live-activity-first").await
-            );
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "live activity dispatch timed out: {}",
-                live_dispatch_snapshot(&database, "msg-live-activity-first").await
-            );
-        }
+        assert!(dispatch.state != DispatchState::Failed, 
+            "live activity dispatch failed: {}",
+            live_dispatch_snapshot(&database, "msg-live-activity-first").await
+        );
+        assert!(tokio::time::Instant::now() < deadline, 
+            "live activity dispatch timed out: {}",
+            live_dispatch_snapshot(&database, "msg-live-activity-first").await
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
@@ -3867,6 +3870,10 @@ async fn dispatch_codex_live_activity_proof_persists_command_history() {
 /// identity, checkpoint encode under the run bind, `commit_batch_with_retry`
 /// with the existing fencing/notifier) and the real authoritative history
 /// read — not the pure resequence helper.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
     use artisan_domain::{

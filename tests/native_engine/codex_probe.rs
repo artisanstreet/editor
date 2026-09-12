@@ -102,7 +102,7 @@ fn login_status_text_is_not_account_evidence() {
 #[test]
 fn malformed_account_documents_stay_invalid() {
     for bytes in [
-        br#"{}"#.as_slice(),
+        br"{}".as_slice(),
         br#"{"account":null}"#,
         br#"{"requiresOpenaiAuth":false}"#,
         br#"{"account":null,"requiresOpenaiAuth":"yes"}"#,
@@ -196,7 +196,7 @@ enum FixtureKind {
 }
 
 #[cfg(unix)]
-fn fixture_command(kind: FixtureKind) -> (PathBuf, Vec<String>) {
+fn fixture_command(kind: &FixtureKind) -> (PathBuf, Vec<String>) {
     let script = match kind {
         FixtureKind::Normal => r#"printf 'codex-cli 0.145.0\n'"#,
         FixtureKind::StdoutFlood => "cat /dev/zero | head -c 300000",
@@ -211,10 +211,8 @@ fn fixture_command(kind: FixtureKind) -> (PathBuf, Vec<String>) {
 }
 
 #[cfg(windows)]
-fn fixture_command(kind: FixtureKind) -> (PathBuf, Vec<String>) {
-    let shell = std::env::var_os("COMSPEC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cmd.exe"));
+fn fixture_command(kind: &FixtureKind) -> (PathBuf, Vec<String>) {
+    let shell = std::env::var_os("COMSPEC").map_or_else(|| PathBuf::from("cmd.exe"), PathBuf::from);
     let script = match kind {
         FixtureKind::Normal => "echo codex-cli 0.145.0".to_owned(),
         FixtureKind::StdoutFlood => format!("for /L %i in (1,1,2000) do @echo {}", "x".repeat(100)),
@@ -229,7 +227,7 @@ fn fixture_command(kind: FixtureKind) -> (PathBuf, Vec<String>) {
 
 #[test]
 fn version_probe_reports_real_child_output() {
-    let (executable, args) = fixture_command(FixtureKind::Normal);
+    let (executable, args) = fixture_command(&FixtureKind::Normal);
     let output = run_codex_version(
         &executable,
         &args,
@@ -245,7 +243,7 @@ fn version_probe_reports_real_child_output() {
 
 #[test]
 fn version_probe_bounds_stdout_flood_without_deadlock() {
-    let (executable, args) = fixture_command(FixtureKind::StdoutFlood);
+    let (executable, args) = fixture_command(&FixtureKind::StdoutFlood);
     let started = Instant::now();
     let outcome = run_codex_version(&executable, &args, Duration::from_secs(30), 16 * 1024);
     assert_eq!(outcome, Err(CodexProbeError::OutputTooLarge));
@@ -254,7 +252,7 @@ fn version_probe_bounds_stdout_flood_without_deadlock() {
 
 #[test]
 fn version_probe_bounds_stderr_flood_without_deadlock() {
-    let (executable, args) = fixture_command(FixtureKind::StderrFlood);
+    let (executable, args) = fixture_command(&FixtureKind::StderrFlood);
     let started = Instant::now();
     let outcome = run_codex_version(&executable, &args, Duration::from_secs(30), 16 * 1024);
     assert_eq!(outcome, Err(CodexProbeError::OutputTooLarge));
@@ -263,7 +261,7 @@ fn version_probe_bounds_stderr_flood_without_deadlock() {
 
 #[test]
 fn version_probe_kills_long_running_child_on_deadline() {
-    let (executable, args) = fixture_command(FixtureKind::Slow);
+    let (executable, args) = fixture_command(&FixtureKind::Slow);
     let started = Instant::now();
     let outcome = run_codex_version(
         &executable,
@@ -277,7 +275,7 @@ fn version_probe_kills_long_running_child_on_deadline() {
 
 #[test]
 fn version_probe_maps_exit_and_spawn_failures() {
-    let (executable, args) = fixture_command(FixtureKind::NonZero);
+    let (executable, args) = fixture_command(&FixtureKind::NonZero);
     assert_eq!(
         run_codex_version(
             &executable,

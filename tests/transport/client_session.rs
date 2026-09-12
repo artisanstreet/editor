@@ -611,7 +611,7 @@ enum Step {
         state: LifecycleState,
     },
     /// A verbatim envelope regardless of what the request carried.
-    Fixed(WireEnvelope),
+    Fixed(Box<WireEnvelope>),
     /// Raw framed bytes that bypass the owned-envelope encoder.
     Raw(Vec<u8>),
 }
@@ -2388,7 +2388,10 @@ async fn event_family_reply_is_terminal() -> Result<(), Box<dyn Error>> {
         Ok::<_, Box<dyn Error>>(())
     };
 
-    let server_side = serve_full(server.take_connections(), vec![Step::Fixed(event_reply()?)]);
+    let server_side = serve_full(
+        server.take_connections(),
+        vec![Step::Fixed(Box::new(event_reply()?))],
+    );
 
     let (client_result, server_result) = tokio::join!(client, server_side);
     let retained_connection = server_result?;
@@ -2434,7 +2437,7 @@ async fn patch_batch_family_reply_is_terminal() -> Result<(), Box<dyn Error>> {
 
     let server_side = serve_full(
         server.take_connections(),
-        vec![Step::Fixed(patch_batch_reply()?)],
+        vec![Step::Fixed(Box::new(patch_batch_reply()?))],
     );
 
     let (client_result, server_result) = tokio::join!(client, server_side);
@@ -2479,7 +2482,7 @@ async fn missing_correlation_reply_is_terminal() -> Result<(), Box<dyn Error>> {
 
     let server_side = serve_full(
         server.take_connections(),
-        vec![Step::Fixed(uncorrelated_failure()?)],
+        vec![Step::Fixed(Box::new(uncorrelated_failure()?))],
     );
 
     let (client_result, server_result) = tokio::join!(client, server_side);

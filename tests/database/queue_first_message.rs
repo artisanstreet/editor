@@ -591,6 +591,11 @@ fn payload_with_text(text: Option<&str>, name: &str) -> QueueMessagePayload {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end scenario keeps send, reopen, replay, and owned image reads in order; \
+              splitting it would rebuild the same file database"
+)]
 async fn general_message_preserves_order_replay_and_owned_image_reads_after_reopen() {
     let temporary = TemporaryDatabase::new("queue-message-media");
     let database = connect(
