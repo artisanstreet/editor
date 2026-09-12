@@ -32,6 +32,7 @@ rust_library(
     edition = "2024",
     lint_config = "//:workspace_lints",
     visibility = [
+        "//:__pkg__",
         "//tests/native_dev:__pkg__",
     ],
 )
