@@ -242,6 +242,7 @@ impl NativeApplication {
         .left_0()
         .size_full();
         let (working, settled) = thread_groups(&listing);
+        let show_separator = !working.is_empty() && !settled.is_empty();
         let mut groups = div()
             .id("artisan-sidebar-threads")
             .relative()
@@ -251,7 +252,7 @@ impl NativeApplication {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(16.0))
+            .gap(px(8.0))
             .debug_selector(|| "artisan-sidebar-threads".to_owned())
             .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
                 if *hovered {
@@ -272,6 +273,16 @@ impl NativeApplication {
         for (name, rows) in [("working", working), ("settled", settled)] {
             if rows.is_empty() {
                 continue;
+            }
+            if name == "settled" && show_separator {
+                groups = groups.child(
+                    div()
+                        .h(px(1.0))
+                        .flex_none()
+                        .mx(px(12.0))
+                        .bg(self.theme.colors.border.to_paint())
+                        .debug_selector(|| "artisan-sidebar-thread-group-separator".to_owned()),
+                );
             }
             let selector = format!("artisan-sidebar-threads-{name}");
             let mut group = div()
@@ -433,7 +444,7 @@ mod tests {
         assert_eq!(ids(settled), ["recent", "empty", "working-new", "old"]);
     }
     #[gpui::test]
-    fn sidebar_rows_have_a_gap_and_open_the_thread(cx: &mut gpui::TestAppContext) {
+    fn sidebar_groups_have_an_inset_separator_and_rows_open_threads(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
         let project = ProjectId::parse("sidebar-project").unwrap();
         let active = ThreadId::parse("active-thread").unwrap();
@@ -475,7 +486,14 @@ mod tests {
         let settled = cx
             .debug_bounds("artisan-sidebar-threads-settled")
             .expect("settled group");
-        assert_eq!(settled.top() - working.bottom(), px(16.0));
+        let separator = cx
+            .debug_bounds("artisan-sidebar-thread-group-separator")
+            .expect("separator between populated groups");
+        assert_eq!(separator.size.height, px(1.0));
+        assert_eq!(separator.top() - working.bottom(), px(8.0));
+        assert_eq!(settled.top() - separator.bottom(), px(8.0));
+        assert_eq!(separator.left() - working.left(), px(12.0));
+        assert_eq!(working.right() - separator.right(), px(12.0));
         let row = cx
             .debug_bounds("artisan-sidebar-thread-idle-thread")
             .expect("thread row");
