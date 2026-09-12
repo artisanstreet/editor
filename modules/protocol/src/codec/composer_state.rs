@@ -338,7 +338,7 @@ pub fn decode_queued_message_listing(
     }
 
     let mut messages = Vec::with_capacity(count);
-    for encoded in encoded_messages.iter() {
+    for encoded in encoded_messages {
         messages.push(decode_queued_message_summary(encoded)?);
     }
     let total_count = value.get_total_count();
@@ -438,7 +438,7 @@ pub fn decode_failed_message_listing(
     }
 
     let mut messages = Vec::with_capacity(count);
-    for encoded in encoded_messages.iter() {
+    for encoded in encoded_messages {
         messages.push(decode_failed_message_summary(encoded)?);
     }
     let total_count = value.get_total_count();
@@ -580,17 +580,17 @@ pub fn encode_run_usage_result(
     mut builder: composer_state_capnp::run_usage_result::Builder<'_>,
     value: &RunUsageResult,
 ) -> Result<(), ComposerStateCodecError> {
-    if let Some(report) = &value.report {
-        if report.thread_id() != &value.thread_id || report.run_id() != &value.run_id {
-            return Err(ComposerStateCodecError::StateValue {
-                field: "response.runUsage.report",
-            });
-        }
+    if let Some(report) = &value.report
+        && (report.thread_id() != &value.thread_id || report.run_id() != &value.run_id)
+    {
+        return Err(ComposerStateCodecError::StateValue {
+            field: "response.runUsage.report",
+        });
     }
     builder.set_thread_id(value.thread_id.as_str());
     builder.set_run_id(value.run_id.as_str());
     if let Some(report) = &value.report {
-        encode_run_usage_report(builder.reborrow().init_report(), report)?;
+        encode_run_usage_report(builder.reborrow().init_report(), report);
     }
     Ok(())
 }
@@ -728,7 +728,7 @@ fn decode_queue_message_payload(
     // Vec or copying one byte. This keeps hostile list lengths and image data
     // from causing an allocation before the finite budget is known.
     let mut total_bytes = 0usize;
-    for attachment in encoded_attachments.iter() {
+    for attachment in encoded_attachments {
         let bytes = attachment.get_bytes()?;
         if bytes.is_empty() {
             return Err(ComposerStateCodecError::Image {
@@ -758,7 +758,7 @@ fn decode_queue_message_payload(
     }
 
     let mut attachments = Vec::with_capacity(count);
-    for attachment in encoded_attachments.iter() {
+    for attachment in encoded_attachments {
         let mime_type = read_text(
             attachment.get_mime_type(),
             "composerState.payload.attachments.mimeType",
@@ -1156,7 +1156,7 @@ fn decode_image_attachment_ref(
 fn encode_run_usage_report(
     mut builder: composer_state_capnp::run_usage_report::Builder<'_>,
     value: &RunUsageReport,
-) -> Result<(), ComposerStateCodecError> {
+) {
     builder.set_provider_session_id(value.provider_session_id());
     builder.set_source_sequence(value.source_sequence());
     builder.set_model_id(value.model_id().as_str());
@@ -1188,7 +1188,6 @@ fn encode_run_usage_report(
         value.context_window_tokens(),
     );
     builder.set_observed_at_millis(value.observed_at().as_millis());
-    Ok(())
 }
 
 fn decode_run_usage_report(

@@ -151,8 +151,11 @@ impl CatalogSnapshotWire {
 
     /// Decodes the snapshot through the shared catalog wire API.
     ///
-    /// This method preserves the shared decoder's typed failure without
-    /// exposing raw payload data in the error.
+    /// # Errors
+    ///
+    /// Returns [`NativeModelCatalogWireError`] when the stored bytes are no
+    /// longer accepted by the shared catalog decoder. The error preserves the
+    /// shared decoder's typed failure without exposing raw payload data.
     pub fn decoded(
         &self,
     ) -> Result<artisan_catalog::NativeModelCatalog, NativeModelCatalogWireError> {
@@ -202,6 +205,13 @@ pub struct ComposerCatalogResult {
 
 impl ComposerCatalogResult {
     /// Creates a catalog result after checking its embedded runtime scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::InvalidCatalogSnapshot`] when the snapshot
+    /// fails shared decoding, or [`ProtocolValueError::CatalogScopeMissing`]
+    /// and [`ProtocolValueError::CatalogScopeMismatch`] when the decoded
+    /// catalog does not carry the result's own profile scope.
     pub fn new(
         thread_id: ThreadId,
         profile_id: EngineProfileId,
@@ -217,6 +227,13 @@ impl ComposerCatalogResult {
     }
 
     /// Validates that the decoded catalog belongs to the response profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::InvalidCatalogSnapshot`] when the snapshot
+    /// fails shared decoding, or [`ProtocolValueError::CatalogScopeMissing`]
+    /// and [`ProtocolValueError::CatalogScopeMismatch`] when the decoded
+    /// catalog does not carry this result's own profile scope.
     pub fn validate_scope(&self) -> Result<(), ProtocolValueError> {
         let catalog = self
             .snapshot
@@ -363,6 +380,11 @@ pub struct ModelFavoritesSnapshot {
 
 impl ModelFavoritesSnapshot {
     /// Creates a protocol snapshot using the existing domain validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelFavoritesSnapshotError`] when the domain snapshot rejects
+    /// the model count, a repeated model id, or the encoded byte ceiling.
     pub fn new(
         revision: ModelFavoritesRevision,
         model_ids: Vec<ModelFavoriteId>,
@@ -384,6 +406,11 @@ impl ModelFavoritesSnapshot {
     }
 
     /// Converts this owned protocol value back through domain validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelFavoritesSnapshotError`] when the domain snapshot rejects
+    /// the model count, a repeated model id, or the encoded byte ceiling.
     pub fn into_domain(self) -> Result<DomainModelFavoritesSnapshot, ModelFavoritesSnapshotError> {
         DomainModelFavoritesSnapshot::new(self.revision, self.model_ids)
     }
