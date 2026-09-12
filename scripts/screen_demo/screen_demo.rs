@@ -7,8 +7,8 @@
 
 use artisan_domain::{ConversationLifecycle, TurnId};
 use artisan_frontend::conversation_scene::{
-    AssistantPhase, ConversationScene, SceneId, SceneItem, SceneItemKind, SceneTurn,
-    TurnNarration, TurnNarrationEntry,
+    AssistantPhase, ConversationScene, SceneId, SceneItem, SceneItemKind, SceneTurn, TurnNarration,
+    TurnNarrationEntry,
 };
 use artisan_frontend::conversation_surface::ConversationSurface;
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
@@ -16,7 +16,6 @@ use gpui::{
     App, Application, Bounds, Context, Entity, IntoElement, Render, Window, WindowBounds,
     WindowOptions, div, prelude::*, px, size,
 };
-use std::borrow::Cow;
 
 fn scene_id(value: &str) -> SceneId {
     SceneId::parse(value).expect("scene id is valid")
@@ -87,17 +86,9 @@ impl Render for TranscriptDemo {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        // Bundle the mono face: hosts without it installed must still render
-        // code text instead of failing closed.
-        cx.text_system()
-            .add_fonts(vec![
-                Cow::Borrowed(
-                    include_bytes!("fonts/JetBrainsMono-Regular.ttf").as_slice(),
-                ),
-                Cow::Borrowed(include_bytes!("fonts/JetBrainsMono-Bold.ttf").as_slice()),
-                Cow::Borrowed(include_bytes!("fonts/JetBrainsMono-Italic.ttf").as_slice()),
-            ])
-            .expect("bundled mono fonts must load");
+        // Register the same bundled typefaces the product ships, so the
+        // screenshot harness renders real product typography.
+        artisan_ui::fonts::register_bundled_fonts(cx).expect("bundled fonts must register");
         let bounds = Bounds::centered(None, size(px(1100.0), px(700.0)), cx);
         cx.open_window(
             WindowOptions {

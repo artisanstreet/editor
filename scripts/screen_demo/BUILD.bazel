@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+# Visual-proof harness: mock transcript screen for screenshots. Renders two
+# turns through the real ConversationSurface with hardcoded scene data (no
+# Forge) and the product's bundled fonts. NOT shipped in any payload.
+rust_binary(
+    name = "screen_demo",
+    srcs = ["screen_demo.rs"],
+    edition = "2024",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+        "//modules/ui:ui",
+        "@crates//:gpui-ce",
+    ],
+)

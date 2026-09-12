@@ -390,7 +390,7 @@ rust_clippy(
         "//tests/ui:toggle_test",
         "//tests/ui:theme_tokens_test",
         "//tests/ui:tooltip_test",
-        "//third_party:screen_demo",
+        "//scripts/screen_demo:screen_demo",
     ],
 )
 
@@ -747,7 +747,7 @@ rustfmt_test(
         "//tests/ui:toggle_test",
         "//tests/ui:theme_tokens_test",
         "//tests/ui:tooltip_test",
-        "//third_party:screen_demo",
+        "//scripts/screen_demo:screen_demo",
     ],
     transitive = True,
 )
