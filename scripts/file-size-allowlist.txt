@@ -17,7 +17,6 @@
 1313 modules/backend/src/native_run_dispatch/claim.rs
 1384 modules/backend/src/native_run_dispatch/turn.rs
 1359 modules/backend/src/request_handler.rs
-1266 modules/backend/src/rich_link_service.rs
 1071 modules/catalog/rust/policy.rs
 1280 modules/cli/rust/commands.rs
 1035 modules/cli/rust/credentials/keychain.rs

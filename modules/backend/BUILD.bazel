@@ -104,6 +104,8 @@ rust_library(
         "src/project_repository_service.rs",
         "src/rich_link_service.rs",
         "src/rich_link_service/host_policy.rs",
+        "src/rich_link_service/html.rs",
+        "src/rich_link_service/tests.rs",
         "src/engine_owner/acp/mod.rs",
         "src/engine_owner/acp/definition.rs",
         "src/engine_owner/acp/runtime.rs",
