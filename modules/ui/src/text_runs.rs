@@ -88,33 +88,7 @@ pub fn compile_text_runs(
     let normalized: Vec<(Range<usize>, HighlightStyle)> =
         combine_highlights(sanitized, Vec::new()).collect();
 
-    let mut cleaned: Vec<(Range<usize>, Option<SharedString>, Option<Pixels>)> = overrides
-        .iter()
-        .filter(|override_value| is_usable_range(text, &override_value.range))
-        .map(|override_value| {
-            (
-                override_value.range.clone(),
-                override_value.font_family.clone(),
-                override_value.letter_spacing,
-            )
-        })
-        .collect();
-    cleaned.sort_by(|left, right| {
-        left.0
-            .start
-            .cmp(&right.0.start)
-            .then_with(|| left.0.end.cmp(&right.0.end))
-    });
-    let mut disjoint: Vec<(Range<usize>, Option<SharedString>, Option<Pixels>)> =
-        Vec::with_capacity(cleaned.len());
-    for item in cleaned {
-        let overlaps = disjoint
-            .last()
-            .is_some_and(|last| item.0.start < last.0.end);
-        if !overlaps {
-            disjoint.push(item);
-        }
-    }
+    let disjoint = disjoint_overrides(text, overrides);
 
     let mut bounds = Vec::with_capacity(normalized.len() * 2 + disjoint.len() * 2 + 2);
     bounds.extend([0, text.len()]);
@@ -181,6 +155,42 @@ pub fn compile_text_runs(
         runs.push(run);
     }
     runs
+}
+
+/// Sanitizes caller override ranges, sorts them by start, and keeps the
+/// earliest of any overlapping ranges.
+fn disjoint_overrides(
+    text: &str,
+    overrides: &[TextRunOverride],
+) -> Vec<(Range<usize>, Option<SharedString>, Option<Pixels>)> {
+    let mut cleaned: Vec<(Range<usize>, Option<SharedString>, Option<Pixels>)> = overrides
+        .iter()
+        .filter(|override_value| is_usable_range(text, &override_value.range))
+        .map(|override_value| {
+            (
+                override_value.range.clone(),
+                override_value.font_family.clone(),
+                override_value.letter_spacing,
+            )
+        })
+        .collect();
+    cleaned.sort_by(|left, right| {
+        left.0
+            .start
+            .cmp(&right.0.start)
+            .then_with(|| left.0.end.cmp(&right.0.end))
+    });
+    let mut disjoint: Vec<(Range<usize>, Option<SharedString>, Option<Pixels>)> =
+        Vec::with_capacity(cleaned.len());
+    for item in cleaned {
+        let overlaps = disjoint
+            .last()
+            .is_some_and(|last| item.0.start < last.0.end);
+        if !overlaps {
+            disjoint.push(item);
+        }
+    }
+    disjoint
 }
 
 /// Returns whether `range` is usable against `text` exactly as given.
