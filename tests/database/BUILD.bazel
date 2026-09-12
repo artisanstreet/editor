@@ -433,3 +433,72 @@ rust_test(
     size = "small",
     visibility = ["//:__pkg__"],
 )
+
+rust_test(
+    name = "model_favorites_test",
+    srcs = ["model_favorites.rs"],
+    crate_name = "model_favorites_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "run_usage_test",
+    srcs = ["run_usage.rs"],
+    crate_name = "run_usage_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "queued_message_test",
+    srcs = ["queued_message.rs"],
+    crate_name = "queued_message_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "session_continuation_test",
+    srcs = ["session_continuation.rs"],
+    crate_name = "session_continuation_test",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:serde_json",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
