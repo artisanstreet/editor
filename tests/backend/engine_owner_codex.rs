@@ -18,11 +18,12 @@ use artisan_database::{
 use artisan_domain::{
     ApprovalMode, ByteLimit, CodexModelContextWindow, CodexReasoningEffort, CodexSelection,
     CodexServiceTier, CountLimit, DirectoryId, DisplayName, EngineAgentId,
-    EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
-    EngineProfileId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, NetworkAccess, ObservationId,
-    ObservationSequence, PermissionId, ProjectId, QueueMessagePayload, RequestId, RootPath, RunId,
-    RunUsageBasis, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
+    EngineConfigUpdatePrecondition, EngineId, EngineModelId, EngineObservationTag, EngineOpenError,
+    EngineOpenInput, EngineOpenOutcome, EnginePermissionPolicy, EngineProfileId, EngineResumeToken,
+    EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection,
+    FilesystemAccess, FiniteMillis, NetworkAccess, ObservationId, ObservationSequence,
+    PermissionId, ProjectId, QueueMessagePayload, RequestId, RootPath, RunId, RunUsageBasis,
+    ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_native_engine::NativeCodexAuthority;
@@ -2250,6 +2251,7 @@ async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
             NonZeroUsize::new(1).expect("one slot"),
             &tokio::runtime::Handle::current(),
         );
+        super::socket::reset_socket_open_count_for_tests();
         let turn = admit_codex_wire_turn(
             &owner,
             settings,
@@ -2265,6 +2267,11 @@ async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
         assert!(
             started.elapsed() < Duration::from_secs(50),
             "accepted turn settles well inside budget"
+        );
+        assert_eq!(
+            super::socket::socket_open_count_for_tests(),
+            1,
+            "the live Codex configured turn must open through the socket seam exactly once"
         );
         assert_eq!(wire.session, "thread-fixture-1");
         assert_eq!(wire.text, "hello wire");
@@ -2495,6 +2502,203 @@ async fn codex_wire_owner_rejects_foreign_resume_thread_without_fresh_start() {
     })
     .await
     .expect("rejected resume settles inside 60s");
+}
+
+// ---------------------------------------------------------------------------
+// Socket open phase (per-engine EngineSocket `open`/drive split)
+// ---------------------------------------------------------------------------
+
+/// Builds one immutable socket open context for the direct open-path tests.
+fn codex_socket_context<'a>(
+    settings: &'a artisan_database::ThreadEngineSettings,
+    shutdown: &'a Arc<CancelHandle>,
+    control: &'a Arc<CancelHandle>,
+) -> super::socket::SocketTurnContext<'a> {
+    let runtime = settings.config().runtime();
+    let budget = |value: FiniteMillis| Duration::from_millis(value.get());
+    super::socket::SocketTurnContext {
+        settings,
+        limits: super::EngineLimits {
+            readiness: budget(runtime.readiness_budget()),
+            health: budget(runtime.health_budget()),
+            prompt: budget(runtime.prompt_budget()),
+            sse: budget(runtime.stream_budget()),
+            close: budget(runtime.close_budget()),
+        },
+        bounds: super::EngineBounds {
+            max_json_body: usize::try_from(runtime.max_json_body_bytes().get())
+                .expect("json body bound"),
+            max_sse_line: usize::try_from(runtime.max_sse_line_bytes().get())
+                .expect("sse line bound"),
+            max_sse_event: usize::try_from(runtime.max_sse_event_bytes().get())
+                .expect("sse event bound"),
+            max_readiness_line: usize::try_from(runtime.max_readiness_line_bytes().get())
+                .expect("readiness line bound"),
+            max_headers: usize::try_from(runtime.max_header_count().get())
+                .expect("header count bound"),
+            max_buf_bytes: usize::try_from(runtime.max_http_buffer_bytes().get())
+                .expect("http buffer bound"),
+            stderr_cap_bytes: usize::try_from(runtime.max_stderr_bytes().get())
+                .expect("stderr bound"),
+            sink_capacity: usize::try_from(runtime.observation_capacity().get())
+                .expect("sink bound"),
+            control_capacity: 1,
+        },
+        attempt_deadline: Instant::now() + Duration::from_secs(30),
+        shutdown,
+        control,
+    }
+}
+
+/// Opens one Codex session directly through the socket seam and returns the
+/// typed outcome (the child is cleaned up by the returned outcome/session).
+async fn open_codex_socket(
+    program: &Path,
+    temp: &WireTempRoot,
+    thread_id: &ThreadId,
+    prompt: &str,
+    resume: Option<EngineResumeToken>,
+) -> EngineOpenOutcome {
+    let settings = codex_wire_settings(
+        codex_wire_selection("codex-fixture", false),
+        &temp.root,
+        thread_id,
+    )
+    .await;
+    let launch = NativeCodexAuthority::new()
+        .resolve_launch_with_executable(
+            &temp.db_path,
+            &EngineProfileId::parse("codex-fixture").expect("profile id"),
+            program,
+            "codex-cli 0.145.0",
+        )
+        .expect("wire launch resolves");
+    let shutdown = Arc::new(CancelHandle::new());
+    let control = Arc::new(CancelHandle::new());
+    let context = codex_socket_context(&settings, &shutdown, &control);
+    let internal = super::InternalLaunch::Codex(Box::new(launch));
+    super::socket::adapter_for(&internal, context)
+        .open(EngineOpenInput {
+            working_directory: temp.root.as_str().to_owned(),
+            prompt: prompt.to_owned(),
+            resume,
+        })
+        .await
+}
+
+#[tokio::test]
+async fn codex_socket_open_maps_spawn_failure() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let fixture = codex_wire_fixture_program();
+        let temp = WireTempRoot::new("socket-spawn");
+        let program = codex_wire_scenario_program(&fixture, &temp.dir, "strict");
+        let thread_id = ThreadId::parse("thread-socket-spawn").expect("thread id");
+        let settings = codex_wire_settings(
+            codex_wire_selection("codex-fixture", false),
+            &temp.root,
+            &thread_id,
+        )
+        .await;
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch_with_executable(
+                &temp.db_path,
+                &EngineProfileId::parse("codex-fixture").expect("profile id"),
+                &program,
+                "codex-cli 0.145.0",
+            )
+            .expect("wire launch resolves");
+        // Removing the resolved fixture after certification makes the
+        // protected spawn revalidation fail deterministically on every
+        // platform, without depending on operating-system spawn errors.
+        std::fs::remove_file(&program).expect("fixture program removal");
+        let shutdown = Arc::new(CancelHandle::new());
+        let control = Arc::new(CancelHandle::new());
+        let context = codex_socket_context(&settings, &shutdown, &control);
+        let internal = super::InternalLaunch::Codex(Box::new(launch));
+        let outcome = super::socket::adapter_for(&internal, context)
+            .open(EngineOpenInput {
+                working_directory: temp.root.as_str().to_owned(),
+                prompt: "hello socket".to_owned(),
+                resume: None,
+            })
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                EngineOpenOutcome::Failed {
+                    error: EngineOpenError::SpawnFailed,
+                    custody: None,
+                }
+            ),
+            "spawn failure must map typed: {outcome:?}"
+        );
+    })
+    .await
+    .expect("socket spawn failure settles inside 30s");
+}
+
+#[tokio::test]
+async fn codex_socket_open_maps_resume_token_to_provider_thread() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let fixture = codex_wire_fixture_program();
+        let temp = WireTempRoot::new("socket-resume");
+        let program = codex_wire_scenario_program(&fixture, &temp.dir, "resume_interleave");
+        let thread_id = ThreadId::parse("thread-socket-resume").expect("thread id");
+        let outcome = open_codex_socket(
+            &program,
+            &temp,
+            &thread_id,
+            "hello socket",
+            Some(EngineResumeToken {
+                native_thread_id: "thread-fixture-1".to_owned(),
+            }),
+        )
+        .await;
+        let EngineOpenOutcome::Opened(run) = outcome else {
+            panic!("gated resume must open: {outcome:?}");
+        };
+        // A resumed thread maps to the provider thread id the app-server
+        // returns, and the run names the shared run-state observation tag.
+        assert_eq!(run.native_thread_id.native_thread_id, "thread-fixture-1");
+        assert_eq!(run.observation_tag, EngineObservationTag::RunState);
+        drop(run);
+    })
+    .await
+    .expect("socket resume open settles inside 30s");
+}
+
+#[tokio::test]
+async fn codex_socket_open_rejects_foreign_resume_thread() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let fixture = codex_wire_fixture_program();
+        let temp = WireTempRoot::new("socket-resume-foreign");
+        let program = codex_wire_scenario_program(&fixture, &temp.dir, "resume_mismatch");
+        let thread_id = ThreadId::parse("thread-socket-resume-foreign").expect("thread id");
+        let outcome = open_codex_socket(
+            &program,
+            &temp,
+            &thread_id,
+            "hello socket",
+            Some(EngineResumeToken {
+                native_thread_id: "thread-fixture-1".to_owned(),
+            }),
+        )
+        .await;
+        // A resume result naming another thread fails closed: no silent
+        // fresh start, so the open maps the rejection typed.
+        assert!(
+            matches!(
+                outcome,
+                EngineOpenOutcome::Failed {
+                    error: EngineOpenError::ResumeRejected,
+                    custody: None,
+                }
+            ),
+            "foreign resume thread must map typed: {outcome:?}"
+        );
+    })
+    .await
+    .expect("socket resume rejection settles inside 30s");
 }
 
 /// Opt-in production acceptance against the installed authenticated CLI.
