@@ -9,7 +9,7 @@
 1669 modules/backend/src/engine_owner/http.rs
 1398 modules/backend/src/engine_owner/mod.rs
 1365 modules/backend/src/engine_owner/opencode_event.rs
-1117 modules/backend/src/engine_owner/operation/codex.rs
+809 modules/backend/src/engine_owner/operation/codex.rs
 1311 modules/backend/src/engine_owner/process.rs
 977 modules/backend/src/forge_runtime/config.rs
 990 modules/backend/src/listener.rs
