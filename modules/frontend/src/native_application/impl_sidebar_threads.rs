@@ -2,6 +2,7 @@
 
 use super::*;
 use artisan_domain::ThreadSummary;
+use gpui::ColorExt as _;
 use std::time::Instant;
 
 #[derive(Default)]
@@ -12,6 +13,71 @@ pub(super) struct SidebarThreadsState {
     generation: u64,
     pending: Option<(ProjectId, u64)>,
     next_read: Option<Instant>,
+    selection: SidebarSelectionFade,
+    selection_frame_pending: bool,
+}
+
+/// Two sequential halves of the transitions-dev icon-swap duration.
+#[derive(Default)]
+struct SidebarSelectionFade {
+    target: Option<ThreadId>,
+    origins: HashMap<ThreadId, f32>,
+    started: Option<Instant>,
+}
+
+impl SidebarSelectionFade {
+    fn weight(&self, id: &ThreadId, now: Instant) -> f32 {
+        let Some(started) = self.started else {
+            return if self.target.as_ref() == Some(id) {
+                1.0
+            } else {
+                0.0
+            };
+        };
+        let elapsed = now.saturating_duration_since(started).as_secs_f32();
+        let half = selection_duration().as_secs_f32() / 2.0;
+        if elapsed < half {
+            self.origins.get(id).copied().unwrap_or(0.0) * (1.0 - fade_curve(elapsed / half))
+        } else if self.target.as_ref() == Some(id) {
+            fade_curve(((elapsed - half) / half).min(1.0))
+        } else {
+            0.0
+        }
+    }
+
+    fn select(&mut self, target: Option<ThreadId>, ids: &[ThreadSummary], reduced: bool) -> bool {
+        let now = Instant::now();
+        if self.target != target {
+            self.origins = ids
+                .iter()
+                .map(|row| (row.thread_id.clone(), self.weight(&row.thread_id, now)))
+                .collect();
+            let initial = self.target.is_none() && self.started.is_none();
+            self.target = target;
+            self.started = if initial || reduced { None } else { Some(now) };
+        }
+        if reduced {
+            self.started = None;
+        }
+        self.started
+            .is_some_and(|at| now.saturating_duration_since(at) < selection_duration())
+    }
+}
+
+fn selection_duration() -> Duration {
+    use artisan_ui::motion::{MotionPlan, MotionPolicy, MotionRecipe};
+    match MotionPolicy::Full.resolve(MotionRecipe::IconSwap) {
+        MotionPlan::Animate(animation) => animation.duration(),
+        MotionPlan::Immediate => Duration::ZERO,
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the easing result is bounded to the unit interval"
+)]
+fn fade_curve(progress: f32) -> f32 {
+    artisan_ui::motion::MotionCurve::EaseInOut.sample(f64::from(progress)) as f32
 }
 
 /// Electron orders each group by the most recent sent message, falling back
@@ -113,11 +179,39 @@ impl NativeApplication {
         cx.notify();
     }
 
+    fn animate_sidebar_selection(&mut self, rows: &[ThreadSummary], cx: &mut Context<Self>) {
+        let target = match self.route() {
+            NativeRoute::Thread { thread, .. } | NativeRoute::Editor { thread, .. } => {
+                Some(thread.clone())
+            }
+            _ => None,
+        };
+        if self
+            .sidebar_threads
+            .selection
+            .select(target, rows, cx.reduce_motion())
+            && !self.sidebar_threads.selection_frame_pending
+        {
+            self.sidebar_threads.selection_frame_pending = true;
+            cx.spawn(async move |entity, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let _ = entity.update(cx, |app, cx| {
+                    app.sidebar_threads.selection_frame_pending = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
     pub(super) fn desktop_sidebar_threads(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let listing = self
             .thread_listing
             .clone()
             .unwrap_or_else(empty_thread_listing);
+        self.animate_sidebar_selection(listing.threads(), cx);
         self.sidebar_threads.focus.retain(|id, _| {
             listing
                 .threads()
@@ -207,8 +301,14 @@ impl NativeApplication {
             .entry(thread.thread_id.clone())
             .or_insert_with(|| cx.focus_handle())
             .clone();
-        let selected = matches!(self.route(), NativeRoute::Thread { thread: id, .. }
-            | NativeRoute::Editor { thread: id, .. } if id == &thread.thread_id);
+        let weight = self
+            .sidebar_threads
+            .selection
+            .weight(&thread.thread_id, Instant::now());
+        let glyph_color = self
+            .desktop_theme
+            .secondary
+            .blend(&self.desktop_theme.foreground.opacity(weight));
         let title = self
             .listed_thread_display_title(&thread.thread_id, cx)
             .unwrap_or_else(|| thread.title.as_str().to_owned());
@@ -259,11 +359,7 @@ impl NativeApplication {
                     },
                     self.desktop_theme,
                 )
-                .text_color(if selected {
-                    self.desktop_theme.foreground
-                } else {
-                    self.desktop_theme.secondary
-                }),
+                .text_color(glyph_color),
             )
             .child(div().flex_1().min_w(px(0.0)).truncate().child(title))
             .on_click(cx.listener(move |app, _, window, cx| {
@@ -283,6 +379,25 @@ impl NativeApplication {
 mod tests {
     use super::*;
     use artisan_domain::{ThreadTitle, UnixMillis};
+
+    #[test]
+    fn selected_foreground_fades_out_before_next_fades_in() {
+        let old = ThreadId::parse("old").unwrap();
+        let next = ThreadId::parse("next").unwrap();
+        let start = Instant::now();
+        let fade = SidebarSelectionFade {
+            target: Some(next.clone()),
+            origins: HashMap::from([(old.clone(), 1.0)]),
+            started: Some(start),
+        };
+        assert!(fade.weight(&old, start + Duration::from_millis(60)) > 0.0);
+        assert!(fade.weight(&next, start + Duration::from_millis(60)).abs() < f32::EPSILON);
+        assert!(fade.weight(&old, start + Duration::from_millis(125)).abs() < f32::EPSILON);
+        assert!(fade.weight(&next, start + Duration::from_millis(180)) > 0.0);
+        assert!(
+            (fade.weight(&next, start + Duration::from_millis(250)) - 1.0).abs() < f32::EPSILON
+        );
+    }
 
     #[test]
     fn sidebar_groups_work_first_and_sort_by_sent_message_not_projection_updates() {

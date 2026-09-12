@@ -276,36 +276,37 @@ async fn load_run_authority(
             run_id: run_id.clone(),
         });
     }
-    // Usage authority mirrors the immutable selection. OpenCode2 authorizes
-    // its exact model/route/variant triple; Codex authorizes its exact model
-    // on the `codex` route with no variant, matching `codex_usage_report`.
-    // Any other engine, or a Codex selection with no model to fence against,
-    // fails closed as an invalid snapshot instead of coercing to the wrong
-    // engine. Scope mismatches against an established authority stay
-    // `ModelOriginMismatch` in `report_matches_authority`.
+    // Validate the immutable model and route for every adapter that emits usage.
+    // A missing model still cannot authorize a report.
     let (model_id, provider_route_id, variant_id) = match config.selection() {
         EngineSelection::OpenCode2(selection) => (
             selection.model_id().clone(),
             selection.route_id().clone(),
             selection.variant_id().cloned(),
         ),
-        EngineSelection::Codex(selection) => {
-            let Some(model_id) = selection.model_id().cloned() else {
+        selection => {
+            let (model_id, route) = match selection {
+                EngineSelection::Codex(selection) => (selection.model_id(), "codex"),
+                EngineSelection::Claude(selection) => (selection.model_id(), "claude"),
+                EngineSelection::Grok(selection) => (selection.model_id(), "grok"),
+                EngineSelection::Cursor(selection) => (selection.model_id(), "cursor"),
+                EngineSelection::OpenCode2(_) => {
+                    return Err(RunUsageRepositoryError::InvalidRunSnapshot {
+                        run_id: run_id.clone(),
+                    });
+                }
+            };
+            let Some(model_id) = model_id.cloned() else {
                 return Err(RunUsageRepositoryError::InvalidRunSnapshot {
                     run_id: run_id.clone(),
                 });
             };
-            let route_id = EngineRouteId::parse("codex").map_err(|_| {
+            let route_id = EngineRouteId::parse(route).map_err(|_| {
                 RunUsageRepositoryError::InvalidRunSnapshot {
                     run_id: run_id.clone(),
                 }
             })?;
             (model_id, route_id, None)
-        }
-        _ => {
-            return Err(RunUsageRepositoryError::InvalidRunSnapshot {
-                run_id: run_id.clone(),
-            });
         }
     };
     Ok(RunUsageAuthority {

@@ -712,15 +712,45 @@ impl ConversationHost {
         };
         let scene = self.surface.read(cx).scene();
         let query = crate::conversation_token_speed::footer_usage_query(snapshot, scene, turn);
+        let baseline_query = query
+            .as_ref()
+            .filter(|_| request || self.footer_policies.contains_key(turn))
+            .and_then(|query| {
+                self.footer_usage
+                    .get(&query.run_id)
+                    .and_then(Option::as_ref)
+                    .filter(|report| {
+                        report.basis() == artisan_domain::RunUsageBasis::Cumulative
+                            && report.provider_route_id().as_str() != "claude"
+                    })
+                    .and_then(|_| {
+                        crate::conversation_token_speed::footer_baseline_query(snapshot, query)
+                    })
+            });
+        let baseline = baseline_query
+            .as_ref()
+            .and_then(|query| self.footer_usage.get(&query.run_id))
+            .and_then(Option::as_ref);
         let speed = query
             .as_ref()
             .and_then(|query| self.footer_usage.get(&query.run_id))
             .and_then(Option::as_ref)
             .and_then(|report| {
-                crate::conversation_token_speed::footer_speed(snapshot, scene, turn, report)
+                crate::conversation_token_speed::footer_speed_with_baseline(
+                    snapshot, scene, turn, report, baseline,
+                )
             });
         self.surface
             .update(cx, |surface, cx| surface.set_footer_speed(turn, speed, cx));
+        if let Some(query) = baseline_query
+            && !self.footer_usage.contains_key(&query.run_id)
+            && self.effects.len() < CONVERSATION_HOST_MAX_EFFECTS
+        {
+            self.footer_usage.insert(query.run_id.clone(), None);
+            self.effects
+                .push(ConversationHostEffect::ReadFooterUsage { query });
+            cx.notify();
+        }
         if request
             && let Some(query) = query
             && !self.footer_usage.contains_key(&query.run_id)

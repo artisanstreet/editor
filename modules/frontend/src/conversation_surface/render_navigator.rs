@@ -298,6 +298,9 @@ impl ConversationSurface {
                 .items_center()
                 .justify_end()
                 .gap(theme.spacing.steps(3.0))
+                .rounded(RadiusTokens::value(RadiusStep::Lg))
+                .px(px(if expanded { 12.0 } else { 0.0 }))
+                .py(px(if expanded { 6.0 } else { 0.0 }))
                 .debug_selector(move || control_selector.clone())
                 .focus_visible(move |focused| {
                     focused.shadow(vec![BoxShadow {

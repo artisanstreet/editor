@@ -260,13 +260,22 @@ async fn seeded(path: Option<&Path>) -> (DatabaseConnection, Repository, RunId, 
 }
 
 fn report(sequence: u64, input_tokens: Option<u64>, observed_at: i64) -> RunUsageReport {
+    report_on_route(sequence, input_tokens, observed_at, "route-usage")
+}
+
+fn report_on_route(
+    sequence: u64,
+    input_tokens: Option<u64>,
+    observed_at: i64,
+    route: &str,
+) -> RunUsageReport {
     RunUsageReport::new(RunUsageReportInput {
         run_id: RunId::parse(RUN_ID).expect("run id"),
         thread_id: ThreadId::parse(THREAD_ID).expect("thread id"),
         provider_session_id: "provider-session-usage".to_owned(),
         source_sequence: sequence,
         model_id: EngineModelId::parse("model-usage").expect("model id"),
-        provider_route_id: EngineRouteId::parse("route-usage").expect("route id"),
+        provider_route_id: EngineRouteId::parse(route).expect("route id"),
         variant_id: None,
         basis: RunUsageBasis::Delta,
         provider_turn_id: Some("assistant-usage".to_owned()),
@@ -759,4 +768,62 @@ async fn codex_snapshot_authorizes_exact_usage_and_rejects_scope_mismatch() {
         .expect("codex usage should remain");
     assert_eq!(latest.source_sequence(), 4);
     drop(database);
+}
+
+#[tokio::test]
+async fn additional_provider_snapshots_authorize_only_their_exact_routes() {
+    use artisan_domain::{ClaudeSelection, CursorSelection, GrokSelection};
+    for route in ["claude", "cursor", "grok"] {
+        let (database, repository) = open_database(None).await;
+        seed_project_and_thread(&database, &repository).await;
+        let profile = EngineProfileId::parse("profile-usage").unwrap();
+        let model = Some(EngineModelId::parse("model-usage").unwrap());
+        let permission = EnginePermissionPolicy::new(
+            PermissionId::parse("permission-usage").unwrap(),
+            EngineAgentId::parse("agent-usage").unwrap(),
+            ApprovalMode::Never,
+            FilesystemAccess::Workspace,
+            NetworkAccess::Enabled,
+            WebSearchAccess::Disabled,
+        );
+        let selection = match route {
+            "claude" => EngineSelection::Claude(
+                ClaudeSelection::new(profile, model, permission, None, None, false, false).unwrap(),
+            ),
+            "cursor" => EngineSelection::Cursor(CursorSelection::new(
+                profile, model, permission, None, None, None,
+            )),
+            _ => EngineSelection::Grok(GrokSelection::new(profile, model, permission, None, None)),
+        };
+        repository
+            .set_thread_engine_config(SetThreadEngineConfigInput {
+                request_id: RequestId::parse("request-new-provider").unwrap(),
+                thread_id: ThreadId::parse(THREAD_ID).unwrap(),
+                precondition: EngineConfigUpdatePrecondition::Exact(
+                    EngineConfigRevision::new(1).unwrap(),
+                ),
+                config: EngineRunConfig::new(selection, runtime()),
+                accepted_at: UnixMillis::from_millis(1),
+            })
+            .await
+            .unwrap();
+        seed_run(&database, &repository).await;
+        let usage = report_on_route(1, Some(10), 10, route);
+        repository
+            .record_run_usage(record_command(&usage))
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .read_latest_run_usage(usage.run_id(), usage.thread_id())
+                .await
+                .unwrap(),
+            Some(usage)
+        );
+        let wrong = report_on_route(2, Some(10), 11, "wrong-route");
+        assert!(matches!(
+            repository.record_run_usage(record_command(&wrong)).await,
+            Err(RunUsageRepositoryError::ModelOriginMismatch { .. })
+        ));
+    }
 }

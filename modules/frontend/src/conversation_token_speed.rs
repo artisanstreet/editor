@@ -22,7 +22,7 @@ pub(crate) fn footer_usage_query(
             .updated_at
             .as_millis()
             .saturating_sub(turn.created_at.as_millis())
-            < 5_000
+            < 2_000
     {
         return None;
     }
@@ -33,7 +33,7 @@ pub(crate) fn footer_usage_query(
                 | TurnBlock::AssistantMessage(_)
                 | TurnBlock::TurnStatus(_)
                 | TurnBlock::TurnFooter(_)
-        )
+        ) && !matches!(block, TurnBlock::WorkGroup(group) if group.items.iter().all(|item| matches!(item, crate::conversation_scene::WorkItem::Reasoning { .. })))
     }) {
         return None;
     }
@@ -53,19 +53,54 @@ pub(crate) fn footer_usage_query(
 
 /// Includes request setup, prefill and waiting for the first token. This is an
 /// estimate of request throughput, deliberately not a claim about decode speed.
+#[cfg(test)]
 pub(crate) fn footer_speed(
     snapshot: &ConversationSnapshot,
     scene: &ConversationScene,
     turn_id: &TurnId,
     report: &RunUsageReport,
 ) -> Option<String> {
+    footer_speed_with_baseline(snapshot, scene, turn_id, report, None)
+}
+
+/// Previous run in this loaded transcript, never an inferred zero baseline.
+pub(crate) fn footer_baseline_query(
+    snapshot: &ConversationSnapshot,
+    query: &ReadRunUsage,
+) -> Option<ReadRunUsage> {
+    let first = snapshot
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::AssistantMessage(message) if message.run_id == query.run_id => {
+                Some(message.ordinal)
+            }
+            _ => None,
+        })
+        .min()?;
+    let previous = snapshot
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::AssistantMessage(message) if message.ordinal < first => Some(message),
+            _ => None,
+        })
+        .max_by_key(|message| message.ordinal)?;
+    Some(ReadRunUsage::new(
+        query.thread_id.clone(),
+        previous.run_id.clone(),
+    ))
+}
+
+pub(crate) fn footer_speed_with_baseline(
+    snapshot: &ConversationSnapshot,
+    scene: &ConversationScene,
+    turn_id: &TurnId,
+    report: &RunUsageReport,
+    baseline: Option<&RunUsageReport>,
+) -> Option<String> {
     let query = footer_usage_query(snapshot, scene, turn_id)?;
     if report.thread_id() != &query.thread_id || report.run_id() != &query.run_id {
-        return None;
-    }
-    // Cumulative counters may include earlier requests in the provider session.
-    // Without a durable baseline, even plausible-looking totals are unsafe.
-    if report.basis() != RunUsageBasis::Delta {
         return None;
     }
     let turn = snapshot
@@ -74,16 +109,42 @@ pub(crate) fn footer_speed(
         .find(|turn| &turn.turn_id == turn_id)?;
     let started = turn.created_at.as_millis();
     let ended = turn.updated_at.as_millis();
+    // Cumulative counters may include earlier requests in the provider session.
+    // Without a durable baseline, even plausible-looking totals are unsafe.
+    let tokens = match report.basis() {
+        RunUsageBasis::Delta => report.output_tokens()?,
+        RunUsageBasis::Cumulative if report.provider_route_id().as_str() == "claude" => {
+            report.output_tokens()?
+        }
+        RunUsageBasis::Cumulative => {
+            let previous = footer_baseline_query(snapshot, &query)?;
+            let baseline = baseline?;
+            if baseline.thread_id() != report.thread_id()
+                || baseline.run_id() != &previous.run_id
+                || baseline.provider_session_id() != report.provider_session_id()
+                || baseline.provider_route_id() != report.provider_route_id()
+                || baseline.basis() != RunUsageBasis::Cumulative
+                || baseline.observed_at() >= report.observed_at()
+                || baseline.observed_at().as_millis() > started
+            {
+                return None;
+            }
+            report
+                .output_tokens()?
+                .checked_sub(baseline.output_tokens()?)?
+        }
+        RunUsageBasis::Unknown => return None,
+    };
     if report.observed_at().as_millis() < started || report.observed_at().as_millis() > ended {
         return None;
     }
-    format_speed(report.output_tokens()?, ended.checked_sub(started)?)
+    format_speed(tokens, ended.checked_sub(started)?)
 }
 
 fn format_speed(tokens: u64, elapsed_ms: i64) -> Option<String> {
-    // Require at least 128 reported tokens and five seconds. Tiny or coarsely
-    // timestamped responses do not carry enough evidence for a useful rate.
-    if tokens < 128 || elapsed_ms < 5_000 {
+    // The full durable request interval avoids the short UI-chunk denominator.
+    // Still suppress tiny or sub-two-second samples with poor time resolution.
+    if tokens < 8 || elapsed_ms < 2_000 {
         return None;
     }
     // Bound before conversion, avoiding precision loss on corrupt huge totals.
@@ -103,8 +164,8 @@ mod tests {
     fn short_or_invalid_samples_have_no_rate() {
         for (tokens, elapsed) in [
             (10, 50),
-            (127, 10_000),
-            (256, 4_999),
+            (7, 10_000),
+            (256, 1_999),
             (256, 0),
             (256, -1),
             (u64::MAX, 10_000),
@@ -185,6 +246,88 @@ mod integration_tests {
             observed_at: UnixMillis::from_millis(10500),
         };
         (snapshot, scene, usage)
+    }
+
+    #[test]
+    fn claude_per_turn_usage_does_not_require_a_session_baseline() {
+        let (snapshot, scene, mut input) = fixture();
+        input.provider_route_id = EngineRouteId::parse("claude").unwrap();
+        input.basis = RunUsageBasis::Cumulative;
+        input.output_tokens = Some(40);
+        assert_eq!(
+            footer_speed(
+                &snapshot,
+                &scene,
+                &TurnId::parse("turn").unwrap(),
+                &RunUsageReport::new(input).unwrap()
+            )
+            .as_deref(),
+            Some("4.0 tok/s")
+        );
+    }
+
+    #[test]
+    fn cumulative_speed_subtracts_only_a_matching_previous_session() {
+        let (snapshot, scene, mut input) = fixture();
+        let mut turns = snapshot.turns().to_vec();
+        turns[0].ordinal = TurnOrdinal::new(2);
+        let mut items = snapshot.items().to_vec();
+        let ConversationItem::AssistantMessage(current) = &mut items[0] else {
+            unreachable!()
+        };
+        current.ordinal = ItemOrdinal::new(3);
+        let mut previous = current.clone();
+        previous.item_id = ItemId::parse("previous-message").unwrap();
+        previous.run_id = RunId::parse("previous-run").unwrap();
+        previous.turn_id = TurnId::parse("previous-turn").unwrap();
+        previous.ordinal = ItemOrdinal::new(1);
+        previous.updated_at = UnixMillis::from_millis(500);
+        previous.created_at = UnixMillis::from_millis(0);
+        let mut previous_turn = turns[0].clone();
+        previous_turn.turn_id = previous.turn_id.clone();
+        previous_turn.ordinal = TurnOrdinal::new(0);
+        previous_turn.created_at = previous.created_at;
+        previous_turn.updated_at = previous.updated_at;
+        turns.push(previous_turn);
+        items.push(ConversationItem::AssistantMessage(previous));
+        let snapshot = ConversationSnapshot::new(
+            snapshot.thread_id().clone(),
+            snapshot.cursor(),
+            turns,
+            items,
+            snapshot.updated_at(),
+        )
+        .unwrap();
+        input.basis = RunUsageBasis::Cumulative;
+        input.output_tokens = Some(1512);
+        let mut baseline = input.clone();
+        baseline.run_id = RunId::parse("previous-run").unwrap();
+        baseline.observed_at = UnixMillis::from_millis(500);
+        baseline.output_tokens = Some(1000);
+        let report = RunUsageReport::new(input).unwrap();
+        let turn = TurnId::parse("turn").unwrap();
+        assert_eq!(
+            footer_speed_with_baseline(
+                &snapshot,
+                &scene,
+                &turn,
+                &report,
+                Some(&RunUsageReport::new(baseline.clone()).unwrap())
+            )
+            .as_deref(),
+            Some("51.2 tok/s")
+        );
+        baseline.provider_session_id = "other-session".into();
+        assert!(
+            footer_speed_with_baseline(
+                &snapshot,
+                &scene,
+                &turn,
+                &report,
+                Some(&RunUsageReport::new(baseline).unwrap())
+            )
+            .is_none()
+        );
     }
 
     #[test]
