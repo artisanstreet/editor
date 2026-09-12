@@ -54,6 +54,7 @@ impl MigrationTrait for Migration {
         manager
             .get_connection()
             .execute_unprepared("DROP TABLE IF EXISTS queued_message_withdrawals")
-            .await.map(|_| ())
+            .await
+            .map(|_| ())
     }
 }

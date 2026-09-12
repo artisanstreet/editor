@@ -5,7 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use artisan_database::{QueueMessageInput, Repository, SetThreadEngineConfigInput, SqliteConfig, connect};
+use artisan_database::{
+    QueueMessageInput, Repository, SetThreadEngineConfigInput, SqliteConfig, connect,
+};
 use artisan_domain::{
     ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigUpdatePrecondition,
     EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
@@ -930,11 +932,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
         ("command_receipts", 1),
     ] {
         assert_eq!(
-            scalar_i64(
-                &database,
-                &format!("SELECT count(*) FROM {table}"),
-            )
-            .await?,
+            scalar_i64(&database, &format!("SELECT count(*) FROM {table}"),).await?,
             expected,
             "{table} rows must survive the upgrade"
         );
@@ -989,10 +987,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
             accepted_at: UnixMillis::from_millis(20),
         })
         .await?;
-    assert_eq!(
-        accepted.receipt.disposition,
-        ReceiptDisposition::Accepted
-    );
+    assert_eq!(accepted.receipt.disposition, ReceiptDisposition::Accepted);
     let snapshot = repository
         .read_receipt_engine_settings(&RequestId::parse("queue-fresh")?)
         .await?
@@ -1079,12 +1074,10 @@ async fn assert_migrated_schema(
 /// pool, migrate cleanly and re-enter idempotently with records and
 /// guards intact.
 #[tokio::test]
-async fn sequential_fresh_files_migrate_and_reenter_idempotently(
-) -> Result<(), Box<dyn Error>> {
+async fn sequential_fresh_files_migrate_and_reenter_idempotently() -> Result<(), Box<dyn Error>> {
     for index in 0..8 {
         let temp = TempDatabase::new(&format!("sequential-migrate-{index}"))?;
-        let database =
-            connect(SqliteConfig::file(temp.database()).sqlx_logging(false)).await?;
+        let database = connect(SqliteConfig::file(temp.database()).sqlx_logging(false)).await?;
         migrate_to_current(&database).await?;
         migrate_to_current(&database).await?;
         assert_migrated_schema(&database).await?;

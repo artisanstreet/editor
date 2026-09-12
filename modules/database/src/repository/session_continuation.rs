@@ -7,8 +7,7 @@
 //! repair rows, create a side table, or expose provider binding bytes.
 
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
-    TransactionTrait,
+    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
 };
 use serde::Deserialize;
 
@@ -711,9 +710,10 @@ async fn read_durable_facts<C: ConnectionTrait>(
             || row
                 .engine_checkpoint_version
                 .is_some_and(|version| version <= 0)
-            || row.engine_checkpoint_blob.as_ref().is_some_and(|blob| {
-                blob.as_slice().is_empty() || blob.as_slice().len() > 262_144
-            })
+            || row
+                .engine_checkpoint_blob
+                .as_ref()
+                .is_some_and(|blob| blob.as_slice().is_empty() || blob.as_slice().len() > 262_144)
         {
             return Err(corrupt_data(
                 "run_checkpoints",

@@ -15,11 +15,12 @@ use artisan_domain::{
     ApprovalMode, AuthoredText, ByteLimit, CountLimit, DirectoryId, DisplayName, EngineAgentId,
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
     EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, ImageAttachment, ListFailedMessages,
-    ListQueuedMessages, MessageId, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId,
-    QUEUED_MESSAGE_LIST_MAX, QueueMessagePayload, QueuedMessageListError, QueuedMessageListOrder,
-    QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId, RootPath, RunId, ThreadId,
-    ThreadTitle, TurnId, ItemId, PatchId, UnixMillis, WebSearchAccess, WithdrawQueuedMessage,
+    EngineSelection, FilesystemAccess, FiniteMillis, ImageAttachment, ItemId, ListFailedMessages,
+    ListQueuedMessages, MessageId, NetworkAccess, OpenCode2Selection, PatchId, PermissionId,
+    ProjectId, QUEUED_MESSAGE_LIST_MAX, QueueMessagePayload, QueuedMessageListError,
+    QueuedMessageListOrder, QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId,
+    RootPath, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
+    WithdrawQueuedMessage,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
@@ -325,16 +326,25 @@ async fn exact_withdrawal_replays_and_reused_identity_conflicts() {
     let mut expected_duplicate = accepted.clone();
     expected_duplicate.receipt.disposition = ReceiptDisposition::Duplicate;
     assert_eq!(duplicate, expected_duplicate);
-    let later_clock_retry = repository.withdraw_queued_message(WithdrawQueuedMessage {
-        accepted_at: UnixMillis::from_millis(500), ..input.clone()
-    }).await.expect("server clock advancement must replay the receipt");
+    let later_clock_retry = repository
+        .withdraw_queued_message(WithdrawQueuedMessage {
+            accepted_at: UnixMillis::from_millis(500),
+            ..input.clone()
+        })
+        .await
+        .expect("server clock advancement must replay the receipt");
     assert_eq!(later_clock_retry, expected_duplicate);
-    let lookup = repository.lookup_queued_message_withdrawal(
-        &input.thread_id, &input.message_id, &input.original_request_id,
-        &input.withdrawal_request_id,
-    ).await.expect("receipt lookup").expect("durable receipt");
+    let lookup = repository
+        .lookup_queued_message_withdrawal(
+            &input.thread_id,
+            &input.message_id,
+            &input.original_request_id,
+            &input.withdrawal_request_id,
+        )
+        .await
+        .expect("receipt lookup")
+        .expect("durable receipt");
     assert_eq!(lookup, expected_duplicate);
-
 
     let reused = repository
         .withdraw_queued_message(WithdrawQueuedMessage {
@@ -499,7 +509,10 @@ async fn withdrawal_fence_races_claim_with_one_deterministic_winner() {
     drop(claim_repository);
     drop(withdraw_repository);
     drop(repository);
-    database.close().await.expect("close SQLite before removing fixture");
+    database
+        .close()
+        .await
+        .expect("close SQLite before removing fixture");
 }
 
 #[tokio::test]
@@ -646,8 +659,16 @@ async fn requeued_dispatch_stays_listed_with_its_last_error() {
     assert_eq!(fresh.messages()[0].last_error, None);
 
     // One dispatcher claim plus a requeue with the production reason.
-    claim_and_requeue_unconfigured(&repository, "message-retry-visible", 0x55, 400, 500, 410, 460)
-        .await;
+    claim_and_requeue_unconfigured(
+        &repository,
+        "message-retry-visible",
+        0x55,
+        400,
+        500,
+        410,
+        460,
+    )
+    .await;
 
     // The retrying row stays in the composer projection with its error.
     let listed = queued_listing(&repository, "thread-1").await;
@@ -665,7 +686,10 @@ async fn requeued_dispatch_stays_listed_with_its_last_error() {
         "engine unconfigured"
     );
     assert_eq!(
-        dispatch(&database, "message-retry-visible").await.last_error.as_deref(),
+        dispatch(&database, "message-retry-visible")
+            .await
+            .last_error
+            .as_deref(),
         Some("engine unconfigured")
     );
 }
@@ -683,8 +707,16 @@ async fn requeued_dispatch_withdrawal_is_too_late_but_claimable_after_backoff() 
         300,
     )
     .await;
-    claim_and_requeue_unconfigured(&repository, "message-retry-visible", 0x55, 400, 500, 410, 460)
-        .await;
+    claim_and_requeue_unconfigured(
+        &repository,
+        "message-retry-visible",
+        0x55,
+        400,
+        500,
+        410,
+        460,
+    )
+    .await;
 
     // Withdrawal stays honest for claimed rows: too late, dispatch untouched.
     let late = repository
@@ -1049,7 +1081,10 @@ async fn failed_dispatch_listing_surfaces_terminal_failure_with_exact_reason() {
     assert_eq!(summary.thread_id, thread_id("thread-1"));
     assert_eq!(summary.original_request_id, request("queue-1"));
     assert_eq!(
-        summary.text.as_ref().map(artisan_domain::AuthoredText::as_str),
+        summary
+            .text
+            .as_ref()
+            .map(artisan_domain::AuthoredText::as_str),
         Some("keep this exact text")
     );
     assert!(summary.attachments.is_empty());
@@ -1059,8 +1094,12 @@ async fn failed_dispatch_listing_surfaces_terminal_failure_with_exact_reason() {
 
     let queued = repository
         .read_queued_messages(
-            ListQueuedMessages::new(thread_id("thread-1"), QueuedMessageListOrder::OldestFirst, 32)
-                .expect("queued query"),
+            ListQueuedMessages::new(
+                thread_id("thread-1"),
+                QueuedMessageListOrder::OldestFirst,
+                32,
+            )
+            .expect("queued query"),
         )
         .await
         .expect("queued listing should read");
@@ -1308,10 +1347,7 @@ async fn unconfigured_accept_refuses_typed_and_persists_nothing() {
         .await
         .expect_err("unconfigured accept must refuse");
     assert!(
-        matches!(
-            error,
-            RepositoryError::ThreadEngineNotConfigured { .. }
-        ),
+        matches!(error, RepositoryError::ThreadEngineNotConfigured { .. }),
         "refusal must be typed, got {error:?}"
     );
     assert!(
@@ -1355,7 +1391,10 @@ async fn steer_target_persists_and_claim_payload_returns_it() {
         .expect("dispatch payload should load")
         .expect("dispatch payload should exist");
     assert_eq!(
-        payload.steer_target.as_ref().map(artisan_domain::SteerTarget::run_id),
+        payload
+            .steer_target
+            .as_ref()
+            .map(artisan_domain::SteerTarget::run_id),
         Some(&run_id("run-steer-1")),
     );
     let snapshot = repository
@@ -1395,10 +1434,7 @@ async fn same_request_different_target_conflicts_while_identical_replays() {
         .await
         .expect_err("same request with a different target must conflict");
     assert!(
-        matches!(
-            conflict,
-            RepositoryError::IdempotencyConflict { .. }
-        ),
+        matches!(conflict, RepositoryError::IdempotencyConflict { .. }),
         "target change must conflict, got {conflict:?}"
     );
     let replay = repository
@@ -1412,10 +1448,7 @@ async fn same_request_different_target_conflicts_while_identical_replays() {
         })
         .await
         .expect("identical retry must replay");
-    assert_eq!(
-        replay.receipt.disposition,
-        ReceiptDisposition::Duplicate,
-    );
+    assert_eq!(replay.receipt.disposition, ReceiptDisposition::Duplicate,);
     assert_eq!(replay.message_id, message_id("message-target"));
 }
 
@@ -1462,7 +1495,8 @@ async fn concurrent_duplicate_accept_has_one_winner_and_one_replay() {
 }
 
 #[tokio::test]
-async fn retry_after_selection_change_replays_stored_snapshot() {    let (_database, repository) = memory_repository().await;
+async fn retry_after_selection_change_replays_stored_snapshot() {
+    let (_database, repository) = memory_repository().await;
     setup_thread(&repository).await;
     queue_named(
         &repository,
@@ -1501,10 +1535,7 @@ async fn retry_after_selection_change_replays_stored_snapshot() {    let (_datab
         })
         .await
         .expect("retry after selection change must replay");
-    assert_eq!(
-        replay.receipt.disposition,
-        ReceiptDisposition::Duplicate,
-    );
+    assert_eq!(replay.receipt.disposition, ReceiptDisposition::Duplicate,);
     assert_eq!(replay.message_id, message_id("message-snapshot"));
     let after = repository
         .read_receipt_engine_settings(&request("queue-snapshot"))
@@ -1604,8 +1635,13 @@ async fn launch_uses_captured_snapshot_across_selection_change() {
         .expect("accept receipt should read")
         .expect("accept receipt should exist");
     assert_eq!(
-        run.engine_run_config.as_ref().map(artisan_database::entities::OpaqueBytes::as_slice),
-        receipt.engine_run_config.as_ref().map(artisan_database::entities::OpaqueBytes::as_slice),
+        run.engine_run_config
+            .as_ref()
+            .map(artisan_database::entities::OpaqueBytes::as_slice),
+        receipt
+            .engine_run_config
+            .as_ref()
+            .map(artisan_database::entities::OpaqueBytes::as_slice),
         "launched run must store the captured snapshot, not current settings"
     );
 }
@@ -1735,10 +1771,7 @@ async fn legacy_null_snapshot_rows_replay_and_read_as_absent() {
         .await
         .expect("legacy lookup should work")
         .expect("legacy receipt should replay");
-    assert_eq!(
-        replay.receipt.disposition,
-        ReceiptDisposition::Duplicate,
-    );
+    assert_eq!(replay.receipt.disposition, ReceiptDisposition::Duplicate,);
     assert_eq!(replay.message_id, message_id("message-legacy"));
     assert!(
         repository

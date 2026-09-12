@@ -1907,7 +1907,10 @@ fn commentary_phase_preserved_without_collapsing_into_streaming() {
     ));
     let provenance = message.1.as_ref().expect("production provenance");
     assert_eq!(
-        provenance.run_id.as_ref().map(artisan_domain::RunId::as_str),
+        provenance
+            .run_id
+            .as_ref()
+            .map(artisan_domain::RunId::as_str),
         Some("run_controller")
     );
     // The fixture assistant carries a Pending lifecycle: phase preservation

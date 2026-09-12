@@ -551,9 +551,7 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
 
         // The projection links the same run: no second spawn happened.
         let runs = database_entities::assistant_run::Entity::find()
-            .filter(
-                database_entities::assistant_run::Column::ThreadId.eq(thread_id.as_str()),
-            )
+            .filter(database_entities::assistant_run::Column::ThreadId.eq(thread_id.as_str()))
             .all(&database)
             .await
             .expect("runs should read");
@@ -1249,10 +1247,14 @@ fn steer_ledger_preflight_records_only_post_ack() {
         Ok(TurnInteractionOutcome::Duplicate)
     );
     // Same command id with a changed intent conflicts in both paths.
-    assert!(ledger.preflight(
-            "request-ledger",
-            &target,
-            InteractionTarget::Steer,
-            "steer:other"
-        ).is_err());
+    assert!(
+        ledger
+            .preflight(
+                "request-ledger",
+                &target,
+                InteractionTarget::Steer,
+                "steer:other"
+            )
+            .is_err()
+    );
 }

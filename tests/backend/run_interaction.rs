@@ -168,9 +168,11 @@ fn spawn_owner_drainer(
                         Ok(artisan_database::ResolveInteractionOutcome::Applied(applied)) => {
                             RunInteractionAck::Settled(applied.receipt)
                         }
-                        Ok(artisan_database::ResolveInteractionOutcome::Duplicate(stored) |
-artisan_database::ResolveInteractionOutcome::UnknownTarget(stored) |
-artisan_database::ResolveInteractionOutcome::AlreadyResolved(stored)) => RunInteractionAck::Settled(stored),
+                        Ok(
+                            artisan_database::ResolveInteractionOutcome::Duplicate(stored)
+                            | artisan_database::ResolveInteractionOutcome::UnknownTarget(stored)
+                            | artisan_database::ResolveInteractionOutcome::AlreadyResolved(stored),
+                        ) => RunInteractionAck::Settled(stored),
                         Ok(artisan_database::ResolveInteractionOutcome::Conflict(_)) => {
                             RunInteractionAck::Conflict
                         }
@@ -199,9 +201,11 @@ artisan_database::ResolveInteractionOutcome::AlreadyResolved(stored)) => RunInte
                         Ok(artisan_database::ResolveInteractionOutcome::Applied(applied)) => {
                             RunInteractionAck::Settled(applied.receipt)
                         }
-                        Ok(artisan_database::ResolveInteractionOutcome::Duplicate(stored) |
-artisan_database::ResolveInteractionOutcome::UnknownTarget(stored) |
-artisan_database::ResolveInteractionOutcome::AlreadyResolved(stored)) => RunInteractionAck::Settled(stored),
+                        Ok(
+                            artisan_database::ResolveInteractionOutcome::Duplicate(stored)
+                            | artisan_database::ResolveInteractionOutcome::UnknownTarget(stored)
+                            | artisan_database::ResolveInteractionOutcome::AlreadyResolved(stored),
+                        ) => RunInteractionAck::Settled(stored),
                         Ok(artisan_database::ResolveInteractionOutcome::Conflict(_)) => {
                             RunInteractionAck::Conflict
                         }

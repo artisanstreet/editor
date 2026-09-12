@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use artisan_backend::conversation_subscription_registry::{
     ActivateError, ApplyBatchError, SubscriptionLease, SubscriptionState, SubscriptionView,
 };
+use artisan_backend::project_repository_service::ProjectRepositoryService;
 use artisan_backend::request_handler::{
     ActivatedConversationSubscription, ConversationSubscriptionRegistrar, RequestHandlerReceipt,
 };
@@ -22,10 +23,10 @@ use artisan_backend::run_interaction::{
     OwnedInteractionCommand, RunInteractionAck, RunInteractionEnvelope, RunInteractionLease,
     RunInteractionRegistry,
 };
-use artisan_backend::project_repository_service::ProjectRepositoryService;
 use artisan_backend::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, ForgeStorage, RequestHandler,
 };
+use artisan_database::entities::DispatchState;
 use artisan_database::{
     AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
     CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
@@ -33,15 +34,14 @@ use artisan_database::{
     ProviderBindingBytes, QueueFirstMessageInput, Repository, RunLaunchCredentials, RunStartKey,
     SetModelFavoriteInput, SetThreadEngineConfigInput, SqliteConfig,
 };
-use artisan_database::entities::DispatchState;
 use artisan_domain::{
     ApprovalMode, ByteLimit, CatalogRevision, Command, ConversationCursor, ConversationPatch,
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSubscribe,
     ConversationUnsubscribe, CountLimit, DirectoryId, DisplayName, EngineAgentId,
     EngineConfigRevision, EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy,
     EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
-    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, IncrementalText,
-    ItemId, ImageAttachment, ListAttachedProjects, ListDirectories, ListProjectThreads,
+    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, ImageAttachment,
+    IncrementalText, ItemId, ListAttachedProjects, ListDirectories, ListProjectThreads,
     MessageBody, MessageId, ModelFavoriteId, NetworkAccess, OpenCode2Selection, PatchBatch,
     PatchId, PatchSequence, PermissionId, ProjectId, Query, QueryTurnCount, QueueMessage,
     QueueMessagePayload, ReadComposerCatalog, ReadModelFavorites, ReceiptDisposition, RequestId,
@@ -679,20 +679,17 @@ async fn project_repository_query_reads_attached_root_git_identity() {
             request_id: request("request-project-repository"),
             directory_id: DirectoryId::parse("directory-varde").expect("valid directory id"),
             project_id: project_id.clone(),
-            root_path: RootPath::parse(
-                working_directory
-                    .path
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-            .expect("valid root path"),
+            root_path: RootPath::parse(working_directory.path.to_string_lossy().into_owned())
+                .expect("valid root path"),
             display_name: DisplayName::parse("varde").expect("valid display name"),
             attached_at: UnixMillis::from_millis(100),
         })
         .await
         .expect("seed attach should persist");
     let handler = RequestHandler::new(storage.repository().clone())
-        .with_project_repository_service(ProjectRepositoryService::new(storage.repository().clone()));
+        .with_project_repository_service(ProjectRepositoryService::new(
+            storage.repository().clone(),
+        ));
 
     let response = handler
         .respond(
@@ -749,7 +746,9 @@ async fn project_repository_query_reports_plain_roots_without_failing() {
         .await
         .expect("seed attach should persist");
     let handler = RequestHandler::new(storage.repository().clone())
-        .with_project_repository_service(ProjectRepositoryService::new(storage.repository().clone()));
+        .with_project_repository_service(ProjectRepositoryService::new(
+            storage.repository().clone(),
+        ));
 
     let response = handler
         .respond(
@@ -800,7 +799,12 @@ async fn project_repository_query_without_service_reports_unsupported() {
         Some(&request("frame-project-repository-unbacked"))
     );
     assert!(!failure.retryable);
-    assert!(failure.detail.as_str().contains("project repository inspection"));
+    assert!(
+        failure
+            .detail
+            .as_str()
+            .contains("project repository inspection")
+    );
 }
 
 #[tokio::test]
@@ -3500,10 +3504,12 @@ async fn handler_unsubscribe_and_replacement_stale_retained_publication_leases()
     .await;
     stop_wire.expect("unsubscribe should answer");
     assert!(stop_receipt.is_no_work());
-    assert!(retained_registrar
-        .subscription_view(&thread_id)
-        .await
-        .is_none());
+    assert!(
+        retained_registrar
+            .subscription_view(&thread_id)
+            .await
+            .is_none()
+    );
     assert_eq!(
         retained_registrar
             .record_published_batch(&initial_lease, &initial_batch)
@@ -3685,8 +3691,8 @@ async fn read_thread_engine_settings_for_missing_thread_fails_thread_unknown() {
 }
 
 #[tokio::test]
-async fn read_thread_engine_settings_response_request_id_equals_triggering_frame_and_no_origin_consult(
-) {
+async fn read_thread_engine_settings_response_request_id_equals_triggering_frame_and_no_origin_consult()
+ {
     let (_temporary, storage) = opened_storage("read-correlation").await;
     let repository = storage.repository();
     repository
@@ -4279,13 +4285,15 @@ async fn persisted_stale_favorite_removal_needs_no_catalog_or_identity() {
     ));
     assert_eq!(origin.identity_calls(), 0);
     assert_eq!(origin.instant_calls(), 1);
-    assert!(storage
-        .repository()
-        .read_model_favorites()
-        .await
-        .expect("favorites should remain readable")
-        .model_ids()
-        .is_empty());
+    assert!(
+        storage
+            .repository()
+            .read_model_favorites()
+            .await
+            .expect("favorites should remain readable")
+            .model_ids()
+            .is_empty()
+    );
     storage.close().await.expect("storage should close");
 }
 
@@ -4325,11 +4333,9 @@ fn steer_command(command_id: &str, thread: &str, run: &str, body: &str) -> Clien
 
 /// Builds an image-only named-steer command correlated to `command_id`.
 fn image_steer_command(command_id: &str, thread: &str, run: &str) -> ClientRequest {
-    let attachment =
-        ImageAttachment::new("image/png", vec![0x89, 0x50, 0x4e, 0x47], "chart.png")
-            .expect("valid image attachment");
-    let payload =
-        QueueMessagePayload::new(None, vec![attachment]).expect("valid image payload");
+    let attachment = ImageAttachment::new("image/png", vec![0x89, 0x50, 0x4e, 0x47], "chart.png")
+        .expect("valid image attachment");
+    let payload = QueueMessagePayload::new(None, vec![attachment]).expect("valid image payload");
     ClientRequest::Command(Command::QueueMessage(
         QueueMessage::new(
             request(command_id),
@@ -4359,8 +4365,8 @@ async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
     let (registry, _lease, mut inbox) = live_steer("thread-steer", "run-steer");
     let origin = ScriptedOriginHandle::deterministic(&["message-steer-1"], 600);
 
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let first = tokio::spawn(async move {
         handler
             .respond(
@@ -4408,8 +4414,8 @@ async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
 
     // A retry of the same command on its correlated frame reroutes the same
     // original identity instead of minting a second send.
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let second = tokio::spawn(async move {
         handler
             .respond(
@@ -4465,9 +4471,12 @@ async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
         })
         .await
         .expect("projection should complete the open row");
-    assert!(matches!(outcome, ProjectSteeredMessageOutcome::Projected(_)));
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    assert!(matches!(
+        outcome,
+        ProjectSteeredMessageOutcome::Projected(_)
+    ));
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         handler.respond(
@@ -4508,8 +4517,8 @@ async fn steer_failed_replay_reproduces_typed_refusal_without_second_write() {
         ],
     );
 
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let first = tokio::spawn(async move {
         handler
             .respond(
@@ -4522,7 +4531,10 @@ async fn steer_failed_replay_reproduces_typed_refusal_without_second_write() {
         .await
         .expect("steer envelope should arrive promptly")
         .expect("steer envelope should arrive");
-    assert!(matches!(envelope.command, OwnedInteractionCommand::Steer { .. }));
+    assert!(matches!(
+        envelope.command,
+        OwnedInteractionCommand::Steer { .. }
+    ));
     envelope
         .respond
         .send(RunInteractionAck::Refused {
@@ -4552,8 +4564,8 @@ async fn steer_failed_replay_reproduces_typed_refusal_without_second_write() {
     );
 
     // The same command replays the stored refusal with no second write.
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let failure = failure_of(
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -4595,8 +4607,8 @@ async fn steer_images_refused_unsupported_first_and_retry_with_payload_retained(
         ],
     );
 
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let failure = failure_of(
         handler
             .respond(
@@ -4646,8 +4658,8 @@ async fn steer_images_refused_unsupported_first_and_retry_with_payload_retained(
 
     // The retry reproduces the typed refusal instead of a generic input
     // error, with the original payload still retained.
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let failure = failure_of(
         handler
             .respond(
@@ -4691,8 +4703,8 @@ async fn steer_stale_target_fails_typed_with_payload_preserved() {
         ],
     );
 
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let failure = failure_of(
         handler
             .respond(
@@ -4735,8 +4747,8 @@ async fn steer_stale_target_fails_typed_with_payload_preserved() {
     );
 
     // A retry against the still-absent run reproduces the refusal.
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let failure = failure_of(
         handler
             .respond(
@@ -4763,8 +4775,8 @@ async fn steer_second_send_while_first_active_routes_both() {
         ScriptedOriginHandle::deterministic(&["message-steer-5a", "message-steer-5b"], 600);
 
     // The first send stays open: the stub acknowledgement never projects.
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let first = tokio::spawn(async move {
         handler
             .respond(
@@ -4790,14 +4802,18 @@ async fn steer_second_send_while_first_active_routes_both() {
         .respond
         .send(RunInteractionAck::Steered)
         .expect("ack should send");
-    let first_receipt =
-        queued_message_of(first.await.expect("task").expect("first steer should route"));
+    let first_receipt = queued_message_of(
+        first
+            .await
+            .expect("task")
+            .expect("first steer should route"),
+    );
     assert_eq!(first_receipt.message_id.as_str(), "message-steer-5a");
 
     // The second send names the same still-live run while the first row is
     // open and routes independently.
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let second = tokio::spawn(async move {
         handler
             .respond(
@@ -4830,8 +4846,12 @@ async fn steer_second_send_while_first_active_routes_both() {
         .respond
         .send(RunInteractionAck::Steered)
         .expect("ack should send");
-    let second_receipt =
-        queued_message_of(second.await.expect("task").expect("second steer should route"));
+    let second_receipt = queued_message_of(
+        second
+            .await
+            .expect("task")
+            .expect("second steer should route"),
+    );
     assert_eq!(second_receipt.message_id.as_str(), "message-steer-5b");
     assert_eq!(second_receipt.disposition, ReceiptDisposition::Accepted);
     assert!(
@@ -4908,8 +4928,8 @@ async fn steer_inbox_full_is_transient_and_row_stays_open_for_retry() {
             })
             .expect("filler envelope should fit");
     }
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let failure = failure_of(
         handler
             .respond(
@@ -4940,8 +4960,8 @@ async fn steer_inbox_full_is_transient_and_row_stays_open_for_retry() {
             .expect("filler should drain");
         let _ = envelope.respond.send(RunInteractionAck::Unavailable);
     }
-    let handler = scripted_handler(&storage, &origin)
-        .with_run_interaction_registry(registry.clone());
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let retry = tokio::spawn(async move {
         handler
             .respond(

@@ -321,11 +321,10 @@ async fn insert_image_attachments(
         let position = i64::try_from(position).map_err(|_| RepositoryError::Invariant {
             reason: "image attachment position overflow",
         })?;
-        let size_bytes = i64::try_from(attachment.byte_len()).map_err(|_| {
-            RepositoryError::Invariant {
+        let size_bytes =
+            i64::try_from(attachment.byte_len()).map_err(|_| RepositoryError::Invariant {
                 reason: "image attachment byte length overflow",
-            }
-        })?;
+            })?;
         entities::message_image_attachment::Entity::insert(
             entities::message_image_attachment::ActiveModel {
                 message_id: Set(input.message_id.as_str().to_owned()),
@@ -357,7 +356,10 @@ async fn insert_queued_dispatch(
         lease_owner: Set(None),
         lease_expires_at_ms: Set(None),
         last_error: Set(None),
-        steer_run_id: Set(input.steer_run_id.as_ref().map(|run_id| run_id.as_str().to_owned())),
+        steer_run_id: Set(input
+            .steer_run_id
+            .as_ref()
+            .map(|run_id| run_id.as_str().to_owned())),
         updated_at_ms: Set(millis(input.accepted_at)),
     })
     .on_conflict(do_nothing_on_conflict())
@@ -380,14 +382,9 @@ async fn insert_queue_receipt(
         thread_id: Set(Some(input.thread_id.as_str().to_owned())),
         title: Set(None),
         message_id: Set(Some(input.message_id.as_str().to_owned())),
-        body: Set(input
-            .payload
-            .text()
-            .map(|text| text.as_str().to_owned())),
+        body: Set(input.payload.text().map(|text| text.as_str().to_owned())),
         accepted_at_ms: Set(millis(input.accepted_at)),
-        engine_run_config_version: Set(Some(i64::from(
-            settings.config().storage_codec_version(),
-        ))),
+        engine_run_config_version: Set(Some(i64::from(settings.config().storage_codec_version()))),
         engine_run_config: Set(Some(entities::OpaqueBytes::new(encoded))),
         engine_run_config_expected_revision: Set(None),
         engine_run_config_result_revision: Set(Some(settings.revision().as_i64())),
@@ -413,10 +410,9 @@ async fn classify_message_conflict(
     .await;
     match receipt {
         Ok(Some(duplicate)) => {
-            transaction
-                .rollback()
-                .await
-                .map_err(|source| database_error("finish duplicate queue-message request", source))?;
+            transaction.rollback().await.map_err(|source| {
+                database_error("finish duplicate queue-message request", source)
+            })?;
             return Ok(duplicate);
         }
         Err(error) => return rollback_with_error(transaction, error).await,
@@ -467,11 +463,12 @@ async fn lookup_queue_receipt(
 
     let message_id = MessageId::parse(required(row.message_id, "command_receipts", "message_id")?)
         .map_err(|error| corrupt_data("command_receipts", "message_id", error))?;
-    let message = message_row_by_id(database, &message_id)
-        .await?
-        .ok_or(RepositoryError::Invariant {
-            reason: "queue receipt references a missing message",
-        })?;
+    let message =
+        message_row_by_id(database, &message_id)
+            .await?
+            .ok_or(RepositoryError::Invariant {
+                reason: "queue receipt references a missing message",
+            })?;
     if message.thread_id != thread_id.as_str()
         || message.body
             != payload
@@ -506,9 +503,7 @@ async fn lookup_queue_receipt(
     // The steer target is part of the wire intent: a reused request id
     // naming a different live run (or dropping a named target) conflicts
     // instead of replaying. Stored settings are replayed, never compared.
-    if dispatch.steer_run_id.as_deref()
-        != steer_run_id.map(artisan_domain::RunId::as_str)
-    {
+    if dispatch.steer_run_id.as_deref() != steer_run_id.map(artisan_domain::RunId::as_str) {
         return Err(RepositoryError::IdempotencyConflict {
             request_id: request_id.clone(),
         });
@@ -521,9 +516,10 @@ async fn lookup_queue_receipt(
 
     let steer_run_id = match dispatch.steer_run_id.as_deref() {
         None | Some("") => None,
-        Some(steer_run_id) => Some(RunId::parse(steer_run_id.to_owned()).map_err(|error| {
-            corrupt_data("message_dispatches", "steer_run_id", error)
-        })?),
+        Some(steer_run_id) => Some(
+            RunId::parse(steer_run_id.to_owned())
+                .map_err(|error| corrupt_data("message_dispatches", "steer_run_id", error))?,
+        ),
     };
 
     Ok(Some(QueueMessageResult {
@@ -551,11 +547,10 @@ pub(crate) async fn read_image_attachments(
         .map_err(|source| database_error("read message image attachments", source))?;
     let mut attachments = Vec::with_capacity(rows.len());
     for (expected_position, row) in rows.into_iter().enumerate() {
-        let expected_position = u32::try_from(expected_position).map_err(|_| {
-            RepositoryError::Invariant {
+        let expected_position =
+            u32::try_from(expected_position).map_err(|_| RepositoryError::Invariant {
                 reason: "image attachment position overflow",
-            }
-        })?;
+            })?;
         if row.position != i64::from(expected_position) {
             return Err(corrupt_data(
                 "message_image_attachments",
@@ -592,10 +587,8 @@ pub(crate) async fn read_queue_message_projection(
     let rows = image_attachment_rows(database, message_id).await?;
     let mut references = Vec::with_capacity(rows.len());
     for (expected_position, row) in rows.into_iter().enumerate() {
-        let index = u32::try_from(expected_position).map_err(|_| {
-            RepositoryError::Invariant {
-                reason: "image attachment position overflow",
-            }
+        let index = u32::try_from(expected_position).map_err(|_| RepositoryError::Invariant {
+            reason: "image attachment position overflow",
         })?;
         if row.position != i64::from(index) {
             return Err(corrupt_data(
@@ -794,10 +787,9 @@ async fn rollback_with_lookup(
     transaction: DatabaseTransaction,
     result: Result<Option<QueueMessageResult>, RepositoryError>,
 ) -> Result<QueueMessageResult, RepositoryError> {
-    transaction
-        .rollback()
-        .await
-        .map_err(|source| database_error("roll back duplicate queue-message transaction", source))?;
+    transaction.rollback().await.map_err(|source| {
+        database_error("roll back duplicate queue-message transaction", source)
+    })?;
     result?.ok_or(RepositoryError::Invariant {
         reason: "receipt insert was ignored without an identifiable request",
     })

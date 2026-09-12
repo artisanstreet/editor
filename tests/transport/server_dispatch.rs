@@ -62,11 +62,10 @@ async fn image_batch_sized_frame_crosses_production_transport() {
         .expect("image frame write deadline")
         .expect("image frame fits production ceiling");
     send.finish().expect("finish image frame");
-    let acknowledgement =
-        tokio::time::timeout(TEST_DEADLINE, transport::read_frame(&mut recv, 32))
-            .await
-            .expect("acknowledgement deadline")
-            .expect("read acknowledgement");
+    let acknowledgement = tokio::time::timeout(TEST_DEADLINE, transport::read_frame(&mut recv, 32))
+        .await
+        .expect("acknowledgement deadline")
+        .expect("read acknowledgement");
     assert_eq!(acknowledgement, b"received");
     let delivered = tokio::time::timeout(TEST_DEADLINE, receiver)
         .await
@@ -76,7 +75,9 @@ async fn image_batch_sized_frame_crosses_production_transport() {
     drop(send);
     drop(recv);
     drop(client);
-    loopback.drain(VarInt::from_u32(0), b"image frame complete").await;
+    loopback
+        .drain(VarInt::from_u32(0), b"image frame complete")
+        .await;
 }
 
 /// A distinct local handler failure type, proving local failures stay typed

@@ -981,7 +981,9 @@ fn thread_scoped_delivery_sequence_survives_run_local_resets() {
     let lease = registry
         .register_pending(thread_id.clone(), cursor(0))
         .expect("registration should succeed");
-    registry.activate(&lease).expect("activation should succeed");
+    registry
+        .activate(&lease)
+        .expect("activation should succeed");
 
     // Patch cursor and observation cursor advance independently: publishing
     // patch batches never moves the thread-scoped delivery cursor.

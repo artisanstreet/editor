@@ -446,7 +446,10 @@ fn ring_color(theme: &ArtisanTheme, tone: GaugeToneMix) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    #![expect(clippy::float_cmp, reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage")]
+    #![expect(
+        clippy::float_cmp,
+        reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage"
+    )]
     use super::{CONTEXT_USAGE_DESCRIPTION_ID, NativeContextUsage, NativeContextUsagePresentation};
     use crate::context_usage_details_policy::ContextUsageDetailsError;
 

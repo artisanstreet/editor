@@ -207,8 +207,6 @@ fn upsert_all(controller: &mut ConversationStateController, facts: Vec<SceneFact
 }
 
 fn work_bodies(controller: &ConversationStateController, turn: &str) -> Vec<String> {
-    
-
     let scene = controller.scene().expect("scene builds");
     let turn_scene = scene.turn_scene(&turn_id(turn)).expect("turn scene exists");
     let mut bodies = Vec::new();
@@ -1068,8 +1066,8 @@ fn stale_batch_with_colliding_ordinal_rolls_back_without_side_effects() {
     assert!(
         matches!(
             controller.upsert_fact(conflict),
-            Err(ConversationStateError::SceneConflict { .. } |
-ConversationStateError::DuplicateFact { .. })
+            Err(ConversationStateError::SceneConflict { .. }
+                | ConversationStateError::DuplicateFact { .. })
         ),
         "ordinal 2 is still owned after rollback"
     );

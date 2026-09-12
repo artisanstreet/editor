@@ -58,9 +58,7 @@ fn item(lifecycle: ConversationLifecycle) -> ConversationItem {
         revision: Revision::new(2),
         lifecycle,
         body: MessageBody::parse("Queued conversation text").expect("fixture body is valid"),
-        source_message_id: Some(
-            MessageId::parse(MESSAGE_ID).expect("fixture message id is valid"),
-        ),
+        source_message_id: Some(MessageId::parse(MESSAGE_ID).expect("fixture message id is valid")),
         created_at: UnixMillis::from_millis(-5),
         updated_at: UnixMillis::from_millis(25),
     })
@@ -754,9 +752,7 @@ fn decoded_snapshot_items(bytes: &[u8]) -> Vec<ConversationItem> {
 
 fn raw_snapshot_with_user_item(
     frame_id: &str,
-    configure: impl FnOnce(
-        artisan_protocol::artisan_capnp::user_message_item::Builder<'_>,
-    ),
+    configure: impl FnOnce(artisan_protocol::artisan_capnp::user_message_item::Builder<'_>),
 ) -> Vec<u8> {
     let mut message = raw_message();
     let mut response = init_raw_envelope(&mut message, frame_id)
@@ -818,10 +814,8 @@ fn source_message_id_roundtrips_when_present() -> Result<(), Box<dyn Error>> {
 fn source_message_id_absent_on_legacy_wire_decodes_to_none() {
     // A sender from before this field leaves it unset (empty text): the
     // row still decodes, with `None` instead of a fabricated identity.
-    let items = decoded_snapshot_items(&raw_snapshot_with_user_item(
-        "server-source-absent",
-        |_| {},
-    ));
+    let items =
+        decoded_snapshot_items(&raw_snapshot_with_user_item("server-source-absent", |_| {}));
     let [ConversationItem::UserMessage(user)] = items.as_slice() else {
         panic!("expected one user echo item");
     };

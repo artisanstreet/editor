@@ -58,7 +58,6 @@ pub(super) async fn execute_claude_turn(
 ) -> Execution {
     use super::super::claude as claude_runtime;
     use super::super::process::spawn_claude_engine;
-    
 
     let artisan_domain::EngineSelection::Claude(selection) =
         request.input.settings.config().selection()
@@ -84,7 +83,9 @@ pub(super) async fn execute_claude_turn(
             let gate = claude_runtime::check_claude_native_continuation(
                 &claude_runtime::ClaudeContinuationGateInput {
                     cli_version: launch.version(),
-                    target_model: selection.model_id().map(artisan_domain::EngineModelId::as_str),
+                    target_model: selection
+                        .model_id()
+                        .map(artisan_domain::EngineModelId::as_str),
                     advertised_models: None,
                     same_engine: true,
                 },

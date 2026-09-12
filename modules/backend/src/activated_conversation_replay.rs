@@ -91,11 +91,7 @@ pub async fn read_activated_observation_history(
     limit: usize,
 ) -> Result<Vec<EngineObservationEvent>, RepositoryError> {
     repository
-        .read_observation_history(
-            subscription.lease().thread_id(),
-            after_sequence,
-            limit,
-        )
+        .read_observation_history(subscription.lease().thread_id(), after_sequence, limit)
         .await
 }
 

@@ -97,8 +97,7 @@ fn attributed_observation_envelope(
                 thread_id: thread_id(),
                 observation,
                 attribution: Some(artisan_domain::EngineObservationAttribution {
-                    run_id: artisan_domain::RunId::parse(run_id)
-                        .expect("fixture run id is valid"),
+                    run_id: artisan_domain::RunId::parse(run_id).expect("fixture run id is valid"),
                     turn_id: artisan_domain::TurnId::parse(turn_id)
                         .expect("fixture turn id is valid"),
                     committed_at: UnixMillis::from_millis(committed_at),

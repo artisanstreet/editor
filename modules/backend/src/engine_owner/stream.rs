@@ -461,8 +461,7 @@ async fn deliver_events(
             observations.push(observation);
         }
         if let Some(reconciliation) = text_reconciliation {
-            let sequence = provider_cursor
-                .map_or_else(|| state.next_local_sequence(), Ok)?;
+            let sequence = provider_cursor.map_or_else(|| state.next_local_sequence(), Ok)?;
             if let Some(observation) = reconciliation_observation(reconciliation, sequence) {
                 observations.push(observation);
             }

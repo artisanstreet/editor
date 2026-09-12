@@ -50,7 +50,9 @@ fn second_lock_holder_fails_while_first_is_live() {
     let dev_dir = scratch_dev_dir("lock");
     let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
     let _first = DevLock::acquire(&paths).expect("first holder acquires");
-    let error = DevLock::acquire(&paths).err().expect("second holder is refused");
+    let error = DevLock::acquire(&paths)
+        .err()
+        .expect("second holder is refused");
     assert!(
         matches!(error, DevError::StagingLocked { .. }),
         "unexpected: {error}"

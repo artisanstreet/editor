@@ -13,8 +13,8 @@ use artisan_domain::{
     EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
     GrokPermissionMode, GrokReasoningEffort, GrokSelection, NetworkAccess, OpenCode2Selection,
-    PermissionId,
-    ProjectId, ReceiptDisposition, RequestId, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
+    PermissionId, ProjectId, ReceiptDisposition, RequestId, ThreadId, ThreadTitle, UnixMillis,
+    WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement, Value};

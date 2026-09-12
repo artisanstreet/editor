@@ -299,7 +299,10 @@ async fn usage_survives_restart_and_returns_the_highest_sequence() {
         Ok(RecordRunUsageOutcome::Recorded(_))
     ));
     let second_result = repository.record_run_usage(record_command(&second)).await;
-    assert!(matches!(second_result, Ok(RecordRunUsageOutcome::Replaced(_))), "{second_result:?}");
+    assert!(
+        matches!(second_result, Ok(RecordRunUsageOutcome::Replaced(_))),
+        "{second_result:?}"
+    );
     drop(repository);
     database.close().await.expect("close SQLite before restart");
 
@@ -312,7 +315,10 @@ async fn usage_survives_restart_and_returns_the_highest_sequence() {
     assert_eq!(latest.source_sequence(), 5);
     assert_eq!(latest.input_tokens(), Some(11));
     drop(reopened);
-    reopened_database.close().await.expect("close reopened SQLite");
+    reopened_database
+        .close()
+        .await
+        .expect("close reopened SQLite");
 }
 
 #[tokio::test]
@@ -599,11 +605,7 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
     drop(run_id);
 }
 
-fn codex_report_with(
-    model: &str,
-    route: &str,
-    variant: Option<EngineVariantId>,
-) -> RunUsageReport {
+fn codex_report_with(model: &str, route: &str, variant: Option<EngineVariantId>) -> RunUsageReport {
     RunUsageReport::new(RunUsageReportInput {
         run_id: RunId::parse("run-codex-2").expect("run id"),
         thread_id: ThreadId::parse(THREAD_ID).expect("thread id"),
@@ -717,7 +719,7 @@ async fn codex_snapshot_authorizes_exact_usage_and_rejects_scope_mismatch() {
     .await
     .expect("codex run should insert");
 
-        // Legitimate Codex usage: exact immutable model on the exact `codex`
+    // Legitimate Codex usage: exact immutable model on the exact `codex`
     // route with no variant. Usage persists and reads back.
     let legitimate = codex_report_with("model-usage", "codex", None);
     assert!(matches!(
@@ -727,10 +729,7 @@ async fn codex_snapshot_authorizes_exact_usage_and_rejects_scope_mismatch() {
         Ok(RecordRunUsageOutcome::Recorded(_))
     ));
     let latest = repository
-        .read_latest_run_usage(
-            &RunId::parse("run-codex-2").expect("run id"),
-            &thread_id,
-        )
+        .read_latest_run_usage(&RunId::parse("run-codex-2").expect("run id"), &thread_id)
         .await
         .expect("codex usage should read")
         .expect("codex usage should exist");
@@ -754,10 +753,7 @@ async fn codex_snapshot_authorizes_exact_usage_and_rejects_scope_mismatch() {
         ));
     }
     let latest = repository
-        .read_latest_run_usage(
-            &RunId::parse("run-codex-2").expect("run id"),
-            &thread_id,
-        )
+        .read_latest_run_usage(&RunId::parse("run-codex-2").expect("run id"), &thread_id)
         .await
         .expect("codex usage should still read")
         .expect("codex usage should remain");

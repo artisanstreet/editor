@@ -459,10 +459,11 @@ impl RenderOnce for Button {
         let focus_visibility = self.focus_visibility;
         let focus = self.focus.clone();
         let on_activate = self.on_activate;
-        let (foreground, hover_foreground) = self.tint.map_or(
-            (style.foreground, style.hover_foreground),
-            |tint| (tint.foreground, tint.hover_foreground),
-        );
+        let (foreground, hover_foreground) = self
+            .tint
+            .map_or((style.foreground, style.hover_foreground), |tint| {
+                (tint.foreground, tint.hover_foreground)
+            });
 
         let mut root = div()
             .id(self.id)

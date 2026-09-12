@@ -35,10 +35,10 @@ use crate::engine_owner::FixtureConfiguredLaunch;
 use crate::{
     SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
+    engine_owner::EngineContinuation,
     engine_owner::cursor::CursorLaunch,
     engine_owner::grok::GrokLaunch,
     engine_owner::operation::{AcceptedTurn, PreparedSession},
-    engine_owner::EngineContinuation,
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
     run_cancellation::{RunCancellationLease, RunCancellationRegistry},

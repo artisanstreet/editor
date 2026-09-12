@@ -125,9 +125,9 @@ async fn seed_run_with_snapshot(
 ) {
     let message_id = format!("message-{run_id}");
     let turn_id = format!("turn-{run_id}");
-    let ordinal = run_id
-        .bytes()
-        .fold(1_i64, |value, byte| value.wrapping_mul(37).wrapping_add(i64::from(byte)) & i64::MAX);
+    let ordinal = run_id.bytes().fold(1_i64, |value, byte| {
+        value.wrapping_mul(37).wrapping_add(i64::from(byte)) & i64::MAX
+    });
     entities::message::ActiveModel {
         message_id: Set(message_id.clone()),
         thread_id: Set(THREAD_ID.to_owned()),
@@ -566,13 +566,20 @@ async fn long_thread_history_does_not_block_latest_session_continuation() {
     let (database, repository) = migrated_memory_database().await;
     for index in 0..66 {
         seed_run(
-            &database, &format!("run-history-{index:03}"), 100 + index,
-            AssistantRunLifecycle::Completed, "profile-fixture",
-            Some("retained-session"), None,
-        ).await;
+            &database,
+            &format!("run-history-{index:03}"),
+            100 + index,
+            AssistantRunLifecycle::Completed,
+            "profile-fixture",
+            Some("retained-session"),
+            None,
+        )
+        .await;
     }
-    let lookup = repository.read_session_continuation(query("profile-fixture", None))
-        .await.expect("long history should remain readable");
+    let lookup = repository
+        .read_session_continuation(query("profile-fixture", None))
+        .await
+        .expect("long history should remain readable");
     let SessionContinuationLookup::Usable(continuation) = lookup else {
         panic!("the newest valid session must remain usable after 64 runs");
     };

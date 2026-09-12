@@ -533,36 +533,65 @@ fn scope_and_receipt_correlation_mismatches_are_rejected() {
 
 #[test]
 fn parent_envelope_dispatch_round_trips_composer_state() {
-    use artisan_protocol::{ClientRequest, FrameId, ProtocolVersion, ResponsePayload, ServerResponse, WireEnvelope, WireEnvelopeBody, encode_envelope, decode_envelope};
     use artisan_domain::{Command, Query};
+    use artisan_protocol::{
+        ClientRequest, FrameId, ProtocolVersion, ResponsePayload, ServerResponse, WireEnvelope,
+        WireEnvelopeBody, decode_envelope, encode_envelope,
+    };
     let request = artisan_domain::RequestId::parse("state-envelope").unwrap();
     let query = ReadRunUsage::new(thread(), run());
-    let command = WithdrawQueuedMessageCommand::new(request.clone(), thread(), artisan_domain::MessageId::parse("queued-message").unwrap(), artisan_domain::RequestId::parse("original-message").unwrap());
+    let command = WithdrawQueuedMessageCommand::new(
+        request.clone(),
+        thread(),
+        artisan_domain::MessageId::parse("queued-message").unwrap(),
+        artisan_domain::RequestId::parse("original-message").unwrap(),
+    );
     let bodies = vec![
         WireEnvelopeBody::Request(ClientRequest::Query(Query::ReadRunUsage(query))),
-        WireEnvelopeBody::Request(ClientRequest::Command(Command::WithdrawQueuedMessage(command))),
-        WireEnvelopeBody::Response(ServerResponse { request_id: request.clone(), payload: ResponsePayload::RunUsage(usage_result()) }),
+        WireEnvelopeBody::Request(ClientRequest::Command(Command::WithdrawQueuedMessage(
+            command,
+        ))),
+        WireEnvelopeBody::Response(ServerResponse {
+            request_id: request.clone(),
+            payload: ResponsePayload::RunUsage(usage_result()),
+        }),
     ];
     for body in bodies {
-        let envelope = WireEnvelope { protocol_version: ProtocolVersion::V1, frame_id: FrameId::parse(request.as_str()).unwrap(), sent_at: UnixMillis::from_millis(20), body };
+        let envelope = WireEnvelope {
+            protocol_version: ProtocolVersion::V1,
+            frame_id: FrameId::parse(request.as_str()).unwrap(),
+            sent_at: UnixMillis::from_millis(20),
+            body,
+        };
         assert!(decode_envelope(&encode_envelope(&envelope).unwrap()).unwrap() == envelope);
     }
 }
 
 #[test]
 fn parent_envelope_dispatch_round_trips_failed_dispatch_arms() {
-    use artisan_protocol::{ClientRequest, FrameId, ProtocolVersion, ResponsePayload, ServerResponse, WireEnvelope, WireEnvelopeBody, encode_envelope, decode_envelope};
     use artisan_domain::Query;
+    use artisan_protocol::{
+        ClientRequest, FrameId, ProtocolVersion, ResponsePayload, ServerResponse, WireEnvelope,
+        WireEnvelopeBody, decode_envelope, encode_envelope,
+    };
     let request = artisan_domain::RequestId::parse("failed-envelope").unwrap();
     let query = ListFailedMessages::new(thread(), 5).expect("failed query");
     let listing =
         FailedMessageListing::new(thread(), 5, 1, vec![failed_summary()]).expect("listing");
     let bodies = vec![
         WireEnvelopeBody::Request(ClientRequest::Query(Query::ListFailedMessages(query))),
-        WireEnvelopeBody::Response(ServerResponse { request_id: request.clone(), payload: ResponsePayload::FailedMessages(listing) }),
+        WireEnvelopeBody::Response(ServerResponse {
+            request_id: request.clone(),
+            payload: ResponsePayload::FailedMessages(listing),
+        }),
     ];
     for body in bodies {
-        let envelope = WireEnvelope { protocol_version: ProtocolVersion::V1, frame_id: FrameId::parse(request.as_str()).unwrap(), sent_at: UnixMillis::from_millis(20), body };
+        let envelope = WireEnvelope {
+            protocol_version: ProtocolVersion::V1,
+            frame_id: FrameId::parse(request.as_str()).unwrap(),
+            sent_at: UnixMillis::from_millis(20),
+            body,
+        };
         assert!(decode_envelope(&encode_envelope(&envelope).unwrap()).unwrap() == envelope);
     }
 }
@@ -654,10 +683,7 @@ fn failed_listing_round_trips_reason_text_attachments_and_counts() {
         row.reason.as_str(),
         "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue"
     );
-    assert_eq!(
-        row.text.as_ref().map(AuthoredText::as_str),
-        Some("hello")
-    );
+    assert_eq!(row.text.as_ref().map(AuthoredText::as_str), Some("hello"));
     assert_eq!(row.attachments.len(), 1);
     assert_eq!(row.failed_at, UnixMillis::from_millis(500));
 }

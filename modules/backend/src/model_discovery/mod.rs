@@ -160,9 +160,7 @@ fn cache() -> &'static Cache {
 pub(crate) fn cached_bundle() -> Option<Arc<DiscoveryBundle>> {
     let guard = cache().try_lock().ok()?;
     match guard.as_ref() {
-        Some((observed, bundle)) if observed.elapsed() < DISCOVERY_TTL => {
-            Some(Arc::clone(bundle))
-        }
+        Some((observed, bundle)) if observed.elapsed() < DISCOVERY_TTL => Some(Arc::clone(bundle)),
         _ => None,
     }
 }

@@ -143,17 +143,15 @@ pub fn summary_line(text: &str) -> Option<String> {
     let sections = split_sections(text);
     for section in sections.iter().rev() {
         if let Some(headline) = parse_headline(section)
-            && !headline.is_empty() {
-                return Some(headline);
-            }
+            && !headline.is_empty()
+        {
+            return Some(headline);
+        }
     }
     for section in sections.iter().rev() {
         let unstarred = section.replace("**", "");
         if let Some(sentence) = first_sentence(&unstarred) {
-            let line: String = sentence
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
+            let line: String = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
             if !line.is_empty() {
                 return Some(line);
             }
@@ -339,10 +337,7 @@ fn strip_one_mark(line: &str) -> Option<&str> {
     while hashes < bytes.len() && hashes < 6 && bytes[hashes] == b'#' {
         hashes += 1;
     }
-    if hashes > 0
-        && hashes < bytes.len()
-        && (bytes[hashes] == b' ' || bytes[hashes] == b'\t')
-    {
+    if hashes > 0 && hashes < bytes.len() && (bytes[hashes] == b' ' || bytes[hashes] == b'\t') {
         return Some(trimmed[hashes..].trim_start_matches([' ', '\t']));
     }
     // Quotes.
@@ -361,10 +356,7 @@ fn strip_one_mark(line: &str) -> Option<&str> {
     {
         bullets += 1;
     }
-    if bullets > 0
-        && bullets < bytes.len()
-        && (bytes[bullets] == b' ' || bytes[bullets] == b'\t')
-    {
+    if bullets > 0 && bullets < bytes.len() && (bytes[bullets] == b' ' || bytes[bullets] == b'\t') {
         return Some(trimmed[bullets..].trim_start_matches([' ', '\t']));
     }
     // Ordered markers: 1-3 digits plus '.' or ')' plus blank.
@@ -545,9 +537,9 @@ fn emphasis_fragments(text: &str, strong: bool, em: bool, strike: bool) -> Vec<I
         }
     }
     fragments
-    .into_iter()
-    .filter(|fragment| !fragment.text.is_empty())
-    .collect()
+        .into_iter()
+        .filter(|fragment| !fragment.text.is_empty())
+        .collect()
 }
 
 /// Splits sections on blank lines, trims, and drops empties.
@@ -570,7 +562,10 @@ fn split_sections(text: &str) -> Vec<String> {
     if !current.is_empty() {
         sections.push(current.join("\n").trim().to_owned());
     }
-    sections.into_iter().filter(|section| !section.is_empty()).collect()
+    sections
+        .into_iter()
+        .filter(|section| !section.is_empty())
+        .collect()
 }
 
 /// Latest `**headline**` inner text, or `None`. The close must sit on the

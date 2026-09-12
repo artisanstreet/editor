@@ -621,7 +621,9 @@ async fn all_five_variants_round_trip() {
                     assert_eq!(u.item_id.as_str(), "item-5var");
                     assert_eq!(u.body.as_str(), "first body");
                     assert_eq!(
-                        u.source_message_id.as_ref().map(artisan_domain::MessageId::as_str),
+                        u.source_message_id
+                            .as_ref()
+                            .map(artisan_domain::MessageId::as_str),
                         Some("msg-5var"),
                         "replay projects the queued source identity"
                     );
@@ -754,17 +756,21 @@ async fn legacy_item_upsert_without_source_message_replays_with_none() {
         "p-leg-a",
         "p-leg-b",
     );
-    let (_claimed, _launched, _bound) =
-        queue_claim_launch_bind(&db, &repo, &tid, "msg-legacy-none", "req-legacy-none", &launch)
-            .await;
+    let (_claimed, _launched, _bound) = queue_claim_launch_bind(
+        &db,
+        &repo,
+        &tid,
+        "msg-legacy-none",
+        "req-legacy-none",
+        &launch,
+    )
+    .await;
     db.execute_unprepared("PRAGMA foreign_keys = OFF")
         .await
         .expect("pragma");
-    db.execute_unprepared(
-        "DELETE FROM conversation_items WHERE item_id = 'item-legacy-none'",
-    )
-    .await
-    .expect("legacy item row removal");
+    db.execute_unprepared("DELETE FROM conversation_items WHERE item_id = 'item-legacy-none'")
+        .await
+        .expect("legacy item row removal");
     db.execute_unprepared("PRAGMA foreign_keys = ON")
         .await
         .expect("pragma on");

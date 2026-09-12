@@ -354,10 +354,7 @@ fn forced_refresh_actions_are_installation_first_then_catalog_order() {
             }
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        ids,
-        ["codex", "claude", "cursor", "grok", "opencode2"]
-    );
+    assert_eq!(ids, ["codex", "claude", "cursor", "grok", "opencode2"]);
 }
 
 #[test]

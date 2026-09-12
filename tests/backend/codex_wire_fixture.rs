@@ -142,10 +142,7 @@ fn main() {
         if value.get("id").is_none() {
             continue;
         }
-        let id = value
-            .get("id")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
+        let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
         let method = value
             .get("method")
             .and_then(|method| method.as_str())
@@ -357,7 +354,11 @@ fn emit(output: &mut impl Write, value: &serde_json::Value) {
 /// per-test record file and flushes before returning, so a test counting
 /// lines observes exactly one record per provider write. A lost record
 /// would silently break that count, so a write failure refuses loudly.
-fn record_steer_request(path: &std::path::Path, id: &serde_json::Value, params: &serde_json::Value) {
+fn record_steer_request(
+    path: &std::path::Path,
+    id: &serde_json::Value,
+    params: &serde_json::Value,
+) {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -412,13 +413,8 @@ fn scenario_from_basename(argv0: &str) -> Option<String> {
         .and_then(|stem| stem.to_str())?;
     let scenario = stem.strip_prefix(SCENARIO_PREFIX)?;
     match scenario {
-        "strict"
-        | "reject_always"
-        | "interleave"
-        | "resume_interleave"
-        | "resume_mismatch"
-        | "steer_burst"
-        | "steer_reject" => Some(scenario.to_owned()),
+        "strict" | "reject_always" | "interleave" | "resume_interleave" | "resume_mismatch"
+        | "steer_burst" | "steer_reject" => Some(scenario.to_owned()),
         _ => None,
     }
 }

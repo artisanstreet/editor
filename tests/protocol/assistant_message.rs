@@ -6,7 +6,7 @@
 use std::error::Error;
 
 use artisan_domain::{
-    AuthoredText, AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
+    AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase, AuthoredText,
     Command, ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
     ConversationSnapshot, ConversationSubscriptionStart, ConversationTurn, EngineId,
     IdentifierError, ImageAttachment, ImageAttachmentRef, ItemId, ItemOrdinal,
@@ -20,8 +20,8 @@ use artisan_protocol::artisan_capnp::{
 };
 use artisan_protocol::{
     ActiveRunResult, ClientRequest, ConversationSubscriptionStarted, FrameId, ProtocolDecodeError,
-    ProtocolVersion, ResponsePayload, RunLiveStatus, ServerResponse, WireEnvelope, WireEnvelopeBody,
-    decode_envelope, encode_envelope,
+    ProtocolVersion, ResponsePayload, RunLiveStatus, ServerResponse, WireEnvelope,
+    WireEnvelopeBody, decode_envelope, encode_envelope,
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
@@ -98,41 +98,37 @@ fn multimodal_snapshot() -> ConversationSnapshot {
         ConversationCursor::new(10),
         vec![turn(ConversationLifecycle::Completed)],
         vec![
-            ConversationItem::MultimodalUserMessage(
-                artisan_domain::MultimodalUserMessageItem {
-                    item_id: item_id("item-mixed-proto-1"),
-                    turn_id: turn_id(),
-                    ordinal: ItemOrdinal::new(1),
-                    revision: Revision::new(0),
-                    lifecycle: ConversationLifecycle::Completed,
-                    text: Some(AuthoredText::parse("caption").expect("caption is valid")),
-                    attachments: vec![image_reference("message-mixed-proto-1", 0)],
-                    source_message_id: Some(
-                        MessageId::parse("message-mixed-proto-1").expect("fixture"),
-                    ),
-                    created_at: UnixMillis::from_millis(1),
-                    updated_at: UnixMillis::from_millis(2),
-                },
-            ),
-            ConversationItem::MultimodalUserMessage(
-                artisan_domain::MultimodalUserMessageItem {
-                    item_id: item_id("item-image-only-proto-1"),
-                    turn_id: turn_id(),
-                    ordinal: ItemOrdinal::new(2),
-                    revision: Revision::new(0),
-                    lifecycle: ConversationLifecycle::Completed,
-                    text: None,
-                    attachments: vec![
-                        image_reference("message-image-only-proto-1", 0),
-                        image_reference("message-image-only-proto-1", 1),
-                    ],
-                    source_message_id: Some(
-                        MessageId::parse("message-image-only-proto-1").expect("fixture"),
-                    ),
-                    created_at: UnixMillis::from_millis(3),
-                    updated_at: UnixMillis::from_millis(4),
-                },
-            ),
+            ConversationItem::MultimodalUserMessage(artisan_domain::MultimodalUserMessageItem {
+                item_id: item_id("item-mixed-proto-1"),
+                turn_id: turn_id(),
+                ordinal: ItemOrdinal::new(1),
+                revision: Revision::new(0),
+                lifecycle: ConversationLifecycle::Completed,
+                text: Some(AuthoredText::parse("caption").expect("caption is valid")),
+                attachments: vec![image_reference("message-mixed-proto-1", 0)],
+                source_message_id: Some(
+                    MessageId::parse("message-mixed-proto-1").expect("fixture"),
+                ),
+                created_at: UnixMillis::from_millis(1),
+                updated_at: UnixMillis::from_millis(2),
+            }),
+            ConversationItem::MultimodalUserMessage(artisan_domain::MultimodalUserMessageItem {
+                item_id: item_id("item-image-only-proto-1"),
+                turn_id: turn_id(),
+                ordinal: ItemOrdinal::new(2),
+                revision: Revision::new(0),
+                lifecycle: ConversationLifecycle::Completed,
+                text: None,
+                attachments: vec![
+                    image_reference("message-image-only-proto-1", 0),
+                    image_reference("message-image-only-proto-1", 1),
+                ],
+                source_message_id: Some(
+                    MessageId::parse("message-image-only-proto-1").expect("fixture"),
+                ),
+                created_at: UnixMillis::from_millis(3),
+                updated_at: UnixMillis::from_millis(4),
+            }),
         ],
         UnixMillis::from_millis(5),
     )
@@ -265,11 +261,17 @@ fn mixed_and_image_only_items_roundtrip_without_image_bytes_in_history()
     let ResponsePayload::ConversationSnapshot(snapshot) = response.payload else {
         panic!("multimodal frame must remain a snapshot");
     };
-    let [ConversationItem::MultimodalUserMessage(mixed),
-        ConversationItem::MultimodalUserMessage(image_only)] = snapshot.items() else {
+    let [
+        ConversationItem::MultimodalUserMessage(mixed),
+        ConversationItem::MultimodalUserMessage(image_only),
+    ] = snapshot.items()
+    else {
         panic!("both multimodal item arms must survive the codec");
     };
-    assert_eq!(mixed.text.as_ref().map(AuthoredText::as_str), Some("caption"));
+    assert_eq!(
+        mixed.text.as_ref().map(AuthoredText::as_str),
+        Some("caption")
+    );
     assert_eq!(mixed.attachments[0].size_bytes, 3);
     assert_eq!(image_only.text, None);
     assert_eq!(image_only.attachments.len(), 2);
@@ -278,8 +280,8 @@ fn mixed_and_image_only_items_roundtrip_without_image_bytes_in_history()
 }
 
 #[test]
-fn mixed_and_image_only_queue_payloads_roundtrip_with_ordered_bytes()
--> Result<(), Box<dyn Error>> {
+fn mixed_and_image_only_queue_payloads_roundtrip_with_ordered_bytes() -> Result<(), Box<dyn Error>>
+{
     let mixed = QueueMessagePayload::new(
         Some(AuthoredText::parse("caption").expect("caption is valid")),
         vec![
@@ -292,8 +294,10 @@ fn mixed_and_image_only_queue_payloads_roundtrip_with_ordered_bytes()
     .expect("mixed payload is valid");
     let image_only = QueueMessagePayload::new(
         None,
-        vec![ImageAttachment::new("image/webp", vec![6, 7], "only.webp")
-            .expect("image-only attachment is valid")],
+        vec![
+            ImageAttachment::new("image/webp", vec![6, 7], "only.webp")
+                .expect("image-only attachment is valid"),
+        ],
     )
     .expect("image-only payload is valid");
 
@@ -310,11 +314,10 @@ fn mixed_and_image_only_queue_payloads_roundtrip_with_ordered_bytes()
             panic!("queue payload must remain a QueueMessage command");
         };
         assert_eq!(command.thread_id, thread_id());
-        assert_eq!(command.payload.attachments().len(), if frame_id.contains("mixed") {
-            2
-        } else {
-            1
-        });
+        assert_eq!(
+            command.payload.attachments().len(),
+            if frame_id.contains("mixed") { 2 } else { 1 }
+        );
     }
     Ok(())
 }
@@ -655,9 +658,7 @@ fn raw_assistant_snapshot_with_lifecycle(lifecycle: WireLifecycle) -> Vec<u8> {
 
 /// Builds one otherwise-valid raw active-run response, letting the caller
 /// override the status and engine fields after the valid defaults.
-fn raw_active_run(
-    customize: impl FnOnce(&mut active_run_result::Builder<'_>),
-) -> Vec<u8> {
+fn raw_active_run(customize: impl FnOnce(&mut active_run_result::Builder<'_>)) -> Vec<u8> {
     let mut message = raw_message();
     let mut response = init_raw_envelope(&mut message, "server-active-raw")
         .init_body()
@@ -675,8 +676,7 @@ fn raw_active_run(
 }
 
 #[test]
-fn active_run_status_and_engine_roundtrip_through_production_codec(
-) -> Result<(), Box<dyn Error>> {
+fn active_run_status_and_engine_roundtrip_through_production_codec() -> Result<(), Box<dyn Error>> {
     let value = response(
         "server-active-roundtrip",
         ResponsePayload::ActiveRun(ActiveRunResult::Active {
@@ -687,17 +687,12 @@ fn active_run_status_and_engine_roundtrip_through_production_codec(
         }),
     );
     let decoded = decode_envelope(&encode_envelope(&value)?)?;
-    assert!(
-        decoded == value,
-        "active run status must survive the wire"
-    );
+    assert!(decoded == value, "active run status must survive the wire");
     let WireEnvelopeBody::Response(decoded_response) = decoded.body else {
         panic!("decoded frame must remain a response");
     };
     let ResponsePayload::ActiveRun(ActiveRunResult::Active {
-        status,
-        engine_id,
-        ..
+        status, engine_id, ..
     }) = decoded_response.payload
     else {
         panic!("decoded response must carry an active run");
@@ -713,10 +708,7 @@ fn raw_unknown_run_status_returns_the_typed_strict_error() {
         active.set_run_status(WireRunStatus::Unknown);
     }));
     assert!(
-        matches!(
-            error,
-            ProtocolDecodeError::UnknownDiscriminant { value: 0 }
-        ),
+        matches!(error, ProtocolDecodeError::UnknownDiscriminant { value: 0 }),
         "unknown run status must fail closed, got {error:?}"
     );
 }

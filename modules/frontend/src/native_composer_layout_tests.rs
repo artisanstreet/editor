@@ -19,10 +19,7 @@ use crate::{
 fn mount_composer(
     cx: &mut TestAppContext,
     snapshot: NativeComposerControlsSnapshot,
-) -> (
-    gpui::Entity<NativeComposer>,
-    &mut gpui::VisualTestContext,
-) {
+) -> (gpui::Entity<NativeComposer>, &mut gpui::VisualTestContext) {
     let (view, window_cx) = cx.add_window_view(|_, cx| {
         let controls = cx.new(|cx| NativeComposerControls::new(snapshot, cx));
         let picker = cx.new(|cx| {

@@ -234,7 +234,8 @@ impl Repository {
     }
 }
 
-pub(super) fn encode_config(config: &EngineRunConfig) -> Result<Vec<u8>, RepositoryError> {    engine_run_config::encode(config).map_err(|error| match error {
+pub(super) fn encode_config(config: &EngineRunConfig) -> Result<Vec<u8>, RepositoryError> {
+    engine_run_config::encode(config).map_err(|error| match error {
         EngineRunConfigCodecError::InvalidField { field } => {
             corrupt_data("engine_run_config", field, "invalid configuration")
         }

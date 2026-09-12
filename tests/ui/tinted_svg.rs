@@ -533,10 +533,22 @@ fn assert_within(outer: Bounds<Pixels>, inner: Bounds<Pixels>) {
     let inner_min_y = f32::from(inner.origin.y);
     let inner_max_x = inner_min_x + f32::from(inner.size.width);
     let inner_max_y = inner_min_y + f32::from(inner.size.height);
-    assert!(inner_min_x >= outer_min_x - 0.001, "inner left escapes outer");
-    assert!(inner_min_y >= outer_min_y - 0.001, "inner top escapes outer");
-    assert!(inner_max_x <= outer_max_x + 0.001, "inner right escapes outer");
-    assert!(inner_max_y <= outer_max_y + 0.001, "inner bottom escapes outer");
+    assert!(
+        inner_min_x >= outer_min_x - 0.001,
+        "inner left escapes outer"
+    );
+    assert!(
+        inner_min_y >= outer_min_y - 0.001,
+        "inner top escapes outer"
+    );
+    assert!(
+        inner_max_x <= outer_max_x + 0.001,
+        "inner right escapes outer"
+    );
+    assert!(
+        inner_max_y <= outer_max_y + 0.001,
+        "inner bottom escapes outer"
+    );
 }
 
 #[test]

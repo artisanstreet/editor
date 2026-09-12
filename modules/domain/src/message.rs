@@ -11,9 +11,9 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::bounds::{
-    MESSAGE_BODY_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
-    MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, MESSAGE_IMAGE_ATTACHMENT_MIME_MAX_BYTES,
-    MESSAGE_IMAGE_ATTACHMENT_NAME_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
+    MESSAGE_BODY_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
+    MESSAGE_IMAGE_ATTACHMENT_MIME_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_NAME_MAX_BYTES,
+    MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
 };
 use crate::identifiers::{MessageId, ThreadId};
 
@@ -280,14 +280,14 @@ impl ImageAttachmentRef {
     ) -> Result<Self, ImageAttachmentRefError> {
         let mime_type = ImageMimeType::parse(mime_type.as_ref())
             .map_err(|_| ImageAttachmentRefError::UnsupportedMimeType)?;
-        if size_bytes == 0 || usize::try_from(size_bytes).unwrap_or(usize::MAX)
-            > MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES
+        if size_bytes == 0
+            || usize::try_from(size_bytes).unwrap_or(usize::MAX)
+                > MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES
         {
             return Err(ImageAttachmentRefError::InvalidSize { size_bytes });
         }
         let name = name.into();
-        validate_attachment_name(&name)
-            .map_err(|_| ImageAttachmentRefError::InvalidName)?;
+        validate_attachment_name(&name).map_err(|_| ImageAttachmentRefError::InvalidName)?;
         Ok(Self {
             message_id,
             thread_id,
@@ -366,9 +366,9 @@ fn validate_attachment_name(name: &str) -> Result<(), ImageAttachmentError> {
     if name.trim().is_empty()
         || name == "."
         || name == ".."
-        || name.chars().any(|character| {
-            character.is_control() || matches!(character, '/' | '\\' | ':')
-        })
+        || name
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\' | ':'))
     {
         return Err(ImageAttachmentError::InvalidName);
     }
@@ -555,14 +555,15 @@ mod tests {
         ));
 
         let four_megabytes = || {
-            ImageAttachment::new(
-                "image/png",
-                vec![7; 4 * 1024 * 1024],
-                "large.png",
-            )
-            .expect("each image remains under the per-image bound")
+            ImageAttachment::new("image/png", vec![7; 4 * 1024 * 1024], "large.png")
+                .expect("each image remains under the per-image bound")
         };
-        let aggregate = vec![four_megabytes(), four_megabytes(), four_megabytes(), image(8)];
+        let aggregate = vec![
+            four_megabytes(),
+            four_megabytes(),
+            four_megabytes(),
+            image(8),
+        ];
         assert!(matches!(
             QueueMessagePayload::new(None, aggregate),
             Err(QueueMessagePayloadError::AttachmentsTooLarge { .. })

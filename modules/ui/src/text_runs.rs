@@ -173,10 +173,11 @@ pub fn compile_text_runs(
         }
         let run = style.to_run(end - start);
         if let Some(last) = runs.last_mut()
-            && runs_equal(last, &run) {
-                last.len += run.len;
-                continue;
-            }
+            && runs_equal(last, &run)
+        {
+            last.len += run.len;
+            continue;
+        }
         runs.push(run);
     }
     runs

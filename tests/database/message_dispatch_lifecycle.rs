@@ -874,7 +874,10 @@ async fn lease_renewal_carries_a_turn_past_its_original_expiry() {
         .await
         .expect("renewed lease should accept its own settlement");
     assert_eq!(completed.updated_at, UnixMillis::from_millis(50));
-    assert_eq!(dispatch(&database, "message-1").await.state, DispatchState::Completed);
+    assert_eq!(
+        dispatch(&database, "message-1").await.state,
+        DispatchState::Completed
+    );
 }
 
 #[tokio::test]

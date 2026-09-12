@@ -176,9 +176,10 @@ pub fn cursor_auth_file_default() -> PathBuf {
     #[cfg(windows)]
     {
         if let Ok(app_data) = std::env::var("APPDATA")
-            && !app_data.is_empty() {
-                return PathBuf::from(app_data).join("Cursor").join("auth.json");
-            }
+            && !app_data.is_empty()
+        {
+            return PathBuf::from(app_data).join("Cursor").join("auth.json");
+        }
         home_dir()
             .join("AppData")
             .join("Roaming")
@@ -202,7 +203,8 @@ pub fn cursor_auth_file_default() -> PathBuf {
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE")).map_or_else(|| PathBuf::from("/"), PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }
 
 /// Reads the stored access token strictly read-only.
@@ -462,9 +464,10 @@ pub async fn post_cursor_period_usage(
         .map_err(|error| map_request_error(&error))?;
     let status = response.status().as_u16();
     if let Some(length) = response.content_length()
-        && length > max_bytes as u64 {
-            return Err(CursorUsageError::BodyTooLarge);
-        }
+        && length > max_bytes as u64
+    {
+        return Err(CursorUsageError::BodyTooLarge);
+    }
     let bytes = response
         .bytes()
         .await

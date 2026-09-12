@@ -16,21 +16,22 @@
 use artisan_database::{
     AssistantChange, BindRunProvider, BindRunProviderOutcome, BoundRunReceipt, CheckpointUpdate,
     ClaimMessageDispatch, ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome,
-    CreateThreadInput, DispatchLeaseOwner, EngineCheckpoint, LaunchClaimedRun, LaunchClaimedRunOutcome,
-    LaunchedRunReceipt, OBSERVATION_BATCH_MAX_OBSERVATIONS, OBSERVATION_CHECKPOINT_VERSION,
-    QueueFirstMessageInput, QueueMessageInput, Repository, RepositoryError, RunBatchScope, RunLaunchCredentials,
-    RunObservationError, RunStartKey, SetThreadEngineConfigInput, SqliteConfig, ThreadEngineSettings,
-    connect, encode_observation_bytes, encode_observation_checkpoint, entities,
+    CreateThreadInput, DispatchLeaseOwner, EngineCheckpoint, LaunchClaimedRun,
+    LaunchClaimedRunOutcome, LaunchedRunReceipt, OBSERVATION_BATCH_MAX_OBSERVATIONS,
+    OBSERVATION_CHECKPOINT_VERSION, QueueFirstMessageInput, QueueMessageInput, Repository,
+    RepositoryError, RunBatchScope, RunLaunchCredentials, RunObservationError, RunStartKey,
+    SetThreadEngineConfigInput, SqliteConfig, ThreadEngineSettings, connect,
+    encode_observation_bytes, encode_observation_checkpoint, entities,
 };
 use artisan_domain::{
     ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, CountLimit, EngineAgentId,
     EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
     EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
-    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody,
-    MessageId, NetworkAccess, Observation, ObservationId, ObservationSequence, OpenCode2Selection,
-    PatchId, PermissionId, ProjectId, QueueMessagePayload, RequestId, RunId, RunState,
-    RunStateObservation, ThreadId, ThreadTitle, ToolAction, ToolObservation, TurnId, TurnState,
-    TurnStateObservation, UnixMillis, WebSearchAccess,
+    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, ItemId,
+    MessageBody, MessageId, NetworkAccess, Observation, ObservationId, ObservationSequence,
+    OpenCode2Selection, PatchId, PermissionId, ProjectId, QueueMessagePayload, RequestId, RunId,
+    RunState, RunStateObservation, ThreadId, ThreadTitle, ToolAction, ToolObservation, TurnId,
+    TurnState, TurnStateObservation, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -311,8 +312,7 @@ async fn claim_launch_bind(
     else {
         panic!("launch should start the run")
     };
-    let binding =
-        artisan_database::ProviderBindingBytes::new(vec![0xab; 16]).expect("binding");
+    let binding = artisan_database::ProviderBindingBytes::new(vec![0xab; 16]).expect("binding");
     let bound = match fixture
         .repository
         .bind_run_provider(BindRunProvider {
@@ -505,7 +505,11 @@ async fn two_batches_before_read_return_ordered_attributed_history() {
         assert_eq!(attribution.run_id.as_str(), RUN_ID_1);
         assert_eq!(attribution.turn_id.as_str(), TURN_ID_1);
         assert_eq!(attribution.delivery_sequence, delivery);
-        let committed_at = if delivery <= 2 { BATCH_1_MS } else { BATCH_2_MS };
+        let committed_at = if delivery <= 2 {
+            BATCH_1_MS
+        } else {
+            BATCH_2_MS
+        };
         assert_eq!(attribution.committed_at.as_millis(), committed_at);
     }
 }
@@ -655,10 +659,7 @@ async fn receipt_replay_creates_no_ledger_rows() {
     )
     .await
     .expect("replay should classify");
-    assert!(matches!(
-        replay,
-        CommitRunBatchOutcome::AlreadyCommitted(_)
-    ));
+    assert!(matches!(replay, CommitRunBatchOutcome::AlreadyCommitted(_)));
     assert_eq!(ledger_rows(&fixture.database).await.len(), 2);
     let history = fixture
         .repository
@@ -761,10 +762,7 @@ async fn bounded_pagination_returns_cursor_pages() {
         run_state(1, RunState::Running),
         turn_state(2, TurnState::Started),
     ];
-    let second = vec![
-        tool(3, ToolAction::Started),
-        tool(4, ToolAction::Completed),
-    ];
+    let second = vec![tool(3, ToolAction::Started), tool(4, ToolAction::Completed)];
     let body = AssistantBody::parse("ledger page one").expect("body");
     let item = ItemId::parse("ledger-item-1").expect("item id");
     let activation = PatchId::parse("ledger-activate-1").expect("patch id");
@@ -882,9 +880,8 @@ async fn oversized_limit_is_capped_at_batch_maximum() {
         let patch_item =
             PatchId::parse(format!("ledger-bulk-patch-{batch_index}")).expect("patch id");
         let checkpoint = observation_checkpoint(base_sequence, &observations);
-        let activation = (batch_index == 0).then(|| {
-            PatchId::parse("ledger-bulk-activate").expect("patch id")
-        });
+        let activation =
+            (batch_index == 0).then(|| PatchId::parse("ledger-bulk-activate").expect("patch id"));
         commit_observations(
             &fixture,
             &run,
@@ -976,9 +973,8 @@ async fn wrong_version_claimed_envelope_rolls_back() {
     let second = vec![tool(2, ToolAction::Started)];
     let envelope = encode_observation_bytes(EngineId::OpenCode2, 1, None, &second)
         .expect("fixture envelope should encode");
-    let mismatched =
-        EngineCheckpoint::new(OBSERVATION_CHECKPOINT_VERSION + 1, envelope)
-            .expect("outer version is still a valid checkpoint version");
+    let mismatched = EngineCheckpoint::new(OBSERVATION_CHECKPOINT_VERSION + 1, envelope)
+        .expect("outer version is still a valid checkpoint version");
     let body = AssistantBody::parse("ledger version second").expect("body");
     let item = ItemId::parse("ledger-item-2").expect("item id");
     let patch_item = PatchId::parse("ledger-patch-2").expect("patch id");

@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use artisan_database::{
-    RecordApprovalRequest, Repository, SqliteConfig, StoredInteractionReceipt,
-    connect, decode_observation_checkpoint,
+    RecordApprovalRequest, Repository, SqliteConfig, StoredInteractionReceipt, connect,
+    decode_observation_checkpoint,
 };
 use artisan_domain::{
     ApprovalMode, ApprovalRequest, ByteLimit, Command, CountLimit, EngineAgentId,

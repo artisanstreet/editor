@@ -1212,7 +1212,10 @@ fn attributed_event(
     }
 }
 
-fn legacy_event(thread_id: &ThreadId, observation: Observation) -> artisan_domain::EngineObservationEvent {
+fn legacy_event(
+    thread_id: &ThreadId,
+    observation: Observation,
+) -> artisan_domain::EngineObservationEvent {
     artisan_domain::EngineObservationEvent {
         thread_id: thread_id.clone(),
         observation,
@@ -1237,9 +1240,10 @@ fn assert_observation_frame(
             match event.event {
                 artisan_domain::Event::EngineObservation(delivered) => {
                     assert_eq!(&delivered.thread_id, thread_id);
-                    let sequence = delivered
-                        .attribution
-                        .as_ref().map_or_else(|| delivered.observation.sequence().get(), |attribution| attribution.delivery_sequence);
+                    let sequence = delivered.attribution.as_ref().map_or_else(
+                        || delivered.observation.sequence().get(),
+                        |attribution| attribution.delivery_sequence,
+                    );
                     assert_eq!(sequence, delivery_sequence);
                     delivered.observation
                 }
@@ -1660,11 +1664,8 @@ async fn observation_send_failure_retains_the_cursor() {
     let writer =
         ConversationDeliveryWriter::new(server_connection, registrar.clone(), ProtocolVersion::V1);
     let lease_owned = lease.clone();
-    let mut delivery = Box::pin(writer.deliver_observation_batch(
-        &lease_owned,
-        thread_id.clone(),
-        batch,
-    ));
+    let mut delivery =
+        Box::pin(writer.deliver_observation_batch(&lease_owned, thread_id.clone(), batch));
     let mut accept = Box::pin(client_connection.accept_uni());
     let mut incoming = tokio::time::timeout(TEST_DEADLINE, async {
         tokio::select! {

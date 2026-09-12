@@ -323,7 +323,8 @@ async fn verify_version(database: &DatabaseConnection, location: &str) -> Result
             source,
         })?;
 
-    let supported = parse_sqlite_version(&found).is_some_and(|version| version >= MIN_SQLITE_VERSION);
+    let supported =
+        parse_sqlite_version(&found).is_some_and(|version| version >= MIN_SQLITE_VERSION);
     if supported {
         return Ok(());
     }

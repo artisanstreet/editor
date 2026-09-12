@@ -160,7 +160,13 @@ mod tests {
         let families: Vec<&str> = ALL.iter().map(|font| font.family).collect();
         assert_eq!(
             families,
-            vec!["Artisan Neo", "Cal Sans", "Spline Sans", "Spline Sans Mono", "Twemoji Mozilla"],
+            vec![
+                "Artisan Neo",
+                "Cal Sans",
+                "Spline Sans",
+                "Spline Sans Mono",
+                "Twemoji Mozilla"
+            ],
             "catalog order is by family name for binary search"
         );
         for (font, (file_name, length)) in ALL.iter().zip(EXPECTED_LENGTHS) {
@@ -251,14 +257,28 @@ mod tests {
         // metadata alone already differ — so the comparison addresses the
         // outline table directly.)
         for (face, left, right) in [
-            (spline.static_faces[2], spline.static_faces[1], spline.static_faces[3]),
-            (spline.static_faces[5], spline.static_faces[4], spline.static_faces[6]),
+            (
+                spline.static_faces[2],
+                spline.static_faces[1],
+                spline.static_faces[3],
+            ),
+            (
+                spline.static_faces[5],
+                spline.static_faces[4],
+                spline.static_faces[6],
+            ),
         ] {
             let outline = sfnt_table_bytes(face, *b"glyf").expect("glyf table");
             let left_outline = sfnt_table_bytes(left, *b"glyf").expect("left glyf");
             let right_outline = sfnt_table_bytes(right, *b"glyf").expect("right glyf");
-            assert_ne!(outline, left_outline, "outlines must differ from the left neighbor");
-            assert_ne!(outline, right_outline, "outlines must differ from the right neighbor");
+            assert_ne!(
+                outline, left_outline,
+                "outlines must differ from the left neighbor"
+            );
+            assert_ne!(
+                outline, right_outline,
+                "outlines must differ from the right neighbor"
+            );
         }
     }
 

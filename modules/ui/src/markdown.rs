@@ -635,7 +635,10 @@ struct ActiveItem {
 enum FormatFrame {
     Emphasis(Vec<Span>),
     Strong(Vec<Span>),
-    Link { label: Vec<Span>, destination: String },
+    Link {
+        label: Vec<Span>,
+        destination: String,
+    },
     ImageAlt(Vec<Span>),
 }
 
@@ -733,8 +736,14 @@ impl DocumentBuilder {
             self.formats.is_empty(),
             "balanced inline events leave no open frame"
         );
-        debug_assert!(self.code.is_none(), "balanced fence events settle every fence");
-        debug_assert!(self.html.is_none(), "balanced HTML events settle every block");
+        debug_assert!(
+            self.code.is_none(),
+            "balanced fence events settle every fence"
+        );
+        debug_assert!(
+            self.html.is_none(),
+            "balanced HTML events settle every block"
+        );
     }
 
     fn start_tag(&mut self, tag: Tag<'_>, start: usize) {

@@ -110,23 +110,17 @@ impl Repository {
             .map_err(|error| corrupt_data("message_dispatches", "correlation_id", error))?;
         let thread_id = ThreadId::parse(message.thread_id)
             .map_err(|error| corrupt_data("messages", "thread_id", error))?;
-        let payload = super::queue_message::read_queue_message_payload(
-            &self.database,
-            message_id,
-        )
-        .await?
-        .ok_or(RepositoryError::Invariant {
-            reason: "message dispatch references a missing message payload",
-        })?;
+        let payload = super::queue_message::read_queue_message_payload(&self.database, message_id)
+            .await?
+            .ok_or(RepositoryError::Invariant {
+                reason: "message dispatch references a missing message payload",
+            })?;
         let steer_target = match dispatch.steer_run_id.as_deref() {
             None | Some("") => None,
-            Some(steer_run_id) => Some(
-                artisan_domain::SteerTarget::new(
-                    RunId::parse(steer_run_id.to_owned()).map_err(|error| {
-                        corrupt_data("message_dispatches", "steer_run_id", error)
-                    })?,
-                ),
-            ),
+            Some(steer_run_id) => Some(artisan_domain::SteerTarget::new(
+                RunId::parse(steer_run_id.to_owned())
+                    .map_err(|error| corrupt_data("message_dispatches", "steer_run_id", error))?,
+            )),
         };
 
         Ok(Some(QueueMessageDispatchPayload {

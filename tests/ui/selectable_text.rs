@@ -13,8 +13,8 @@ use artisan_ui::selectable_text::{
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
     Context, FocusHandle, FontStyle, FontWeight, HighlightStyle, InteractiveElement, IntoElement,
-    Modifiers, ParentElement, Pixels, Point, Render, SharedString, Styled, TestAppContext, TextStyle,
-    VisualTestContext, Window, div, point, px,
+    Modifiers, ParentElement, Pixels, Point, Render, SharedString, Styled, TestAppContext,
+    TextStyle, VisualTestContext, Window, div, point, px,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -60,7 +60,10 @@ fn normalize_orders_endpoints_and_rejects_collapsed() {
     assert_eq!(normalize_selection(2, 8, BODY), Some(2..8));
     assert_eq!(normalize_selection(8, 2, BODY), Some(2..8));
     assert_eq!(normalize_selection(4, 4, BODY), None);
-    assert_eq!(normalize_selection(0, BODY.len(), BODY), Some(0..BODY.len()));
+    assert_eq!(
+        normalize_selection(0, BODY.len(), BODY),
+        Some(0..BODY.len())
+    );
     // Clamping applies before the collapse check: both ends fold to 1.
     assert_eq!(normalize_selection(2, 4, EMOJI_BODY), None);
     assert_eq!(normalize_selection(0, 5, EMOJI_BODY), Some(0..5));
@@ -182,18 +185,52 @@ fn merge_overlays_selection_wash_onto_caller_ranges() {
 }
 
 #[test]
-fn keystroke_predicates_match_copy_and_select_all_only() {    assert!(is_copy_keystroke("c", &modifiers(true, false, false, false)));
-    assert!(is_copy_keystroke("C", &modifiers(false, true, false, false)));
-    assert!(is_select_all_keystroke("a", &modifiers(true, false, false, false)));
-    assert!(is_select_all_keystroke("A", &modifiers(false, true, false, false)));
+fn keystroke_predicates_match_copy_and_select_all_only() {
+    assert!(is_copy_keystroke(
+        "c",
+        &modifiers(true, false, false, false)
+    ));
+    assert!(is_copy_keystroke(
+        "C",
+        &modifiers(false, true, false, false)
+    ));
+    assert!(is_select_all_keystroke(
+        "a",
+        &modifiers(true, false, false, false)
+    ));
+    assert!(is_select_all_keystroke(
+        "A",
+        &modifiers(false, true, false, false)
+    ));
 
-    assert!(!is_copy_keystroke("c", &modifiers(false, false, false, false)));
-    assert!(!is_copy_keystroke("c", &modifiers(true, false, true, false)));
-    assert!(!is_copy_keystroke("c", &modifiers(true, false, false, true)));
-    assert!(!is_copy_keystroke("x", &modifiers(true, false, false, false)));
-    assert!(!is_select_all_keystroke("a", &modifiers(false, false, false, false)));
-    assert!(!is_select_all_keystroke("a", &modifiers(true, false, true, false)));
-    assert!(!is_select_all_keystroke("c", &modifiers(true, false, false, false)));
+    assert!(!is_copy_keystroke(
+        "c",
+        &modifiers(false, false, false, false)
+    ));
+    assert!(!is_copy_keystroke(
+        "c",
+        &modifiers(true, false, true, false)
+    ));
+    assert!(!is_copy_keystroke(
+        "c",
+        &modifiers(true, false, false, true)
+    ));
+    assert!(!is_copy_keystroke(
+        "x",
+        &modifiers(true, false, false, false)
+    ));
+    assert!(!is_select_all_keystroke(
+        "a",
+        &modifiers(false, false, false, false)
+    ));
+    assert!(!is_select_all_keystroke(
+        "a",
+        &modifiers(true, false, true, false)
+    ));
+    assert!(!is_select_all_keystroke(
+        "c",
+        &modifiers(true, false, false, false)
+    ));
 }
 
 #[test]
@@ -413,17 +450,14 @@ impl Render for RetainedProbe {
 /// Resolves drag points inside the painted text line: just inside the left
 /// edge, just inside the right wrapper edge (past the line end, so the head
 /// clamps to the text end regardless of font metrics), and mid-line.
-fn wrap_points(cx: &mut VisualTestContext, selector: &'static str) -> (Point<Pixels>, Point<Pixels>, Point<Pixels>) {
+fn wrap_points(
+    cx: &mut VisualTestContext,
+    selector: &'static str,
+) -> (Point<Pixels>, Point<Pixels>, Point<Pixels>) {
     let bounds = cx.debug_bounds(selector).expect("wrap must paint");
     let left = point(bounds.origin.x + px(1.0), bounds.origin.y + px(10.0));
-    let right = point(
-        bounds.origin.x + px(399.0),
-        bounds.origin.y + px(10.0),
-    );
-    let inside = point(
-        bounds.origin.x + px(10.0),
-        bounds.origin.y + px(10.0),
-    );
+    let right = point(bounds.origin.x + px(399.0), bounds.origin.y + px(10.0));
+    let inside = point(bounds.origin.x + px(10.0), bounds.origin.y + px(10.0));
     (left, right, inside)
 }
 
@@ -649,10 +683,7 @@ fn text_run_pipeline_keeps_mono_through_selection_split() {
         letter_spacing: Some(px(0.0)),
     }];
     let runs = compile_text_runs(text, &default, &merged, &overrides);
-    assert_eq!(
-        runs.iter().map(|run| run.len).sum::<usize>(),
-        text.len()
-    );
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
 
     let mut offset = 0_usize;
     let mut saw_mono_selected = false;
@@ -706,10 +737,7 @@ fn compiler_splits_mono_with_exact_coverage() {
             letter_spacing: Some(px(0.0)),
         }],
     );
-    assert_eq!(
-        runs.iter().map(|run| run.len).sum::<usize>(),
-        text.len()
-    );
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
     let mut offset = 0_usize;
     let mut saw_mono = false;
     let mut saw_body = false;
@@ -758,10 +786,7 @@ fn compiler_merges_agreeing_overlaps_deterministically() {
             letter_spacing: Some(px(0.0)),
         }],
     );
-    assert_eq!(
-        runs.iter().map(|run| run.len).sum::<usize>(),
-        text.len()
-    );
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
     let mut offset = 0_usize;
     for run in &runs {
         let end = offset + run.len;
@@ -810,10 +835,7 @@ fn compiler_normalizes_unsorted_highlights() {
         compile_text_runs(text, &default, &reversed, &[])
     );
     let runs = compile_text_runs(text, &default, &reversed, &[]);
-    assert_eq!(
-        runs.iter().map(|run| run.len).sum::<usize>(),
-        text.len()
-    );
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
     let mut offset = 0_usize;
     for run in &runs {
         let end = offset + run.len;
@@ -858,10 +880,7 @@ fn compiler_conflicting_overlap_resolves_without_shift() {
         ),
     ];
     let runs = compile_text_runs(text, &default, &highlights, &[]);
-    assert_eq!(
-        runs.iter().map(|run| run.len).sum::<usize>(),
-        text.len()
-    );
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
     let mut offset = 0_usize;
     for run in &runs {
         let end = offset + run.len;
@@ -871,8 +890,7 @@ fn compiler_conflicting_overlap_resolves_without_shift() {
             assert_eq!(run.font.weight, FontWeight::EXTRA_BOLD);
         } else {
             assert!(
-                run.font.weight == FontWeight::BOLD
-                    || run.font.weight == FontWeight::EXTRA_BOLD,
+                run.font.weight == FontWeight::BOLD || run.font.weight == FontWeight::EXTRA_BOLD,
                 "overlap winner must be one of the two inputs"
             );
         }
@@ -933,10 +951,7 @@ fn compiler_drops_invalid_ranges_entirely() {
         },
     ];
     let runs = compile_text_runs(text, &default, &highlights, &overrides);
-    assert_eq!(
-        runs.iter().map(|run| run.len).sum::<usize>(),
-        text.len()
-    );
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
     let mut offset = 0_usize;
     for run in &runs {
         let end = offset + run.len;
@@ -1045,9 +1060,7 @@ impl Render for OverrideProbe {
     }
 }
 
-fn override_points(
-    cx: &mut VisualTestContext,
-) -> (Point<Pixels>, Point<Pixels>, Point<Pixels>) {
+fn override_points(cx: &mut VisualTestContext) -> (Point<Pixels>, Point<Pixels>, Point<Pixels>) {
     wrap_points(cx, "override-wrap")
 }
 

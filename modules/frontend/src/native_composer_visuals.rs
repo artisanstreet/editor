@@ -833,7 +833,10 @@ pub fn fixture_send_buttons() -> [SendButtonStill; 3] {
 
 #[cfg(test)]
 mod tests {
-    #![expect(clippy::float_cmp, reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage")]
+    #![expect(
+        clippy::float_cmp,
+        reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage"
+    )]
     use super::{
         ATTACHMENT_THUMBNAIL_EDGE_STEPS, ATTACHMENT_TRAY_GAP_STEPS, ATTACHMENT_TRAY_LABEL,
         AttachmentFact, AttachmentThumbnail, AttachmentTrayStill, ButtonContent, ButtonSize,

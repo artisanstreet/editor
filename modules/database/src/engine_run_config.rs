@@ -16,8 +16,7 @@ use artisan_domain::{
     EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
     GrokPermissionMode, GrokReasoningEffort, GrokSelection, NetworkAccess, OpenCode2Selection,
-    PermissionId,
-    WebSearchAccess,
+    PermissionId, WebSearchAccess,
 };
 
 #[derive(Debug, Error)]

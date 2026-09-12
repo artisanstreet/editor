@@ -607,9 +607,7 @@ fn source_message_id_correlates_receipt_to_echo_without_body_guessing() {
             revision: Revision::default(),
             lifecycle: ConversationLifecycle::Completed,
             body: MessageBody::parse("same repeated body").expect("fixture body is valid"),
-            source_message_id: Some(
-                MessageId::parse(source).expect("fixture message id is valid"),
-            ),
+            source_message_id: Some(MessageId::parse(source).expect("fixture message id is valid")),
             created_at: UnixMillis::from_millis(-5),
             updated_at: UnixMillis::from_millis(25),
         })
@@ -635,10 +633,7 @@ fn source_message_id_correlates_receipt_to_echo_without_body_guessing() {
     let items = snapshot.items();
     assert_eq!(items.len(), 2);
     let mut sources = Vec::with_capacity(items.len());
-    for (item, expected_source) in items
-        .iter()
-        .zip(["message-echo-1", "message-echo-2"])
-    {
+    for (item, expected_source) in items.iter().zip(["message-echo-1", "message-echo-2"]) {
         let ConversationItem::UserMessage(user) = item else {
             panic!("expected user echo item");
         };

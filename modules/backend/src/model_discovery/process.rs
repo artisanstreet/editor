@@ -56,10 +56,12 @@ pub(crate) async fn run_bounded(
     }))
     .await;
 
-    if let Ok(Some((stdout_bytes, success))) = captured { Some(BoundedOutput {
-        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
-        success,
-    }) } else {
+    if let Ok(Some((stdout_bytes, success))) = captured {
+        Some(BoundedOutput {
+            stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+            success,
+        })
+    } else {
         let _ = child.kill().await;
         let _ = child.wait().await;
         None

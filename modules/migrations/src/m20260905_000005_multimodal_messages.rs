@@ -5,8 +5,8 @@
 //! thread may accept any number of subsequent messages while each request id
 //! remains globally idempotent.
 
-use sea_orm_migration::prelude::*;
 use sea_orm_migration::SchemaManagerConnection;
+use sea_orm_migration::prelude::*;
 
 const RECEIPT_COLUMNS: &str = "request_id, command_kind, directory_id, project_id, thread_id, title, message_id, body, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_expected_revision, engine_run_config_result_revision";
 
@@ -47,7 +47,9 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let connection = manager.get_connection();
         connection
-            .execute_unprepared("DROP INDEX IF EXISTS idx_message_image_attachments_message_position")
+            .execute_unprepared(
+                "DROP INDEX IF EXISTS idx_message_image_attachments_message_position",
+            )
             .await?;
         connection
             .execute_unprepared("DROP TABLE message_image_attachments")

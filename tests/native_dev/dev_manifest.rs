@@ -11,10 +11,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use artisan_editor_cli::{
-    manifest::InstallationManifest,
-    payload::PAYLOAD_MANIFEST_NAME,
-};
+use artisan_editor_cli::{manifest::InstallationManifest, payload::PAYLOAD_MANIFEST_NAME};
 use native_dev::{
     BinarySet, DevError, DevPaths, installation_document, provision_manifest, stage_binaries,
     verify_payload_dir, write_payload_manifest,

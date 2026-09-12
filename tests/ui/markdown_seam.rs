@@ -302,14 +302,15 @@ fn paragraph_texts(blocks: &[Block]) -> Vec<String> {
         .collect()
 }
 
-fn lists(
-    blocks: &[Block],
-) -> Vec<(&bool, &Option<u64>, &Vec<artisan_ui::markdown::ListItem>)> {
+fn lists(blocks: &[Block]) -> Vec<(&bool, &Option<u64>, &Vec<artisan_ui::markdown::ListItem>)> {
     blocks
         .iter()
         .filter_map(|block| match block {
             Block::List {
-                ordered, start, items, ..
+                ordered,
+                start,
+                items,
+                ..
             } => Some((ordered, start, items)),
             _ => None,
         })
@@ -338,8 +339,7 @@ fn longform_assistant_checklist_survives_with_link_destination() {
         "wide viewport keeps the composer docked"
     );
     assert!(
-        items[2].text_content().contains("runbook")
-            && items[2].text_content().contains("attached"),
+        items[2].text_content().contains("runbook") && items[2].text_content().contains("attached"),
         "third item keeps its label, got {:?}",
         items[2].text_content()
     );
@@ -361,7 +361,10 @@ fn longform_assistant_checklist_survives_with_link_destination() {
     assert_eq!(visible(label), "runbook");
 
     // Nothing before the list was disturbed: heading, prose, and fence stay.
-    assert!(matches!(blocks.first(), Some(Block::Heading { level: 2, .. })));
+    assert!(matches!(
+        blocks.first(),
+        Some(Block::Heading { level: 2, .. })
+    ));
     assert_eq!(fences(blocks).len(), 1);
     assert!(
         paragraph_texts(blocks)
@@ -433,10 +436,9 @@ fn ordered_loose_nested_and_task_lists_preserve_every_row() {
     assert_eq!(loose.len(), 2);
     for item in *loose {
         assert!(
-            item.blocks.iter().any(|block| matches!(
-                block,
-                Block::Paragraph { .. }
-            )),
+            item.blocks
+                .iter()
+                .any(|block| matches!(block, Block::Paragraph { .. })),
             "loose items keep paragraph blocks, got {item:?}"
         );
     }
@@ -533,7 +535,9 @@ fn nested_list_keeps_exact_tree() {
 #[test]
 fn emphasis_strong_and_links_survive_with_destinations() {
     let parsed = engine()
-        .parse_document("A *soft* word, a **hard** word, and a [label](https://example.invalid/x).\n")
+        .parse_document(
+            "A *soft* word, a **hard** word, and a [label](https://example.invalid/x).\n",
+        )
         .expect("parse succeeds");
     let paragraph = parsed
         .blocks()
@@ -617,7 +621,10 @@ fn truncated_streaming_prefix_drops_no_confirmed_text() {
         joined.contains("narrow viewport keeps the insp"),
         "truncated item survives, got {joined:?}"
     );
-    assert!(joined.contains("bold tail"), "unclosed strong label survives");
+    assert!(
+        joined.contains("bold tail"),
+        "unclosed strong label survives"
+    );
     assert_eq!(
         joined.matches("narrow viewport keeps the insp").count(),
         1,
@@ -778,8 +785,7 @@ fn nested_bold_code_merges_into_combined_segments() {
 
 #[test]
 fn nested_bold_link_label_keeps_link_color_and_weight() {
-    let presentation =
-        presented("Open [**runbook**](https://example.invalid/runbook) now.\n");
+    let presentation = presented("Open [**runbook**](https://example.invalid/runbook) now.\n");
     assert_merged(&presentation);
     assert_eq!(presentation.links.len(), 1);
     assert_eq!(
@@ -807,8 +813,7 @@ fn nested_bold_link_label_keeps_link_color_and_weight() {
 
 #[test]
 fn code_inside_link_keeps_link_color() {
-    let presentation =
-        presented("Open [`runbook`](https://example.invalid/runbook) now.\n");
+    let presentation = presented("Open [`runbook`](https://example.invalid/runbook) now.\n");
     assert_merged(&presentation);
     assert_eq!(presentation.links.len(), 1);
     let label = presentation
@@ -876,7 +881,10 @@ fn two_paragraphs_collapse_to_a_single_gap() {
     let parsed = engine()
         .parse_document("alpha\n\nbeta\n")
         .expect("parse succeeds");
-    assert_eq!(block_gaps(parsed.blocks(), BlockScope::Root), vec![0.0, 20.0]);
+    assert_eq!(
+        block_gaps(parsed.blocks(), BlockScope::Root),
+        vec![0.0, 20.0]
+    );
 }
 
 #[test]
@@ -890,7 +898,10 @@ fn heading_follower_keeps_the_heading_bottom_gap() {
     let parsed = engine()
         .parse_document("## Head\n\nBody\n")
         .expect("parse succeeds");
-    assert_eq!(block_gaps(parsed.blocks(), BlockScope::Root), vec![0.0, 24.0]);
+    assert_eq!(
+        block_gaps(parsed.blocks(), BlockScope::Root),
+        vec![0.0, 24.0]
+    );
 
     let parsed = engine()
         .parse_document("# Head\n\nBody\n")
@@ -985,7 +996,10 @@ fn prose_reference_weights_request_exact_static_faces() {
     // 410/630 request the vendored prose statics by OS/2 metadata; strong
     // and link weights ride established statics.
     assert_eq!(ProseTypography::BODY_WEIGHT, gpui::FontWeight::from(410.0));
-    assert_eq!(ProseTypography::HEADING_WEIGHT, gpui::FontWeight::from(630.0));
+    assert_eq!(
+        ProseTypography::HEADING_WEIGHT,
+        gpui::FontWeight::from(630.0)
+    );
     assert_eq!(ProseTypography::STRONG_WEIGHT, FontWeight::SEMIBOLD);
     assert_eq!(ProseTypography::LINK_WEIGHT, FontWeight::MEDIUM);
 }
@@ -1034,7 +1048,10 @@ fn mailto_links_open_like_http() {
     let presentation = presented("Write [us](mailto:crew@example.invalid) today.\n");
     assert_merged(&presentation);
     assert_eq!(presentation.links.len(), 1);
-    assert_eq!(presentation.links[0].destination, "mailto:crew@example.invalid");
+    assert_eq!(
+        presentation.links[0].destination,
+        "mailto:crew@example.invalid"
+    );
     let label = &presentation.highlights[0];
     assert_eq!(&presentation.source[label.0.clone()], "us");
     assert_eq!(
@@ -1054,13 +1071,11 @@ struct MountedMarkdownProbe {
 
 impl Render for MountedMarkdownProbe {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(600.0)).child(
-            self.renderer.render_source(
-                self.source,
-                ArtisanTheme::for_mode(ThemeMode::Dark),
-                "probe",
-            ),
-        )
+        div().w(px(600.0)).child(self.renderer.render_source(
+            self.source,
+            ArtisanTheme::for_mode(ThemeMode::Dark),
+            "probe",
+        ))
     }
 }
 

@@ -66,13 +66,15 @@ impl MigrationTrait for Migration {
         manager
             .get_connection()
             .execute_unprepared(RUN_USAGE_TABLE)
-            .await.map(|_| ())
+            .await
+            .map(|_| ())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
             .execute_unprepared("DROP TABLE run_usage")
-            .await.map(|_| ())
+            .await
+            .map(|_| ())
     }
 }

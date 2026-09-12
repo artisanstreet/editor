@@ -530,9 +530,8 @@ async fn patch_from_row(
                         ));
                     }
                     let Some(source_message_id) = source_message_id_opt else {
-                        let body = MessageBody::parse(body_str).map_err(|error| {
-                            corrupt_data("conversation_patches", "body", error)
-                        })?;
+                        let body = MessageBody::parse(body_str)
+                            .map_err(|error| corrupt_data("conversation_patches", "body", error))?;
                         return Ok(ConversationPatch::ItemUpsert {
                             patch_id,
                             sequence,
@@ -567,9 +566,8 @@ async fn patch_from_row(
                         ));
                     }
                     if attachments.is_empty() {
-                        let body = MessageBody::parse(body_str).map_err(|error| {
-                            corrupt_data("conversation_patches", "body", error)
-                        })?;
+                        let body = MessageBody::parse(body_str)
+                            .map_err(|error| corrupt_data("conversation_patches", "body", error))?;
                         ConversationItem::UserMessage(artisan_domain::UserMessageItem {
                             item_id,
                             turn_id,

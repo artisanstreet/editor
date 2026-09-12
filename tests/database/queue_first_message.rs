@@ -685,11 +685,7 @@ async fn general_message_preserves_order_replay_and_owned_image_reads_after_reop
     ));
 
     let first_image = repository
-        .read_message_image(
-            &thread_id("thread-1"),
-            &accepted.message_id,
-            0,
-        )
+        .read_message_image(&thread_id("thread-1"), &accepted.message_id, 0)
         .await
         .expect("owned image read should work")
         .expect("first image should exist");
@@ -701,15 +697,13 @@ async fn general_message_preserves_order_replay_and_owned_image_reads_after_reop
     assert_eq!(first_image.bytes[0], 0);
     assert_ne!(first_image.reference.digest, [0; 32]);
 
-    assert!(repository
-        .read_message_image(
-            &thread_id("thread-2"),
-            &accepted.message_id,
-            0,
-        )
-        .await
-        .expect("wrong-thread image read should be handled")
-        .is_none());
+    assert!(
+        repository
+            .read_message_image(&thread_id("thread-2"), &accepted.message_id, 0,)
+            .await
+            .expect("wrong-thread image read should be handled")
+            .is_none()
+    );
 
     database.close().await.expect("database should close");
     let reopened = connect(SqliteConfig::file(temporary.path()).sqlx_logging(false))
@@ -738,11 +732,7 @@ async fn general_message_preserves_order_replay_and_owned_image_reads_after_reop
         .expect("reopened dispatch payload should exist");
     assert_eq!(reopened_dispatch.payload, payload);
     let third_image = reopened_repository
-        .read_message_image(
-            &thread_id("thread-1"),
-            &accepted.message_id,
-            2,
-        )
+        .read_message_image(&thread_id("thread-1"), &accepted.message_id, 2)
         .await
         .expect("reopened image read should work")
         .expect("third image should exist");
@@ -750,17 +740,16 @@ async fn general_message_preserves_order_replay_and_owned_image_reads_after_reop
     assert_eq!(third_image.reference.name, "capture-2.png");
     assert_eq!(third_image.bytes[0], 2);
     let second_history_image = reopened_repository
-        .read_message_image(
-            &thread_id("thread-1"),
-            &second.message_id,
-            1,
-        )
+        .read_message_image(&thread_id("thread-1"), &second.message_id, 1)
         .await
         .expect("second history image read should work")
         .expect("second history image should exist");
     assert_eq!(second_history_image.reference.message_id, second.message_id);
     assert_eq!(second_history_image.bytes[0], 11);
-    reopened.close().await.expect("reopened database should close");
+    reopened
+        .close()
+        .await
+        .expect("reopened database should close");
 }
 
 #[tokio::test]
@@ -857,7 +846,10 @@ async fn general_message_reloads_absent_and_empty_text_exactly_after_reopen() {
         RepositoryError::IdempotencyConflict { .. }
     ));
 
-    reopened.close().await.expect("reopened database should close");
+    reopened
+        .close()
+        .await
+        .expect("reopened database should close");
 }
 
 struct TemporaryDatabase {

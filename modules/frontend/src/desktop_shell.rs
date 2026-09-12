@@ -430,7 +430,10 @@ pub fn desktop_rule(theme: DesktopTheme) -> Div {
 
 #[cfg(test)]
 mod tests {
-    #![expect(clippy::float_cmp, reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage")]
+    #![expect(
+        clippy::float_cmp,
+        reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage"
+    )]
     use super::*;
 
     #[test]

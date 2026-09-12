@@ -22,11 +22,11 @@ use crate::bounds::{
     CONVERSATION_TEXT_FRAGMENT_MAX_BYTES,
 };
 use crate::identifiers::{ItemId, MessageId, PatchId, ThreadId, TurnId};
+use crate::time::UnixMillis;
 use crate::{
     message::{AuthoredText, ImageAttachmentRef},
     text::MessageBody,
 };
-use crate::time::UnixMillis;
 
 /// Failure while advancing a bounded conversation counter.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]

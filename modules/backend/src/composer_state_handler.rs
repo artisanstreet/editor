@@ -1,9 +1,12 @@
 //! Durable queue recovery and usage reads for the composer.
-use super::{RequestHandler, RequestId, ServerResponse, ProtocolFailure, outcome, ResponsePayload, typed_failure, ErrorCode, origin_clock_failure, RepositoryError};
+use super::{
+    ErrorCode, ProtocolFailure, RepositoryError, RequestHandler, RequestId, ResponsePayload,
+    ServerResponse, origin_clock_failure, outcome, typed_failure,
+};
 use artisan_database::{QueuedMessageRepositoryError, RunUsageRepositoryError};
 use artisan_domain::{
-    ListFailedMessages, ListQueuedMessages, ReadRecalledMessage, ReadRunUsage, RecalledMessageResult, RunUsageResult,
-    WithdrawQueuedMessage, WithdrawQueuedMessageCommand,
+    ListFailedMessages, ListQueuedMessages, ReadRecalledMessage, ReadRunUsage,
+    RecalledMessageResult, RunUsageResult, WithdrawQueuedMessage, WithdrawQueuedMessageCommand,
 };
 
 impl RequestHandler {
@@ -60,16 +63,15 @@ impl RequestHandler {
             .map_err(|error| queue_failure(&error, request_id))?;
         let payload = match withdrawn {
             Some(payload) => Some(payload),
-            None => {
-                self.repository
-                    .read_failed_message_payload(
-                        &query.thread_id,
-                        &query.message_id,
-                        &query.original_request_id,
-                    )
-                    .await
-                    .map_err(|error| queue_failure(&error, request_id))?
-            }
+            None => self
+                .repository
+                .read_failed_message_payload(
+                    &query.thread_id,
+                    &query.message_id,
+                    &query.original_request_id,
+                )
+                .await
+                .map_err(|error| queue_failure(&error, request_id))?,
         };
         let result = RecalledMessageResult::new(
             query.thread_id.clone(),

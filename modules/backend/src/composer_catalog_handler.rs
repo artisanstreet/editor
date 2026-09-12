@@ -242,9 +242,7 @@ async fn current_catalog(
     match result {
         Some(result) => match discovery {
             Some(discovery) => crate::native_model_catalog::from_catalog_result_with_discovery(
-                result,
-                &discovery,
-                &favorites,
+                result, &discovery, &favorites,
             ),
             None => crate::native_model_catalog::from_catalog_result(result, &favorites),
         },

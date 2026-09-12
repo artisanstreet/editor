@@ -3,7 +3,15 @@ use artisan_catalog::{
     NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeOptionValue,
     NativePermissionOption,
 };
-use artisan_domain::{EngineRunConfig, EngineSelection, EngineProfileId, CodexReasoningEffort, CodexServiceTier, EngineModelId, CodexSelection, ClaudePermissionMode, ClaudeEffort, ClaudeSelection, GrokReasoningEffort, GrokSelection, CursorReasoningEffort, CursorSpeed, CursorSelection, EngineRouteId, EngineVariantId, ApprovalMode, FilesystemAccess, NetworkAccess, WebSearchAccess, EnginePermissionPolicy, PermissionId, EngineAgentId, OpenCode2Selection, GrokPermissionMode, CursorPermissionMode, CodexModelContextWindow, EngineRuntimeControls, FiniteMillis, ByteLimit, CountLimit, EngineRuntimeControlsInput};
+use artisan_domain::{
+    ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
+    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier, CountLimit,
+    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed, EngineAgentId,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
+    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, EngineVariantId,
+    FilesystemAccess, FiniteMillis, GrokPermissionMode, GrokReasoningEffort, GrokSelection,
+    NetworkAccess, OpenCode2Selection, PermissionId, WebSearchAccess,
+};
 
 /// Default profile identity persisted for native engine selections that
 /// carry no explicit profile.
@@ -366,7 +374,9 @@ fn policy_for_codex(
     let speed = selection
         .service_tier()
         .map(|tier| tier.as_str().to_owned());
-    let window = selection.model_context_window().map(artisan_domain::CodexModelContextWindow::get);
+    let window = selection
+        .model_context_window()
+        .map(artisan_domain::CodexModelContextWindow::get);
     let profile = selection.profile_id().as_str().to_owned();
     for model in catalog
         .manifest
@@ -752,8 +762,14 @@ fn inherited_network_web(
         .filter(|selection| selection.engine_id().as_str() == engine_id)
         .map(EngineSelection::permission);
     (
-        permission.map_or(NetworkAccess::Disabled, artisan_domain::EnginePermissionPolicy::network),
-        permission.map_or(WebSearchAccess::Disabled, artisan_domain::EnginePermissionPolicy::web_search),
+        permission.map_or(
+            NetworkAccess::Disabled,
+            artisan_domain::EnginePermissionPolicy::network,
+        ),
+        permission.map_or(
+            WebSearchAccess::Disabled,
+            artisan_domain::EnginePermissionPolicy::web_search,
+        ),
     )
 }
 
@@ -1093,7 +1109,9 @@ mod tests {
             panic!("expected a Codex selection");
         };
         assert_eq!(
-            selection.model_context_window().map(artisan_domain::CodexModelContextWindow::get),
+            selection
+                .model_context_window()
+                .map(artisan_domain::CodexModelContextWindow::get),
             Some(1_050_000)
         );
         // The window is configuration, never identity: the model id stays bare.

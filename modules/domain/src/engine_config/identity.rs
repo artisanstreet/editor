@@ -5,9 +5,7 @@ use crate::bounds::{
 };
 use crate::identifiers::{EngineModelId, EngineProfileId, EngineRouteId, EngineVariantId};
 
-use super::providers::{
-    ClaudeSelection, CodexSelection, CursorSelection, GrokSelection,
-};
+use super::providers::{ClaudeSelection, CodexSelection, CursorSelection, GrokSelection};
 
 use super::runtime::EnginePermissionPolicy;
 /// Bounded category for a rejected engine configuration field.
@@ -309,13 +307,9 @@ impl EngineSelection {
     pub const fn as_opencode2(&self) -> Result<&OpenCode2Selection, EngineConfigError> {
         match self {
             Self::OpenCode2(selection) => Ok(selection),
-            Self::Codex(_)
-            | Self::Claude(_)
-            | Self::Grok(_)
-            | Self::Cursor(_) => Err(EngineConfigError::new(
-                "engine",
-                EngineConfigReason::Unsupported,
-            )),
+            Self::Codex(_) | Self::Claude(_) | Self::Grok(_) | Self::Cursor(_) => Err(
+                EngineConfigError::new("engine", EngineConfigReason::Unsupported),
+            ),
         }
     }
 
@@ -328,13 +322,9 @@ impl EngineSelection {
     pub const fn as_codex(&self) -> Result<&CodexSelection, EngineConfigError> {
         match self {
             Self::Codex(selection) => Ok(selection),
-            Self::OpenCode2(_)
-            | Self::Claude(_)
-            | Self::Grok(_)
-            | Self::Cursor(_) => Err(EngineConfigError::new(
-                "engine",
-                EngineConfigReason::Unsupported,
-            )),
+            Self::OpenCode2(_) | Self::Claude(_) | Self::Grok(_) | Self::Cursor(_) => Err(
+                EngineConfigError::new("engine", EngineConfigReason::Unsupported),
+            ),
         }
     }
 
@@ -347,13 +337,9 @@ impl EngineSelection {
     pub const fn as_claude(&self) -> Result<&ClaudeSelection, EngineConfigError> {
         match self {
             Self::Claude(selection) => Ok(selection),
-            Self::OpenCode2(_)
-            | Self::Codex(_)
-            | Self::Grok(_)
-            | Self::Cursor(_) => Err(EngineConfigError::new(
-                "engine",
-                EngineConfigReason::Unsupported,
-            )),
+            Self::OpenCode2(_) | Self::Codex(_) | Self::Grok(_) | Self::Cursor(_) => Err(
+                EngineConfigError::new("engine", EngineConfigReason::Unsupported),
+            ),
         }
     }
 
@@ -366,13 +352,9 @@ impl EngineSelection {
     pub const fn as_grok(&self) -> Result<&GrokSelection, EngineConfigError> {
         match self {
             Self::Grok(selection) => Ok(selection),
-            Self::OpenCode2(_)
-            | Self::Codex(_)
-            | Self::Claude(_)
-            | Self::Cursor(_) => Err(EngineConfigError::new(
-                "engine",
-                EngineConfigReason::Unsupported,
-            )),
+            Self::OpenCode2(_) | Self::Codex(_) | Self::Claude(_) | Self::Cursor(_) => Err(
+                EngineConfigError::new("engine", EngineConfigReason::Unsupported),
+            ),
         }
     }
 
@@ -385,13 +367,9 @@ impl EngineSelection {
     pub const fn as_cursor(&self) -> Result<&CursorSelection, EngineConfigError> {
         match self {
             Self::Cursor(selection) => Ok(selection),
-            Self::OpenCode2(_)
-            | Self::Codex(_)
-            | Self::Claude(_)
-            | Self::Grok(_) => Err(EngineConfigError::new(
-                "engine",
-                EngineConfigReason::Unsupported,
-            )),
+            Self::OpenCode2(_) | Self::Codex(_) | Self::Claude(_) | Self::Grok(_) => Err(
+                EngineConfigError::new("engine", EngineConfigReason::Unsupported),
+            ),
         }
     }
 }

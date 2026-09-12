@@ -381,9 +381,10 @@ impl ConversationDeliveryWriter {
 /// run-local `observation.sequence()` instead; production must never emit
 /// `None`.
 fn observation_delivery_sequence(event: &EngineObservationEvent) -> u64 {
-    event
-        .attribution
-        .as_ref().map_or_else(|| event.observation.sequence().get(), |attribution| attribution.delivery_sequence)
+    event.attribution.as_ref().map_or_else(
+        || event.observation.sequence().get(),
+        |attribution| attribution.delivery_sequence,
+    )
 }
 
 /// Private synchronous cleanup guard for the writer's outbound direction.

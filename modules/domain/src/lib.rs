@@ -58,8 +58,8 @@ pub use bounds::{
 pub use commands::{
     AttachProject, Command, CreateThread, ListAttachedProjects, ListDirectories,
     ListProjectThreads, ListRegisteredEngineProfiles, Query, QueueFirstMessage, QueueMessage,
-    ReadActiveRun, ReadMessageImage, ReadThreadEngineSettings,
-    SetThreadEngineConfig, SteerTarget, StopRun,
+    ReadActiveRun, ReadMessageImage, ReadThreadEngineSettings, SetThreadEngineConfig, SteerTarget,
+    StopRun,
 };
 pub use conversation::{
     AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
@@ -77,8 +77,7 @@ pub use engine_config::{
     EngineConfigReason, EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId,
     EnginePermissionPolicy, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, FilesystemAccess, FiniteMillis, GrokPermissionMode, GrokReasoningEffort,
-    GrokSelection, NetworkAccess,
-    OpenCode2Selection, WebSearchAccess,
+    GrokSelection, NetworkAccess, OpenCode2Selection, WebSearchAccess,
 };
 pub use engine_socket::{
     EngineCapabilityName, EngineCapabilityState, EngineCommandTag, EngineDescriptor,
@@ -87,8 +86,8 @@ pub use engine_socket::{
     EngineSocket, EngineSocketSession,
 };
 pub use events::{
-    EngineObservationAttribution, EngineObservationEvent, Event, FirstMessageQueued, ProjectAttached,
-    ThreadCreated,
+    EngineObservationAttribution, EngineObservationEvent, Event, FirstMessageQueued,
+    ProjectAttached, ThreadCreated,
 };
 pub use identifiers::{
     DirectoryId, EngineAgentId, EngineModelId, EngineProfileId, EngineProfileIdError,
@@ -155,12 +154,11 @@ pub use run_usage::{
 
 mod queued_message;
 pub use queued_message::{
-    DispatchError, DispatchErrorParseError, FailedMessageListError, FailedMessageListing,
-    FailedMessageListingError, FailedMessageSummary, ListFailedMessages, FAILED_MESSAGE_LIST_MAX,
-    ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX,
-    QueuedMessageListError, QueuedMessageListOrder, QueuedMessageListing, QueuedMessageListingError,
-    QueuedMessageSummary, QueuedMessageWithdrawalOutcome, WithdrawQueuedMessage,
-    WithdrawQueuedMessageResult,
+    DispatchError, DispatchErrorParseError, FAILED_MESSAGE_LIST_MAX, FailedMessageListError,
+    FailedMessageListing, FailedMessageListingError, FailedMessageSummary, ListFailedMessages,
+    ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListError, QueuedMessageListOrder,
+    QueuedMessageListing, QueuedMessageListingError, QueuedMessageSummary,
+    QueuedMessageWithdrawalOutcome, WithdrawQueuedMessage, WithdrawQueuedMessageResult,
 };
 mod run_interaction;
 pub use run_interaction::{

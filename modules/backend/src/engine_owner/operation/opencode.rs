@@ -545,7 +545,11 @@ async fn execute_authorized_configured_turn(
             &files,
             &session.input.prompt_id,
             session.resume,
-            session.input.prompt.text().map(artisan_domain::AuthoredText::as_str),
+            session
+                .input
+                .prompt
+                .text()
+                .map(artisan_domain::AuthoredText::as_str),
         ),
     )
     .await

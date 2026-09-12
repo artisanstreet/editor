@@ -2994,12 +2994,12 @@ async fn assert_midturn_restart_replay(
 // Codex send-dispatch proof: continuation rejection + live scratch send
 // ---------------------------------------------------------------------------
 
+use crate::native_run_dispatch::binding_bytes_vec as codex_proof_binding_bytes;
 use artisan_domain::{
     ApprovalMode as CodexProofApprovalMode, CodexReasoningEffort as CodexProofEffort,
     CodexSelection as CodexProofSelection, EngineModelId as CodexProofModel,
     EngineProfileId as CodexProofProfile,
 };
-use crate::native_run_dispatch::binding_bytes_vec as codex_proof_binding_bytes;
 
 fn codex_send_proof_selection(profile_id: &str) -> artisan_domain::CodexSelection {
     let permission = EnginePermissionPolicy::new(
@@ -3136,7 +3136,9 @@ fn config_for_live_send_proof(
 
 fn codex_session_in_binding(binding: Option<&entities::OpaqueBytes>) -> String {
     let value: serde_json::Value = serde_json::from_slice(
-        binding.expect("provider binding must be present").as_slice(),
+        binding
+            .expect("provider binding must be present")
+            .as_slice(),
     )
     .expect("provider binding JSON");
     assert_eq!(value.get("engine").and_then(|v| v.as_str()), Some("codex"));
@@ -3292,14 +3294,14 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
             .find(|d| d.message_id == "msg-codex-retry");
         if let Some(dispatch) = retry
             && dispatch.state == DispatchState::Failed
-                && dispatch
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("provider continuation unavailable"))
-            {
-                settled = true;
-                break;
-            }
+            && dispatch
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("provider continuation unavailable"))
+        {
+            settled = true;
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(
@@ -3323,7 +3325,11 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
         .expect("prior run");
     assert_eq!(old_run.lifecycle, AssistantRunLifecycle::Interrupted);
     // No new assistant run was launched for the rejected retry.
-    assert_eq!(after.runs.len(), 1, "rejected continuation must not launch a run");
+    assert_eq!(
+        after.runs.len(),
+        1,
+        "rejected continuation must not launch a run"
+    );
     let retry = after
         .dispatches
         .iter()
@@ -3338,7 +3344,10 @@ async fn dispatch_codex_continuation_unavailable_fails_without_new_run() {
         "retry must fail closed on provider continuation unavailability"
     );
     let counts = crate::engine_owner::witness_counts();
-    assert_eq!(counts.spawned, 0, "no provider child may spawn after rejection");
+    assert_eq!(
+        counts.spawned, 0,
+        "no provider child may spawn after rejection"
+    );
 }
 
 /// Live scratch send through the configured dispatcher.
@@ -3487,11 +3496,13 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
             if dispatch.state == DispatchState::Completed {
                 return;
             }
-            assert!(dispatch.state != DispatchState::Failed, 
+            assert!(
+                dispatch.state != DispatchState::Failed,
                 "live dispatch {message_id} failed: {}",
                 live_dispatch_snapshot(database, message_id).await
             );
-            assert!(tokio::time::Instant::now() < deadline, 
+            assert!(
+                tokio::time::Instant::now() < deadline,
                 "live dispatch {message_id} timed out: {}",
                 live_dispatch_snapshot(database, message_id).await
             );
@@ -3522,7 +3533,11 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
                     && i.run_id.as_deref() == Some(run.run_id.as_str())
             })
             .collect();
-        assert_eq!(assistant.len(), 1, "first send persists one assistant message");
+        assert_eq!(
+            assistant.len(),
+            1,
+            "first send persists one assistant message"
+        );
         assert_eq!(
             assistant[0].body.trim(),
             "SEND_PROBE_OK",
@@ -3581,7 +3596,11 @@ async fn dispatch_codex_live_scratch_send_and_followup_share_session() {
                 && i.run_id.as_deref() == Some(second_run.run_id.as_str())
         })
         .collect();
-    assert_eq!(assistant.len(), 1, "follow-up persists one assistant message");
+    assert_eq!(
+        assistant.len(),
+        1,
+        "follow-up persists one assistant message"
+    );
     assert_eq!(
         assistant[0].body.trim(),
         "FOLLOWUP_PROBE_OK",
@@ -3669,8 +3688,7 @@ async fn dispatch_codex_live_activity_proof_persists_command_history() {
                 request_id: RequestId::parse("req-live-activity-thread").expect("req"),
                 thread_id: thread_id.clone(),
                 project_id: ProjectId::parse("project-1").expect("pid"),
-                title: artisan_domain::ThreadTitle::parse("Live activity proof")
-                    .expect("title"),
+                title: artisan_domain::ThreadTitle::parse("Live activity proof").expect("title"),
                 created_at: UnixMillis::from_millis(10),
                 updated_at: UnixMillis::from_millis(10),
             })
@@ -3696,8 +3714,7 @@ async fn dispatch_codex_live_activity_proof_persists_command_history() {
         .expect("runtime valid");
         repository
             .set_thread_engine_config(SetThreadEngineConfigInput {
-                request_id: RequestId::parse("engine-live-activity-thread")
-                    .expect("request id"),
+                request_id: RequestId::parse("engine-live-activity-thread").expect("request id"),
                 thread_id: thread_id.clone(),
                 precondition: EngineConfigUpdatePrecondition::Unconfigured,
                 config: EngineRunConfig::new(EngineSelection::Codex(selection), runtime),
@@ -3744,11 +3761,13 @@ async fn dispatch_codex_live_activity_proof_persists_command_history() {
         if dispatch.state == DispatchState::Completed {
             break;
         }
-        assert!(dispatch.state != DispatchState::Failed, 
+        assert!(
+            dispatch.state != DispatchState::Failed,
             "live activity dispatch failed: {}",
             live_dispatch_snapshot(&database, "msg-live-activity-first").await
         );
-        assert!(tokio::time::Instant::now() < deadline, 
+        assert!(
+            tokio::time::Instant::now() < deadline,
             "live activity dispatch timed out: {}",
             live_dispatch_snapshot(&database, "msg-live-activity-first").await
         );
@@ -3776,7 +3795,11 @@ async fn dispatch_codex_live_activity_proof_persists_command_history() {
                 && i.run_id.as_deref() == Some(run.run_id.as_str())
         })
         .collect();
-    assert_eq!(assistant.len(), 1, "activity turn persists one assistant message");
+    assert_eq!(
+        assistant.len(),
+        1,
+        "activity turn persists one assistant message"
+    );
     assert_eq!(
         assistant[0].body.trim(),
         ANSWER_MARKER,
@@ -3791,10 +3814,7 @@ async fn dispatch_codex_live_activity_proof_persists_command_history() {
         .read_observation_history(&thread_id, 0, 128)
         .await
         .expect("activity ledger should read");
-    assert!(
-        !history.is_empty(),
-        "live turn must persist activity rows"
-    );
+    assert!(!history.is_empty(), "live turn must persist activity rows");
     let mut last_delivery = 0u64;
     let mut kinds = Vec::new();
     let mut marker_hits = 0usize;
@@ -3876,12 +3896,12 @@ async fn dispatch_codex_live_activity_proof_persists_command_history() {
 )]
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
+    use crate::SystemCommandOrigin;
+    use crate::native_run_dispatch::{SubagentCommitCursor, commit_activity_observation};
     use artisan_domain::{
         EngineId, Observation, ObservationId, ObservationSequence, Revision, ToolAction,
         ToolObservation,
     };
-    use crate::SystemCommandOrigin;
-    use crate::native_run_dispatch::{SubagentCommitCursor, commit_activity_observation};
 
     let (database, repository, _temp) = temp_repository("activity-history").await;
     seed_project_and_thread(&database, &repository, "thread-activity-history").await;
@@ -4301,8 +4321,7 @@ async fn dispatch_lease_heartbeat_carries_a_turn_past_its_claim_window() {
         .expect("dispatch should exist");
     assert_eq!(leased.state, DispatchState::Leased);
     assert!(
-        leased.lease_expires_at_ms.expect("renewed lease")
-            > original_expiry_ms,
+        leased.lease_expires_at_ms.expect("renewed lease") > original_expiry_ms,
         "the heartbeat must move the lease past its original expiry"
     );
 

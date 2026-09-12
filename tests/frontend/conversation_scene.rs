@@ -12,8 +12,8 @@ use artisan_frontend::conversation_scene::{
     SCENE_MAX_MESSAGE_BODY_BYTES, SCENE_MAX_NARRATIONS, SCENE_MAX_NATIVE_FACT_BYTES,
     SCENE_MAX_PLAN_ENTRIES, SCENE_MAX_STEERING_PLACEMENTS, SCENE_MAX_TURNS,
     SCENE_MAX_WORK_GROUP_ITEMS, SceneBuildError, SceneDisclosure, SceneFileChange, SceneId,
-    SceneItem, SceneItemKind, SceneTurn, SteeringPlacement, TurnBlock,
-    TurnNarration, TurnNarrationEntry, WorkGroupBlock, WorkGroupLabel, WorkItem,
+    SceneItem, SceneItemKind, SceneTurn, SteeringPlacement, TurnBlock, TurnNarration,
+    TurnNarrationEntry, WorkGroupBlock, WorkGroupLabel, WorkItem,
 };
 
 fn scene_id(value: &str) -> SceneId {

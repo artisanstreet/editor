@@ -762,5 +762,3 @@ impl AcpCompletionState {
 #[cfg(test)]
 #[path = "acp_bridges/tests.rs"]
 mod tests;
-
-

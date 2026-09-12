@@ -291,14 +291,15 @@ impl SelectableTextState {
         let inner = self.inner.borrow();
         if inner.dragging
             && let (Some(anchor), Some(head)) = (inner.anchor, inner.head)
-                && anchor != head {
-                    let (start, end) = if anchor < head {
-                        (anchor, head)
-                    } else {
-                        (head, anchor)
-                    };
-                    return Some(start..end);
-                }
+            && anchor != head
+        {
+            let (start, end) = if anchor < head {
+                (anchor, head)
+            } else {
+                (head, anchor)
+            };
+            return Some(start..end);
+        }
         inner.selection.map(|(start, end)| start..end)
     }
 
@@ -386,8 +387,8 @@ impl SelectableTextState {
         if let Ok(mut inner) = self.inner.try_borrow_mut() {
             inner.dragging = false;
             if let Some((anchor, head)) = inner.anchor.zip(inner.head) {
-                inner.selection = normalize_selection(anchor, head, text)
-                    .map(|range| (range.start, range.end));
+                inner.selection =
+                    normalize_selection(anchor, head, text).map(|range| (range.start, range.end));
             }
             inner.anchor = None;
             inner.head = None;
@@ -790,9 +791,10 @@ impl Element for SelectableText {
         }
         if let Some(frame) = self.frame.as_ref()
             && frame.register_focus
-                && let Some(focus) = frame.focus.as_ref() {
-                    window.set_focus_handle(focus, cx);
-                }
+            && let Some(focus) = frame.focus.as_ref()
+        {
+            window.set_focus_handle(focus, cx);
+        }
         if let Some(styled) = self.styled.as_mut() {
             styled.prepaint(None, inspector_id, bounds, state, window, cx);
         }
@@ -828,9 +830,8 @@ impl Element for SelectableText {
 
         if hitbox_snapshot.is_hovered(window) {
             let hovered = layout.index_for_position(window.mouse_position()).ok();
-            let over_link = hovered.is_some_and(|index| {
-                frame.links.iter().any(|range| range.contains(&index))
-            });
+            let over_link =
+                hovered.is_some_and(|index| frame.links.iter().any(|range| range.contains(&index)));
             window.set_cursor_style(
                 if over_link {
                     CursorStyle::PointingHand
@@ -954,11 +955,12 @@ impl Element for SelectableText {
                         window.refresh();
                         cx.notify(current_view);
                     } else if is_copy_keystroke(key, modifiers)
-                        && let Some(copied) = state.copy_text(&key_text) {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copied));
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        }
+                        && let Some(copied) = state.copy_text(&key_text)
+                    {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copied));
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
                 },
             );
         }

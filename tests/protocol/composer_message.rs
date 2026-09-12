@@ -54,10 +54,7 @@ fn named_steer_target_roundtrips_with_run_identity() {
     )));
     let bytes = encode_envelope(&value).expect("encode");
     let decoded = decode_envelope(&bytes).expect("decode");
-    assert!(
-        decoded == value,
-        "steer target must survive the wire"
-    );
+    assert!(decoded == value, "steer target must survive the wire");
     let WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueMessage(decoded))) =
         decoded.body
     else {
@@ -200,8 +197,12 @@ fn stop_receipt_preserves_and_checks_its_nested_request_identity() {
         }),
     }));
     assert_roundtrip(&value);
-    let WireEnvelopeBody::Response(response) = &mut value.body else { unreachable!() };
-    let ResponsePayload::RunStopped(receipt) = &mut response.payload else { unreachable!() };
+    let WireEnvelopeBody::Response(response) = &mut value.body else {
+        unreachable!()
+    };
+    let ResponsePayload::RunStopped(receipt) = &mut response.payload else {
+        unreachable!()
+    };
     receipt.request_id = RequestId::parse("another-request").unwrap();
     assert!(encode_envelope(&value).is_err());
 }

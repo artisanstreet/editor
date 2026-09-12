@@ -181,7 +181,9 @@ impl Repository {
 }
 
 /// Rebuilds one attributed delivery event from its immutable ledger row.
-fn ledger_event(row: &observation_ledger::Model) -> Result<EngineObservationEvent, RepositoryError> {
+fn ledger_event(
+    row: &observation_ledger::Model,
+) -> Result<EngineObservationEvent, RepositoryError> {
     let thread_id = ThreadId::parse(row.thread_id.clone())
         .map_err(|error| corrupt_data("observation_ledger", "thread_id", error))?;
     let run_id = RunId::parse(row.run_id.clone())
@@ -201,12 +203,8 @@ fn ledger_event(row: &observation_ledger::Model) -> Result<EngineObservationEven
         })?;
     let decoded =
         decode_observation_checkpoint(row.observation_version, row.observation_bytes.as_slice())
-            .map_err(|source| {
-                corrupt_data("observation_ledger", "observation_bytes", source)
-            })?;
-    if decoded.engine().as_str() != row.engine
-        || decoded.binding_version() != row.binding_version
-    {
+            .map_err(|source| corrupt_data("observation_ledger", "observation_bytes", source))?;
+    if decoded.engine().as_str() != row.engine || decoded.binding_version() != row.binding_version {
         return Err(corrupt_data(
             "observation_ledger",
             "observation_bytes",

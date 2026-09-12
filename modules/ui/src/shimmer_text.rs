@@ -891,7 +891,8 @@ fn styled_runs_for_phase(
 ) -> SelectableText {
     let sweep = highlighted_ranges(content.as_ref(), phase, spread);
     let merged = merge_sweep_highlights(base_highlights, &sweep, band);
-    SelectableText::retained(id, content, *theme, merged).with_text_run_overrides(overrides.to_vec())
+    SelectableText::retained(id, content, *theme, merged)
+        .with_text_run_overrides(overrides.to_vec())
 }
 
 fn phase_from_seconds(elapsed: f32, duration: f32, delay: f32) -> f32 {

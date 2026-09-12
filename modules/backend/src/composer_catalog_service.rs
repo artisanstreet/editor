@@ -15,8 +15,8 @@ use artisan_native_engine::NativeOpenCode2Authority;
 use thiserror::Error;
 
 use crate::engine_owner::{
-    catalog::{CatalogResult, CatalogScope},
     EngineBounds, EngineCatalogClient, EngineCatalogInput, PreflightDeadlines,
+    catalog::{CatalogResult, CatalogScope},
 };
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -122,9 +122,11 @@ impl ComposerCatalogService {
         {
             let cache = self.cache.lock().await;
             if let Some((observed, result)) = cache.as_ref()
-                && result.scope == scope && now.duration_since(*observed) < CACHE_TTL {
-                    return Ok(result.clone());
-                }
+                && result.scope == scope
+                && now.duration_since(*observed) < CACHE_TTL
+            {
+                return Ok(result.clone());
+            }
         }
 
         // Discovery is a bounded product operation, independent of a turn's
@@ -174,10 +176,10 @@ impl ComposerCatalogService {
         let mut cache = self.cache.lock().await;
         if let Some((observed, cached)) = cache.as_ref()
             && cached.scope == scope
-                && tokio::time::Instant::now().duration_since(*observed) < CACHE_TTL
-            {
-                return Ok(cached.clone());
-            }
+            && tokio::time::Instant::now().duration_since(*observed) < CACHE_TTL
+        {
+            return Ok(cached.clone());
+        }
         *cache = Some((tokio::time::Instant::now(), result.clone()));
         Ok(result)
     }

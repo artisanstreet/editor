@@ -21,11 +21,11 @@ use artisan_backend::{
     ForgeListener, ForgeStartupError, ListenerLimits, RequestHandler, RequestTermination,
 };
 use artisan_database::{
-    AssistantChange, AttachProjectInput, BindRunProvider, BindRunProviderOutcome,
-    CheckpointUpdate, ClaimMessageDispatch, CommitRunBatch, CompleteRun, ConversationPatchReplay,
-    CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
-    ProviderBindingBytes, QueueFirstMessageInput, Repository, RunBatchScope,
-    RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
+    AssistantChange, AttachProjectInput, BindRunProvider, BindRunProviderOutcome, CheckpointUpdate,
+    ClaimMessageDispatch, CommitRunBatch, CompleteRun, ConversationPatchReplay, CreateThreadInput,
+    DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome, ProviderBindingBytes,
+    QueueFirstMessageInput, Repository, RunBatchScope, RunLaunchCredentials, RunStartKey,
+    SetThreadEngineConfigInput, SqliteConfig,
 };
 use artisan_domain::{
     ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, ConversationCursor,
@@ -887,7 +887,12 @@ async fn peer_loss_releases_connection_owned_delivery() -> Result<(), Box<dyn Er
 // Persisted activity history: live wake delivery plus reconnect replay
 // ---------------------------------------------------------------------------
 
-fn activity_tool_observation(id: &str, tool_id: &str, tool_name: &str, detail: &str) -> Observation {
+fn activity_tool_observation(
+    id: &str,
+    tool_id: &str,
+    tool_name: &str,
+    detail: &str,
+) -> Observation {
     Observation::Tool(
         ToolObservation::new(
             ObservationId::parse(id).expect("fixture observation id is valid"),
@@ -1162,11 +1167,7 @@ fn activity_unsubscribe_envelope(thread_id: ThreadId, frame_id: &str) -> WireEnv
 async fn receive_delivery_frame(
     stream: &mut quinn::RecvStream,
 ) -> Result<WireEnvelope, Box<dyn Error>> {
-    Ok(tokio::time::timeout(
-        TEST_DEADLINE,
-        artisan_transport::receive_envelope(stream),
-    )
-    .await??)
+    Ok(tokio::time::timeout(TEST_DEADLINE, artisan_transport::receive_envelope(stream)).await??)
 }
 
 /// Names the received frame shape for mismatch diagnostics without decoding
@@ -1271,8 +1272,8 @@ async fn serve_activity_delivery(
     reason = "single linear fixture body; extraction would duplicate the shared test wiring"
 )]
 #[tokio::test]
-async fn activity_history_drives_live_delivery_and_reconnect_replay(
-) -> Result<(), Box<dyn Error>> {
+async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<(), Box<dyn Error>>
+{
     let (_temporary, app) = opened_app().await?;
     let repository = app.repository().clone();
     let seeded = seed_thread(&repository).await?;
@@ -1281,8 +1282,8 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
     let pki = test_pki();
     let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
     let notifier = ConversationCommitNotifier::new();
-    let handler = RequestHandler::new(repository.clone())
-        .with_conversation_commit_notifier(notifier.clone());
+    let handler =
+        RequestHandler::new(repository.clone()).with_conversation_commit_notifier(notifier.clone());
     let listener = ForgeListener::bind(
         server_config(&pki),
         LocalCapability::from_bytes(INITIAL_CAPABILITY),
@@ -1298,9 +1299,12 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
     let client = async {
         let connection = connect_client(&endpoint, address).await?;
         let (mut control_send, mut control_recv) = connection.open_bi().await?;
-        let _welcome =
-            artisan_transport::client_handshake(&mut control_send, &mut control_recv, hello_envelope())
-                .await?;
+        let _welcome = artisan_transport::client_handshake(
+            &mut control_send,
+            &mut control_recv,
+            hello_envelope(),
+        )
+        .await?;
         let (mut request_send, mut request_recv) = connection.open_bi().await?;
         artisan_transport::send_envelope(
             &mut request_send,
@@ -1328,10 +1332,7 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
         let initial = receive_delivery_frame(&mut delivery_stream).await?;
         let initial_kind = frame_kind(&initial.body);
         let WireEnvelopeBody::PatchBatch(initial_batch) = initial.body else {
-            return Err(format!(
-                "expected the initial replay batch, got {initial_kind}"
-            )
-            .into());
+            return Err(format!("expected the initial replay batch, got {initial_kind}").into());
         };
         let base_cursor = initial_batch.to_cursor();
 
@@ -1381,7 +1382,14 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
             "delivery-obs-1-patch",
         )
         .await?;
-        settle_run_completed(&repository, &seeded.run, 750, 800, "delivery-assistant-item").await?;
+        settle_run_completed(
+            &repository,
+            &seeded.run,
+            750,
+            800,
+            "delivery-assistant-item",
+        )
+        .await?;
         let run2 = seed_followup_run(&repository, &thread_id).await?;
         commit_assistant_start_at(
             &repository,
@@ -1409,7 +1417,9 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
 
         // The authoritative read already orders both rows thread-scoped before
         // the wake fires.
-        let history = repository.read_observation_history(&thread_id, 0, 64).await?;
+        let history = repository
+            .read_observation_history(&thread_id, 0, 64)
+            .await?;
         assert_eq!(history.len(), 2, "both runs must persist one row each");
 
         let _ = notifier.publish(&thread_id);
@@ -1423,7 +1433,10 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
         };
         assert_eq!(wake_batch.from_cursor(), base_cursor);
 
-        let first = decoded_activity(receive_delivery_frame(&mut delivery_stream).await?, &thread_id);
+        let first = decoded_activity(
+            receive_delivery_frame(&mut delivery_stream).await?,
+            &thread_id,
+        );
         assert_eq!(first.event_cursor, 1);
         assert_eq!(first.delivery_sequence, 1);
         assert_eq!(first.run_id, "delivery-run");
@@ -1435,9 +1448,14 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
                 assert_eq!(row.tool_name(), "read");
                 assert_eq!(row.detail(), Some("read 42 lines"));
             }
-            other => return Err(format!("first row must stay a tool row, got {}", other.tag()).into()),
+            other => {
+                return Err(format!("first row must stay a tool row, got {}", other.tag()).into());
+            }
         }
-        let second = decoded_activity(receive_delivery_frame(&mut delivery_stream).await?, &thread_id);
+        let second = decoded_activity(
+            receive_delivery_frame(&mut delivery_stream).await?,
+            &thread_id,
+        );
         assert_eq!(second.event_cursor, 2);
         assert_eq!(second.delivery_sequence, 2);
         assert_eq!(second.run_id, "delivery-run-2");
@@ -1449,7 +1467,9 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
                 assert_eq!(row.tool_name(), "grep");
                 assert_eq!(row.detail(), Some("3 matches"));
             }
-            other => return Err(format!("second row must stay a tool row, got {}", other.tag()).into()),
+            other => {
+                return Err(format!("second row must stay a tool row, got {}", other.tag()).into());
+            }
         }
         // One wake delivered everything: no duplicate or trailing frame.
         assert!(
@@ -1510,14 +1530,18 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
             return Err(format!("expected the replay patch batch, got {replay_kind}").into());
         };
         assert_eq!(replay_batch.from_cursor(), ConversationCursor::default());
-        let replayed_first =
-            decoded_activity(receive_delivery_frame(&mut delivery_stream).await?, &thread_id);
+        let replayed_first = decoded_activity(
+            receive_delivery_frame(&mut delivery_stream).await?,
+            &thread_id,
+        );
         assert_eq!(replayed_first.event_cursor, 3);
         assert_eq!(replayed_first.delivery_sequence, 1);
         assert_eq!(replayed_first.run_id, "delivery-run");
         assert_eq!(replayed_first.committed_at_ms, 750);
-        let replayed_second =
-            decoded_activity(receive_delivery_frame(&mut delivery_stream).await?, &thread_id);
+        let replayed_second = decoded_activity(
+            receive_delivery_frame(&mut delivery_stream).await?,
+            &thread_id,
+        );
         assert_eq!(replayed_second.event_cursor, 4);
         assert_eq!(replayed_second.delivery_sequence, 2);
         assert_eq!(replayed_second.run_id, "delivery-run-2");
@@ -1567,7 +1591,7 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay(
     // failing delivery stage while the client error names the failed read,
     // so a rerun exposes the actual failure instead of masking one side.
     match (server_result, client_result) {
-        (Ok(()), Ok(())) => {},
+        (Ok(()), Ok(())) => {}
         (server, client) => {
             let server_note = match server {
                 Ok(()) => String::from("ok"),

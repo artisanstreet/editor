@@ -814,9 +814,7 @@ impl NativeMessageImages {
             }
             self.pump_requests(cx);
             cx.notify();
-            return ImageResponseDisposition::Rejected(
-                ImageResponseRejection::GenerationExhausted,
-            );
+            return ImageResponseDisposition::Rejected(ImageResponseRejection::GenerationExhausted);
         };
 
         let scope_generation = self.state.scope_generation;
@@ -1196,12 +1194,8 @@ impl NativeMessageImages {
         cx: &mut Context<Self>,
     ) {
         let is_current = self.viewer.as_ref().is_some_and(|viewer| {
-            preview_fence_is_current(
-                Some(&viewer.fence),
-                reference,
-                generation,
-                scope_generation,
-            ) && self.state.scope_generation == scope_generation
+            preview_fence_is_current(Some(&viewer.fence), reference, generation, scope_generation)
+                && self.state.scope_generation == scope_generation
                 && self.state.current_thread.as_ref() == Some(&reference.thread_id)
         });
         if !is_current {

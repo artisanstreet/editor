@@ -453,9 +453,10 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             for patch in batch.patches() {
                 if let ConversationPatch::ItemUpsert { item, .. } = patch
                     && let ConversationItem::UserMessage(user) = item
-                        && user.body.as_str() == "hello stream" {
-                            saw_user = true;
-                        }
+                    && user.body.as_str() == "hello stream"
+                {
+                    saw_user = true;
+                }
             }
             assert!(saw_user, "launch must stream the user admission");
             // Nothing else can commit: no provider was ever admitted, so

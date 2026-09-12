@@ -691,7 +691,8 @@ fn thinking_from_discovery(
             }
             let default_id = options
                 .iter()
-                .find(|option| option.id == *default).map_or_else(|| options[0].id.clone(), |option| option.id.clone());
+                .find(|option| option.id == *default)
+                .map_or_else(|| options[0].id.clone(), |option| option.id.clone());
             NativeThinkingCapability::Supported {
                 default: default_id,
                 options: options
@@ -776,5 +777,3 @@ fn provider_label(provider: &str) -> &'static str {
 #[cfg(test)]
 #[path = "native_model_catalog/tests.rs"]
 mod tests;
-
-

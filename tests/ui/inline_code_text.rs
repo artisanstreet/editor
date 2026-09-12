@@ -6,7 +6,7 @@
 //! summary reduction.
 
 use artisan_ui::inline_code_text::{
-    flatten_fragments, fragment_runs, inline_fragments, summary_line, InlineFragment,
+    InlineFragment, flatten_fragments, fragment_runs, inline_fragments, summary_line,
 };
 
 fn plain(text: &str) -> InlineFragment {
@@ -48,23 +48,44 @@ fn unclosed_backtick_reads_rest_as_code() {
 #[test]
 fn strong_and_emphasis_resolve_longest_first() {
     let fragments = inline_fragments("**bold** and *italic*");
-    assert!(fragments.iter().any(|fragment| fragment.strong
-        && fragment.text == "bold"));
-    assert!(fragments.iter().any(|fragment| fragment.em && fragment.text == "italic"));
-    assert!(fragments
-        .iter()
-        .all(|fragment| !fragment.text.contains("**") && !fragment.text.contains('*')
-            || fragment.code));
+    assert!(
+        fragments
+            .iter()
+            .any(|fragment| fragment.strong && fragment.text == "bold")
+    );
+    assert!(
+        fragments
+            .iter()
+            .any(|fragment| fragment.em && fragment.text == "italic")
+    );
+    assert!(
+        fragments
+            .iter()
+            .all(
+                |fragment| !fragment.text.contains("**") && !fragment.text.contains('*')
+                    || fragment.code
+            )
+    );
 }
 
 #[test]
 fn strikethrough_and_underscore_edges() {
     let fragments = inline_fragments("~~gone~~ and inspection_types stay");
-    assert!(fragments
-        .iter()
-        .any(|fragment| fragment.strike && fragment.text == "gone"));
-    assert!(fragments.iter().any(|fragment| fragment.text.contains("inspection_types")));
-    assert!(fragments.iter().all(|fragment| !fragment.text.contains("~~")));
+    assert!(
+        fragments
+            .iter()
+            .any(|fragment| fragment.strike && fragment.text == "gone")
+    );
+    assert!(
+        fragments
+            .iter()
+            .any(|fragment| fragment.text.contains("inspection_types"))
+    );
+    assert!(
+        fragments
+            .iter()
+            .all(|fragment| !fragment.text.contains("~~"))
+    );
 }
 
 #[test]
@@ -83,8 +104,7 @@ fn block_marks_strip_per_line() {
 
 #[test]
 fn code_ranges_get_aligned_runs_for_family_overrides() {
-    let (flat, highlights, code_ranges) =
-        fragment_runs(&inline_fragments("read `Cargo.toml` now"));
+    let (flat, highlights, code_ranges) = fragment_runs(&inline_fragments("read `Cargo.toml` now"));
     assert_eq!(flat, "read Cargo.toml now");
     // The override only applies to an existing run fully inside it, so
     // every code range must own an aligned highlight range even when the
@@ -145,23 +165,35 @@ fn multibyte_prose_never_splits_boundaries() {
         "日本語テスト"
     );
     let marked = inline_fragments("`🎉` party *日本*");
-    assert!(marked.iter().any(|fragment| fragment.code
-        && fragment.text == "🎉"));
-    assert!(marked
-        .iter()
-        .any(|fragment| fragment.em && fragment.text == "日本"));
+    assert!(
+        marked
+            .iter()
+            .any(|fragment| fragment.code && fragment.text == "🎉")
+    );
+    assert!(
+        marked
+            .iter()
+            .any(|fragment| fragment.em && fragment.text == "日本")
+    );
     assert_eq!(flatten_fragments(&marked), "🎉 party 日本");
 }
 
 #[test]
 fn nested_marks_resolve_inside_out() {
     let fragments = inline_fragments("**bold with *italic* inside**");
-    assert!(fragments.iter().any(|fragment| fragment.strong
-        && fragment.em
-        && fragment.text == "italic"));
-    assert!(fragments.iter().any(|fragment| fragment.strong
-        && !fragment.em
-        && fragment.text == "bold with "));
-    assert!(fragments.iter().all(|fragment| !fragment.text.contains("**")
-        && !fragment.text.contains('*')));
+    assert!(
+        fragments
+            .iter()
+            .any(|fragment| fragment.strong && fragment.em && fragment.text == "italic")
+    );
+    assert!(
+        fragments
+            .iter()
+            .any(|fragment| fragment.strong && !fragment.em && fragment.text == "bold with ")
+    );
+    assert!(
+        fragments
+            .iter()
+            .all(|fragment| !fragment.text.contains("**") && !fragment.text.contains('*'))
+    );
 }

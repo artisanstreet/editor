@@ -457,7 +457,8 @@ pub fn composer_send_blocked_reason(
             catalog
                 .routes
                 .iter()
-                .filter(|route| route.engine_id == engine_id).find_map(|route| route.unavailable_reason)
+                .filter(|route| route.engine_id == engine_id)
+                .find_map(|route| route.unavailable_reason)
                 .map_or_else(
                     || format!("{label} is unavailable on this Forge right now"),
                     str::to_owned,

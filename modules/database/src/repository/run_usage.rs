@@ -644,12 +644,27 @@ fn raw_optional_string(
     })
 }
 
-fn raw_i64(row: &sea_orm::QueryResult, index: usize, run_id: &RunId) -> Result<i64, RunUsageRepositoryError> {
-    row.try_get_by_index::<i64>(index).map_err(|_| RunUsageRepositoryError::CorruptUsageRow { run_id: run_id.clone() })
+fn raw_i64(
+    row: &sea_orm::QueryResult,
+    index: usize,
+    run_id: &RunId,
+) -> Result<i64, RunUsageRepositoryError> {
+    row.try_get_by_index::<i64>(index)
+        .map_err(|_| RunUsageRepositoryError::CorruptUsageRow {
+            run_id: run_id.clone(),
+        })
 }
 
-fn raw_optional_i64(row: &sea_orm::QueryResult, index: usize, run_id: &RunId) -> Result<Option<i64>, RunUsageRepositoryError> {
-    row.try_get_by_index::<Option<i64>>(index).map_err(|_| RunUsageRepositoryError::CorruptUsageRow { run_id: run_id.clone() })
+fn raw_optional_i64(
+    row: &sea_orm::QueryResult,
+    index: usize,
+    run_id: &RunId,
+) -> Result<Option<i64>, RunUsageRepositoryError> {
+    row.try_get_by_index::<Option<i64>>(index).map_err(|_| {
+        RunUsageRepositoryError::CorruptUsageRow {
+            run_id: run_id.clone(),
+        }
+    })
 }
 
 fn repository_error(error: RepositoryError) -> RunUsageRepositoryError {

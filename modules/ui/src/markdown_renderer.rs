@@ -674,7 +674,13 @@ pub fn present_inline_with_titles(
     titles: &dyn RichLinkTitleSource,
 ) -> InlinePresentation {
     let mut accumulator = InlineAccumulator::default();
-    flatten_spans(spans, HighlightStyle::default(), &mut accumulator, &theme, titles);
+    flatten_spans(
+        spans,
+        HighlightStyle::default(),
+        &mut accumulator,
+        &theme,
+        titles,
+    );
     InlinePresentation {
         source: accumulator.source,
         highlights: accumulator.runs,
@@ -698,10 +704,12 @@ fn emit_run(accumulator: &mut InlineAccumulator, start: usize, end: usize, style
         return;
     }
     if let Some((last_range, last_style)) = accumulator.runs.last_mut()
-        && *last_style == style && last_range.end == start {
-            last_range.end = end;
-            return;
-        }
+        && *last_style == style
+        && last_range.end == start
+    {
+        last_range.end = end;
+        return;
+    }
     accumulator.runs.push((start..end, style));
 }
 
@@ -988,10 +996,7 @@ mod tests {
         );
 
         // A title for a different URL never leaks into this link.
-        let unrelated = TestTitles(HashMap::from([(
-            "https://example.com/other",
-            "Other Page",
-        )]));
+        let unrelated = TestTitles(HashMap::from([("https://example.com/other", "Other Page")]));
         let presentation = present_inline_with_titles(&spans, theme, &unrelated);
         assert_eq!(presentation.source, "see authored label end");
 
@@ -1028,11 +1033,8 @@ mod tests {
         );
 
         // Relative links stay inert labels and never consult the lookup.
-        let relative = present_inline_with_titles(
-            &link_spans("/docs/page", "relative label"),
-            theme,
-            &titles,
-        );
+        let relative =
+            present_inline_with_titles(&link_spans("/docs/page", "relative label"), theme, &titles);
         assert_eq!(relative.source, "see relative label end");
         assert!(relative.links.is_empty());
     }

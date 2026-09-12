@@ -241,10 +241,7 @@ impl HttpRichLinkFetcher {
         let client = self.client.as_ref().map_err(|error| *error)?.clone();
         let mut response = client
             .get(url)
-            .header(
-                reqwest::header::ACCEPT,
-                "text/html, application/xhtml+xml",
-            )
+            .header(reqwest::header::ACCEPT, "text/html, application/xhtml+xml")
             .send()
             .await
             .map_err(|error| map_reqwest_error(&error))?;
@@ -267,7 +264,11 @@ impl HttpRichLinkFetcher {
             return Err(RichLinkError::UnsupportedContentType);
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|error| map_reqwest_error(&error))? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| map_reqwest_error(&error))?
+        {
             if body.len().saturating_add(chunk.len()) > self.options.max_html_bytes {
                 return Err(RichLinkError::ResponseTooLarge);
             }
@@ -433,7 +434,8 @@ pub fn parse_rich_link_html(html: &str) -> ParsedRichLinkHtml {
             }
             continue;
         }
-        if rest_lower.starts_with('!') || rest_lower.starts_with('/') || rest_lower.starts_with('?') {
+        if rest_lower.starts_with('!') || rest_lower.starts_with('/') || rest_lower.starts_with('?')
+        {
             match find_tag_end(&lower, tag_start + 1) {
                 Some(end) => cursor = end + 1,
                 None => break,
@@ -550,7 +552,10 @@ fn parse_meta_attributes(attributes: &str) -> MetaAttributes {
 
 fn read_attribute_value(attributes: &str, index: &mut usize) -> String {
     let bytes = attributes.as_bytes();
-    if bytes.get(*index).is_some_and(|byte| *byte == b'"' || *byte == b'\'') {
+    if bytes
+        .get(*index)
+        .is_some_and(|byte| *byte == b'"' || *byte == b'\'')
+    {
         let quote = bytes[*index];
         *index += 1;
         let value_start = *index;
@@ -604,7 +609,12 @@ pub fn normalize_rich_link_text(value: &str) -> Option<String> {
     if collapsed.is_empty() {
         return None;
     }
-    Some(collapsed.chars().take(RICH_LINK_PAGE_NAME_MAX_CHARS).collect())
+    Some(
+        collapsed
+            .chars()
+            .take(RICH_LINK_PAGE_NAME_MAX_CHARS)
+            .collect(),
+    )
 }
 
 fn decode_rich_link_entities(value: &str) -> String {
@@ -840,10 +850,7 @@ impl RichLinkResolver {
 }
 
 impl RichLinkResolverInner {
-    async fn fetch_resolution(
-        &self,
-        cache_key: &str,
-    ) -> Result<RichLinkResolution, RichLinkError> {
+    async fn fetch_resolution(&self, cache_key: &str) -> Result<RichLinkResolution, RichLinkError> {
         let url = Url::parse(cache_key).map_err(|_| RichLinkError::InvalidUrl)?;
         let page = timeout(self.options.fetch_timeout, self.fetcher.fetch(url))
             .await
@@ -896,8 +903,8 @@ impl RichLinkResolver {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        atomic::{AtomicI64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicI64, AtomicUsize, Ordering},
     };
 
     use super::*;
@@ -989,7 +996,8 @@ mod tests {
         assert_eq!(parsed.open_graph.as_deref(), Some("Open Graph Title"));
         assert_eq!(parsed.page_name(), Some("Open Graph Title"));
 
-        let title_only = parse_rich_link_html("<html><head><title>Only Title</title></head></html>");
+        let title_only =
+            parse_rich_link_html("<html><head><title>Only Title</title></head></html>");
         assert_eq!(title_only.page_name(), Some("Only Title"));
 
         let twitter_only = parse_rich_link_html(
@@ -1050,10 +1058,7 @@ mod tests {
         let decoded = parse_rich_link_html(
             "<title>&#72;&#x65;llo &amp; &quot;world&quot; &hellip; &unknown;</title>",
         );
-        assert_eq!(
-            decoded.page_name(),
-            Some("Hello & \"world\" … &unknown;")
-        );
+        assert_eq!(decoded.page_name(), Some("Hello & \"world\" … &unknown;"));
     }
 
     #[tokio::test]

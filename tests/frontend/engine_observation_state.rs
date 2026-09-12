@@ -463,7 +463,12 @@ fn question_requested_resolves_in_place_by_request_id() {
     assert_eq!(requested.text(), "Which runtime?");
     assert_eq!(requested.header(), Some("Runtime"));
     assert!(!requested.multi_select());
-    assert_eq!(requested.options().map(<[artisan_frontend::engine_observation_state::QuestionOptionView]>::len), Some(2));
+    assert_eq!(
+        requested
+            .options()
+            .map(<[artisan_frontend::engine_observation_state::QuestionOptionView]>::len),
+        Some(2)
+    );
 
     let outcome = presentation.apply(12, &event(question_resolved()));
     assert!(matches!(

@@ -11,8 +11,8 @@ use artisan_ui::button::{
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, SurfaceStep, ThemeMode};
 use gpui::{
-    ClickEvent, Context, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ParentElement,
-    Render, Styled, TestAppContext, Window, div, point, transparent_black,
+    ClickEvent, Context, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
+    ParentElement, Render, Styled, TestAppContext, Window, div, point, transparent_black,
 };
 
 const BUTTON_SELECTOR: &str = "native-button-under-test";

@@ -75,7 +75,9 @@ pub(super) async fn execute_grok_turn(
             let gate = grok_runtime::check_grok_native_continuation(
                 &grok_runtime::GrokContinuationGateInput {
                     cli_version: launch.version(),
-                    target_model: selection.model_id().map(artisan_domain::EngineModelId::as_str),
+                    target_model: selection
+                        .model_id()
+                        .map(artisan_domain::EngineModelId::as_str),
                     advertised_models: None,
                     same_engine: true,
                 },

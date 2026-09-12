@@ -1400,7 +1400,10 @@ pub(crate) fn local_account_picture() -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod legacy_shell_tests {
-    #![expect(clippy::float_cmp, reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage")]
+    #![expect(
+        clippy::float_cmp,
+        reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage"
+    )]
     use super::*;
     use gpui::{Context, Render, TestAppContext, Window};
 

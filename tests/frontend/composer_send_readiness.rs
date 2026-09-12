@@ -116,7 +116,10 @@ fn non_runnable_unknown_harness_falls_back_to_its_id() {
 
     assert_eq!(
         composer_send_blocked_reason(true, &catalog, Some(&selected), no_provisioning().as_ref()),
-        Some("unknown-harness models are preview-only - this engine cannot run in Artisan yet".to_owned())
+        Some(
+            "unknown-harness models are preview-only - this engine cannot run in Artisan yet"
+                .to_owned()
+        )
     );
 }
 

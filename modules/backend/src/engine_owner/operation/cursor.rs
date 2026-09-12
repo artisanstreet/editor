@@ -58,7 +58,9 @@ pub(super) async fn execute_cursor_turn(
         let gate = cursor_runtime::check_cursor_native_continuation(
             &cursor_runtime::CursorContinuationGateInput {
                 cli_version: request.input.launch.version(),
-                target_model: selection.model_id().map(artisan_domain::EngineModelId::as_str),
+                target_model: selection
+                    .model_id()
+                    .map(artisan_domain::EngineModelId::as_str),
                 advertised_models: None,
                 same_engine: true,
             },

@@ -74,8 +74,7 @@ impl NativeCatalogScope {
 }
 
 /// Catalog lifecycle visible to the selector adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum NativeCatalogPhase {
     /// No configured thread/profile scope is currently available.
     #[default]
@@ -628,7 +627,6 @@ impl NativeCatalogController {
         }
     }
 }
-
 
 /// Why a favorite intent was not admitted locally.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

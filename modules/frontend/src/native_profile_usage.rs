@@ -408,7 +408,6 @@ impl ProfileUsageGeneration {
     pub const fn get(self) -> u64 {
         self.0
     }
-
 }
 
 /// Stable per-engine roster in backend order.
@@ -807,5 +806,3 @@ pub fn checked_label(fetched_at_ms: Option<i64>, now_ms: i64) -> Option<String> 
 #[cfg(test)]
 #[path = "native_profile_usage/tests.rs"]
 mod tests;
-
-
