@@ -12,9 +12,9 @@
 1295 modules/backend/src/engine_owner/process.rs
 977 modules/backend/src/forge_runtime/config.rs
 990 modules/backend/src/listener.rs
-917 modules/backend/src/native_run_dispatch.rs
+884 modules/backend/src/native_run_dispatch.rs
 1313 modules/backend/src/native_run_dispatch/claim.rs
-1384 modules/backend/src/native_run_dispatch/turn.rs
+1352 modules/backend/src/native_run_dispatch/turn.rs
 1359 modules/backend/src/request_handler.rs
 1071 modules/catalog/rust/policy.rs
 1280 modules/cli/rust/commands.rs
@@ -33,7 +33,7 @@
 1445 modules/database/src/repository/run_observation/terminal/auxiliary.rs
 1081 modules/database/src/repository/run_observation/terminal/complete.rs
 1000 modules/database/src/repository/run_observation/terminal/fail.rs
-1084 modules/database/src/repository/startup_reconciliation_disposition.rs
+1083 modules/database/src/repository/startup_reconciliation_disposition.rs
 1103 modules/domain/src/account_usage.rs
 990 modules/domain/src/conversation.rs
 962 modules/domain/src/observation/conversation.rs
@@ -56,7 +56,7 @@
 1475 modules/frontend/src/editor_route_screen.rs
 1183 modules/frontend/src/engine_observation_state/state.rs
 1605 modules/frontend/src/native_application/impl_profile_menu.rs
-1727 modules/frontend/src/native_application/impl_service_events.rs
+1726 modules/frontend/src/native_application/impl_service_events.rs
 1076 modules/frontend/src/native_application/tests.rs
 1194 modules/frontend/src/native_application/tests/lifecycle.rs
 1231 modules/frontend/src/native_application/tests/navigation.rs
@@ -77,7 +77,6 @@
 808 modules/frontend/src/native_profile_usage.rs
 1052 modules/frontend/src/native_project_menu.rs
 1603 modules/frontend/src/native_settings/render/sections.rs
-823 modules/frontend/src/native_transport_service/handlers.rs
 1708 modules/frontend/src/native_transport_service/tests.rs
 1498 modules/frontend/src/parity_visual_proof.rs
 1357 modules/frontend/src/project_picker.rs
@@ -85,7 +84,7 @@
 1023 modules/frontend/src/subscription_projection.rs
 802 modules/frontend/src/thread_environment_presentation.rs
 863 modules/frontend/src/thread_screen.rs
-969 modules/installer/rust/install/workflow.rs
+888 modules/installer/rust/install/workflow.rs
 1158 modules/migrations/src/m20260824_000003_conversation_execution.rs
 834 modules/protocol/src/codec/conversation.rs
 1032 modules/protocol/src/codec/engine_config.rs
