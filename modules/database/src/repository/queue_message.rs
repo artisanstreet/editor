@@ -85,6 +85,11 @@ impl Repository {
     /// Settings never participate: the stored snapshot is replayed
     /// without comparing current thread settings, so a selection change
     /// between send and retry cannot break safe retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] when the receipt lookup fails or stored
+    /// receipt data fails validation.
     pub async fn lookup_queue_message(
         &self,
         request_id: &RequestId,
@@ -113,6 +118,12 @@ impl Repository {
     /// all inserts — happens inside one transaction, so a concurrent
     /// config save between read and begin cannot snapshot stale config
     /// at accept.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] when the thread row is missing, an
+    /// identifier or body fails validation, or a database read or write
+    /// fails.
     pub async fn queue_message(
         &self,
         input: QueueMessageInput,
@@ -206,6 +217,11 @@ impl Repository {
     /// owning thread match. Wrong-thread and missing-index reads return
     /// `None`, so callers cannot use this seam to probe another thread's
     /// attachment rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] when a database read fails or a stored
+    /// attachment row fails validation.
     pub async fn read_message_image(
         &self,
         thread_id: &ThreadId,
@@ -450,7 +466,7 @@ async fn lookup_queue_receipt(
     }
 
     let message_id = MessageId::parse(required(row.message_id, "command_receipts", "message_id")?)
-        .map_err(|error| corrupt_data("command_receipts", "message_id", &error))?;
+        .map_err(|error| corrupt_data("command_receipts", "message_id", error))?;
     let message = message_row_by_id(database, &message_id)
         .await?
         .ok_or(RepositoryError::Invariant {
@@ -491,7 +507,7 @@ async fn lookup_queue_receipt(
     // naming a different live run (or dropping a named target) conflicts
     // instead of replaying. Stored settings are replayed, never compared.
     if dispatch.steer_run_id.as_deref()
-        != steer_run_id.map(|run_id| run_id.as_str())
+        != steer_run_id.map(artisan_domain::RunId::as_str)
     {
         return Err(RepositoryError::IdempotencyConflict {
             request_id: request_id.clone(),
@@ -506,7 +522,7 @@ async fn lookup_queue_receipt(
     let steer_run_id = match dispatch.steer_run_id.as_deref() {
         None | Some("") => None,
         Some(steer_run_id) => Some(RunId::parse(steer_run_id.to_owned()).map_err(|error| {
-            corrupt_data("message_dispatches", "steer_run_id", &error)
+            corrupt_data("message_dispatches", "steer_run_id", error)
         })?),
     };
 
@@ -644,7 +660,7 @@ fn image_attachment_ref_from_row(
         size_bytes,
         digest,
     )
-    .map_err(|error| corrupt_data("message_image_attachments", "metadata", &error))
+    .map_err(|error| corrupt_data("message_image_attachments", "metadata", error))
 }
 
 /// Reconstructs authored text without collapsing the queue command's optional
@@ -675,9 +691,9 @@ async fn read_authored_text(
 
     let text = receipt
         .body
-        .map(|body| AuthoredText::parse(body))
+        .map(AuthoredText::parse)
         .transpose()
-        .map_err(|error| corrupt_data("command_receipts", "body", &error))?;
+        .map_err(|error| corrupt_data("command_receipts", "body", error))?;
     if message.body != text.as_ref().map_or("", AuthoredText::as_str) {
         return Err(RepositoryError::Invariant {
             reason: "queue receipt and immutable message text presence disagree",
@@ -692,7 +708,7 @@ fn authored_text_from_body(body: String) -> Result<Option<AuthoredText>, Reposit
     }
     AuthoredText::parse(body)
         .map(Some)
-        .map_err(|error| corrupt_data("messages", "body", &error))
+        .map_err(|error| corrupt_data("messages", "body", error))
 }
 
 async fn receipt_row_by_id(

@@ -583,6 +583,11 @@ struct VersionPeek {
     version: u16,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the v2 decoder is one linear field-by-field conversion with per-field error mapping; \
+              extraction would fragment the field-to-error table"
+)]
 fn into_domain_v2(raw: RawConfigV2) -> Result<EngineRunConfig, EngineRunConfigCodecError> {
     if raw.version != 2 {
         return Err(EngineRunConfigCodecError::InvalidField { field: "version" });

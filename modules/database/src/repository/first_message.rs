@@ -233,7 +233,7 @@ async fn classify_message_conflict(
 
     if let Some(existing) = first_message_row(&transaction, &input.thread_id).await? {
         let existing_message_id = MessageId::parse(existing.message_id)
-            .map_err(|error| corrupt_data("messages", "message_id", &error))?;
+            .map_err(|error| corrupt_data("messages", "message_id", error))?;
         return rollback_with_error(
             transaction,
             RepositoryError::FirstMessageAlreadyExists {
@@ -286,7 +286,7 @@ async fn lookup_queue_receipt(
     }
 
     let message_id = MessageId::parse(required(row.message_id, "command_receipts", "message_id")?)
-        .map_err(|error| corrupt_data("command_receipts", "message_id", &error))?;
+        .map_err(|error| corrupt_data("command_receipts", "message_id", error))?;
     let message =
         message_row_by_id(database, &message_id)
             .await?
@@ -319,7 +319,7 @@ async fn lookup_queue_receipt(
         });
     }
     let persisted_body = MessageBody::parse(message.body)
-        .map_err(|error| corrupt_data("messages", "body", &error))?;
+        .map_err(|error| corrupt_data("messages", "body", error))?;
 
     Ok(Some(QueueFirstMessageResult {
         receipt: CommandReceipt {

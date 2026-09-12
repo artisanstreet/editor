@@ -11,7 +11,7 @@ use zeroize::Zeroize;
 
 use crate::entities::{self, DispatchState};
 
-use super::{Repository, RepositoryError, corrupt_data, database_error, millis};
+use super::{Repository, RepositoryError, corrupt_data, database_error, millis, row_value};
 
 const OWNER_BYTES: usize = 32;
 const OWNER_STORAGE_BYTES: usize = OWNER_BYTES * 2;
@@ -793,6 +793,11 @@ impl Repository {
     /// live lifecycle are left untouched for their owning loop.
     ///
     /// Returns the number of rows failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] when the constant failure reason would
+    /// exceed its persisted bound or the recovery update fails.
     pub async fn fail_orphaned_steered_dispatches(
         &self,
         operated_at: UnixMillis,
@@ -1026,27 +1031,27 @@ fn renewed_from_row(
     operated_at_ms: i64,
     lease_expires_at_ms: i64,
 ) -> Result<TransitionedMessageDispatch, RepositoryError> {
-    let returned_id = row_value::<String>(row, 0, "message_id")?;
+    let returned_id = row_value::<String, _>(row, 0, "message_id", "message_dispatches")?;
     if returned_id != message_id.as_str() {
         return Err(RepositoryError::Invariant {
             reason: "renewed lease returned a different message id",
         });
     }
-    let attempt_count = row_value::<i64>(row, 1, "attempt_count")?;
+    let attempt_count = row_value::<i64, _>(row, 1, "attempt_count", "message_dispatches")?;
     let attempt_count = u32::try_from(attempt_count)
-        .map_err(|error| corrupt_data("message_dispatches", "attempt_count", &error))?;
+        .map_err(|error| corrupt_data("message_dispatches", "attempt_count", error))?;
     if attempt_count == 0 {
         return Err(RepositoryError::Invariant {
             reason: "renewed lease retained a zero attempt count",
         });
     }
-    let returned_expiry = row_value::<i64>(row, 3, "lease_expires_at_ms")?;
+    let returned_expiry = row_value::<i64, _>(row, 3, "lease_expires_at_ms", "message_dispatches")?;
     if returned_expiry != lease_expires_at_ms {
         return Err(RepositoryError::Invariant {
             reason: "renewed lease returned inconsistent lease timestamps",
         });
     }
-    let updated_at_ms = row_value::<i64>(row, 4, "updated_at_ms")?;
+    let updated_at_ms = row_value::<i64, _>(row, 4, "updated_at_ms", "message_dispatches")?;
     if updated_at_ms != operated_at_ms {
         return Err(RepositoryError::Invariant {
             reason: "renewed lease returned inconsistent update timestamps",
@@ -1065,29 +1070,46 @@ fn claimed_from_row(
     claimed_at_ms: i64,
     lease_expires_at_ms: i64,
 ) -> Result<ClaimedMessageDispatch, RepositoryError> {
-    let message_id = MessageId::parse(row_value::<String>(row, 0, "message_id")?)
-        .map_err(|error| corrupt_data("message_dispatches", "message_id", &error))?;
-    let correlation_id = RequestId::parse(row_value::<String>(row, 1, "correlation_id")?)
-        .map_err(|error| corrupt_data("message_dispatches", "correlation_id", &error))?;
-    let attempt_count = row_value::<i64>(row, 2, "attempt_count")?;
+    let message_id = MessageId::parse(row_value::<String, _>(
+        row,
+        0,
+        "message_id",
+        "message_dispatches",
+    )?)
+    .map_err(|error| corrupt_data("message_dispatches", "message_id", error))?;
+    let correlation_id = RequestId::parse(row_value::<String, _>(
+        row,
+        1,
+        "correlation_id",
+        "message_dispatches",
+    )?)
+    .map_err(|error| corrupt_data("message_dispatches", "correlation_id", error))?;
+    let attempt_count = row_value::<i64, _>(row, 2, "attempt_count", "message_dispatches")?;
     let attempt_count = u32::try_from(attempt_count)
-        .map_err(|error| corrupt_data("message_dispatches", "attempt_count", &error))?;
+        .map_err(|error| corrupt_data("message_dispatches", "attempt_count", error))?;
     if attempt_count == 0 {
         return Err(RepositoryError::Invariant {
             reason: "claimed dispatch retained a zero attempt count",
         });
     }
-    let queued_at = UnixMillis::from_millis(row_value(row, 3, "queued_at_ms")?);
-    let available_at = UnixMillis::from_millis(row_value(row, 4, "available_at_ms")?);
-    let owner = DispatchLeaseOwner::from_storage(&row_value::<String>(row, 5, "lease_owner")?)
-        .map_err(|error| corrupt_data("message_dispatches", "lease_owner", &error))?;
+    let queued_at =
+        UnixMillis::from_millis(row_value(row, 3, "queued_at_ms", "message_dispatches")?);
+    let available_at =
+        UnixMillis::from_millis(row_value(row, 4, "available_at_ms", "message_dispatches")?);
+    let owner = DispatchLeaseOwner::from_storage(&row_value::<String, _>(
+        row,
+        5,
+        "lease_owner",
+        "message_dispatches",
+    )?)
+    .map_err(|error| corrupt_data("message_dispatches", "lease_owner", error))?;
     if !owner.constant_time_eq(expected_owner) {
         return Err(RepositoryError::Invariant {
             reason: "claimed dispatch returned a different lease owner",
         });
     }
-    let returned_expiry = row_value::<i64>(row, 6, "lease_expires_at_ms")?;
-    let returned_update = row_value::<i64>(row, 7, "updated_at_ms")?;
+    let returned_expiry = row_value::<i64, _>(row, 6, "lease_expires_at_ms", "message_dispatches")?;
+    let returned_update = row_value::<i64, _>(row, 7, "updated_at_ms", "message_dispatches")?;
     if returned_expiry != lease_expires_at_ms || returned_update != claimed_at_ms {
         return Err(RepositoryError::Invariant {
             reason: "claimed dispatch returned inconsistent lease timestamps",
@@ -1137,7 +1159,7 @@ async fn classify_unclaimed(
         return Ok(());
     };
     let message_id = MessageId::parse(exhausted.message_id)
-        .map_err(|error| corrupt_data("message_dispatches", "message_id", &error))?;
+        .map_err(|error| corrupt_data("message_dispatches", "message_id", error))?;
     Err(RepositoryError::DispatchAttemptLimit { message_id })
 }
 
@@ -1194,14 +1216,6 @@ async fn rollback_claim<T>(
         .await
         .map_err(|source| database_error("roll back message-dispatch claim", source))?;
     Err(error)
-}
-
-fn row_value<T>(row: &QueryResult, index: usize, field: &'static str) -> Result<T, RepositoryError>
-where
-    T: sea_orm::TryGetable,
-{
-    row.try_get_by_index(index)
-        .map_err(|error| corrupt_data("message_dispatches", field, &error))
 }
 
 const fn hex_digit(nibble: u8) -> char {
@@ -1279,21 +1293,21 @@ fn transitioned_from_row(
     operated_at_ms: i64,
     expected_available_at_ms: Option<i64>,
 ) -> Result<TransitionedMessageDispatch, RepositoryError> {
-    let returned_id = row_value::<String>(row, 0, "message_id")?;
+    let returned_id = row_value::<String, _>(row, 0, "message_id", "message_dispatches")?;
     if returned_id != message_id.as_str() {
         return Err(RepositoryError::Invariant {
             reason: "fenced transition returned a different message id",
         });
     }
-    let attempt_count = row_value::<i64>(row, 1, "attempt_count")?;
+    let attempt_count = row_value::<i64, _>(row, 1, "attempt_count", "message_dispatches")?;
     let attempt_count = u32::try_from(attempt_count)
-        .map_err(|error| corrupt_data("message_dispatches", "attempt_count", &error))?;
+        .map_err(|error| corrupt_data("message_dispatches", "attempt_count", error))?;
     if attempt_count == 0 {
         return Err(RepositoryError::Invariant {
             reason: "transitioned dispatch retained a zero attempt count",
         });
     }
-    let available_at_ms = row_value::<i64>(row, 2, "available_at_ms")?;
+    let available_at_ms = row_value::<i64, _>(row, 2, "available_at_ms", "message_dispatches")?;
     if let Some(expected) = expected_available_at_ms
         && available_at_ms != expected
     {
@@ -1301,13 +1315,14 @@ fn transitioned_from_row(
             reason: "requeued dispatch returned inconsistent availability",
         });
     }
-    let lease_expires_at_ms = row_value::<Option<i64>>(row, 3, "lease_expires_at_ms")?;
+    let lease_expires_at_ms =
+        row_value::<Option<i64>, _>(row, 3, "lease_expires_at_ms", "message_dispatches")?;
     if lease_expires_at_ms.is_some() {
         return Err(RepositoryError::Invariant {
             reason: "transitioned dispatch retained lease metadata",
         });
     }
-    let updated_at_ms = row_value::<i64>(row, 4, "updated_at_ms")?;
+    let updated_at_ms = row_value::<i64, _>(row, 4, "updated_at_ms", "message_dispatches")?;
     if updated_at_ms != operated_at_ms {
         return Err(RepositoryError::Invariant {
             reason: "transitioned dispatch returned inconsistent update timestamps",
@@ -1361,7 +1376,7 @@ async fn classify_unfenced_transition(
     let persisted_owner = match DispatchLeaseOwner::from_storage(persisted_owner) {
         Ok(persisted_owner) => persisted_owner,
         Err(error) => {
-            return corrupt_data("message_dispatches", "lease_owner", &error);
+            return corrupt_data("message_dispatches", "lease_owner", error);
         }
     };
     if !persisted_owner.constant_time_eq(owner) {
@@ -1433,7 +1448,7 @@ async fn classify_unfenced_lease_renewal(
     let persisted_owner = match DispatchLeaseOwner::from_storage(persisted_owner) {
         Ok(persisted_owner) => persisted_owner,
         Err(error) => {
-            return corrupt_data("message_dispatches", "lease_owner", &error);
+            return corrupt_data("message_dispatches", "lease_owner", error);
         }
     };
     if !persisted_owner.constant_time_eq(owner) {

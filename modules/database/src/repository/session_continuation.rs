@@ -38,6 +38,11 @@ pub struct SessionContinuationQuery {
 }
 
 /// The explicit result of a continuation lookup.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the usable/unavailable variants carry the full continuation record by value; boxing \
+              would push an allocation into every caller's match for no correctness gain"
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionContinuationLookup {
     /// There are no historical run rows after applying the exclusion.
@@ -268,6 +273,11 @@ impl Repository {
     /// The read is transactionally consistent across the run, checkpoint,
     /// receipts, and thread sequence row.  It never mutates or repairs any
     /// persisted data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] when a database read fails or a persisted
+    /// row fails continuation validation.
     pub async fn read_session_continuation(
         &self,
         query: SessionContinuationQuery,
@@ -626,6 +636,11 @@ fn decode_binding(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the four dependent reads of one continuation snapshot in a single linear \
+              sequence; extraction would split the transaction locals"
+)]
 async fn read_durable_facts<C: ConnectionTrait>(
     database: &C,
     run: &entities::assistant_run::Model,
@@ -678,68 +693,65 @@ async fn read_durable_facts<C: ConnectionTrait>(
         }
     }
 
-    let checkpoint_facts = match checkpoint {
-        Some(row) => {
-            if row.generation != run.generation
-                || row.last_batch_sequence < 0
-                || row.updated_at_ms < run.created_at_ms
-                || row.updated_at_ms > run.updated_at_ms
-            {
-                return Err(corrupt_data(
-                    "run_checkpoints",
-                    "generation",
-                    "checkpoint facts are outside the run fence",
-                ));
-            }
-            let has_version = row.engine_checkpoint_version.is_some();
-            let has_blob = row.engine_checkpoint_blob.is_some();
-            if has_version != has_blob
-                || row
-                    .engine_checkpoint_version
-                    .is_some_and(|version| version <= 0)
-                || row.engine_checkpoint_blob.as_ref().is_some_and(|blob| {
-                    blob.as_slice().is_empty() || blob.as_slice().len() > 262_144
-                })
-            {
-                return Err(corrupt_data(
-                    "run_checkpoints",
-                    "engine_checkpoint_blob",
-                    "checkpoint payload tuple is invalid",
-                ));
-            }
-            if let Some(receipt) = &receipt {
-                if row.last_batch_sequence != receipt.batch_sequence {
-                    return Err(corrupt_data(
-                        "run_checkpoints",
-                        "last_batch_sequence",
-                        "checkpoint and receipt sequences disagree",
-                    ));
-                }
-            } else if row.last_batch_sequence != 0 {
+    let checkpoint_facts = if let Some(row) = checkpoint {
+        if row.generation != run.generation
+            || row.last_batch_sequence < 0
+            || row.updated_at_ms < run.created_at_ms
+            || row.updated_at_ms > run.updated_at_ms
+        {
+            return Err(corrupt_data(
+                "run_checkpoints",
+                "generation",
+                "checkpoint facts are outside the run fence",
+            ));
+        }
+        let has_version = row.engine_checkpoint_version.is_some();
+        let has_blob = row.engine_checkpoint_blob.is_some();
+        if has_version != has_blob
+            || row
+                .engine_checkpoint_version
+                .is_some_and(|version| version <= 0)
+            || row.engine_checkpoint_blob.as_ref().is_some_and(|blob| {
+                blob.as_slice().is_empty() || blob.as_slice().len() > 262_144
+            })
+        {
+            return Err(corrupt_data(
+                "run_checkpoints",
+                "engine_checkpoint_blob",
+                "checkpoint payload tuple is invalid",
+            ));
+        }
+        if let Some(receipt) = &receipt {
+            if row.last_batch_sequence != receipt.batch_sequence {
                 return Err(corrupt_data(
                     "run_checkpoints",
                     "last_batch_sequence",
-                    "checkpoint has no corresponding batch receipt",
+                    "checkpoint and receipt sequences disagree",
                 ));
             }
-            Some(SessionContinuationCheckpoint {
-                generation: row.generation,
-                last_batch_sequence: row.last_batch_sequence,
-                engine_checkpoint_version: row.engine_checkpoint_version,
-                has_engine_checkpoint: has_blob,
-                updated_at: UnixMillis::from_millis(row.updated_at_ms),
-            })
+        } else if row.last_batch_sequence != 0 {
+            return Err(corrupt_data(
+                "run_checkpoints",
+                "last_batch_sequence",
+                "checkpoint has no corresponding batch receipt",
+            ));
         }
-        None => {
-            if receipt.is_some() {
-                return Err(corrupt_data(
-                    "run_checkpoints",
-                    "run_id",
-                    "batch receipt exists without a checkpoint row",
-                ));
-            }
-            None
+        Some(SessionContinuationCheckpoint {
+            generation: row.generation,
+            last_batch_sequence: row.last_batch_sequence,
+            engine_checkpoint_version: row.engine_checkpoint_version,
+            has_engine_checkpoint: has_blob,
+            updated_at: UnixMillis::from_millis(row.updated_at_ms),
+        })
+    } else {
+        if receipt.is_some() {
+            return Err(corrupt_data(
+                "run_checkpoints",
+                "run_id",
+                "batch receipt exists without a checkpoint row",
+            ));
         }
+        None
     };
 
     let last_batch_sequence = checkpoint_facts

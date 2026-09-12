@@ -321,10 +321,10 @@ fn next_revision_for_update(
 
     match current_revision {
         None => EngineConfigRevision::new(1)
-            .map_err(|error| corrupt_data("threads", "engine_run_config_revision", &error)),
+            .map_err(|error| corrupt_data("threads", "engine_run_config_revision", error)),
         Some(revision) => revision
             .checked_next()
-            .map_err(|error| corrupt_data("threads", "engine_run_config_revision", &error)),
+            .map_err(|error| corrupt_data("threads", "engine_run_config_revision", error)),
     }
 }
 
@@ -513,7 +513,7 @@ fn validate_set_receipt_shape<'a>(
             "set receipt thread is null",
         )
     })?;
-    if !matches!(row.engine_run_config_version, Some(1) | Some(2)) {
+    if !matches!(row.engine_run_config_version, Some(1 | 2)) {
         return Err(corrupt_data(
             "command_receipts",
             "engine_run_config_version",
@@ -540,7 +540,7 @@ fn parse_set_receipt_expected_revision(
                 corrupt_data(
                     "command_receipts",
                     "engine_run_config_expected_revision",
-                    &error,
+                    error,
                 )
             })?,
         )),
@@ -569,7 +569,7 @@ fn validate_set_receipt_result_revision(
                 corrupt_data(
                     "command_receipts",
                     "engine_run_config_result_revision",
-                    &error,
+                    error,
                 )
             })?
             .get(),

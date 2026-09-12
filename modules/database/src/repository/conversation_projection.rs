@@ -8,20 +8,19 @@ use sea_orm::{
 };
 
 use artisan_domain::{
-    AssistantBody, AssistantMessageItem, AssistantMessagePhase, ConversationCursor,
-    ConversationItem, ConversationLifecycle, ConversationQuery, ConversationQueryBounds,
-    ConversationSnapshot, ConversationSnapshotError, ConversationTurn, ItemId, ItemOrdinal,
-    MessageBody, MessageId, Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis,
-    UserMessageItem,
+    AssistantBody, AssistantMessageItem, ConversationCursor, ConversationItem, ConversationQuery,
+    ConversationQueryBounds, ConversationSnapshot, ConversationSnapshotError, ConversationTurn,
+    ItemId, ItemOrdinal, MessageBody, MessageId, Revision, RunId, ThreadId, TurnId, TurnOrdinal,
+    UnixMillis, UserMessageItem,
 };
 
+use super::common::{
+    STATE_QUERY, THREAD_QUERY, ensure_expected_thread, ensure_no_projection_rows,
+    nonnegative_counter, parse_lifecycle, parse_phase, raw_signed_integer, raw_value,
+    validate_entity_times,
+};
 use super::{Repository, RepositoryError, corrupt_data, database_error};
 
-const THREAD_QUERY: &str = "SELECT thread_id, CAST(created_at_ms AS TEXT), CAST(updated_at_ms AS TEXT) \
-     FROM threads WHERE thread_id = ? LIMIT 1";
-const STATE_QUERY: &str = "SELECT thread_id, CAST(next_renderer_ordinal AS TEXT), \
-            CAST(last_patch_sequence AS TEXT), CAST(updated_at_ms AS TEXT) \
-     FROM conversation_state WHERE thread_id = ? LIMIT 1";
 const TURN_COLUMNS: &str = "SELECT turn_id, thread_id, CAST(ordinal AS TEXT), kind, \
             CAST(revision AS TEXT), lifecycle, CAST(created_at_ms AS TEXT), \
             CAST(updated_at_ms AS TEXT) FROM conversation_turns";
@@ -90,21 +89,39 @@ async fn read_snapshot(
     };
 
     let persisted_thread_id =
-        ThreadId::parse(raw_value::<String>(&thread, 0, "threads", "thread_id")?)
-            .map_err(|error| corrupt_data("threads", "thread_id", &error))?;
+        ThreadId::parse(raw_value::<String, _>(&thread, 0, "threads", "thread_id")?)
+            .map_err(|error| corrupt_data("threads", "thread_id", error))?;
     ensure_expected_thread(
         &persisted_thread_id,
         &query.thread_id,
         "threads",
         "thread_id",
+        || {
+            format!(
+                "expected thread {}, found {persisted_thread_id}",
+                query.thread_id
+            )
+        },
     )?;
     let thread_created_at_ms = raw_signed_integer(&thread, 1, "threads", "created_at_ms")?;
     let thread_updated_at_ms = raw_signed_integer(&thread, 2, "threads", "updated_at_ms")?;
-    validate_entity_times("threads", thread_created_at_ms, thread_updated_at_ms)?;
+    validate_entity_times(
+        "threads",
+        thread_created_at_ms,
+        thread_updated_at_ms,
+        |updated_at_ms, created_at_ms| {
+            format!("updated timestamp {updated_at_ms} precedes created timestamp {created_at_ms}")
+        },
+    )?;
 
     let state = load_state(transaction, &query.thread_id).await?;
     let Some((cursor, updated_at)) = state else {
-        ensure_no_projection_rows(transaction, &query.thread_id).await?;
+        ensure_no_projection_rows(
+            transaction,
+            &query.thread_id,
+            "check conversation state absence",
+        )
+        .await?;
         return ConversationSnapshot::new(
             query.thread_id.clone(),
             ConversationCursor::default(),
@@ -142,29 +159,32 @@ async fn load_state(
         return Ok(None);
     };
 
-    let persisted_thread_id = ThreadId::parse(raw_value::<String>(
+    let persisted_thread_id = ThreadId::parse(raw_value::<String, _>(
         &state,
         0,
         "conversation_state",
         "thread_id",
     )?)
-    .map_err(|error| corrupt_data("conversation_state", "thread_id", &error))?;
+    .map_err(|error| corrupt_data("conversation_state", "thread_id", error))?;
     ensure_expected_thread(
         &persisted_thread_id,
         expected_thread_id,
         "conversation_state",
         "thread_id",
+        || format!("expected thread {expected_thread_id}, found {persisted_thread_id}"),
     )?;
     let next_renderer_ordinal = nonnegative_counter(
         raw_signed_integer(&state, 1, "conversation_state", "next_renderer_ordinal")?,
         "conversation_state",
         "next_renderer_ordinal",
+        |value| format!("persisted counter value {value} is negative"),
     )?;
     let _ = next_renderer_ordinal;
     let last_patch_sequence = nonnegative_counter(
         raw_signed_integer(&state, 2, "conversation_state", "last_patch_sequence")?,
         "conversation_state",
         "last_patch_sequence",
+        |value| format!("persisted counter value {value} is negative"),
     )?;
     let updated_at_ms = raw_signed_integer(&state, 3, "conversation_state", "updated_at_ms")?;
 
@@ -172,36 +192,6 @@ async fn load_state(
         ConversationCursor::new(last_patch_sequence),
         UnixMillis::from_millis(updated_at_ms),
     )))
-}
-
-async fn ensure_no_projection_rows(
-    transaction: &DatabaseTransaction,
-    thread_id: &ThreadId,
-) -> Result<(), RepositoryError> {
-    for table in [
-        "conversation_ordinals",
-        "conversation_turns",
-        "conversation_items",
-        "conversation_patches",
-    ] {
-        let sql = format!("SELECT 1 FROM {table} WHERE thread_id = ? LIMIT 1");
-        let row = transaction
-            .query_one_raw(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                sql,
-                [thread_id.as_str().to_owned().into()],
-            ))
-            .await
-            .map_err(|source| database_error("check conversation state absence", source))?;
-        if row.is_some() {
-            return Err(corrupt_data(
-                "conversation_state",
-                "thread_id",
-                &format!("{table} contains rows without conversation state"),
-            ));
-        }
-    }
-    Ok(())
 }
 
 async fn load_turns(
@@ -361,33 +351,35 @@ fn turn_from_row(
     row: &QueryResult,
     expected_thread_id: &ThreadId,
 ) -> Result<ConversationTurn, RepositoryError> {
-    let turn_id = TurnId::parse(raw_value::<String>(
+    let turn_id = TurnId::parse(raw_value::<String, _>(
         row,
         0,
         "conversation_turns",
         "turn_id",
     )?)
-    .map_err(|error| corrupt_data("conversation_turns", "turn_id", &error))?;
-    let persisted_thread_id = ThreadId::parse(raw_value::<String>(
+    .map_err(|error| corrupt_data("conversation_turns", "turn_id", error))?;
+    let persisted_thread_id = ThreadId::parse(raw_value::<String, _>(
         row,
         1,
         "conversation_turns",
         "thread_id",
     )?)
-    .map_err(|error| corrupt_data("conversation_turns", "thread_id", &error))?;
+    .map_err(|error| corrupt_data("conversation_turns", "thread_id", error))?;
     ensure_expected_thread(
         &persisted_thread_id,
         expected_thread_id,
         "conversation_turns",
         "thread_id",
+        || format!("expected thread {expected_thread_id}, found {persisted_thread_id}"),
     )?;
     let ordinal = TurnOrdinal::new(nonnegative_counter(
         raw_signed_integer(row, 2, "conversation_turns", "ordinal")?,
         "conversation_turns",
         "ordinal",
+        |value| format!("persisted counter value {value} is negative"),
     )?);
     require_literal(
-        &raw_value::<String>(row, 3, "conversation_turns", "kind")?,
+        &raw_value::<String, _>(row, 3, "conversation_turns", "kind")?,
         "turn",
         "conversation_turns",
         "kind",
@@ -396,14 +388,23 @@ fn turn_from_row(
         raw_signed_integer(row, 4, "conversation_turns", "revision")?,
         "conversation_turns",
         "revision",
+        |value| format!("persisted counter value {value} is negative"),
     )?);
     let lifecycle = parse_lifecycle(
-        &raw_value::<String>(row, 5, "conversation_turns", "lifecycle")?,
+        &raw_value::<String, _>(row, 5, "conversation_turns", "lifecycle")?,
         "conversation_turns",
+        |value| format!("unknown conversation lifecycle {value}"),
     )?;
     let created_at_ms = raw_signed_integer(row, 6, "conversation_turns", "created_at_ms")?;
     let updated_at_ms = raw_signed_integer(row, 7, "conversation_turns", "updated_at_ms")?;
-    validate_entity_times("conversation_turns", created_at_ms, updated_at_ms)?;
+    validate_entity_times(
+        "conversation_turns",
+        created_at_ms,
+        updated_at_ms,
+        |updated_at_ms, created_at_ms| {
+            format!("updated timestamp {updated_at_ms} precedes created timestamp {created_at_ms}")
+        },
+    )?;
 
     Ok(ConversationTurn {
         turn_id,
@@ -425,33 +426,34 @@ async fn item_from_row(
     selected_turn_ids: &HashSet<String>,
     transaction: &DatabaseTransaction,
 ) -> Result<ConversationItem, RepositoryError> {
-    let item_id = ItemId::parse(raw_value::<String>(
+    let item_id = ItemId::parse(raw_value::<String, _>(
         row,
         0,
         "conversation_items",
         "item_id",
     )?)
-    .map_err(|error| corrupt_data("conversation_items", "item_id", &error))?;
-    let persisted_thread_id = ThreadId::parse(raw_value::<String>(
+    .map_err(|error| corrupt_data("conversation_items", "item_id", error))?;
+    let persisted_thread_id = ThreadId::parse(raw_value::<String, _>(
         row,
         1,
         "conversation_items",
         "thread_id",
     )?)
-    .map_err(|error| corrupt_data("conversation_items", "thread_id", &error))?;
+    .map_err(|error| corrupt_data("conversation_items", "thread_id", error))?;
     ensure_expected_thread(
         &persisted_thread_id,
         expected_thread_id,
         "conversation_items",
         "thread_id",
+        || format!("expected thread {expected_thread_id}, found {persisted_thread_id}"),
     )?;
-    let turn_id = TurnId::parse(raw_value::<String>(
+    let turn_id = TurnId::parse(raw_value::<String, _>(
         row,
         2,
         "conversation_items",
         "turn_id",
     )?)
-    .map_err(|error| corrupt_data("conversation_items", "turn_id", &error))?;
+    .map_err(|error| corrupt_data("conversation_items", "turn_id", error))?;
     if !selected_turn_ids.contains(turn_id.as_str()) {
         return Err(corrupt_data(
             "conversation_items",
@@ -463,9 +465,10 @@ async fn item_from_row(
         raw_signed_integer(row, 3, "conversation_items", "ordinal")?,
         "conversation_items",
         "ordinal",
+        |value| format!("persisted counter value {value} is negative"),
     )?);
     require_literal(
-        &raw_value::<String>(row, 4, "conversation_items", "kind")?,
+        &raw_value::<String, _>(row, 4, "conversation_items", "kind")?,
         "item",
         "conversation_items",
         "kind",
@@ -474,17 +477,19 @@ async fn item_from_row(
         raw_signed_integer(row, 5, "conversation_items", "revision")?,
         "conversation_items",
         "revision",
+        |value| format!("persisted counter value {value} is negative"),
     )?);
     let lifecycle = parse_lifecycle(
-        &raw_value::<String>(row, 6, "conversation_items", "lifecycle")?,
+        &raw_value::<String, _>(row, 6, "conversation_items", "lifecycle")?,
         "conversation_items",
+        |value| format!("unknown conversation lifecycle {value}"),
     )?;
-    let item_kind = raw_value::<String>(row, 7, "conversation_items", "item_kind")?;
+    let item_kind = raw_value::<String, _>(row, 7, "conversation_items", "item_kind")?;
     let source_message_id =
-        raw_value::<Option<String>>(row, 8, "conversation_items", "source_message_id")?;
-    let run_id = raw_value::<Option<String>>(row, 9, "conversation_items", "run_id")?;
+        raw_value::<Option<String>, _>(row, 8, "conversation_items", "source_message_id")?;
+    let run_id = raw_value::<Option<String>, _>(row, 9, "conversation_items", "run_id")?;
     let native_item_key =
-        raw_value::<Option<String>>(row, 10, "conversation_items", "native_item_key")?;
+        raw_value::<Option<String>, _>(row, 10, "conversation_items", "native_item_key")?;
     if native_item_key.as_deref() == Some("") {
         return Err(corrupt_data(
             "conversation_items",
@@ -492,11 +497,18 @@ async fn item_from_row(
             "optional native item key must not be empty",
         ));
     }
-    let phase = raw_value::<Option<String>>(row, 11, "conversation_items", "phase")?;
-    let body = raw_value::<String>(row, 12, "conversation_items", "body")?;
+    let phase = raw_value::<Option<String>, _>(row, 11, "conversation_items", "phase")?;
+    let body = raw_value::<String, _>(row, 12, "conversation_items", "body")?;
     let created_at_ms = raw_signed_integer(row, 13, "conversation_items", "created_at_ms")?;
     let updated_at_ms = raw_signed_integer(row, 14, "conversation_items", "updated_at_ms")?;
-    validate_entity_times("conversation_items", created_at_ms, updated_at_ms)?;
+    validate_entity_times(
+        "conversation_items",
+        created_at_ms,
+        updated_at_ms,
+        |updated_at_ms, created_at_ms| {
+            format!("updated timestamp {updated_at_ms} precedes created timestamp {created_at_ms}")
+        },
+    )?;
 
     match item_kind.as_str() {
         "user_message" => {
@@ -514,9 +526,8 @@ async fn item_from_row(
                     "user-message item is missing its source message",
                 )
             })?;
-            let source_message_id = MessageId::parse(source_message_id).map_err(|error| {
-                corrupt_data("conversation_items", "source_message_id", &error)
-            })?;
+            let source_message_id = MessageId::parse(source_message_id)
+                .map_err(|error| corrupt_data("conversation_items", "source_message_id", error))?;
             let (text, attachments) = super::queue_message::read_queue_message_projection(
                 transaction,
                 &source_message_id,
@@ -532,7 +543,7 @@ async fn item_from_row(
             }
             if attachments.is_empty() {
                 let body = MessageBody::parse(body)
-                    .map_err(|error| corrupt_data("conversation_items", "body", &error))?;
+                    .map_err(|error| corrupt_data("conversation_items", "body", error))?;
                 Ok(ConversationItem::UserMessage(UserMessageItem {
                     item_id,
                     turn_id,
@@ -577,10 +588,15 @@ async fn item_from_row(
                 )
             })?;
             let run_id = RunId::parse(run_id)
-                .map_err(|error| corrupt_data("conversation_items", "run_id", &error))?;
-            let phase = parse_phase(phase)?;
+                .map_err(|error| corrupt_data("conversation_items", "run_id", error))?;
+            let phase = parse_phase(
+                phase,
+                "conversation_items",
+                "assistant-message item is missing its phase",
+                |value| format!("unknown assistant message phase {value}"),
+            )?;
             let body = AssistantBody::parse(body)
-                .map_err(|error| corrupt_data("conversation_items", "body", &error))?;
+                .map_err(|error| corrupt_data("conversation_items", "body", error))?;
             Ok(ConversationItem::AssistantMessage(AssistantMessageItem {
                 item_id,
                 turn_id,
@@ -597,66 +613,9 @@ async fn item_from_row(
         _ => Err(corrupt_data(
             "conversation_items",
             "item_kind",
-            &format!("unknown conversation item kind {item_kind}"),
+            format!("unknown conversation item kind {item_kind}"),
         )),
     }
-}
-
-fn parse_lifecycle(
-    value: &str,
-    table: &'static str,
-) -> Result<ConversationLifecycle, RepositoryError> {
-    match value {
-        "pending" => Ok(ConversationLifecycle::Pending),
-        "streaming" => Ok(ConversationLifecycle::Streaming),
-        "active" => Ok(ConversationLifecycle::Active),
-        "waiting" => Ok(ConversationLifecycle::Waiting),
-        "completed" => Ok(ConversationLifecycle::Completed),
-        "failed" => Ok(ConversationLifecycle::Failed),
-        "interrupted" => Ok(ConversationLifecycle::Interrupted),
-        "cancelled" => Ok(ConversationLifecycle::Cancelled),
-        _ => Err(corrupt_data(
-            table,
-            "lifecycle",
-            &format!("unknown conversation lifecycle {value}"),
-        )),
-    }
-}
-
-fn parse_phase(value: Option<String>) -> Result<AssistantMessagePhase, RepositoryError> {
-    let value = value.ok_or_else(|| {
-        corrupt_data(
-            "conversation_items",
-            "phase",
-            "assistant-message item is missing its phase",
-        )
-    })?;
-    match value.as_str() {
-        "commentary" => Ok(AssistantMessagePhase::Commentary),
-        "final" => Ok(AssistantMessagePhase::Final),
-        "unspecified" => Ok(AssistantMessagePhase::Unspecified),
-        _ => Err(corrupt_data(
-            "conversation_items",
-            "phase",
-            &format!("unknown assistant message phase {value}"),
-        )),
-    }
-}
-
-fn ensure_expected_thread(
-    actual: &ThreadId,
-    expected: &ThreadId,
-    table: &'static str,
-    field: &'static str,
-) -> Result<(), RepositoryError> {
-    if actual == expected {
-        return Ok(());
-    }
-    Err(corrupt_data(
-        table,
-        field,
-        &format!("expected thread {expected}, found {actual}"),
-    ))
 }
 
 fn require_literal(
@@ -671,62 +630,8 @@ fn require_literal(
     Err(corrupt_data(
         table,
         field,
-        &format!("expected {expected}, found {actual}"),
+        format!("expected {expected}, found {actual}"),
     ))
-}
-
-fn nonnegative_counter(
-    value: i64,
-    table: &'static str,
-    field: &'static str,
-) -> Result<u64, RepositoryError> {
-    u64::try_from(value).map_err(|_| {
-        corrupt_data(
-            table,
-            field,
-            &format!("persisted counter value {value} is negative"),
-        )
-    })
-}
-
-fn validate_entity_times(
-    table: &'static str,
-    created_at_ms: i64,
-    updated_at_ms: i64,
-) -> Result<(), RepositoryError> {
-    if updated_at_ms >= created_at_ms {
-        return Ok(());
-    }
-    Err(corrupt_data(
-        table,
-        "updated_at_ms",
-        &format!("updated timestamp {updated_at_ms} precedes created timestamp {created_at_ms}"),
-    ))
-}
-
-fn raw_signed_integer(
-    row: &QueryResult,
-    index: usize,
-    table: &'static str,
-    field: &'static str,
-) -> Result<i64, RepositoryError> {
-    let value = raw_value::<String>(row, index, table, field)?;
-    value
-        .parse::<i64>()
-        .map_err(|error| corrupt_data(table, field, &error))
-}
-
-fn raw_value<T>(
-    row: &QueryResult,
-    index: usize,
-    table: &'static str,
-    field: &'static str,
-) -> Result<T, RepositoryError>
-where
-    T: sea_orm::TryGetable,
-{
-    row.try_get_by_index::<T>(index)
-        .map_err(|source| corrupt_data(table, field, &source))
 }
 
 fn snapshot_error(error: &ConversationSnapshotError) -> RepositoryError {

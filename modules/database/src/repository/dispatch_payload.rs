@@ -71,11 +71,11 @@ impl Repository {
         };
 
         let correlation_id = RequestId::parse(dispatch.correlation_id)
-            .map_err(|error| corrupt_data("message_dispatches", "correlation_id", &error))?;
+            .map_err(|error| corrupt_data("message_dispatches", "correlation_id", error))?;
         let thread_id = ThreadId::parse(message.thread_id)
-            .map_err(|error| corrupt_data("messages", "thread_id", &error))?;
+            .map_err(|error| corrupt_data("messages", "thread_id", error))?;
         let body = MessageBody::parse(message.body)
-            .map_err(|error| corrupt_data("messages", "body", &error))?;
+            .map_err(|error| corrupt_data("messages", "body", error))?;
 
         Ok(Some(MessageDispatchPayload {
             message_id: message_id.clone(),
@@ -87,6 +87,12 @@ impl Repository {
 
     /// Loads the immutable general text/image dispatch payload without
     /// touching claim or lease state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] when the dispatch references a missing
+    /// message or payload, a stored identifier or body fails validation, or a
+    /// database query fails.
     pub async fn read_queue_message_dispatch_payload(
         &self,
         message_id: &MessageId,
@@ -101,9 +107,9 @@ impl Repository {
         };
 
         let correlation_id = RequestId::parse(dispatch.correlation_id)
-            .map_err(|error| corrupt_data("message_dispatches", "correlation_id", &error))?;
+            .map_err(|error| corrupt_data("message_dispatches", "correlation_id", error))?;
         let thread_id = ThreadId::parse(message.thread_id)
-            .map_err(|error| corrupt_data("messages", "thread_id", &error))?;
+            .map_err(|error| corrupt_data("messages", "thread_id", error))?;
         let payload = super::queue_message::read_queue_message_payload(
             &self.database,
             message_id,
@@ -117,7 +123,7 @@ impl Repository {
             Some(steer_run_id) => Some(
                 artisan_domain::SteerTarget::new(
                     RunId::parse(steer_run_id.to_owned()).map_err(|error| {
-                        corrupt_data("message_dispatches", "steer_run_id", &error)
+                        corrupt_data("message_dispatches", "steer_run_id", error)
                     })?,
                 ),
             ),

@@ -423,7 +423,7 @@ async fn lookup_attach_receipt(
         });
     }
     let project_id = ProjectId::parse(required(row.project_id, "command_receipts", "project_id")?)
-        .map_err(|error| corrupt_data("command_receipts", "project_id", &error))?;
+        .map_err(|error| corrupt_data("command_receipts", "project_id", error))?;
     let project = project_row_by_id(database, &project_id)
         .await?
         .map(project_summary)
@@ -456,7 +456,7 @@ async fn lookup_create_receipt(
         });
     }
     let thread_id = ThreadId::parse(required(row.thread_id, "command_receipts", "thread_id")?)
-        .map_err(|error| corrupt_data("command_receipts", "thread_id", &error))?;
+        .map_err(|error| corrupt_data("command_receipts", "thread_id", error))?;
     let thread = thread_row_by_id(database, &thread_id)
         .await?
         .map(thread_summary)
@@ -516,11 +516,11 @@ pub(super) fn project_summary(
 ) -> Result<ProjectSummary, RepositoryError> {
     Ok(ProjectSummary {
         project_id: ProjectId::parse(row.project_id)
-            .map_err(|error| corrupt_data("attached_projects", "project_id", &error))?,
+            .map_err(|error| corrupt_data("attached_projects", "project_id", error))?,
         display_name: DisplayName::parse(row.display_name)
-            .map_err(|error| corrupt_data("attached_projects", "display_name", &error))?,
+            .map_err(|error| corrupt_data("attached_projects", "display_name", error))?,
         root_path: RootPath::parse(row.root_path)
-            .map_err(|error| corrupt_data("attached_projects", "root_path", &error))?,
+            .map_err(|error| corrupt_data("attached_projects", "root_path", error))?,
         attached_at: UnixMillis::from_millis(row.attached_at_ms),
     })
 }
@@ -528,11 +528,11 @@ pub(super) fn project_summary(
 fn thread_summary(row: entities::Thread) -> Result<ThreadSummary, RepositoryError> {
     Ok(ThreadSummary {
         thread_id: ThreadId::parse(row.thread_id)
-            .map_err(|error| corrupt_data("threads", "thread_id", &error))?,
+            .map_err(|error| corrupt_data("threads", "thread_id", error))?,
         project_id: ProjectId::parse(row.project_id)
-            .map_err(|error| corrupt_data("threads", "project_id", &error))?,
+            .map_err(|error| corrupt_data("threads", "project_id", error))?,
         title: ThreadTitle::parse(row.title)
-            .map_err(|error| corrupt_data("threads", "title", &error))?,
+            .map_err(|error| corrupt_data("threads", "title", error))?,
         created_at: UnixMillis::from_millis(row.created_at_ms),
         updated_at: UnixMillis::from_millis(row.updated_at_ms),
     })

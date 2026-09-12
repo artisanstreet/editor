@@ -134,6 +134,12 @@ impl Repository {
     ///
     /// The explicit command scope must match the report. The persisted run
     /// snapshot is then checked before the row is inserted or replaced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunUsageRepositoryError`] when the command scope disagrees
+    /// with the report, the run snapshot does not match, a stored usage row
+    /// fails validation, or a transaction fails.
     pub async fn record_run_usage(
         &self,
         command: RecordRunUsage<'_>,
@@ -172,6 +178,12 @@ impl Repository {
 
     /// Reads the current (highest accepted provider sequence) usage for an
     /// exact run/thread scope after revalidating its immutable run snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunUsageRepositoryError`] when the run snapshot is missing
+    /// or invalid, a stored usage row fails validation, or a transaction
+    /// fails.
     pub async fn read_latest_run_usage(
         &self,
         run_id: &RunId,
@@ -233,7 +245,7 @@ async fn load_run_authority(
         });
     }
     if run.generation < 0
-        || !matches!(run.engine_run_config_version, Some(1) | Some(2))
+        || !matches!(run.engine_run_config_version, Some(1 | 2))
         || run
             .engine_run_config_revision
             .and_then(|value| u64::try_from(value).ok())

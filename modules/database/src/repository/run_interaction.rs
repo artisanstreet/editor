@@ -187,6 +187,11 @@ pub struct AppliedInteraction {
 }
 
 /// Typed outcome of one resolve call.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "every payload variant carries the durable receipt by value; boxing would push an \
+              allocation into each arm of every match for no correctness gain"
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveInteractionOutcome {
     /// This transaction recorded the decision.
@@ -259,6 +264,11 @@ impl Repository {
     ///
     /// Returns [`RunInteractionError`] for invalid bindings, domain bound
     /// violations, record conflicts, or database failures.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the constant validation sequence `1` were outside the
+    /// domain sequence bound.
     pub async fn record_approval_request(
         &self,
         command: RecordApprovalRequest<'_>,
@@ -298,6 +308,11 @@ impl Repository {
     ///
     /// Returns [`RunInteractionError`] for invalid bindings, domain bound
     /// violations, record conflicts, or database failures.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the constant validation sequence `1` were outside the
+    /// domain sequence bound.
     pub async fn record_question_request(
         &self,
         command: RecordQuestionRequest<'_>,
@@ -541,12 +556,17 @@ impl Repository {
                     RunInteractionError::Repository(super::corrupt_data(
                         "run_checkpoints",
                         "engine_checkpoint_blob",
-                        &source,
+                        source,
                     ))
                 })?;
         Ok(decoded.max_sequence())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the shared private record path threads each identity of the durable row; every \
+                  field is already a distinct command local at the call sites"
+    )]
     async fn record_request(
         &self,
         thread_id: &ThreadId,
@@ -855,7 +875,6 @@ impl Repository {
             answers_json: Set(encoded_answers),
             binding_version: Set(scope.binding_version),
             responded_at_ms: Set(millis(scope.responded_at)),
-            ..Default::default()
         };
         model.insert(transaction).await.map_err(|source| {
             RunInteractionError::Repository(database_error("insert interaction receipt", source))
@@ -1399,7 +1418,7 @@ fn question_input_from_json(value: &Value) -> Result<QuestionInput, RunInteracti
                                 RunInteractionError::Repository(super::corrupt_data(
                                     "pending_run_interactions",
                                     "request_json",
-                                    &source,
+                                    source,
                                 ))
                             })
                         })

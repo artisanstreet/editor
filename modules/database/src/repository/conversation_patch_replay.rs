@@ -6,19 +6,18 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, Statement, Transa
 
 use artisan_domain::bounds::CONVERSATION_PATCH_BATCH_MAX_PATCHES;
 use artisan_domain::{
-    AssistantBody, AssistantMessageItem, AssistantMessagePhase, ConversationCursor,
-    ConversationItem, ConversationLifecycle, ConversationPatch, ConversationTurn, IncrementalText,
-    ItemId, ItemOrdinal, MessageBody, MessageId, PatchBatch, PatchId, PatchSequence, Revision,
-    RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis,
+    AssistantBody, AssistantMessageItem, ConversationCursor, ConversationItem, ConversationPatch,
+    ConversationTurn, IncrementalText, ItemId, ItemOrdinal, MessageBody, MessageId, PatchBatch,
+    PatchId, PatchSequence, Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis,
 };
 
+use super::common::{
+    STATE_QUERY, THREAD_QUERY, ensure_expected_thread, ensure_no_projection_rows,
+    nonnegative_counter, parse_lifecycle, parse_phase, raw_signed_integer, raw_value,
+    validate_entity_times,
+};
 use super::{Repository, RepositoryError, corrupt_data, database_error};
 
-const THREAD_QUERY: &str = "SELECT thread_id, CAST(created_at_ms AS TEXT), CAST(updated_at_ms AS TEXT) \
-     FROM threads WHERE thread_id = ? LIMIT 1";
-const STATE_QUERY: &str = "SELECT thread_id, CAST(next_renderer_ordinal AS TEXT), \
-            CAST(last_patch_sequence AS TEXT), CAST(updated_at_ms AS TEXT) \
-     FROM conversation_state WHERE thread_id = ? LIMIT 1";
 const PATCH_SELECT: &str = "SELECT patch_id, thread_id, CAST(sequence AS TEXT), kind, \
             CAST(revision AS TEXT), CAST(recorded_at_ms AS TEXT), turn_id, item_id, \
             CAST(ordinal AS TEXT), lifecycle, item_kind, run_id, phase, body, fragment, \
@@ -116,13 +115,13 @@ async fn read_replay(
     let first_sequence = patches.first().expect("non-empty").sequence().get();
     let expected_first = after_cursor
         .checked_next_sequence()
-        .map_err(|error| corrupt_data("conversation_patches", "sequence", &error))?
+        .map_err(|error| corrupt_data("conversation_patches", "sequence", error))?
         .get();
     if first_sequence != expected_first {
         return Err(corrupt_data(
             "conversation_patches",
             "sequence",
-            &format!("expected sequence {expected_first}, found {first_sequence}"),
+            format!("expected sequence {expected_first}, found {first_sequence}"),
         ));
     }
     let last_sequence = patches.last().expect("non-empty").sequence().get();
@@ -156,12 +155,21 @@ async fn ensure_thread_exists(
             thread_id: thread_id.clone(),
         });
     };
-    let persisted = ThreadId::parse(raw_value::<String>(&row, 0, "threads", "thread_id")?)
-        .map_err(|error| corrupt_data("threads", "thread_id", &error))?;
-    ensure_expected_thread(&persisted, thread_id, "threads", "thread_id")?;
+    let persisted = ThreadId::parse(raw_value::<String, _>(&row, 0, "threads", "thread_id")?)
+        .map_err(|error| corrupt_data("threads", "thread_id", error))?;
+    ensure_expected_thread(&persisted, thread_id, "threads", "thread_id", || {
+        "thread id mismatch".to_owned()
+    })?;
     let created = raw_signed_integer(&row, 1, "threads", "created_at_ms")?;
     let updated = raw_signed_integer(&row, 2, "threads", "updated_at_ms")?;
-    validate_entity_times("threads", created, updated)?;
+    validate_entity_times(
+        "threads",
+        created,
+        updated,
+        |updated_at_ms, created_at_ms| {
+            format!("updated {updated_at_ms} precedes created {created_at_ms}")
+        },
+    )?;
     Ok(())
 }
 
@@ -178,54 +186,41 @@ async fn load_tail(
         .await
         .map_err(|source| database_error("load patch replay state", source))?;
     let Some(row) = row else {
-        ensure_no_projection_rows(transaction, thread_id).await?;
+        ensure_no_projection_rows(transaction, thread_id, "check patch replay state absence")
+            .await?;
         return Ok(ConversationCursor::default());
     };
-    let persisted = ThreadId::parse(raw_value::<String>(
+    let persisted = ThreadId::parse(raw_value::<String, _>(
         &row,
         0,
         "conversation_state",
         "thread_id",
     )?)
-    .map_err(|error| corrupt_data("conversation_state", "thread_id", &error))?;
-    ensure_expected_thread(&persisted, thread_id, "conversation_state", "thread_id")?;
+    .map_err(|error| corrupt_data("conversation_state", "thread_id", error))?;
+    ensure_expected_thread(
+        &persisted,
+        thread_id,
+        "conversation_state",
+        "thread_id",
+        || "thread id mismatch".to_owned(),
+    )?;
     let next_ordinal = raw_signed_integer(&row, 1, "conversation_state", "next_renderer_ordinal")?;
-    let _ = nonnegative_counter(next_ordinal, "conversation_state", "next_renderer_ordinal")?;
+    let _ = nonnegative_counter(
+        next_ordinal,
+        "conversation_state",
+        "next_renderer_ordinal",
+        |value| format!("counter value {value} is negative"),
+    )?;
     let last_patch = raw_signed_integer(&row, 2, "conversation_state", "last_patch_sequence")?;
-    let tail_u64 = nonnegative_counter(last_patch, "conversation_state", "last_patch_sequence")?;
+    let tail_u64 = nonnegative_counter(
+        last_patch,
+        "conversation_state",
+        "last_patch_sequence",
+        |value| format!("counter value {value} is negative"),
+    )?;
     let updated = raw_signed_integer(&row, 3, "conversation_state", "updated_at_ms")?;
     let _ = updated;
     Ok(ConversationCursor::new(tail_u64))
-}
-
-async fn ensure_no_projection_rows(
-    transaction: &DatabaseTransaction,
-    thread_id: &ThreadId,
-) -> Result<(), RepositoryError> {
-    for table in [
-        "conversation_ordinals",
-        "conversation_turns",
-        "conversation_items",
-        "conversation_patches",
-    ] {
-        let sql = format!("SELECT 1 FROM {table} WHERE thread_id = ? LIMIT 1");
-        let row = transaction
-            .query_one_raw(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                sql,
-                [thread_id.as_str().to_owned().into()],
-            ))
-            .await
-            .map_err(|source| database_error("check patch replay state absence", source))?;
-        if row.is_some() {
-            return Err(corrupt_data(
-                "conversation_state",
-                "thread_id",
-                &format!("{table} contains rows without conversation state"),
-            ));
-        }
-    }
-    Ok(())
 }
 
 async fn load_patches(
@@ -282,9 +277,9 @@ async fn patch_from_row(
     tail: ConversationCursor,
     transaction: &DatabaseTransaction,
 ) -> Result<ConversationPatch, RepositoryError> {
-    let patch_id_raw = raw_value::<String>(row, 0, "conversation_patches", "patch_id")?;
+    let patch_id_raw = raw_value::<String, _>(row, 0, "conversation_patches", "patch_id")?;
     let patch_id = PatchId::parse(patch_id_raw)
-        .map_err(|error| corrupt_data("conversation_patches", "patch_id", &error))?;
+        .map_err(|error| corrupt_data("conversation_patches", "patch_id", error))?;
     if !seen_patch_ids.insert(patch_id.as_str().to_owned()) {
         return Err(corrupt_data(
             "conversation_patches",
@@ -292,14 +287,15 @@ async fn patch_from_row(
             "duplicate patch identity in batch",
         ));
     }
-    let thread_raw = raw_value::<String>(row, 1, "conversation_patches", "thread_id")?;
+    let thread_raw = raw_value::<String, _>(row, 1, "conversation_patches", "thread_id")?;
     let persisted_thread = ThreadId::parse(thread_raw)
-        .map_err(|error| corrupt_data("conversation_patches", "thread_id", &error))?;
+        .map_err(|error| corrupt_data("conversation_patches", "thread_id", error))?;
     ensure_expected_thread(
         &persisted_thread,
         expected_thread_id,
         "conversation_patches",
         "thread_id",
+        || "thread id mismatch".to_owned(),
     )?;
     let sequence_raw = raw_signed_integer(row, 2, "conversation_patches", "sequence")?;
     if sequence_raw <= 0 {
@@ -324,7 +320,7 @@ async fn patch_from_row(
         ));
     }
     let sequence = PatchSequence::new(sequence_u64)
-        .map_err(|error| corrupt_data("conversation_patches", "sequence", &error))?;
+        .map_err(|error| corrupt_data("conversation_patches", "sequence", error))?;
     if !seen_sequences.insert(sequence_u64) {
         return Err(corrupt_data(
             "conversation_patches",
@@ -332,27 +328,32 @@ async fn patch_from_row(
             "duplicate patch sequence",
         ));
     }
-    let kind = raw_value::<String>(row, 3, "conversation_patches", "kind")?;
+    let kind = raw_value::<String, _>(row, 3, "conversation_patches", "kind")?;
     let revision_raw = raw_signed_integer(row, 4, "conversation_patches", "revision")?;
-    let revision_u64 = nonnegative_counter(revision_raw, "conversation_patches", "revision")?;
+    let revision_u64 =
+        nonnegative_counter(revision_raw, "conversation_patches", "revision", |value| {
+            format!("counter value {value} is negative")
+        })?;
     let revision = Revision::new(revision_u64);
     let recorded_raw = raw_signed_integer(row, 5, "conversation_patches", "recorded_at_ms")?;
     let recorded_at = UnixMillis::from_millis(recorded_raw);
-    let turn_id_opt = raw_value::<Option<String>>(row, 6, "conversation_patches", "turn_id")?;
-    let item_id_opt = raw_value::<Option<String>>(row, 7, "conversation_patches", "item_id")?;
+    let turn_id_opt = raw_value::<Option<String>, _>(row, 6, "conversation_patches", "turn_id")?;
+    let item_id_opt = raw_value::<Option<String>, _>(row, 7, "conversation_patches", "item_id")?;
     let ordinal_opt = raw_opt_signed_integer(row, 8, "conversation_patches", "ordinal")?;
-    let lifecycle_opt = raw_value::<Option<String>>(row, 9, "conversation_patches", "lifecycle")?;
-    let item_kind_opt = raw_value::<Option<String>>(row, 10, "conversation_patches", "item_kind")?;
-    let run_id_opt = raw_value::<Option<String>>(row, 11, "conversation_patches", "run_id")?;
-    let phase_opt = raw_value::<Option<String>>(row, 12, "conversation_patches", "phase")?;
-    let body_opt = raw_value::<Option<String>>(row, 13, "conversation_patches", "body")?;
-    let fragment_opt = raw_value::<Option<String>>(row, 14, "conversation_patches", "fragment")?;
+    let lifecycle_opt =
+        raw_value::<Option<String>, _>(row, 9, "conversation_patches", "lifecycle")?;
+    let item_kind_opt =
+        raw_value::<Option<String>, _>(row, 10, "conversation_patches", "item_kind")?;
+    let run_id_opt = raw_value::<Option<String>, _>(row, 11, "conversation_patches", "run_id")?;
+    let phase_opt = raw_value::<Option<String>, _>(row, 12, "conversation_patches", "phase")?;
+    let body_opt = raw_value::<Option<String>, _>(row, 13, "conversation_patches", "body")?;
+    let fragment_opt = raw_value::<Option<String>, _>(row, 14, "conversation_patches", "fragment")?;
     let entity_created_opt =
         raw_opt_signed_integer(row, 15, "conversation_patches", "entity_created_at_ms")?;
     let entity_updated_opt =
         raw_opt_signed_integer(row, 16, "conversation_patches", "entity_updated_at_ms")?;
     let source_message_id_opt =
-        raw_value::<Option<String>>(row, 17, "conversation_items", "source_message_id")?;
+        raw_value::<Option<String>, _>(row, 17, "conversation_items", "source_message_id")?;
 
     match kind.as_str() {
         "turn_upsert" => {
@@ -377,7 +378,7 @@ async fn patch_from_row(
                 )
             })?;
             let turn_id = TurnId::parse(turn_id_str)
-                .map_err(|error| corrupt_data("conversation_patches", "turn_id", &error))?;
+                .map_err(|error| corrupt_data("conversation_patches", "turn_id", error))?;
             let ordinal_raw = ordinal_opt.ok_or_else(|| {
                 corrupt_data(
                     "conversation_patches",
@@ -385,7 +386,10 @@ async fn patch_from_row(
                     "turn_upsert missing ordinal",
                 )
             })?;
-            let ordinal_u64 = nonnegative_counter(ordinal_raw, "conversation_patches", "ordinal")?;
+            let ordinal_u64 =
+                nonnegative_counter(ordinal_raw, "conversation_patches", "ordinal", |value| {
+                    format!("counter value {value} is negative")
+                })?;
             let ordinal = TurnOrdinal::new(ordinal_u64);
             let lifecycle_str = lifecycle_opt.ok_or_else(|| {
                 corrupt_data(
@@ -394,7 +398,9 @@ async fn patch_from_row(
                     "turn_upsert missing lifecycle",
                 )
             })?;
-            let lifecycle = parse_lifecycle(&lifecycle_str, "conversation_patches")?;
+            let lifecycle = parse_lifecycle(&lifecycle_str, "conversation_patches", |_| {
+                "unknown lifecycle".to_owned()
+            })?;
             let created_raw = entity_created_opt.ok_or_else(|| {
                 corrupt_data(
                     "conversation_patches",
@@ -409,7 +415,14 @@ async fn patch_from_row(
                     "turn_upsert missing entity stamps",
                 )
             })?;
-            validate_entity_times("conversation_patches", created_raw, updated_raw)?;
+            validate_entity_times(
+                "conversation_patches",
+                created_raw,
+                updated_raw,
+                |updated_at_ms, created_at_ms| {
+                    format!("updated {updated_at_ms} precedes created {created_at_ms}")
+                },
+            )?;
             let turn = ConversationTurn {
                 turn_id,
                 ordinal,
@@ -447,9 +460,9 @@ async fn patch_from_row(
                 )
             })?;
             let turn_id = TurnId::parse(turn_id_str)
-                .map_err(|error| corrupt_data("conversation_patches", "turn_id", &error))?;
+                .map_err(|error| corrupt_data("conversation_patches", "turn_id", error))?;
             let item_id = ItemId::parse(item_id_str)
-                .map_err(|error| corrupt_data("conversation_patches", "item_id", &error))?;
+                .map_err(|error| corrupt_data("conversation_patches", "item_id", error))?;
             let ordinal_raw = ordinal_opt.ok_or_else(|| {
                 corrupt_data(
                     "conversation_patches",
@@ -457,7 +470,10 @@ async fn patch_from_row(
                     "item_upsert missing ordinal",
                 )
             })?;
-            let ordinal_u64 = nonnegative_counter(ordinal_raw, "conversation_patches", "ordinal")?;
+            let ordinal_u64 =
+                nonnegative_counter(ordinal_raw, "conversation_patches", "ordinal", |value| {
+                    format!("counter value {value} is negative")
+                })?;
             let ordinal = ItemOrdinal::new(ordinal_u64);
             let lifecycle_str = lifecycle_opt.ok_or_else(|| {
                 corrupt_data(
@@ -466,7 +482,9 @@ async fn patch_from_row(
                     "item_upsert missing lifecycle",
                 )
             })?;
-            let lifecycle = parse_lifecycle(&lifecycle_str, "conversation_patches")?;
+            let lifecycle = parse_lifecycle(&lifecycle_str, "conversation_patches", |_| {
+                "unknown lifecycle".to_owned()
+            })?;
             let item_kind_str = item_kind_opt.ok_or_else(|| {
                 corrupt_data(
                     "conversation_patches",
@@ -491,7 +509,14 @@ async fn patch_from_row(
                     "item_upsert missing stamps",
                 )
             })?;
-            validate_entity_times("conversation_patches", created_raw, updated_raw)?;
+            validate_entity_times(
+                "conversation_patches",
+                created_raw,
+                updated_raw,
+                |updated_at_ms, created_at_ms| {
+                    format!("updated {updated_at_ms} precedes created {created_at_ms}")
+                },
+            )?;
             let created_at = UnixMillis::from_millis(created_raw);
             let updated_at = UnixMillis::from_millis(updated_raw);
             let _ = recorded_raw;
@@ -506,7 +531,7 @@ async fn patch_from_row(
                     }
                     let Some(source_message_id) = source_message_id_opt else {
                         let body = MessageBody::parse(body_str).map_err(|error| {
-                            corrupt_data("conversation_patches", "body", &error)
+                            corrupt_data("conversation_patches", "body", error)
                         })?;
                         return Ok(ConversationPatch::ItemUpsert {
                             patch_id,
@@ -524,16 +549,16 @@ async fn patch_from_row(
                             }),
                         });
                     };
-                    let source_message_id = MessageId::parse(source_message_id).map_err(|error| {
-                        corrupt_data("conversation_patches", "source_message_id", &error)
-                    })?;
-                    let (text, attachments) =
-                        super::queue_message::read_queue_message_projection(
-                            transaction,
-                            &source_message_id,
-                            expected_thread_id,
-                        )
-                        .await?;
+                    let source_message_id =
+                        MessageId::parse(source_message_id).map_err(|error| {
+                            corrupt_data("conversation_patches", "source_message_id", error)
+                        })?;
+                    let (text, attachments) = super::queue_message::read_queue_message_projection(
+                        transaction,
+                        &source_message_id,
+                        expected_thread_id,
+                    )
+                    .await?;
                     if body_str != text.as_ref().map_or("", |value| value.as_str()) {
                         return Err(corrupt_data(
                             "conversation_patches",
@@ -543,7 +568,7 @@ async fn patch_from_row(
                     }
                     if attachments.is_empty() {
                         let body = MessageBody::parse(body_str).map_err(|error| {
-                            corrupt_data("conversation_patches", "body", &error)
+                            corrupt_data("conversation_patches", "body", error)
                         })?;
                         ConversationItem::UserMessage(artisan_domain::UserMessageItem {
                             item_id,
@@ -582,7 +607,7 @@ async fn patch_from_row(
                         )
                     })?;
                     let run_id = RunId::parse(run_id_str)
-                        .map_err(|error| corrupt_data("conversation_patches", "run_id", &error))?;
+                        .map_err(|error| corrupt_data("conversation_patches", "run_id", error))?;
                     let phase_str = phase_opt.ok_or_else(|| {
                         corrupt_data(
                             "conversation_patches",
@@ -590,9 +615,14 @@ async fn patch_from_row(
                             "assistant item missing phase",
                         )
                     })?;
-                    let phase = parse_phase(Some(phase_str))?;
+                    let phase = parse_phase(
+                        Some(phase_str),
+                        "conversation_patches",
+                        "assistant item missing phase",
+                        |_| "unknown phase".to_owned(),
+                    )?;
                     let body = AssistantBody::parse(body_str)
-                        .map_err(|error| corrupt_data("conversation_patches", "body", &error))?;
+                        .map_err(|error| corrupt_data("conversation_patches", "body", error))?;
                     ConversationItem::AssistantMessage(AssistantMessageItem {
                         item_id,
                         turn_id,
@@ -645,7 +675,7 @@ async fn patch_from_row(
                 )
             })?;
             let item_id = ItemId::parse(item_id_str)
-                .map_err(|error| corrupt_data("conversation_patches", "item_id", &error))?;
+                .map_err(|error| corrupt_data("conversation_patches", "item_id", error))?;
             let fragment_str = fragment_opt.ok_or_else(|| {
                 corrupt_data(
                     "conversation_patches",
@@ -654,7 +684,7 @@ async fn patch_from_row(
                 )
             })?;
             let text = IncrementalText::parse(fragment_str)
-                .map_err(|error| corrupt_data("conversation_patches", "fragment", &error))?;
+                .map_err(|error| corrupt_data("conversation_patches", "fragment", error))?;
             Ok(ConversationPatch::ItemAppend {
                 patch_id,
                 sequence,
@@ -689,7 +719,7 @@ async fn patch_from_row(
                 )
             })?;
             let item_id = ItemId::parse(item_id_str)
-                .map_err(|error| corrupt_data("conversation_patches", "item_id", &error))?;
+                .map_err(|error| corrupt_data("conversation_patches", "item_id", error))?;
             let lifecycle_str = lifecycle_opt.ok_or_else(|| {
                 corrupt_data(
                     "conversation_patches",
@@ -697,7 +727,9 @@ async fn patch_from_row(
                     "item_lifecycle missing lifecycle",
                 )
             })?;
-            let lifecycle = parse_lifecycle(&lifecycle_str, "conversation_patches")?;
+            let lifecycle = parse_lifecycle(&lifecycle_str, "conversation_patches", |_| {
+                "unknown lifecycle".to_owned()
+            })?;
             Ok(ConversationPatch::ItemLifecycle {
                 patch_id,
                 sequence,
@@ -732,7 +764,7 @@ async fn patch_from_row(
                 )
             })?;
             let turn_id = TurnId::parse(turn_id_str)
-                .map_err(|error| corrupt_data("conversation_patches", "turn_id", &error))?;
+                .map_err(|error| corrupt_data("conversation_patches", "turn_id", error))?;
             let lifecycle_str = lifecycle_opt.ok_or_else(|| {
                 corrupt_data(
                     "conversation_patches",
@@ -740,7 +772,9 @@ async fn patch_from_row(
                     "turn_lifecycle missing lifecycle",
                 )
             })?;
-            let lifecycle = parse_lifecycle(&lifecycle_str, "conversation_patches")?;
+            let lifecycle = parse_lifecycle(&lifecycle_str, "conversation_patches", |_| {
+                "unknown lifecycle".to_owned()
+            })?;
             Ok(ConversationPatch::TurnLifecycle {
                 patch_id,
                 sequence,
@@ -758,98 +792,13 @@ async fn patch_from_row(
     }
 }
 
-fn parse_lifecycle(
-    value: &str,
-    table: &'static str,
-) -> Result<ConversationLifecycle, RepositoryError> {
-    match value {
-        "pending" => Ok(ConversationLifecycle::Pending),
-        "streaming" => Ok(ConversationLifecycle::Streaming),
-        "active" => Ok(ConversationLifecycle::Active),
-        "waiting" => Ok(ConversationLifecycle::Waiting),
-        "completed" => Ok(ConversationLifecycle::Completed),
-        "failed" => Ok(ConversationLifecycle::Failed),
-        "interrupted" => Ok(ConversationLifecycle::Interrupted),
-        "cancelled" => Ok(ConversationLifecycle::Cancelled),
-        _ => Err(corrupt_data(table, "lifecycle", "unknown lifecycle")),
-    }
-}
-
-fn parse_phase(value: Option<String>) -> Result<AssistantMessagePhase, RepositoryError> {
-    let value = value.ok_or_else(|| {
-        corrupt_data(
-            "conversation_patches",
-            "phase",
-            "assistant item missing phase",
-        )
-    })?;
-    match value.as_str() {
-        "commentary" => Ok(AssistantMessagePhase::Commentary),
-        "final" => Ok(AssistantMessagePhase::Final),
-        "unspecified" => Ok(AssistantMessagePhase::Unspecified),
-        _ => Err(corrupt_data(
-            "conversation_patches",
-            "phase",
-            "unknown phase",
-        )),
-    }
-}
-
-fn ensure_expected_thread(
-    actual: &ThreadId,
-    expected: &ThreadId,
-    table: &'static str,
-    field: &'static str,
-) -> Result<(), RepositoryError> {
-    if actual == expected {
-        return Ok(());
-    }
-    Err(corrupt_data(table, field, "thread id mismatch"))
-}
-
-fn nonnegative_counter(
-    value: i64,
-    table: &'static str,
-    field: &'static str,
-) -> Result<u64, RepositoryError> {
-    u64::try_from(value)
-        .map_err(|_| corrupt_data(table, field, &format!("counter value {value} is negative")))
-}
-
-fn validate_entity_times(
-    table: &'static str,
-    created_at_ms: i64,
-    updated_at_ms: i64,
-) -> Result<(), RepositoryError> {
-    if updated_at_ms >= created_at_ms {
-        return Ok(());
-    }
-    Err(corrupt_data(
-        table,
-        "updated_at_ms",
-        &format!("updated {updated_at_ms} precedes created {created_at_ms}"),
-    ))
-}
-
-fn raw_signed_integer(
-    row: &sea_orm::QueryResult,
-    index: usize,
-    table: &'static str,
-    field: &'static str,
-) -> Result<i64, RepositoryError> {
-    let value = raw_value::<String>(row, index, table, field)?;
-    value
-        .parse::<i64>()
-        .map_err(|error| corrupt_data(table, field, &error))
-}
-
 fn raw_opt_signed_integer(
     row: &sea_orm::QueryResult,
     index: usize,
     table: &'static str,
     field: &'static str,
 ) -> Result<Option<i64>, RepositoryError> {
-    let value = raw_value::<Option<String>>(row, index, table, field)?;
+    let value = raw_value::<Option<String>, _>(row, index, table, field)?;
     match value {
         None => Ok(None),
         Some(text) => text
@@ -857,17 +806,4 @@ fn raw_opt_signed_integer(
             .map(Some)
             .map_err(|error| corrupt_data(table, field, &error)),
     }
-}
-
-fn raw_value<T>(
-    row: &sea_orm::QueryResult,
-    index: usize,
-    table: &'static str,
-    field: &'static str,
-) -> Result<T, RepositoryError>
-where
-    T: sea_orm::TryGetable,
-{
-    row.try_get_by_index::<T>(index)
-        .map_err(|source| corrupt_data(table, field, &source))
 }

@@ -1,5 +1,6 @@
 //! Domain-typed repositories for the native schema.
 
+mod common;
 mod conversation_patch_replay;
 mod conversation_projection;
 mod dispatch_payload;
@@ -26,6 +27,10 @@ use artisan_domain::{
 };
 
 use crate::entities;
+
+pub(crate) use common::{
+    RepositoryFailure, corrupt_data, database_error, negative_counter, row_value,
+};
 
 pub use conversation_patch_replay::ConversationPatchReplay;
 pub use dispatch_payload::{MessageDispatchPayload, QueueMessageDispatchPayload};
@@ -228,30 +233,14 @@ impl Repository {
                 thread_id: thread_id.clone(),
             })?;
         let project_id = ProjectId::parse(thread.project_id)
-            .map_err(|error| corrupt_data("threads", "project_id", &error))?;
+            .map_err(|error| corrupt_data("threads", "project_id", error))?;
         let project = entities::attached_project::Entity::find_by_id(project_id.as_str())
             .one(&self.database)
             .await
             .map_err(|source| database_error("read attached project", source))?
             .ok_or(RepositoryError::ProjectNotFound { project_id })?;
         RootPath::parse(project.root_path)
-            .map_err(|error| corrupt_data("attached_projects", "root_path", &error))
-    }
-}
-
-fn database_error(operation: &'static str, source: DbErr) -> RepositoryError {
-    RepositoryError::Database { operation, source }
-}
-
-fn corrupt_data(
-    table: &'static str,
-    field: &'static str,
-    reason: &(impl ToString + ?Sized),
-) -> RepositoryError {
-    RepositoryError::CorruptData {
-        table,
-        field,
-        reason: reason.to_string(),
+            .map_err(|error| corrupt_data("attached_projects", "root_path", error))
     }
 }
 

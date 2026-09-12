@@ -15,7 +15,7 @@ use artisan_domain::{
     ModelFavoritesRevision, ModelFavoritesSnapshot, ReceiptDisposition, RequestId, UnixMillis,
 };
 
-use super::Repository;
+use super::{Repository, RepositoryFailure, corrupt_data, database_error};
 
 const FAVORITES_STATE_SELECT: &str =
     "SELECT revision FROM model_favorites_state WHERE state_id = 1";
@@ -134,6 +134,20 @@ pub enum ModelFavoritesRepositoryError {
         #[source]
         source: DbErr,
     },
+}
+
+impl RepositoryFailure for ModelFavoritesRepositoryError {
+    fn corrupt_data(table: &'static str, field: &'static str, reason: String) -> Self {
+        Self::CorruptData {
+            table,
+            field,
+            reason,
+        }
+    }
+
+    fn database_error(operation: &'static str, source: DbErr) -> Self {
+        Self::Database { operation, source }
+    }
 }
 
 impl Repository {
@@ -641,20 +655,4 @@ fn parse_revision(
         .map_err(|_| corrupt_data(table, field, "revision must be non-negative".to_owned()))?;
     ModelFavoritesRevision::new(value)
         .map_err(|source| corrupt_data(table, field, source.to_string()))
-}
-
-fn corrupt_data(
-    table: &'static str,
-    field: &'static str,
-    reason: impl Into<String>,
-) -> ModelFavoritesRepositoryError {
-    ModelFavoritesRepositoryError::CorruptData {
-        table,
-        field,
-        reason: reason.into(),
-    }
-}
-
-fn database_error(operation: &'static str, source: DbErr) -> ModelFavoritesRepositoryError {
-    ModelFavoritesRepositoryError::Database { operation, source }
 }

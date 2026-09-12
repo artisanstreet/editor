@@ -161,9 +161,8 @@ impl Repository {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let after = match i64::try_from(after_sequence) {
-            Ok(cursor) => cursor,
-            Err(_) => return Ok(Vec::new()),
+        let Ok(after) = i64::try_from(after_sequence) else {
+            return Ok(Vec::new());
         };
         let bounded = limit.min(OBSERVATION_BATCH_MAX_OBSERVATIONS);
         let take = u64::try_from(bounded).map_err(|_| RepositoryError::Invariant {
@@ -184,11 +183,11 @@ impl Repository {
 /// Rebuilds one attributed delivery event from its immutable ledger row.
 fn ledger_event(row: &observation_ledger::Model) -> Result<EngineObservationEvent, RepositoryError> {
     let thread_id = ThreadId::parse(row.thread_id.clone())
-        .map_err(|error| corrupt_data("observation_ledger", "thread_id", &error))?;
+        .map_err(|error| corrupt_data("observation_ledger", "thread_id", error))?;
     let run_id = RunId::parse(row.run_id.clone())
-        .map_err(|error| corrupt_data("observation_ledger", "run_id", &error))?;
+        .map_err(|error| corrupt_data("observation_ledger", "run_id", error))?;
     let turn_id = TurnId::parse(row.turn_id.clone())
-        .map_err(|error| corrupt_data("observation_ledger", "turn_id", &error))?;
+        .map_err(|error| corrupt_data("observation_ledger", "turn_id", error))?;
     if row.delivery_sequence <= 0 {
         return Err(corrupt_data(
             "observation_ledger",
@@ -203,7 +202,7 @@ fn ledger_event(row: &observation_ledger::Model) -> Result<EngineObservationEven
     let decoded =
         decode_observation_checkpoint(row.observation_version, row.observation_bytes.as_slice())
             .map_err(|source| {
-                corrupt_data("observation_ledger", "observation_bytes", &source)
+                corrupt_data("observation_ledger", "observation_bytes", source)
             })?;
     if decoded.engine().as_str() != row.engine
         || decoded.binding_version() != row.binding_version

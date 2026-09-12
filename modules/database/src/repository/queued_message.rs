@@ -15,7 +15,7 @@
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, DbErr, EntityTrait, QueryFilter,
     QueryOrder, QueryResult, QuerySelect, SqliteTransactionMode, Statement, TransactionOptions,
-    TransactionTrait, TryGetable, Value,
+    TransactionTrait, Value,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -34,7 +34,7 @@ use artisan_domain::{
 
 use crate::entities::{self, CommandKind, DispatchState};
 
-use super::Repository;
+use super::{Repository, RepositoryFailure, corrupt_data, database_error, row_value};
 
 const LIST_COUNT_SQL: &str = r"
 SELECT COUNT(*)
@@ -297,10 +297,24 @@ pub enum QueuedMessageRepositoryError {
     Database {
         /// Operation being attempted.
         operation: &'static str,
-        /// Original SeaORM error.
+        /// Original `SeaORM` error.
         #[source]
         source: DbErr,
     },
+}
+
+impl RepositoryFailure for QueuedMessageRepositoryError {
+    fn corrupt_data(table: &'static str, field: &'static str, reason: String) -> Self {
+        Self::CorruptData {
+            table,
+            field,
+            reason,
+        }
+    }
+
+    fn database_error(operation: &'static str, source: DbErr) -> Self {
+        Self::Database { operation, source }
+    }
 }
 
 impl Repository {
@@ -657,6 +671,11 @@ impl Repository {
     /// receipt. It is intentionally separate from [`Self::read_queued_messages`]
     /// so normal composer listing never carries image bytes. Wrong-thread,
     /// missing, mismatched, or not-withdrawn targets return `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueuedMessageRepositoryError`] when the thread is unknown,
+    /// stored rows disagree, or a database read fails.
     pub async fn read_withdrawn_message_payload(
         &self,
         thread_id: &ThreadId,
@@ -718,6 +737,10 @@ impl Repository {
 
     /// Explicitly named alias for edit flows that restore an original queue
     /// payload after the discard fence has committed.
+    ///
+    /// # Errors
+    ///
+    /// Inherits [`Self::read_withdrawn_message_payload`]'s failures.
     pub async fn read_original_queued_message_payload(
         &self,
         thread_id: &ThreadId,
@@ -998,10 +1021,11 @@ async fn lookup_withdrawal(
         "original_request_id",
         "queued_message_withdrawals",
     )?)?;
-    let stored_outcome =
-        parse_outcome(row_value(&row, 3, "outcome", "queued_message_withdrawals")?)?;
+    let stored_outcome_value =
+        row_value::<String, _>(&row, 3, "outcome", "queued_message_withdrawals")?;
+    let stored_outcome = parse_outcome(&stored_outcome_value)?;
     let stored_accepted_at =
-        row_value::<i64>(&row, 4, "accepted_at_ms", "queued_message_withdrawals")?;
+        row_value::<i64, _>(&row, 4, "accepted_at_ms", "queued_message_withdrawals")?;
 
     if stored_thread_id != input.thread_id
         || stored_message_id != input.message_id
@@ -1056,7 +1080,7 @@ async fn read_eligible_count(
         .ok_or(QueuedMessageRepositoryError::Invariant {
             reason: "queued-message count query returned no row",
         })?;
-    let count = row_value::<i64>(&row, 0, "count", "message_dispatches")?;
+    let count = row_value::<i64, _>(&row, 0, "count", "message_dispatches")?;
     u64::try_from(count).map_err(|_| {
         corrupt_data(
             "message_dispatches",
@@ -1081,7 +1105,7 @@ async fn read_failed_count(
         .ok_or(QueuedMessageRepositoryError::Invariant {
             reason: "failed-message count query returned no row",
         })?;
-    let count = row_value::<i64>(&row, 0, "count", "message_dispatches")?;
+    let count = row_value::<i64, _>(&row, 0, "count", "message_dispatches")?;
     u64::try_from(count).map_err(|_| {
         corrupt_data(
             "message_dispatches",
@@ -1105,10 +1129,10 @@ async fn failed_summary_from_row(
             "failed-message page returned another thread",
         ));
     }
-    let message_body = row_value::<String>(row, 2, "body", "messages")?;
+    let message_body = row_value::<String, _>(row, 2, "body", "messages")?;
     let original_request_id =
         parse_request_id(row_value(row, 3, "correlation_id", "message_dispatches")?)?;
-    let text = authored_text(row_value::<Option<String>>(
+    let text = authored_text(row_value::<Option<String>, _>(
         row,
         4,
         "body",
@@ -1121,9 +1145,9 @@ async fn failed_summary_from_row(
             "queue receipt and immutable message text presence disagree",
         ));
     }
-    let accepted_at_ms = row_value::<i64>(row, 5, "accepted_at_ms", "messages")?;
-    let failed_at_ms = row_value::<i64>(row, 6, "updated_at_ms", "message_dispatches")?;
-    let receipt_accepted_at_ms = row_value::<i64>(row, 7, "accepted_at_ms", "command_receipts")?;
+    let accepted_at_ms = row_value::<i64, _>(row, 5, "accepted_at_ms", "messages")?;
+    let failed_at_ms = row_value::<i64, _>(row, 6, "updated_at_ms", "message_dispatches")?;
+    let receipt_accepted_at_ms = row_value::<i64, _>(row, 7, "accepted_at_ms", "command_receipts")?;
     if receipt_accepted_at_ms != accepted_at_ms {
         return Err(corrupt_data(
             "message_dispatches",
@@ -1138,7 +1162,7 @@ async fn failed_summary_from_row(
             "dispatch failure precedes message acceptance",
         ));
     }
-    let reason = row_value::<Option<String>>(row, 8, "last_error", "message_dispatches")?
+    let reason = row_value::<Option<String>, _>(row, 8, "last_error", "message_dispatches")?
         .ok_or_else(|| {
             corrupt_data(
                 "message_dispatches",
@@ -1203,10 +1227,10 @@ async fn summary_from_row(
             "queued-message page returned another thread",
         ));
     }
-    let message_body = row_value::<String>(row, 2, "body", "messages")?;
+    let message_body = row_value::<String, _>(row, 2, "body", "messages")?;
     let original_request_id =
         parse_request_id(row_value(row, 3, "correlation_id", "message_dispatches")?)?;
-    let text = authored_text(row_value::<Option<String>>(
+    let text = authored_text(row_value::<Option<String>, _>(
         row,
         4,
         "body",
@@ -1219,9 +1243,9 @@ async fn summary_from_row(
             "queue receipt and immutable message text presence disagree",
         ));
     }
-    let accepted_at_ms = row_value::<i64>(row, 5, "accepted_at_ms", "messages")?;
-    let queued_at_ms = row_value::<i64>(row, 6, "queued_at_ms", "message_dispatches")?;
-    let receipt_accepted_at_ms = row_value::<i64>(row, 7, "accepted_at_ms", "command_receipts")?;
+    let accepted_at_ms = row_value::<i64, _>(row, 5, "accepted_at_ms", "messages")?;
+    let queued_at_ms = row_value::<i64, _>(row, 6, "queued_at_ms", "message_dispatches")?;
+    let receipt_accepted_at_ms = row_value::<i64, _>(row, 7, "accepted_at_ms", "command_receipts")?;
     if queued_at_ms != accepted_at_ms || receipt_accepted_at_ms != accepted_at_ms {
         return Err(corrupt_data(
             "message_dispatches",
@@ -1229,7 +1253,7 @@ async fn summary_from_row(
             "message, dispatch, and receipt acceptance times disagree",
         ));
     }
-    let last_error = row_value::<Option<String>>(row, 8, "last_error", "message_dispatches")?
+    let last_error = row_value::<Option<String>, _>(row, 8, "last_error", "message_dispatches")?
         .map(DispatchError::parse)
         .transpose()
         .map_err(|error| corrupt_data("message_dispatches", "last_error", error))?;
@@ -1442,7 +1466,7 @@ fn queue_receipt_owns_message(
 fn authored_text(
     body: Option<String>,
 ) -> Result<Option<AuthoredText>, QueuedMessageRepositoryError> {
-    body.map(|body| AuthoredText::parse(body))
+    body.map(AuthoredText::parse)
         .transpose()
         .map_err(|error| corrupt_data("command_receipts", "body", error))
 }
@@ -1483,9 +1507,9 @@ fn parse_request_id(value: String) -> Result<RequestId, QueuedMessageRepositoryE
 }
 
 fn parse_outcome(
-    value: String,
+    value: &str,
 ) -> Result<QueuedMessageWithdrawalOutcome, QueuedMessageRepositoryError> {
-    match value.as_str() {
+    match value {
         "withdrawn" => Ok(QueuedMessageWithdrawalOutcome::Withdrawn),
         "too_late" => Ok(QueuedMessageWithdrawalOutcome::TooLate),
         "not_queued" => Ok(QueuedMessageWithdrawalOutcome::NotQueued),
@@ -1503,33 +1527,4 @@ const fn outcome_label(outcome: QueuedMessageWithdrawalOutcome) -> &'static str 
         QueuedMessageWithdrawalOutcome::TooLate => "too_late",
         QueuedMessageWithdrawalOutcome::NotQueued => "not_queued",
     }
-}
-
-fn row_value<T>(
-    row: &QueryResult,
-    index: usize,
-    field: &'static str,
-    table: &'static str,
-) -> Result<T, QueuedMessageRepositoryError>
-where
-    T: TryGetable,
-{
-    row.try_get_by_index(index)
-        .map_err(|error| corrupt_data(table, field, error))
-}
-
-fn corrupt_data(
-    table: &'static str,
-    field: &'static str,
-    reason: impl ToString,
-) -> QueuedMessageRepositoryError {
-    QueuedMessageRepositoryError::CorruptData {
-        table,
-        field,
-        reason: reason.to_string(),
-    }
-}
-
-fn database_error(operation: &'static str, source: DbErr) -> QueuedMessageRepositoryError {
-    QueuedMessageRepositoryError::Database { operation, source }
 }

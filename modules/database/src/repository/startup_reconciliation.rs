@@ -98,7 +98,7 @@ impl StartupRunLifecycle {
             _ => Err(StartupReconciliationError::Repository(corrupt_data(
                 "assistant_runs",
                 "lifecycle",
-                &format!("unexpected lifecycle `{value}`"),
+                format!("unexpected lifecycle `{value}`"),
             ))),
         }
     }
@@ -219,7 +219,7 @@ where
     F: FnOnce(&str) -> Result<T, artisan_domain::IdentifierError>,
 {
     parser(value)
-        .map_err(|error| StartupReconciliationError::Repository(corrupt_data(table, field, &error)))
+        .map_err(|error| StartupReconciliationError::Repository(corrupt_data(table, field, error)))
 }
 
 impl Repository {
@@ -407,7 +407,7 @@ impl Repository {
                 return Err(StartupReconciliationError::Repository(corrupt_data(
                     "assistant_runs",
                     "generation",
-                    &format!("generation {generation} must be positive"),
+                    format!("generation {generation} must be positive"),
                 )));
             }
             let lifecycle = StartupRunLifecycle::parse(&lifecycle_raw)?;
@@ -453,7 +453,7 @@ impl Repository {
                     return Err(StartupReconciliationError::Repository(corrupt_data(
                         "conversation_items",
                         "thread_id",
-                        &format!(
+                        format!(
                             "assistant item thread `{item_thread_raw}` disagrees with run thread `{thread_id_raw}`"
                         ),
                     )));
@@ -462,7 +462,7 @@ impl Repository {
                     return Err(StartupReconciliationError::Repository(corrupt_data(
                         "conversation_items",
                         "turn_id",
-                        &format!(
+                        format!(
                             "assistant item turn `{item_turn_raw}` disagrees with run origin turn `{turn_id_raw}`"
                         ),
                     )));
