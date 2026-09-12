@@ -250,7 +250,7 @@ fn sweep_merge_preserves_fragment_faces_under_band_color() {
         merged
             .iter()
             .find(|(range, _)| range.start == start)
-            .map(|(_, style)| style.clone())
+            .map(|(_, style)| *style)
             .expect("merged sweep covers every union edge")
     };
     // Sweep-only span: band color, no inherited weight.
@@ -275,7 +275,7 @@ fn sweep_merge_keeps_utf8_boundaries_stable() {
     let band = theme.colors.highlight.to_paint();
     // "a" + U+1F4A1 (bytes 1..5) + "b": ranges address whole scalars only.
     let base = vec![(1..5, HighlightStyle::default())];
-    let merged = merge_sweep_highlights(&base, &[0..2], band);
+    let merged = merge_sweep_highlights(&base, std::slice::from_ref(&(0..2)), band);
     assert_eq!(merged.len(), 3);
     assert_eq!(merged[0].0, 0..1);
     assert_eq!(merged[1].0, 1..2);

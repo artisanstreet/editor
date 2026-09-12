@@ -241,7 +241,7 @@ mod tests {
                 "weight {weight}: OS/2 metadata must carry the exact prose weight"
             );
             assert!(
-                !sfnt_has_table(bytes, b"fvar"),
+                !sfnt_has_table(bytes, *b"fvar"),
                 "weight {weight}: a remaining fvar axis would defeat static matching"
             );
         }
@@ -254,9 +254,9 @@ mod tests {
             (spline.static_faces[2], spline.static_faces[1], spline.static_faces[3]),
             (spline.static_faces[5], spline.static_faces[4], spline.static_faces[6]),
         ] {
-            let outline = sfnt_table_bytes(face, b"glyf").expect("glyf table");
-            let left_outline = sfnt_table_bytes(left, b"glyf").expect("left glyf");
-            let right_outline = sfnt_table_bytes(right, b"glyf").expect("right glyf");
+            let outline = sfnt_table_bytes(face, *b"glyf").expect("glyf table");
+            let left_outline = sfnt_table_bytes(left, *b"glyf").expect("left glyf");
+            let right_outline = sfnt_table_bytes(right, *b"glyf").expect("right glyf");
             assert_ne!(outline, left_outline, "outlines must differ from the left neighbor");
             assert_ne!(outline, right_outline, "outlines must differ from the right neighbor");
         }
@@ -264,18 +264,18 @@ mod tests {
 
     /// Reads OS/2 `usWeightClass` (offset 4) without a font parser.
     fn sfnt_weight_class(bytes: &[u8]) -> Option<u16> {
-        let table = sfnt_table_bytes(bytes, b"OS/2")?;
+        let table = sfnt_table_bytes(bytes, *b"OS/2")?;
         Some(u16::from_be_bytes(table.get(4..6)?.try_into().ok()?))
     }
 
     /// Slices one table's bytes from an sfnt directory.
-    fn sfnt_table_bytes<'bytes>(bytes: &'bytes [u8], tag: &[u8; 4]) -> Option<&'bytes [u8]> {
+    fn sfnt_table_bytes(bytes: &[u8], tag: [u8; 4]) -> Option<&[u8]> {
         let count_bytes = bytes.get(4..6)?;
         let count_bytes: [u8; 2] = count_bytes.try_into().ok()?;
         let count = u16::from_be_bytes(count_bytes) as usize;
         (0..count).find_map(|index| {
             let record = bytes.get(12 + index * 16..12 + index * 16 + 16)?;
-            if &record[0..4] != tag {
+            if record.get(0..4) != Some(&tag[..]) {
                 return None;
             }
             let offset = u32::from_be_bytes(record[8..12].try_into().ok()?) as usize;
@@ -284,7 +284,7 @@ mod tests {
         })
     }
     /// Reports whether the sfnt directory names `tag`.
-    fn sfnt_has_table(bytes: &[u8], tag: &[u8; 4]) -> bool {
+    fn sfnt_has_table(bytes: &[u8], tag: [u8; 4]) -> bool {
         sfnt_table_bytes(bytes, tag).is_some()
     }
 
