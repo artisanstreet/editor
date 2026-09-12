@@ -1,4 +1,0 @@
-.svelte-kit/
-modules/backend/drizzle/
-modules/frontend/.svelte-kit/
-pnpm-lock.yaml
