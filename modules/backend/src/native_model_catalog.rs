@@ -1,4 +1,4 @@
-//! Conversion from the owner-scoped OpenCode2 runtime result to the shared
+//! Conversion from the owner-scoped `OpenCode2` runtime result to the shared
 //! static-plus-runtime native model catalog.
 //!
 //! The engine-owner catalog worker owns discovery and returns typed data. This
@@ -27,14 +27,11 @@ use thiserror::Error;
 use crate::engine_owner::catalog::{
     CatalogAvailability, CatalogModel, CatalogResult, CatalogRoute,
 };
+use crate::engine_owner::consts::{
+    CLAUDE_ENGINE_ID, CODEX_ENGINE_ID, CURSOR_ENGINE_ID, GROK_ENGINE_ID, HERMES_ENGINE_ID,
+    OPENCODE2_ENGINE_ID,
+};
 use crate::model_discovery::DiscoveredModel;
-
-const OPENCODE2_ENGINE_ID: &str = "opencode2";
-const CODEX_ENGINE_ID: &str = "codex";
-const CLAUDE_ENGINE_ID: &str = "claude";
-const GROK_ENGINE_ID: &str = "grok";
-const CURSOR_ENGINE_ID: &str = "cursor";
-const HERMES_ENGINE_ID: &str = "hermes";
 
 /// Harness identifiers Forge can execute once their fixture-proven runtimes
 /// are registered in this process.
@@ -62,7 +59,7 @@ pub(crate) enum NativeModelCatalogBridgeError {
     /// The checked-in manifest could not be decoded.
     #[error("bundled native catalog manifest is invalid")]
     BundledManifest,
-    /// A runtime route did not satisfy the OpenCode2 route contract.
+    /// A runtime route did not satisfy the `OpenCode2` route contract.
     #[error("native catalog route is invalid")]
     InvalidRoute,
     /// A normalized row did not retain its exact native identity.
@@ -76,14 +73,14 @@ pub(crate) enum NativeModelCatalogBridgeError {
     InvalidCatalog,
 }
 
-/// Combines one typed OpenCode2 discovery result with the exact bundled
+/// Combines one typed `OpenCode2` discovery result with the exact bundled
 /// manifest and owner-authoritative favorites.
 ///
 /// Only the discovered `opencode2` rows are added to the manifest. Static
 /// rows for the other fixture-proven harnesses are readable and runnable
-/// through [`RUNNABLE_ENGINE_IDS`]; Hermes and OpenCode2 rows arrive only
+/// through [`RUNNABLE_ENGINE_IDS`]; Hermes and `OpenCode2` rows arrive only
 /// through live discovery. No thinking, speed, MCP, web-search, permission,
-/// or cost value is inferred when OpenCode2 did not report it.
+/// or cost value is inferred when `OpenCode2` did not report it.
 pub(crate) fn from_catalog_result(
     result: CatalogResult,
     favorites: &ModelFavoritesSnapshot,
@@ -264,7 +261,7 @@ fn convert_route(route: CatalogRoute) -> NativeModelRoute {
     }
 }
 
-/// Combines the typed OpenCode2 result with best-effort live discovery from
+/// Combines the typed `OpenCode2` result with best-effort live discovery from
 /// every other engine.
 ///
 /// Discovery rows replace static reported fields (name, description,
@@ -308,8 +305,8 @@ pub(crate) fn from_catalog_result_with_discovery(
 }
 
 /// Builds the scope-free catalog: the bundled baseline plus live discovery,
-/// with no OpenCode2 profile or runtime routes. Used when a thread has no
-/// registered OpenCode2 profile, so the picker still shows static and
+/// with no `OpenCode2` profile or runtime routes. Used when a thread has no
+/// registered `OpenCode2` profile, so the picker still shows static and
 /// discovered models instead of failing empty.
 pub(crate) fn from_discovery(
     discovery: &crate::model_discovery::DiscoveryBundle,
@@ -482,7 +479,7 @@ fn hide_missing_harnesses(
     }
 }
 
-/// Adds runtime-only OpenCode2 rows from local CLI discovery.
+/// Adds runtime-only `OpenCode2` rows from local CLI discovery.
 ///
 /// Each row is built with the exact `opencode2:` route identity the runtime
 /// path uses, so a selection stays runnable end to end. Route metadata is
@@ -525,7 +522,7 @@ fn apply_opencode2_rows(
     }
 }
 
-/// Builds one CLI-discovered OpenCode2 row with exact route identity.
+/// Builds one CLI-discovered `OpenCode2` row with exact route identity.
 fn opencode2_definition(row: &DiscoveredModel, id: String) -> NativeModelDefinition {
     NativeModelDefinition {
         id,
@@ -696,9 +693,7 @@ fn thinking_from_discovery(
             }
             let default_id = options
                 .iter()
-                .find(|option| option.id == *default)
-                .map(|option| option.id.clone())
-                .unwrap_or_else(|| options[0].id.clone());
+                .find(|option| option.id == *default).map_or_else(|| options[0].id.clone(), |option| option.id.clone());
             NativeThinkingCapability::Supported {
                 default: default_id,
                 options: options
@@ -801,7 +796,7 @@ mod tests {
                     "providerID": "opencode",
                     "status": "active",
                     "enabled": true,
-                    "limit": {"context": 128000, "output": 4096},
+                    "limit": {"context": 128_000, "output": 4096},
                     "capabilities": {
                         "input": ["text", "image"],
                         "output": ["text"],
@@ -888,6 +883,10 @@ mod tests {
         .expect("fixture favorites are valid")
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive route/variant identity assertion over the fixture; splitting would fragment the coverage matrix"
+    )]
     #[test]
     fn converts_all_runtime_rows_with_exact_route_variant_identity() {
         let result = fixture_result();
@@ -969,7 +968,7 @@ mod tests {
                 .as_deref(),
             Some("high")
         );
-        assert_eq!(variant.capabilities.context_window_tokens, Some(128000));
+        assert_eq!(variant.capabilities.context_window_tokens, Some(128_000));
         assert_eq!(variant.capabilities.output_tokens, Some(4096));
         assert!(variant.capabilities.image_input);
         assert!(variant.capabilities.local_tools);

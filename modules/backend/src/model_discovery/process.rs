@@ -41,7 +41,7 @@ pub(crate) async fn run_bounded(
     let mut stdout = child.stdout.take()?;
     let mut stderr = child.stderr.take()?;
 
-    let captured = tokio::time::timeout(timeout, async {
+    let captured = Box::pin(tokio::time::timeout(timeout, async {
         let mut stdout_bytes = Vec::new();
         let mut stderr_bytes = Vec::new();
         let (stdout_result, stderr_result) = tokio::join!(
@@ -53,19 +53,16 @@ pub(crate) async fn run_bounded(
             return None;
         }
         Some((stdout_bytes, status.success()))
-    })
+    }))
     .await;
 
-    match captured {
-        Ok(Some((stdout_bytes, success))) => Some(BoundedOutput {
-            stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
-            success,
-        }),
-        _ => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            None
-        }
+    if let Ok(Some((stdout_bytes, success))) = captured { Some(BoundedOutput {
+        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        success,
+    }) } else {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        None
     }
 }
 

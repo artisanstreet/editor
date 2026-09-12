@@ -175,11 +175,10 @@ impl Default for CursorUsageConfig {
 pub fn cursor_auth_file_default() -> PathBuf {
     #[cfg(windows)]
     {
-        if let Ok(app_data) = std::env::var("APPDATA") {
-            if !app_data.is_empty() {
+        if let Ok(app_data) = std::env::var("APPDATA")
+            && !app_data.is_empty() {
                 return PathBuf::from(app_data).join("Cursor").join("auth.json");
             }
-        }
         home_dir()
             .join("AppData")
             .join("Roaming")
@@ -203,9 +202,7 @@ pub fn cursor_auth_file_default() -> PathBuf {
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .or_else(|| std::env::var_os("USERPROFILE")).map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }
 
 /// Reads the stored access token strictly read-only.
@@ -235,7 +232,6 @@ pub fn read_cursor_access_token(
     let credential = value.as_object().ok_or(CursorUsageError::TokenMalformed)?;
     match credential.get("accessToken") {
         Some(serde_json::Value::String(token)) if !token.is_empty() => Ok(Some(token.clone())),
-        None => Ok(None),
         _ => Ok(None),
     }
 }
@@ -318,6 +314,10 @@ fn iso_millis_of(millis: f64) -> Option<String> {
 ///
 /// Returns [`CursorUsageError::BodyMalformed`] for a non-object response, a
 /// missing `planUsage` object, or mistyped numeric fields.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear projection over the provider usage object; extraction would split closely coupled field reads"
+)]
 pub fn map_cursor_period_usage(
     response: &serde_json::Value,
 ) -> Result<Vec<EngineUsageWindow>, CursorUsageError> {
@@ -358,7 +358,7 @@ pub fn map_cursor_period_usage(
     let other_models = optional_number(plan, "apiPercentUsed")?;
     let has_auto_buckets = response
         .get("autoBucketModels")
-        .is_some_and(|value| value.is_array());
+        .is_some_and(serde_json::Value::is_array);
     let pools: Vec<(&str, &str, f64)> =
         if cursor_models.is_some() || other_models.is_some() || has_auto_buckets {
             vec![
@@ -459,13 +459,12 @@ pub async fn post_cursor_period_usage(
         .body("{}")
         .send()
         .await
-        .map_err(map_request_error)?;
+        .map_err(|error| map_request_error(&error))?;
     let status = response.status().as_u16();
-    if let Some(length) = response.content_length() {
-        if length > max_bytes as u64 {
+    if let Some(length) = response.content_length()
+        && length > max_bytes as u64 {
             return Err(CursorUsageError::BodyTooLarge);
         }
-    }
     let bytes = response
         .bytes()
         .await
@@ -478,7 +477,7 @@ pub async fn post_cursor_period_usage(
     Ok((status, value))
 }
 
-fn map_request_error(error: reqwest::Error) -> CursorUsageError {
+fn map_request_error(error: &reqwest::Error) -> CursorUsageError {
     if error.is_timeout() {
         CursorUsageError::Timeout
     } else if error.is_connect() {

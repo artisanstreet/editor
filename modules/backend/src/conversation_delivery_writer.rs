@@ -198,6 +198,9 @@ impl ConversationDeliveryWriter {
                     sent_at: stamp.sent_at,
                     body: WireEnvelopeBody::PatchBatch(batch),
                 };
+                // The stream is installed immediately above whenever absent,
+                // and `self.stream` is private with no other removal path
+                // before Drop stores the owner; the option is `Some` here.
                 let stream = self
                     .stream
                     .as_mut()
@@ -277,8 +280,7 @@ impl ConversationDeliveryWriter {
             .registrar
             .subscription_view(&thread_id)
             .await
-            .map(|view| view.observation_cursor())
-            .unwrap_or(0);
+            .map_or(0, |view| view.observation_cursor());
         let mut pending: Vec<(ServerFrameStamp, EngineObservationEvent)> = Vec::new();
         for (stamp, event) in batch {
             if event.thread_id != thread_id || event.thread_id != *lease.thread_id() {
@@ -310,6 +312,8 @@ impl ConversationDeliveryWriter {
         let mut delivered = Vec::with_capacity(pending.len());
         let mut to_sequence = from_sequence;
         for (stamp, event) in pending {
+            // `next_event_cursor` starts at one and only saturating-adds, so
+            // it never wraps to the rejected zero cursor.
             let cursor = EventCursor::new(self.next_event_cursor)
                 .expect("a connection delivers fewer than 2^64 events");
             to_sequence = observation_delivery_sequence(&event).max(to_sequence);
@@ -323,6 +327,9 @@ impl ConversationDeliveryWriter {
                 sent_at: stamp.sent_at,
                 body: WireEnvelopeBody::Event(event.clone()),
             };
+            // The shared stream is installed before this loop whenever absent
+            // and is never removed while the writer is owned; the option is
+            // `Some` for every send.
             let stream = self
                 .stream
                 .as_mut()
@@ -376,9 +383,7 @@ impl ConversationDeliveryWriter {
 fn observation_delivery_sequence(event: &EngineObservationEvent) -> u64 {
     event
         .attribution
-        .as_ref()
-        .map(|attribution| attribution.delivery_sequence)
-        .unwrap_or_else(|| event.observation.sequence().get())
+        .as_ref().map_or_else(|| event.observation.sequence().get(), |attribution| attribution.delivery_sequence)
 }
 
 /// Private synchronous cleanup guard for the writer's outbound direction.

@@ -1,5 +1,5 @@
 //! Durable queue recovery and usage reads for the composer.
-use super::*;
+use super::{RequestHandler, RequestId, ServerResponse, ProtocolFailure, outcome, ResponsePayload, typed_failure, ErrorCode, origin_clock_failure, RepositoryError};
 use artisan_database::{QueuedMessageRepositoryError, RunUsageRepositoryError};
 use artisan_domain::{
     ListFailedMessages, ListQueuedMessages, ReadRecalledMessage, ReadRunUsage, RecalledMessageResult, RunUsageResult,
@@ -16,7 +16,7 @@ impl RequestHandler {
             .repository
             .read_queued_messages(query.clone())
             .await
-            .map_err(|error| queue_failure(error, request_id))?;
+            .map_err(|error| queue_failure(&error, request_id))?;
         Ok(outcome(
             request_id,
             ResponsePayload::QueuedMessages(listing),
@@ -32,7 +32,7 @@ impl RequestHandler {
             .repository
             .read_failed_messages(query.clone())
             .await
-            .map_err(|error| queue_failure(error, request_id))?;
+            .map_err(|error| queue_failure(&error, request_id))?;
         Ok(outcome(
             request_id,
             ResponsePayload::FailedMessages(listing),
@@ -57,7 +57,7 @@ impl RequestHandler {
                 &query.original_request_id,
             )
             .await
-            .map_err(|error| queue_failure(error, request_id))?;
+            .map_err(|error| queue_failure(&error, request_id))?;
         let payload = match withdrawn {
             Some(payload) => Some(payload),
             None => {
@@ -68,7 +68,7 @@ impl RequestHandler {
                         &query.original_request_id,
                     )
                     .await
-                    .map_err(|error| queue_failure(error, request_id))?
+                    .map_err(|error| queue_failure(&error, request_id))?
             }
         };
         let result = RecalledMessageResult::new(
@@ -100,7 +100,7 @@ impl RequestHandler {
             .repository
             .read_latest_run_usage(&query.run_id, &query.thread_id)
             .await
-            .map_err(|error| usage_failure(error, request_id))?;
+            .map_err(|error| usage_failure(&error, request_id))?;
         let result = RunUsageResult::new(query.thread_id.clone(), query.run_id.clone(), report)
             .map_err(|_| {
                 typed_failure(
@@ -130,7 +130,7 @@ impl RequestHandler {
                 &command.request_id,
             )
             .await
-            .map_err(|error| queue_failure(error, request_id))?
+            .map_err(|error| queue_failure(&error, request_id))?
         {
             return Ok(outcome(
                 request_id,
@@ -151,7 +151,7 @@ impl RequestHandler {
                 accepted_at,
             })
             .await
-            .map_err(|error| queue_failure(error, request_id))?;
+            .map_err(|error| queue_failure(&error, request_id))?;
         // `withdraw_queued_message` commits its fence before returning. The
         // original payload is intentionally recovered only through the
         // separate recalled-message query after this result is returned.
@@ -162,7 +162,7 @@ impl RequestHandler {
     }
 }
 
-fn queue_failure(error: QueuedMessageRepositoryError, request_id: &RequestId) -> ProtocolFailure {
+fn queue_failure(error: &QueuedMessageRepositoryError, request_id: &RequestId) -> ProtocolFailure {
     let (code, detail, retryable) = match error {
         QueuedMessageRepositoryError::IdempotencyConflict { .. } => (
             ErrorCode::IdempotencyConflict,
@@ -200,7 +200,7 @@ fn queue_failure(error: QueuedMessageRepositoryError, request_id: &RequestId) ->
     typed_failure(code, detail, retryable, request_id)
 }
 
-fn usage_failure(error: RunUsageRepositoryError, request_id: &RequestId) -> ProtocolFailure {
+fn usage_failure(error: &RunUsageRepositoryError, request_id: &RequestId) -> ProtocolFailure {
     let (code, detail, retryable) = match error {
         RunUsageRepositoryError::RunNotFound { .. }
         | RunUsageRepositoryError::RunThreadMismatch { .. }
@@ -208,18 +208,6 @@ fn usage_failure(error: RunUsageRepositoryError, request_id: &RequestId) -> Prot
         | RunUsageRepositoryError::ReportThreadMismatch => (
             ErrorCode::InvalidInput,
             "run-usage request is outside the exact run scope",
-            false,
-        ),
-        RunUsageRepositoryError::InvalidRunSnapshot { .. }
-        | RunUsageRepositoryError::ModelOriginMismatch { .. }
-        | RunUsageRepositoryError::StoredThreadMismatch { .. }
-        | RunUsageRepositoryError::GenerationMismatch { .. }
-        | RunUsageRepositoryError::ProviderSessionConflict { .. }
-        | RunUsageRepositoryError::StaleSequence { .. }
-        | RunUsageRepositoryError::SequenceConflict { .. }
-        | RunUsageRepositoryError::CorruptUsageRow { .. } => (
-            ErrorCode::Internal,
-            "run-usage storage state is invalid",
             false,
         ),
         RunUsageRepositoryError::Repository(RepositoryError::Database { .. }) => (
@@ -232,7 +220,15 @@ fn usage_failure(error: RunUsageRepositoryError, request_id: &RequestId) -> Prot
             "run-usage thread is unavailable",
             false,
         ),
-        RunUsageRepositoryError::Repository(_) => (
+        RunUsageRepositoryError::InvalidRunSnapshot { .. }
+        | RunUsageRepositoryError::ModelOriginMismatch { .. }
+        | RunUsageRepositoryError::StoredThreadMismatch { .. }
+        | RunUsageRepositoryError::GenerationMismatch { .. }
+        | RunUsageRepositoryError::ProviderSessionConflict { .. }
+        | RunUsageRepositoryError::StaleSequence { .. }
+        | RunUsageRepositoryError::SequenceConflict { .. }
+        | RunUsageRepositoryError::CorruptUsageRow { .. }
+        | RunUsageRepositoryError::Repository(_) => (
             ErrorCode::Internal,
             "run-usage storage state is invalid",
             false,

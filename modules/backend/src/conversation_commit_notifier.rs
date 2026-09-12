@@ -86,6 +86,7 @@ pub struct ConversationCommitSubscription {
 /// coalesce all successful conversation commits into one cancellation-bound
 /// scan wake.
 #[must_use]
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct ConversationCommitAnySubscription {
     receiver: watch::Receiver<()>,
@@ -219,6 +220,7 @@ impl ConversationCommitNotifier {
     /// The receiver retains only the latest watch generation, so the caller
     /// can scan its bounded active set once after a burst of commits without
     /// allocating a per-commit queue.
+    #[allow(dead_code)]
     pub(crate) fn subscribe_any(&self) -> ConversationCommitAnySubscription {
         ConversationCommitAnySubscription {
             receiver: self.registry.any_sender.subscribe(),
@@ -232,6 +234,7 @@ impl ConversationCommitAnySubscription {
     /// Tokio watch change detection is cancellation safe, and the receiver
     /// therefore remains usable when the bounded wait is cancelled by the
     /// caller's outer operation.
+    #[allow(dead_code)]
     pub(crate) async fn wait(&mut self) -> Result<(), ConversationCommitWaitError> {
         self.receiver
             .changed()

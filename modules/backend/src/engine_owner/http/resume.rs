@@ -28,7 +28,7 @@ use super::{
     settle_driver_prompt,
 };
 
-/// Prepared, immutable values needed by the exact OpenCode2 resume sequence.
+/// Prepared, immutable values needed by the exact `OpenCode2` resume sequence.
 ///
 /// The repository/root caller validates the thread, profile, model, route,
 /// agent, and authoritative project root before constructing this value.
@@ -336,12 +336,10 @@ async fn read_log_cursor(input: &ResumeInput<'_>) -> Result<Option<u64>, ResumeE
         return Err(ResumeError::StatusNotSuccess);
     }
     let mut body = response.into_body();
-    let mut framer = match SseFramer::new(input.bounds.max_sse_line, input.bounds.max_sse_event) {
-        Ok(framer) => framer,
-        Err(_) => {
-            abort_and_join(driver).await;
-            return Err(ResumeError::FramingFailed);
-        }
+    let Ok(mut framer) = SseFramer::new(input.bounds.max_sse_line, input.bounds.max_sse_event)
+    else {
+        abort_and_join(driver).await;
+        return Err(ResumeError::FramingFailed);
     };
     let mut latest = None;
     loop {
@@ -366,12 +364,9 @@ async fn read_log_cursor(input: &ResumeInput<'_>) -> Result<Option<u64>, ResumeE
                 let Ok(data) = frame.into_data() else {
                     continue;
                 };
-                let events = match framer.feed(&data) {
-                    Ok(events) => events,
-                    Err(_) => {
-                        abort_and_join(driver).await;
-                        return Err(ResumeError::FramingFailed);
-                    }
+                let Ok(events) = framer.feed(&data) else {
+                    abort_and_join(driver).await;
+                    return Err(ResumeError::FramingFailed);
                 };
                 for event in &events {
                     let sequence = match durable_sequence(event) {

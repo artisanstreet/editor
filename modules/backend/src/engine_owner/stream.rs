@@ -26,9 +26,23 @@ use crate::engine_owner::usage::{OpenCode2UsageContext, parse_opencode2_usage};
 
 use artisan_domain::{EngineModelId, EngineRouteId, EngineVariantId, RunId, ThreadId, UnixMillis};
 
+/// Effective `after` cursor selection for one follow.
+#[derive(Clone, Copy, Debug, Default)]
+enum AfterCursor {
+    /// Use the session's durable sequence.
+    #[default]
+    Session,
+    /// Use the caller-supplied cursor; `None` omits the cursor entirely.
+    Explicit(Option<u64>),
+}
+
 /// Immutable launch attribution used only while normalizing provider usage.
 /// The provider session remains the authenticated stream input and is never
 /// accepted from an event envelope as authority.
+#[expect(
+    clippy::struct_field_names,
+    reason = "fields mirror the launch identity vocabulary; renaming would obscure the mapping"
+)]
 pub(crate) struct StreamUsageContext {
     run_id: RunId,
     thread_id: ThreadId,
@@ -65,6 +79,7 @@ pub(crate) struct StreamState {
     adapter: Option<OpenCodeEventAdapter>,
 }
 
+#[allow(dead_code)]
 impl StreamState {
     pub(crate) fn new(after: Option<u64>) -> Self {
         Self {
@@ -184,7 +199,7 @@ pub(crate) struct StreamInput<'a> {
     pub(crate) session: &'a str,
     pub(crate) after: u64,
     pub(crate) sender: mpsc::Sender<EngineObservation>,
-    after_override: Option<Option<u64>>,
+    after_cursor: AfterCursor,
     usage_context: Option<StreamUsageContext>,
 }
 
@@ -202,7 +217,7 @@ impl<'a> StreamInput<'a> {
             session,
             after,
             sender,
-            after_override: None,
+            after_cursor: AfterCursor::default(),
             usage_context: None,
         }
     }
@@ -210,23 +225,21 @@ impl<'a> StreamInput<'a> {
     /// Replaces the provider `after` cursor for this follow. `None` omits the
     /// cursor rather than inventing one when a resume log had no sequence.
     pub(crate) fn with_after(mut self, after: Option<u64>) -> Self {
-        self.after_override = Some(after);
+        self.after_cursor = AfterCursor::Explicit(after);
         self
     }
 
     /// Supplies immutable launch attribution for provider usage events.
-    pub(crate) fn with_usage_context(mut self, context: StreamUsageContext) -> Self {
-        self.usage_context = Some(context);
-        self
-    }
-
     pub(crate) fn with_usage_context_option(mut self, context: Option<StreamUsageContext>) -> Self {
         self.usage_context = context;
         self
     }
 
     fn effective_after(&self) -> Option<u64> {
-        self.after_override.unwrap_or(Some(self.after))
+        match self.after_cursor {
+            AfterCursor::Session => Some(self.after),
+            AfterCursor::Explicit(after) => after,
+        }
     }
 }
 
@@ -244,6 +257,7 @@ impl std::fmt::Debug for StreamInput<'_> {
 /// chunks into `SseFramer`, decodes with `decode_sse_event`, and delivers
 /// via `deliver_observation` sequentially. Exactly one terminal ends success;
 /// clean EOF without terminal is a typed error.
+#[allow(dead_code)]
 pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceipt, StreamError> {
     let mut state = StreamState::new(input.effective_after());
     follow_stream_inner(input, None, &mut state).await
@@ -251,6 +265,7 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
 
 /// Follows the stream while requiring every authenticated envelope to carry
 /// the immutable run identity owned by the current operation.
+#[allow(dead_code)]
 pub(crate) async fn follow_stream_for_run(
     input: StreamInput<'_>,
     expected_run: &RunId,
@@ -420,7 +435,7 @@ async fn deliver_events(
                 .map(|observations| super::opencode_event::OpenCodeEventResult {
                     observations,
                     provider_cursor: None,
-                    recognized_event_kind: Default::default(),
+                    recognized_event_kind: super::opencode_event::OpenCodeEventKindFlags::default(),
                     text_reconciliation: None,
                 })
                 .map_err(|_| StreamError::DecodeFailed)?
@@ -447,7 +462,7 @@ async fn deliver_events(
         }
         if let Some(reconciliation) = text_reconciliation {
             let sequence = provider_cursor
-                .map_or_else(|| state.next_local_sequence(), |sequence| Ok(sequence))?;
+                .map_or_else(|| state.next_local_sequence(), Ok)?;
             if let Some(observation) = reconciliation_observation(reconciliation, sequence) {
                 observations.push(observation);
             }

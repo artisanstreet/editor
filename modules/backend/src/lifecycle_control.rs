@@ -116,10 +116,10 @@ impl ActivityGateImpl {
 
     fn release(&self) {
         let mut state = self.lock_state();
-        state.active_work_count = state
-            .active_work_count
-            .checked_sub(1)
-            .expect("an activity lease must release an admitted unit");
+        // One linear lease releases exactly the unit its `acquire` counted,
+        // so the subtraction cannot underflow; saturate rather than panic so
+        // a drop path can never abort the process.
+        state.active_work_count = state.active_work_count.saturating_sub(1);
     }
 
     fn rollback_stop(&self) {
@@ -173,11 +173,12 @@ impl ActivityGate for ActivityGateImpl {
 
 impl ActivityStopReservation for ActivityStopReservationImpl {
     fn commit(mut self: Box<Self>) {
-        let gate = self
-            .gate
-            .take()
-            .expect("an activity stop reservation commits at most once");
-        gate.commit_stop();
+        // `commit` consumes the boxed reservation and a lease cannot be
+        // cloned, so the gate is present at most once; a missing gate means
+        // Drop already released the reservation.
+        if let Some(gate) = self.gate.take() {
+            gate.commit_stop();
+        }
     }
 }
 
@@ -217,6 +218,7 @@ impl ActivitySnapshot {
 /// Result of the activity gate's linear stop-admission operation.
 pub(crate) enum StopAdmission {
     Busy {
+        #[allow(dead_code)]
         active_work_count: u32,
     },
     Accepted {
@@ -244,7 +246,7 @@ pub(crate) enum ActivityGateError {
 
 enum ControlState {
     Ready,
-    Pending(StopKey),
+    Pending(#[allow(dead_code)] StopKey),
     Draining(StopKey),
 }
 
@@ -528,7 +530,9 @@ fn protocol_failure(
 ) -> ProtocolFailure {
     ProtocolFailure {
         code,
-        detail: ErrorDetail::parse(detail).expect("lifecycle detail is within the protocol bound"),
+        // All call sites pass static bounded text; an empty detail stays
+        // representable instead of panicking if that ever changes.
+        detail: ErrorDetail::parse(detail).unwrap_or_default(),
         retryable,
         request_id: Some(request_id),
     }

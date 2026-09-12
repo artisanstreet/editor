@@ -255,6 +255,12 @@ impl RunCancellationRegistry {
     /// Multiple active runs are deliberately not ordered or guessed: callers
     /// receive [`RunCancellationError::AmbiguousActiveRuns`] and must fail
     /// closed until the registry returns to a singleton or empty state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunCancellationError::Poisoned`] when the registry lock is
+    /// poisoned, and [`RunCancellationError::AmbiguousActiveRuns`] when more
+    /// than one run is active for the thread.
     pub fn active_run(&self, thread_id: &ThreadId) -> Result<Option<RunId>, RunCancellationError> {
         let state = self.inner.lock()?;
         let mut active = state
@@ -332,6 +338,11 @@ impl RunCancellationLease {
     /// is never allowed to remove a newer registration for the same ids. A
     /// poisoned lock returns [`RunCancellationError::Poisoned`] and leaves
     /// the lease armed for its best-effort, non-panicking `Drop` path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunCancellationError::Poisoned`] when the registry lock is
+    /// poisoned.
     pub fn unregister(mut self) -> Result<(), RunCancellationError> {
         self.release()
     }
@@ -639,7 +650,7 @@ mod tests {
         drop_thread.join().expect("drop thread should finish");
         assert!(matches!(
             request_result,
-            Ok(CancelRequestOutcome::Signalled) | Ok(CancelRequestOutcome::NotActive)
+            Ok(CancelRequestOutcome::Signalled | CancelRequestOutcome::NotActive)
         ));
         match request_result {
             Ok(CancelRequestOutcome::Signalled) => assert!(old_handle.is_cancelled()),

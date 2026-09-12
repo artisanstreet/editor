@@ -32,7 +32,7 @@ use artisan_transport::CancelHandle;
 
 #[path = "http/resume.rs"]
 mod resume;
-pub(crate) use resume::{ResumeError, ResumeInput, ResumeReceipt, ResumeSelection, perform_resume};
+pub(crate) use resume::{ResumeError, ResumeInput, ResumeSelection, perform_resume};
 
 use super::catalog::{
     CatalogError, CatalogResult, CatalogScope, MAX_CATALOG_RESPONSE_BYTES, decode_models_response,
@@ -143,11 +143,13 @@ impl PromptFile {
         Self::new(format!("data:{mime_type};base64,{encoded}"), name)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn uri(&self) -> &str {
         &self.uri
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn name(&self) -> &str {
         &self.name
@@ -213,6 +215,7 @@ impl fmt::Debug for CreateSessionReceipt {
 }
 
 impl<'a> PromptInput<'a> {
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn new(
         session: &'a str,
@@ -463,7 +466,7 @@ pub async fn perform_health(
     Ok(version)
 }
 
-/// Performs the bounded authenticated, location-scoped OpenCode2 model
+/// Performs the bounded authenticated, location-scoped `OpenCode2` model
 /// discovery request. The request is deliberately limited to `GET
 /// /api/model`; no provider session, assistant run, or prompt is created.
 ///
@@ -634,16 +637,15 @@ async fn settle_catalog_driver(
 
 fn map_health_error_to_catalog(error: HealthError) -> CatalogError {
     match error {
-        HealthError::EntropyFailed => CatalogError::InvalidShape,
         HealthError::ConnectFailed => CatalogError::ConnectFailed,
         HealthError::HandshakeFailed => CatalogError::HandshakeFailed,
         HealthError::SendFailed => CatalogError::SendFailed,
         HealthError::StatusNotSuccess => CatalogError::StatusNotSuccess,
-        HealthError::HeadersTooLarge => CatalogError::BodyTooLarge,
-        HealthError::BodyTooLarge => CatalogError::BodyTooLarge,
+        HealthError::HeadersTooLarge | HealthError::BodyTooLarge => CatalogError::BodyTooLarge,
         HealthError::InvalidJson
         | HealthError::MissingVersion
-        | HealthError::IncompatibleVersion => CatalogError::InvalidShape,
+        | HealthError::IncompatibleVersion
+        | HealthError::EntropyFailed => CatalogError::InvalidShape,
         HealthError::BodyReadFailed => CatalogError::BodyReadFailed,
         HealthError::Timeout => CatalogError::Timeout,
         HealthError::Cancelled => CatalogError::Cancelled,
@@ -1420,7 +1422,7 @@ mod tests {
     }
 
     fn catalog_endpoint(port: u16) -> ValidatedEndpoint {
-        let line = format!(r###"{{"url":"http://127.0.0.1:{port}"}}"###);
+        let line = format!(r#"{{"url":"http://127.0.0.1:{port}"}}"#);
         super::super::readiness::validate_readiness_line(line.as_bytes(), 1024)
             .expect("fixture endpoint should validate")
     }
@@ -1535,7 +1537,7 @@ mod tests {
                 CatalogError::InvalidShape,
             ),
             (
-                br#"{}"#.as_slice(),
+                br"{}".as_slice(),
                 Some(catalog_bounds().max_json_body + 1),
                 CatalogError::BodyTooLarge,
             ),

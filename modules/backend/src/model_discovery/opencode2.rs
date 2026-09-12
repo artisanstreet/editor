@@ -1,9 +1,9 @@
-//! OpenCode2 model discovery via the installed `opencode2` CLI.
+//! `OpenCode2` model discovery via the installed `opencode2` CLI.
 //!
 //! `opencode2 models` prints the model identifiers the engine offers as
 //! `provider/model` lines (the same route/model pairs the harness runs).
 //! The CLI reports no names or limits, so the engine's own catalogue cache
-//! (`~/.cache/opencode/models.json`, the models.dev data OpenCode ships and
+//! (`~/.cache/opencode/models.json`, the models.dev data `OpenCode` ships and
 //! refreshes for its own picker) supplies display metadata when present.
 //! Missing metadata degrades to a humanized identifier, never to an invented
 //! capability: thinking stays engine-managed and unexposed here.
@@ -28,10 +28,10 @@ const MAX_LINE_BYTES: usize = 512;
 /// Maximum catalogue cache size retained for metadata.
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Probes the OpenCode2 CLI; `None` when it does not answer.
+/// Probes the `OpenCode2` CLI; `None` when it does not answer.
 pub(super) async fn discover_opencode2(program: Option<&str>) -> Option<Vec<DiscoveredModel>> {
     let executable = program?;
-    let output = run_bounded(executable, &["models"], DEADLINE, MAX_BYTES).await?;
+    let output = Box::pin(run_bounded(executable, &["models"], DEADLINE, MAX_BYTES)).await?;
     if !output.success {
         return None;
     }
@@ -45,7 +45,7 @@ pub(super) async fn discover_opencode2(program: Option<&str>) -> Option<Vec<Disc
             .into_iter()
             .flat_map(|(provider, model)| {
                 let entry = metadata.get(&(provider.clone(), model.clone()));
-                rows_for(provider, model, entry)
+                rows_for(&provider, &model, entry)
             })
             .collect(),
     )
@@ -53,20 +53,15 @@ pub(super) async fn discover_opencode2(program: Option<&str>) -> Option<Vec<Disc
 
 /// Builds the base row plus one row per engine-reported effort variant.
 ///
-/// OpenCode exposes reasoning levels as native variants (its own config sets
+/// `OpenCode` exposes reasoning levels as native variants (its own config sets
 /// `model.variant`), and the runtime path models each as its own identity
 /// row. The cache's `reasoning_options` effort values are exactly those
 /// variant ids; toggle and budget options are not derivable and stay out.
-fn rows_for(provider: String, model: String, entry: Option<&CacheEntry>) -> Vec<DiscoveredModel> {
-    let mut rows = vec![row(provider.clone(), model.clone(), entry, None)];
+fn rows_for(provider: &str, model: &str, entry: Option<&CacheEntry>) -> Vec<DiscoveredModel> {
+    let mut rows = vec![row(provider, model, entry, None)];
     if let Some(entry) = entry {
         for variant in &entry.variants {
-            rows.push(row(
-                provider.clone(),
-                model.clone(),
-                Some(entry),
-                Some(variant.clone()),
-            ));
+            rows.push(row(provider, model, Some(entry), Some(variant.clone())));
         }
     }
     rows
@@ -103,7 +98,7 @@ fn parse_model_list(output: &str) -> Vec<(String, String)> {
     rows
 }
 
-/// Display metadata retained from OpenCode's own catalogue cache.
+/// Display metadata retained from `OpenCode`'s own catalogue cache.
 #[derive(Default)]
 struct CacheEntry {
     name: Option<String>,
@@ -249,20 +244,20 @@ fn cost_pair(value: Option<&Value>) -> Option<(f64, f64)> {
 }
 
 fn row(
-    provider: String,
-    model: String,
+    provider: &str,
+    model: &str,
     entry: Option<&CacheEntry>,
     variant_id: Option<String>,
 ) -> DiscoveredModel {
     DiscoveredModel {
         engine_id: "opencode2",
-        provider,
-        native_model_id: model.clone(),
-        upstream_model_id: Some(model.clone()),
+        provider: provider.to_owned(),
+        native_model_id: model.to_owned(),
+        upstream_model_id: Some(model.to_owned()),
         variant_id,
         name: entry
             .and_then(|entry| entry.name.clone())
-            .unwrap_or_else(|| humanized_model_name(&model)),
+            .unwrap_or_else(|| humanized_model_name(model)),
         description: entry.and_then(|entry| entry.description.clone()),
         hidden: false,
         default: false,
@@ -336,7 +331,7 @@ mod tests {
         let model = serde_json::json!({
             "name": "Kimi K3",
             "description": "Frontier open model",
-            "limit": { "context": 262144, "output": 262144 },
+            "limit": { "context": 262_144, "output": 262_144 },
             "modalities": { "input": ["text", "image"] },
             "tool_call": true,
             "reasoning": true,
@@ -360,7 +355,7 @@ mod tests {
             variants: vec!["high".to_owned(), "max".to_owned()],
             ..CacheEntry::default()
         };
-        let rows = rows_for("opencode-go".to_owned(), "kimi-k3".to_owned(), Some(&entry));
+        let rows = rows_for("opencode-go", "kimi-k3", Some(&entry));
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].variant_id, None);
         assert_eq!(rows[1].variant_id.as_deref(), Some("high"));

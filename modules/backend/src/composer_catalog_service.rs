@@ -110,7 +110,7 @@ impl ComposerCatalogService {
             .repository
             .read_thread_project_root(thread)
             .await
-            .map_err(classify_scope_repository_error)?;
+            .map_err(|error| classify_scope_repository_error(&error))?;
         let authority = NativeOpenCode2Authority::new();
         let launch = authority
             .resolve_profile_launch(&self.database, profile)
@@ -121,11 +121,10 @@ impl ComposerCatalogService {
 
         {
             let cache = self.cache.lock().await;
-            if let Some((observed, result)) = cache.as_ref() {
-                if result.scope == scope && now.duration_since(*observed) < CACHE_TTL {
+            if let Some((observed, result)) = cache.as_ref()
+                && result.scope == scope && now.duration_since(*observed) < CACHE_TTL {
                     return Ok(result.clone());
                 }
-            }
         }
 
         // Discovery is a bounded product operation, independent of a turn's
@@ -173,19 +172,18 @@ impl ComposerCatalogService {
         }
 
         let mut cache = self.cache.lock().await;
-        if let Some((observed, cached)) = cache.as_ref() {
-            if cached.scope == scope
+        if let Some((observed, cached)) = cache.as_ref()
+            && cached.scope == scope
                 && tokio::time::Instant::now().duration_since(*observed) < CACHE_TTL
             {
                 return Ok(cached.clone());
             }
-        }
         *cache = Some((tokio::time::Instant::now(), result.clone()));
         Ok(result)
     }
 }
 
-fn classify_scope_repository_error(error: RepositoryError) -> ComposerCatalogServiceError {
+fn classify_scope_repository_error(error: &RepositoryError) -> ComposerCatalogServiceError {
     match error {
         RepositoryError::ThreadNotFound { .. } => ComposerCatalogServiceError::ThreadUnknown,
         RepositoryError::ProjectNotFound { .. } => ComposerCatalogServiceError::ProjectUnknown,

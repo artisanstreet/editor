@@ -25,6 +25,10 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(windows)]
+use super::consts::CREATE_NO_WINDOW;
+#[cfg(test)]
+use super::consts::WATCHDOG_FAILURE_EXIT;
 #[cfg(test)]
 use base64::Engine as _;
 #[cfg(windows)]
@@ -35,9 +39,6 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
 use artisan_domain::RootPath;
 use artisan_native_engine::VerifiedOpenCode2ProfileLaunch;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// The exact executable launch the owner task performs.
 ///
@@ -516,7 +517,7 @@ pub(crate) fn spawn_codex_engine(
     launch: &artisan_native_engine::VerifiedCodexLaunch,
     project_root: &RootPath,
 ) -> io::Result<EngineChild> {
-    let mut command = codex_engine_command(launch.executable_path(), project_root);
+    let command = codex_engine_command(launch.executable_path(), project_root);
 
     launch
         .revalidate()
@@ -534,10 +535,7 @@ pub(crate) fn spawn_codex_engine(
 /// No `CODEX_HOME` override is ever inserted here; inserting one would seat
 /// dispatch at a managed home that does not exist instead of the
 /// authenticated ambient account.
-fn codex_engine_command(
-    executable: &Path,
-    project_root: &RootPath,
-) -> tokio::process::Command {
+fn codex_engine_command(executable: &Path, project_root: &RootPath) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(executable);
     command
         .current_dir(Path::new(project_root.as_str()))
@@ -734,6 +732,7 @@ pub(crate) enum StderrEvent {
 }
 
 /// Exact custody retained when a child's death could not be observed.
+#[allow(dead_code)]
 pub(crate) struct RetainedEngine {
     /// The exact direct child or whole-job child, boxed for long-term custody.
     pub(crate) child: Box<EngineChild>,
@@ -908,9 +907,6 @@ thread_local! {
     static WITNESS_WATCHDOG: Cell<u64> = const { Cell::new(0) };
     static WITNESS_CONTROL_DRIVER: Cell<u64> = const { Cell::new(0) };
 }
-
-#[cfg(test)]
-const WATCHDOG_FAILURE_EXIT: i32 = 99;
 
 #[cfg(test)]
 fn witness_spawned() {
@@ -1326,10 +1322,9 @@ mod tests {
 
     #[test]
     fn codex_engine_command_inherits_ambient_account_environment() {
-        let root = artisan_domain::RootPath::parse(
-            std::env::temp_dir().to_string_lossy().into_owned(),
-        )
-        .expect("temp dir is a valid root");
+        let root =
+            artisan_domain::RootPath::parse(std::env::temp_dir().to_string_lossy().into_owned())
+                .expect("temp dir is a valid root");
         let command = codex_engine_command(Path::new("codex-probe-exe"), &root);
         let std_command = command.as_std();
         // The child must observe the ambient/explicit CODEX_HOME account

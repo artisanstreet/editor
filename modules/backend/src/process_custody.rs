@@ -248,6 +248,7 @@ impl Error for ForgeProcessCustodyError {
 /// lock file itself is never unlinked.
 #[must_use = "Forge process custody must remain alive through application shutdown"]
 pub struct ForgeProcessCustody {
+    #[allow(dead_code)]
     file: File,
     lock_path: PathBuf,
 }

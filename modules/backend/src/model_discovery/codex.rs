@@ -42,7 +42,7 @@ pub(super) async fn discover_codex() -> Option<Vec<DiscoveredModel>> {
 }
 
 /// Resolves the Codex executable with the same precedence the runtime uses:
-/// explicit override, per-user install, WinGet, then eligible PATH entries.
+/// explicit override, per-user install, `WinGet`, then eligible PATH entries.
 fn resolve_codex_command() -> String {
     let configured_executable = std::env::var("ARTISAN_CODEX_EXECUTABLE").ok();
     let local_app_data = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
@@ -76,6 +76,10 @@ fn resolve_codex_command() -> String {
         .into_owned()
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the raw wire row carries independent provider flags; grouping them would not reduce ambiguity"
+)]
 struct RawCodexModel {
     id: String,
     display_name: String,
@@ -396,7 +400,7 @@ mod tests {
         let context = HashMap::from([("gpt-test".to_owned(), (272_000_u64, 872_000_u64))]);
         let mapped = map_row(raw, &context);
         assert_eq!(mapped.native_model_id, "gpt-test");
-        assert!(mapped.hidden == false);
+        assert!(!mapped.hidden);
         assert!(mapped.default);
         assert!(mapped.image_input);
         assert!(mapped.fast);

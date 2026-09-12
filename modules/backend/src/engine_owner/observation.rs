@@ -39,6 +39,7 @@ pub(crate) struct TextDelta {
     delta: String,
 }
 
+#[allow(dead_code)]
 impl TextDelta {
     #[must_use]
     pub(crate) fn run_id(&self) -> &RunId {
@@ -149,6 +150,7 @@ pub(crate) struct TerminalObservation {
     summary_title: Option<String>,
 }
 
+#[allow(dead_code)]
 impl TerminalObservation {
     #[must_use]
     pub(crate) fn new(
@@ -209,7 +211,7 @@ impl TerminalObservation {
     }
 }
 
-/// A bounded provider text projection used when OpenCode sends a text-end
+/// A bounded provider text projection used when `OpenCode` sends a text-end
 /// reconciliation envelope. The dispatcher applies it to the explicit part
 /// projection and rebuilds the one durable assistant item without appending
 /// the same full part twice.
@@ -221,6 +223,7 @@ pub(crate) struct TextSnapshot {
     text: String,
 }
 
+#[allow(dead_code)]
 impl TextSnapshot {
     #[must_use]
     pub(crate) fn new(run_id: RunId, sequence: u64, part_id: String, text: String) -> Self {

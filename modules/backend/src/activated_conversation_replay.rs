@@ -105,6 +105,10 @@ pub async fn read_activated_observation_history(
 /// `thread_id` must be the exact thread of an active subscription lease held
 /// by the caller; this seam performs no lease lookup itself. Prefer
 /// [`read_activated_observation_history`] when the activation is available.
+///
+/// # Errors
+///
+/// Returns [`RepositoryError`] when the durable observation read fails.
 pub async fn read_observation_history_for_thread(
     repository: &Repository,
     thread_id: &ThreadId,

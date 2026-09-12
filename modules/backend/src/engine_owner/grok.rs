@@ -58,6 +58,7 @@ use artisan_domain::{
     EngineModelId, EngineProfileId, EngineRouteId, FilesystemAccess, GrokSelection, RunId,
     RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId, UnixMillis,
 };
+#[cfg(test)]
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -140,7 +141,7 @@ impl GrokSettings {
     /// executable, embedded image blocks, the TypeScript version and auth
     /// classifiers, and the arg builder above.
     #[must_use = "definition rows must drive the dispatch arm"]
-    pub(crate) fn definition(&self) -> AcpDefinition {
+    pub(crate) fn definition() -> AcpDefinition {
         GROK_ACP
     }
 }
@@ -252,6 +253,7 @@ pub(crate) fn follow_up(prompt_active: bool) -> Result<GrokFollowUp, GrokCommand
 /// unobserved ACP reap surfaces as `UnresolvedReapDuring` through the
 /// executor's finish path (the retained ACP handle carries no observable
 /// wait and drops rather than quarantining the owner).
+#[cfg(test)]
 pub(crate) const fn grok_requires_group_termination() -> bool {
     true
 }
@@ -261,10 +263,12 @@ pub(crate) const fn grok_requires_group_termination() -> bool {
 /// A leading name and any trailing pre-release/build suffix are ignored, so
 /// `grok 1.2.3-beta.1` compares equal to `1.2.3`. Returns `None` when either
 /// side has no parseable triple; callers fail closed on `None`.
+#[cfg(test)]
 pub(crate) fn compare_grok_cli_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
     Some(parse_cli_triple(left)?.cmp(&parse_cli_triple(right)?))
 }
 
+#[cfg(test)]
 fn parse_cli_triple(text: &str) -> Option<[u64; 3]> {
     let start = text.find(|character: char| character.is_ascii_digit())?;
     let run: String = text[start..]
@@ -425,6 +429,10 @@ pub(crate) struct GrokUsageAttribution {
 }
 
 /// Borrowed usage scope for one pump loop.
+#[expect(
+    clippy::struct_field_names,
+    reason = "fields mirror GrokUsageAttribution and the wire usage vocabulary; renaming would obscure the mapping"
+)]
 pub(crate) struct GrokUsageScope<'a> {
     pub thread_id: &'a ThreadId,
     pub model_id: &'a EngineModelId,
@@ -516,6 +524,7 @@ pub(crate) async fn project_grok_usage_sample(
 /// weekly window, 40,000–45,000 a monthly window; anything else (including
 /// absent) is unknown rather than guessed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(test)]
 pub(crate) enum GrokQuotaWindowKind {
     Session,
     Weekly,
@@ -524,6 +533,7 @@ pub(crate) enum GrokQuotaWindowKind {
 }
 
 /// Classifies one quota-budget window duration.
+#[cfg(test)]
 pub(crate) fn classify_grok_quota_window_kind(window_minutes: Option<u64>) -> GrokQuotaWindowKind {
     match window_minutes {
         Some(300) => GrokQuotaWindowKind::Session,
@@ -537,6 +547,7 @@ pub(crate) fn classify_grok_quota_window_kind(window_minutes: Option<u64>) -> Gr
 ///
 /// Absent or non-finite readings become `0`: usage display never blocks on a
 /// corrupt gauge and never invents quota from it.
+#[cfg(test)]
 pub(crate) fn clamp_grok_percent_used(used_percent: Option<f64>) -> f64 {
     match used_percent {
         Some(value) if value.is_finite() => value.clamp(0.0, 100.0),
@@ -550,6 +561,7 @@ pub(crate) fn clamp_grok_percent_used(used_percent: Option<f64>) -> f64 {
 /// seconds and the reset instant is display-only diagnostics, never turn
 /// input. Computed without a date library so the owner keeps no new
 /// dependency for one diagnostic string.
+#[cfg(test)]
 pub(crate) fn grok_reset_at_iso(resets_at_secs: u64) -> String {
     let days = i64::try_from(resets_at_secs / 86_400).unwrap_or(i64::MAX);
     let clock = i64::try_from(resets_at_secs % 86_400).unwrap_or(0);
@@ -581,6 +593,7 @@ pub(crate) fn grok_reset_at_iso(resets_at_secs: u64) -> String {
 /// Budget windows are read through a non-billable surface and classified
 /// here; they are never copied into [`RunUsageReport`] and never gate a turn.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg(test)]
 pub(crate) struct GrokQuotaWindow {
     pub id: String,
     pub kind: GrokQuotaWindowKind,
@@ -600,6 +613,7 @@ pub(crate) struct GrokQuotaWindow {
 /// `primary`/`secondary` slot in bucket-then-slot order. Malformed input
 /// yields no windows: collection is best-effort diagnostics and never blocks
 /// a turn.
+#[cfg(test)]
 pub(crate) fn map_grok_quota_windows(result: &Value) -> Vec<GrokQuotaWindow> {
     let mut buckets: Vec<(String, Value)> = Vec::new();
     if let Some(map) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {

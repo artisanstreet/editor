@@ -21,7 +21,7 @@
 //!
 //! Engine coverage mirrors the TypeScript adapters: Codex reads
 //! `account/rateLimits/read`, Claude parses `claude -p /usage`, Cursor posts
-//! its dashboard endpoint, and Grok Build, Hermes, and OpenCode report
+//! its dashboard endpoint, and Grok Build, Hermes, and `OpenCode` report
 //! unsupported-with-reason because their adapters expose no account-usage
 //! surface (`Engine.Usage` is optional in `modules/engines/src/engine.ts`
 //! and absent from those three adapters).
@@ -386,7 +386,7 @@ struct CachedUsage {
 
 impl AccountUsageService {
     /// Creates the production roster: Codex, Claude, Cursor, then the
-    /// unsupported Grok Build, Hermes, and OpenCode entries.
+    /// unsupported Grok Build, Hermes, and `OpenCode` entries.
     #[must_use]
     pub fn with_defaults(codex: &CliLaunch, claude: &CliLaunch, cursor: CursorUsageConfig) -> Self {
         Self::with_readers(
@@ -446,6 +446,15 @@ impl AccountUsageService {
     /// its original fetch time and marks the served copy with the refresh
     /// failure, so stale data is never stamped with the current clock. Only
     /// successful provider reads refresh the cache.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a constructed snapshot violates the domain's bounded roster
+    /// invariants; all inputs are pre-bounded, so this cannot occur in practice.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear read over the per-engine roster; extraction would split the shared cache and failure bookkeeping"
+    )]
     pub async fn read(&self, query: &ReadAccountUsage) -> EngineUsageSnapshot {
         let selected: Vec<usize> = match query.engine_id() {
             Some(engine_id) => match self
@@ -462,8 +471,20 @@ impl AccountUsageService {
         let mut served: Vec<Option<(EngineUsageReport, String)>> =
             selected.iter().map(|_| None).collect();
         let mut missing: Vec<(usize, usize)> = Vec::new();
-        if !query.force() {
-            let cache = self.cache.lock().expect("usage cache is not poisoned");
+        if query.force() {
+            missing = selected
+                .iter()
+                .enumerate()
+                .map(|(slot, index)| (slot, *index))
+                .collect();
+        } else {
+            // A panic while the cache lock was held must not take the usage
+            // service down: the map holds plain report data with no
+            // cross-entry invariants, so serving it after poison is safe.
+            let cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for (slot, reader_index) in selected.iter().enumerate() {
                 let engine_id = self.readers[*reader_index].engine_id();
                 match cache.get(engine_id) {
@@ -473,12 +494,6 @@ impl AccountUsageService {
                     _ => missing.push((slot, *reader_index)),
                 }
             }
-        } else {
-            missing = selected
-                .iter()
-                .enumerate()
-                .map(|(slot, index)| (slot, *index))
-                .collect();
         }
 
         let mut outcomes: HashMap<usize, Result<ProviderUsage, ReaderFailure>> = HashMap::new();
@@ -498,14 +513,11 @@ impl AccountUsageService {
                 });
             }
             while let Some(joined) = set.join_next().await {
-                match joined {
-                    Ok((slot, outcome)) => {
-                        outcomes.insert(slot, outcome);
-                    }
-                    Err(_) => {
-                        // A panicking reader task settles as a failed read;
-                        // sibling outcomes are unaffected.
-                    }
+                if let Ok((slot, outcome)) = joined {
+                    outcomes.insert(slot, outcome);
+                } else {
+                    // A panicking reader task settles as a failed read;
+                    // sibling outcomes are unaffected.
                 }
             }
         }
@@ -550,7 +562,10 @@ impl AccountUsageService {
             }
         }
         if !fresh.is_empty() {
-            let mut cache = self.cache.lock().expect("usage cache is not poisoned");
+            let mut cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for (engine_id, cached) in fresh {
                 cache.insert(engine_id, cached);
             }
@@ -559,7 +574,7 @@ impl AccountUsageService {
         let mut fetched_at = String::new();
         for (report, observed_at) in served.into_iter().flatten() {
             if observed_at > fetched_at {
-                fetched_at = observed_at.clone();
+                fetched_at.clone_from(&observed_at);
             }
             reports.push(report);
         }
@@ -569,6 +584,9 @@ impl AccountUsageService {
             // carries its own observation time instead.
             fetched_at = iso_millis(system_millis());
         }
+        // Construction invariant: `selected` is bounded by the fixed reader
+        // roster and `fetched_at` comes from `iso_millis`; `read` has no typed
+        // error channel to report an unrepresentable snapshot.
         EngineUsageSnapshot::new(reports, fetched_at).expect("usage roster is bounded")
     }
 
@@ -581,7 +599,10 @@ impl AccountUsageService {
         failure: &ReaderFailure,
         now_iso: String,
     ) -> (EngineUsageReport, String) {
-        let cache = self.cache.lock().expect("usage cache is not poisoned");
+        let cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = cache.get(reader.engine_id()) {
             let marked = cached
                 .report
@@ -603,6 +624,8 @@ impl AccountUsageService {
         );
         let report = EngineUsageReport::new(
             None,
+            // The failure above carries no reason; the only fallible
+            // `EngineUsageAuth` input cannot occur here.
             EngineUsageAuth::new(failure.auth_state, failure.auth_reason)
                 .expect("static auth state is valid"),
             engine_id.to_owned(),
@@ -611,7 +634,11 @@ impl AccountUsageService {
             Some(failure.quota_surface),
             Vec::new(),
         )
+        // The id came from a validated query and every other field is static
+        // or empty; the report is within its bounds.
         .expect("unknown-engine report is bounded");
+        // One report and an `iso_millis` instant are within the snapshot
+        // bounds.
         EngineUsageSnapshot::new(vec![report], iso_millis(system_millis()))
             .expect("single report snapshot is bounded")
     }
@@ -646,6 +673,9 @@ fn failure_report(
 ) -> EngineUsageReport {
     EngineUsageReport::new(
         None,
+        // The caller-owned reason is the only fallible auth input; a
+        // recoverable path needs a typed error channel from this reporting
+        // path (or an infallible no-reason constructor in the domain).
         EngineUsageAuth::new(failure.auth_state, failure.auth_reason.clone())
             .expect("static auth state is valid"),
         reader.display_name().to_owned(),
@@ -654,12 +684,15 @@ fn failure_report(
         Some(failure.quota_surface),
         Vec::new(),
     )
+    // Reader-supplied id/display text and failure text are caller-owned; a
+    // malformed reader still needs a typed outcome rather than a panic.
     .expect("failure report is bounded")
 }
 
 fn system_millis() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
 }

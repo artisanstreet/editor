@@ -13,6 +13,7 @@ use crate::engine_owner::observation::{
 /// `Debug` and `Display` are constant strings; no raw event data, text,
 /// reason, error reference, or identifier is ever embedded. All variants are
 /// `Copy` and `Eq` to keep error handling free of allocations.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub(crate) enum EventDecodeError {
     #[error("event data is not valid json")]
@@ -64,6 +65,7 @@ pub(crate) enum EventDecodeError {
 ///   validated run ID string.
 /// - Extra unrelated JSON fields are ignored.
 /// - Typed errors never retain raw payload bytes.
+#[allow(dead_code)]
 pub(crate) fn decode_sse_event(
     event: &SseEvent,
 ) -> Result<Vec<EngineObservation>, EventDecodeError> {
@@ -74,6 +76,7 @@ pub(crate) fn decode_sse_event(
 /// run/session pair owned by the current turn.  The legacy wrapper above
 /// intentionally keeps the original decoder contract for the isolated owner
 /// tests; production configured turns always provide both expected values.
+#[allow(dead_code)]
 pub(crate) fn decode_sse_event_for_run(
     event: &SseEvent,
     expected_run: Option<&RunId>,

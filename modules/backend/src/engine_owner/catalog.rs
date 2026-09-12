@@ -1,4 +1,4 @@
-//! Bounded OpenCode2 model discovery and adapter-neutral normalization.
+//! Bounded `OpenCode2` model discovery and adapter-neutral normalization.
 //!
 //! The only accepted source is the authenticated `/api/model` response from
 //! the certified engine owned by the sibling operation. This module keeps the
@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
+use super::consts::HEX_UPPER;
 use base64::Engine as _;
 use serde_json::Value;
 use thiserror::Error;
@@ -19,7 +20,7 @@ use thiserror::Error;
 /// Hard upper bound for one runtime catalog response, independent of the
 /// caller's larger generic JSON bound.
 pub(crate) const MAX_CATALOG_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-/// Maximum number of source models accepted from OpenCode.
+/// Maximum number of source models accepted from `OpenCode`.
 pub(crate) const MAX_CATALOG_MODELS: usize = 512;
 /// Maximum number of normalized rows after expanding variants.
 pub(crate) const MAX_NORMALIZED_CATALOG_MODELS: usize = 2048;
@@ -64,7 +65,7 @@ pub(crate) enum CatalogError {
     /// The response body was not valid JSON.
     #[error("catalog response was not valid json")]
     InvalidJson,
-    /// The response shape did not match OpenCode2's model schema.
+    /// The response shape did not match `OpenCode2`'s model schema.
     #[error("catalog response shape was invalid")]
     InvalidShape,
     /// A model field did not satisfy its bounded schema.
@@ -149,7 +150,7 @@ impl CatalogScope {
         &self.profile_id
     }
 
-    /// Returns the exact directory used in the OpenCode location query.
+    /// Returns the exact directory used in the `OpenCode` location query.
     #[must_use]
     pub(crate) fn working_directory(&self) -> &str {
         &self.working_directory
@@ -193,7 +194,7 @@ fn bounded_scope_string(value: String, maximum: usize) -> Result<String, Catalog
     Ok(value)
 }
 
-/// The schema status reported by OpenCode2 for one source model.
+/// The schema status reported by `OpenCode2` for one source model.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogModelStatus {
     /// A generally available source model.
@@ -228,12 +229,12 @@ impl CatalogModelStatus {
     }
 }
 
-/// OpenCode's first reported cost record.
+/// `OpenCode`'s first reported cost record.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CatalogCost {
-    /// Input USD per million tokens as reported by OpenCode.
+    /// Input USD per million tokens as reported by `OpenCode`.
     pub(crate) input_usd_per_million: f64,
-    /// Output USD per million tokens as reported by OpenCode.
+    /// Output USD per million tokens as reported by `OpenCode`.
     pub(crate) output_usd_per_million: f64,
 }
 
@@ -251,6 +252,7 @@ pub(crate) enum CatalogAvailability {
 
 impl CatalogAvailability {
     /// Returns whether a row is selectable in this runtime snapshot.
+    #[cfg(test)]
     #[must_use]
     pub(crate) const fn is_available(self) -> bool {
         matches!(self, Self::Available)
@@ -269,7 +271,7 @@ impl CatalogAvailability {
 /// Thinking metadata from `/api/model`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogThinkingMetadata {
-    /// OpenCode's model schema does not report selectable thinking levels.
+    /// `OpenCode`'s model schema does not report selectable thinking levels.
     NotReported,
 }
 
@@ -286,20 +288,24 @@ pub(crate) struct CatalogCapabilities {
     pub(crate) output_tokens: u64,
     /// Whether `input` reported image support.
     pub(crate) image_input: bool,
-    /// Whether OpenCode reported tool support.
+    /// Whether `OpenCode` reported tool support.
     pub(crate) tools: bool,
     /// Explicitly non-inferred thinking metadata.
     pub(crate) thinking: CatalogThinkingMetadata,
 }
 
 /// Exact source model/route/variant identity.
+#[expect(
+    clippy::struct_field_names,
+    reason = "fields mirror the provider model/route/variant identity vocabulary; renaming would obscure the mapping"
+)]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct CatalogModelSelection {
-    /// OpenCode's native model ID.
+    /// `OpenCode`'s native model ID.
     pub(crate) model_id: String,
-    /// OpenCode provider route ID.
+    /// `OpenCode` provider route ID.
     pub(crate) provider_route_id: String,
-    /// Optional exact OpenCode variant ID.
+    /// Optional exact `OpenCode` variant ID.
     pub(crate) variant_id: Option<String>,
 }
 
@@ -310,7 +316,7 @@ pub(crate) struct CatalogModel {
     pub(crate) catalog_id: String,
     /// Source model ID.
     pub(crate) model_id: String,
-    /// Native model ID used by OpenCode.
+    /// Native model ID used by `OpenCode`.
     pub(crate) native_model_id: String,
     /// Provider route ID.
     pub(crate) provider_route_id: String,
@@ -349,7 +355,7 @@ pub(crate) struct CatalogRouteGroup {
     pub(crate) show_route_labels: bool,
 }
 
-/// One deduplicated provider route reported by OpenCode2.
+/// One deduplicated provider route reported by `OpenCode2`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CatalogRoute {
     /// Owning engine identifier.
@@ -427,19 +433,21 @@ pub(crate) struct CatalogResult {
 
 impl CatalogResult {
     /// Returns the number of normalized model rows.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn model_count(&self) -> usize {
         self.models.len()
     }
 
     /// Returns the number of deduplicated routes.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn route_count(&self) -> usize {
         self.routes.len()
     }
 }
 
-/// Decodes the exact OpenCode2 `{ "data": [...] }` response shape.
+/// Decodes the exact `OpenCode2` `{ "data": [...] }` response shape.
 pub(crate) fn decode_models_response(
     bytes: &[u8],
 ) -> Result<RawOpenCode2ModelsResponse, CatalogError> {
@@ -807,29 +815,28 @@ fn canonical_route(route: &CatalogRoute) -> Value {
 }
 
 fn stable_hash(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3_u64);
+        hash = hash.wrapping_mul(0x0100_0000_01b3_u64);
     }
     hash
 }
 
-/// Encodes the exact OpenCode location query used by the Electron adapter.
+/// Encodes the exact `OpenCode` location query used by the Electron adapter.
 /// Spaces use `+`; all other non-unreserved UTF-8 bytes use uppercase `%XX`.
 pub(crate) fn location_query(scope: &CatalogScope) -> String {
     let mut encoded = String::with_capacity(scope.working_directory.len().saturating_mul(3));
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for byte in scope.working_directory().as_bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(char::from(*byte))
+                encoded.push(char::from(*byte));
             }
             b' ' => encoded.push('+'),
             byte => {
                 encoded.push('%');
-                encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-                encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+                encoded.push(char::from(HEX_UPPER[usize::from(byte >> 4)]));
+                encoded.push(char::from(HEX_UPPER[usize::from(byte & 0x0f)]));
             }
         }
     }
@@ -855,7 +862,7 @@ mod tests {
             "cost": [{ "input": 1.25, "output": 2.5 }],
             "enabled": enabled,
             "id": id,
-            "limit": { "context": 131072, "output": 8192 },
+            "limit": { "context": 131_072, "output": 8_192 },
             "modelID": format!("upstream-{id}"),
             "name": format!("Model {id}"),
             "providerID": provider,
@@ -896,7 +903,7 @@ mod tests {
             variant.catalog_id,
             "opencode2:eyJtb2RlbF9pZCI6Im1vZGVsLWEiLCJwcm92aWRlcl9yb3V0ZV9pZCI6Im9wZW5jb2RlIiwidmFyaWFudF9pZCI6ImhpZ2gifQ"
         );
-        assert_eq!(variant.capabilities.context_window_tokens, 131072);
+        assert_eq!(variant.capabilities.context_window_tokens, 131_072);
         assert!(variant.capabilities.image_input);
         assert!(variant.capabilities.tools);
         assert_eq!(
@@ -952,7 +959,7 @@ mod tests {
     #[test]
     fn malformed_and_overbound_responses_are_rejected_before_normalization() {
         assert_eq!(
-            decode_models_response(br#"not-json"#),
+            decode_models_response(br"not-json"),
             Err(CatalogError::InvalidJson)
         );
         let too_many = serde_json::json!({

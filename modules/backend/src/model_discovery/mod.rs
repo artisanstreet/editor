@@ -36,6 +36,10 @@ pub(crate) const DISCOVERY_TTL: Duration = Duration::from_secs(300);
 const ENGINE_DEADLINE: Duration = Duration::from_secs(6);
 
 /// One live row reported by an engine.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the row carries independent provider capability bits; grouping them into a nested struct would not reduce ambiguity"
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DiscoveredModel {
     /// Owning harness/engine identifier (`codex`, `claude`, `cursor`, `grok`).
@@ -46,7 +50,7 @@ pub(crate) struct DiscoveredModel {
     pub(crate) native_model_id: String,
     /// Optional upstream provider model id when it differs from the native id.
     pub(crate) upstream_model_id: Option<String>,
-    /// Optional engine variant id (OpenCode2 reasoning level).
+    /// Optional engine variant id (`OpenCode2` reasoning level).
     pub(crate) variant_id: Option<String>,
     /// Display name reported by the engine.
     pub(crate) name: String,
@@ -154,7 +158,7 @@ fn cache() -> &'static Cache {
 /// Returns a fresh cached bundle without blocking. `None` while the first
 /// warm-up is still running or the cache is empty/stale.
 pub(crate) fn cached_bundle() -> Option<Arc<DiscoveryBundle>> {
-    let mut guard = cache().try_lock().ok()?;
+    let guard = cache().try_lock().ok()?;
     match guard.as_ref() {
         Some((observed, bundle)) if observed.elapsed() < DISCOVERY_TTL => {
             Some(Arc::clone(bundle))
@@ -174,7 +178,7 @@ pub(crate) fn warm_discovery() {
         return;
     }
     tokio::spawn(async {
-        let _ = discovery_bundle().await;
+        let _ = Box::pin(discovery_bundle()).await;
         WARMING.store(false, std::sync::atomic::Ordering::Release);
     });
 }
@@ -282,7 +286,6 @@ fn resolve_program(name: &str) -> Option<String> {
 /// Maps an engine effort spelling to the Artisan level identifier.
 fn artisan_level(effort: &str) -> Option<&'static str> {
     match effort {
-        "none" => None,
         "minimal" | "low" => Some("light"),
         "medium" => Some("medium"),
         "high" => Some("high"),

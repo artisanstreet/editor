@@ -112,30 +112,35 @@ impl CommandTargetError {
     }
 
     /// Returns the run the command targeted.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn run_id(&self) -> &RunId {
         &self.artisan_run_id
     }
 
     /// Returns the delivered command identity.
+    #[allow(dead_code)]
     #[must_use]
     pub fn command_id(&self) -> &str {
         &self.command_id
     }
 
     /// Returns the named provider request identity.
+    #[allow(dead_code)]
     #[must_use]
     pub fn target_id(&self) -> &str {
         &self.target_id
     }
 
     /// Returns which request kind was named.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn target(&self) -> InteractionTarget {
         self.target
     }
 
     /// Returns why the target missed.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn reason(&self) -> TargetFailure {
         self.reason
@@ -176,12 +181,14 @@ impl CommandIdConflict {
     }
 
     /// Returns the run the command targeted.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn run_id(&self) -> &RunId {
         &self.run_id
     }
 
     /// Returns the reused command identity.
+    #[allow(dead_code)]
     #[must_use]
     pub fn command_id(&self) -> &str {
         &self.command_id
@@ -235,6 +242,7 @@ impl TurnInteractionLedger {
     }
 
     /// Returns the run this ledger delivers for.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn run_id(&self) -> &RunId {
         &self.run_id

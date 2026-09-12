@@ -32,12 +32,10 @@
 
 use std::collections::BTreeMap;
 
+use super::consts::MAX_PROVIDER_ID_BYTES;
 use artisan_domain::{ApprovalRequest, ObservationId, QuestionInput, QuestionOption};
 use serde_json::Value;
 use thiserror::Error;
-
-/// Structural ceiling for one provider request identity held as a table key.
-const MAX_PROVIDER_ID_BYTES: usize = 256;
 
 /// Default description when a permission request discloses no title,
 /// mirroring the TypeScript evidence.
@@ -766,6 +764,10 @@ mod tests {
     use super::*;
     use artisan_domain::ApprovalKind;
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "test helper takes JSON fixtures by value for call-site symmetry with serde_json::json!"
+    )]
     fn permission_params(tool_call: Value, options: Value) -> Value {
         serde_json::json!({
             "toolCall": tool_call,
@@ -914,6 +916,10 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "test helper takes a JSON fixture by value for call-site symmetry with serde_json::json!"
+    )]
     fn elicitation_params(properties: Value, message: &str) -> Value {
         serde_json::json!({
             "mode": "form",
@@ -1028,7 +1034,7 @@ mod tests {
         let answers = BTreeMap::from([
             ("enabled".to_owned(), vec!["TRUE".to_owned()]),
             ("count".to_owned(), vec!["42".to_owned()]),
-            ("ratio".to_owned(), vec!["".to_owned()]),
+            ("ratio".to_owned(), vec![String::new()]),
         ]);
         let content = answer_elicitation(&pending, &answers).expect("encode");
         assert_eq!(content.get("enabled"), Some(&Value::Bool(true)));

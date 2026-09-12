@@ -634,10 +634,15 @@ impl ForgeConnection<'_, '_, '_, '_> {
     }
 
     async fn next_driver_event(&mut self) -> Result<DriverEvent, DeadlineError<RequestStageError>> {
-        let driver = self
-            .conversation_delivery
-            .as_mut()
-            .expect("configured delivery driver remains owned");
+        // `drive_until_end` only enters a driver stage while the driver is
+        // installed, and the field is never reassigned after authentication;
+        // a missing driver is reported as a typed stage failure, not a panic.
+        let Some(driver) = self.conversation_delivery.as_mut() else {
+            return Err(delivery_stage_failure(
+                OperationKind::Receive,
+                DeliveryStageError::Writer,
+            ));
+        };
         // Ordinary desktop idle is not a request failure: this wait has no
         // deadline and resolves on the next request stream, delivery wake,
         // caller cancellation, or transport failure. Started dispatches keep
@@ -661,10 +666,14 @@ impl ForgeConnection<'_, '_, '_, '_> {
         frame: ServerFrameStamp,
         streams: &mut StageStreams,
     ) -> Result<RequestDispatchOutcome, DeadlineError<RequestStageError>> {
-        let driver = self
-            .conversation_delivery
-            .as_ref()
-            .expect("configured delivery driver remains owned");
+        // Only reached from the driver branch of `drive_until_end`; a missing
+        // driver stays a typed delivery failure rather than panicking.
+        let Some(driver) = self.conversation_delivery.as_ref() else {
+            return Err(delivery_stage_failure(
+                OperationKind::Receive,
+                DeliveryStageError::Writer,
+            ));
+        };
         run_with_deadline(
             OperationKind::Receive,
             self.limits.next_request,
@@ -690,10 +699,14 @@ impl ForgeConnection<'_, '_, '_, '_> {
     where
         F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
     {
-        let driver = self
-            .conversation_delivery
-            .as_mut()
-            .expect("configured delivery driver remains owned");
+        // Only reached from the driver branch of `drive_until_end`; a missing
+        // driver stays a typed delivery failure rather than panicking.
+        let Some(driver) = self.conversation_delivery.as_mut() else {
+            return Err(delivery_stage_failure(
+                OperationKind::Send,
+                DeliveryStageError::Writer,
+            ));
+        };
         driver
             .deliver_wake(stamp, self.limits.next_request, self.cancel)
             .await
@@ -707,10 +720,14 @@ impl ForgeConnection<'_, '_, '_, '_> {
     where
         F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
     {
-        let driver = self
-            .conversation_delivery
-            .as_mut()
-            .expect("configured delivery driver remains owned");
+        // Only reached from the driver branch of `drive_until_end`; a missing
+        // driver stays a typed delivery failure rather than panicking.
+        let Some(driver) = self.conversation_delivery.as_mut() else {
+            return Err(delivery_stage_failure(
+                OperationKind::Send,
+                DeliveryStageError::Writer,
+            ));
+        };
         driver
             .handle_request(outcome, stamp, self.limits.next_request, self.cancel)
             .await
@@ -734,8 +751,17 @@ impl ForgeConnection<'_, '_, '_, '_> {
 }
 
 fn delivery_cleanup_source(error: DeliveryStageError) -> DeadlineError<RequestStageError> {
+    delivery_stage_failure(OperationKind::Send, error)
+}
+
+/// Builds the typed deadline failure for an unavailable delivery-driver
+/// stage.
+fn delivery_stage_failure(
+    operation: OperationKind,
+    error: DeliveryStageError,
+) -> DeadlineError<RequestStageError> {
     DeadlineError::Peer {
-        operation: OperationKind::Send,
+        operation,
         error: RequestStageError::Delivery(error),
     }
 }
@@ -857,6 +883,9 @@ async fn drive_request_stream(
     streams: &mut StageStreams,
     cancel: &CancelHandle,
 ) -> Result<RequestDispatchOutcome, RequestStageError> {
+    // `StageStreams::install` runs synchronously at every caller, the fields
+    // are private, and `release` only runs after dispatch returns; the pair is
+    // installed for this whole stage.
     let send = streams
         .send
         .as_mut()
@@ -997,8 +1026,10 @@ async fn complete_lifecycle_receipt(
 fn unsupported_feature_failure(request_id: &RequestId) -> ProtocolFailure {
     ProtocolFailure {
         code: ErrorCode::UnsupportedFeature,
+        // Static bounded text cannot exceed the error-detail ceiling; an
+        // empty detail is representable if that ever changed.
         detail: ErrorDetail::parse("native lifecycle control was not negotiated")
-            .expect("lifecycle detail is within the protocol bound"),
+            .unwrap_or_default(),
         retryable: false,
         request_id: Some(request_id.clone()),
     }
@@ -1079,10 +1110,13 @@ impl StageStreams {
     /// finished lifecycle response stream. A peer STOP or connection loss is
     /// deliberately collapsed to a payload-free request-stage failure.
     async fn await_finished_send_ack(&self) -> Result<(), RequestStageError> {
-        let send = self
-            .send
-            .as_ref()
-            .expect("response send stream is installed before acknowledgement");
+        // The send side is installed before this wait and is only released
+        // after the enclosing dispatch returns; a missing stream cannot
+        // acknowledge its FIN, so report the acknowledgement failure instead
+        // of panicking.
+        let Some(send) = self.send.as_ref() else {
+            return Err(RequestStageError::LifecycleResponseAcknowledgement);
+        };
         match send.stopped().await {
             Ok(None) => Ok(()),
             Ok(Some(_)) | Err(_) => Err(RequestStageError::LifecycleResponseAcknowledgement),

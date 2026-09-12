@@ -18,12 +18,12 @@ const MAX_BYTES: usize = 1024 * 1024;
 /// Probes Grok Build; `None` when it does not answer.
 pub(super) async fn discover_grok(program: Option<&str>) -> Option<Vec<DiscoveredModel>> {
     let executable = program?;
-    let output = run_bounded(
+    let output = Box::pin(run_bounded(
         executable,
         &["--no-auto-update", "models"],
         DEADLINE,
         MAX_BYTES,
-    )
+    ))
     .await?;
     if !output.success {
         return None;
@@ -53,8 +53,7 @@ fn parse_models(output: &str) -> Vec<DiscoveredModel> {
         let without_marker = trimmed
             .strip_prefix('*')
             .or_else(|| trimmed.strip_prefix('-'))
-            .map(str::trim_start)
-            .unwrap_or(trimmed);
+            .map_or(trimmed, str::trim_start);
         let mut parts = without_marker.split_whitespace();
         let Some(id) = parts.next() else {
             continue;

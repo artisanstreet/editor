@@ -335,6 +335,7 @@ fn has_allowed_windows_prefix(path: &Path) -> bool {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum PickFailure {
     /// This platform has no supported native chooser implementation.
+    #[allow(dead_code)]
     #[error("this platform offers no supported directory chooser")]
     UnsupportedPlatform,
     /// The native dialog failed before producing a decision.

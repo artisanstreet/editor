@@ -78,9 +78,7 @@ async fn fetch_published() -> Option<Value> {
     if value.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return None;
     }
-    if value.get("version").and_then(Value::as_u64).is_none() {
-        return None;
-    }
+    value.get("version").and_then(Value::as_u64)?;
     Some(value)
 }
 
@@ -293,6 +291,10 @@ mod tests {
 
     use super::*;
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "test helper takes a JSON fixture by value for call-site symmetry with serde_json::json!"
+    )]
     fn surface_value(models: serde_json::Value) -> Value {
         json!({
             "schema_version": 1,
@@ -321,8 +323,8 @@ mod tests {
             },
             "fast_mode": { "type": "toggle" },
             "runtime": {
-                "max_input_tokens": 1000000,
-                "max_output_tokens": 128000,
+                "max_input_tokens": 1_000_000,
+                "max_output_tokens": 128_000,
                 "effort_levels": ["low", "medium", "high", "xhigh", "max"],
                 "default_effort": "high"
             }
@@ -366,7 +368,7 @@ mod tests {
             "name": "Opus 4.1",
             "offered_on": ["bedrock", "vertex"],
             "thinking": { "type": "none" },
-            "runtime": { "max_input_tokens": 200000, "max_output_tokens": 32000 }
+            "runtime": { "max_input_tokens": 200_000, "max_output_tokens": 32000 }
         }]));
         assert!(
             surface_models(&value)
@@ -382,7 +384,7 @@ mod tests {
             "name": "Haiku 4.5",
             "offered_on": ["first_party"],
             "thinking": { "type": "none" },
-            "runtime": { "max_input_tokens": 200000, "max_output_tokens": 64000 }
+            "runtime": { "max_input_tokens": 200_000, "max_output_tokens": 64000 }
         }]));
         let row = map_model(surface_models(&value)[0]).expect("row maps");
         assert_eq!(row.thinking, DiscoveredThinking::Unavailable);

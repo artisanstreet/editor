@@ -26,6 +26,10 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 
 use crate::directory_helper::INTERNAL_DIRECTORY_HELPER_FLAG;
 use crate::directory_helper_codec::{HEADER_LEN, ResponseHeaderFault, parse_response_header};
+#[cfg(windows)]
+use crate::engine_owner::consts::CREATE_NO_WINDOW;
+#[cfg(test)]
+use crate::engine_owner::consts::WATCHDOG_FAILURE_EXIT;
 
 /// Fixed independent cleanup budget: how long the owner waits after closing
 /// the lifeline before requesting termination.
@@ -120,7 +124,6 @@ pub(crate) fn spawn_helper(recipe: &LaunchRecipe) -> io::Result<Child> {
     command.kill_on_drop(true);
     #[cfg(windows)]
     {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
@@ -482,6 +485,7 @@ impl StderrCounter {
 /// The already-closed lifeline writer and both pipe reader states stay
 /// owned alongside the exact child until a later observed reap releases
 /// them; quarantine never discards pipe handles early.
+#[allow(dead_code)]
 pub(crate) struct RetainedHelper {
     /// The exact child, boxed for long-term ownership.
     pub(crate) child: Box<Child>,
@@ -636,10 +640,6 @@ pub(crate) struct WitnessCounts {
 /// Witness sentinel: no exit observed yet.
 #[cfg(test)]
 pub(crate) const NO_EXIT_CODE_WITNESSED: i32 = -1;
-
-/// The fixture watchdog exit code mirrored for witness classification.
-#[cfg(test)]
-pub(crate) const WATCHDOG_FAILURE_EXIT: i32 = 99;
 
 #[cfg(test)]
 static WITNESS_SPAWNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

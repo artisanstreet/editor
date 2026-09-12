@@ -18,7 +18,7 @@ const MAX_BYTES: usize = 1024 * 1024;
 /// Probes the Cursor CLI; `None` when it does not answer.
 pub(super) async fn discover_cursor(program: Option<&str>) -> Option<Vec<DiscoveredModel>> {
     let executable = program?;
-    let output = run_bounded(executable, &["models"], DEADLINE, MAX_BYTES).await?;
+    let output = Box::pin(run_bounded(executable, &["models"], DEADLINE, MAX_BYTES)).await?;
     if !output.success {
         return None;
     }

@@ -1,9 +1,9 @@
-//! Stateful, bounded normalization of real OpenCode2 session envelopes.
+//! Stateful, bounded normalization of real `OpenCode2` session envelopes.
 //!
 //! This leaf deliberately sits beside, rather than inside, `event.rs`.  The
 //! latter is the legacy fixture decoder and its `run_id`/`sequence`/
 //! `delta|state` contract remains unchanged until the owner wiring packet
-//! switches production streams over.  OpenCode2 itself supplies an envelope
+//! switches production streams over.  `OpenCode2` itself supplies an envelope
 //! shaped like `{ "type", "data", "durable": { "seq" } }`; its Artisan run
 //! identity is therefore always supplied by the owner that creates this
 //! adapter.
@@ -14,6 +14,7 @@ use artisan_domain::RunId;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::engine_owner::consts::MAX_PROVIDER_ID_BYTES;
 use crate::engine_owner::framing::SseEvent;
 use crate::engine_owner::observation::{
     EngineObservation, TerminalObservation, TerminalState, chunk_text,
@@ -38,7 +39,6 @@ pub(crate) const OPENCODE2_MAX_DEDUP_IDENTITIES: usize = 1024;
 
 const MAX_EVENT_TYPE_BYTES: usize = 128;
 const MAX_PROVIDER_SESSION_BYTES: usize = 256;
-const MAX_PROVIDER_ID_BYTES: usize = 256;
 const MAX_SOURCE_ID_BYTES: usize = 1024;
 const MAX_REASON_BYTES: usize = 1024;
 const MAX_ERROR_REF_BYTES: usize = 256;
@@ -50,6 +50,10 @@ type JsonObject = Map<String, Value>;
 /// In particular, `usage` lets the owner route the original envelope to the
 /// separate bounded usage parser without making usage look like a terminal or
 /// text observation.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flag word mirrors the provider event-kind vocabulary bit-for-bit; a bitset type would obscure the public field reads"
+)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct OpenCodeEventKindFlags {
     pub(crate) error: bool,
@@ -90,7 +94,7 @@ pub(crate) enum OpenCodeTextReconciliation {
 
 /// Bounded output for one complete provider envelope.
 ///
-/// `provider_cursor` is the actual OpenCode `durable.seq` (or the actual
+/// `provider_cursor` is the actual `OpenCode` `durable.seq` (or the actual
 /// top-level `seq` on `log.synced`) from this envelope.  It is not the
 /// sequence used to satisfy the older `EngineObservation` shape when a live
 /// event has no durable cursor.  In that case the adapter allocates a
@@ -105,7 +109,7 @@ pub(crate) struct OpenCodeEventResult {
     pub(crate) text_reconciliation: Option<OpenCodeTextReconciliation>,
 }
 
-/// Payload-free failure while normalizing one bounded OpenCode envelope.
+/// Payload-free failure while normalizing one bounded `OpenCode` envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub(crate) enum OpenCodeEventError {
     #[error("provider event exceeds the bounded adapter input limit")]
@@ -264,7 +268,7 @@ fn terminal_state(
         OpenCodeEventKind::ExecutionSucceeded => Some(TerminalState::Completed),
         OpenCodeEventKind::ExecutionInterrupted => {
             let reason = optional_bounded_text(data, "reason", MAX_REASON_BYTES)
-                .map_err(|_| OpenCodeEventError::InvalidReason)?;
+                .map_err(|()| OpenCodeEventError::InvalidReason)?;
             Some(if reason.as_deref() == Some("user") {
                 TerminalState::Cancelled
             } else {
@@ -315,7 +319,7 @@ impl OpenCodeEventAdapter {
     /// Creates an adapter bound to the owner-supplied run and provider session.
     pub(crate) fn new(run_id: RunId, session_id: String) -> Result<Self, OpenCodeEventError> {
         validate_identifier(&session_id, MAX_PROVIDER_SESSION_BYTES)
-            .map_err(|_| OpenCodeEventError::InvalidSessionId)?;
+            .map_err(|()| OpenCodeEventError::InvalidSessionId)?;
         Ok(Self {
             run_id,
             session_id,
@@ -329,6 +333,7 @@ impl OpenCodeEventAdapter {
     }
 
     /// Returns the greatest provider cursor observed by this adapter.
+    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn provider_cursor(&self) -> Option<u64> {
         self.provider_cursor
@@ -340,6 +345,10 @@ impl OpenCodeEventAdapter {
     /// no-op results with flags/cursor metadata.  Only text events and actual
     /// execution terminal events require a source identity, because those are
     /// the events this leaf must deduplicate or expose as observations.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one event-normalization dispatch over the provider vocabulary; extraction would thread the adapter state"
+    )]
     pub(crate) fn normalize(
         &mut self,
         event: &SseEvent,
@@ -357,7 +366,7 @@ impl OpenCodeEventAdapter {
             .and_then(Value::as_str)
             .ok_or(OpenCodeEventError::InvalidEventType)?;
         validate_identifier(event_type, MAX_EVENT_TYPE_BYTES)
-            .map_err(|_| OpenCodeEventError::InvalidEventType)?;
+            .map_err(|()| OpenCodeEventError::InvalidEventType)?;
 
         let provider_cursor = provider_cursor(envelope, event_type)?;
         let kind = classify_event(event_type);
@@ -425,16 +434,19 @@ impl OpenCodeEventAdapter {
             return Ok(result(provider_cursor, flags, Vec::new(), None));
         }
 
+        // The text kinds are covered by `requires_source_identity()` and the
+        // terminal kinds by `is_terminal()`, so these typed errors are
+        // defensive against classification drift, not expected provider input.
         let normalized = match kind {
             OpenCodeEventKind::TextDelta => self.normalize_text_delta(
                 data,
-                source_event_id.expect("text delta source identity present"),
+                &source_event_id.ok_or(OpenCodeEventError::MissingEventIdentity)?,
                 provider_cursor,
                 flags,
             ),
             OpenCodeEventKind::TextEnded => self.normalize_text_ended(
                 data,
-                source_event_id.expect("text ended source identity present"),
+                source_event_id.ok_or(OpenCodeEventError::MissingEventIdentity)?,
                 provider_cursor,
                 flags,
             ),
@@ -442,7 +454,7 @@ impl OpenCodeEventAdapter {
             | OpenCodeEventKind::ExecutionInterrupted
             | OpenCodeEventKind::ExecutionSucceeded => self.normalize_terminal(
                 data,
-                incoming_terminal.expect("terminal state present for terminal kind"),
+                incoming_terminal.ok_or(OpenCodeEventError::TerminalConflict)?,
                 provider_cursor,
                 flags,
             ),
@@ -460,7 +472,7 @@ impl OpenCodeEventAdapter {
     fn normalize_text_delta(
         &mut self,
         data: &JsonObject,
-        source_event_id: String,
+        source_event_id: &str,
         provider_cursor: Option<u64>,
         flags: OpenCodeEventKindFlags,
     ) -> Result<OpenCodeEventResult, OpenCodeEventError> {
@@ -491,7 +503,7 @@ impl OpenCodeEventAdapter {
             part.text.push_str(delta);
         }
         let observations = sequence.map_or_else(Vec::new, |sequence| {
-            chunk_text(&self.run_id, sequence, &source_event_id, delta)
+            chunk_text(&self.run_id, sequence, source_event_id, delta)
                 .into_iter()
                 .map(|delta| delta.with_part_id(part_id.clone()))
                 .map(EngineObservation::TextDelta)
@@ -519,7 +531,7 @@ impl OpenCodeEventAdapter {
         let Some(part) = self.parts.get_mut(&part_id) else {
             self.insert_text_part(&part_id)?;
             if let Some(part) = self.parts.get_mut(&part_id) {
-                part.text = text.to_owned();
+                text.clone_into(&mut part.text);
                 part.ended = true;
             }
             return Ok(result(
@@ -540,7 +552,7 @@ impl OpenCodeEventAdapter {
             return Ok(result(provider_cursor, flags, Vec::new(), None));
         }
         let replacement = part.text != text;
-        part.text = text.to_owned();
+        text.clone_into(&mut part.text);
         part.ended = true;
         let reconciliation = if replacement {
             OpenCodeTextReconciliation::Replace {
@@ -574,9 +586,9 @@ impl OpenCodeEventAdapter {
         flags: OpenCodeEventKindFlags,
     ) -> Result<OpenCodeEventResult, OpenCodeEventError> {
         let reason = optional_bounded_text(data, "reason", MAX_REASON_BYTES)
-            .map_err(|_| OpenCodeEventError::InvalidReason)?;
+            .map_err(|()| OpenCodeEventError::InvalidReason)?;
         let error_ref = optional_bounded_text(data, "error_ref", MAX_ERROR_REF_BYTES)
-            .map_err(|_| OpenCodeEventError::InvalidErrorRef)?;
+            .map_err(|()| OpenCodeEventError::InvalidErrorRef)?;
         let sequence = self.observation_sequence(provider_cursor)?;
         self.terminal = Some(state);
         self.parts.clear();
@@ -624,7 +636,7 @@ impl OpenCodeEventAdapter {
             .or(nested)
             .ok_or(OpenCodeEventError::MissingSessionId)?;
         validate_identifier(session, MAX_PROVIDER_SESSION_BYTES)
-            .map_err(|_| OpenCodeEventError::InvalidSessionId)?;
+            .map_err(|()| OpenCodeEventError::InvalidSessionId)?;
         if session != self.session_id {
             return Err(OpenCodeEventError::SessionMismatch);
         }
@@ -818,7 +830,7 @@ fn text_part_id(data: &JsonObject) -> Result<String, OpenCodeEventError> {
         .and_then(Value::as_str)
         .ok_or(OpenCodeEventError::InvalidAssistantMessageId)?;
     validate_identifier(assistant_message_id, MAX_PROVIDER_ID_BYTES)
-        .map_err(|_| OpenCodeEventError::InvalidAssistantMessageId)?;
+        .map_err(|()| OpenCodeEventError::InvalidAssistantMessageId)?;
 
     let part = if let Some(value) = data.get("ordinal") {
         let ordinal = value
@@ -830,7 +842,7 @@ fn text_part_id(data: &JsonObject) -> Result<String, OpenCodeEventError> {
             .as_str()
             .ok_or(OpenCodeEventError::InvalidTextPartIdentity)?;
         validate_identifier(part_id, MAX_PROVIDER_ID_BYTES)
-            .map_err(|_| OpenCodeEventError::InvalidTextPartIdentity)?;
+            .map_err(|()| OpenCodeEventError::InvalidTextPartIdentity)?;
         format!("{assistant_message_id}:part:{part_id}")
     } else {
         return Err(OpenCodeEventError::MissingTextPartIdentity);
@@ -935,7 +947,13 @@ mod tests {
     fn text_delta_from(observation: &EngineObservation) -> &TextDelta {
         match observation {
             EngineObservation::TextDelta(delta) => delta,
-            EngineObservation::TextSnapshot(_) | EngineObservation::Usage(_) | EngineObservation::Activity(_) | EngineObservation::Subagent(_) | EngineObservation::SubagentTranscript(_) => panic!("unexpected production observation in fixture"),
+            EngineObservation::TextSnapshot(_)
+            | EngineObservation::Usage(_)
+            | EngineObservation::Activity(_)
+            | EngineObservation::Subagent(_)
+            | EngineObservation::SubagentTranscript(_) => {
+                panic!("unexpected production observation in fixture")
+            }
             EngineObservation::Terminal(_) => panic!("expected text delta"),
         }
     }

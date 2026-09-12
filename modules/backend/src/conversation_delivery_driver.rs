@@ -173,8 +173,7 @@ impl ConversationDeliveryDriver {
                 .registrar()
                 .subscription_view(&thread_id)
                 .await
-                .map(|view| view.observation_cursor())
-                .unwrap_or(0);
+                .map_or(0, |view| view.observation_cursor());
             // Fall back to the just-activated subscription when the registrar
             // has not yet observed it (initial activation path): the cursor
             // is zero there by construction.
@@ -223,7 +222,6 @@ impl ConversationDeliveryDriver {
                     // Another page may have committed during the send; loop
                     // until the durable tail instead of stopping after one
                     // page so two commits before one ack lose no events.
-                    continue;
                 }
             }
         }

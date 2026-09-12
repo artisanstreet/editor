@@ -306,6 +306,7 @@ impl ConversationSubscriptionRegistry {
     /// This is used only by the owning connection teardown path. Generation
     /// history is retained so a later accidental use of the same registry
     /// cannot mint a lease that was already issued.
+    #[allow(dead_code)]
     pub(crate) fn clear_all(&mut self) {
         self.entries.clear();
     }

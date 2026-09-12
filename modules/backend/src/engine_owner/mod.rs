@@ -45,6 +45,7 @@ pub(crate) mod acp_bridges;
 pub(crate) mod catalog;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod consts;
 pub(crate) mod cursor;
 pub(crate) mod event;
 pub(crate) mod framing;
@@ -57,6 +58,7 @@ pub(crate) mod opencode_event;
 pub(crate) mod operation;
 mod process;
 pub mod readiness;
+pub(crate) mod socket;
 pub(crate) mod stream;
 pub(crate) mod usage;
 
@@ -227,7 +229,7 @@ impl std::fmt::Debug for FixtureTurnInput {
 
 /// Private launch for the single internal configured pipeline.
 ///
-/// The `Verified` variant carries the production OpenCode2 capability, the
+/// The `Verified` variant carries the production `OpenCode2` capability, the
 /// `Codex` variant carries the production Codex capability, the `Claude`
 /// variant carries the production Claude capability, the `Grok` variant
 /// carries the probe-certified Grok launch, the `Cursor` variant carries
@@ -468,6 +470,7 @@ pub(crate) struct PreflightDeadlines {
 /// root, absolute phase/admission deadlines, and the existing protocol
 /// bounds. No profile, root, executable, credential, or budget is discovered
 /// by the owner.
+#[allow(dead_code)]
 pub(crate) struct EnginePreflightInput {
     pub(crate) project_root: RootPath,
     pub(crate) launch: VerifiedOpenCode2ProfileLaunch,
@@ -950,6 +953,7 @@ impl EngineOwner {
     /// Health and shutdown are checked first; deadline computed once via
     /// `checked_add`; `try_send` full yields `Busy`, closed or quarantined
     /// yields `Unavailable`. No polling loops.
+    #[allow(dead_code)]
     pub(crate) fn admit(
         &self,
         run_id: RunId,
@@ -1152,6 +1156,7 @@ impl EngineOwner {
     /// performs only configured spawn, readiness, authenticated health, and
     /// observed cleanup; it does not create a provider session or deliver a
     /// prompt.
+    #[allow(dead_code)]
     pub(crate) fn admit_preflight(
         &self,
         input: EnginePreflightInput,
@@ -1165,10 +1170,11 @@ impl EngineOwner {
         self.admit_internal_preflight(internal)
     }
 
-    /// Admits one configured OpenCode2 runtime model discovery into the
+    /// Admits one configured `OpenCode2` runtime model discovery into the
     /// single owner queue. The owner performs certified spawn, readiness,
     /// authenticated health, and the location-scoped `/api/model` request,
     /// then observes cleanup before resolving the returned future.
+    #[allow(dead_code)]
     pub(crate) fn admit_catalog(
         &self,
         input: EngineCatalogInput,
@@ -1201,6 +1207,7 @@ impl EngineOwner {
         self.admit_internal_preflight(internal)
     }
 
+    #[allow(dead_code)]
     fn admit_internal_preflight(
         &self,
         input: InternalPreflightInput,
@@ -1222,6 +1229,7 @@ impl EngineOwner {
         }
     }
 
+    #[allow(dead_code)]
     fn admit_internal_catalog(
         &self,
         input: InternalCatalogInput,
@@ -1308,9 +1316,7 @@ impl EngineOwner {
         // `Unsupported` without prompt-state plumbing.
         let steer_capable = matches!(
             input.launch,
-            InternalLaunch::Codex(_)
-                | InternalLaunch::Claude(_)
-                | InternalLaunch::Hermes(_)
+            InternalLaunch::Codex(_) | InternalLaunch::Claude(_) | InternalLaunch::Hermes(_)
         );
         let (steer_tx, steer_rx) = if steer_capable {
             let (sender, receiver) = mpsc::channel(operation::STEER_CHANNEL_CAPACITY);

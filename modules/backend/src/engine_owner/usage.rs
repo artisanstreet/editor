@@ -1,9 +1,9 @@
-//! Pure, bounded extraction of provider token usage from OpenCode2 envelopes.
+//! Pure, bounded extraction of provider token usage from `OpenCode2` envelopes.
 //!
 //! The parser follows the Electron normalizer's authenticated event shape:
 //! only `session.step.ended` and `session.step.failed` carry usage, the
 //! session is `data.sessionID`, and the monotonic source cursor is
-//! `durable.seq`. OpenCode2 does not put an Artisan run or model in that
+//! `durable.seq`. `OpenCode2` does not put an Artisan run or model in that
 //! envelope, so the owner supplies immutable launch-context attribution.
 //! No provider payload is retained in the result or in an error.
 
@@ -22,7 +22,7 @@ use crate::engine_owner::framing::SseEvent;
 /// before asking `serde_json` to allocate a value tree.
 pub(crate) const OPENCODE2_USAGE_EVENT_MAX_BYTES: usize = 64 * 1024;
 
-/// Immutable owner context needed to attribute an OpenCode2 usage envelope.
+/// Immutable owner context needed to attribute an `OpenCode2` usage envelope.
 ///
 /// `model_id`, `provider_route_id`, and `variant_id` must come from the
 /// persisted run launch snapshot. In particular, they must not be read from
@@ -61,7 +61,7 @@ impl<'a> OpenCode2UsageContext<'a> {
     }
 }
 
-/// Payload-free failure while extracting one OpenCode2 usage observation.
+/// Payload-free failure while extracting one `OpenCode2` usage observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub(crate) enum UsageParseError {
     #[error("usage event exceeds its bounded size")]
@@ -100,7 +100,7 @@ pub(crate) enum UsageParseError {
 
 /// Extracts one usage report from a complete framed SSE event.
 ///
-/// Unrelated valid OpenCode2 event types return `Ok(None)`. A recognized
+/// Unrelated valid `OpenCode2` event types return `Ok(None)`. A recognized
 /// usage event must contain the actual durable/session fields; projected
 /// recovery envelopes without `durable.seq` return
 /// [`UsageParseError::MissingSourceSequence`] rather than receiving an
