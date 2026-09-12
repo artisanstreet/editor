@@ -17,11 +17,11 @@
 //! - Approval and question rows are keyed by their provider `approval_id` and
 //!   `question_id`. A resolution settles its requested row in place and never
 //!   duplicates it, so a later answer packet can attach by request id.
-//! - Message and reasoning deltas accumulate per item; a completion settles
-//!   the accumulated text authoritatively.
-//! - Usage reports fold into [`UsageTotals`] honoring their
-//!   [`UsageBasis`](artisan_domain::UsageBasis): delta counts add,
-//!   cumulative counts replace, and the context-window gauge always replaces.
+//! - Reasoning deltas accumulate per item; a completion settles the
+//!   accumulated text authoritatively.
+//! - Plain assistant replies are not retained: the durable conversation
+//!   snapshot is their one authoritative copy on this path.
+//! - Provider usage is not retained here; the profile/usage surfaces own it.
 //! - Unknown future arms degrade to a diagnostic timeline row through
 //!   [`EngineObservationState::record_unknown`] and never panic. The protocol
 //!   codec already rejects unknown wire discriminants with typed errors, so
@@ -39,10 +39,10 @@ use std::fmt::Write as _;
 
 use artisan_domain::{
     ApprovalKind as DomainApprovalKind, ApprovalObservation, ApprovalState as DomainApprovalState,
-    EngineObservationAttribution, EngineObservationEvent, MessagePhase, Observation,
-    QuestionObservation, QuestionState as DomainQuestionState, RunId, RunState, RunTerminalState,
+    EngineObservationAttribution, EngineObservationEvent, Observation, QuestionObservation,
+    QuestionState as DomainQuestionState, RunId, RunState, RunTerminalState,
     TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction, ToolObservation,
-    TurnId, TurnState, UnixMillis, UsageBasis, UsageObservation,
+    TurnId, UnixMillis,
 };
 
 use crate::approval_presentation::{

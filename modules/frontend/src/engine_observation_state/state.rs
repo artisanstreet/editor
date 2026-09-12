@@ -90,8 +90,6 @@ pub struct EngineObservationState {
     /// strictly increasing sequence plus the stable observation identity,
     /// never on the wire cursor.
     seen_delivery_sequences: HashSet<u64>,
-    messages: HashMap<String, MessageRow>,
-    message_order: Vec<String>,
     reasoning: HashMap<String, ReasoningRow>,
     reasoning_order: Vec<String>,
     tools: HashMap<String, ToolRow>,
@@ -102,13 +100,11 @@ pub struct EngineObservationState {
     approval_order: Vec<String>,
     questions: HashMap<String, QuestionRow>,
     question_order: Vec<String>,
-    turn_states: HashMap<String, TurnState>,
     run_state: Option<RunState>,
     run_terminal: Option<RunTerminalView>,
     /// Latest harness-generated session title, retained as an owned string
     /// because [`RunTerminalView`] stays `Copy`.
     summary_title: Option<String>,
-    usage: UsageTotals,
     timeline: Vec<TimelineRow>,
 }
 
@@ -121,8 +117,6 @@ impl EngineObservationState {
             last_cursor: 0,
             seen_ids: HashSet::new(),
             seen_delivery_sequences: HashSet::new(),
-            messages: HashMap::new(),
-            message_order: Vec::new(),
             reasoning: HashMap::new(),
             reasoning_order: Vec::new(),
             tools: HashMap::new(),
@@ -133,20 +127,9 @@ impl EngineObservationState {
             approval_order: Vec::new(),
             questions: HashMap::new(),
             question_order: Vec::new(),
-            turn_states: HashMap::new(),
             run_state: None,
             run_terminal: None,
             summary_title: None,
-            usage: UsageTotals {
-                reports: 0,
-                basis: UsageBasis::Unknown,
-                input_tokens: 0,
-                cached_input_tokens: 0,
-                output_tokens: 0,
-                context_tokens: None,
-                context_window_tokens: None,
-                cost_usd: 0.0,
-            },
             timeline: Vec::new(),
         }
     }
@@ -166,8 +149,7 @@ impl EngineObservationState {
     /// Returns the total number of presentation rows retained.
     #[must_use]
     pub fn row_count(&self) -> usize {
-        self.message_order.len()
-            + self.reasoning_order.len()
+        self.reasoning_order.len()
             + self.tool_order.len()
             + self.terminal_order.len()
             + self.approval_order.len()
@@ -179,18 +161,6 @@ impl EngineObservationState {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.row_count() == 0
-    }
-
-    /// Returns the message row for `item_id`, if one has arrived.
-    #[must_use]
-    pub fn message(&self, item_id: &str) -> Option<&MessageRow> {
-        self.messages.get(item_id)
-    }
-
-    /// Returns message rows in first-seen order.
-    #[must_use]
-    pub fn messages_in_order(&self) -> Vec<&MessageRow> {
-        Self::ordered(&self.message_order, &self.messages)
     }
 
     /// Returns the reasoning row for `item_id`, if one has arrived.
@@ -288,12 +258,6 @@ impl EngineObservationState {
         Self::ordered(&self.question_order, &self.questions)
     }
 
-    /// Returns the latest lifecycle state for `turn_id`, if one has arrived.
-    #[must_use]
-    pub fn turn_state(&self, turn_id: &str) -> Option<TurnState> {
-        self.turn_states.get(turn_id).copied()
-    }
-
     /// Returns the latest non-terminal run state, if one has arrived.
     #[must_use]
     pub const fn run_state(&self) -> Option<RunState> {
@@ -315,12 +279,6 @@ impl EngineObservationState {
     #[must_use]
     pub fn summary_title(&self) -> Option<&str> {
         self.summary_title.as_deref()
-    }
-
-    /// Returns the folded provider usage.
-    #[must_use]
-    pub const fn usage(&self) -> &UsageTotals {
-        &self.usage
     }
 
     /// Returns discrete timeline rows in cursor application order.
@@ -513,14 +471,11 @@ impl EngineObservationState {
         attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
         match observation {
-            Observation::AgentMessageDelta(value) => {
-                self.pair_message_delta(cursor, sequence, value, attribution);
-                (observation.tag(), false)
-            }
-            Observation::AgentMessageCompleted(value) => {
-                self.pair_message_completed(cursor, sequence, value, attribution);
-                (observation.tag(), true)
-            }
+            // Plain assistant replies are already authoritative in the durable
+            // conversation snapshot; the observation state retains no second
+            // copy and projects nothing from them.
+            Observation::AgentMessageDelta(_) => (observation.tag(), false),
+            Observation::AgentMessageCompleted(_) => (observation.tag(), true),
             Observation::Approval(value) => {
                 let settled = self.pair_approval(cursor, sequence, value, attribution);
                 (observation.tag(), settled)
@@ -598,10 +553,9 @@ impl EngineObservationState {
             Observation::TurnState(value) => {
                 self.push_turn_state(cursor, sequence, observation.tag(), value, attribution)
             }
-            Observation::Usage(value) => {
-                self.pair_usage(value);
-                (observation.tag(), false)
-            }
+            // Provider usage is folded by the profile/usage surfaces, not by
+            // the conversation activity projection; nothing here reads it.
+            Observation::Usage(_) => (observation.tag(), false),
         }
     }
 
@@ -772,8 +726,6 @@ impl EngineObservationState {
         value: &artisan_domain::TurnStateObservation,
         attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
-        self.turn_states
-            .insert(value.turn_id().as_str().to_owned(), value.state());
         let summary = format!(
             "turn {} {}",
             value.turn_id().as_str(),
@@ -781,71 +733,6 @@ impl EngineObservationState {
         );
         self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
-    }
-
-    fn pair_message_delta(
-        &mut self,
-        cursor: u64,
-        sequence: u64,
-        value: &artisan_domain::AgentMessageDeltaObservation,
-        attribution: Option<&EngineObservationAttribution>,
-    ) {
-        let key = scoped_row_key(attribution, value.item_id().as_str());
-        if !self.message_order.iter().any(|known| known == &key) {
-            self.message_order.push(key.clone());
-        }
-        self.messages
-            .entry(key)
-            .and_modify(|row| {
-                row.phase = value.phase();
-                row.text.push_str(value.delta());
-                row.cursor = cursor;
-                row.sequence = sequence;
-                row.attribution = attribution.cloned();
-            })
-            .or_insert_with(|| MessageRow {
-                item_id: value.item_id().as_str().to_owned(),
-                phase: value.phase(),
-                text: value.delta().to_owned(),
-                completed: false,
-                turn_id: value.turn_id().as_str().to_owned(),
-                cursor,
-                sequence,
-                attribution: attribution.cloned(),
-            });
-    }
-
-    fn pair_message_completed(
-        &mut self,
-        cursor: u64,
-        sequence: u64,
-        value: &artisan_domain::AgentMessageCompletedObservation,
-        attribution: Option<&EngineObservationAttribution>,
-    ) {
-        let key = scoped_row_key(attribution, value.item_id().as_str());
-        if !self.message_order.iter().any(|known| known == &key) {
-            self.message_order.push(key.clone());
-        }
-        self.messages
-            .entry(key)
-            .and_modify(|row| {
-                row.phase = value.phase();
-                value.message().clone_into(&mut row.text);
-                row.completed = true;
-                row.cursor = cursor;
-                row.sequence = sequence;
-                row.attribution = attribution.cloned();
-            })
-            .or_insert_with(|| MessageRow {
-                item_id: value.item_id().as_str().to_owned(),
-                phase: value.phase(),
-                text: value.message().to_owned(),
-                completed: true,
-                turn_id: value.turn_id().as_str().to_owned(),
-                cursor,
-                sequence,
-                attribution: attribution.cloned(),
-            });
     }
 
     fn pair_reasoning_delta(
@@ -1082,46 +969,6 @@ impl EngineObservationState {
                 attribution: attribution.cloned(),
             });
         settled_in_place
-    }
-
-    fn pair_usage(&mut self, value: &UsageObservation) {
-        let totals = &mut self.usage;
-        totals.reports = totals.reports.saturating_add(1);
-        totals.basis = value.basis();
-        match value.basis() {
-            UsageBasis::Delta => {
-                totals.input_tokens = totals
-                    .input_tokens
-                    .saturating_add(value.input_tokens().unwrap_or(0));
-                totals.cached_input_tokens = totals
-                    .cached_input_tokens
-                    .saturating_add(value.cached_input_tokens().unwrap_or(0));
-                totals.output_tokens = totals
-                    .output_tokens
-                    .saturating_add(value.output_tokens().unwrap_or(0));
-                totals.cost_usd += value.cost_usd().unwrap_or(0.0);
-            }
-            UsageBasis::Cumulative | UsageBasis::Unknown => {
-                if let Some(input) = value.input_tokens() {
-                    totals.input_tokens = input;
-                }
-                if let Some(cached) = value.cached_input_tokens() {
-                    totals.cached_input_tokens = cached;
-                }
-                if let Some(output) = value.output_tokens() {
-                    totals.output_tokens = output;
-                }
-                if let Some(cost) = value.cost_usd() {
-                    totals.cost_usd = cost;
-                }
-            }
-        }
-        if value.context_tokens().is_some() {
-            totals.context_tokens = value.context_tokens();
-        }
-        if value.context_window_tokens().is_some() {
-            totals.context_window_tokens = value.context_window_tokens();
-        }
     }
 
     fn pair_file(
