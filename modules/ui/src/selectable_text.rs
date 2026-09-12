@@ -966,7 +966,13 @@ impl Element for SelectableText {
         }
 
         if let Some(styled) = self.styled.as_mut() {
-            styled.paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
+            if self.snapshot.is_some() {
+                window.with_text_color_map(None, |window| {
+                    styled.paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
+                });
+            } else {
+                styled.paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
+            }
         }
     }
 }

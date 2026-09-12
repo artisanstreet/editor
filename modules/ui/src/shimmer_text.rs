@@ -1,27 +1,24 @@
 //! Native, theme-aware travelling-band text for loading and status surfaces.
 //!
-//! GPUI 0.2.2 exposes styled text runs, but it does not expose a continuous
-//! gradient or a per-glyph paint callback. The animated path therefore rebuilds
-//! [`gpui::StyledText`] with highlight ranges for each character on every GPUI
-//! animation frame. This is an intentional segmented-glyph treatment: the
-//! stable character positions make the phase and palette decisions testable,
-//! while the text itself remains one measured GPUI text element and keeps its
-//! normal wrapping behavior.
+//! The travelling fill is sampled across the rasterized glyphs, using the
+//! Electron component's five gradient stops and sRGB contrast mix. Text keeps
+//! its original shaping, wrapping, inline faces, and selection geometry.
 //!
 //! Motion is explicit through [`crate::motion::MotionPolicy`]. Inactive and
 //! reduced-motion states return the same readable text without constructing a
 //! GPUI animation, so neither state requests animation frames.
 
-use std::{convert::TryFrom, ops::Range, time::Duration};
+use std::{ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, Div, HighlightStyle, Hsla, IntoElement, ParentElement,
-    SharedString, Styled, StyledText, combine_highlights, div,
+    Animation, AnimationExt, AnyElement, App, Bounds, Div, Element, ElementId, GlobalElementId,
+    HighlightStyle, Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels,
+    SharedString, Styled, StyledText, Window, div, hsla_to_rgba, rgb_to_hsla,
 };
 
 use crate::motion::{MotionPolicy, SHIMMER_CYCLE, SHIMMER_DELAY};
 use crate::selectable_text::{SelectableText, TextRunOverride};
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, ThemeMode};
 
 /// The named color treatments reached by the legacy `ShimmerText` wrapper.
 ///
@@ -120,7 +117,7 @@ impl ShimmerTextVariant {
 
         ShimmerTextStyle {
             foreground,
-            highlight: theme.colors.highlight.to_paint(),
+            highlight: shimmer_color(foreground, theme.mode, 1.0),
         }
     }
 }
@@ -134,7 +131,7 @@ pub type ShimmerTextColor = ShimmerTextVariant;
 pub struct ShimmerTextStyle {
     /// The settled text color.
     pub foreground: Hsla,
-    /// The theme-aware color used by highlighted glyph runs.
+    /// The contrast color at the center of the travelling gradient.
     pub highlight: Hsla,
 }
 
@@ -314,7 +311,7 @@ impl ShimmerAnimation {
     }
 
     /// Adapts a GPUI clock progress value to the delayed, wrapping shimmer
-    /// phase used by the segmented glyph decisions.
+    /// phase used by the continuous text fill.
     #[must_use]
     pub fn phase_for_progress(self, progress: f32) -> f32 {
         let progress = if progress.is_finite() {
@@ -377,84 +374,6 @@ impl ShimmerMotionPlan {
     pub const fn is_animating(self) -> bool {
         matches!(self, Self::Animate(_))
     }
-}
-
-/// The visual decision for one character-sized text segment.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ShimmerSegmentStyle {
-    /// Use the settled foreground color.
-    Base,
-    /// Use the theme-aware band highlight color.
-    Highlight,
-}
-
-/// One stable byte range and normalized character position in a shimmer text.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ShimmerSegment {
-    /// UTF-8 byte range for the character-sized segment.
-    pub range: Range<usize>,
-    /// Character-order position in `0..=1`, before GPUI glyph measurement.
-    pub position: f32,
-    /// The color decision for this phase.
-    pub style: ShimmerSegmentStyle,
-}
-
-/// Returns per-character segment decisions for a normalized phase and spread.
-///
-/// GPUI's styled text API works in UTF-8 byte ranges, so each Unicode scalar
-/// value becomes one valid range. The visual band travels from beyond the
-/// trailing edge to beyond the leading edge; a zero spread is deliberately
-/// settled and highlights no ranges.
-#[must_use]
-pub fn segments_for(content: &str, phase: f32, spread: f32) -> Vec<ShimmerSegment> {
-    let starts: Vec<usize> = content.char_indices().map(|(start, _)| start).collect();
-    let count = starts.len();
-    if count == 0 {
-        return Vec::new();
-    }
-
-    let phase = normalize_phase(phase);
-    let width = normalize_spread(spread) / MAX_SPREAD;
-    let center = 1.0 + width - phase * (1.0 + 2.0 * width);
-    let half_width = width / 2.0;
-    let denominator = count.saturating_sub(1);
-
-    starts
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(index, start)| {
-            let end = starts.get(index + 1).copied().unwrap_or(content.len());
-            let position = index
-                .saturating_mul(usize::from(u16::MAX))
-                .checked_div(denominator)
-                .map_or(0.5, |fixed_point| {
-                    let fixed_point = u16::try_from(fixed_point).unwrap_or(u16::MAX);
-                    f32::from(fixed_point) / f32::from(u16::MAX)
-                });
-            let style = if width > 0.0 && (position - center).abs() < half_width {
-                ShimmerSegmentStyle::Highlight
-            } else {
-                ShimmerSegmentStyle::Base
-            };
-
-            ShimmerSegment {
-                range: start..end,
-                position,
-                style,
-            }
-        })
-        .collect()
-}
-
-/// Returns the highlighted UTF-8 ranges for a phase and spread.
-#[must_use]
-pub fn highlighted_ranges(content: &str, phase: f32, spread: f32) -> Vec<Range<usize>> {
-    segments_for(content, phase, spread)
-        .into_iter()
-        .filter(|segment| segment.style == ShimmerSegmentStyle::Highlight)
-        .map(|segment| segment.range)
-        .collect()
 }
 
 /// Semantic state retained for a future accessibility layer.
@@ -743,7 +662,6 @@ impl IntoElement for ShimmerText {
             element,
             content,
             theme,
-            variant,
             timing,
             active,
             motion,
@@ -752,68 +670,31 @@ impl IntoElement for ShimmerText {
             run_overrides,
             ..
         } = self;
-        let palette = variant.resolve(theme);
         let plan = ShimmerMotionPlan::for_active_policy(motion, timing, active);
 
-        let text = match (plan, run_id) {
-            (ShimmerMotionPlan::Immediate, None) => StyledText::new(content).into_any_element(),
-            (ShimmerMotionPlan::Immediate, Some(id)) => {
-                SelectableText::retained(id, content, theme, run_highlights)
-                    .with_text_run_overrides(run_overrides)
-                    .into_any_element()
+        let text = match run_id {
+            None => StyledText::new(content).into_any_element(),
+            Some(id) => SelectableText::retained(id, content, theme, run_highlights)
+                .with_text_run_overrides(run_overrides)
+                .into_any_element(),
+        };
+        let text = match plan {
+            ShimmerMotionPlan::Immediate => text,
+            ShimmerMotionPlan::Animate(animation) => GradientText {
+                child: text,
+                phase: animation.phase_for_progress(0.0),
+                spread: timing.spread(),
+                mode: theme.mode,
             }
-            (ShimmerMotionPlan::Animate(animation), None) => {
-                let initial = styled_text_for_phase(
-                    content.clone(),
-                    palette,
-                    animation.phase_for_progress(0.0),
-                    timing.spread(),
-                );
-                initial
-                    .with_animation(
-                        SHIMMER_ANIMATION_ID,
-                        animation.gpui_animation(),
-                        move |_, progress| {
-                            styled_text_for_phase(
-                                content.clone(),
-                                palette,
-                                animation.phase_for_progress(progress),
-                                timing.spread(),
-                            )
-                        },
-                    )
-                    .into_any_element()
-            }
-            (ShimmerMotionPlan::Animate(animation), Some(id)) => {
-                let initial = styled_runs_for_phase(
-                    id.clone(),
-                    content.clone(),
-                    &theme,
-                    palette.highlight,
-                    animation.phase_for_progress(0.0),
-                    timing.spread(),
-                    &run_highlights,
-                    &run_overrides,
-                );
-                initial
-                    .with_animation(
-                        SHIMMER_ANIMATION_ID,
-                        animation.gpui_animation(),
-                        move |_, progress| {
-                            styled_runs_for_phase(
-                                id.clone(),
-                                content.clone(),
-                                &theme,
-                                palette.highlight,
-                                animation.phase_for_progress(progress),
-                                timing.spread(),
-                                &run_highlights,
-                                &run_overrides,
-                            )
-                        },
-                    )
-                    .into_any_element()
-            }
+            .with_animation(
+                SHIMMER_ANIMATION_ID,
+                animation.gpui_animation(),
+                move |mut text, progress| {
+                    text.phase = animation.phase_for_progress(progress);
+                    text
+                },
+            )
+            .into_any_element(),
         };
 
         element.child(text).into_any_element()
@@ -830,69 +711,115 @@ pub fn shimmer_text(
     ShimmerText::new(content, theme, motion)
 }
 
-/// Merges caller base faces under the travelling-band color wash.
-///
-/// Each base range keeps its weight, style, and decorations, gaining the
-/// band color exactly where the sweep covers it. Edges union both inputs;
-/// all edges are caller-supplied character boundaries (or sweep segments,
-/// which the segmenter builds per scalar value), and empty spans never
-/// emit. With no base ranges the output is the sweep wash alone, so callers
-/// without fragments render exactly as before.
+/** Electron's background-position runs from 250% to -100% on an image
+ * whose width is `spread` percent of the text box. The flat center occupies
+ * stops 40% through 60%; each edge fades continuously to currentColor.
+ */
 #[must_use]
-pub fn merge_sweep_highlights(
-    base: &[(Range<usize>, HighlightStyle)],
-    sweep: &[Range<usize>],
-    sweep_color: Hsla,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    let sweep = sweep.iter().cloned().map(|range| {
-        (
-            range,
-            HighlightStyle {
-                color: Some(sweep_color),
-                ..HighlightStyle::default()
-            },
-        )
-    });
-    combine_highlights(base.iter().cloned(), sweep).collect()
+pub fn gradient_strength(position: f32, phase: f32, spread: f32) -> f32 {
+    let width = normalize_spread(spread) / MAX_SPREAD;
+    if width <= 0.0 || !position.is_finite() {
+        return 0.0;
+    }
+    let start = (1.0 - width) * (2.5 - 3.5 * normalize_phase(phase));
+    let offset = (position - start) / width;
+    (offset / 0.4).min((1.0 - offset) / 0.4).clamp(0.0, 1.0)
 }
 
-fn styled_text_for_phase(
-    content: SharedString,
-    palette: ShimmerTextStyle,
-    phase: f32,
-    spread: f32,
-) -> StyledText {
-    let highlights = highlighted_ranges(content.as_ref(), phase, spread)
-        .into_iter()
-        .map(|range| (range, HighlightStyle::from(palette.highlight)));
-    StyledText::new(content).with_highlights(highlights)
+/** Match the reference's sRGB currentColor/white and currentColor/black mix.
+ * Alpha stays with the run so ancestor opacity and translucent text survive.
+ */
+#[must_use]
+pub fn shimmer_color(base: Hsla, mode: ThemeMode, strength: f32) -> Hsla {
+    if strength <= 0.0 {
+        return base;
+    }
+    let (target, mix) = match mode {
+        ThemeMode::Light => (1.0, 0.65),
+        ThemeMode::Dark => (0.0, 0.55),
+    };
+    let amount = strength.clamp(0.0, 1.0) * mix;
+    let mut color = hsla_to_rgba(base);
+    color.red += (target - color.red) * amount;
+    color.green += (target - color.green) * amount;
+    color.blue += (target - color.blue) * amount;
+    rgb_to_hsla(color)
 }
 
-/// Builds one selectable sweep frame with compiled text runs.
-///
-/// The sweep color merges over the caller base faces through the same
-/// combine semantic; family and zero-tracking overrides compile at layout
-/// from the inherited window text style, so selection retains per stable id
-/// with identical metrics while selected or not.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the phase frame needs id, content, theme, band, phase, spread, and the caller's \
-              highlight/override slices; a struct would just rename the same fields"
-)]
-fn styled_runs_for_phase(
-    id: SharedString,
-    content: SharedString,
-    theme: &ArtisanTheme,
-    band: Hsla,
+/** Paint-only wrapper: the child owns its stable layout and interaction state. */
+struct GradientText {
+    child: AnyElement,
     phase: f32,
     spread: f32,
-    base_highlights: &[(Range<usize>, HighlightStyle)],
-    overrides: &[TextRunOverride],
-) -> SelectableText {
-    let sweep = highlighted_ranges(content.as_ref(), phase, spread);
-    let merged = merge_sweep_highlights(base_highlights, &sweep, band);
-    SelectableText::retained(id, content, *theme, merged)
-        .with_text_run_overrides(overrides.to_vec())
+    mode: ThemeMode,
+}
+
+impl IntoElement for GradientText {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for GradientText {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        (): &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        (): &mut (),
+        (): &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let (phase, spread, mode) = (self.phase, self.spread, self.mode);
+        let width = f32::from(bounds.size.width);
+        if width <= 0.0 || spread <= 0.0 {
+            self.child.paint(window, cx);
+            return;
+        }
+        window.with_text_color_map(
+            Some(Rc::new(move |x, color| {
+                let position = f32::from(x - bounds.left()) / width;
+                shimmer_color(color, mode, gradient_strength(position, phase, spread))
+            })),
+            |window| self.child.paint(window, cx),
+        );
+    }
 }
 
 fn phase_from_seconds(elapsed: f32, duration: f32, delay: f32) -> f32 {

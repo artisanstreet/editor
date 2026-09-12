@@ -1,17 +1,14 @@
 //! Behavioral coverage for the native GPUI `ShimmerText` primitive.
 //!
-//! The deterministic tests cover the legacy timing/color contract and the
-//! native segmented-glyph fallback. The GPUI test covers real layout bounds;
-//! it intentionally makes no screenshot, platform-accessibility, or gradient
-//! fidelity claim.
+//! Covers the reference gradient geometry and sRGB mix, timing, readable
+//! reduced-motion states, and native layout bounds.
 
 use std::time::Duration;
 
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::shimmer_text::{
-    DEFAULT_DELAY, DEFAULT_DURATION, DEFAULT_SPREAD, ShimmerMotionPlan, ShimmerSegmentStyle,
-    ShimmerText, ShimmerTextStyle, ShimmerTextVariant, ShimmerTiming, highlighted_ranges,
-    merge_sweep_highlights, phase_at, segments_for,
+    DEFAULT_DELAY, DEFAULT_DURATION, DEFAULT_SPREAD, ShimmerMotionPlan, ShimmerText,
+    ShimmerTextStyle, ShimmerTextVariant, ShimmerTiming, phase_at,
 };
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
@@ -76,7 +73,10 @@ fn every_public_variant_resolves_in_both_theme_modes() {
                 expected_foreground.to_paint(),
                 "{mode:?} {variant:?} foreground"
             );
-            assert_eq!(style.highlight, theme.colors.highlight.to_paint());
+            assert_eq!(
+                style.highlight,
+                artisan_ui::shimmer_text::shimmer_color(style.foreground, mode, 1.0)
+            );
             assert!(style.foreground.alpha > 0.0);
         }
     }
@@ -118,7 +118,7 @@ fn phase_honors_delay_and_wraps_deterministically() {
 }
 
 #[test]
-fn timing_and_segments_bound_invalid_spread_and_keep_utf8_ranges_valid() {
+fn timing_bounds_invalid_spread() {
     assert_eq!(
         ShimmerTiming::default()
             .with_spread(-20.0)
@@ -139,25 +139,6 @@ fn timing_and_segments_bound_invalid_spread_and_keep_utf8_ranges_valid() {
             .spread()
             .to_bits(),
         0.0_f32.to_bits()
-    );
-
-    let segments = segments_for("Åbc", 0.5, 50.0);
-    assert_eq!(segments.len(), 3);
-    assert_eq!(segments[0].range, 0..2);
-    assert_eq!(segments[1].range, 2..3);
-    assert_eq!(segments[2].range, 3..4);
-    assert_eq!(segments[0].position.to_bits(), 0.0_f32.to_bits());
-    assert_eq!(segments[2].position.to_bits(), 1.0_f32.to_bits());
-    assert!(
-        segments
-            .iter()
-            .any(|segment| { segment.style == ShimmerSegmentStyle::Highlight })
-    );
-    assert!(highlighted_ranges("", 0.5, 50.0).is_empty());
-    assert!(
-        segments_for("hello", 0.5, 0.0)
-            .iter()
-            .all(|segment| segment.style == ShimmerSegmentStyle::Base)
     );
 }
 
@@ -187,7 +168,9 @@ fn inactive_and_reduced_motion_are_immediate_but_keep_semantic_content() {
     assert!(!animation.gpui_animation().oneshot);
 }
 
-struct ShimmerLayoutProbe;
+struct ShimmerLayoutProbe {
+    motion: MotionPolicy,
+}
 
 impl Render for ShimmerLayoutProbe {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -196,7 +179,7 @@ impl Render for ShimmerLayoutProbe {
             .child(ShimmerText::new(
                 "Receiving response",
                 ArtisanTheme::for_mode(ThemeMode::Dark),
-                MotionPolicy::Reduced,
+                self.motion,
             ));
 
         div()
@@ -209,7 +192,9 @@ impl Render for ShimmerLayoutProbe {
 
 #[gpui::test]
 fn reduced_motion_shimmer_has_real_nonempty_gpui_geometry(cx: &mut TestAppContext) {
-    let (_, cx) = cx.add_window_view(|_, _| ShimmerLayoutProbe);
+    let (_, cx) = cx.add_window_view(|_, _| ShimmerLayoutProbe {
+        motion: MotionPolicy::Reduced,
+    });
     let host = cx
         .debug_bounds(HOST_SELECTOR)
         .expect("host must paint inspectable bounds");
@@ -221,67 +206,6 @@ fn reduced_motion_shimmer_has_real_nonempty_gpui_geometry(cx: &mut TestAppContex
     assert_eq!(host.size.height, px(80.0));
     assert!(text.size.width > px(0.0));
     assert!(text.size.height > px(0.0));
-}
-
-#[test]
-fn sweep_merge_preserves_fragment_faces_under_band_color() {
-    use gpui::{FontStyle, FontWeight, HighlightStyle};
-    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-    let band = theme.colors.highlight.to_paint();
-    let base = vec![
-        (
-            5..15,
-            HighlightStyle {
-                font_weight: Some(FontWeight::SEMIBOLD),
-                ..HighlightStyle::default()
-            },
-        ),
-        (
-            16..20,
-            HighlightStyle {
-                font_style: Some(FontStyle::Italic),
-                ..HighlightStyle::default()
-            },
-        ),
-    ];
-    let sweep = vec![0..8, 18..20];
-    let merged = merge_sweep_highlights(&base, &sweep, band);
-    let at = |start: usize| {
-        merged
-            .iter()
-            .find(|(range, _)| range.start == start)
-            .map(|(_, style)| *style)
-            .expect("merged sweep covers every union edge")
-    };
-    // Sweep-only span: band color, no inherited weight.
-    assert_eq!(at(0).color, Some(band));
-    assert_eq!(at(0).font_weight, None);
-    // Overlap: band color layered over the fragment semibold.
-    assert_eq!(at(5).color, Some(band));
-    assert_eq!(at(5).font_weight, Some(FontWeight::SEMIBOLD));
-    // Base-only span: fragment style with no band color.
-    assert_eq!(at(8).color, None);
-    assert_eq!(at(8).font_weight, Some(FontWeight::SEMIBOLD));
-    assert_eq!(at(16).font_style, Some(FontStyle::Italic));
-    assert_eq!(at(16).color, None);
-    // Trailing sweep span past the base: color wash alone.
-    assert_eq!(at(18).color, Some(band));
-}
-
-#[test]
-fn sweep_merge_keeps_utf8_boundaries_stable() {
-    use gpui::HighlightStyle;
-    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-    let band = theme.colors.highlight.to_paint();
-    // "a" + U+1F4A1 (bytes 1..5) + "b": ranges address whole scalars only.
-    let base = vec![(1..5, HighlightStyle::default())];
-    let merged = merge_sweep_highlights(&base, std::slice::from_ref(&(0..2)), band);
-    assert_eq!(merged.len(), 3);
-    assert_eq!(merged[0].0, 0..1);
-    assert_eq!(merged[1].0, 1..2);
-    assert_eq!(merged[2].0, 2..5);
-    assert_eq!(merged[1].1.color, Some(band));
-    assert_eq!(merged[2].1.color, None);
 }
 
 #[test]
@@ -314,4 +238,71 @@ fn builders_retain_fragment_inputs_with_empty_defaults() {
     // Styled runs never change the motion decision: active Full still
     // schedules frames, so the sweep animates over compiled runs.
     assert!(styled.motion_plan().is_animating());
+}
+
+#[test]
+fn gradient_matches_electron_stops_and_background_position() {
+    use artisan_ui::shimmer_text::gradient_strength;
+    // At 3/7 of the sweep, the 50%-wide image starts at x=50%.
+    let phase = 3.0 / 7.0;
+    for (position, expected) in [
+        (0.5, 0.0),
+        (0.6, 0.5),
+        (0.7, 1.0),
+        (0.8, 1.0),
+        (0.9, 0.5),
+        (1.0, 0.0),
+    ] {
+        assert!((gradient_strength(position, phase, 50.0) - expected).abs() < 0.00001);
+    }
+    assert_eq!(
+        gradient_strength(0.5, 0.0, 50.0).to_bits(),
+        0.0_f32.to_bits()
+    );
+    assert_eq!(
+        gradient_strength(0.5, phase, 0.0).to_bits(),
+        0.0_f32.to_bits()
+    );
+    assert_eq!(
+        gradient_strength(f32::NAN, phase, 50.0).to_bits(),
+        0.0_f32.to_bits()
+    );
+    // A fade changes within a single wide glyph, rather than at character boundaries.
+    assert!(gradient_strength(0.61, phase, 50.0) > gradient_strength(0.60, phase, 50.0));
+}
+
+#[test]
+fn gradient_mixes_the_actual_run_color_in_srgb() {
+    use artisan_ui::shimmer_text::shimmer_color;
+    use gpui::{Rgba, hsla_to_rgba, rgb_to_hsla};
+    let base = rgb_to_hsla(Rgba::new(0.2, 0.4, 0.6, 0.7));
+    for (mode, expected) in [
+        (ThemeMode::Light, [0.72, 0.79, 0.86]),
+        (ThemeMode::Dark, [0.09, 0.18, 0.27]),
+    ] {
+        let peak = hsla_to_rgba(shimmer_color(base, mode, 1.0));
+        for (actual, expected) in [peak.red, peak.green, peak.blue].into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 0.00001);
+        }
+        assert!((peak.alpha - 0.7).abs() < 0.00001);
+        assert_eq!(shimmer_color(base, mode, 0.0), base);
+    }
+}
+
+#[gpui::test]
+fn full_motion_gradient_keeps_the_measured_text_geometry(cx: &mut TestAppContext) {
+    let (_, full) = cx.add_window_view(|_, _| ShimmerLayoutProbe {
+        motion: MotionPolicy::Full,
+    });
+    let animated = full
+        .debug_bounds(TEXT_SELECTOR)
+        .expect("animated text paints");
+    let (_, reduced) = cx.add_window_view(|_, _| ShimmerLayoutProbe {
+        motion: MotionPolicy::Reduced,
+    });
+    let settled = reduced
+        .debug_bounds(TEXT_SELECTOR)
+        .expect("settled text paints");
+    assert_eq!(animated.size, settled.size);
+    assert!(animated.size.width > px(0.0));
 }
