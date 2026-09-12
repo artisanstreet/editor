@@ -22,7 +22,7 @@
 //! - seeds every synthetic state through the **real controller path**:
 //!   `SnapshotReceived` domain snapshots plus directly registered
 //!   Activity/Reasoning/Error facts (projection contract `fd6f3aa0`,
-//!   delivery-owned turn sync — no manual `RegisterTurn`). Timestamps are
+//!   delivery-owned turn sync, no manual registration). Timestamps are
 //!   current-relative so the timed host clock renders live spans, and the
 //!   fixture prints the projected block order per case;
 //! - captures exactly one selected state at one baseline viewport per
@@ -363,8 +363,8 @@ fn make_assistant(
 /// turn times so the timed host clock renders live spans.
 ///
 /// Production path (projection contract `fd6f3aa0`): the delivery-owned sync
-/// derives turn drive from snapshot lifecycles plus registered facts — no
-/// manual `RegisterTurn`. Active turns tick from their own `created_at`;
+/// derives turn drive from snapshot lifecycles plus registered facts, with no
+/// manual turn registration. Active turns tick from their own `created_at`;
 /// terminal turns settle on their own `updated_at` span:
 fn case_snapshot(
     case: ProofSceneCase,
@@ -594,7 +594,7 @@ fn case_facts(case: ProofSceneCase) -> Result<Vec<SceneFact>, String> {
 
 /// Seeds one case through the production delivery-plus-fact path: snapshot
 /// (and, where the case needs one, directly registered Activity/Reasoning/
-/// Error facts). No manual `RegisterTurn`: the delivery-owned sync derives
+/// Error facts). No manual turn registration: the delivery-owned sync derives
 /// turn drive, per projection contract `fd6f3aa0`. A refusal is returned as
 /// a message so the runner records it against the case instead of painting
 /// an undriven window.

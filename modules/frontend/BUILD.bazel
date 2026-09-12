@@ -47,8 +47,6 @@ rust_library(
         "src/conversation_state_machine/types.rs",
         "src/conversation_surface.rs",
         "src/conversation_scroll_position.rs",
-        "src/conversation_steering.rs",
-        "src/conversation_steering_machine.rs",
         "src/conversation_turn_footer_policy.rs",
         "src/conversation_turn_machine.rs",
         "src/conversation_turn_navigator.rs",

@@ -20,19 +20,6 @@ impl ConversationStateController {
             });
         }
 
-        let mut steering_views = Vec::with_capacity(self.steerings.len());
-        let mut pending_lip_steering_views = Vec::new();
-        for record in self.steerings.values() {
-            let view = record.controller.view();
-            if matches!(&view.placement, ChildSteeringPlacement::ComposerPendingLip) {
-                pending_lip_steering_views.push(view.clone());
-            }
-            steering_views.push(ConversationSteeringView {
-                scene_id: record.scene_id.clone(),
-                view,
-            });
-        }
-
         let mut disclosure_views = Vec::with_capacity(self.disclosures.len());
         for (scene_id, controller) in &self.disclosures {
             disclosure_views.push(ConversationDisclosureView {
@@ -47,8 +34,6 @@ impl ConversationStateController {
             delivery_status: delivery.projection_status,
             delivery,
             turn_views,
-            steering_views,
-            pending_lip_steering_views,
             disclosure_views,
             viewport_state: self.viewport.state(),
             viewport_generation: self.viewport.generation(),
@@ -59,13 +44,11 @@ impl ConversationStateController {
     }
 
     /// Purely projects the last-good durable snapshot, typed facts, child
-    /// narrations, anchored steering labels, and child disclosure values.
+    /// narrations, and child disclosure values.
     ///
     /// While delivery is recovering, its child retains the last-good snapshot;
     /// this method therefore projects that same durable scene rather than a
-    /// partially applied batch. Pending-lip, hidden, and failed steerings are
-    /// intentionally absent from the scene and remain available through
-    /// [`Self::view`] and aggregate effects.
+    /// partially applied batch.
     ///
     /// Active turn controllers contribute their authoritative clock basis to
     /// the turn status, and eligible completed turns receive their settled
@@ -140,20 +123,7 @@ impl ConversationStateController {
             }
         }
 
-        let mut steerings = Vec::new();
-        for record in self.steerings.values() {
-            let view = record.controller.view();
-            let ChildSteeringPlacement::AnchoredAfter { anchor } = view.placement else {
-                continue;
-            };
-            let label = steering_label(view.label_kind);
-            steerings.push(
-                SceneSteeringPlacement::new(record.scene_id.clone(), anchor, label)
-                    .map_err(ConversationStateError::Scene)?,
-            );
-        }
-
-        ConversationScene::build(turns, items, narrations, steerings)
+        ConversationScene::build(turns, items, narrations, Vec::new())
             .map_err(ConversationStateError::Scene)
             .and_then(|mut scene| {
                 self.annotate_turn_footer_settlements(&mut scene)?;
@@ -217,15 +187,6 @@ impl ConversationStateController {
                 return Err(ConversationStateError::SceneConflict {
                     id: fact.id.clone(),
                 });
-            }
-        }
-
-        for record in self.steerings.values() {
-            let view = record.controller.view();
-            if let ChildSteeringPlacement::AnchoredAfter { anchor } = view.placement
-                && !snapshot_has_user_item(snapshot, &anchor)
-            {
-                return Err(ConversationStateError::SteeringAnchorUnavailable { anchor });
             }
         }
         Ok(())
@@ -469,16 +430,6 @@ pub(super) fn snapshot_uses_ordinal(snapshot: &ConversationSnapshot, ordinal: u6
             .any(|item| item.ordinal().get() == ordinal)
 }
 
-fn snapshot_has_user_item(snapshot: &ConversationSnapshot, item_id: &ItemId) -> bool {
-    snapshot.items().iter().any(|item| {
-        item.item_id() == item_id
-            && matches!(
-                item,
-                ConversationItem::UserMessage(_) | ConversationItem::MultimodalUserMessage(_)
-            )
-    })
-}
-
 fn scene_narration(narration: &TurnNarration) -> SceneTurnNarration {
     match narration {
         TurnNarration::Hidden => SceneTurnNarration::Quiet,
@@ -497,11 +448,5 @@ fn scene_narration(narration: &TurnNarration) -> SceneTurnNarration {
         TurnNarration::Failed { .. } => SceneTurnNarration::Failed,
         TurnNarration::Interrupted { .. } => SceneTurnNarration::Interrupted,
         TurnNarration::Cancelled { .. } => SceneTurnNarration::Cancelled,
-    }
-}
-
-fn steering_label(label_kind: SteeringLabelKind) -> String {
-    match label_kind {
-        SteeringLabelKind::Steering => "steering".to_owned(),
     }
 }

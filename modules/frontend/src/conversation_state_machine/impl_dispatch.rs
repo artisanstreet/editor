@@ -24,9 +24,7 @@ impl ConversationStateController {
         Self {
             delivery,
             turns: BTreeMap::new(),
-            explicit_turns: BTreeSet::new(),
             turn_engine_labels: BTreeMap::new(),
-            steerings: BTreeMap::new(),
             disclosures: BTreeMap::new(),
             facts: BTreeMap::new(),
             viewport: ViewportController::new(),
@@ -65,26 +63,11 @@ impl ConversationStateController {
                 self.close_owner()
             }
             ConversationStateEvent::Delivery(event) => self.dispatch_delivery(&event),
-            ConversationStateEvent::RegisterTurn { turn_id } => self.register_turn(turn_id),
             ConversationStateEvent::Turn { turn_id, event } => self.dispatch_turn(turn_id, event),
             ConversationStateEvent::SetTurnEngineLabel {
                 turn_id,
                 engine_label,
             } => self.set_turn_engine_label(turn_id, engine_label),
-            ConversationStateEvent::RegisterSteering {
-                command_id,
-                generation,
-                source_reference,
-                started_at_ms,
-                label_kind,
-            } => self.register_steering(
-                command_id,
-                generation,
-                &source_reference,
-                started_at_ms,
-                label_kind,
-            ),
-            ConversationStateEvent::Steering(event) => self.dispatch_steering(&event),
             ConversationStateEvent::RegisterDisclosure {
                 scene_id,
                 initially_working,
@@ -123,41 +106,7 @@ impl ConversationStateController {
         self.dispatch(ConversationStateEvent::Delivery(event))
     }
 
-    /// Registers one turn controller.
-    ///
-    /// Explicit registration takes permanent ownership of the turn: it
-    /// replaces any delivery-derived controller with a fresh one, and later
-    /// delivery synchronization skips explicitly owned turns. Registering an
-    /// already explicit turn is still a typed duplicate.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConversationStateError::OwnerClosed`] for a closed owner,
-    /// [`ConversationStateError::DuplicateTurn`] for an already explicit
-    /// identity, or [`ConversationStateError::CapacityExhausted`] when a bound
-    /// is full.
-    pub fn register_turn(&mut self, turn_id: TurnId) -> Result<(), ConversationStateError> {
-        if self.delivery.is_closed() {
-            return Err(ConversationStateError::OwnerClosed);
-        }
-        if self.explicit_turns.contains(&turn_id) {
-            return Err(ConversationStateError::DuplicateTurn { turn_id });
-        }
-        let fresh = !self.turns.contains_key(&turn_id);
-        Self::ensure_capacity(
-            CapacityResource::Turns,
-            self.turns.len().saturating_add(usize::from(fresh)),
-            MAX_TURN_CONTROLLERS,
-        )?;
-        self.ensure_effect_capacity(1)?;
-        self.turns
-            .insert(turn_id.clone(), ConversationTurnController::new());
-        self.explicit_turns.insert(turn_id);
-        self.push_effect(ConversationStateEffect::SceneInvalidated);
-        Ok(())
-    }
-
-    /// Routes one event to a registered turn controller.
+    /// Routes one event to a delivery-derived turn controller.
     ///
     /// # Errors
     ///
@@ -244,102 +193,6 @@ impl ConversationStateController {
         }
         self.push_effect(ConversationStateEffect::SceneInvalidated);
         Ok(())
-    }
-
-    /// Registers one exact steering command generation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConversationStateError`] for a closed owner, duplicate or
-    /// conflicting identity, exhausted capacity, invalid scene identity, or
-    /// rejected steering construction.
-    pub fn register_steering(
-        &mut self,
-        command_id: RequestId,
-        generation: u64,
-        source_reference: &crate::conversation_steering_machine::SourceReference,
-        started_at_ms: i64,
-        label_kind: SteeringLabelKind,
-    ) -> Result<(), ConversationStateError> {
-        if self.delivery.is_closed() {
-            return Err(ConversationStateError::OwnerClosed);
-        }
-        let key = SteeringKey {
-            command_id: command_id.clone(),
-            generation,
-        };
-        if self.steerings.contains_key(&key) {
-            return Err(ConversationStateError::DuplicateSteering {
-                command_id,
-                generation,
-            });
-        }
-        Self::ensure_capacity(
-            CapacityResource::Steerings,
-            self.steerings.len().saturating_add(1),
-            MAX_STEERING_CONTROLLERS,
-        )?;
-        self.ensure_effect_capacity(1)?;
-
-        let scene_id = steering_scene_id(&key)
-            .map_err(|error| ConversationStateError::InvalidSceneIdentity { error })?;
-        if self
-            .steerings
-            .values()
-            .any(|record| record.scene_id == scene_id)
-        {
-            return Err(ConversationStateError::SceneConflict { id: scene_id });
-        }
-        if self.facts.contains_key(&scene_id)
-            || self.delivery.snapshot().is_some_and(|snapshot| {
-                snapshot
-                    .items()
-                    .iter()
-                    .any(|item| item.item_id().as_str() == scene_id.as_str())
-            })
-        {
-            return Err(ConversationStateError::SceneConflict { id: scene_id });
-        }
-
-        let controller = ConversationSteeringMachine::new(
-            command_id.as_str(),
-            generation,
-            source_reference.as_str(),
-            started_at_ms,
-            label_kind,
-        )
-        .map_err(|error| {
-            let error = match error {
-                SteeringControllerError::InvalidGeneration => {
-                    SteeringConstructionError::InvalidGeneration
-                }
-                SteeringControllerError::InvalidCommandId(_)
-                | SteeringControllerError::EmptySourceReference
-                | SteeringControllerError::InvalidSourceReference(_) => {
-                    SteeringConstructionError::InvalidInput
-                }
-            };
-            ConversationStateError::SteeringConstruction(error)
-        })?;
-        self.steerings.insert(
-            key,
-            SteeringRecord {
-                scene_id,
-                controller,
-            },
-        );
-        self.push_effect(ConversationStateEffect::SceneInvalidated);
-        Ok(())
-    }
-
-    /// Routes one fenced event to its exact steering controller.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConversationStateError`] when the owner or steering child
-    /// rejects the event, its anchor is invalid, or effect capacity is full.
-    pub fn on_steering(&mut self, event: SteeringEvent) -> Result<(), ConversationStateError> {
-        self.dispatch(ConversationStateEvent::Steering(event))
     }
 
     /// Registers one disclosure controller keyed by stable scene identity.
@@ -719,7 +572,6 @@ impl ConversationStateController {
         };
         synchronize_turns(
             &mut self.turns,
-            &self.explicit_turns,
             &self.facts,
             snapshot,
             &mut self.effects,
@@ -861,45 +713,6 @@ impl ConversationStateController {
         Ok(())
     }
 
-    fn dispatch_steering(&mut self, event: &SteeringEvent) -> Result<(), ConversationStateError> {
-        let key = steering_key(event);
-        if !self.steerings.contains_key(&key) {
-            return Err(ConversationStateError::UnknownSteering {
-                command_id: key.command_id.clone(),
-                generation: key.generation,
-            });
-        }
-
-        if let SteeringEvent::DurableItemAnchored { item_id, .. } = event {
-            self.validate_steering_anchor(item_id)?;
-        }
-        self.ensure_effect_capacity(MAX_STEERING_EFFECTS_PER_EVENT)?;
-        let child_effects = {
-            let Some(record) = self.steerings.get_mut(&key) else {
-                return Err(ConversationStateError::UnknownSteering {
-                    command_id: key.command_id.clone(),
-                    generation: key.generation,
-                });
-            };
-            record.controller.handle_event(event).map_err(|error| {
-                ConversationStateError::Steering {
-                    command_id: key.command_id.clone(),
-                    generation: key.generation,
-                    error,
-                }
-            })?;
-            record.controller.drain_effects()
-        };
-        for effect in child_effects {
-            self.push_effect(ConversationStateEffect::Steering {
-                command_id: key.command_id.clone(),
-                generation: key.generation,
-                effect,
-            });
-        }
-        Ok(())
-    }
-
     fn dispatch_disclosure(
         &mut self,
         scene_id: SceneId,
@@ -965,7 +778,6 @@ impl ConversationStateController {
         {
             synchronize_turns(
                 &mut self.turns,
-                &self.explicit_turns,
                 &self.facts,
                 snapshot,
                 &mut self.effects,
@@ -1020,13 +832,6 @@ impl ConversationStateController {
             .facts
             .values()
             .any(|existing| existing.ordinal == fact.ordinal)
-        {
-            return Err(ConversationStateError::SceneConflict { id: fact.id });
-        }
-        if self
-            .steerings
-            .values()
-            .any(|record| record.scene_id == fact.id)
         {
             return Err(ConversationStateError::SceneConflict { id: fact.id });
         }
@@ -1110,32 +915,6 @@ impl ConversationStateController {
         Ok(true)
     }
 
-    fn validate_steering_anchor(&self, item_id: &ItemId) -> Result<(), ConversationStateError> {
-        let Some(snapshot) = self.delivery.snapshot() else {
-            return Err(ConversationStateError::UnknownSteeringAnchor {
-                anchor: item_id.clone(),
-            });
-        };
-        let Some(item) = snapshot
-            .items()
-            .iter()
-            .find(|item| item.item_id() == item_id)
-        else {
-            return Err(ConversationStateError::UnknownSteeringAnchor {
-                anchor: item_id.clone(),
-            });
-        };
-        if !matches!(
-            item,
-            ConversationItem::UserMessage(_) | ConversationItem::MultimodalUserMessage(_)
-        ) {
-            return Err(ConversationStateError::NonUserSteeringAnchor {
-                anchor: item_id.clone(),
-            });
-        }
-        Ok(())
-    }
-
     fn push_delivery_effects(&mut self) {
         for effect in self.delivery.drain_effects() {
             self.push_effect(ConversationStateEffect::Delivery(effect));
@@ -1177,9 +956,9 @@ impl ConversationStateController {
 
 /// Drives delivery-owned turn controllers from one accepted snapshot.
 ///
-/// For every durable turn without an explicitly registered controller, ensures
-/// a controller exists (skipped when the turn registry is full) and dispatches
-/// the events derived from canonical lifecycle and item evidence. Derived
+/// For every durable turn, ensures a controller exists (skipped when the turn
+/// registry is full) and dispatches the events derived from canonical
+/// lifecycle and item evidence. Derived
 /// refusals leave state unchanged: they only mean the controller already
 /// covers that durable state. Late historical fact evidence for an
 /// already-settled success rebuilds the delivery-owned controller from the
@@ -1191,7 +970,6 @@ impl ConversationStateController {
 /// effect-quiet.
 fn synchronize_turns(
     turns: &mut BTreeMap<TurnId, ConversationTurnController>,
-    explicit_turns: &BTreeSet<TurnId>,
     facts: &BTreeMap<SceneId, SceneFact>,
     snapshot: &ConversationSnapshot,
     effects: &mut Vec<ConversationStateEffect>,
@@ -1229,9 +1007,6 @@ fn synchronize_turns(
 
     let mut changed = false;
     for turn in snapshot.turns() {
-        if explicit_turns.contains(&turn.turn_id) {
-            continue;
-        }
         if !turns.contains_key(&turn.turn_id) {
             if turns.len() >= MAX_TURN_CONTROLLERS {
                 continue;
@@ -1447,51 +1222,5 @@ fn drive_active_like(
             at: activate_at,
             revision: first_revision,
         }
-    }
-}
-
-fn steering_scene_id(key: &SteeringKey) -> Result<SceneId, SceneIdError> {
-    SceneId::parse(format!(
-        "steering-{}-{}",
-        key.command_id.as_str(),
-        key.generation
-    ))
-}
-
-fn steering_key(event: &SteeringEvent) -> SteeringKey {
-    match event {
-        SteeringEvent::DispatchStarted {
-            command_id,
-            generation,
-            ..
-        }
-        | SteeringEvent::DispatchAccepted {
-            command_id,
-            generation,
-            ..
-        }
-        | SteeringEvent::DispatchFailed {
-            command_id,
-            generation,
-            ..
-        }
-        | SteeringEvent::DurableItemAnchored {
-            command_id,
-            generation,
-            ..
-        }
-        | SteeringEvent::EngineAcknowledged {
-            command_id,
-            generation,
-            ..
-        }
-        | SteeringEvent::Cancelled {
-            command_id,
-            generation,
-            ..
-        } => SteeringKey {
-            command_id: command_id.clone(),
-            generation: *generation,
-        },
     }
 }
