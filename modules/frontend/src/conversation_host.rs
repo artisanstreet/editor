@@ -18,12 +18,11 @@ use artisan_domain::{
 };
 use artisan_ui::theme::ThemeMode;
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, Render, Subscription,
-    Window,
+    App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, Render, Subscription, Window,
 };
-use thiserror::Error;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 
 use crate::conversation_delivery_machine::ConversationDeliveryEffect;
 use crate::conversation_relative_age::format_relative_age;
@@ -131,8 +130,7 @@ pub fn host_now_millis() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0),
+            .map_or(0, |elapsed| elapsed.as_millis()),
     )
     .unwrap_or(i64::MAX)
 }
@@ -503,10 +501,10 @@ impl ConversationHost {
                     self.route_rich_link_requests(urls, cx)
                 }
                 ConversationSurfaceAction::TurnFooterRevealed { turn } => {
-                    self.route_footer_revealed(turn, surface, cx)
+                    self.route_footer_revealed(&turn, surface, cx)
                 }
                 ConversationSurfaceAction::TurnFooterCopyRequested { turn, text: _ } => {
-                    self.route_footer_copy(turn, surface, cx)
+                    self.route_footer_copy(&turn, surface, cx)
                 }
             };
 
@@ -606,7 +604,7 @@ impl ConversationHost {
             let task = cx.spawn(async move |host, cx| {
                 loop {
                     cx.background_executor().timer(CLOCK_TICK_INTERVAL).await;
-                    let tick = host.update(cx, |host, cx| host.tick_clock(cx)).ok();
+                    let tick = host.update(cx, ConversationHost::tick_clock).ok();
                     if tick != Some(true) {
                         break;
                     }
@@ -647,9 +645,10 @@ impl ConversationHost {
         settled_at: String,
         response_text: String,
     ) -> &mut ConversationTurnFooterPolicy {
-        let stale = self.footer_policies.get(turn).is_some_and(|policy| {
-            footer_policy_is_stale(policy, &settled_at, &response_text)
-        });
+        let stale = self
+            .footer_policies
+            .get(turn)
+            .is_some_and(|policy| footer_policy_is_stale(policy, &settled_at, &response_text));
         if stale {
             self.footer_policies.remove(turn);
         }
@@ -666,21 +665,20 @@ impl ConversationHost {
     /// with no settlement is stale paint and drains as a no-op.
     fn route_footer_revealed(
         &mut self,
-        turn: TurnId,
+        turn: &TurnId,
         surface: &Entity<ConversationSurface>,
         cx: &mut Context<Self>,
     ) -> SurfaceRouteDecision {
-        let staged: Option<(String, String)> =
-            settled_footer_for(surface.read(cx).scene(), &turn);
+        let staged: Option<(String, String)> = settled_footer_for(surface.read(cx).scene(), turn);
         let Some((settled_at, response_text)) = staged else {
             return SurfaceRouteDecision::Accepted;
         };
-        let policy = self.sync_footer_policy(&turn, settled_at.clone(), response_text);
+        let policy = self.sync_footer_policy(turn, settled_at.clone(), response_text);
         if policy.observe(TurnFooterInput::Hover) == TurnFooterAction::RequestClockSample {
             let age = format_relative_age(host_now_millis(), &settled_at);
             policy.set_relative_age(age.clone());
             surface.update(cx, |surface, surface_cx| {
-                surface.set_footer_relative_age(&turn, age, surface_cx);
+                surface.set_footer_relative_age(turn, age, surface_cx);
             });
         }
         SurfaceRouteDecision::Accepted
@@ -694,23 +692,22 @@ impl ConversationHost {
     /// claimed. The scene settlement supplies the bytes, never the action.
     fn route_footer_copy(
         &mut self,
-        turn: TurnId,
+        turn: &TurnId,
         surface: &Entity<ConversationSurface>,
         cx: &mut Context<Self>,
     ) -> SurfaceRouteDecision {
-        let staged: Option<(String, String)> =
-            settled_footer_for(surface.read(cx).scene(), &turn);
+        let staged: Option<(String, String)> = settled_footer_for(surface.read(cx).scene(), turn);
         let Some((settled_at, response_text)) = staged else {
             return SurfaceRouteDecision::Accepted;
         };
-        let policy = self.sync_footer_policy(&turn, settled_at, response_text);
+        let policy = self.sync_footer_policy(turn, settled_at, response_text);
         if let TurnFooterAction::CopyResponse { text } = policy.start_copy() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             policy.settle_copy(CopyOutcome::Succeeded);
         }
         let message = policy.copy_message().to_owned();
         surface.update(cx, |surface, surface_cx| {
-            surface.set_footer_copy_message(&turn, message, surface_cx);
+            surface.set_footer_copy_message(turn, message, surface_cx);
         });
         SurfaceRouteDecision::Accepted
     }
@@ -921,11 +918,8 @@ mod tests {
 
     #[test]
     fn stale_policy_facts_retire_on_revision() {
-        let policy = ConversationTurnFooterPolicy::new(
-            "2024-01-01T00:00:00Z",
-            "hello",
-            String::new(),
-        );
+        let policy =
+            ConversationTurnFooterPolicy::new("2024-01-01T00:00:00Z", "hello", String::new());
         assert!(!footer_policy_is_stale(
             &policy,
             "2024-01-01T00:00:00Z",
@@ -945,11 +939,8 @@ mod tests {
 
     #[test]
     fn footer_policy_reveal_and_copy_flow() {
-        let mut policy = ConversationTurnFooterPolicy::new(
-            "2024-01-01T00:00:00.000Z",
-            "hello",
-            String::new(),
-        );
+        let mut policy =
+            ConversationTurnFooterPolicy::new("2024-01-01T00:00:00.000Z", "hello", String::new());
         assert_eq!(
             policy.observe(TurnFooterInput::Hover),
             TurnFooterAction::RequestClockSample

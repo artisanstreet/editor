@@ -16,12 +16,12 @@ use crate::{
     native_model_selector::{NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR, NativeModelSelector},
 };
 
-fn mount_composer<'a>(
-    cx: &'a mut TestAppContext,
+fn mount_composer(
+    cx: &mut TestAppContext,
     snapshot: NativeComposerControlsSnapshot,
 ) -> (
     gpui::Entity<NativeComposer>,
-    &'a mut gpui::VisualTestContext,
+    &mut gpui::VisualTestContext,
 ) {
     let (view, window_cx) = cx.add_window_view(|_, cx| {
         let controls = cx.new(|cx| NativeComposerControls::new(snapshot, cx));
@@ -34,7 +34,7 @@ fn mount_composer<'a>(
             )
         });
         let mut composer = NativeComposer::new(cx);
-        composer.set_components(controls, picker, cx);
+        composer.set_components(&controls, &picker, cx);
         composer
     });
     (view, window_cx)
@@ -53,7 +53,7 @@ fn composer_controls_keep_equal_edge_insets_as_the_draft_grows(cx: &mut TestAppC
             view.update(app, |composer, cx| {
                 composer.set_draft(draft);
                 cx.notify();
-            })
+            });
         });
         cx.run_until_parked();
         let card = cx.debug_bounds("artisan-native-composer").unwrap();
@@ -69,7 +69,8 @@ fn composer_controls_keep_equal_edge_insets_as_the_draft_grows(cx: &mut TestAppC
         // control edge sits exactly 8px inside the card.
         for inset in [left, right, picker_bottom, primary_bottom] {
             assert_eq!(
-                inset, px(8.0),
+                inset,
+                px(8.0),
                 "expected 8px card padding, got {inset:?} for {draft:?}; card={card:?} picker={picker:?} send={primary:?}"
             );
         }
@@ -120,7 +121,9 @@ fn composer_empty_card_matches_the_reference_128px_box(cx: &mut TestAppContext) 
     assert_eq!(placeholder.top() - editor.top(), px(8.0));
     assert_eq!(placeholder.left() - editor.left(), px(12.0));
 
-    let row = cx.debug_bounds(NATIVE_COMPOSER_CONTROL_ROW_SELECTOR).unwrap();
+    let row = cx
+        .debug_bounds(NATIVE_COMPOSER_CONTROL_ROW_SELECTOR)
+        .unwrap();
     assert_eq!(row.size.height, px(32.0));
     assert_eq!(card.bottom() - row.bottom(), px(8.0));
 }
@@ -134,7 +137,7 @@ fn composer_hides_the_placeholder_once_drafted(cx: &mut TestAppContext) {
         view.update(app, |composer, cx| {
             composer.set_draft("hello");
             cx.notify();
-        })
+        });
     });
     cx.run_until_parked();
     assert!(
@@ -162,7 +165,7 @@ fn composer_grows_uncapped_with_long_drafts(cx: &mut TestAppContext) {
         view.update(app, |composer, cx| {
             composer.set_draft(draft.as_str());
             cx.notify();
-        })
+        });
     });
     cx.run_until_parked();
     let card = cx.debug_bounds("artisan-native-composer").unwrap();

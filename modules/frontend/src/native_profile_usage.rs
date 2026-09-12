@@ -409,10 +409,6 @@ impl ProfileUsageGeneration {
         self.0
     }
 
-    #[cfg(test)]
-    pub(crate) const fn from_raw_for_test(value: u64) -> Self {
-        Self(value)
-    }
 }
 
 /// Stable per-engine roster in backend order.
@@ -591,11 +587,7 @@ pub fn engine_readiness(
         .iter()
         .any(|current| current == engine_id);
     match state.entry(engine_id) {
-        Some(entry) => match entry
-            .report
-            .as_ref()
-            .map(|report| report.authentication)
-        {
+        Some(entry) => match entry.report.as_ref().map(|report| report.authentication) {
             Some(NativeUsageAuthentication::Authenticated) => {
                 if profile_usage_is_fresh(entry.fetched_at_ms, now_ms) {
                     EngineReadiness::Ready
@@ -631,10 +623,7 @@ pub fn engine_readiness(
 /// when no report arrived. Callers paint it next to the last-good state with
 /// a retry action; it never clears the stored account verdict on its own.
 #[must_use]
-pub fn engine_refresh_failure(
-    state: &NativeProfileUsageState,
-    engine_id: &str,
-) -> Option<String> {
+pub fn engine_refresh_failure(state: &NativeProfileUsageState, engine_id: &str) -> Option<String> {
     let entry = state.entry(engine_id)?;
     entry
         .report
@@ -729,7 +718,7 @@ pub fn group_usage_windows(windows: &[NativeUsageWindow]) -> Vec<NativeUsageWind
     }
     let unique = unique
         .into_iter()
-        .filter(|window| window.has_valid_percentage())
+        .filter(NativeUsageWindow::has_valid_percentage)
         .collect::<Vec<_>>();
 
     let mut groups = Vec::new();
@@ -779,6 +768,10 @@ pub fn reset_duration(windows: &[NativeUsageWindow], at_ms: i64) -> Option<Strin
 /// meter itself stays ceil-quantized. Non-finite input cannot reach a meter
 /// and deterministically reads as fully used.
 #[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the clamped percentage is converted to the integer remaining-percent count the reference tooltip rounds to"
+)]
 pub fn usage_remaining_percent(percent_used: f64) -> i64 {
     if !percent_used.is_finite() {
         return 0;
@@ -814,6 +807,7 @@ pub fn checked_label(fetched_at_ms: Option<i64>, now_ms: i64) -> Option<String> 
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::float_cmp, reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage")]
     use super::*;
 
     fn window(
@@ -1224,7 +1218,7 @@ mod tests {
         assert!(
             state
                 .entry("claude")
-                .is_some_and(|entry| entry.has_response())
+                .is_some_and(super::NativeUsageEntry::has_response)
         );
 
         state.accept(NativeUsageEntry {
@@ -1376,13 +1370,13 @@ mod tests {
         // a stale reply without an observation time never replaces the
         // newer reading, exactly like the production controller.
         state.begin_refresh_seq("codex", 2);
-        let mut stale = readiness_entry(
+        let mut older_reading = readiness_entry(
             "codex",
             NativeUsageAuthentication::Unknown,
             Some("provider usage read timed out"),
         );
-        stale.fetched_at_ms = None;
-        state.accept(stale);
+        older_reading.fetched_at_ms = None;
+        state.accept(older_reading);
         assert_eq!(
             engine_readiness(&state, "codex", READINESS_NOW_MS),
             EngineReadiness::Ready
@@ -1418,11 +1412,7 @@ mod tests {
     #[test]
     fn stale_last_good_is_not_fresh_readiness() {
         let mut state = NativeProfileUsageState::default();
-        let mut old = readiness_entry(
-            "codex",
-            NativeUsageAuthentication::Authenticated,
-            None,
-        );
+        let mut old = readiness_entry("codex", NativeUsageAuthentication::Authenticated, None);
         // Just past the shared 180-second freshness window.
         old.fetched_at_ms = Some(READINESS_NOW_MS - 181_000);
         state.accept(old);
@@ -1494,8 +1484,7 @@ mod tests {
             NativeUsageAuthentication::Unauthenticated,
             None,
         ));
-        let admitted =
-            catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
+        let admitted = catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
         assert_eq!(admitted.runnable_harness_ids, vec!["codex".to_owned()]);
         assert!(admitted.selectability("codex-sol").is_available());
         assert!(!admitted.selectability("claude-fable").is_available());
@@ -1524,11 +1513,14 @@ mod tests {
             NativeUsageAuthentication::Authenticated,
             None,
         ));
-        let admitted =
-            catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
+        let admitted = catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
         assert_eq!(
             admitted.runnable_harness_ids,
-            vec!["opencode2".to_owned(), "grok".to_owned(), "codex".to_owned()]
+            vec![
+                "opencode2".to_owned(),
+                "grok".to_owned(),
+                "codex".to_owned()
+            ]
         );
 
         // The account signs out later: the recomputed overlay drops Codex
@@ -1539,8 +1531,7 @@ mod tests {
             NativeUsageAuthentication::Unauthenticated,
             None,
         ));
-        let recomputed =
-            catalog_with_usage_readiness(admitted, &usage, READINESS_NOW_MS);
+        let recomputed = catalog_with_usage_readiness(admitted, &usage, READINESS_NOW_MS);
         assert_eq!(
             recomputed.runnable_harness_ids,
             vec!["opencode2".to_owned(), "grok".to_owned()]

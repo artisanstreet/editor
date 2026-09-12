@@ -144,6 +144,7 @@ path = "../../tests/frontend/conversation_error_card_policy.rs"
 [[test]]
 name = "conversation_host"
 path = "../../tests/frontend/conversation_host.rs"
+required-features = ["visual-proof"]
 
 [[test]]
 name = "conversation_presentation"
@@ -428,6 +429,7 @@ path = "../../tests/frontend/project_picker.rs"
 [[test]]
 name = "project_picker_native"
 path = "../../tests/frontend/project_picker_native.rs"
+required-features = ["visual-proof"]
 
 [[test]]
 name = "reader_attention"

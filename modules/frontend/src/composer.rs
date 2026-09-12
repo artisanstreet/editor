@@ -280,11 +280,19 @@ impl ComposerState {
     /// Begins custody for an already validated text/image payload. Empty text
     /// is admitted only through the domain payload's image-only validation;
     /// no placeholder is inserted into the authored draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmissionBlocked`] when the staged draft no longer matches
+    /// the payload, the payload fails validation, or another submission is
+    /// already in flight.
     pub fn begin_payload_submission(
         &mut self,
         payload: &artisan_domain::QueueMessagePayload,
     ) -> Result<SubmissionToken, SubmissionBlocked> {
-        let text = payload.text().map_or("", artisan_domain::AuthoredText::as_str);
+        let text = payload
+            .text()
+            .map_or("", artisan_domain::AuthoredText::as_str);
         if text != self.draft {
             return Err(SubmissionBlocked::DraftChanged);
         }
@@ -356,7 +364,9 @@ mod multimodal_tests {
     #[test]
     fn image_only_flight_never_inserts_placeholder_text() {
         let mut composer = ComposerState::new();
-        let token = composer.begin_payload_submission(&image_payload(None)).expect("image flight");
+        let token = composer
+            .begin_payload_submission(&image_payload(None))
+            .expect("image flight");
         assert_eq!(composer.draft(), "");
         composer.set_draft("next message");
         composer.finish_submission(token, DraftDisposition::Accepted);
@@ -374,7 +384,10 @@ mod multimodal_tests {
         assert!(!composer.is_submitting());
         let payload = image_payload(Some(AuthoredText::parse("current").expect("text")));
         let token = composer.begin_payload_submission(&payload).expect("flight");
-        assert_eq!(composer.begin_payload_submission(&payload), Err(SubmissionBlocked::InFlight));
+        assert_eq!(
+            composer.begin_payload_submission(&payload),
+            Err(SubmissionBlocked::InFlight)
+        );
         composer.finish_submission(token, DraftDisposition::Retained);
         assert_eq!(composer.draft(), "current");
     }

@@ -118,7 +118,7 @@ pub(crate) fn glass_highlight_layer(strength: GlassStrength, radius: Pixels) -> 
 /// the material gradient. Keeping the value here gives the picker and composer
 /// one tuneable 5% adjustment while preserving the backdrop and source stops.
 #[must_use]
-pub(crate) fn glass_foreground_base(theme: ArtisanTheme) -> Hsla {
+pub(crate) fn glass_foreground_base(theme: &ArtisanTheme) -> Hsla {
     theme.colors.foreground.with_alpha(0.05).to_paint()
 }
 
@@ -128,12 +128,13 @@ pub(crate) fn glass_foreground_base(theme: ArtisanTheme) -> Hsla {
 /// engine strip is a regular card, not a card-glass surface; using the latter
 /// there creates the doubled bright/dark rims visible in the native picker.
 #[must_use]
-pub(crate) fn card_shadows(theme: ArtisanTheme) -> Vec<BoxShadow> {
+pub(crate) fn card_shadows(theme: &ArtisanTheme) -> Vec<BoxShadow> {
     theme
         .elevation
         .card_shadow
-        .into_iter()
-        .map(|layer| layer.to_box_shadow())
+        .iter()
+        .copied()
+        .map(artisan_ui::theme::ShadowLayer::to_box_shadow)
         .collect()
 }
 

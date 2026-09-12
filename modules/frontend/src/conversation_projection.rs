@@ -571,8 +571,12 @@ fn apply_item_upsert(
         {
             return Err(ProjectionError::IdentityConflict);
         }
-        if let (ConversationItem::MultimodalUserMessage(previous), ConversationItem::MultimodalUserMessage(next)) = (&staged_items[index], item)
-            && previous.attachments != next.attachments {
+        if let (
+            ConversationItem::MultimodalUserMessage(previous),
+            ConversationItem::MultimodalUserMessage(next),
+        ) = (&staged_items[index], item)
+            && previous.attachments != next.attachments
+        {
             return Err(ProjectionError::IdentityConflict);
         }
         let previous_revision = entity_revision(&staged_items[index]);
@@ -655,7 +659,9 @@ fn apply_item_append(
     ensure_nondecreasing(entity_updated_at(&staged_items[index]), updated_at)?;
     let previous_len = item_body_len(&staged_items[index]);
     let previous_text_len = match &staged_items[index] {
-        ConversationItem::MultimodalUserMessage(message) => message.text.as_ref().map_or(0, |text| text.as_str().len()),
+        ConversationItem::MultimodalUserMessage(message) => {
+            message.text.as_ref().map_or(0, |text| text.as_str().len())
+        }
         _ => previous_len,
     };
     let joined_len = previous_text_len
@@ -679,10 +685,14 @@ fn apply_item_append(
         }
         ConversationItem::MultimodalUserMessage(message) => {
             let mut joined = String::with_capacity(joined_len);
-            if let Some(text) = &message.text { joined.push_str(text.as_str()); }
+            if let Some(text) = &message.text {
+                joined.push_str(text.as_str());
+            }
             joined.push_str(fragment);
-            message.text = Some(artisan_domain::AuthoredText::parse(joined)
-                .map_err(|_| ProjectionError::BodyBoundExceeded)?);
+            message.text = Some(
+                artisan_domain::AuthoredText::parse(joined)
+                    .map_err(|_| ProjectionError::BodyBoundExceeded)?,
+            );
             message.revision = next_revision;
             message.updated_at = updated_at;
         }
@@ -819,8 +829,12 @@ fn validate_common_item(
     {
         return Err(ProjectionError::IdentityConflict);
     }
-    if let (ConversationItem::MultimodalUserMessage(previous), ConversationItem::MultimodalUserMessage(next)) = (previous, next)
-        && previous.attachments != next.attachments {
+    if let (
+        ConversationItem::MultimodalUserMessage(previous),
+        ConversationItem::MultimodalUserMessage(next),
+    ) = (previous, next)
+        && previous.attachments != next.attachments
+    {
         return Err(ProjectionError::IdentityConflict);
     }
     if next.item_id() != previous.item_id()
@@ -899,7 +913,9 @@ fn ensure_nondecreasing(previous: UnixMillis, next: UnixMillis) -> Result<(), Pr
 
 const fn max_body_bytes(item: &ConversationItem) -> usize {
     match item {
-        ConversationItem::UserMessage(_) | ConversationItem::MultimodalUserMessage(_) => MESSAGE_BODY_MAX_BYTES,
+        ConversationItem::UserMessage(_) | ConversationItem::MultimodalUserMessage(_) => {
+            MESSAGE_BODY_MAX_BYTES
+        }
         ConversationItem::AssistantMessage(_) => AssistantBody::MAX_BYTES,
     }
 }

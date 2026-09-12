@@ -586,22 +586,20 @@ impl NativeMessageImages {
     /// current scope when the checked scope-generation counter cannot advance.
     pub fn set_current_thread(
         &mut self,
-        thread_id: Option<ThreadId>,
+        thread_id: Option<&ThreadId>,
         cx: &mut Context<Self>,
     ) -> Result<(), ImageStateError> {
-        if self.state.current_thread == thread_id {
+        if self.state.current_thread.as_ref() == thread_id {
             return Ok(());
         }
         let scope_generation = self.state.next_generation()?;
         self.state.scope_generation = scope_generation;
-        self.state.current_thread = thread_id.clone();
-        self.state.clear_pending_other_threads(thread_id.as_ref());
-        let evicted = self.state.cache.clear_other_threads(thread_id.as_ref());
+        self.state.current_thread = thread_id.cloned();
+        self.state.clear_pending_other_threads(thread_id);
+        let evicted = self.state.cache.clear_other_threads(thread_id);
         self.drop_thumbnail_tasks(evicted);
         self.thumbnail_tasks.retain(|reference, _| {
-            thread_id
-                .as_ref()
-                .is_some_and(|thread_id| &reference.thread_id == thread_id)
+            thread_id.is_some_and(|thread_id| &reference.thread_id == thread_id)
         });
         self.viewer = None;
         cx.notify();
@@ -632,6 +630,10 @@ impl NativeMessageImages {
     /// callback. It compares the actual element bounds with the current
     /// content mask, so rendering a long historical scene does not queue the
     /// entire scene.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one GPUI tile builder composes the prepaint admission gate, status overlays, and keyboard/pointer wiring"
+    )]
     pub fn render_thumbnail(
         &mut self,
         reference: &ImageAttachmentRef,
@@ -667,19 +669,19 @@ impl NativeMessageImages {
             .debug_selector(move || selector_for_debug.clone())
             .on_prepaint(move |prepaint, window, app| {
                 if is_visible_in_content_mask(prepaint.bounds, &window.content_mask().bounds) {
-                    let _ = request_entity.update(app, |images, images_cx| {
+                    let () = request_entity.update(app, |images, images_cx| {
                         images.request_visible(request_reference.clone(), images_cx);
                     });
                 }
             })
             .on_click(move |_, window, app| {
-                let _ = click_entity.update(app, |images, images_cx| {
+                let () = click_entity.update(app, |images, images_cx| {
                     let _ = images.open_preview(click_reference.clone(), window, images_cx);
                 });
             })
             .on_key_down(move |event, window, app| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    let _ = key_entity.update(app, |images, images_cx| {
+                    let () = key_entity.update(app, |images, images_cx| {
                         let _ = images.open_preview(key_reference.clone(), window, images_cx);
                     });
                 }
@@ -709,16 +711,16 @@ impl NativeMessageImages {
                 );
             }
             (ImageThumbnailStatus::Queued, _) => {
-                media = media.child(image_status_label(theme, "Queued"));
+                media = media.child(image_status_label(&theme, "Queued"));
             }
             (ImageThumbnailStatus::Loading, _) => {
-                media = media.child(image_status_label(theme, "Loading image…"));
+                media = media.child(image_status_label(&theme, "Loading image…"));
             }
             (ImageThumbnailStatus::Decoding, _) => {
-                media = media.child(image_status_label(theme, "Preparing image…"));
+                media = media.child(image_status_label(&theme, "Preparing image…"));
             }
             (ImageThumbnailStatus::Unrequested, _) | (ImageThumbnailStatus::Ready, None) => {
-                media = media.child(image_status_label(theme, "Image"));
+                media = media.child(image_status_label(&theme, "Image"));
             }
         }
 
@@ -746,14 +748,14 @@ impl NativeMessageImages {
                 .text_color(theme.colors.accent.to_paint())
                 .on_click(move |_, _, app| {
                     app.stop_propagation();
-                    let _ = retry_entity.update(app, |images, images_cx| {
+                    let () = retry_entity.update(app, |images, images_cx| {
                         let _ = images.retry_image(&retry_reference, images_cx);
                     });
                 })
                 .on_key_down(move |event, _, app| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         app.stop_propagation();
-                        let _ = retry_key_entity.update(app, |images, images_cx| {
+                        let () = retry_key_entity.update(app, |images, images_cx| {
                             let _ = images.retry_image(&retry_key_reference, images_cx);
                         });
                     }
@@ -780,15 +782,15 @@ impl NativeMessageImages {
     /// background executor.
     pub fn accept_image(
         &mut self,
-        reference: ImageAttachmentRef,
-        image: ImageAttachment,
+        reference: &ImageAttachmentRef,
+        image: &ImageAttachment,
         cx: &mut Context<Self>,
     ) -> ImageResponseDisposition {
-        if let Err(rejection) = validate_pending_response(&self.state, &reference, &image) {
+        if let Err(rejection) = validate_pending_response(&self.state, reference, image) {
             if rejection == ImageResponseRejection::NoPendingReference {
                 return ImageResponseDisposition::IgnoredNotPending;
             }
-            let _ = self.state.settle_pending(&reference);
+            let _ = self.state.settle_pending(reference);
             let protected = self.viewer_reference();
             if let Ok(evicted) = self
                 .state
@@ -801,47 +803,41 @@ impl NativeMessageImages {
             return ImageResponseDisposition::Rejected(rejection);
         }
 
-        let generation = match self.state.next_generation() {
-            Ok(generation) => generation,
-            Err(_) => {
-                let _ = self.state.settle_pending(&reference);
-                let protected = self.viewer_reference();
-                if let Ok(evicted) = self
-                    .state
-                    .record_failure(reference.clone(), protected.as_ref())
-                {
-                    self.drop_thumbnail_tasks(evicted);
-                }
-                self.pump_requests(cx);
-                cx.notify();
-                return ImageResponseDisposition::Rejected(
-                    ImageResponseRejection::GenerationExhausted,
-                );
+        let Ok(generation) = self.state.next_generation() else {
+            let _ = self.state.settle_pending(reference);
+            let protected = self.viewer_reference();
+            if let Ok(evicted) = self
+                .state
+                .record_failure(reference.clone(), protected.as_ref())
+            {
+                self.drop_thumbnail_tasks(evicted);
             }
+            self.pump_requests(cx);
+            cx.notify();
+            return ImageResponseDisposition::Rejected(
+                ImageResponseRejection::GenerationExhausted,
+            );
         };
 
         let scope_generation = self.state.scope_generation;
         let encoded = Arc::new(image.bytes().to_vec());
-        let _ = self.state.settle_pending(&reference);
+        let _ = self.state.settle_pending(reference);
         let protected = self.viewer_reference();
-        let evicted = match self.state.insert_decoding(
+        let Ok(evicted) = self.state.insert_decoding(
             reference.clone(),
             encoded.clone(),
             generation,
             protected.as_ref(),
-        ) {
-            Ok(evicted) => evicted,
-            Err(_) => {
-                if let Ok(evicted) = self
-                    .state
-                    .record_failure(reference.clone(), protected.as_ref())
-                {
-                    self.drop_thumbnail_tasks(evicted);
-                }
-                self.pump_requests(cx);
-                cx.notify();
-                return ImageResponseDisposition::Rejected(ImageResponseRejection::CacheCapacity);
+        ) else {
+            if let Ok(evicted) = self
+                .state
+                .record_failure(reference.clone(), protected.as_ref())
+            {
+                self.drop_thumbnail_tasks(evicted);
             }
+            self.pump_requests(cx);
+            cx.notify();
+            return ImageResponseDisposition::Rejected(ImageResponseRejection::CacheCapacity);
         };
         self.drop_thumbnail_tasks(evicted);
 
@@ -854,7 +850,7 @@ impl NativeMessageImages {
                 .await;
             let _ = this.update(async_cx, |images, images_cx| {
                 images.finish_thumbnail(
-                    task_reference,
+                    &task_reference,
                     generation,
                     scope_generation,
                     result,
@@ -862,7 +858,7 @@ impl NativeMessageImages {
                 );
             });
         });
-        self.thumbnail_tasks.insert(reference, task);
+        self.thumbnail_tasks.insert(reference.clone(), task);
         self.pump_requests(cx);
         cx.notify();
         ImageResponseDisposition::Applied
@@ -957,9 +953,8 @@ impl NativeMessageImages {
         let thumbnail = record.thumbnail.clone();
         self.state.cache.touch(&reference);
         let scope_generation = self.state.scope_generation;
-        let generation = match self.state.next_generation() {
-            Ok(generation) => generation,
-            Err(_) => return PreviewOpenDisposition::GenerationExhausted,
+        let Ok(generation) = self.state.next_generation() else {
+            return PreviewOpenDisposition::GenerationExhausted;
         };
         let task_reference = reference.clone();
         let mime_type = reference.mime_type;
@@ -970,7 +965,7 @@ impl NativeMessageImages {
                 .await;
             let _ = this.update(async_cx, |images, images_cx| {
                 images.finish_preview(
-                    task_reference,
+                    &task_reference,
                     generation,
                     scope_generation,
                     result,
@@ -1009,6 +1004,10 @@ impl NativeMessageImages {
     /// The returned element is empty when no viewer is open, so the root may
     /// mount this entity continuously without an invisible hitbox covering
     /// the conversation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one GPUI overlay builder composes the backdrop, viewer chrome, and dismissal wiring"
+    )]
     pub fn render_preview(
         &mut self,
         theme: ArtisanTheme,
@@ -1042,7 +1041,7 @@ impl NativeMessageImages {
             .bottom(Pixels::ZERO)
             .debug_selector(|| NATIVE_MESSAGE_IMAGE_PREVIEW_BACKDROP_SELECTOR.to_owned())
             .on_click(move |_, _, app| {
-                let _ = dismiss_entity.update(app, |images, images_cx| {
+                let () = dismiss_entity.update(app, |images, images_cx| {
                     let _ = images.close_preview(images_cx);
                 });
             });
@@ -1102,13 +1101,13 @@ impl NativeMessageImages {
             .aria_label("Close image preview")
             .debug_selector(|| NATIVE_MESSAGE_IMAGE_PREVIEW_CLOSE_SELECTOR.to_owned())
             .on_click(move |_, _, app| {
-                let _ = close_entity.update(app, |images, images_cx| {
+                let () = close_entity.update(app, |images, images_cx| {
                     let _ = images.close_preview(images_cx);
                 });
             })
             .on_key_down(move |event, _, app| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    let _ = close_key_entity.update(app, |images, images_cx| {
+                    let () = close_key_entity.update(app, |images, images_cx| {
                         let _ = images.close_preview(images_cx);
                     });
                 }
@@ -1159,7 +1158,7 @@ impl NativeMessageImages {
 
     fn finish_thumbnail(
         &mut self,
-        reference: ImageAttachmentRef,
+        reference: &ImageAttachmentRef,
         generation: u64,
         scope_generation: u64,
         result: Result<Arc<RenderImage>, DecodeFailure>,
@@ -1170,27 +1169,27 @@ impl NativeMessageImages {
         {
             return;
         }
-        self.thumbnail_tasks.remove(&reference);
+        self.thumbnail_tasks.remove(reference);
         let changed = match result {
             Ok(thumbnail) => {
                 self.state
                     .cache
-                    .mark_ready(&reference, generation, scope_generation, thumbnail)
+                    .mark_ready(reference, generation, scope_generation, thumbnail)
             }
             Err(_) => self
                 .state
                 .cache
-                .mark_failed(&reference, generation, scope_generation),
+                .mark_failed(reference, generation, scope_generation),
         };
         if changed {
-            self.state.cache.touch(&reference);
+            self.state.cache.touch(reference);
             cx.notify();
         }
     }
 
     fn finish_preview(
         &mut self,
-        reference: ImageAttachmentRef,
+        reference: &ImageAttachmentRef,
         generation: u64,
         scope_generation: u64,
         result: Result<Arc<RenderImage>, DecodeFailure>,
@@ -1199,7 +1198,7 @@ impl NativeMessageImages {
         let is_current = self.viewer.as_ref().is_some_and(|viewer| {
             preview_fence_is_current(
                 Some(&viewer.fence),
-                &reference,
+                reference,
                 generation,
                 scope_generation,
             ) && self.state.scope_generation == scope_generation
@@ -1212,15 +1211,12 @@ impl NativeMessageImages {
             return;
         };
         viewer.task = None;
-        match result {
-            Ok(preview) => {
-                viewer.preview = Some(preview);
-                viewer.error = false;
-            }
-            Err(_) => {
-                viewer.preview = None;
-                viewer.error = true;
-            }
+        if let Ok(preview) = result {
+            viewer.preview = Some(preview);
+            viewer.error = false;
+        } else {
+            viewer.preview = None;
+            viewer.error = true;
         }
         cx.notify();
     }
@@ -1342,7 +1338,7 @@ fn retry_selector(reference: &ImageAttachmentRef) -> String {
     )
 }
 
-fn image_status_label(theme: ArtisanTheme, label: &'static str) -> impl IntoElement {
+fn image_status_label(theme: &ArtisanTheme, label: &'static str) -> impl IntoElement {
     div()
         .size_full()
         .flex()
@@ -1575,7 +1571,12 @@ mod tests {
         let small = Arc::new(vec![0_u8; 1]);
         let mut references = Vec::new();
         for index in 0..MAX_THUMBNAIL_COUNT {
-            let reference = reference("thread-a", &format!("message-{index}"), index as u32, &[1]);
+            let reference = reference(
+                "thread-a",
+                &format!("message-{index}"),
+                u32::try_from(index).expect("bounded index"),
+                &[1],
+            );
             cache
                 .insert(
                     reference.clone(),
@@ -1632,7 +1633,14 @@ mod tests {
     fn request_admission_deduplicates_caps_and_retries_errors() {
         let mut state = state_for("thread-a");
         let references = (0..MAX_PENDING_VISIBLE_REQUESTS)
-            .map(|index| reference("thread-a", &format!("message-{index}"), index as u32, &[1]))
+            .map(|index| {
+                reference(
+                    "thread-a",
+                    &format!("message-{index}"),
+                    u32::try_from(index).expect("bounded index"),
+                    &[1],
+                )
+            })
             .collect::<Vec<_>>();
 
         assert!(

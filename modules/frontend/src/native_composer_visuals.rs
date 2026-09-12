@@ -164,8 +164,7 @@ pub const COMPOSER_PLACEHOLDER_VOCABULARY: [&str; 100] = [
 #[allow(clippy::cast_possible_truncation)]
 #[must_use]
 pub fn composer_placeholder_phrase(generation: u64) -> &'static str {
-    COMPOSER_PLACEHOLDER_VOCABULARY
-        [(generation as usize) % COMPOSER_PLACEHOLDER_VOCABULARY.len()]
+    COMPOSER_PLACEHOLDER_VOCABULARY[(generation as usize) % COMPOSER_PLACEHOLDER_VOCABULARY.len()]
 }
 
 /// Lip-row entrance/fade duration: `--acc-expand: 250ms`
@@ -834,18 +833,19 @@ pub fn fixture_send_buttons() -> [SendButtonStill; 3] {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::float_cmp, reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage")]
     use super::{
         ATTACHMENT_THUMBNAIL_EDGE_STEPS, ATTACHMENT_TRAY_GAP_STEPS, ATTACHMENT_TRAY_LABEL,
         AttachmentFact, AttachmentThumbnail, AttachmentTrayStill, ButtonContent, ButtonSize,
-        ButtonVariant, COMPOSER_LIP_MOTION_MS, COMPOSER_PLACEHOLDER_VOCABULARY, COMPOSER_TRAY_MOTION_MS,
-        DISCARD_QUEUED_MESSAGE_LABEL, EDIT_QUEUED_MESSAGE_LABEL,
+        ButtonVariant, COMPOSER_LIP_MOTION_MS, COMPOSER_PLACEHOLDER_VOCABULARY,
+        COMPOSER_TRAY_MOTION_MS, DISCARD_QUEUED_MESSAGE_LABEL, EDIT_QUEUED_MESSAGE_LABEL,
         FORGE_OFFLINE_REASON, IconSize, LIP_ROW_GROW, MotionPolicy, NEW_THREAD_FAILURE_TITLE,
         PREPARING_TO_SEND_REASON, QUEUED_STEER_EMPTY_TEXT, QUEUED_STEER_ROLE, QueuedSteerRow,
         RECALL_UNAVAILABLE_MESSAGE, SEND_BUTTON_TEXT, SEND_FAILURE_TITLE, SEND_MESSAGE_LABEL,
         SENDING_BUTTON_TEXT, START_NEW_THREAD_PROMPT_LABEL, STOP_RUN_LABEL, SendButtonStill,
         SendGate, StatusDot, TrayAxis, composer_placeholder_phrase, composer_smooth_out,
-        fixture_attachment_tray, fixture_queued_steers,
-        fixture_send_buttons, fixture_theme, preview_only_blocked_reason, queued_steer_label,
+        fixture_attachment_tray, fixture_queued_steers, fixture_send_buttons, fixture_theme,
+        preview_only_blocked_reason, queued_steer_label,
     };
     use artisan_assets::AssetId;
     use artisan_ui::progress::ProgressFraction;
@@ -1112,7 +1112,8 @@ mod tests {
     }
 
     #[test]
-    fn fixtures_hold_together_for_screenshots() {        let tray = fixture_attachment_tray();
+    fn fixtures_hold_together_for_screenshots() {
+        let tray = fixture_attachment_tray();
         assert_eq!(tray.len(), 2);
         assert!(tray.is_visible());
         let rows = tray.rows_or_nothing().expect("fixture tray paints");

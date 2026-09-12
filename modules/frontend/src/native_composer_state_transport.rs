@@ -16,9 +16,9 @@
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_domain::{
-    Command, FailedMessageListing, ListFailedMessages, ListQueuedMessages, QueuedMessageListOrder, QueuedMessageListing,
-    QueuedMessageWithdrawalResult, ReadRecalledMessage, RecalledMessageResult, RequestId,
-    RunUsageResult, ThreadId, WithdrawQueuedMessageCommand,
+    Command, FailedMessageListing, ListFailedMessages, ListQueuedMessages, QueuedMessageListOrder,
+    QueuedMessageListing, QueuedMessageWithdrawalResult, ReadRecalledMessage,
+    RecalledMessageResult, RunUsageResult, ThreadId, WithdrawQueuedMessageCommand,
 };
 use artisan_protocol::ResponsePayload;
 
@@ -29,7 +29,7 @@ pub(crate) const COMPOSER_STATE_READ_LIMIT: usize = artisan_domain::QUEUED_MESSA
 
 /// One bounded command sent from the application thread to the service child.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ComposerStateCommand {
+pub enum ComposerStateCommand {
     /// Read one bounded, byte-free queue page for the mounted scope.
     ListQueuedMessages {
         /// Thread whose still-queued rows are requested.
@@ -78,7 +78,7 @@ pub(crate) enum ComposerStateCommand {
 
 /// One bounded event returned by the service child.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ComposerStateEvent {
+pub enum ComposerStateEvent {
     /// Authoritative byte-free queue listing.
     QueuedMessages {
         /// Thread requested by the application.
@@ -201,9 +201,7 @@ pub(super) async fn handle_composer_state_command(
             thread_id,
             generation,
             limit,
-        } => {
-            list_failed_messages(runtime, frames, events, thread_id, generation, limit).await
-        }
+        } => list_failed_messages(runtime, frames, events, thread_id, generation, limit).await,
         ComposerStateCommand::WithdrawQueuedMessage {
             generation,
             command,
@@ -248,18 +246,15 @@ async fn list_queued_messages(
             },
         );
     }
-    let query = match ListQueuedMessages::new(thread_id.clone(), order, limit) {
-        Ok(query) => query,
-        Err(_) => {
-            return publish_composer_event(
-                events,
-                ComposerStateEvent::QueuedMessagesFailed {
-                    thread_id,
-                    generation,
-                    failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-                },
-            );
-        }
+    let Ok(query) = ListQueuedMessages::new(thread_id.clone(), order, limit) else {
+        return publish_composer_event(
+            events,
+            ComposerStateEvent::QueuedMessagesFailed {
+                thread_id,
+                generation,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
     };
     let payload = match runtime
         .request(
@@ -344,18 +339,15 @@ async fn list_failed_messages(
             },
         );
     }
-    let query = match ListFailedMessages::new(thread_id.clone(), limit) {
-        Ok(query) => query,
-        Err(_) => {
-            return publish_composer_event(
-                events,
-                ComposerStateEvent::FailedMessagesFailed {
-                    thread_id,
-                    generation,
-                    failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-                },
-            );
-        }
+    let Ok(query) = ListFailedMessages::new(thread_id.clone(), limit) else {
+        return publish_composer_event(
+            events,
+            ComposerStateEvent::FailedMessagesFailed {
+                thread_id,
+                generation,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
     };
     let payload = match runtime
         .request(

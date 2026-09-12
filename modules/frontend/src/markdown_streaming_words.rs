@@ -406,10 +406,13 @@ fn wrap_streaming_text(
         segment_is_whitespace = Some(is_whitespace);
     }
 
+    let Some(is_whitespace) = segment_is_whitespace else {
+        return nodes;
+    };
     push_text_segment(
         &mut nodes,
         &text[segment_start..],
-        segment_is_whitespace.expect("non-empty text has a first character"),
+        is_whitespace,
         start_path,
         last_word_path,
     );
@@ -435,12 +438,13 @@ fn push_text_segment(
 
     nodes.push(StreamingNode::word(segment));
     let mut path = start_path.to_vec();
-    let final_index = path
-        .last_mut()
-        .expect("a wrapped node always has a path")
-        .checked_add(output_index)
-        .expect("node path index overflow");
-    *path.last_mut().expect("a wrapped node always has a path") = final_index;
+    let Some(last) = path.last_mut() else {
+        return;
+    };
+    let Some(final_index) = last.checked_add(output_index) else {
+        return;
+    };
+    *last = final_index;
     *last_word_path = Some(path);
 }
 

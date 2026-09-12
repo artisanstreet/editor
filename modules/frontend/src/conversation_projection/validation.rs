@@ -111,10 +111,16 @@ pub(super) fn item_body_len(item: &ConversationItem) -> usize {
         ConversationItem::UserMessage(message) => message.body.as_str().len(),
         ConversationItem::MultimodalUserMessage(message) => {
             message.text.as_ref().map_or(0, |text| text.as_str().len())
-                + message.attachments.iter().map(|image| {
-                    image.name.len() + image.message_id.as_str().len()
-                        + image.thread_id.as_str().len() + 64
-                }).sum::<usize>()
+                + message
+                    .attachments
+                    .iter()
+                    .map(|image| {
+                        image.name.len()
+                            + image.message_id.as_str().len()
+                            + image.thread_id.as_str().len()
+                            + 64
+                    })
+                    .sum::<usize>()
         }
         ConversationItem::AssistantMessage(message) => message.body.as_str().len(),
     }

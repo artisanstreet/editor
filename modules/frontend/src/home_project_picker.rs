@@ -202,12 +202,7 @@ impl HomeProjectPickerView {
     }
 
     /// Activates one row, then restores trigger focus.
-    pub fn choose_home_row(
-        &mut self,
-        row: PickerRow,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn choose_home_row(&mut self, row: PickerRow, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_row(row, cx);
         self.sync_focus_after_transition(window, cx);
     }
@@ -242,25 +237,22 @@ impl HomeProjectPickerView {
         let probe_origin = Rc::clone(&self.trigger_origin);
         let probe_reveal = Rc::clone(&self.initial_reveal_flat);
         let probe_scroll = self.menu_scroll.clone();
-        let probe = canvas(
-            move |_, _, _| {},
-            {
-                let probe_origin = Rc::clone(&probe_origin);
-                move |bounds, (), window, cx| {
-                    let moved = *probe_origin.borrow_mut() != Some(bounds.origin);
-                    *probe_origin.borrow_mut() = Some(bounds.origin);
-                    if let Some(flat) = probe_reveal.take() {
-                        let scroll = probe_scroll.clone();
-                        window.defer(cx, move |window, _| {
-                            scroll.scroll_to_item(flat);
-                            window.refresh();
-                        });
-                    } else if moved {
-                        window.defer(cx, |window, _| window.refresh());
-                    }
+        let probe = canvas(move |_, _, _| {}, {
+            let probe_origin = Rc::clone(&probe_origin);
+            move |bounds, (), window, cx| {
+                let moved = *probe_origin.borrow_mut() != Some(bounds.origin);
+                *probe_origin.borrow_mut() = Some(bounds.origin);
+                if let Some(flat) = probe_reveal.take() {
+                    let scroll = probe_scroll.clone();
+                    window.defer(cx, move |window, _| {
+                        scroll.scroll_to_item(flat);
+                        window.refresh();
+                    });
+                } else if moved {
+                    window.defer(cx, |window, _| window.refresh());
                 }
-            },
-        )
+            }
+        })
         .absolute()
         .size_full();
 
@@ -553,11 +545,15 @@ impl HomeProjectPickerView {
         let highlighted = self.state.highlighted_row() == Some(PickerRow::Project(catalog_index));
         let row_selector = format!("{HOME_ROW_SELECTOR_PREFIX}-{catalog_index}");
         div()
-            .id(SharedString::from(format!("home-project-row-{catalog_index}")))
+            .id(SharedString::from(format!(
+                "home-project-row-{catalog_index}"
+            )))
             .debug_selector(move || row_selector.clone())
-            .on_click(cx.listener(move |view: &mut Self, _: &ClickEvent, window, context| {
-                view.choose_home_row(PickerRow::Project(catalog_index), window, context);
-            }))
+            .on_click(
+                cx.listener(move |view: &mut Self, _: &ClickEvent, window, context| {
+                    view.choose_home_row(PickerRow::Project(catalog_index), window, context);
+                }),
+            )
             .flex()
             .items_center()
             .w_full()
@@ -593,9 +589,11 @@ impl HomeProjectPickerView {
         div()
             .id("home-project-row-new")
             .debug_selector(|| format!("{HOME_ROW_SELECTOR_PREFIX}-new"))
-            .on_click(cx.listener(|view: &mut Self, _: &ClickEvent, window, context| {
-                view.choose_home_row(PickerRow::NewProject, window, context);
-            }))
+            .on_click(
+                cx.listener(|view: &mut Self, _: &ClickEvent, window, context| {
+                    view.choose_home_row(PickerRow::NewProject, window, context);
+                }),
+            )
             .flex()
             .items_center()
             .w_full()

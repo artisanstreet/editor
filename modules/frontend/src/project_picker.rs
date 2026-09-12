@@ -263,7 +263,11 @@ impl ProjectPickerState {
     /// project when still visible, else the first visible row); while closed
     /// the highlight stays unset.
     pub fn set_filter(&mut self, filter: impl Into<String>) {
-        let text: String = filter.into().chars().take(PROJECT_FILTER_MAX_CHARS).collect();
+        let text: String = filter
+            .into()
+            .chars()
+            .take(PROJECT_FILTER_MAX_CHARS)
+            .collect();
         self.filter = text;
         if self.open {
             self.highlight = Some(self.initial_highlight());
@@ -508,8 +512,7 @@ impl ProjectPickerState {
                     .find(|&&index| self.projects[index].id == *id)
                     .copied()
             })
-            .map(PickerRow::Project)
-            .unwrap_or(PickerRow::Project(visible[0]))
+            .map_or(PickerRow::Project(visible[0]), PickerRow::Project)
     }
 
     fn advance(&mut self, forward: bool) {
@@ -1318,10 +1321,7 @@ mod tests {
         assert_eq!(state.selectable_row_count(), 1);
         assert_eq!(state.highlighted_row(), Some(PickerRow::NewProject));
         state.activate_highlighted();
-        assert_eq!(
-            state.take_actions(),
-            vec![ProjectPickerAction::NewProject]
-        );
+        assert_eq!(state.take_actions(), vec![ProjectPickerAction::NewProject]);
     }
 
     #[test]

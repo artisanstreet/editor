@@ -75,8 +75,10 @@ impl NativeCatalogScope {
 
 /// Catalog lifecycle visible to the selector adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Default)]
 pub enum NativeCatalogPhase {
     /// No configured thread/profile scope is currently available.
+    #[default]
     Offline,
     /// One bounded authenticated discovery is in flight.
     Loading,
@@ -231,6 +233,11 @@ impl NativeCatalogController {
 
     /// Selects a thread/profile pair and advances its generation when the
     /// pair changes.  Every old operation becomes stale immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogScopeError::GenerationExhausted`] when the monotonic
+    /// generation counter cannot be advanced any further.
     pub fn select_scope(
         &mut self,
         thread_id: ThreadId,
@@ -450,6 +457,13 @@ impl NativeCatalogController {
     }
 
     /// Starts one stable favorite intent after catalog readiness is known.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FavoriteIntentError::CatalogUnavailable`] without a ready
+    /// runtime catalog for the exact scope, and
+    /// [`FavoriteIntentError::AlreadyPending`] when another favorite mutation
+    /// still awaits its receipt.
     pub fn begin_favorite(
         &mut self,
         scope: &NativeCatalogScope,
@@ -615,11 +629,6 @@ impl NativeCatalogController {
     }
 }
 
-impl Default for NativeCatalogPhase {
-    fn default() -> Self {
-        Self::Offline
-    }
-}
 
 /// Why a favorite intent was not admitted locally.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -699,12 +708,12 @@ mod tests {
         let (mut state, scope) = ready_state();
         assert!(state.favorites_request_needed(&scope));
         assert!(state.mark_favorites_admitted(&scope));
-        let stale = NativeCatalogScope::new(
+        let other_scope = NativeCatalogScope::new(
             scope.thread_id.clone(),
             profile("profile-stale"),
             scope.generation,
         );
-        assert!(!state.on_favorites_loaded(&stale, 3, vec!["stale".to_owned()]));
+        assert!(!state.on_favorites_loaded(&other_scope, 3, vec!["stale".to_owned()]));
         assert!(state.on_favorites_loaded(&scope, 3, vec!["model-a".to_owned()]));
         assert_eq!(state.favorite_revision(), Some(3));
         assert_eq!(state.favorite_ids(), ["model-a"]);

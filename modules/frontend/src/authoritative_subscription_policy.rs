@@ -789,10 +789,9 @@ impl AuthoritativeSubscriptionPolicy {
         if self.state.kind() != expected_kind {
             return Err(self.invalid(operation));
         }
-        let expected = self
-            .state
-            .attempt()
-            .expect("non-ready state kinds always carry an attempt");
+        let Some(expected) = self.state.attempt() else {
+            return Err(self.invalid(operation));
+        };
         Self::ensure_same_attempt(expected, actual)
     }
 

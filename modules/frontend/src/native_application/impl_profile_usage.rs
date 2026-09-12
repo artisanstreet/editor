@@ -1,0 +1,168 @@
+//! Account-usage readiness and refresh flights for [`NativeApplication`].
+//!
+//! Extracted verbatim from `native_application.rs` during the phase-4 module
+//! split; visibility was widened to `pub(super)` for parent-owned methods.
+
+use super::*;
+
+impl NativeApplication {
+    /// Returns whether the Forge connection can admit an account-usage read.
+    pub(super) fn profile_usage_connected(&self) -> bool {
+        #[cfg(test)]
+        if self.test_command_sink.is_some() {
+            return !self.service_stopped && !self.shutdown_prepared;
+        }
+        self.service
+            .as_ref()
+            .is_some_and(|service| !service.is_finished())
+            && !self.service_stopped
+            && !self.shutdown_prepared
+    }
+
+    /// Advances the connection scope and drops incompatible cache/pending.
+    pub(super) fn reset_profile_usage_for_connection(&mut self) {
+        let next = self
+            .profile_usage_generation
+            .checked_next()
+            .unwrap_or(ProfileUsageGeneration::first());
+        self.profile_usage_generation = next;
+        self.profile_usage.clear_for_connection();
+    }
+
+    /// Ensures per-engine usage for an opened menu.
+    ///
+    /// Missing and stale (180s) rows are dispatched independently with named
+    /// pending rows; fresh rows are retained. `force` bypasses freshness and
+    /// keeps the menu open. Each dispatch carries the current connection
+    /// generation plus a per-engine request sequence so an older same-engine
+    /// reply arriving after a forced refresh cannot settle or replace the
+    /// newer request.
+    pub(super) fn ensure_profile_usage(
+        &mut self,
+        force: bool,
+        only_engine_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.profile_usage_connected() {
+            return;
+        }
+        let now_ms = profile_usage_now_ms();
+        let wanted = plan_profile_usage_loads(&self.profile_usage, now_ms, force, only_engine_id);
+        if wanted.is_empty() {
+            return;
+        }
+        let generation = self.profile_usage_generation;
+        for engine_id in wanted {
+            let Some(request_seq) = self.profile_usage_next_seq.checked_add(1) else {
+                let display_name = profile_usage_display_name(&engine_id).to_owned();
+                self.profile_usage.accept_failure(
+                    &engine_id,
+                    &display_name,
+                    invalid_service_failure().to_string(),
+                    None,
+                );
+                continue;
+            };
+            self.profile_usage_next_seq = request_seq;
+            let display_name = profile_usage_display_name(&engine_id).to_owned();
+            if self.profile_usage.entry(&engine_id).is_none() {
+                self.profile_usage.entries.push(NativeUsageEntry::pending(
+                    engine_id.clone(),
+                    display_name.clone(),
+                ));
+            }
+            self.profile_usage
+                .begin_refresh_seq(&engine_id, request_seq);
+            let command = NativeTransportCommand::ReadAccountUsage {
+                engine_id: engine_id.clone(),
+                generation,
+                request_seq,
+                force,
+            };
+            if let Err(error) = self.submit_command(command) {
+                let failure = command_failure(error);
+                let _ = self
+                    .profile_usage
+                    .finish_refresh_seq(&engine_id, request_seq);
+                self.profile_usage.accept_failure(
+                    &engine_id,
+                    &display_name,
+                    failure.to_string(),
+                    None,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// Refreshes one provider row from its explicit refresh control.
+    pub(super) fn refresh_single_profile_engine(
+        &mut self,
+        engine_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_profile_usage(true, Some(engine_id), cx);
+    }
+
+    pub(super) fn handle_account_usage(
+        &mut self,
+        engine_id: &str,
+        generation: ProfileUsageGeneration,
+        request_seq: u64,
+        entry: NativeUsageEntry,
+        cx: &mut Context<Self>,
+    ) {
+        if !account_usage_response_current(
+            &self.profile_usage,
+            generation,
+            self.profile_usage_generation,
+            engine_id,
+            request_seq,
+        ) || entry.engine_id.as_str() != engine_id
+        {
+            return;
+        }
+        self.profile_usage.try_accept(entry, request_seq);
+        self.refresh_settings_engine_snapshot(cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_account_usage_failed(
+        &mut self,
+        engine_id: &str,
+        generation: ProfileUsageGeneration,
+        request_seq: u64,
+        failure: ServiceFailure,
+        cx: &mut Context<Self>,
+    ) {
+        if !account_usage_response_current(
+            &self.profile_usage,
+            generation,
+            self.profile_usage_generation,
+            engine_id,
+            request_seq,
+        ) {
+            return;
+        }
+        let display_name = self.profile_usage.entry(engine_id).map_or_else(
+            || profile_usage_display_name(engine_id).to_owned(),
+            |entry| {
+                entry
+                    .report
+                    .as_ref()
+                    .map_or(entry.display_name.clone(), |report| {
+                        report.display_name.clone()
+                    })
+            },
+        );
+        self.profile_usage.try_accept_failure(
+            engine_id,
+            &display_name,
+            failure.to_string(),
+            None,
+            request_seq,
+        );
+        self.refresh_settings_engine_snapshot(cx);
+        cx.notify();
+    }
+}

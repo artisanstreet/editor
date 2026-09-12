@@ -288,7 +288,11 @@ fn make_followup_turn(created_at: UnixMillis, updated_at: UnixMillis) -> Convers
 }
 
 /// Second-turn user message for the navigator case only.
-fn make_followup_user(body: &str, created_at: UnixMillis, updated_at: UnixMillis) -> ConversationItem {
+fn make_followup_user(
+    body: &str,
+    created_at: UnixMillis,
+    updated_at: UnixMillis,
+) -> ConversationItem {
     ConversationItem::UserMessage(UserMessageItem {
         item_id: ItemId::parse("parity-proof-user-4").expect("fixture item id is valid"),
         turn_id: followup_turn_id(),
@@ -406,11 +410,7 @@ fn case_snapshot(
             ],
         )?,
         ProofSceneCase::Thinking | ProofSceneCase::Working => build(
-            vec![make_turn(
-                ConversationLifecycle::Active,
-                ago(65_000),
-                now,
-            )],
+            vec![make_turn(ConversationLifecycle::Active, ago(65_000), now)],
             vec![make_user(
                 1,
                 "fixture prompt: prove visual parity",
@@ -419,18 +419,9 @@ fn case_snapshot(
             )],
         )?,
         ProofSceneCase::Streaming => build(
-            vec![make_turn(
-                ConversationLifecycle::Active,
-                ago(65_000),
-                now,
-            )],
+            vec![make_turn(ConversationLifecycle::Active, ago(65_000), now)],
             vec![
-                make_user(
-                    1,
-                    "fixture prompt: prove visual parity",
-                    ago(60_000),
-                    now,
-                ),
+                make_user(1, "fixture prompt: prove visual parity", ago(60_000), now),
                 make_assistant(
                     2,
                     "fixture partial: rendering the",
@@ -485,11 +476,7 @@ fn case_snapshot(
         // navigator rail carries more than one user marker and never
         // renders collapsed.
         ProofSceneCase::ReferenceSettled => build(
-            vec![make_turn(
-                ConversationLifecycle::Completed,
-                ago(6_000),
-                now,
-            )],
+            vec![make_turn(ConversationLifecycle::Completed, ago(6_000), now)],
             vec![
                 make_user(1, "Whoopty", ago(5_500), now),
                 make_assistant(
@@ -507,11 +494,7 @@ fn case_snapshot(
             thread.clone(),
             ConversationCursor::new(2),
             vec![
-                make_turn(
-                    ConversationLifecycle::Completed,
-                    ago(6_000),
-                    now,
-                ),
+                make_turn(ConversationLifecycle::Completed, ago(6_000), now),
                 make_followup_turn(ago(4_000), ago(1_000)),
             ],
             vec![
@@ -526,11 +509,7 @@ fn case_snapshot(
                     now,
                 ),
                 make_followup_user("Whoopty again", ago(3_500), ago(1_000)),
-                make_followup_assistant(
-                    "Still here and playful.",
-                    ago(3_000),
-                    ago(1_000),
-                ),
+                make_followup_assistant("Still here and playful.", ago(3_000), ago(1_000)),
             ],
             now,
         )
@@ -539,11 +518,7 @@ fn case_snapshot(
         // reasoning summary (inline code, strong, italic) attributed to the
         // run, so the live thinking summary line renders from provenance.
         ProofSceneCase::ReferenceThinking => build(
-            vec![make_turn(
-                ConversationLifecycle::Active,
-                ago(65_000),
-                now,
-            )],
+            vec![make_turn(ConversationLifecycle::Active, ago(65_000), now)],
             vec![make_user(1, "Whoopty", ago(60_000), now)],
         )?,
     };
@@ -752,12 +727,7 @@ fn print_case_manifest(screen: &Entity<ThreadScreen>, case: ProofSceneCase, cx: 
 /// quits. Every terminal path (seed refusal, open failure, capture
 /// success/failure, resize exhaustion) ends here or quits directly, so one
 /// process can neither hang nor outlive its capture.
-fn settle_slot(
-    settled: &Rc<Cell<bool>>,
-    failed_flag: &Rc<Cell<bool>>,
-    failed: bool,
-    cx: &mut App,
-) {
+fn settle_slot(settled: &Rc<Cell<bool>>, failed_flag: &Rc<Cell<bool>>, failed: bool, cx: &mut App) {
     if failed {
         failed_flag.set(true);
     }
@@ -846,9 +816,8 @@ impl ParityProofShell {
         case: ProofSceneCase,
         cx: &mut App,
     ) -> Result<Entity<Self>, String> {
-        let screen =
-            ThreadScreen::mount_proof(thread_id.clone(), content_width_px, cx)
-                .map_err(|error| format!("mount refused: {error:?}"))?;
+        let screen = ThreadScreen::mount_proof(thread_id.clone(), content_width_px, cx)
+            .map_err(|error| format!("mount refused: {error:?}"))?;
         seed_case(&screen, case, &thread_id, cx)?;
         print_case_manifest(&screen, case, cx);
         Ok(cx.new(|_| Self { screen }))
@@ -915,10 +884,12 @@ const PROOF_USAGE: &str = "usage: parity-proof --case <empty|thinking|working|st
 /// Parses one explicit selection; anything else is a hard error.
 fn parse_selection(args: &[String]) -> Result<ProofCapture, String> {
     if args.len() != 4 || args[0] != "--case" || args[2] != "--viewport" {
-        return Err(String::from("expected exactly --case <slug> --viewport <name>"));
+        return Err(String::from(
+            "expected exactly --case <slug> --viewport <name>",
+        ));
     }
-    let case = ProofSceneCase::parse(&args[1])
-        .ok_or_else(|| format!("unknown case {:?}", args[1]))?;
+    let case =
+        ProofSceneCase::parse(&args[1]).ok_or_else(|| format!("unknown case {:?}", args[1]))?;
     let (viewport_slug, width, height) = match args[3].as_str() {
         "narrow" => ("narrow", NARROW_LOGICAL_WIDTH, NARROW_LOGICAL_HEIGHT),
         "wide" => ("wide", WIDE_LOGICAL_WIDTH, WIDE_LOGICAL_HEIGHT),
@@ -965,44 +936,40 @@ pub fn run() -> ExitCode {
     gpui_platform::application()
         .with_assets(artisan_ui::asset_seam::CatalogAssetSource)
         .run(move |cx: &mut App| {
-        // Shipping boot parity: vendored typefaces and catalog assets before
-        // any window opens, mirroring `native_application::run`.
-        if let Err(error) = artisan_ui::fonts::register_bundled_fonts(cx) {
-            eprintln!("bundled font registration failed, using system faces: {error}");
-        }
-
-        // No internal watchdog: an in-process timer cannot interrupt a
-        // blocked UI thread, so root's external 45s guard owns the timeout.
-        // The resize loop below is bounded (50 × 100ms) for the settling
-        // path itself.
-
-        let stem = capture.file_stem();
-        let thread_id = ThreadId::parse(format!(
-            "parity-proof-{}-{}",
-            capture.case.slug(),
-            capture.viewport_slug
-        ))
-        .expect("fixture thread id is valid");
-        let shell = match ParityProofShell::mount(
-            thread_id,
-            capture.width - DESKTOP_SIDEBAR_WIDTH_PX,
-            capture.case,
-            cx,
-        ) {
-            Ok(shell) => shell,
-            Err(error) => {
-                eprintln!("parity-proof seed failed for {stem}: {error}");
-                failed.set(true);
-                cx.quit();
-                return;
+            // Shipping boot parity: vendored typefaces and catalog assets before
+            // any window opens, mirroring `native_application::run`.
+            if let Err(error) = artisan_ui::fonts::register_bundled_fonts(cx) {
+                eprintln!("bundled font registration failed, using system faces: {error}");
             }
-        };
-        let screen = shell.read(cx).screen().clone();
-            let bounds = Bounds::centered(
-                None,
-                size(px(capture.width), px(capture.height)),
+
+            // No internal watchdog: an in-process timer cannot interrupt a
+            // blocked UI thread, so root's external 45s guard owns the timeout.
+            // The resize loop below is bounded (50 × 100ms) for the settling
+            // path itself.
+
+            let stem = capture.file_stem();
+            let thread_id = ThreadId::parse(format!(
+                "parity-proof-{}-{}",
+                capture.case.slug(),
+                capture.viewport_slug
+            ))
+            .expect("fixture thread id is valid");
+            let shell = match ParityProofShell::mount(
+                thread_id,
+                capture.width - DESKTOP_SIDEBAR_WIDTH_PX,
+                capture.case,
                 cx,
-            );
+            ) {
+                Ok(shell) => shell,
+                Err(error) => {
+                    eprintln!("parity-proof seed failed for {stem}: {error}");
+                    failed.set(true);
+                    cx.quit();
+                    return;
+                }
+            };
+            let screen = shell.read(cx).screen().clone();
+            let bounds = Bounds::centered(None, size(px(capture.width), px(capture.height)), cx);
             let caption = stem.clone();
             let opened = cx.open_window(
                 WindowOptions {
@@ -1040,183 +1007,165 @@ pub fn run() -> ExitCode {
                         let mut warmup_draws = 0u32;
                         let navigator_focused = Rc::new(Cell::new(false));
                         for _ in 0..RESIZE_MAX_POLLS {
-                            let outcome =
-                                cx.update_window(any_handle, |_, window, cx| {
-                                    window.bounds_changed(cx);
-                                    let scale = window.scale_factor();
-                                    let style =
-                                        DesktopShellStyle::resolve(false, scale);
-                                    let actual_width =
-                                        window.bounds().size.width.as_f32();
-                                    let actual_height =
-                                        window.bounds().size.height.as_f32();
-                                    if (actual_width - capture.width).abs() > BOUNDS_SETTLE_PX
-                                        || (actual_height - capture.height).abs()
-                                            > BOUNDS_SETTLE_PX
-                                    {
-                                        window.resize(size(
-                                            px(capture.width),
-                                            px(capture.height),
-                                        ));
-                                        return ResizePoll::Waiting;
+                            let outcome = cx.update_window(any_handle, |_, window, cx| {
+                                window.bounds_changed(cx);
+                                let scale = window.scale_factor();
+                                let style = DesktopShellStyle::resolve(false, scale);
+                                let actual_width = window.bounds().size.width.as_f32();
+                                let actual_height = window.bounds().size.height.as_f32();
+                                if (actual_width - capture.width).abs() > BOUNDS_SETTLE_PX
+                                    || (actual_height - capture.height).abs() > BOUNDS_SETTLE_PX
+                                {
+                                    window.resize(size(px(capture.width), px(capture.height)));
+                                    return ResizePoll::Waiting;
+                                }
+                                let content_width = actual_width - style.sidebar_width.as_f32();
+                                screen.update(cx, |screen, screen_cx| {
+                                    if screen.set_content_width(content_width) {
+                                        screen_cx.notify();
                                     }
-                                    let content_width = actual_width
-                                        - style.sidebar_width.as_f32();
-                                    screen.update(cx, |screen, screen_cx| {
-                                        if screen.set_content_width(content_width) {
-                                            screen_cx.notify();
-                                        }
-                                    });
-                                    // Navigator cases focus the real rail
-                                    // control through window focus state on
-                                    // every settled poll until it lands, so
-                                    // warmup draws include the expanded rail.
-                                    if capture.case.focuses_navigator()
-                                        && !navigator_focused.get()
-                                    {
-                                        match focus_first_navigator(&screen, window, cx) {
-                                            Ok(label) => {
-                                                navigator_focused.set(true);
-                                                println!(
-                                                    "parity-proof navigator focused \
+                                });
+                                // Navigator cases focus the real rail
+                                // control through window focus state on
+                                // every settled poll until it lands, so
+                                // warmup draws include the expanded rail.
+                                if capture.case.focuses_navigator() && !navigator_focused.get() {
+                                    match focus_first_navigator(&screen, window, cx) {
+                                        Ok(label) => {
+                                            navigator_focused.set(true);
+                                            println!(
+                                                "parity-proof navigator focused \
                                                      {label} for {stem}"
-                                                );
-                                            }
-                                            Err(error) => {
-                                                eprintln!(
-                                                    "parity-proof navigator not ready \
+                                            );
+                                        }
+                                        Err(error) => {
+                                            eprintln!(
+                                                "parity-proof navigator not ready \
                                                      for {stem}: {error}"
-                                                );
-                                            }
+                                            );
                                         }
                                     }
-                                    // Settle the frame: a hidden window paints
-                                    // nothing on its own, and one draw can
-                                    // reuse incomplete cached paint while the
-                                    // async asset/text pipeline lands (seen as
-                                    // missing title/composer glyphs with
-                                    // shapes intact). Every pass refreshes and
-                                    // redraws with yields between; the capture
-                                    // reads the final refreshed frame
-                                    // directly — no second draw without a
-                                    // refresh in between.
-                                    window.refresh();
-                                    let arena = window.draw(cx);
-                                    arena.clear(cx);
-                                    warmup_draws += 1;
-                                    if warmup_draws < WARMUP_DRAW_PASSES {
-                                        return ResizePoll::Waiting;
-                                    }
-                                    // A navigator capture without a focused
-                                    // rail control proves nothing about the
-                                    // expanded rail: fail rather than capture
-                                    // collapsed pixels.
-                                    if capture.case.focuses_navigator()
-                                        && !navigator_focused.get()
-                                    {
-                                        eprintln!(
-                                            "parity-proof navigator never expanded \
-                                             for {stem}"
-                                        );
-                                        return ResizePoll::Done(true);
-                                    }
-                                    print_capture_geometry(
-                                        &stem,
-                                        capture.width,
-                                        capture.height,
-                                        actual_width,
-                                        actual_height,
-                                        scale,
-                                        content_width,
-                                    );
-                                    print_proof_manifest(&screen, &stem, cx);
-                                    // The shipping wgpu readback of the final
-                                    // refreshed frame above, then save.
-                                    let quads = window.painted_quads().len();
-                                    let capture_result = window.render_to_image();
-                                    println!(
-                                        "parity-proof paint {stem}: quads={quads}"
-                                    );
-                                    let expected_width =
-                                        (capture.width * scale).round() as u32;
-                                    let expected_height =
-                                        (capture.height * scale).round() as u32;
-                                    let mut failed = quads == 0;
-                                    if failed {
-                                        eprintln!(
-                                            "parity-proof paint failed for {stem}: \
-                                             no quads painted"
-                                        );
-                                    }
-                                    match capture_result {
-                            Ok(image) => {
-                                let actual = (image.width(), image.height());
-                                let path = format!(
-                                    "{stem}-scale{scale}-{}x{}.png",
-                                    actual.0, actual.1
-                                );
-                                if actual != (expected_width, expected_height) {
+                                }
+                                // Settle the frame: a hidden window paints
+                                // nothing on its own, and one draw can
+                                // reuse incomplete cached paint while the
+                                // async asset/text pipeline lands (seen as
+                                // missing title/composer glyphs with
+                                // shapes intact). Every pass refreshes and
+                                // redraws with yields between; the capture
+                                // reads the final refreshed frame
+                                // directly — no second draw without a
+                                // refresh in between.
+                                window.refresh();
+                                let arena = window.draw(cx);
+                                arena.clear(cx);
+                                warmup_draws += 1;
+                                if warmup_draws < WARMUP_DRAW_PASSES {
+                                    return ResizePoll::Waiting;
+                                }
+                                // A navigator capture without a focused
+                                // rail control proves nothing about the
+                                // expanded rail: fail rather than capture
+                                // collapsed pixels.
+                                if capture.case.focuses_navigator() && !navigator_focused.get() {
                                     eprintln!(
-                                        "parity-proof dimension mismatch for {stem}: \
+                                        "parity-proof navigator never expanded \
+                                             for {stem}"
+                                    );
+                                    return ResizePoll::Done(true);
+                                }
+                                print_capture_geometry(
+                                    &stem,
+                                    capture.width,
+                                    capture.height,
+                                    actual_width,
+                                    actual_height,
+                                    scale,
+                                    content_width,
+                                );
+                                print_proof_manifest(&screen, &stem, cx);
+                                // The shipping wgpu readback of the final
+                                // refreshed frame above, then save.
+                                let quads = window.painted_quads().len();
+                                let capture_result = window.render_to_image();
+                                println!("parity-proof paint {stem}: quads={quads}");
+                                let expected_width = (capture.width * scale).round() as u32;
+                                let expected_height = (capture.height * scale).round() as u32;
+                                let mut failed = quads == 0;
+                                if failed {
+                                    eprintln!(
+                                        "parity-proof paint failed for {stem}: \
+                                             no quads painted"
+                                    );
+                                }
+                                match capture_result {
+                                    Ok(image) => {
+                                        let actual = (image.width(), image.height());
+                                        let path = format!(
+                                            "{stem}-scale{scale}-{}x{}.png",
+                                            actual.0, actual.1
+                                        );
+                                        if actual != (expected_width, expected_height) {
+                                            eprintln!(
+                                                "parity-proof dimension mismatch for {stem}: \
                                          logical {}x{} at scale {scale} (reference \
                                          {REFERENCE_SCALE}) produced {}x{}, expected \
                                          {expected_width}x{expected_height}",
-                                        capture.width,
-                                        capture.height,
-                                        actual.0,
-                                        actual.1,
-                                    );
-                                    failed = true;
+                                                capture.width, capture.height, actual.0, actual.1,
+                                            );
+                                            failed = true;
+                                        }
+                                        if let Err(error) =
+                                            image::DynamicImage::ImageRgba8(image).save(&path)
+                                        {
+                                            eprintln!(
+                                                "parity-proof could not save {path}: {error:?}"
+                                            );
+                                            failed = true;
+                                        } else {
+                                            println!("parity-proof saved {path}");
+                                        }
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "parity-proof capture failed for {stem}: {error:?}"
+                                        );
+                                        failed = true;
+                                    }
                                 }
-                                if let Err(error) =
-                                    image::DynamicImage::ImageRgba8(image).save(&path)
-                                {
+                                ResizePoll::Done(failed)
+                            });
+                            match outcome {
+                                Ok(ResizePoll::Done(failed)) => {
+                                    cx.update(|cx| {
+                                        settle_slot(&settled_flag, &failed_flag, failed, cx)
+                                    });
+                                    return;
+                                }
+                                Ok(ResizePoll::Waiting) => {
+                                    clock.timer(Duration::from_millis(RESIZE_POLL_MILLIS)).await;
+                                }
+                                Err(error) => {
                                     eprintln!(
-                                        "parity-proof could not save {path}: {error:?}"
+                                        "parity-proof update failed for {caption}: {error:?}"
                                     );
-                                    failed = true;
-                                } else {
-                                    println!("parity-proof saved {path}");
+                                    cx.update(|cx| {
+                                        failed_flag.set(true);
+                                        settled_flag.set(true);
+                                        cx.quit();
+                                    });
+                                    return;
                                 }
-                            }
-                            Err(error) => {
-                                eprintln!(
-                                    "parity-proof capture failed for {stem}: {error:?}"
-                                );
-                                failed = true;
                             }
                         }
-                        ResizePoll::Done(failed)
-                    });
-                    match outcome {
-                    Ok(ResizePoll::Done(failed)) => {
-                        cx.update(|cx| settle_slot(&settled_flag, &failed_flag, failed, cx));
-                        return;
-                    }
-                    Ok(ResizePoll::Waiting) => {
-                        clock
-                            .timer(Duration::from_millis(RESIZE_POLL_MILLIS))
-                            .await;
-                    }
-                    Err(error) => {
-                        eprintln!("parity-proof update failed for {caption}: {error:?}");
+                        eprintln!("parity-proof resize never settled for {caption}");
                         cx.update(|cx| {
                             failed_flag.set(true);
                             settled_flag.set(true);
                             cx.quit();
                         });
-                        return;
-                    }
-                }
-            }
-            eprintln!("parity-proof resize never settled for {caption}");
-            cx.update(|cx| {
-                failed_flag.set(true);
-                settled_flag.set(true);
-                cx.quit();
-            });
-        })
-        .detach();
+                    })
+                    .detach();
                 }
                 Err(error) => {
                     eprintln!("parity-proof could not open its window: {error:?}");
@@ -1224,7 +1173,7 @@ pub fn run() -> ExitCode {
                     cx.quit();
                 }
             }
-    });
+        });
 
     if launched.get() && !failed_after_run.get() {
         ExitCode::SUCCESS
@@ -1273,7 +1222,9 @@ mod tests {
             .expect("snapshot accepted");
         for fact in case_facts(case).expect("facts build") {
             controller
-                .dispatch(ConversationStateEvent::Fact(SceneFactCommand::Register(fact)))
+                .dispatch(ConversationStateEvent::Fact(SceneFactCommand::Register(
+                    fact,
+                )))
                 .expect("fact accepted");
         }
         controller.scene().expect("scene projects")
@@ -1310,7 +1261,11 @@ mod tests {
                 .expect("empty builds")
                 .is_none()
         );
-        assert!(case_facts(ProofSceneCase::Empty).expect("empty facts").is_empty());
+        assert!(
+            case_facts(ProofSceneCase::Empty)
+                .expect("empty facts")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1479,9 +1434,8 @@ mod tests {
     fn reference_navigator_has_two_turns_and_many_markers() {
         let scene = project(ProofSceneCase::ReferenceNavigator);
         assert_eq!(scene.turn_scenes().len(), 2);
-        let user = |id: &str| {
-            ConversationSurfaceTarget::Item(ItemId::parse(id).expect("item id parses"))
-        };
+        let user =
+            |id: &str| ConversationSurfaceTarget::Item(ItemId::parse(id).expect("item id parses"));
         assert_eq!(
             navigator_candidates(&scene),
             vec![user("parity-proof-user-1"), user("parity-proof-user-4")],
@@ -1530,7 +1484,11 @@ mod tests {
         let snapshot = case_snapshot(ProofSceneCase::Longform, &thread(), now())
             .expect("longform builds")
             .expect("longform snapshot builds");
-        assert!(case_facts(ProofSceneCase::Longform).expect("longform facts").is_empty());
+        assert!(
+            case_facts(ProofSceneCase::Longform)
+                .expect("longform facts")
+                .is_empty()
+        );
         let debug = format!("{snapshot:?}");
         assert!(
             debug.contains("MultimodalUserMessage"),

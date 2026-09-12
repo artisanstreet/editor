@@ -44,7 +44,7 @@ pub(super) const MAXIMUM_RAW_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const MAXIMUM_RAW_ATTACHMENT_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// The maximum decoded RGBA pixel count allowed before a preview is retained.
 pub(super) const MAXIMUM_DECODED_IMAGE_PIXELS: usize = 16 * 1024 * 1024;
-const MAXIMUM_BASE64_INPUT_BYTES: usize = ((MAXIMUM_RAW_ATTACHMENT_BYTES + 2) / 3) * 4 + 4;
+const MAXIMUM_BASE64_INPUT_BYTES: usize = MAXIMUM_RAW_ATTACHMENT_BYTES.div_ceil(3) * 4 + 4;
 
 pub(super) const ATTACHMENT_COUNT_LIMIT_MESSAGE: &str = "Attach up to 10 images at a time.";
 pub(super) const ATTACHMENT_TOTAL_LIMIT_MESSAGE: &str =
@@ -230,8 +230,11 @@ pub(super) struct PreparedComposerAttachment {
     /// Draft-safe base64 prepared with the encoded payload off the UI thread.
     pub(super) content_base64: String,
     pub(super) thumbnail: Arc<RenderImage>,
+    #[cfg(test)]
     pub(super) dimensions: ImageDimensions,
+    #[cfg(test)]
     pub(super) recommended_media_type: ImageMediaType,
+    #[cfg(test)]
     pub(super) rescale_target: Option<ImageDimensions>,
     pub(super) source_digest: String,
     pub(super) encoded_digest: String,
@@ -251,9 +254,6 @@ pub(super) struct ComposerAttachment {
     /// Draft-safe base64 for the encoded payload. Pending slots keep this empty.
     pub(super) content_base64: String,
     pub(super) thumbnail: Option<Arc<RenderImage>>,
-    pub(super) dimensions: Option<ImageDimensions>,
-    pub(super) recommended_media_type: Option<ImageMediaType>,
-    pub(super) rescale_target: Option<ImageDimensions>,
     pub(super) source_digest: String,
     pub(super) encoded_digest: String,
     pub(super) source_size_bytes: usize,
@@ -276,9 +276,6 @@ impl ComposerAttachment {
             bytes: None,
             content_base64: String::new(),
             thumbnail: None,
-            dimensions: None,
-            recommended_media_type: None,
-            rescale_target: None,
             source_digest: String::new(),
             encoded_digest: String::new(),
             source_size_bytes: size_bytes,
@@ -295,9 +292,6 @@ impl ComposerAttachment {
             bytes: Some(prepared.bytes),
             content_base64: prepared.content_base64,
             thumbnail: Some(prepared.thumbnail),
-            dimensions: Some(prepared.dimensions),
-            recommended_media_type: Some(prepared.recommended_media_type),
-            rescale_target: prepared.rescale_target,
             source_digest: prepared.source_digest,
             encoded_digest: prepared.encoded_digest,
             source_size_bytes: prepared.source_size_bytes,
@@ -378,7 +372,7 @@ pub(super) struct RecalledAttachmentInput {
 /// Prepares a batch of clipboard images sequentially on a background worker.
 pub(super) fn prepare_clipboard_batch(
     items: Vec<(String, ClipboardImageCandidate)>,
-    engine_id: Option<String>,
+    engine_id: Option<&str>,
 ) -> Vec<AttachmentPreparationOutcome> {
     let mut input_total: usize = 0;
     let mut output_total = 0;
@@ -398,10 +392,10 @@ pub(super) fn prepare_clipboard_batch(
                     limit_batch_output(
                         prepare_image_bytes(
                             id.clone(),
-                            candidate.name,
+                            &candidate.name,
                             candidate.format,
-                            candidate.bytes,
-                            engine_id.as_deref(),
+                            &candidate.bytes,
+                            engine_id,
                         ),
                         &mut output_total,
                     )
@@ -414,7 +408,7 @@ pub(super) fn prepare_clipboard_batch(
 /// Reads and prepares dropped files sequentially on a background worker.
 pub(super) fn prepare_file_batch(
     items: Vec<(String, PathBuf)>,
-    engine_id: Option<String>,
+    engine_id: Option<&str>,
 ) -> Vec<AttachmentPreparationOutcome> {
     let mut output_total = 0;
     items
@@ -422,7 +416,7 @@ pub(super) fn prepare_file_batch(
         .map(|(id, path)| {
             let name = display_file_name(&path);
             let result = limit_batch_output(
-                read_and_prepare_file(id.clone(), path, engine_id.as_deref()),
+                read_and_prepare_file(id.clone(), &path, engine_id),
                 &mut output_total,
             );
             AttachmentPreparationOutcome { id, name, result }
@@ -433,7 +427,7 @@ pub(super) fn prepare_file_batch(
 /// Revives ready values retained by the draft policy.
 pub(super) fn prepare_restored_batch(
     items: Vec<RestoredAttachmentInput>,
-    engine_id: Option<String>,
+    engine_id: Option<&str>,
 ) -> Vec<AttachmentPreparationOutcome> {
     let mut output_total = 0;
     items
@@ -442,7 +436,7 @@ pub(super) fn prepare_restored_batch(
             let id = item.id.clone();
             let name = item.name.clone();
             let result = limit_batch_output(
-                decode_and_prepare_restored(item, engine_id.as_deref()),
+                decode_and_prepare_restored(item, engine_id),
                 &mut output_total,
             );
             AttachmentPreparationOutcome { id, name, result }
@@ -498,18 +492,23 @@ fn limit_batch_output(
 }
 
 /// Reads, validates, decodes, resizes, encodes, and policy-checks one image.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "rescale targets are finite, positive, whole-pixel dimensions already bounded by the attachment limits"
+)]
 pub(super) fn prepare_image_bytes(
     id: String,
-    name: String,
+    name: &str,
     format: ImageFormat,
-    bytes: Vec<u8>,
+    bytes: &[u8],
     engine_id: Option<&str>,
 ) -> Result<PreparedComposerAttachment, AttachmentPreparationError> {
     validate_format(format)?;
     validate_raw_size(bytes.len())?;
 
-    let source_digest = sha256_hex(&bytes);
-    let (decoded, source_dimensions) = decode_bounded(&bytes, format)?;
+    let source_digest = sha256_hex(bytes);
+    let (decoded, source_dimensions) = decode_bounded(bytes, format)?;
     let source_dimensions = ImageDimensions {
         width: f64::from(source_dimensions.0),
         height: f64::from(source_dimensions.1),
@@ -539,16 +538,14 @@ pub(super) fn prepare_image_bytes(
     };
     let recommended_format = encoded_format_for_media_type(recommended_media_type);
     let (output_bytes, output_format, output_name) = if is_gif {
-        (bytes.clone(), format, name.clone())
+        (bytes.to_vec(), format, name.to_owned())
     } else {
         let encoded = encode_image(&display_image, recommended_format);
         let use_encoded = rescale_target.is_some()
             || encoded
                 .as_ref()
                 .is_ok_and(|encoded| encoded.len() < bytes.len());
-        if !use_encoded {
-            (bytes.clone(), format, name.clone())
-        } else {
+        if use_encoded {
             let encoded = encoded.map_err(|_| AttachmentPreparationError::InvalidImage)?;
             validate_encoded_size(encoded.len())?;
             let encoded_format = to_gpui_format(recommended_format)
@@ -556,12 +553,15 @@ pub(super) fn prepare_image_bytes(
             (
                 encoded,
                 encoded_format,
-                encoded_name(&name, recommended_format),
+                encoded_name(name, recommended_format),
             )
+        } else {
+            (bytes.to_vec(), format, name.to_owned())
         }
     };
     validate_encoded_size(output_bytes.len())?;
 
+    #[cfg(test)]
     let output_dimensions = ImageDimensions {
         width: f64::from(display_image.width()),
         height: f64::from(display_image.height()),
@@ -578,8 +578,11 @@ pub(super) fn prepare_image_bytes(
         bytes: Arc::new(output_bytes.clone()),
         content_base64: BASE64.encode(&output_bytes),
         thumbnail,
+        #[cfg(test)]
         dimensions: output_dimensions,
+        #[cfg(test)]
         recommended_media_type,
+        #[cfg(test)]
         rescale_target,
         source_digest,
         encoded_digest: sha256_hex(&output_bytes),
@@ -590,13 +593,13 @@ pub(super) fn prepare_image_bytes(
 
 fn read_and_prepare_file(
     id: String,
-    path: PathBuf,
+    path: &Path,
     engine_id: Option<&str>,
 ) -> Result<PreparedComposerAttachment, AttachmentPreparationError> {
-    let name = display_file_name(&path);
-    let bytes = read_bounded_file(&path)?;
+    let name = display_file_name(path);
+    let bytes = read_bounded_file(path)?;
     let format = detect_image_format(&bytes)?;
-    prepare_image_bytes(id, name, format, bytes, engine_id)
+    prepare_image_bytes(id, &name, format, &bytes, engine_id)
 }
 
 fn decode_and_prepare_restored(
@@ -693,6 +696,8 @@ fn prepare_preserved_encoded(
     } else {
         source_size_bytes
     };
+    #[cfg(not(test))]
+    let _ = (recommended_media_type, source_dimensions);
 
     Ok(PreparedComposerAttachment {
         id,
@@ -702,11 +707,14 @@ fn prepare_preserved_encoded(
         content_base64: BASE64.encode(bytes.as_ref()),
         bytes,
         thumbnail,
+        #[cfg(test)]
         dimensions: ImageDimensions {
             width: f64::from(source_dimensions.0),
             height: f64::from(source_dimensions.1),
         },
+        #[cfg(test)]
         recommended_media_type,
+        #[cfg(test)]
         rescale_target: None,
         source_digest,
         encoded_digest,
@@ -805,11 +813,15 @@ fn decode_bounded(
             height: dimensions.1,
         });
     }
-    let decoded = DynamicImage::from_decoder(decoder)
+    let image = DynamicImage::from_decoder(decoder)
         .map_err(|_| AttachmentPreparationError::InvalidImage)?;
-    Ok((decoded, dimensions))
+    Ok((image, dimensions))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the decoded-pixel budget constant fits u32 by construction; the decoder limits are u32 fields"
+)]
 fn decoding_limits() -> Limits {
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAXIMUM_DECODED_IMAGE_PIXELS as u32);
@@ -852,7 +864,7 @@ fn render_preview(
 
 /// Decodes exactly one selected payload with the same limits as intake, then
 /// gives GPUI a bounded PNG generated from that decoded image. The full
-/// RenderImage exists only while the viewer is open; attachments retain only
+/// `RenderImage` exists only while the viewer is open; attachments retain only
 /// encoded bytes and their small tray thumbnail.
 pub(super) fn render_full_preview(
     format: ImageFormat,
@@ -868,9 +880,9 @@ fn to_encoded_format(format: ImageFormat) -> EncodedImageFormat {
     match format {
         ImageFormat::Gif => EncodedImageFormat::Gif,
         ImageFormat::Jpeg => EncodedImageFormat::Jpeg,
-        ImageFormat::Png => EncodedImageFormat::Png,
         ImageFormat::Webp => EncodedImageFormat::WebP,
-        ImageFormat::Svg
+        ImageFormat::Png
+        | ImageFormat::Svg
         | ImageFormat::Bmp
         | ImageFormat::Tiff
         | ImageFormat::Ico
@@ -906,7 +918,6 @@ fn encoded_name(name: &str, format: EncodedImageFormat) -> String {
     let extension = match format {
         EncodedImageFormat::Gif => "gif",
         EncodedImageFormat::Jpeg => "jpg",
-        EncodedImageFormat::Png => "png",
         EncodedImageFormat::WebP => "webp",
         _ => "png",
     };
@@ -925,6 +936,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::float_cmp,
+        reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage"
+    )]
     use super::*;
 
     // A valid 1x1 RGBA PNG. Keeping the fixture inline makes the focused
@@ -965,9 +980,9 @@ mod tests {
     fn intake_resizes_encodes_and_retains_source_digest() {
         let prepared = prepare_image_bytes(
             "attachment:0".into(),
-            "pixel.png".into(),
+            "pixel.png",
             ImageFormat::Png,
-            ONE_BY_ONE_PNG.to_vec(),
+            ONE_BY_ONE_PNG,
             Some("claude"),
         )
         .expect("fixture decodes");
@@ -1016,9 +1031,9 @@ mod tests {
         let bytes = encode_image(&source, EncodedImageFormat::Png).expect("PNG source");
         let prepared = prepare_image_bytes(
             "attachment:0".into(),
-            "wide.png".into(),
+            "wide.png",
             ImageFormat::Png,
-            bytes,
+            &bytes,
             None,
         )
         .expect("wide fixture decodes");
@@ -1040,9 +1055,9 @@ mod tests {
     fn intake_rejects_unsupported_format_before_decoding() {
         let result = prepare_image_bytes(
             "attachment:0".into(),
-            "vector.svg".into(),
+            "vector.svg",
             ImageFormat::Svg,
-            b"<svg/>".to_vec(),
+            b"<svg/>",
             None,
         );
         assert!(matches!(
@@ -1107,12 +1122,12 @@ mod tests {
         // Valid header and CRC, but a raster larger than the pixel budget.
         png[16..20].copy_from_slice(&4097_u32.to_be_bytes());
         png[20..24].copy_from_slice(&4096_u32.to_be_bytes());
-        png[29..33].copy_from_slice(&0x1d614f29_u32.to_be_bytes());
+        png[29..33].copy_from_slice(&0x1d61_4f29_u32.to_be_bytes());
         let result = prepare_image_bytes(
             "attachment:0".into(),
-            "wide.png".into(),
+            "wide.png",
             ImageFormat::Png,
-            png,
+            &png,
             None,
         );
         assert!(matches!(

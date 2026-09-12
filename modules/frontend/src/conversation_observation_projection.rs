@@ -140,6 +140,10 @@ pub fn truncate_bounded(text: &str, maximum: usize) -> String {
 /// - Bodies are truncated to scene bounds; only the public reasoning summary
 ///   is retained.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered projection pass keeps the watermark, ordering, and body-bounds rules reviewable together"
+)]
 pub fn project_activities(
     state: &EngineObservationState,
     snapshot: &ConversationSnapshot,
@@ -596,7 +600,7 @@ mod tests {
             attribution: Some(EngineObservationAttribution {
                 run_id: run.clone(),
                 turn_id: turn.clone(),
-                committed_at: UnixMillis::from_millis(cursor as i64),
+                committed_at: UnixMillis::from_millis(cursor.cast_signed()),
                 delivery_sequence: cursor,
             }),
         }
@@ -643,7 +647,7 @@ mod tests {
             ),
         );
         let mut state = EngineObservationState::new(thread.clone());
-        state.apply(1, &event);
+        let _ = state.apply(1, &event);
 
         let projection = project_activities(&state, &snapshot(&thread, &turn));
         assert_eq!(projection.facts.len(), 1);
@@ -690,7 +694,7 @@ mod tests {
             ),
         );
         let mut state = EngineObservationState::new(thread.clone());
-        state.apply(1, &event);
+        let _ = state.apply(1, &event);
 
         let projection = project_activities(&state, &snapshot(&thread, &turn));
         assert_eq!(projection.facts.len(), 1);
@@ -729,7 +733,7 @@ mod tests {
             ),
         );
         let mut state = EngineObservationState::new(thread.clone());
-        state.apply(1, &event);
+        let _ = state.apply(1, &event);
 
         let projection = project_activities(&state, &snapshot(&thread, &turn));
         assert_eq!(projection.facts.len(), 1);

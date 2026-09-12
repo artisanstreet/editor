@@ -608,7 +608,10 @@ pub(crate) fn profile_avatar(theme: &ArtisanTheme, identity: RailIdentity<'_>) -
     for y in 0..GRADIENT_AVATAR_CELLS {
         for x in 0..GRADIENT_AVATAR_CELLS {
             if gradient_avatar_cell_lit(x, y) {
-                svg.push_str(&format!(r#"<rect x="{x}" y="{y}" width="1" height="1"/>"#));
+                let _ = std::fmt::Write::write_fmt(
+                    &mut svg,
+                    format_args!(r#"<rect x="{x}" y="{y}" width="1" height="1"/>"#),
+                );
             }
         }
     }
@@ -721,7 +724,7 @@ pub fn title_bar_caption_asset(area: WindowControlArea) -> AssetId {
 /// [`WindowControlArea`], so the pinned backend reports `HTMINBUTTON` /
 /// `HTMAXBUTTON` / `HTCLOSE` at `WM_NCHITTEST` (gpui `events.rs:872-878`) and
 /// performs the minimize, maximize/restore toggle, and `WM_CLOSE` itself
-/// (gpui `events.rs:1033-1064`), including restore (CE also toggles restore through Window::zoom_window). The `on_click`
+/// (gpui `events.rs:1033-1064`), including restore (CE also toggles restore through `Window::zoom_window`). The `on_click`
 /// handler therefore ignores mouse presses — the backend already consumed
 /// them — and exists only as the keyboard path (native caption buttons are
 /// not tab stops, but a focused GPUI element answers Enter/Space): minimize
@@ -734,7 +737,10 @@ pub fn title_bar_caption_button(
     selector: &'static str,
 ) -> Stateful<Div> {
     let (hover_background, hover_foreground) = match area {
-        WindowControlArea::Close => (gpui::rgb_to_hsla(gpui::rgb(0xe81123)), gpui::rgb_to_hsla(gpui::rgb(0xffffff))),
+        WindowControlArea::Close => (
+            gpui::rgb_to_hsla(gpui::rgb(0x00e8_1123)),
+            gpui::rgb_to_hsla(gpui::rgb(0x00ff_ffff)),
+        ),
         WindowControlArea::Min | WindowControlArea::Max | WindowControlArea::Drag => {
             let hover = match theme.mode {
                 ThemeMode::Light => theme.colors.muted,
@@ -1340,10 +1346,63 @@ pub fn legacy_shell_frame(props: LegacyShellProps<'_>, content: AnyElement) -> D
         )
 }
 
+/// Resolve the current local OS account picture off the UI thread.
+/// Missing account metadata is an ordinary avatar-fallback case.
+#[cfg(not(test))]
+pub(crate) fn local_account_picture() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    let output = {
+        use std::os::windows::process::CommandExt as _;
+        std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+                $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                $account = Get-ItemProperty -LiteralPath ("Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AccountPicture\Users\" + $sid) -ErrorAction SilentlyContinue
+                foreach ($size in @('Image96','Image192','Image448','Image32')) {
+                    $path = $account.$size
+                    if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+                        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+                        [Console]::Write($path)
+                        break
+                    }
+                }
+            "#]).creation_flags(0x0800_0000).output().ok()?
+    };
+    #[cfg(target_os = "macos")]
+    let output = std::process::Command::new("/usr/bin/dscl")
+        .args([
+            ".",
+            "-read",
+            &format!("/Users/{}", std::env::var("USER").ok()?),
+            "Picture",
+        ])
+        .output()
+        .ok()?;
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        let path = text
+            .trim()
+            .strip_prefix("Picture:")
+            .unwrap_or(text.trim())
+            .trim();
+        if path.is_empty() {
+            return None;
+        }
+        let path = std::path::PathBuf::from(path);
+        path.is_file().then_some(path)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    None
+}
+
 #[cfg(test)]
 mod legacy_shell_tests {
+    #![expect(clippy::float_cmp, reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage")]
     use super::*;
-    use gpui::{Context, IntoElement as _, Render, TestAppContext, Window};
+    use gpui::{Context, Render, TestAppContext, Window};
 
     #[test]
     fn monogram_prefers_display_name_then_hostname() {
@@ -1535,55 +1594,4 @@ mod legacy_shell_tests {
             AssetId::TABLER_X
         );
     }
-}
-
-/// Resolve the current local OS account picture off the UI thread.
-/// Missing account metadata is an ordinary avatar-fallback case.
-pub(crate) fn local_account_picture() -> Option<std::path::PathBuf> {
-    #[cfg(target_os = "windows")]
-    let output = {
-        use std::os::windows::process::CommandExt as _;
-        std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", r#"
-                $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-                $account = Get-ItemProperty -LiteralPath ("Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AccountPicture\Users\" + $sid) -ErrorAction SilentlyContinue
-                foreach ($size in @('Image96','Image192','Image448','Image32')) {
-                    $path = $account.$size
-                    if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
-                        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-                        [Console]::Write($path)
-                        break
-                    }
-                }
-            "#]).creation_flags(0x08000000).output().ok()?
-    };
-    #[cfg(target_os = "macos")]
-    let output = std::process::Command::new("/usr/bin/dscl")
-        .args([
-            ".",
-            "-read",
-            &format!("/Users/{}", std::env::var("USER").ok()?),
-            "Picture",
-        ])
-        .output()
-        .ok()?;
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    {
-        if !output.status.success() {
-            return None;
-        }
-        let text = String::from_utf8(output.stdout).ok()?;
-        let path = text
-            .trim()
-            .strip_prefix("Picture:")
-            .unwrap_or(text.trim())
-            .trim();
-        if path.is_empty() {
-            return None;
-        }
-        let path = std::path::PathBuf::from(path);
-        return path.is_file().then_some(path);
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    None
 }

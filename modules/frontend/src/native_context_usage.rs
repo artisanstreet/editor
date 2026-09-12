@@ -132,6 +132,10 @@ impl NativeContextUsage {
     /// Projects a renderable reading, or hides it when the report is not
     /// attributable to the current run or lacks a valid denominator.
     #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "token counters are converted to f64 for the shared percentage and auto-compaction policy; u64 counters stay far below 2^53 in practice"
+    )]
     pub fn presentation(
         &self,
         current_run_id: Option<&str>,
@@ -223,8 +227,8 @@ impl NativeContextUsage {
         on_open_change: impl Fn(bool, PopoverChangeReason, &mut Window, &mut App) + 'static,
     ) -> Option<Popover> {
         let presentation = self.presentation(current_run_id)?;
-        let trigger = render_ring_trigger(&presentation, theme);
-        let details = render_details(&presentation, theme);
+        let trigger = render_ring_trigger(&presentation, &theme);
+        let details = render_details(&presentation, &theme);
 
         Some(
             Popover::new(CONTEXT_USAGE_SELECTOR, focus, theme, open, trigger, details)
@@ -275,6 +279,10 @@ impl NativeContextUsagePresentation {
 
     /// Returns the normalized progress share used by the details bar.
     #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the details fill ratio is f64 policy math narrowed to the f32 value the GPUI progress bar paints"
+    )]
     pub fn progress_fraction(&self) -> ProgressFraction {
         ProgressFraction::new((self.details.fill().value() / self.details.fill().max()) as f32)
     }
@@ -284,7 +292,7 @@ impl NativeContextUsagePresentation {
 #[must_use]
 pub fn render_details(
     presentation: &NativeContextUsagePresentation,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
 ) -> Stateful<gpui::Div> {
     let details = &presentation.details;
     div()
@@ -322,7 +330,7 @@ pub fn render_details(
         )
         .child(
             progress(
-                artisan_ui::progress::ProgressStyle::resolve(theme),
+                artisan_ui::progress::ProgressStyle::resolve(*theme),
                 presentation.progress_fraction(),
             )
             .debug_selector(|| format!("{CONTEXT_USAGE_DETAILS_SELECTOR}-progress")),
@@ -331,7 +339,7 @@ pub fn render_details(
 
 fn render_ring_trigger(
     presentation: &NativeContextUsagePresentation,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
 ) -> Stateful<gpui::Div> {
     let tone = presentation.tone_mix();
     let ring_color = ring_color(theme, tone);
@@ -414,6 +422,10 @@ fn point_on_circle(
     )
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the clamped percentage is narrowed from f64 policy math to the f32 arc geometry GPUI paints"
+)]
 fn finite_percent(percent: f64) -> f32 {
     if percent.is_finite() {
         percent.clamp(0.0, 100.0) as f32 / 100.0
@@ -422,7 +434,7 @@ fn finite_percent(percent: f64) -> f32 {
     }
 }
 
-fn ring_color(theme: ArtisanTheme, tone: GaugeToneMix) -> Hsla {
+fn ring_color(theme: &ArtisanTheme, tone: GaugeToneMix) -> Hsla {
     if tone.danger > 0 {
         theme.colors.banner_error.to_paint()
     } else if tone.warn > 0 {
@@ -434,6 +446,7 @@ fn ring_color(theme: ArtisanTheme, tone: GaugeToneMix) -> Hsla {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::float_cmp, reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage")]
     use super::{CONTEXT_USAGE_DESCRIPTION_ID, NativeContextUsage, NativeContextUsagePresentation};
     use crate::context_usage_details_policy::ContextUsageDetailsError;
 

@@ -225,10 +225,7 @@ mod tests {
         table.fail("https://example.com/page");
         assert!(table.lookup("https://example.com/page").is_none());
         assert_eq!(table.queue("https://example.com/page", 0), None);
-        assert_eq!(
-            table.request_candidate("https://example.com/page", 0),
-            None
-        );
+        assert_eq!(table.request_candidate("https://example.com/page", 0), None);
     }
 
     #[test]

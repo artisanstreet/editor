@@ -306,7 +306,8 @@ impl NativeApplication {
         &mut self,
         candidate: RecallRestoreCandidate,
         cx: &mut Context<Self>,
-    ) {        if self.selected_thread.as_ref() != Some(&candidate.thread_id) {
+    ) {
+        if self.selected_thread.as_ref() != Some(&candidate.thread_id) {
             let _ = self
                 .composer_queue
                 .state
@@ -348,14 +349,13 @@ impl NativeApplication {
         if let Some(command) = self.composer_queue.state.retry_pending_withdrawal() {
             self.send_queue_withdrawal(command);
         } else if self.composer_queue.state.can_retry_restore() {
-            if let Some(target) = self.composer.read(cx).capture_recall_target() {
-                if let Some(candidate) = self
+            if let Some(target) = self.composer.read(cx).capture_recall_target()
+                && let Some(candidate) = self
                     .composer_queue
                     .state
                     .take_restore_candidate_with_target(target)
-                {
-                    self.restore_queue_candidate(candidate, cx);
-                }
+            {
+                self.restore_queue_candidate(candidate, cx);
             }
         } else {
             self.request_recalled_payload();
@@ -378,6 +378,10 @@ impl NativeApplication {
         self.composer_queue.state.mark_service_failed();
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive event dispatch keeps every composer-state projection and its refresh fencing visible together"
+    )]
     pub(super) fn handle_composer_state_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::QueuedMessages {
@@ -385,20 +389,17 @@ impl NativeApplication {
                 generation,
                 listing,
             } => {
-                if self.composer_queue.refresh.as_ref().is_some_and(|token| {
+                if let Some(token) = self.composer_queue.refresh.take_if(|token| {
                     token.thread_id() == &thread_id && token.generation() == generation
-                }) {
-                    let token = self.composer_queue.refresh.take().unwrap();
-                    if self
-                        .composer_queue
-                        .state
-                        .apply_queue_listing(&token, listing)
-                        .is_ok()
-                    {
-                        // Re-resolve watches retained across a failed label
-                        // dispatch against the fresh authoritative page.
-                        self.rescan_retained_echo_watches(cx);
-                    }
+                }) && self
+                    .composer_queue
+                    .state
+                    .apply_queue_listing(&token, &listing)
+                    .is_ok()
+                {
+                    // Re-resolve watches retained across a failed label
+                    // dispatch against the fresh authoritative page.
+                    self.rescan_retained_echo_watches(cx);
                 }
             }
             Event::QueuedMessagesFailed {
@@ -406,10 +407,9 @@ impl NativeApplication {
                 generation,
                 ..
             } => {
-                if self.composer_queue.refresh.as_ref().is_some_and(|token| {
+                if let Some(token) = self.composer_queue.refresh.take_if(|token| {
                     token.thread_id() == &thread_id && token.generation() == generation
                 }) {
-                    let token = self.composer_queue.refresh.take().unwrap();
                     self.composer_queue.state.finish_queue_refresh(&token);
                     self.composer_queue.state.mark_transport_failure();
                 }
@@ -419,19 +419,13 @@ impl NativeApplication {
                 generation,
                 listing,
             } => {
-                if self
-                    .composer_queue
-                    .failed_refresh
-                    .as_ref()
-                    .is_some_and(|token| {
-                        token.thread_id() == &thread_id && token.generation() == generation
-                    })
-                {
-                    let token = self.composer_queue.failed_refresh.take().unwrap();
+                if let Some(token) = self.composer_queue.failed_refresh.take_if(|token| {
+                    token.thread_id() == &thread_id && token.generation() == generation
+                }) {
                     let _ = self
                         .composer_queue
                         .state
-                        .apply_failed_listing(&token, listing);
+                        .apply_failed_listing(&token, &listing);
                     self.sync_composer_controls(cx);
                 }
             }
@@ -440,15 +434,9 @@ impl NativeApplication {
                 generation,
                 ..
             } => {
-                if self
-                    .composer_queue
-                    .failed_refresh
-                    .as_ref()
-                    .is_some_and(|token| {
-                        token.thread_id() == &thread_id && token.generation() == generation
-                    })
-                {
-                    let token = self.composer_queue.failed_refresh.take().unwrap();
+                if let Some(token) = self.composer_queue.failed_refresh.take_if(|token| {
+                    token.thread_id() == &thread_id && token.generation() == generation
+                }) {
                     self.composer_queue.state.finish_failed_refresh(&token);
                 }
             }
@@ -475,10 +463,9 @@ impl NativeApplication {
                         .state
                         .accept_recalled_message(*result)
                         .is_ok()
+                    && let Some(candidate) = self.composer_queue.state.take_restore_candidate()
                 {
-                    if let Some(candidate) = self.composer_queue.state.take_restore_candidate() {
-                        self.restore_queue_candidate(candidate, cx);
-                    }
+                    self.restore_queue_candidate(candidate, cx);
                 }
             }
             Event::RecalledMessageFailed { query, failure, .. } => {
@@ -492,13 +479,12 @@ impl NativeApplication {
                 query,
                 result,
             } => {
-                if self.composer_queue.usage.as_ref().is_some_and(|token| {
+                if let Some(token) = self.composer_queue.usage.take_if(|token| {
                     token.generation() == generation
                         && token.sequence() == sequence
                         && token.thread_id() == &query.thread_id
                         && token.run_id() == &query.run_id
                 }) {
-                    let token = self.composer_queue.usage.take().unwrap();
                     let name = result
                         .report
                         .as_ref()
@@ -516,13 +502,12 @@ impl NativeApplication {
                 query,
                 ..
             } => {
-                if self.composer_queue.usage.as_ref().is_some_and(|token| {
+                if let Some(token) = self.composer_queue.usage.take_if(|token| {
                     token.generation() == generation
                         && token.sequence() == sequence
                         && token.thread_id() == &query.thread_id
                         && token.run_id() == &query.run_id
                 }) {
-                    let token = self.composer_queue.usage.take().unwrap();
                     self.composer_queue.state.mark_usage_read_failed(&token);
                 }
             }

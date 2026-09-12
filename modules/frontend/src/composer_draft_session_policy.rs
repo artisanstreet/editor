@@ -272,10 +272,7 @@ impl ComposerDraftStore for InMemoryComposerDraftStore {
             .drafts
             .iter()
             .position(|retained| retained.key == draft_key)?;
-        let retained = self
-            .drafts
-            .remove(index)
-            .expect("draft index came from the retained draft list");
+        let retained = self.drafts.remove(index)?;
         let draft = retained.draft.clone();
         self.drafts.push_back(retained);
         Some(draft)
@@ -305,10 +302,9 @@ impl ComposerDraftStore for InMemoryComposerDraftStore {
                 break;
             }
 
-            let retained = self
-                .drafts
-                .pop_front()
-                .expect("capacity pressure requires a retained draft");
+            let Some(retained) = self.drafts.pop_front() else {
+                break;
+            };
             evicted.push(retained.draft);
         }
 

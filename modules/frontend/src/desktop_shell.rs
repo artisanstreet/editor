@@ -149,6 +149,14 @@ pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
 /// mounted without reserving space: it paints nothing in flow at rest and
 /// overlays its palette dialog when open.
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shell frame mounts each region as its own element; bundling them into a struct would obscure which region is which"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one GPUI builder composes the whole desktop frame; extraction would split the shared reactive style resolution"
+)]
 pub fn desktop_shell(
     theme: DesktopTheme,
     collapsed: bool,
@@ -196,7 +204,12 @@ pub fn desktop_shell(
         .overflow_hidden()
         .debug_selector(|| DESKTOP_TITLEBAR_BRAND_SELECTOR.to_owned())
         .child(brand)
-        .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag));
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+                .window_control_area(WindowControlArea::Drag),
+        );
 
     // The content section carries the workspace header at its leading end,
     // inset from the sidebar rule by the same measure as the wordmark section,
@@ -223,7 +236,12 @@ pub fn desktop_shell(
                 .pr(px(24.0))
                 .overflow_hidden()
                 .child(header)
-                .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag)),
+                .child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .window_control_area(WindowControlArea::Drag),
+                ),
         );
 
     let titlebar = div()
@@ -412,6 +430,7 @@ pub fn desktop_rule(theme: DesktopTheme) -> Div {
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::float_cmp, reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage")]
     use super::*;
 
     #[test]

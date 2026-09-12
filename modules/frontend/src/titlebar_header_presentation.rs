@@ -308,12 +308,9 @@ mod tests {
 
     #[test]
     fn missing_project_keeps_the_subject_alone() {
-        let presentation = present_titlebar_header(TitlebarHeaderInput::new(
-            None,
-            None,
-            Some("Ship the port"),
-        ))
-        .expect("a named conversation has a header");
+        let presentation =
+            present_titlebar_header(TitlebarHeaderInput::new(None, None, Some("Ship the port")))
+                .expect("a named conversation has a header");
 
         assert_eq!(
             presentation.segments(),
@@ -343,12 +340,9 @@ mod tests {
 
     #[test]
     fn presentation_is_visible_exactly_when_it_has_segments() {
-        let presentation = present_titlebar_header(TitlebarHeaderInput::new(
-            Some("editor"),
-            None,
-            Some(""),
-        ))
-        .expect("an explicitly empty title still closes the line");
+        let presentation =
+            present_titlebar_header(TitlebarHeaderInput::new(Some("editor"), None, Some("")))
+                .expect("an explicitly empty title still closes the line");
         assert!(presentation.is_visible());
         assert_eq!(
             presentation.into_segments().last(),

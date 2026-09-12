@@ -1,9 +1,7 @@
 //! Application-side exact-run observation and cancellation controls.
 use super::*;
 use artisan_domain::{RunId, StopRun};
-use artisan_protocol::{
-    ActiveRunResult, RunLiveStatus, StopRunDisposition, StopRunReceipt,
-};
+use artisan_protocol::{ActiveRunResult, RunLiveStatus, StopRunDisposition, StopRunReceipt};
 
 #[derive(Default)]
 pub(super) struct RunControlsState {
@@ -49,7 +47,7 @@ impl RunControlsState {
         }
         if !matches!(
             self.status,
-            Some(RunLiveStatus::Running) | Some(RunLiveStatus::Waiting)
+            Some(RunLiveStatus::Running | RunLiveStatus::Waiting)
         ) {
             return None;
         }
@@ -138,29 +136,28 @@ impl NativeApplication {
             return;
         };
         self.run_controls.generation = generation;
-        match self.submit_command(NativeTransportCommand::ReadActiveRun {
+        if let Ok(()) = self.submit_command(NativeTransportCommand::ReadActiveRun {
             thread_id,
             generation,
         }) {
-            Ok(()) => self.run_controls.pending = Some(generation),
-            Err(_) => {
-                self.run_controls.available = false;
-                self.schedule_run_observation(cx);
-            }
+            self.run_controls.pending = Some(generation);
+        } else {
+            self.run_controls.available = false;
+            self.schedule_run_observation(cx);
         }
         self.sync_composer_controls(cx);
     }
 
     pub(super) fn receive_active_run(
         &mut self,
-        thread_id: ThreadId,
+        thread_id: &ThreadId,
         generation: u64,
         result: Result<ActiveRunResult, ServiceFailure>,
         cx: &mut Context<Self>,
     ) {
         if self.run_controls.pending != Some(generation)
-            || self.run_controls.thread.as_ref() != Some(&thread_id)
-            || self.selected_thread.as_ref() != Some(&thread_id)
+            || self.run_controls.thread.as_ref() != Some(thread_id)
+            || self.selected_thread.as_ref() != Some(thread_id)
         {
             return;
         }
@@ -172,7 +169,7 @@ impl NativeApplication {
                 run_id,
                 status,
                 engine_id,
-            }) if owner == thread_id => {
+            }) if owner == *thread_id => {
                 if self.run_controls.active.as_ref() != Some(&run_id) {
                     self.run_controls.stop = None;
                 }
@@ -181,7 +178,7 @@ impl NativeApplication {
                 self.run_controls.engine = Some(engine_id);
                 self.run_controls.available = true;
             }
-            Ok(ActiveRunResult::NoActive { thread_id: owner }) if owner == thread_id => {
+            Ok(ActiveRunResult::NoActive { thread_id: owner }) if owner == *thread_id => {
                 self.run_controls.active = None;
                 self.run_controls.status = None;
                 self.run_controls.engine = None;
@@ -192,7 +189,9 @@ impl NativeApplication {
         }
         self.sync_composer_controls(cx);
         self.schedule_composer_queue(false, cx);
-        if was_active && self.run_controls.active.is_none() { self.request_composer_usage(cx); }
+        if was_active && self.run_controls.active.is_none() {
+            self.request_composer_usage(cx);
+        }
         self.schedule_run_observation(cx);
         cx.notify();
     }
@@ -223,7 +222,7 @@ impl NativeApplication {
         match self.submit_command(NativeTransportCommand::StopRun(command.clone())) {
             Ok(()) => self.run_controls.stop = Some(command),
             Err(error) => {
-                self.message_failure = Some(NativeMessageFailure::new(command_failure(error)))
+                self.message_failure = Some(NativeMessageFailure::new(command_failure(error)));
             }
         }
         self.sync_composer_controls(cx);
@@ -259,11 +258,11 @@ impl NativeApplication {
 
     pub(super) fn receive_run_stop_failure(
         &mut self,
-        command: StopRun,
+        command: &StopRun,
         failure: ServiceFailure,
         cx: &mut Context<Self>,
     ) {
-        if self.run_controls.stop.as_ref() != Some(&command) {
+        if self.run_controls.stop.as_ref() != Some(command) {
             return;
         }
         self.run_controls.stop = None;
@@ -271,6 +270,27 @@ impl NativeApplication {
         self.sync_composer_controls(cx);
         self.schedule_run_observation(cx);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+impl super::NativeApplication {
+    /// Seeds one observed active run for terminal-failure presentation tests.
+    ///
+    /// Test-only direct state seeding: production observes runs exclusively
+    /// through the generation-fenced read path.
+    pub(super) fn seed_active_run_for_tests(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        status: RunLiveStatus,
+        engine_id: artisan_domain::EngineId,
+    ) {
+        self.run_controls.thread = Some(thread_id);
+        self.run_controls.active = Some(run_id);
+        self.run_controls.status = Some(status);
+        self.run_controls.engine = Some(engine_id);
+        self.run_controls.available = true;
     }
 }
 
@@ -298,7 +318,7 @@ mod tests {
                 application.run_controls.pending = Some(2);
                 application.run_controls.stop = Some(stop.clone());
                 application.receive_active_run(
-                    thread.clone(),
+                    &thread,
                     1,
                     Ok(ActiveRunResult::NoActive {
                         thread_id: thread.clone(),
@@ -328,7 +348,7 @@ mod tests {
                 assert!(application.composer_controls.read(cx).snapshot().cancelling);
                 assert_eq!(application.run_controls.active.as_ref(), Some(&run));
                 application.receive_active_run(
-                    thread.clone(),
+                    &thread,
                     2,
                     Ok(ActiveRunResult::NoActive {
                         thread_id: thread.clone(),
@@ -338,28 +358,7 @@ mod tests {
                 assert!(application.run_controls.active.is_none());
                 assert!(application.run_controls.stop.is_none());
                 assert!(!application.composer_controls.read(cx).snapshot().run_active);
-            })
+            });
         });
-    }
-}
-
-#[cfg(test)]
-impl super::NativeApplication {
-    /// Seeds one observed active run for terminal-failure presentation tests.
-    ///
-    /// Test-only direct state seeding: production observes runs exclusively
-    /// through the generation-fenced read path.
-    pub(super) fn seed_active_run_for_tests(
-        &mut self,
-        thread_id: ThreadId,
-        run_id: RunId,
-        status: RunLiveStatus,
-        engine_id: artisan_domain::EngineId,
-    ) {
-        self.run_controls.thread = Some(thread_id);
-        self.run_controls.active = Some(run_id);
-        self.run_controls.status = Some(status);
-        self.run_controls.engine = Some(engine_id);
-        self.run_controls.available = true;
     }
 }

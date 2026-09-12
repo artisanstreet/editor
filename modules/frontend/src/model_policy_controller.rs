@@ -344,21 +344,15 @@ impl ModelPolicyController {
     /// A changed authoritative value clears the repair key. Repeating the
     /// exact same authoritative value preserves that key, matching the
     /// source controller's structural comparison.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the controller's internal invariant is violated: after
-    /// setting `authoritative`, an effective current policy must be available.
     pub fn set_authoritative(&self, policy: SessionPolicy) -> SessionPolicy {
         let mut state = lock_unpoisoned(&self.state);
         let changed = state.authoritative.as_ref() != Some(&policy);
+        let fallback = policy.clone();
         state.authoritative = Some(policy);
         if changed {
             state.repair_key = None;
         }
-        state
-            .current()
-            .expect("an authoritative replacement always supplies a current policy")
+        state.current().unwrap_or(fallback)
     }
 
     /// Replaces the whole desired policy without merging it with prior state.

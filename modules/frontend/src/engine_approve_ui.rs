@@ -345,12 +345,11 @@ pub fn pair_approval_answer(
     }
     let row = paired_approval_row(state, command);
     let settlement = match receipt.outcome {
-        RunInteractionOutcome::Applied => AnswerSettlement::SettledInPlace {
-            duplicate: receipt.disposition == ReceiptDisposition::Duplicate,
-        },
-        RunInteractionOutcome::AlreadyResolved => AnswerSettlement::SettledInPlace {
-            duplicate: receipt.disposition == ReceiptDisposition::Duplicate,
-        },
+        RunInteractionOutcome::Applied | RunInteractionOutcome::AlreadyResolved => {
+            AnswerSettlement::SettledInPlace {
+                duplicate: receipt.disposition == ReceiptDisposition::Duplicate,
+            }
+        }
         RunInteractionOutcome::WrongRun => AnswerSettlement::RetryWhenLive {
             message: format!(
                 "run {} is not live; retry the same answer once it is live",
@@ -393,12 +392,11 @@ pub fn pair_question_answer(
     }
     let row = paired_question_row(state, command);
     let settlement = match receipt.outcome {
-        RunInteractionOutcome::Applied => AnswerSettlement::SettledInPlace {
-            duplicate: receipt.disposition == ReceiptDisposition::Duplicate,
-        },
-        RunInteractionOutcome::AlreadyResolved => AnswerSettlement::SettledInPlace {
-            duplicate: receipt.disposition == ReceiptDisposition::Duplicate,
-        },
+        RunInteractionOutcome::Applied | RunInteractionOutcome::AlreadyResolved => {
+            AnswerSettlement::SettledInPlace {
+                duplicate: receipt.disposition == ReceiptDisposition::Duplicate,
+            }
+        }
         RunInteractionOutcome::WrongRun => AnswerSettlement::RetryWhenLive {
             message: format!(
                 "run {} is not live; retry the same answer once it is live",

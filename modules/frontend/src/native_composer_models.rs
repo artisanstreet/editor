@@ -19,7 +19,9 @@ impl NativeApplication {
                 // re-failing on a stale row.
                 self.ensure_profile_usage(false, None, cx);
                 if let Some(pending) = self.catalog_controller.pending_favorite().cloned() {
-                    if !pending.admitted { self.submit_pending_model_favorite(pending, cx); }
+                    if !pending.admitted {
+                        self.submit_pending_model_favorite(&pending, cx);
+                    }
                 } else if self.engine_settings.can_save() {
                     self.save_engine_settings(cx);
                 } else if !self.retry_native_policy_save(cx) {
@@ -46,8 +48,7 @@ impl NativeApplication {
         // Native choices without an explicit profile persist under the
         // supported default profile, so the stored choice, the save, and the
         // send-time check all observe the same durable identity.
-        let policy =
-            crate::composer_model_config::with_default_native_profile(policy);
+        let policy = crate::composer_model_config::with_default_native_profile(policy);
         self.composer_model_choice = Some((self.selected_thread.clone(), policy.clone()));
         self.composer_model_run_error = None;
         self.sync_composer_controls(cx);
@@ -168,12 +169,13 @@ impl NativeApplication {
         self.sync_composer_controls(cx);
     }
 
-    fn handle_composer_favorite(&mut self, intent: &SetFavorite, cx: &mut Context<Self>) {        if let Some(pending) = self.catalog_controller.pending_favorite().cloned() {
+    fn handle_composer_favorite(&mut self, intent: &SetFavorite, cx: &mut Context<Self>) {
+        if let Some(pending) = self.catalog_controller.pending_favorite().cloned() {
             if pending.model_id.as_str() == intent.model_id && pending.favorite == intent.favorite {
-                if !pending.admitted {
-                    self.submit_pending_model_favorite(pending, cx);
-                } else {
+                if pending.admitted {
                     self.sync_composer_catalog_status(cx);
+                } else {
+                    self.submit_pending_model_favorite(&pending, cx);
                 }
             } else {
                 self.set_model_selector_error(
@@ -203,29 +205,20 @@ impl NativeApplication {
             self.set_model_selector_error("The selected model is not in the runtime catalog.", cx);
             return;
         }
-        let model_id = match ModelFavoriteId::parse(intent.model_id.clone()) {
-            Ok(model_id) => model_id,
-            Err(_) => {
-                self.set_model_selector_error("The selected model identity is invalid.", cx);
-                return;
-            }
+        let Ok(model_id) = ModelFavoriteId::parse(intent.model_id.clone()) else {
+            self.set_model_selector_error("The selected model identity is invalid.", cx);
+            return;
         };
-        let catalog_revision = match CatalogRevision::parse(catalog.catalog_revision.clone()) {
-            Ok(revision) => revision,
-            Err(_) => {
-                self.set_model_selector_error(
-                    "The runtime catalog revision is invalid; reload the catalog before retrying.",
-                    cx,
-                );
-                return;
-            }
+        let Ok(catalog_revision) = CatalogRevision::parse(catalog.catalog_revision.clone()) else {
+            self.set_model_selector_error(
+                "The runtime catalog revision is invalid; reload the catalog before retrying.",
+                cx,
+            );
+            return;
         };
-        let request_id = match create_model_favorite_request_id() {
-            Ok(request_id) => request_id,
-            Err(_) => {
-                self.set_model_selector_error("Favorite request identity is unavailable.", cx);
-                return;
-            }
+        let Ok(request_id) = create_model_favorite_request_id() else {
+            self.set_model_selector_error("Favorite request identity is unavailable.", cx);
+            return;
         };
         let pending = match self.catalog_controller.begin_favorite(
             &scope,
@@ -244,12 +237,12 @@ impl NativeApplication {
             }
             Err(FavoriteIntentError::AlreadyPending) => return,
         };
-        self.submit_pending_model_favorite(pending, cx);
+        self.submit_pending_model_favorite(&pending, cx);
     }
 
     pub(super) fn submit_pending_model_favorite(
         &mut self,
-        pending: crate::native_transport::PendingModelFavorite,
+        pending: &crate::native_transport::PendingModelFavorite,
         cx: &mut Context<Self>,
     ) {
         let command = SetModelFavorite::new(
@@ -261,7 +254,7 @@ impl NativeApplication {
             pending.favorite,
         );
         let Some(service) = self.service.clone() else {
-            self.catalog_controller.on_favorite_admission_failed(
+            let _ = self.catalog_controller.on_favorite_admission_failed(
                 &pending.scope,
                 &pending.request_id,
                 NativeCatalogController::unavailable_failure(),
@@ -275,7 +268,7 @@ impl NativeApplication {
                     .catalog_controller
                     .mark_favorite_admitted(&pending.scope, &pending.request_id)
                 {
-                    self.catalog_controller.on_favorite_admission_failed(
+                    let _ = self.catalog_controller.on_favorite_admission_failed(
                         &pending.scope,
                         &pending.request_id,
                         invalid_service_failure(),
@@ -283,7 +276,7 @@ impl NativeApplication {
                 }
             }
             Err(error) => {
-                self.catalog_controller.on_favorite_admission_failed(
+                let _ = self.catalog_controller.on_favorite_admission_failed(
                     &pending.scope,
                     &pending.request_id,
                     command_failure(error),
@@ -313,7 +306,11 @@ impl NativeApplication {
     }
 
     pub(super) fn sync_composer_model_policy(&mut self, cx: &mut Context<Self>) {
-        if self.composer_model_choice.as_ref().is_some_and(|(thread, _)| thread != &self.selected_thread) {
+        if self
+            .composer_model_choice
+            .as_ref()
+            .is_some_and(|(thread, _)| thread != &self.selected_thread)
+        {
             self.composer_model_choice = None;
             self.composer_model_run_error = None;
         }
@@ -330,12 +327,9 @@ impl NativeApplication {
                 // displays its saved model/effort/profile/permission instead
                 // of drifting to no selection. Only an exact round-trip is
                 // accepted; anything else falls back to no saved policy.
-                let artisan_domain::EngineSelection::OpenCode2(native) = config.selection()
-                else {
-                    return crate::composer_model_config::policy_for_selection(
-                        &snapshot, config,
-                    )
-                    .ok();
+                let artisan_domain::EngineSelection::OpenCode2(native) = config.selection() else {
+                    return crate::composer_model_config::policy_for_selection(&snapshot, config)
+                        .ok();
                 };
                 if snapshot.scope.as_ref()?.profile_id != native.profile_id().as_str() {
                     return None;
@@ -345,7 +339,9 @@ impl NativeApplication {
                         selection.model_id == native.model_id().as_str()
                             && selection.provider_route_id == native.route_id().as_str()
                             && selection.variant_id.as_deref()
-                                == native.variant_id().map(|v| v.as_str())
+                                == native
+                                    .variant_id()
+                                    .map(artisan_domain::EngineVariantId::as_str)
                     })
                 })?;
                 let mut policy = snapshot.preview_policy_for_model(&model.id).ok()?;
@@ -363,7 +359,9 @@ impl NativeApplication {
                 Some(policy)
             });
         let saved_policy = policy;
-        let policy = self.composer_model_choice.as_ref()
+        let policy = self
+            .composer_model_choice
+            .as_ref()
             .and_then(|(_, choice)| snapshot.rebase_policy(choice))
             .or_else(|| saved_policy.clone());
         // The saved-policy projection above stays `OpenCode` 2-shaped;
@@ -374,19 +372,20 @@ impl NativeApplication {
         // selection reads as saved instead of permanently drifting.
         let authoritative = match (&policy, &saved_policy) {
             (Some(displayed), Some(saved)) => displayed == saved,
-            (Some(displayed), None) => self
-                .engine_settings
-                .authoritative_config()
-                .is_some_and(|saved| {
-                    crate::composer_model_config::config_for_policy(
-                        &snapshot,
-                        displayed,
-                        Some(saved),
-                    )
-                    .ok()
-                    .as_ref()
-                        == Some(saved)
-                }),
+            (Some(displayed), None) => {
+                self.engine_settings
+                    .authoritative_config()
+                    .is_some_and(|saved| {
+                        crate::composer_model_config::config_for_policy(
+                            &snapshot,
+                            displayed,
+                            Some(saved),
+                        )
+                        .ok()
+                        .as_ref()
+                            == Some(saved)
+                    })
+            }
             _ => false,
         };
         let pending_save = self.engine_settings.pending_save_request_id().is_some();

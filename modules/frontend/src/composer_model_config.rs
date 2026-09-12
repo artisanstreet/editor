@@ -3,7 +3,7 @@ use artisan_catalog::{
     NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeOptionValue,
     NativePermissionOption,
 };
-use artisan_domain::*;
+use artisan_domain::{EngineRunConfig, EngineSelection, EngineProfileId, CodexReasoningEffort, CodexServiceTier, EngineModelId, CodexSelection, ClaudePermissionMode, ClaudeEffort, ClaudeSelection, GrokReasoningEffort, GrokSelection, CursorReasoningEffort, CursorSpeed, CursorSelection, EngineRouteId, HermesPermissionMode, HermesReasoningEffort, HermesSelection, EngineVariantId, ApprovalMode, FilesystemAccess, NetworkAccess, WebSearchAccess, EnginePermissionPolicy, PermissionId, EngineAgentId, OpenCode2Selection, GrokPermissionMode, CursorPermissionMode, CodexModelContextWindow, EngineRuntimeControls, FiniteMillis, ByteLimit, CountLimit, EngineRuntimeControlsInput};
 
 /// Default profile identity persisted for native engine selections that
 /// carry no explicit profile.
@@ -16,16 +16,13 @@ use artisan_domain::*;
 pub(crate) const NATIVE_DEFAULT_PROFILE_ID: &str = "default";
 
 /// Engines whose selections may use [`NATIVE_DEFAULT_PROFILE_ID`].
-const NATIVE_DEFAULT_PROFILE_ENGINES: [&str; 5] =
-    ["codex", "claude", "grok", "cursor", "hermes"];
+const NATIVE_DEFAULT_PROFILE_ENGINES: [&str; 5] = ["codex", "claude", "grok", "cursor", "hermes"];
 
 /// Attaches the default profile to a native choice without one.
 ///
 /// Policies that already name a profile and every `OpenCode` 2 policy are
 /// returned unchanged.
-pub(crate) fn with_default_native_profile(
-    policy: &NativeModelPolicy,
-) -> NativeModelPolicy {
+pub(crate) fn with_default_native_profile(policy: &NativeModelPolicy) -> NativeModelPolicy {
     if policy.profile_id.is_some() {
         return policy.clone();
     }
@@ -87,6 +84,10 @@ pub(crate) fn config_for_policy(
 /// is an honest error, never a silent downgrade — except where the resolver
 /// itself drops the axis (Hermes context, neutral standard speed), which is
 /// documented at the call site.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one resolver per engine keeps each capability-to-selection mapping reviewable beside its engine's option vocabulary"
+)]
 fn native_selection_config(
     catalog: &NativeModelCatalog,
     policy: &NativeModelPolicy,
@@ -286,9 +287,7 @@ pub(crate) fn policy_for_selection(
     saved: &EngineRunConfig,
 ) -> Result<NativeModelPolicy, &'static str> {
     match saved.selection() {
-        EngineSelection::OpenCode2(_) => {
-            Err("OpenCode selections keep their registry projection")
-        }
+        EngineSelection::OpenCode2(_) => Err("OpenCode selections keep their registry projection"),
         EngineSelection::Codex(selection) => policy_for_codex(catalog, saved, selection),
         EngineSelection::Claude(selection) => policy_for_claude(catalog, saved, selection),
         EngineSelection::Grok(selection) => policy_for_grok(catalog, saved, selection),
@@ -315,10 +314,7 @@ fn verified_policy(
 }
 
 /// Finds one thinking option by its native value.
-fn thinking_option(
-    model: &NativeModelDefinition,
-    native_value: &str,
-) -> Option<NativeOptionValue> {
+fn thinking_option(model: &NativeModelDefinition, native_value: &str) -> Option<NativeOptionValue> {
     match &model.capabilities.thinking {
         artisan_catalog::NativeThinkingCapability::Supported { options, .. } => options
             .iter()
@@ -354,14 +350,12 @@ fn window_option(
         .context_window
         .as_ref()
         .and_then(|capability| {
-            capability
-                .options
-                .iter()
-                .find(|option| {
-                    option.native_config.as_ref().is_some_and(|config| {
-                        config.model_context_window == model_context_window
-                    })
-                })
+            capability.options.iter().find(|option| {
+                option
+                    .native_config
+                    .as_ref()
+                    .is_some_and(|config| config.model_context_window == model_context_window)
+            })
         })
         .map(|option| artisan_catalog::NativeContextSelection {
             id: option.id.clone(),
@@ -416,7 +410,7 @@ fn policy_for_codex(
     let speed = selection
         .service_tier()
         .map(|tier| tier.as_str().to_owned());
-    let window = selection.model_context_window().map(|window| window.get());
+    let window = selection.model_context_window().map(artisan_domain::CodexModelContextWindow::get);
     let profile = selection.profile_id().as_str().to_owned();
     for model in catalog
         .manifest
@@ -472,9 +466,7 @@ fn policy_for_claude(
         .model_id()
         .map(|model| model.as_str().to_owned())
         .ok_or("Saved Claude selection names no model")?;
-    let effort = selection
-        .effort()
-        .map(|effort| effort.as_str().to_owned());
+    let effort = selection.effort().map(|effort| effort.as_str().to_owned());
     let profile = selection.profile_id().as_str().to_owned();
     for model in catalog
         .manifest
@@ -513,6 +505,10 @@ fn policy_for_claude(
 /// back to no selection (both rebuild to the bare id); otherwise the id must
 /// end in a real config-less option suffix. A missing row or suffix is
 /// `None` so the caller keeps scanning later rows.
+#[expect(
+    clippy::option_option,
+    reason = "the outer None means the saved id did not match this manifest row; the inner None is the config-less option choice, and both are load-bearing"
+)]
 fn claude_context_for_model(
     model: &NativeModelDefinition,
     wanted: &str,
@@ -523,9 +519,7 @@ fn claude_context_for_model(
             capability
                 .options
                 .iter()
-                .find(|option| {
-                    option.native_suffix.is_empty() && option.native_config.is_none()
-                })
+                .find(|option| option.native_suffix.is_empty() && option.native_config.is_none())
                 .map(|option| artisan_catalog::NativeContextSelection {
                     id: option.id.clone(),
                     native_suffix: option.native_suffix.clone(),
@@ -850,8 +844,8 @@ fn inherited_network_web(
         .filter(|selection| selection.engine_id().as_str() == engine_id)
         .and_then(EngineSelection::permission);
     (
-        permission.map_or(NetworkAccess::Disabled, |policy| policy.network()),
-        permission.map_or(WebSearchAccess::Disabled, |policy| policy.web_search()),
+        permission.map_or(NetworkAccess::Disabled, artisan_domain::EnginePermissionPolicy::network),
+        permission.map_or(WebSearchAccess::Disabled, artisan_domain::EnginePermissionPolicy::web_search),
     )
 }
 
@@ -1194,7 +1188,7 @@ mod tests {
             panic!("expected a Codex selection");
         };
         assert_eq!(
-            selection.model_context_window().map(|window| window.get()),
+            selection.model_context_window().map(artisan_domain::CodexModelContextWindow::get),
             Some(1_050_000)
         );
         // The window is configuration, never identity: the model id stays bare.
@@ -1444,9 +1438,7 @@ mod tests {
         let mut hermes = hermes_policy(&routed, "hermes-test-route");
         hermes.profile_id = None;
         assert_eq!(
-            with_default_native_profile(&hermes)
-                .profile_id
-                .as_deref(),
+            with_default_native_profile(&hermes).profile_id.as_deref(),
             Some("default")
         );
     }
@@ -1472,9 +1464,9 @@ mod tests {
     fn assert_selection_round_trip(catalog: &NativeModelCatalog, model_id: &str) {
         let policy = profiled_policy(catalog, model_id);
         let config = config_for_policy(catalog, &policy, None).unwrap();
-        let projected = policy_for_selection(&catalog, &config).unwrap();
+        let projected = policy_for_selection(catalog, &config).unwrap();
         assert_eq!(
-            config_for_policy(&catalog, &projected, Some(&config)).unwrap(),
+            config_for_policy(catalog, &projected, Some(&config)).unwrap(),
             config,
             "{model_id} projection must rebuild its saved configuration"
         );
@@ -1483,7 +1475,7 @@ mod tests {
         assert_eq!(projected.native_model_id, policy.native_model_id);
         assert_eq!(projected.native_selection, policy.native_selection);
         assert_eq!(projected.profile_id, policy.profile_id);
-        assert!(validate_run_choice(&catalog, &projected, Some(&config)).is_ok());
+        assert!(validate_run_choice(catalog, &projected, Some(&config)).is_ok());
     }
 
     #[test]
@@ -1510,10 +1502,7 @@ mod tests {
             panic!("expected a Claude selection");
         };
         // The durable id composes the base with the extended suffix.
-        assert_eq!(
-            selection.model_id().unwrap().as_str(),
-            "claude-fable-5[1m]"
-        );
+        assert_eq!(selection.model_id().unwrap().as_str(), "claude-fable-5[1m]");
         let projected = policy_for_selection(&catalog, &config).unwrap();
         assert_eq!(projected.context_window, policy.context_window);
         assert_eq!(projected.permission, policy.permission);
@@ -1565,8 +1554,7 @@ mod tests {
                 None,
                 EnginePermissionPolicy::new(
                     PermissionId::parse("autonomous").expect("permission"),
-                    EngineAgentId::parse("artisan-v1-autonomous-offline-no-web")
-                        .expect("agent"),
+                    EngineAgentId::parse("artisan-v1-autonomous-offline-no-web").expect("agent"),
                     ApprovalMode::OnRequest,
                     FilesystemAccess::Workspace,
                     NetworkAccess::Disabled,

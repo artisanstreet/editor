@@ -52,6 +52,7 @@ pub mod conversation_turn_footer_policy;
 pub mod conversation_turn_machine;
 pub mod conversation_turn_navigator;
 pub mod conversation_view_machine;
+pub mod desktop_shell;
 pub mod dev_instance_policy;
 pub mod dev_startup_receipt;
 pub mod dropdown_highlight_settle;
@@ -73,11 +74,11 @@ pub mod forge_recovery_health;
 pub mod forge_repair_request;
 pub mod gradient_avatar;
 pub mod harness_setup_policy;
+pub mod home_project_picker;
 pub mod host_identity_controller;
 pub mod host_resume_recovery_policy;
 pub mod hover_pill_geometry_policy;
 pub mod hover_pill_group_policy;
-pub mod home_project_picker;
 pub mod image_inspection_store;
 pub mod image_policy;
 pub mod image_viewer;
@@ -96,14 +97,13 @@ pub mod model_policy_controller;
 pub mod model_policy_controls_presentation;
 pub mod model_selection_presentation;
 pub mod motion_spring;
-pub mod desktop_shell;
 pub mod native_application;
 pub mod native_command_menu;
 pub mod native_composer;
-mod native_composer_material;
 pub mod native_composer_controls;
-pub mod native_context_usage;
+mod native_composer_material;
 pub mod native_composer_visuals;
+pub mod native_context_usage;
 pub mod native_hover_rail_card;
 pub mod native_new_thread_surface;
 pub mod native_project_menu;
@@ -122,19 +122,20 @@ pub mod object_url_boundary;
 pub mod onboarding_harness_presentation;
 pub mod onboarding_route;
 pub mod onboarding_screen;
+#[cfg(feature = "visual-proof")]
+pub mod parity_visual_proof;
 pub mod project_catalog;
 pub mod project_identity_policy;
 pub mod project_path_policy;
 pub mod project_picker;
+#[cfg(any(test, feature = "visual-proof"))]
 pub mod proof;
-#[cfg(feature = "visual-proof")]
-pub mod parity_visual_proof;
 pub mod reader_attention;
 pub mod reasoning_display;
 pub mod relative_time;
 pub mod repository_mark;
-pub mod rich_link_url;
 pub mod rich_link_titles;
+pub mod rich_link_url;
 pub mod route_navigation;
 pub mod route_navigation_adapter;
 pub mod run_usage_policy;
@@ -186,9 +187,9 @@ pub mod workspace_tab_state;
 pub fn run() -> std::process::ExitCode {
     native_application::run()
 }
+pub mod native_message_images;
 pub mod native_model_catalog;
 pub mod native_model_selector;
-pub mod native_message_images;
 pub mod native_profile_usage;
 
 mod composer_model_config;

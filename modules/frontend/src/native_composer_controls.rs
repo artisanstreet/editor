@@ -29,8 +29,8 @@ use artisan_ui::{
 };
 use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, FocusHandle,
-    Focusable, IntoElement, Render, Stateful, Task, Window, div, px,
+    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, FocusHandle, Focusable,
+    IntoElement, Render, Stateful, Task, Window, div, px,
 };
 
 use crate::composer_action_failure::ComposerActionFailure;
@@ -217,6 +217,10 @@ impl NativeComposerFailure {
 /// it must be `None` when there is no current usage owner. Readiness booleans
 /// are already projected by the parent and are never inferred from draft text
 /// here.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the snapshot projects independent parent-owned readiness bits; each gates a distinct control and is never inferred from the others"
+)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NativeComposerControlsSnapshot {
     /// Current run identity, when a run or its final usage still owns the view.
@@ -544,17 +548,15 @@ impl NativeComposerControls {
             .line_height(px(24.0))
             .text_color(desktop_theme.secondary)
             .bg(desktop_theme.sidebar)
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .flex_1()
-                    .truncate()
-                    .child(label),
-            )
+            .child(div().min_w(px(0.0)).flex_1().truncate().child(label))
     }
 
     /// Renders the pending steering lip above the parent-owned editor.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one GPUI builder composes the steering lip rows and their edit/discard actions in visual order"
+    )]
     pub fn render_lip(
         &mut self,
         theme: ArtisanTheme,
@@ -613,6 +615,15 @@ impl NativeComposerControls {
                 let discard_entity = entity.clone();
                 let edit_identity = identity.clone();
                 let discard_identity = identity.clone();
+                let Some(edit_label) = AccessibleLabel::new(QueuedSteerRow::edit_label()).ok()
+                else {
+                    continue;
+                };
+                let Some(discard_label) =
+                    AccessibleLabel::new(QueuedSteerRow::discard_label()).ok()
+                else {
+                    continue;
+                };
 
                 let edit = Button::new(
                     ElementId::Name(edit_selector.clone().into()),
@@ -621,26 +632,24 @@ impl NativeComposerControls {
                     MotionPolicy::Reduced,
                     ButtonVariant::Ghost,
                     ButtonSize::IconSmall,
-                    ButtonContent::icon_only(
-                        QueuedSteerRow::edit_icon(),
-                        AccessibleLabel::new(QueuedSteerRow::edit_label())
-                            .expect("the edit label is nonempty"),
-                    ),
+                    ButtonContent::icon_only(QueuedSteerRow::edit_icon(), edit_label),
                 )
-                .expect("the queued-steer edit button is valid")
-                .focus_visibility(FocusVisibility::Visible)
-                .disabled(self.snapshot.disabled)
-                .debug_selector(edit_selector)
-                .on_activate(move |_, _, app| {
-                    edit_entity.update(app, |controls, controls_cx| {
-                        controls.emit_if_allowed(
-                            NativeComposerControlsEvent::EditQueuedSteer {
-                                command_id: edit_identity.command_id.clone(),
-                                generation: edit_identity.generation,
-                            },
-                            controls_cx,
-                        );
-                    });
+                .map(|button| {
+                    button
+                        .focus_visibility(FocusVisibility::Visible)
+                        .disabled(self.snapshot.disabled)
+                        .debug_selector(edit_selector)
+                        .on_activate(move |_, _, app| {
+                            edit_entity.update(app, |controls, controls_cx| {
+                                controls.emit_if_allowed(
+                                    NativeComposerControlsEvent::EditQueuedSteer {
+                                        command_id: edit_identity.command_id.clone(),
+                                        generation: edit_identity.generation,
+                                    },
+                                    controls_cx,
+                                );
+                            });
+                        })
                 });
 
                 let discard = Button::new(
@@ -650,38 +659,38 @@ impl NativeComposerControls {
                     MotionPolicy::Reduced,
                     ButtonVariant::Ghost,
                     ButtonSize::IconSmall,
-                    ButtonContent::icon_only(
-                        QueuedSteerRow::discard_icon(),
-                        AccessibleLabel::new(QueuedSteerRow::discard_label())
-                            .expect("the discard label is nonempty"),
-                    ),
+                    ButtonContent::icon_only(QueuedSteerRow::discard_icon(), discard_label),
                 )
-                .expect("the queued-steer discard button is valid")
-                .focus_visibility(FocusVisibility::Visible)
-                .disabled(self.snapshot.disabled)
-                .debug_selector(discard_selector)
-                .on_activate(move |_, _, app| {
-                    discard_entity.update(app, |controls, controls_cx| {
-                        controls.emit_if_allowed(
-                            NativeComposerControlsEvent::DiscardQueuedSteer {
-                                command_id: discard_identity.command_id.clone(),
-                                generation: discard_identity.generation,
-                            },
-                            controls_cx,
-                        );
-                    });
+                .map(|button| {
+                    button
+                        .focus_visibility(FocusVisibility::Visible)
+                        .disabled(self.snapshot.disabled)
+                        .debug_selector(discard_selector)
+                        .on_activate(move |_, _, app| {
+                            discard_entity.update(app, |controls, controls_cx| {
+                                controls.emit_if_allowed(
+                                    NativeComposerControlsEvent::DiscardQueuedSteer {
+                                        command_id: discard_identity.command_id.clone(),
+                                        generation: discard_identity.generation,
+                                    },
+                                    controls_cx,
+                                );
+                            });
+                        })
                 });
 
-                row_view = row_view.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .flex_shrink_0()
-                        .child(edit)
-                        .child(discard),
-                );
+                if let (Ok(edit), Ok(discard)) = (edit, discard) {
+                    row_view = row_view.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .flex_shrink_0()
+                            .child(edit)
+                            .child(discard),
+                    );
+                }
             }
 
             // Reference mount motion (`utilities.css:522-531`,
@@ -789,7 +798,7 @@ impl NativeComposerControls {
             .tab_stop(!self.snapshot.disabled && failure.retryable);
 
         let dismiss_entity = entity.clone();
-        let dismiss = Button::new(
+        let Ok(dismiss) = Button::new(
             ElementId::Name(FAILURE_DISMISS_SELECTOR.into()),
             self.failure_dismiss_focus.clone(),
             theme,
@@ -797,26 +806,28 @@ impl NativeComposerControls {
             ButtonVariant::Ghost,
             ButtonSize::Small,
             ButtonContent::text("Dismiss"),
-        )
-        .expect("the failure dismiss button is valid")
-        .focus_visibility(FocusVisibility::Visible)
-        // Dismissal remains available even when the parent has disabled the
-        // run-scoped controls, so an error cannot trap keyboard focus.
-        .disabled(false)
-        .debug_selector(FAILURE_DISMISS_SELECTOR)
-        .on_activate(move |_, _, app| {
-            dismiss_entity.update(app, |controls, controls_cx| {
-                controls.emit_if_allowed(
-                    NativeComposerControlsEvent::DismissFailure { failure_id },
-                    controls_cx,
-                );
+        ) else {
+            return None;
+        };
+        let dismiss = dismiss
+            .focus_visibility(FocusVisibility::Visible)
+            // Dismissal remains available even when the parent has disabled the
+            // run-scoped controls, so an error cannot trap keyboard focus.
+            .disabled(false)
+            .debug_selector(FAILURE_DISMISS_SELECTOR)
+            .on_activate(move |_, _, app| {
+                dismiss_entity.update(app, |controls, controls_cx| {
+                    controls.emit_if_allowed(
+                        NativeComposerControlsEvent::DismissFailure { failure_id },
+                        controls_cx,
+                    );
+                });
             });
-        });
 
         let mut actions = div().flex().flex_row().items_center().gap(px(4.0));
         if failure.retryable {
             let retry_entity = entity.clone();
-            let retry = Button::new(
+            if let Ok(retry) = Button::new(
                 ElementId::Name(FAILURE_RETRY_SELECTOR.into()),
                 self.failure_retry_focus.clone(),
                 theme,
@@ -824,20 +835,21 @@ impl NativeComposerControls {
                 ButtonVariant::Ghost,
                 ButtonSize::Small,
                 ButtonContent::text("Retry"),
-            )
-            .expect("the failure retry button is valid")
-            .focus_visibility(FocusVisibility::Visible)
-            .disabled(self.snapshot.disabled)
-            .debug_selector(FAILURE_RETRY_SELECTOR)
-            .on_activate(move |_, _, app| {
-                retry_entity.update(app, |controls, controls_cx| {
-                    controls.emit_if_allowed(
-                        NativeComposerControlsEvent::RetryFailure { failure_id },
-                        controls_cx,
-                    );
-                });
-            });
-            actions = actions.child(retry);
+            ) {
+                let retry = retry
+                    .focus_visibility(FocusVisibility::Visible)
+                    .disabled(self.snapshot.disabled)
+                    .debug_selector(FAILURE_RETRY_SELECTOR)
+                    .on_activate(move |_, _, app| {
+                        retry_entity.update(app, |controls, controls_cx| {
+                            controls.emit_if_allowed(
+                                NativeComposerControlsEvent::RetryFailure { failure_id },
+                                controls_cx,
+                            );
+                        });
+                    });
+                actions = actions.child(retry);
+            }
         }
         actions = actions.child(dismiss);
 
@@ -900,6 +912,10 @@ impl NativeComposerControls {
     /// new thread as an unsent draft. There is deliberately no retry: a
     /// terminal failure will never send on its thread.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one GPUI builder composes every terminal-failure card and its copy in list order"
+    )]
     pub fn render_failed_dispatches(
         &mut self,
         theme: ArtisanTheme,
@@ -924,8 +940,10 @@ impl NativeComposerControls {
             let row_index = isize::try_from(index).unwrap_or(isize::MAX);
             let tab_index = 30isize.saturating_add(row_index);
             let focus = self.failed_focus(&row.identity, tab_index, cx);
-            let selector =
-                format!("{NATIVE_COMPOSER_FAILED_NEW_THREAD_SELECTOR}-{}", row.command_id());
+            let selector = format!(
+                "{NATIVE_COMPOSER_FAILED_NEW_THREAD_SELECTOR}-{}",
+                row.command_id()
+            );
             let action_entity = entity.clone();
             let command_id = row.command_id().to_owned();
             let generation = row.generation();
@@ -938,20 +956,22 @@ impl NativeComposerControls {
                 ButtonSize::Small,
                 ButtonContent::text("Start new chat"),
             )
-            .expect("the failed-dispatch new-chat button is valid")
-            .focus_visibility(FocusVisibility::Visible)
-            .disabled(self.snapshot.disabled || !self.snapshot.failed_new_chat_ready)
-            .debug_selector(selector.clone())
-            .on_activate(move |_, _, app| {
-                action_entity.update(app, |controls, controls_cx| {
-                    controls.emit_if_allowed(
-                        NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
-                            command_id: command_id.clone(),
-                            generation,
-                        },
-                        controls_cx,
-                    );
-                });
+            .map(|button| {
+                button
+                    .focus_visibility(FocusVisibility::Visible)
+                    .disabled(self.snapshot.disabled || !self.snapshot.failed_new_chat_ready)
+                    .debug_selector(selector.clone())
+                    .on_activate(move |_, _, app| {
+                        action_entity.update(app, |controls, controls_cx| {
+                            controls.emit_if_allowed(
+                                NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
+                                    command_id: command_id.clone(),
+                                    generation,
+                                },
+                                controls_cx,
+                            );
+                        });
+                    })
             });
             let mut body = div()
                 .min_w(px(0.0))
@@ -995,29 +1015,30 @@ impl NativeComposerControls {
                         .child("Start a new chat once the composer is empty and idle."),
                 );
             }
-            cards = cards.child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(px(12.0))
-                    .rounded(px(14.0))
-                    .border_1()
-                    .border_color(theme.colors.destructive.with_alpha(0.4).to_paint())
-                    .bg(desktop_theme.field)
-                    .px(px(16.0))
-                    .py(px(12.0))
-                    .child(body)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(action),
-                    ),
-            );
+            let mut card = div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(12.0))
+                .rounded(px(14.0))
+                .border_1()
+                .border_color(theme.colors.destructive.with_alpha(0.4).to_paint())
+                .bg(desktop_theme.field)
+                .px(px(16.0))
+                .py(px(12.0))
+                .child(body);
+            if let Ok(action) = action {
+                card = card.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(action),
+                );
+            }
+            cards = cards.child(card);
         }
         Some(cards)
     }
@@ -1038,28 +1059,30 @@ impl NativeComposerControls {
 
         self.jump_focus = self.jump_focus.clone().tab_stop(!self.snapshot.disabled);
         let jump_entity = cx.entity();
-        let jump = Button::new(
+        let Ok(jump_label) = AccessibleLabel::new(JUMP_TO_LATEST_LABEL) else {
+            return None;
+        };
+        let Ok(jump) = Button::new(
             ElementId::Name(NATIVE_COMPOSER_JUMP_TO_LATEST_SELECTOR.into()),
             self.jump_focus.clone(),
             theme,
             MotionPolicy::Reduced,
             ButtonVariant::Ghost,
             ButtonSize::IconSmall,
-            ButtonContent::icon_only(
-                AssetId::TABLER_CHEVRON_DOWN,
-                AccessibleLabel::new(JUMP_TO_LATEST_LABEL)
-                    .expect("the jump-to-latest label is nonempty"),
-            ),
-        )
-        .expect("the jump-to-latest button is valid")
-        .focus_visibility(FocusVisibility::Visible)
-        .disabled(self.snapshot.disabled)
-        .debug_selector(NATIVE_COMPOSER_JUMP_TO_LATEST_SELECTOR)
-        .on_activate(move |_, _, app| {
-            jump_entity.update(app, |controls, controls_cx| {
-                controls.emit_if_allowed(NativeComposerControlsEvent::JumpToLatest, controls_cx);
+            ButtonContent::icon_only(AssetId::TABLER_CHEVRON_DOWN, jump_label),
+        ) else {
+            return None;
+        };
+        let jump = jump
+            .focus_visibility(FocusVisibility::Visible)
+            .disabled(self.snapshot.disabled)
+            .debug_selector(NATIVE_COMPOSER_JUMP_TO_LATEST_SELECTOR)
+            .on_activate(move |_, _, app| {
+                jump_entity.update(app, |controls, controls_cx| {
+                    controls
+                        .emit_if_allowed(NativeComposerControlsEvent::JumpToLatest, controls_cx);
+                });
             });
-        });
 
         Some(
             div()
@@ -1073,6 +1096,10 @@ impl NativeComposerControls {
 
     /// Renders the bottom row, accepting a parent-supplied model picker slot.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one GPUI builder composes the primary action, stop/new-thread states, and picker slot they share"
+    )]
     pub fn render_control_row<E: IntoElement>(
         &mut self,
         theme: ArtisanTheme,
@@ -1142,7 +1169,7 @@ impl NativeComposerControls {
         if let Some(event) = new_thread_event {
             let new_thread_entity = entity.clone();
             let focus = self.new_thread_focus.clone();
-            let new_thread = Button::new(
+            if let Ok(new_thread) = Button::new(
                 ElementId::Name(NATIVE_COMPOSER_NEW_THREAD_SELECTOR.into()),
                 focus,
                 theme,
@@ -1153,18 +1180,19 @@ impl NativeComposerControls {
                     AssetId::TABLER_MESSAGE_PLUS,
                     START_NEW_THREAD_PROMPT_LABEL,
                 ),
-            )
-            .expect("the new-thread button is valid")
-            .focus_visibility(FocusVisibility::Visible)
-            .corner_radius(px(10.0))
-            .disabled(self.snapshot.disabled)
-            .debug_selector(NATIVE_COMPOSER_NEW_THREAD_SELECTOR)
-            .on_activate(move |_, _, app| {
-                new_thread_entity.update(app, |controls, controls_cx| {
-                    controls.emit_if_allowed(event.clone(), controls_cx);
-                });
-            });
-            right = right.child(new_thread);
+            ) {
+                let new_thread = new_thread
+                    .focus_visibility(FocusVisibility::Visible)
+                    .corner_radius(px(10.0))
+                    .disabled(self.snapshot.disabled)
+                    .debug_selector(NATIVE_COMPOSER_NEW_THREAD_SELECTOR)
+                    .on_activate(move |_, _, app| {
+                        new_thread_entity.update(app, |controls, controls_cx| {
+                            controls.emit_if_allowed(event.clone(), controls_cx);
+                        });
+                    });
+                right = right.child(new_thread);
+            }
         }
 
         let (icon, label) = (
@@ -1172,32 +1200,40 @@ impl NativeComposerControls {
             SendButtonStill::control_label(self.snapshot.run_active),
         );
         let primary_disabled = primary_event.is_none();
-        let mut primary = Button::new(
-            ElementId::Name(NATIVE_COMPOSER_PRIMARY_SELECTOR.into()),
-            self.primary_focus.clone(),
-            theme,
-            MotionPolicy::Reduced,
-            ButtonVariant::Ghost,
-            ButtonSize::IconSmall,
-            ButtonContent::icon_only(
-                icon,
-                AccessibleLabel::new(label).expect("the primary action label is nonempty"),
-            ),
-        )
-        .expect("the primary composer control is valid")
-        .focus_visibility(FocusVisibility::Visible)
-        .corner_radius(px(10.0))
-        .disabled(primary_disabled)
-        .debug_selector(NATIVE_COMPOSER_PRIMARY_SELECTOR);
-        if let Some(event) = primary_event {
+        let primary = AccessibleLabel::new(label).ok().and_then(|label| {
+            Button::new(
+                ElementId::Name(NATIVE_COMPOSER_PRIMARY_SELECTOR.into()),
+                self.primary_focus.clone(),
+                theme,
+                MotionPolicy::Reduced,
+                ButtonVariant::Ghost,
+                ButtonSize::IconSmall,
+                ButtonContent::icon_only(icon, label),
+            )
+            .ok()
+        });
+        let primary = primary.map(|button| {
+            button
+                .focus_visibility(FocusVisibility::Visible)
+                .corner_radius(px(10.0))
+                .disabled(primary_disabled)
+                .debug_selector(NATIVE_COMPOSER_PRIMARY_SELECTOR)
+        });
+        let primary = if let Some(event) = primary_event {
             let primary_entity = entity.clone();
-            primary = primary.on_activate(move |_, _, app| {
-                primary_entity.update(app, |controls, controls_cx| {
-                    controls.emit_if_allowed(event.clone(), controls_cx);
-                });
-            });
+            primary.map(|button| {
+                button.on_activate(move |_, _, app| {
+                    primary_entity.update(app, |controls, controls_cx| {
+                        controls.emit_if_allowed(event.clone(), controls_cx);
+                    });
+                })
+            })
+        } else {
+            primary
+        };
+        if let Some(primary) = primary {
+            right = right.child(primary);
         }
-        right = right.child(primary);
 
         div()
             .id(ElementId::Name(NATIVE_COMPOSER_CONTROL_ROW_SELECTOR.into()))
@@ -1231,7 +1267,7 @@ impl NativeComposerControls {
     /// Native composer integration normally calls the focused methods above so
     /// the actual model selector can occupy the left slot. This implementation
     /// exists for standalone component-gallery and behavior tests.
-    fn render_standalone(&mut self, theme: ArtisanTheme, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_standalone(&mut self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> Stateful<Div> {
         let mut root = div()
             .id(ElementId::Name(NATIVE_COMPOSER_CONTROLS_SELECTOR.into()))
             .debug_selector(|| NATIVE_COMPOSER_CONTROLS_SELECTOR.to_owned())
@@ -1239,19 +1275,19 @@ impl NativeComposerControls {
             .flex()
             .flex_col()
             .gap(px(8.0));
-        if let Some(lip) = self.render_lip(theme, cx) {
+        if let Some(lip) = self.render_lip(*theme, cx) {
             root = root.child(lip);
         }
-        if let Some(jump) = self.render_jump_to_latest(theme, cx) {
+        if let Some(jump) = self.render_jump_to_latest(*theme, cx) {
             root = root.child(jump);
         }
-        if let Some(failure) = self.render_failure(theme, cx) {
+        if let Some(failure) = self.render_failure(*theme, cx) {
             root = root.child(failure);
         }
-        if let Some(failed) = self.render_failed_dispatches(theme, cx) {
+        if let Some(failed) = self.render_failed_dispatches(*theme, cx) {
             root = root.child(failed);
         }
-        root.child(self.render_control_row(theme, div(), cx))
+        root.child(self.render_control_row(*theme, div(), cx))
     }
 
     fn steering_focus(
@@ -1287,16 +1323,14 @@ impl NativeComposerControls {
                 .clone()
                 .tab_index(tab_index)
                 .tab_stop(!self.snapshot.disabled);
-            self.failed_focus
-                .insert(identity.clone(), focus.clone());
+            self.failed_focus.insert(identity.clone(), focus.clone());
             return focus;
         }
         let focus = cx
             .focus_handle()
             .tab_index(tab_index)
             .tab_stop(!self.snapshot.disabled);
-        self.failed_focus
-            .insert(identity.clone(), focus.clone());
+        self.failed_focus.insert(identity.clone(), focus.clone());
         focus
     }
 
@@ -1347,8 +1381,7 @@ pub fn native_composer_controls_event_is_allowed(
         } => {
             snapshot.failed_new_chat_ready
                 && snapshot.failed_dispatches.iter().any(|row| {
-                    row.identity.command_id == *command_id
-                        && row.identity.generation == *generation
+                    row.identity.command_id == *command_id && row.identity.generation == *generation
                 })
         }
         NativeComposerControlsEvent::JumpToLatest => snapshot.show_jump_to_latest,
@@ -1395,7 +1428,7 @@ fn failure_matches(
 
 impl Render for NativeComposerControls {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_standalone(ArtisanTheme::for_mode(ThemeMode::Dark), cx)
+        self.render_standalone(&ArtisanTheme::for_mode(ThemeMode::Dark), cx)
     }
 }
 
@@ -1411,9 +1444,8 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use super::{
-        NATIVE_COMPOSER_FAILED_NEW_THREAD_SELECTOR, NATIVE_COMPOSER_PRIMARY_SELECTOR,
-        FailedDispatchRow, NativeComposerControls, NativeComposerControlsEvent,
-        NativeComposerControlsSnapshot, PendingSteeringRow,
+        FailedDispatchRow, NATIVE_COMPOSER_PRIMARY_SELECTOR, NativeComposerControls,
+        NativeComposerControlsEvent, NativeComposerControlsSnapshot, PendingSteeringRow,
         native_composer_controls_event_is_allowed,
     };
     use gpui::{

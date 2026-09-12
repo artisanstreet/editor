@@ -10,29 +10,14 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
-use artisan_ui::{
-    button::{AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility},
-    motion::MotionPolicy,
-    theme::{ArtisanTheme, DesktopTheme},
-};
-use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
-use gpui::{App, Div, ElementId, FocusHandle, Stateful, Window, div, px};
-
 use crate::composer_queue_state::{
-    ComposerQueueIdentity, ComposerQueueState, FailedQueueEntry, QueueLipRow, QueueStatus,
-    ReportingUsage,
+    ComposerQueueIdentity, ComposerQueueState, FailedQueueEntry, QueueLipRow, ReportingUsage,
 };
 use crate::native_composer_controls::{
     FailedDispatchRow, NativeComposerControlsEvent, NativeComposerControlsSnapshot,
     PendingSteeringRow,
 };
 use crate::native_context_usage::NativeContextUsage;
-
-/// Stable selector for the queue count/status companion surface.
-pub(crate) const NATIVE_COMPOSER_QUEUE_SELECTOR: &str = "artisan-native-composer-queue";
-/// Stable selector for the explicit restore retry action.
-pub(crate) const NATIVE_COMPOSER_QUEUE_RESTORE_SELECTOR: &str =
-    "artisan-native-composer-queue-restore";
 
 /// A controls action resolved to one exact byte-free queue identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,13 +135,13 @@ pub(crate) fn resolve_controls_event(
             .failed_entries()
             .iter()
             .any(|entry| entry.identity() == &identity)
-            .then(|| QueueControlIntent::NewThread(identity));
+            .then_some(QueueControlIntent::NewThread(identity));
     }
     let editable = state
         .pending_lip_rows()
         .into_iter()
         .any(|row| row.command_id == command_id && row.generation == generation && row.editable);
-    editable.then(|| match intent {
+    editable.then_some(match intent {
         QueueIntentKind::Edit => QueueControlIntent::Edit(identity),
         QueueIntentKind::Discard => QueueControlIntent::Discard(identity),
         QueueIntentKind::NewThread => QueueControlIntent::NewThread(identity),
@@ -174,6 +159,7 @@ enum QueueIntentKind {
 /// authoritative yet. A count remains exact even when the server says the
 /// bounded page has more rows than it can display.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn queue_count_label(state: &ComposerQueueState) -> Option<String> {
     if state.total_count() == 0 && state.entries().is_empty() {
         return None;
@@ -187,102 +173,6 @@ pub(crate) fn queue_count_label(state: &ComposerQueueState) -> Option<String> {
     } else {
         Some(format!("{} queued", state.total_count()))
     }
-}
-
-/// Renders the bounded queue count and any truthful operation status.
-///
-/// The existing controls entity renders the ordered rows and edit/discard
-/// buttons. Mount this small sibling above that lip when the parent wants the
-/// exact count/status visible without turning the composer into a settings
-/// page.
-#[must_use]
-pub(crate) fn render_queue_summary(
-    state: &ComposerQueueState,
-    theme: ArtisanTheme,
-) -> Option<Stateful<Div>> {
-    render_queue_summary_inner(state, theme, None)
-}
-
-/// Renders the same summary with an explicit restore retry button.
-///
-/// The callback is invoked only by pointer/keyboard activation of the button;
-/// it must capture a fresh empty-composer target and use
-/// `take_restore_candidate_with_target` before attempting restoration.
-#[must_use]
-pub(crate) fn render_queue_summary_with_retry<F>(
-    state: &ComposerQueueState,
-    theme: ArtisanTheme,
-    focus: FocusHandle,
-    on_retry: F,
-) -> Option<Stateful<Div>>
-where
-    F: Fn(&mut Window, &mut App) + 'static,
-{
-    render_queue_summary_inner(state, theme, Some((focus, Box::new(on_retry))))
-}
-
-type RetryCallback = Box<dyn Fn(&mut Window, &mut App)>;
-
-fn render_queue_summary_inner(
-    state: &ComposerQueueState,
-    theme: ArtisanTheme,
-    retry: Option<(FocusHandle, RetryCallback)>,
-) -> Option<Stateful<Div>> {
-    let count = queue_count_label(state);
-    let status = state.status();
-    if count.is_none() && status == QueueStatus::Idle {
-        return None;
-    }
-
-    let desktop_theme = DesktopTheme::neutral_dark();
-    let mut body = div()
-        .id(ElementId::Name(NATIVE_COMPOSER_QUEUE_SELECTOR.into()))
-        .debug_selector(|| NATIVE_COMPOSER_QUEUE_SELECTOR.to_owned())
-        .w_full()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(20.0))
-        .py(px(6.0))
-        .text_size(theme.typography.control_text)
-        .text_color(desktop_theme.secondary);
-
-    if let Some(count) = count {
-        body = body.child(div().min_w(px(0.0)).flex_shrink_0().child(count));
-    }
-    if !status.label().is_empty() {
-        body = body.child(
-            div()
-                .min_w(px(0.0))
-                .flex_1()
-                .truncate()
-                .child(status.label()),
-        );
-    }
-
-    if status.restore_retry_available()
-        && state.can_retry_restore()
-        && let Some((focus, on_retry)) = retry
-    {
-        let retry_button = Button::new(
-            ElementId::Name(NATIVE_COMPOSER_QUEUE_RESTORE_SELECTOR.into()),
-            focus,
-            theme,
-            MotionPolicy::Reduced,
-            ButtonVariant::Ghost,
-            ButtonSize::Small,
-            ButtonContent::text("Restore"),
-        )
-        .expect("the queued-message restore button is valid")
-        .focus_visibility(FocusVisibility::Visible)
-        .disabled(false)
-        .debug_selector(NATIVE_COMPOSER_QUEUE_RESTORE_SELECTOR)
-        .on_activate(move |_, window, app| on_retry(window, app));
-        body = body.child(retry_button);
-    }
-
-    Some(body)
 }
 
 #[cfg(test)]
@@ -344,7 +234,7 @@ mod tests {
             .begin_queue_refresh(true, true, false, false, true)
             .expect("refresh");
         state
-            .apply_queue_listing(&token, page(&thread_id))
+            .apply_queue_listing(&token, &page(&thread_id))
             .expect("page");
 
         let rows = state.pending_lip_rows();
@@ -356,8 +246,10 @@ mod tests {
         );
         assert_eq!(queue_count_label(&state).as_deref(), Some("2 queued"));
 
-        let mut snapshot = NativeComposerControlsSnapshot::default();
-        snapshot.run_id = None;
+        let mut snapshot = NativeComposerControlsSnapshot {
+            run_id: None,
+            ..Default::default()
+        };
         project_controls_snapshot(&state, &mut snapshot, false);
         assert_eq!(snapshot.pending_steering.len(), 2);
         assert_eq!(snapshot.pending_steering[1].text, "second");
@@ -377,13 +269,13 @@ mod tests {
             .begin_queue_refresh(true, true, false, false, true)
             .expect("refresh");
         state
-            .apply_queue_listing(&token, page(&thread_id))
+            .apply_queue_listing(&token, &page(&thread_id))
             .expect("page");
-        let stale = NativeComposerControlsEvent::EditQueuedSteer {
+        let outdated = NativeComposerControlsEvent::EditQueuedSteer {
             command_id: "command-a".to_owned(),
             generation: 6,
         };
-        assert!(resolve_controls_event(&state, &stale).is_none());
+        assert!(resolve_controls_event(&state, &outdated).is_none());
         let current = NativeComposerControlsEvent::DiscardQueuedSteer {
             command_id: "command-a".to_owned(),
             generation: 7,
@@ -425,7 +317,7 @@ mod tests {
             .begin_failed_refresh(true, true, false, true)
             .expect("failed refresh");
         state
-            .apply_failed_listing(&token, failed_page(&thread_id))
+            .apply_failed_listing(&token, &failed_page(&thread_id))
             .expect("failed page");
 
         let mut snapshot = NativeComposerControlsSnapshot::default();
@@ -455,10 +347,10 @@ mod tests {
             resolve_controls_event(&state, &event),
             Some(QueueControlIntent::NewThread(_))
         ));
-        let stale = NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
+        let outdated = NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
             command_id: "command-failed".to_owned(),
             generation: 8,
         };
-        assert!(resolve_controls_event(&state, &stale).is_none());
+        assert!(resolve_controls_event(&state, &outdated).is_none());
     }
 }

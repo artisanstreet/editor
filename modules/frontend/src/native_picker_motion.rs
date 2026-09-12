@@ -224,6 +224,7 @@ impl PickerMenuMotion {
 
     /// Returns the retained visual state at the latest animation sample.
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn current(self) -> (f32, f32) {
         (self.current_opacity, self.current_offset)
     }
@@ -322,6 +323,7 @@ pub(crate) struct PickerScrollState {
 impl PickerScrollState {
     /// Returns the currently requested content offset.
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn target(self) -> f32 {
         self.target
     }
@@ -347,6 +349,10 @@ impl PickerScrollState {
 
     /// Takes one bounded interpolation step toward the target.
     #[must_use]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the settle branch returns the target only when it differs exactly from the clamped current value; an epsilon would emit a redundant identical frame"
+    )]
     pub(crate) fn step(&mut self, current: f32, max: f32) -> Option<f32> {
         self.clamp_to_max(max);
         let current = current.clamp(-max.max(0.0), 0.0);
@@ -368,6 +374,10 @@ impl PickerScrollState {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::float_cmp,
+        reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage"
+    )]
     use super::*;
 
     #[test]
