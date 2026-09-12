@@ -125,6 +125,11 @@ use scroll_anchor::{RenderedScrollAnchor, ScrollAnchorRegistry, ViewportGeometry
 )]
 pub struct ConversationSurface {
     scene: ConversationScene,
+    /// Loaded user-message markers, rebuilt only when the scene changes.
+    ///
+    /// Render and the per-frame prepaint geometry both read this cache, so a
+    /// frame never re-walks the transcript to rebuild navigator labels.
+    navigator_markers: Rc<Vec<NavigatorMarker>>,
     message_images: Option<Entity<crate::native_message_images::NativeMessageImages>>,
     message_images_observation: Option<gpui::Subscription>,
     theme_mode: ThemeMode,
@@ -473,6 +478,7 @@ impl Render for ConversationSurface {
                 // into the same window-local state discipline: per-window
                 // geometry in, change-guarded notify out.
                 let active = ConversationSurface::navigator_active_for_geometry(
+                    &surface.navigator_markers,
                     &surface.scene,
                     &surface.scroll_handle,
                     &children_bounds,

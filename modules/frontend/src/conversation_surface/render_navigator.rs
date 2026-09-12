@@ -87,7 +87,10 @@ impl ConversationSurface {
         cx: &mut Context<Self>,
         navigator_active: Option<&str>,
     ) -> Option<AnyElement> {
-        let markers = loaded_turn_navigator_markers(&self.scene);
+        // Reused scene-derived cache: markers only change when the accepted
+        // scene is replaced, so a render never re-walks the transcript to
+        // rebuild navigator labels.
+        let markers = Rc::clone(&self.navigator_markers);
         // Window-local rail geometry, measured live: two windows sharing one
         // surface center independently, exactly like end-space height.
         let navigator_metrics = window.use_state(cx, |_, _| TurnNavigatorMetrics::default());
@@ -119,7 +122,7 @@ impl ConversationSurface {
         // Handles are ensured before any focus observation below, so a
         // keyboard arrival can expand the rail into labels exactly like rail
         // hover does in the reference (`group-focus-within`).
-        for marker in &markers {
+        for marker in markers.iter() {
             let key = navigator_focus_key(&marker.target);
             self.navigator_focus
                 .entry(key)
@@ -222,7 +225,7 @@ impl ConversationSurface {
             .left_0()
             .size_full(),
         );
-        for marker in &markers {
+        for marker in markers.iter() {
             let key = navigator_focus_key(&marker.target);
             let Some(handle) = self.navigator_focus.get(&key).cloned() else {
                 continue;

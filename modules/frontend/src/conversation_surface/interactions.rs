@@ -11,8 +11,10 @@ impl ConversationSurface {
     /// handles. The surface starts with the supplied scene and no actions.
     #[must_use]
     pub fn new(scene: ConversationScene, theme_mode: ThemeMode, cx: &mut Context<Self>) -> Self {
+        let navigator_markers = Rc::new(loaded_turn_navigator_markers(&scene));
         let mut surface = Self {
             scene,
+            navigator_markers,
             message_images: None,
             message_images_observation: None,
             theme_mode,
@@ -168,6 +170,7 @@ impl ConversationSurface {
     /// Replaces the accepted scene. Disclosure state is not changed locally;
     /// the next replacement scene remains authoritative.
     pub fn replace_scene(&mut self, scene: ConversationScene, cx: &mut Context<Self>) {
+        self.navigator_markers = Rc::new(loaded_turn_navigator_markers(&scene));
         self.scene = scene;
         let live_keys: Vec<String> = self
             .scene
@@ -815,12 +818,12 @@ impl ConversationSurface {
     /// reproduces), re-based onto the viewport origin the host header
     /// offsets in the full app.
     pub(super) fn navigator_active_for_geometry(
+        markers: &[NavigatorMarker],
         scene: &ConversationScene,
         scroll_handle: &ScrollHandle,
         children_bounds: &[gpui::Bounds<gpui::Pixels>],
         window: &Window,
     ) -> Option<String> {
-        let markers = loaded_turn_navigator_markers(scene);
         if markers.is_empty() {
             return None;
         }

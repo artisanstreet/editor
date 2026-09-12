@@ -237,6 +237,34 @@ fn navigator_active_tracks_the_reader_not_the_tail(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn navigator_markers_are_cached_across_renders(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(tall_navigator_scene(), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    let first = cx.update(|_, app| Rc::clone(&surface.read(app).navigator_markers));
+    cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
+    cx.run_until_parked();
+    let second = cx.update(|_, app| Rc::clone(&surface.read(app).navigator_markers));
+    assert!(
+        Rc::ptr_eq(&first, &second),
+        "a plain re-render must reuse the scene-derived marker cache"
+    );
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            surface.replace_scene(tall_navigator_scene(), surface_cx);
+        });
+    });
+    cx.run_until_parked();
+    let third = cx.update(|_, app| Rc::clone(&surface.read(app).navigator_markers));
+    assert!(
+        !Rc::ptr_eq(&first, &third),
+        "a scene replacement must rebuild the marker cache"
+    );
+}
+
+#[gpui::test]
 fn transcript_wheel_queues_bounded_target_then_settles(cx: &mut TestAppContext) {
     // Manual frame pump, stated honestly: the test harness never runs
     // `on_next_frame` callbacks on dirty draws, so parked frames alone
