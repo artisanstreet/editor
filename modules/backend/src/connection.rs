@@ -1462,6 +1462,12 @@ mod lifecycle_response_ack_tests {
         let receipt = accepted_stop(&controller, "ack-peer-stop").await;
         let (server_send, server_recv, client_send, mut client_recv) =
             open_stream_pair(&server, &client).await;
+        // The response is written but deliberately left unfinished. A
+        // *finished* stream can be fully acknowledged and retired before
+        // Quinn observes the peer STOP, after which `stopped()` reports the
+        // stream closed rather than stopped and this assertion races under
+        // load. Keeping the response pending means the receipt completion
+        // must observe the reset.
         let mut streams = StageStreams::new();
         {
             let (server_send, _server_recv) = streams.install(server_send, server_recv);
@@ -1469,14 +1475,10 @@ mod lifecycle_response_ack_tests {
                 .write_all(b"lifecycle-stop-response")
                 .await
                 .expect("acknowledgement response should be written");
-            server_send
-                .finish()
-                .expect("acknowledgement response should finish");
         }
         client_recv
             .stop(VarInt::from_u32(7))
             .expect("peer STOP should be sent");
-        streams.mark_send_finished();
 
         let failure = tokio::time::timeout(
             ACK_TIMEOUT,
