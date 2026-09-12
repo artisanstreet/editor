@@ -472,9 +472,9 @@ impl EngineObservationState {
     ) -> (&'static str, bool) {
         match observation {
             // Plain assistant replies are already authoritative in the durable
-            // conversation snapshot; the observation state retains no second
-            // copy and projects nothing from them.
-            Observation::AgentMessageDelta(_) => (observation.tag(), false),
+            // conversation snapshot, and provider usage is folded by the
+            // profile/usage surfaces; neither is retained here.
+            Observation::AgentMessageDelta(_) | Observation::Usage(_) => (observation.tag(), false),
             Observation::AgentMessageCompleted(_) => (observation.tag(), true),
             Observation::Approval(value) => {
                 let settled = self.pair_approval(cursor, sequence, value, attribution);
@@ -553,9 +553,6 @@ impl EngineObservationState {
             Observation::TurnState(value) => {
                 self.push_turn_state(cursor, sequence, observation.tag(), value, attribution)
             }
-            // Provider usage is folded by the profile/usage surfaces, not by
-            // the conversation activity projection; nothing here reads it.
-            Observation::Usage(_) => (observation.tag(), false),
         }
     }
 

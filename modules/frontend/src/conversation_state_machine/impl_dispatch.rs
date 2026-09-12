@@ -570,12 +570,7 @@ impl ConversationStateController {
         let Some(snapshot) = self.delivery.snapshot() else {
             return;
         };
-        synchronize_turns(
-            &mut self.turns,
-            &self.facts,
-            snapshot,
-            &mut self.effects,
-        );
+        synchronize_turns(&mut self.turns, &self.facts, snapshot, &mut self.effects);
         // A turn that left the authoritative snapshot is retired from view:
         // its engine label goes with it so a later turn reusing nothing
         // stale can never inherit it. Removal changes future scenes, so it
@@ -776,12 +771,7 @@ impl ConversationStateController {
         if !self.delivery.is_closed()
             && let Some(snapshot) = self.delivery.snapshot()
         {
-            synchronize_turns(
-                &mut self.turns,
-                &self.facts,
-                snapshot,
-                &mut self.effects,
-            );
+            synchronize_turns(&mut self.turns, &self.facts, snapshot, &mut self.effects);
             self.synchronize_session_disclosures();
         }
         Ok(())
