@@ -2,7 +2,7 @@
 //!
 //! Mirrors `resolve_codex_executable` in
 //! `modules/engines/src/codex/executable.ts` (configured override, local
-//! installs, winget, then `PATH`, never the WindowsApps execution alias)
+//! installs, winget, then `PATH`, never the `WindowsApps` execution alias)
 //! and extends it to the installed reality on this host: `codex` and
 //! `claude` resolve to pnpm/npm shims (`codex.ps1`, `claude.ps1`,
 //! `*.cmd`), which `CreateProcess` cannot run directly. Resolution
@@ -60,7 +60,7 @@ pub struct CliResolveInput {
 /// Resolves one provider CLI from explicit inputs.
 ///
 /// Order: configured override, local installs, winget (Codex only),
-/// `PATH` direct executables and shims (never WindowsApps), then a bare
+/// `PATH` direct executables and shims (never `WindowsApps`), then a bare
 /// tool-name fallback resolved at spawn time.
 #[must_use]
 pub fn resolve_cli_with(input: &CliResolveInput) -> CliLaunch {
@@ -82,7 +82,7 @@ pub fn resolve_cli_with(input: &CliResolveInput) -> CliLaunch {
         let mut versioned: Vec<PathBuf> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&bin) {
             let mut names: Vec<String> = entries
-                .filter_map(|entry| entry.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
                 .filter_map(|entry| entry.file_name().into_string().ok())
                 .collect();
@@ -192,14 +192,15 @@ fn live_input(tool: &'static str, override_var: &'static str) -> CliResolveInput
         std::env::var("LOCALAPPDATA")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var("USERPROFILE")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("C:/"))
-                    .join("AppData")
-                    .join("Local")
-            }),
+            .map_or_else(
+                || {
+                    std::env::var("USERPROFILE")
+                        .map_or_else(|_| PathBuf::from("C:/"), PathBuf::from)
+                        .join("AppData")
+                        .join("Local")
+                },
+                PathBuf::from,
+            ),
     );
     #[cfg(not(windows))]
     let local_app_data: Option<PathBuf> = None;

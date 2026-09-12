@@ -125,8 +125,14 @@ impl fmt::Debug for SpawnedVersionOutput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SpawnedVersionOutput")
-            .field("stdout_bytes", &self.stdout_len())
-            .field("stderr_bytes", &self.stderr_len())
+            .field(
+                "stdout",
+                &format_args!("<{} bytes redacted>", self.stdout_len()),
+            )
+            .field(
+                "stderr",
+                &format_args!("<{} bytes redacted>", self.stderr_len()),
+            )
             .field("exit_code", &self.exit_code)
             .finish()
     }
@@ -330,9 +336,7 @@ fn drain_bounded(mut reader: impl Read, maximum_bytes: u64) -> Result<Vec<u8>, H
         if read == 0 {
             return Ok(collected);
         }
-        total = total
-            .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
-            .unwrap_or(u64::MAX);
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         if total > maximum_bytes {
             return Err(HermesProbeError::OutputTooLarge);
         }
@@ -390,19 +394,13 @@ pub fn spawn_capture(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| HermesProbeError::SpawnFailed)?;
-    let stdout = match child.stdout.take() {
-        Some(stream) => stream,
-        None => {
-            kill_and_reap(&mut child);
-            return Err(HermesProbeError::SpawnFailed);
-        }
+    let Some(stdout) = child.stdout.take() else {
+        kill_and_reap(&mut child);
+        return Err(HermesProbeError::SpawnFailed);
     };
-    let stderr = match child.stderr.take() {
-        Some(stream) => stream,
-        None => {
-            kill_and_reap(&mut child);
-            return Err(HermesProbeError::SpawnFailed);
-        }
+    let Some(stderr) = child.stderr.take() else {
+        kill_and_reap(&mut child);
+        return Err(HermesProbeError::SpawnFailed);
     };
     let maximum_bytes = limits.maximum_bytes_per_stream();
     let stdout_thread = thread::spawn(move || drain_bounded(stdout, maximum_bytes));

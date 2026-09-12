@@ -328,12 +328,13 @@ pub fn await_response_id(
                 *budget -= 1;
                 match envelope {
                     ServerEnvelope::Response { id, result } if id == want => return Ok(result),
-                    ServerEnvelope::Response { .. } => {}
                     ServerEnvelope::ErrorResponse { id } if id == want => {
                         return Err(CodexProbeError::Protocol);
                     }
-                    ServerEnvelope::ErrorResponse { .. } => {}
-                    ServerEnvelope::ServerRequest { .. } | ServerEnvelope::Notification { .. } => {}
+                    ServerEnvelope::Response { .. }
+                    | ServerEnvelope::ErrorResponse { .. }
+                    | ServerEnvelope::ServerRequest { .. }
+                    | ServerEnvelope::Notification { .. } => {}
                 }
             }
         }
@@ -386,7 +387,7 @@ pub fn probe_codex_account(
     let outcome = drive_session_exchange(
         &mut child,
         &mut stdin,
-        &mut stdout_drain,
+        &stdout_drain,
         &mut stderr_drain,
         input,
         deadline,
@@ -486,9 +487,9 @@ impl<'a> LiveEnvelopes<'a> {
         }
     }
 
-    fn fail(&mut self, error: CodexProbeError) -> Option<Result<ServerEnvelope, CodexProbeError>> {
+    fn fail(&mut self, error: CodexProbeError) -> Result<ServerEnvelope, CodexProbeError> {
         self.terminal = true;
-        Some(Err(error))
+        Err(error)
     }
 }
 
@@ -503,32 +504,31 @@ impl Iterator for LiveEnvelopes<'_> {
             while let Ok(event) = self.stderr.events().try_recv() {
                 match event {
                     PipeEvent::Line(_) | PipeEvent::Eof => {}
-                    PipeEvent::TooLarge => return self.fail(CodexProbeError::OutputTooLarge),
-                    PipeEvent::Io => return self.fail(CodexProbeError::Unavailable),
+                    PipeEvent::TooLarge => return Some(self.fail(CodexProbeError::OutputTooLarge)),
+                    PipeEvent::Io => return Some(self.fail(CodexProbeError::Unavailable)),
                 }
             }
             match self.stdout.events().recv_timeout(PROBE_POLL_INTERVAL) {
                 Ok(PipeEvent::Line(line)) => {
-                    if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+                    if line.iter().all(u8::is_ascii_whitespace) {
                         continue;
                     }
                     match decode_server_envelope(&line) {
                         Ok(envelope) => return Some(Ok(envelope)),
-                        Err(error) => return self.fail(error),
+                        Err(error) => return Some(self.fail(error)),
                     }
                 }
-                Ok(PipeEvent::Eof) => return self.fail(CodexProbeError::Unavailable),
-                Ok(PipeEvent::TooLarge) => return self.fail(CodexProbeError::OutputTooLarge),
-                Ok(PipeEvent::Io) => return self.fail(CodexProbeError::Unavailable),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return self.fail(CodexProbeError::Unavailable);
+                Ok(PipeEvent::Eof | PipeEvent::Io)
+                | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Some(self.fail(CodexProbeError::Unavailable));
                 }
+                Ok(PipeEvent::TooLarge) => return Some(self.fail(CodexProbeError::OutputTooLarge)),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if Instant::now() >= self.deadline {
-                        return self.fail(CodexProbeError::Timeout);
+                        return Some(self.fail(CodexProbeError::Timeout));
                     }
                     if self.child.try_wait().is_err() {
-                        return self.fail(CodexProbeError::Unavailable);
+                        return Some(self.fail(CodexProbeError::Unavailable));
                     }
                 }
             }

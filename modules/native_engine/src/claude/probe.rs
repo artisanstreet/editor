@@ -363,7 +363,7 @@ fn match_version_at(bytes: &[u8], start: usize) -> Option<(String, usize)> {
             index += 1;
         }
     }
-    for marker in [b'-', b'+'] {
+    for marker in *b"-+" {
         if bytes.get(index) == Some(&marker) {
             let mut end = index + 1;
             while bytes
@@ -395,12 +395,12 @@ pub fn parse_claude_version(output: &str) -> Option<String> {
     let bytes = output.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index].is_ascii_digit() && (index == 0 || !is_word_byte(bytes[index - 1])) {
-            if let Some((version, end)) = match_version_at(bytes, index) {
-                if end >= bytes.len() || !is_word_byte(bytes[end]) {
-                    return Some(version);
-                }
-            }
+        if bytes[index].is_ascii_digit()
+            && (index == 0 || !is_word_byte(bytes[index - 1]))
+            && let Some((version, end)) = match_version_at(bytes, index)
+            && (end >= bytes.len() || !is_word_byte(bytes[end]))
+        {
+            return Some(version);
         }
         index += 1;
     }
@@ -548,13 +548,10 @@ fn run_bounded(
         .stderr
         .take()
         .map(|pipe| spawn_bounded_reader(pipe, max_stderr_bytes));
-    let (stdout_reader, stderr_reader) = match (stdout_reader, stderr_reader) {
-        (Some(stdout), Some(stderr)) => (stdout, stderr),
-        _ => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(ClaudeProbeError::SpawnFailed { phase });
-        }
+    let (Some(stdout_reader), Some(stderr_reader)) = (stdout_reader, stderr_reader) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(ClaudeProbeError::SpawnFailed { phase });
     };
 
     let deadline = Instant::now()

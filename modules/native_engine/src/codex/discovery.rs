@@ -4,7 +4,7 @@
 //! `modules/engines/src/codex/executable.ts` (`resolve_codex_executable`):
 //! explicit `ARTISAN_CODEX_EXECUTABLE` override, then on Windows the
 //! `<LOCALAPPDATA>/OpenAI/Codex/bin` scan (plain binary first, then
-//! versioned subdirectories in reverse numeric order), then the WinGet
+//! versioned subdirectories in reverse numeric order), then the `WinGet`
 //! package path, then `PATH` entries with the Windows App Execution Alias
 //! directory removed. Non-Windows hosts resolve to `codex` unless an
 //! explicit override is set. No filesystem or process work happens here;
@@ -20,7 +20,7 @@ pub const CODEX_EXECUTABLE_OVERRIDE_ENV: &str = "ARTISAN_CODEX_EXECUTABLE";
 /// Fallback command used on non-Windows hosts and when nothing is installed.
 pub const CODEX_FALLBACK_COMMAND: &str = "codex";
 
-/// WinGet package directory suffix used by the TypeScript resolver.
+/// `WinGet` package directory suffix used by the TypeScript resolver.
 pub const CODEX_WINGET_PACKAGE_DIR: &str = "OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe";
 
 /// Input for the pure Codex executable resolver.
@@ -52,7 +52,7 @@ impl CodexDiscoveryInput {
         codex_local_root(self.local_app_data.as_deref())
     }
 
-    /// Builds the WinGet executable candidate for the configured app-data dir.
+    /// Builds the `WinGet` executable candidate for the configured app-data dir.
     #[must_use]
     pub fn winget_candidate(&self) -> Option<PathBuf> {
         codex_winget_executable(self.local_app_data.as_deref(), &self.architecture)
@@ -72,7 +72,7 @@ pub fn codex_local_root(local_app_data: Option<&Path>) -> PathBuf {
     }
 }
 
-/// Maps the host architecture to the WinGet binary name.
+/// Maps the host architecture to the `WinGet` binary name.
 ///
 /// Mirrors the TypeScript resolver exactly: only `arm64` selects the
 /// `aarch64` binary; every other value (including `aarch64` itself) selects
@@ -86,7 +86,7 @@ pub fn codex_winget_arch(architecture: &str) -> &'static str {
     }
 }
 
-/// Builds the WinGet executable candidate for an app-data directory.
+/// Builds the `WinGet` executable candidate for an app-data directory.
 #[must_use]
 pub fn codex_winget_executable(
     local_app_data: Option<&Path>,
@@ -164,7 +164,7 @@ pub fn sort_codex_directory_names(names: &mut [String]) {
 /// Resolves the Codex executable with TypeScript precedence.
 ///
 /// Order: explicit override, then (Windows only) local `codex.exe`, local
-/// versioned `*/codex.exe` in reverse numeric order, WinGet binary, eligible
+/// versioned `*/codex.exe` in reverse numeric order, `WinGet` binary, eligible
 /// `PATH` `codex.exe` entries; otherwise the local fallback. `PATH` entries
 /// that are empty or inside the Windows App Execution Alias directory are
 /// skipped. `PathBuf` joins preserve paths containing spaces without

@@ -158,6 +158,11 @@ impl VerifiedCodexLaunch {
     /// The fixture must already be a regular file; the version string is
     /// still parsed and still enforced against the minimum so fixture
     /// launches cannot smuggle an unsupported version into the capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeCodexLaunchError`] when the fixture program is not a
+    /// verifiable regular file or carries a version below the minimum.
     #[cfg(test)]
     pub fn for_tests(
         program: PathBuf,
@@ -183,7 +188,6 @@ pub struct NativeCodexAuthority;
 
 impl NativeCodexAuthority {
     /// Constructs the Codex launch authority.
-    #[must_use]
     pub const fn new() -> Self {
         Self
     }
@@ -193,7 +197,7 @@ impl NativeCodexAuthority {
     /// Honors `ARTISAN_CODEX_EXECUTABLE` when it names an existing regular
     /// file, otherwise follows the single discovery precedence in
     /// [`crate::codex::discovery`] (local Codex bin, versioned installs,
-    /// WinGet package, then `PATH` with the Windows App Execution Alias
+    /// `WinGet` package, then `PATH` with the Windows App Execution Alias
     /// rejected; the bare fallback command via `PATH` on non-Windows hosts).
     /// Every candidate is certified as a regular file before it is returned,
     /// so an unverified discovery fallback never becomes a launch.

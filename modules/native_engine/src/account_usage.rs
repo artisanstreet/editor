@@ -143,12 +143,6 @@ impl ProviderError {
     /// case-insensitively over whitespace-normalized text.
     #[must_use]
     pub fn is_login_error(&self) -> bool {
-        let normalized = self
-            .message
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
         const PATTERNS: &[&str] = &[
             "not logged in",
             "login required",
@@ -163,6 +157,12 @@ impl ProviderError {
             "no active account",
             "authentication required",
         ];
+        let normalized = self
+            .message
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
         PATTERNS.iter().any(|pattern| normalized.contains(pattern))
     }
 }
@@ -226,6 +226,10 @@ pub struct ProviderUsage {
 
 impl ProviderUsage {
     /// Returns an authenticated read with no email.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the static authenticated auth state stops validating.
     #[must_use]
     pub fn authenticated(windows: Vec<artisan_domain::EngineUsageWindow>) -> Self {
         Self {
@@ -238,6 +242,10 @@ impl ProviderUsage {
     }
 
     /// Returns an unauthenticated read with an Artisan-owned reason.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the static unauthenticated auth state stops validating.
     #[must_use]
     pub fn unauthenticated(reason: &'static str) -> Self {
         Self {
@@ -423,33 +431,31 @@ impl JsonRpcSession {
         let max_line_bytes = bounds.max_line_bytes;
         let mut stdout_reader = None;
         if let Some(stdout) = stdout {
-            match thread::Builder::new()
+            if let Ok(handle) = thread::Builder::new()
                 .name("usage-stdout-drain".to_owned())
-                .spawn(move || drain_stdout_lines(stdout, sender, max_line_bytes))
+                .spawn(move || drain_stdout_lines(stdout, &sender, max_line_bytes))
             {
-                Ok(handle) => stdout_reader = Some(handle),
-                Err(_) => {
-                    let _kill_result = custody.kill();
-                    wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
-                    return Err(UsageReaderError::Spawn);
-                }
+                stdout_reader = Some(handle);
+            } else {
+                let _kill_result = custody.kill();
+                wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
+                return Err(UsageReaderError::Spawn);
             }
         }
         let mut stderr_drain = None;
         if let Some(stderr) = stderr {
-            match thread::Builder::new()
+            if let Ok(handle) = thread::Builder::new()
                 .name("usage-stderr-drain".to_owned())
                 .spawn(move || drain_to_void(stderr))
             {
-                Ok(handle) => stderr_drain = Some(handle),
-                Err(_) => {
-                    let _kill_result = custody.kill();
-                    wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
-                    if let Some(reader) = stdout_reader.take() {
-                        join_thread_bounded(reader, USAGE_TEARDOWN_GRACE);
-                    }
-                    return Err(UsageReaderError::Spawn);
+                stderr_drain = Some(handle);
+            } else {
+                let _kill_result = custody.kill();
+                wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
+                if let Some(reader) = stdout_reader.take() {
+                    join_thread_bounded(reader, USAGE_TEARDOWN_GRACE);
                 }
+                return Err(UsageReaderError::Spawn);
             }
         }
         Ok(Self {
@@ -500,7 +506,7 @@ impl JsonRpcSession {
     pub fn notify(
         &mut self,
         method: &str,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Result<(), UsageReaderError> {
         let line = serde_json::json!({"method": method, "params": params}).to_string() + "\n";
         self.write_line(line.as_bytes())
@@ -520,7 +526,7 @@ impl JsonRpcSession {
     pub fn call(
         &mut self,
         method: &str,
-        params: serde_json::Value,
+        params: &serde_json::Value,
         deadline: Instant,
     ) -> Result<serde_json::Value, CallError> {
         if self.torn_down {
@@ -545,14 +551,11 @@ impl JsonRpcSession {
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(CallError::Transport(UsageReaderError::Timeout));
                 }
-                Err(RecvTimeoutError::Disconnected) => {
+                Err(RecvTimeoutError::Disconnected) | Ok(LineEvent::Finished) => {
                     return Err(CallError::Transport(UsageReaderError::Closed));
                 }
                 Ok(LineEvent::Oversize) => {
                     return Err(CallError::Transport(UsageReaderError::TooLarge));
-                }
-                Ok(LineEvent::Finished) => {
-                    return Err(CallError::Transport(UsageReaderError::Closed));
                 }
                 Ok(LineEvent::Line(line)) => {
                     self.total_bytes = self.total_bytes.saturating_add(line.len());
@@ -587,12 +590,11 @@ impl JsonRpcSession {
         // tolerance keeps fixture harnesses honest. Valid JSON with the wrong
         // shape still fails as malformed below, and unbounded chatter fails
         // as a protocol violation.
-        let value: serde_json::Value = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(_) => {
-                self.skip_frame()?;
-                return Ok(None);
-            }
+        let value: serde_json::Value = if let Ok(value) = serde_json::from_str(line) {
+            value
+        } else {
+            self.skip_frame()?;
+            return Ok(None);
         };
         let object = value
             .as_object()
@@ -640,7 +642,7 @@ impl Drop for JsonRpcSession {
 
 fn drain_stdout_lines(
     stdout: ChildStdout,
-    sender: mpsc::SyncSender<LineEvent>,
+    sender: &mpsc::SyncSender<LineEvent>,
     max_line_bytes: usize,
 ) {
     let mut reader = BufReader::new(stdout);
@@ -653,7 +655,7 @@ fn drain_stdout_lines(
     loop {
         let mut line = Vec::new();
         match reader.by_ref().take(limit).read_until(b'\n', &mut line) {
-            Ok(0) => {
+            Ok(0) | Err(_) => {
                 let _send_result = sender.send(LineEvent::Finished);
                 break;
             }
@@ -679,10 +681,6 @@ fn drain_stdout_lines(
                 if oversize {
                     break;
                 }
-            }
-            Err(_) => {
-                let _send_result = sender.send(LineEvent::Finished);
-                break;
             }
         }
     }

@@ -158,6 +158,11 @@ impl VerifiedClaudeLaunch {
     /// The fixture must already be a regular file; the version string is
     /// still parsed and still enforced against the minimum so fixture
     /// launches cannot smuggle an unsupported version into the capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeClaudeLaunchError`] when the fixture program is not a
+    /// verifiable regular file or carries a version below the minimum.
     #[cfg(test)]
     pub fn for_tests(
         program: PathBuf,
@@ -183,7 +188,6 @@ pub struct NativeClaudeAuthority;
 
 impl NativeClaudeAuthority {
     /// Constructs the Claude launch authority.
-    #[must_use]
     pub const fn new() -> Self {
         Self
     }
@@ -316,7 +320,7 @@ fn parse_claude_version(stdout: &str) -> Result<ClaudeVersion, NativeClaudeLaunc
     let version = crate::claude::probe::parse_claude_version(stdout)
         .ok_or(NativeClaudeLaunchError::VersionUnparseable)?;
     let core = version
-        .split(|c| c == '-' || c == '+')
+        .split(['-', '+'])
         .next()
         .ok_or(NativeClaudeLaunchError::VersionUnparseable)?;
     let mut components = core.split('.');
@@ -402,15 +406,11 @@ fn verify_regular_executable(path: &Path) -> Result<(), NativeClaudeLaunchError>
 #[must_use]
 pub fn compare_claude_versions(left: &str, right: &str) -> i64 {
     match (parse_claude_version(left), parse_claude_version(right)) {
-        (Ok(left), Ok(right)) => {
-            if left == right {
-                0
-            } else if left < right {
-                -1
-            } else {
-                1
-            }
-        }
+        (Ok(left), Ok(right)) => match left.cmp(&right) {
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Greater => 1,
+        },
         _ => 0,
     }
 }

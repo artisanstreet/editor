@@ -11,10 +11,10 @@ rust-version.workspace = true
 artisan-domain = { path = "../domain" }
 command-group.workspace = true
 fs2.workspace = true
-serde = { version = "1", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] } # workspace-absent
 serde_json.workspace = true
 sha2.workspace = true
-tempfile = "3"
+tempfile = "=3.27.0" # workspace-absent
 winapi-util.workspace = true
 
 [lints]

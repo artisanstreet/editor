@@ -200,7 +200,6 @@ pub fn redact_probe_excerpt(output: &str) -> String {
 ///
 /// Returns [`CursorProbeError::InvalidBinary`] for non-zero exits or output
 /// without a parseable version.
-#[must_use]
 pub fn classify_version_output(exit_code: i32, output: &str) -> Result<String, CursorProbeError> {
     if exit_code != 0 {
         let excerpt = redact_probe_excerpt(output);

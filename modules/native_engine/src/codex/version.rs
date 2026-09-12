@@ -60,7 +60,7 @@ pub fn compare_semantic_versions(left: &str, right: &str) -> Ordering {
         let left_part = numeric_component(left, index);
         let right_part = numeric_component(right, index);
         match left_part.cmp(&right_part) {
-            Ordering::Equal => continue,
+            Ordering::Equal => {}
             order => return order,
         }
     }
@@ -84,7 +84,7 @@ fn numeric_component(version: &str, index: usize) -> u64 {
         .split('.')
         .nth(index)
         .and_then(|part| {
-            let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
             if digits.is_empty() {
                 None
             } else {
@@ -101,12 +101,12 @@ fn is_word_byte(byte: u8) -> bool {
 fn find_dotted_version(output: &[u8], extended: bool) -> Option<String> {
     let mut index = 0;
     while index < output.len() {
-        if output[index].is_ascii_digit() && is_version_start(output, index) {
-            if let Some((version, end)) = match_version_at(output, index, extended) {
-                if end >= output.len() || !is_word_byte(output[end]) {
-                    return Some(version);
-                }
-            }
+        if output[index].is_ascii_digit()
+            && is_version_start(output, index)
+            && let Some((version, end)) = match_version_at(output, index, extended)
+            && (end >= output.len() || !is_word_byte(output[end]))
+        {
+            return Some(version);
         }
         index += 1;
     }

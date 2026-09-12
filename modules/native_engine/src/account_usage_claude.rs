@@ -65,7 +65,7 @@ impl ClaudeUsageConfig {
     #[must_use]
     pub fn launched(launch: &CliLaunch) -> Self {
         let mut config = Self::new(launch.program.clone());
-        config.prefix_args = launch.prefix_args.clone();
+        config.prefix_args.clone_from(&launch.prefix_args);
         config
     }
 }
@@ -96,48 +96,42 @@ pub fn read_claude_usage(config: &ClaudeUsageConfig) -> Result<ProviderUsage, Us
     drop(stdin);
     let max_bytes = config.max_bytes;
     let (sender, receiver) = mpsc::sync_channel(1);
-    let stdout_reader = match thread::Builder::new()
+    let Ok(stdout_reader) = thread::Builder::new()
         .name("claude-usage-stdout".to_owned())
         .spawn(move || {
             let mut bytes = Vec::new();
             let outcome = read_bounded(stdout.as_mut(), &mut bytes, max_bytes);
             let _send_result = sender.send((outcome, bytes));
-        }) {
-        Ok(handle) => handle,
-        Err(_) => {
-            let _kill_result = custody.kill();
-            wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
-            return Err(UsageReaderError::Spawn);
-        }
+        })
+    else {
+        let _kill_result = custody.kill();
+        wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
+        return Err(UsageReaderError::Spawn);
     };
-    let stderr_drain = match thread::Builder::new()
+    let Ok(stderr_drain) = thread::Builder::new()
         .name("claude-usage-stderr".to_owned())
         .spawn(move || {
             let mut sink = Vec::new();
             let _drain_result = read_bounded(stderr.as_mut(), &mut sink, max_bytes);
-        }) {
-        Ok(handle) => handle,
-        Err(_) => {
-            let _kill_result = custody.kill();
-            wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
-            let _join_result = stdout_reader.join();
-            return Err(UsageReaderError::Spawn);
-        }
+        })
+    else {
+        let _kill_result = custody.kill();
+        wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
+        let _join_result = stdout_reader.join();
+        return Err(UsageReaderError::Spawn);
     };
     let status = loop {
-        match custody.try_wait().map_err(|_| UsageReaderError::Closed)? {
-            Some(status) => break status,
-            None => {
-                if Instant::now() >= deadline {
-                    let _kill_result = custody.kill();
-                    wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
-                    join_thread_bounded(stderr_drain, USAGE_TEARDOWN_GRACE);
-                    join_thread_bounded(stdout_reader, USAGE_TEARDOWN_GRACE);
-                    return Err(UsageReaderError::Timeout);
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
+        if let Some(status) = custody.try_wait().map_err(|_| UsageReaderError::Closed)? {
+            break status;
         }
+        if Instant::now() >= deadline {
+            let _kill_result = custody.kill();
+            wait_child_bounded(&mut custody, USAGE_TEARDOWN_GRACE);
+            join_thread_bounded(stderr_drain, USAGE_TEARDOWN_GRACE);
+            join_thread_bounded(stdout_reader, USAGE_TEARDOWN_GRACE);
+            return Err(UsageReaderError::Timeout);
+        }
+        thread::sleep(Duration::from_millis(10));
     };
     join_thread_bounded(stderr_drain, USAGE_TEARDOWN_GRACE);
     join_thread_bounded(stdout_reader, USAGE_TEARDOWN_GRACE);
@@ -194,8 +188,9 @@ fn read_bounded(
 fn system_millis() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Slices the outermost JSON object out of surrounding banner text.
@@ -290,10 +285,9 @@ fn parse_reset_at(line: &str, at_ms: i64) -> Option<String> {
     let clock_lower = time_part.to_lowercase();
     let (clock, afternoon) = if let Some(clock) = clock_lower.strip_suffix("pm") {
         (clock, true)
-    } else if let Some(clock) = clock_lower.strip_suffix("am") {
-        (clock, false)
     } else {
-        return None;
+        let clock = clock_lower.strip_suffix("am")?;
+        (clock, false)
     };
     let clock = clock.trim();
     let (hour_text, minute) = match clock.split_once(':') {
@@ -369,6 +363,7 @@ fn push_window(
 /// Recognizes the `Current session` line, the `Current week (all models)`
 /// line, and per-model `Current week (<Label>)` lines, each with an optional
 /// trailing reset clause. Pure and free of process I/O.
+#[must_use]
 pub fn parse_claude_usage_windows(result_text: &str, at_ms: i64) -> Vec<EngineUsageWindow> {
     let mut windows = Vec::new();
     for raw_line in result_text.lines() {
@@ -436,11 +431,7 @@ fn percent_after_prefix(line: &str, prefix: &str) -> Option<f64> {
     let percent: u32 = digits.parse().ok()?;
     let after = rest[percent_end + 1..].trim_start();
     let tail = after.strip_prefix("used")?;
-    if tail
-        .chars()
-        .next()
-        .is_some_and(|next| next.is_alphanumeric())
-    {
+    if tail.chars().next().is_some_and(char::is_alphanumeric) {
         return None;
     }
     Some(f64::from(percent))
@@ -462,11 +453,7 @@ fn match_weekly_labeled_line(line: &str) -> Option<(String, f64)> {
     }
     let percent: u32 = digits.parse().ok()?;
     let tail = after[percent_end + 1..].trim_start().strip_prefix("used")?;
-    if tail
-        .chars()
-        .next()
-        .is_some_and(|next| next.is_alphanumeric())
-    {
+    if tail.chars().next().is_some_and(char::is_alphanumeric) {
         return None;
     }
     Some((label, f64::from(percent)))
@@ -488,10 +475,10 @@ mod tests {
         assert_eq!(windows.len(), 3);
         assert_eq!(windows[0].id(), "five_hour");
         assert_eq!(windows[0].kind(), EngineUsageWindowKind::Session);
-        assert_eq!(windows[0].percent_used(), 42.0);
+        assert!((windows[0].percent_used() - 42.0).abs() < f64::EPSILON);
         assert_eq!(windows[0].resets_at(), Some("2026-09-09T17:00:00Z"));
         assert_eq!(windows[1].id(), "seven_day");
-        assert_eq!(windows[1].percent_used(), 17.0);
+        assert!((windows[1].percent_used() - 17.0).abs() < f64::EPSILON);
         assert_eq!(windows[1].resets_at(), Some("2026-09-14T17:00:00Z"));
         assert_eq!(windows[2].id(), "seven_day:fable");
         assert_eq!(windows[2].label(), Some("Fable"));
@@ -542,7 +529,7 @@ mod tests {
             Current session: 10% used\nCurrent session: 20% used\n";
         let windows = parse_claude_usage_windows(text, AT_MS);
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].percent_used(), 10.0);
+        assert!((windows[0].percent_used() - 10.0).abs() < f64::EPSILON);
         assert!(parse_claude_usage_windows("", AT_MS).is_empty());
         assert_eq!(slugify_label("Claude  Opus 4.1!"), "claude-opus-4-1");
     }

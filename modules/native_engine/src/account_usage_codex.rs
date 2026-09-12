@@ -30,7 +30,7 @@ const CODEX_OPT_OUT_NOTIFICATION_METHODS: &[&str] = &[
 
 /// Artisan-owned reason when no Codex account is active.
 const CODEX_UNAUTHENTICATED_REASON: &str = "Codex account sign-in is required.";
-/// Artisan-owned reason when Codex demands OpenAI authentication.
+/// Artisan-owned reason when Codex demands `OpenAI` authentication.
 const CODEX_OPENAI_AUTH_REASON: &str = "OpenAI authentication is required.";
 
 /// Configures one non-billable Codex account-usage read.
@@ -69,7 +69,7 @@ impl CodexUsageConfig {
     #[must_use]
     pub fn launched(launch: &CliLaunch) -> Self {
         let mut config = Self::new(launch.program.clone());
-        config.prefix_args = launch.prefix_args.clone();
+        config.prefix_args.clone_from(&launch.prefix_args);
         config
     }
 }
@@ -89,22 +89,22 @@ pub fn read_codex_usage(config: &CodexUsageConfig) -> Result<ProviderUsage, Usag
     args.push("--stdio".to_owned());
     let mut session =
         JsonRpcSession::spawn(&config.executable, &args, &config.spawn_env, config.bounds)?;
-    call_with_deadline(&mut session, deadline, "initialize", initialize_params())
-        .map_err(into_reader_error)?;
+    call_with_deadline(&mut session, deadline, "initialize", &initialize_params())
+        .map_err(|error| into_reader_error(&error))?;
     session
-        .notify("initialized", serde_json::json!({}))
+        .notify("initialized", &serde_json::json!({}))
         .map_err(|_| UsageReaderError::Closed)?;
     let account = match call_with_deadline(
         &mut session,
         deadline,
         "account/read",
-        serde_json::json!({}),
+        &serde_json::json!({}),
     ) {
         Ok(account) => account,
         Err(CallError::Provider(error)) if error.is_login_error() => {
             return Ok(ProviderUsage::unauthenticated(CODEX_UNAUTHENTICATED_REASON));
         }
-        Err(error) => return Err(map_call_error(error, deadline)),
+        Err(error) => return Err(map_call_error(&error, deadline)),
     };
     let email = match map_codex_account(&account)? {
         CodexAccount::Active { email } => email,
@@ -119,13 +119,13 @@ pub fn read_codex_usage(config: &CodexUsageConfig) -> Result<ProviderUsage, Usag
         &mut session,
         deadline,
         "account/rateLimits/read",
-        serde_json::json!({}),
+        &serde_json::json!({}),
     ) {
         Ok(limits) => limits,
         Err(CallError::Provider(error)) if error.is_login_error() => {
             return Ok(ProviderUsage::unauthenticated(CODEX_UNAUTHENTICATED_REASON));
         }
-        Err(error) => return Err(map_call_error(error, deadline)),
+        Err(error) => return Err(map_call_error(&error, deadline)),
     };
     let mut usage = ProviderUsage::authenticated(map_codex_rate_limits(&limits)?);
     usage.account_email = email;
@@ -136,7 +136,7 @@ fn call_with_deadline(
     session: &mut JsonRpcSession,
     deadline: Instant,
     method: &str,
-    params: serde_json::Value,
+    params: &serde_json::Value,
 ) -> Result<serde_json::Value, CallError> {
     if Instant::now() >= deadline {
         return Err(CallError::Transport(UsageReaderError::Timeout));
@@ -144,21 +144,21 @@ fn call_with_deadline(
     session.call(method, params, deadline)
 }
 
-fn into_reader_error(error: CallError) -> UsageReaderError {
+fn into_reader_error(error: &CallError) -> UsageReaderError {
     match error {
-        CallError::Transport(error) => error,
+        CallError::Transport(error) => *error,
         CallError::Provider(_) => UsageReaderError::Protocol,
     }
 }
 
-fn map_call_error(error: CallError, deadline: Instant) -> UsageReaderError {
+fn map_call_error(error: &CallError, deadline: Instant) -> UsageReaderError {
     match error {
         CallError::Transport(UsageReaderError::Timeout) => UsageReaderError::Timeout,
         CallError::Transport(error) if Instant::now() >= deadline => {
             let _ = error;
             UsageReaderError::Timeout
         }
-        CallError::Transport(error) => error,
+        CallError::Transport(error) => *error,
         CallError::Provider(_) => UsageReaderError::Protocol,
     }
 }
@@ -183,12 +183,12 @@ fn initialize_params() -> serde_json::Value {
 pub enum CodexAccount {
     /// An active `apiKey`, `chatgpt`, or `amazonBedrock` account.
     Active {
-        /// ChatGPT account email, when the transport discloses a valid one.
+        /// `ChatGPT` account email, when the transport discloses a valid one.
         email: Option<String>,
     },
-    /// No ChatGPT or API-key account is active.
+    /// No `ChatGPT` or API-key account is active.
     Inactive {
-        /// Whether Codex explicitly demands OpenAI authentication.
+        /// Whether Codex explicitly demands `OpenAI` authentication.
         openai_auth: bool,
     },
 }
@@ -254,11 +254,10 @@ fn codex_reset_at(resets_at: &serde_json::Value) -> Result<Option<String>, Usage
 
 fn classify_codex_window_kind(window_minutes: Option<u32>) -> EngineUsageWindowKind {
     match window_minutes {
-        None => EngineUsageWindowKind::Unknown,
         Some(300) => EngineUsageWindowKind::Session,
         Some(10_080) => EngineUsageWindowKind::Weekly,
         Some(minutes) if (40_000..=45_000).contains(&minutes) => EngineUsageWindowKind::Monthly,
-        Some(_) => EngineUsageWindowKind::Unknown,
+        _ => EngineUsageWindowKind::Unknown,
     }
 }
 
@@ -409,18 +408,18 @@ mod tests {
         assert_eq!(windows.len(), 5);
         assert_eq!(windows[0].id(), "codex:primary");
         assert_eq!(windows[0].kind(), EngineUsageWindowKind::Session);
-        assert_eq!(windows[0].percent_used(), 42.5);
+        assert!((windows[0].percent_used() - 42.5).abs() < f64::EPSILON);
         assert_eq!(windows[0].resets_at(), Some("2026-09-09T12:00:00Z"));
         assert_eq!(windows[0].window_minutes(), Some(300));
 
         assert_eq!(windows[1].id(), "codex:secondary");
         assert_eq!(windows[1].kind(), EngineUsageWindowKind::Weekly);
-        assert_eq!(windows[1].percent_used(), 100.0);
+        assert!((windows[1].percent_used() - 100.0).abs() < f64::EPSILON);
 
         assert_eq!(windows[2].id(), "gpt-5:primary");
         assert_eq!(windows[2].kind(), EngineUsageWindowKind::Monthly);
         assert_eq!(windows[2].label(), Some("Fable"));
-        assert_eq!(windows[2].percent_used(), 0.0);
+        assert!((windows[2].percent_used() - 0.0).abs() < f64::EPSILON);
         assert_eq!(windows[2].resets_at(), None);
 
         assert_eq!(windows[3].id(), "weird:primary");

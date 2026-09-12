@@ -211,30 +211,30 @@ pub fn parse_cursor_version(output: &str) -> Option<String> {
     let bytes = output.as_bytes();
     let mut index = 0_usize;
     while index < bytes.len() {
-        if let Some((suffix_start, greedy_end)) = match_version_at(bytes, index) {
-            if index == 0 || !is_word_char(bytes[index - 1]) {
-                let mut end = greedy_end;
-                loop {
-                    let boundary_ok = if end >= bytes.len() {
-                        true
-                    } else if is_word_char(bytes[end - 1]) {
-                        !is_word_char(bytes[end])
-                    } else {
-                        is_word_char(bytes[end])
-                    };
-                    if boundary_ok {
-                        return core::str::from_utf8(&bytes[index..end])
-                            .ok()
-                            .map(str::to_owned);
-                    }
-                    // Only a trailing run of non-word suffix characters
-                    // (`.`/`-`) can gain a boundary by shrinking; anything
-                    // else means no match starts here.
-                    if end > suffix_start && !is_word_char(bytes[end - 1]) {
-                        end -= 1;
-                    } else {
-                        break;
-                    }
+        if let Some((suffix_start, greedy_end)) = match_version_at(bytes, index)
+            && (index == 0 || !is_word_char(bytes[index - 1]))
+        {
+            let mut end = greedy_end;
+            loop {
+                let boundary_ok = if end >= bytes.len() {
+                    true
+                } else if is_word_char(bytes[end - 1]) {
+                    !is_word_char(bytes[end])
+                } else {
+                    is_word_char(bytes[end])
+                };
+                if boundary_ok {
+                    return core::str::from_utf8(&bytes[index..end])
+                        .ok()
+                        .map(str::to_owned);
+                }
+                // Only a trailing run of non-word suffix characters
+                // (`.`/`-`) can gain a boundary by shrinking; anything
+                // else means no match starts here.
+                if end > suffix_start && !is_word_char(bytes[end - 1]) {
+                    end -= 1;
+                } else {
+                    break;
                 }
             }
         }

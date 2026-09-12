@@ -183,15 +183,13 @@ pub(crate) fn reap_or_kill(
     deadline: Instant,
 ) -> Result<ExitStatus, CodexProbeError> {
     loop {
-        match child.try_wait().map_err(|_| CodexProbeError::Unavailable)? {
-            Some(status) => return Ok(status),
-            None => {
-                if Instant::now() >= deadline {
-                    stop_child(child);
-                    return Err(CodexProbeError::Timeout);
-                }
-                thread::sleep(PROBE_POLL_INTERVAL);
-            }
+        if let Some(status) = child.try_wait().map_err(|_| CodexProbeError::Unavailable)? {
+            return Ok(status);
         }
+        if Instant::now() >= deadline {
+            stop_child(child);
+            return Err(CodexProbeError::Timeout);
+        }
+        thread::sleep(PROBE_POLL_INTERVAL);
     }
 }

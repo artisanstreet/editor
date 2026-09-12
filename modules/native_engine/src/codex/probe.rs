@@ -129,7 +129,7 @@ impl CodexAccountRead {
         self.account
     }
 
-    /// Returns whether the server requires OpenAI authentication.
+    /// Returns whether the server requires `OpenAI` authentication.
     #[must_use]
     pub const fn requires_openai_auth(self) -> bool {
         self.requires_openai_auth
@@ -272,7 +272,7 @@ fn decode_account_object(
         "apiKey" => Ok(CodexAccountType::ApiKey),
         "chatgpt" => {
             match account.get("email") {
-                Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => {}
+                Some(serde_json::Value::Null | serde_json::Value::String(_)) => {}
                 Some(_) | None => return Err(CodexProbeError::AccountInvalid),
             }
             if !account.contains_key("planType") {
@@ -407,12 +407,9 @@ fn drive_version_drain(
             }
             Ok(false) => {}
         }
-        match pump_version_stderr(stderr_drain) {
-            Err(error) => {
-                stop_child(child);
-                return Err(error);
-            }
-            Ok(_) => {}
+        if let Err(error) = pump_version_stderr(stderr_drain) {
+            stop_child(child);
+            return Err(error);
         }
         if Instant::now() >= deadline {
             stop_child(child);
