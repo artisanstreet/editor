@@ -9,7 +9,6 @@
 
 use core::fmt;
 
-use artisan_domain::ItemId;
 use statig::blocking;
 
 // ---------------------------------------------------------------------------
@@ -376,25 +375,10 @@ impl ViewportGeneration {
     }
 }
 
-/// The exact domain item and visual offset needed to restore an anchor.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ViewportAnchor {
-    pub anchor_id: ItemId,
-    pub offset: i32,
-}
-
-impl ViewportAnchor {
-    #[must_use]
-    pub fn new(anchor_id: ItemId, offset: i32) -> Self {
-        Self { anchor_id, offset }
-    }
-}
-
 /// The viewport leaves.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ViewportState {
     Following,
-    Anchored { anchor_id: ItemId, offset: i32 },
     Detached,
     Scrolling { generation: ViewportGeneration },
     Settling { generation: ViewportGeneration },
@@ -405,11 +389,6 @@ impl ViewportState {
     #[must_use]
     pub const fn is_following(&self) -> bool {
         matches!(self, Self::Following)
-    }
-
-    #[must_use]
-    pub const fn is_anchored(&self) -> bool {
-        matches!(self, Self::Anchored { .. })
     }
 
     #[must_use]
@@ -438,26 +417,14 @@ impl ViewportState {
 pub enum ViewportEvent {
     ExtentChanged,
     UserScrolled { at_bottom: bool },
-    AnchorObserved { anchor_id: ItemId, offset: i32 },
     JumpToBottomRequested,
     ProgrammaticScrollStarted { generation: ViewportGeneration },
     ScrollCompleted { generation: ViewportGeneration },
     LayoutSettled,
-    AnchorRemoved { anchor_id: ItemId },
     OwnerClosed,
 }
 
 impl ViewportEvent {
-    #[must_use]
-    pub fn anchor_observed(anchor_id: ItemId, offset: i32) -> Self {
-        Self::AnchorObserved { anchor_id, offset }
-    }
-
-    #[must_use]
-    pub fn anchor_removed(anchor_id: ItemId) -> Self {
-        Self::AnchorRemoved { anchor_id }
-    }
-
     #[must_use]
     pub const fn scroll_completed(generation: ViewportGeneration) -> Self {
         Self::ScrollCompleted { generation }
@@ -484,11 +451,6 @@ pub enum ViewportEffect {
     RequestBottomScroll {
         generation: ViewportGeneration,
     },
-    RequestAnchorRestore {
-        anchor_id: ItemId,
-        offset: i32,
-        generation: ViewportGeneration,
-    },
     ShowJumpToLatest,
     HideJumpToLatest,
     InvalidateRender,
@@ -501,8 +463,7 @@ pub enum ViewportEffect {
 
 mod viewport_statig {
     use super::{
-        CompletionRejection, ItemId, ViewportEffect, ViewportEvent, ViewportGeneration,
-        ViewportState,
+        CompletionRejection, ViewportEffect, ViewportEvent, ViewportGeneration, ViewportState,
     };
     use statig::blocking::{
         self, IntoStateMachineExt, Outcome,
@@ -574,10 +535,6 @@ mod viewport_statig {
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::detached())
                 }
-                ViewportEvent::AnchorObserved { anchor_id, offset } => {
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::anchored(anchor_id.clone(), *offset))
-                }
                 ViewportEvent::JumpToBottomRequested => {
                     let Some(generation) = self.allocate_generation(context) else {
                         return Handled;
@@ -607,86 +564,7 @@ mod viewport_statig {
                     });
                     Handled
                 }
-                ViewportEvent::LayoutSettled | ViewportEvent::AnchorRemoved { .. } => {
-                    context.none();
-                    Handled
-                }
-                ViewportEvent::OwnerClosed => {
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::closed())
-                }
-            }
-        }
-
-        #[state(local_storage("anchor_id: ItemId", "offset: i32"))]
-        fn anchored(
-            &mut self,
-            anchor_id: &mut ItemId,
-            offset: &mut i32,
-            context: &mut Context,
-            event: &Event,
-        ) -> Outcome<State> {
-            let Event::Public(event) = event;
-            match event {
-                ViewportEvent::ExtentChanged => {
-                    let Some(generation) = self.allocate_generation(context) else {
-                        return Handled;
-                    };
-                    context.push(ViewportEffect::RequestAnchorRestore {
-                        anchor_id: anchor_id.clone(),
-                        offset: *offset,
-                        generation,
-                    });
-                    Handled
-                }
-                ViewportEvent::UserScrolled { at_bottom: true } => {
-                    context.push(ViewportEffect::HideJumpToLatest);
-                    Transition(State::following())
-                }
-                ViewportEvent::UserScrolled { at_bottom: false } => {
-                    context.push(ViewportEffect::ShowJumpToLatest);
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::detached())
-                }
-                ViewportEvent::AnchorObserved { anchor_id, offset } => {
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::anchored(anchor_id.clone(), *offset))
-                }
-                ViewportEvent::JumpToBottomRequested => {
-                    let Some(generation) = self.allocate_generation(context) else {
-                        return Handled;
-                    };
-                    context.push(ViewportEffect::RequestBottomScroll { generation });
-                    context.push(ViewportEffect::HideJumpToLatest);
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::scrolling(generation))
-                }
-                ViewportEvent::ProgrammaticScrollStarted { generation }
-                    if *generation == self.last_generation =>
-                {
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::scrolling(*generation))
-                }
-                ViewportEvent::ProgrammaticScrollStarted { generation } => {
-                    context.push(ViewportEffect::CompletionRejected {
-                        generation: *generation,
-                        reason: CompletionRejection::StaleGeneration,
-                    });
-                    Handled
-                }
-                ViewportEvent::ScrollCompleted { generation } => {
-                    context.push(ViewportEffect::CompletionRejected {
-                        generation: *generation,
-                        reason: CompletionRejection::NoActiveScroll,
-                    });
-                    Handled
-                }
-                ViewportEvent::AnchorRemoved { anchor_id: removed } if removed == &*anchor_id => {
-                    context.push(ViewportEffect::ShowJumpToLatest);
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::detached())
-                }
-                ViewportEvent::LayoutSettled | ViewportEvent::AnchorRemoved { .. } => {
+                ViewportEvent::LayoutSettled => {
                     context.none();
                     Handled
                 }
@@ -703,8 +581,7 @@ mod viewport_statig {
             match event {
                 ViewportEvent::ExtentChanged
                 | ViewportEvent::UserScrolled { at_bottom: false }
-                | ViewportEvent::LayoutSettled
-                | ViewportEvent::AnchorRemoved { .. } => {
+                | ViewportEvent::LayoutSettled => {
                     context.none();
                     Handled
                 }
@@ -712,10 +589,6 @@ mod viewport_statig {
                     context.push(ViewportEffect::HideJumpToLatest);
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::following())
-                }
-                ViewportEvent::AnchorObserved { anchor_id, offset } => {
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::anchored(anchor_id.clone(), *offset))
                 }
                 ViewportEvent::JumpToBottomRequested => {
                     let Some(generation) = self.allocate_generation(context) else {
@@ -764,7 +637,6 @@ mod viewport_statig {
             match event {
                 ViewportEvent::ExtentChanged
                 | ViewportEvent::UserScrolled { at_bottom: false }
-                | ViewportEvent::AnchorRemoved { .. }
                 | ViewportEvent::LayoutSettled => {
                     context.none();
                     Handled
@@ -772,10 +644,6 @@ mod viewport_statig {
                 ViewportEvent::UserScrolled { at_bottom: true } => {
                     context.push(ViewportEffect::HideJumpToLatest);
                     Transition(State::following())
-                }
-                ViewportEvent::AnchorObserved { anchor_id, offset } => {
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::anchored(anchor_id.clone(), *offset))
                 }
                 ViewportEvent::JumpToBottomRequested => {
                     let Some(next_generation) = self.allocate_generation(context) else {
@@ -836,18 +704,13 @@ mod viewport_statig {
             let Event::Public(event) = event;
             match event {
                 ViewportEvent::ExtentChanged
-                | ViewportEvent::UserScrolled { at_bottom: false }
-                | ViewportEvent::AnchorRemoved { .. } => {
+                | ViewportEvent::UserScrolled { at_bottom: false } => {
                     context.none();
                     Handled
                 }
                 ViewportEvent::UserScrolled { at_bottom: true } => {
                     context.push(ViewportEffect::HideJumpToLatest);
                     Transition(State::following())
-                }
-                ViewportEvent::AnchorObserved { anchor_id, offset } => {
-                    context.push(ViewportEffect::InvalidateRender);
-                    Transition(State::anchored(anchor_id.clone(), *offset))
                 }
                 ViewportEvent::JumpToBottomRequested => {
                     let Some(next_generation) = self.allocate_generation(context) else {
@@ -919,12 +782,6 @@ mod viewport_statig {
     pub(super) fn public_state(state: &State) -> ViewportState {
         match state {
             State::Following { .. } => ViewportState::Following,
-            State::Anchored {
-                anchor_id, offset, ..
-            } => ViewportState::Anchored {
-                anchor_id: anchor_id.clone(),
-                offset: *offset,
-            },
             State::Detached { .. } => ViewportState::Detached,
             State::Scrolling { generation, .. } => ViewportState::Scrolling {
                 generation: *generation,
@@ -952,13 +809,6 @@ impl ViewportController {
     #[must_use]
     pub fn new() -> Self {
         Self::from_machine(viewport_statig::new_machine(ViewportGeneration::INITIAL))
-    }
-
-    #[must_use]
-    pub fn anchored(anchor_id: ItemId, offset: i32) -> Self {
-        let mut controller = Self::new();
-        let _ = controller.handle(ViewportEvent::anchor_observed(anchor_id, offset));
-        controller
     }
 
     /// Creates a machine with a bounded pre-machine seed for overflow tests.
@@ -1000,9 +850,6 @@ impl Clone for ViewportController {
         let mut clone = Self::seeded_for_test(self.generation());
         match self.state() {
             ViewportState::Following => {}
-            ViewportState::Anchored { anchor_id, offset } => {
-                let _ = clone.handle(ViewportEvent::anchor_observed(anchor_id, offset));
-            }
             ViewportState::Detached => {
                 let _ = clone.handle(ViewportEvent::UserScrolled { at_bottom: false });
             }
