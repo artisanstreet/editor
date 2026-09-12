@@ -25,7 +25,7 @@ use artisan_domain::{
 };
 use artisan_native_engine::VerifiedCodexLaunch;
 use tokio::io::BufReader;
-use tokio::process::{ChildStdin, ChildStdout};
+use tokio::process::ChildStdout;
 use tokio::time::Instant;
 
 use super::super::codex as codex_runtime;
@@ -50,7 +50,6 @@ const CODEX_RUN_OBSERVATION_TAG: EngineObservationTag = EngineObservationTag::Ru
 /// separated from the child they belong to.
 pub(crate) struct CodexOpenSession {
     parts: ChildParts,
-    stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     thread_id: String,
     next_id: u64,
@@ -69,7 +68,6 @@ impl CodexOpenSession {
     pub(crate) fn into_drive(self) -> CodexDriveSession {
         CodexDriveSession {
             parts: self.parts,
-            stdin: self.stdin,
             reader: self.reader,
             thread_id: self.thread_id,
             next_id: self.next_id,
@@ -80,10 +78,8 @@ impl CodexOpenSession {
 
 /// Everything the drive phase owns after a successful open.
 pub(crate) struct CodexDriveSession {
-    /// Exact child custody plus the closed lifeline slot and stderr state.
+    /// Exact child custody plus the sole stdin lifeline and stderr state.
     pub(crate) parts: ChildParts,
-    /// The sole stdin writer for the whole turn.
-    pub(crate) stdin: ChildStdin,
     /// Bounded stdout reader positioned after the handshake.
     pub(crate) reader: BufReader<ChildStdout>,
     /// Native provider thread identity returned by the handshake.
@@ -143,12 +139,14 @@ pub(crate) async fn open_codex_session(
     let Ok(mut child) = spawn_codex_engine(launch, &project_root) else {
         return EngineOpenOutcome::failed(EngineOpenError::SpawnFailed);
     };
-    let stdin_opt = child.stdin.take();
+    // The sole stdin lifeline is taken before any handshake step can fail;
+    // every write below borrows this exact handle, so `fail_open` cleanup
+    // always closes the one true EOF source and never races a local clone.
+    let lifeline = LifelineWriter::take(&mut child);
     let stdout_opt = child.stdout.take();
     let stderr_opt = child.stderr.take();
-    let lifeline = LifelineWriter::take(&mut child);
     let stderr_counter = StderrCounter::new(stderr_opt, context.bounds.stderr_cap_bytes);
-    let (Some(stdin), Some(stdout)) = (stdin_opt, stdout_opt) else {
+    let Some(stdout) = stdout_opt else {
         let parts = ChildParts {
             child,
             lifeline,
@@ -157,14 +155,13 @@ pub(crate) async fn open_codex_session(
         };
         return fail_open(parts, EngineOpenError::SpawnFailed, context.limits.close).await;
     };
-    let parts = ChildParts {
+    let mut parts = ChildParts {
         child,
         lifeline,
         stdout: None,
         stderr_counter,
     };
     let mut reader = BufReader::new(stdout);
-    let mut stdin = stdin;
     let mut line = String::new();
     let mut next_id: u64 = 1;
 
@@ -175,7 +172,7 @@ pub(crate) async fn open_codex_session(
         &codex_runtime::initialize_params("artisan-editor", "0.3.0"),
     );
     next_id += 1;
-    if codex_runtime::write_codex_line(&mut stdin, &init_line)
+    if codex_runtime::write_codex_line(&mut parts.lifeline, &init_line)
         .await
         .is_err()
     {
@@ -198,7 +195,7 @@ pub(crate) async fn open_codex_session(
     // before any `thread/*` request. A notification never consumes a request
     // id, so `next_id` still names the `thread/*` request below.
     let initialized_line = codex_runtime::notification_line("initialized");
-    if codex_runtime::write_codex_line(&mut stdin, &initialized_line)
+    if codex_runtime::write_codex_line(&mut parts.lifeline, &initialized_line)
         .await
         .is_err()
     {
@@ -230,7 +227,7 @@ pub(crate) async fn open_codex_session(
         let resume_line =
             codex_runtime::request_line(thread_request_id, "thread/resume", &resume_params);
         next_id += 1;
-        if codex_runtime::write_codex_line(&mut stdin, &resume_line)
+        if codex_runtime::write_codex_line(&mut parts.lifeline, &resume_line)
             .await
             .is_err()
         {
@@ -261,7 +258,7 @@ pub(crate) async fn open_codex_session(
             &settings.thread_params(&project_root),
         );
         next_id += 1;
-        if codex_runtime::write_codex_line(&mut stdin, &thread_line)
+        if codex_runtime::write_codex_line(&mut parts.lifeline, &thread_line)
             .await
             .is_err()
         {
@@ -296,7 +293,6 @@ pub(crate) async fn open_codex_session(
         observation_tag: CODEX_RUN_OBSERVATION_TAG,
         session: Box::new(CodexOpenSession {
             parts,
-            stdin,
             reader,
             thread_id,
             next_id,

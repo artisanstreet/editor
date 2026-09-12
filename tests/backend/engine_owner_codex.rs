@@ -32,17 +32,18 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use super::bounded_line::{BoundedLineError, read_bounded_line};
 use super::codex::{
     CODEX_MAX_FRAME_BYTES, CodexContinuationDecision, CodexContinuationGateInput, CodexEvent,
-    CodexPendingTracker, CodexQuotaWindowKind, CodexSettings, CodexTerminalLifecycle,
-    CodexToolAction, CodexTurnState, CodexUsageAttribution, CodexUsageContext, CodexUsageScope,
-    answer_approval, answer_questions, apply_event, check_codex_native_continuation,
-    clamp_codex_percent_used, classify_codex_quota_window_kind, classify_exit,
-    codex_account_read_line, codex_cli_meets_minimum, codex_rate_limits_read_line,
+    CodexLineError, CodexPendingTracker, CodexQuotaWindowKind, CodexSettings,
+    CodexTerminalLifecycle, CodexToolAction, CodexTurnState, CodexUsageAttribution,
+    CodexUsageContext, CodexUsageScope, answer_approval, answer_questions, apply_event,
+    check_codex_native_continuation, clamp_codex_percent_used, classify_codex_quota_window_kind,
+    classify_exit, codex_account_read_line, codex_cli_meets_minimum, codex_rate_limits_read_line,
     codex_requires_group_termination, codex_reset_at_iso, codex_usage_report, has_stalled,
     initialize_params, interrupt_live_turn, is_codex_error_response, map_codex_rate_limit_windows,
-    notification_line, parse_frame, parse_thread_token_usage, request_line, steer_live_turn,
-    terminal_observation, thread_resume_params, write_line,
+    notification_line, parse_frame, parse_thread_token_usage, read_codex_line, request_line,
+    steer_live_turn, terminal_observation, thread_resume_params, write_line,
 };
 use super::observation::{EngineObservation, TerminalState};
 use super::operation::{
@@ -293,6 +294,87 @@ async fn interrupt_live_turn_saturates_max_sentinel_id() {
     let value: serde_json::Value =
         serde_json::from_str(line.trim()).expect("interrupt line is json");
     assert_eq!(value["id"], 7);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded provider line reads
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn bounded_line_reader_rejects_oversized_and_unterminated_lines() {
+    // A cap of 8 bytes: the unterminated 64-byte line must fail typed
+    // BEFORE its bytes are copied into the caller's line.
+    let oversized = [b'x'; 64];
+    let mut reader = BufReader::new(&oversized[..]);
+    let mut line = String::from("stale");
+    let error = read_bounded_line(&mut reader, &mut line, 8)
+        .await
+        .expect_err("an over-cap line must reject");
+    assert_eq!(error, BoundedLineError::LineTooLong);
+    assert!(line.is_empty(), "no over-cap bytes may be retained");
+
+    // A terminated line of exactly the cap is accepted, including the LF,
+    // and the next read observes the clean EOF.
+    let exact = b"12345678\n".to_vec();
+    let mut reader = BufReader::new(&exact[..]);
+    let mut line = String::new();
+    let read = read_bounded_line(&mut reader, &mut line, 8)
+        .await
+        .expect("exact-cap line reads");
+    assert_eq!(read, 9);
+    assert_eq!(line, "12345678\n");
+    let mut tail = String::new();
+    assert_eq!(
+        read_bounded_line(&mut reader, &mut tail, 8)
+            .await
+            .expect("clean eof reads"),
+        0
+    );
+
+    // An EOF-terminated partial line is returned verbatim, mirroring
+    // `read_line`, and non-UTF-8 bytes reject typed.
+    let partial = b"tail".to_vec();
+    let mut reader = BufReader::new(&partial[..]);
+    let mut line = String::new();
+    assert_eq!(
+        read_bounded_line(&mut reader, &mut line, 8)
+            .await
+            .expect("partial eof line reads"),
+        4
+    );
+    assert_eq!(line, "tail");
+    let invalid = [0xff, 0xfe];
+    let mut reader = BufReader::new(&invalid[..]);
+    let mut line = String::new();
+    assert_eq!(
+        read_bounded_line(&mut reader, &mut line, 8)
+            .await
+            .expect_err("invalid utf-8 must reject"),
+        BoundedLineError::InvalidUtf8
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn codex_wire_line_reads_are_bounded_before_allocation() {
+    let oversized = vec![b'{'; CODEX_MAX_FRAME_BYTES + 1];
+    let mut reader = BufReader::new(&oversized[..]);
+    let mut line = String::new();
+    let shutdown = Arc::new(CancelHandle::new());
+    let control = Arc::new(CancelHandle::new());
+    let error = read_codex_line(
+        &mut reader,
+        &mut line,
+        Instant::now() + Duration::from_secs(5),
+        &shutdown,
+        &control,
+    )
+    .await
+    .expect_err("an over-bound codex line must reject typed");
+    assert_eq!(error, CodexLineError::FrameTooLarge);
+    assert!(
+        line.is_empty(),
+        "over-bound provider bytes must never land in the line buffer"
+    );
 }
 
 // ---------------------------------------------------------------------------

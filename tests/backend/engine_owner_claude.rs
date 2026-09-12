@@ -2578,3 +2578,31 @@ async fn fixture_restart_after_kill_replays_prefix_on_the_same_session() {
         "durable-replayed"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn oversized_claude_line_fails_typed_before_allocation() {
+    // The init gate reads through the bounded reader: an over-cap provider
+    // line must fail typed while retaining no bytes in the line buffer.
+    let oversized = vec![b'{'; CLAUDE_MAX_FRAME_BYTES + 1];
+    let mut reader = BufReader::new(&oversized[..]);
+    let mut line = String::from("stale");
+    let shutdown = Arc::new(CancelHandle::new());
+    let control = Arc::new(CancelHandle::new());
+    let error = crate::engine_owner::operation::read_claude_line(
+        &mut reader,
+        &mut line,
+        Instant::now() + Duration::from_secs(5),
+        &shutdown,
+        &control,
+    )
+    .await
+    .expect_err("an over-cap claude line must reject");
+    assert_eq!(
+        error,
+        crate::engine_owner::operation::EngineOperationError::FrameTooLarge
+    );
+    assert!(
+        line.is_empty(),
+        "over-cap provider bytes must never be retained"
+    );
+}

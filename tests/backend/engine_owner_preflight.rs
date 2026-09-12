@@ -18,8 +18,8 @@ use super::{
 use crate::engine_owner::http::{HealthError, HealthSecret};
 use crate::engine_owner::operation::{EngineOperationError, PreflightReap};
 use crate::engine_owner::process::{
-    ChildParts, CleanupObservation, LifelineWriter, StderrCounter, cleanup_after_abort,
-    eventual_wait_once, spawn_configured_fixture_engine,
+    ChildParts, CleanupObservation, LaunchRecipe, LifelineWriter, StderrCounter,
+    cleanup_after_abort, eventual_wait_once, spawn_configured_fixture_engine, spawn_engine,
 };
 use artisan_domain::RootPath;
 
@@ -447,4 +447,78 @@ async fn close_deadline_uses_existing_kill_and_custody_sequence() {
     assert_eq!(counts.spawned, 1);
     assert_eq!(counts.reaps_observed, 1);
     assert!(counts.kills_requested <= 1);
+}
+
+/// Legacy-lane spawn (no pre-wait group termination) so the cleanup's own
+/// kill/observation sequence is what is exercised on every platform.
+fn ungrouped_lifeline_fixture() -> crate::engine_owner::process::EngineChild {
+    let fixture = fixture_program_path();
+    let secret = HealthSecret::generate().expect("fixture secret");
+    spawn_engine(
+        &LaunchRecipe::Fixture {
+            program: fixture,
+            args: Vec::new(),
+            scenario: "hang_until_lifeline",
+        },
+        secret.as_str(),
+    )
+    .expect("fixture should spawn")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn zero_budget_cleanup_kills_then_reaps_within_the_defined_grace() {
+    reset_witnesses();
+    let mut child = ungrouped_lifeline_fixture();
+    let lifeline = LifelineWriter::take(&mut child);
+    let parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter: StderrCounter::new(None, 4_096),
+    };
+    let settled = tokio::time::timeout(
+        Duration::from_secs(5),
+        cleanup_after_abort(parts, Duration::ZERO),
+    )
+    .await
+    .expect("zero-budget cleanup must settle bounded");
+    assert!(
+        matches!(settled, CleanupObservation::ReapedAfterKill(_)),
+        "a live child must be killed and then observed inside the post-kill grace"
+    );
+    let counts = witness_counts();
+    assert_eq!(counts.kills_requested, 1);
+    assert_eq!(counts.reaps_observed, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lifeline_close_is_the_single_eof_for_an_ungrouped_child() {
+    reset_witnesses();
+    let mut child = ungrouped_lifeline_fixture();
+    // The sole lifeline writer is established before any failure cleanup, so
+    // it must own the child's only stdin handle: closing it must be the
+    // child's EOF. The fixture exits with its lifeline-lost code (3) when it
+    // observes EOF, and the ungrouped launch keeps that exit observable on
+    // every platform instead of masking it with a pre-wait group kill.
+    let lifeline = LifelineWriter::take(&mut child);
+    assert!(lifeline.is_open(), "the lifeline must own the child stdin");
+    let parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter: StderrCounter::new(None, 4_096),
+    };
+    let settled = tokio::time::timeout(
+        Duration::from_secs(5),
+        cleanup_after_abort(parts, Duration::from_secs(2)),
+    )
+    .await
+    .expect("lifeline close must settle bounded");
+    let CleanupObservation::ReapedWithoutKill(status) = settled else {
+        panic!("lifeline close must reap the fixture without a kill");
+    };
+    assert_eq!(status.code(), Some(3), "fixture lifeline-lost exit code");
+    let counts = witness_counts();
+    assert_eq!(counts.kills_requested, 0);
+    assert_eq!(counts.reaps_observed, 1);
 }

@@ -80,7 +80,7 @@ pub(crate) use dispatch_support::{binding_bytes_vec, binding_matches_bytes};
 pub(crate) use observation_commit::{
     SubagentCommitCursor, commit_activity_observation, commit_subagent_observation,
 };
-use recovery::{run_final_recovery_page, run_recovery_pages, shutdown_owner_until_settled};
+use recovery::{run_final_recovery_page, run_recovery_pages, shutdown_owner_bounded};
 #[cfg(test)]
 use steer::handle_steer;
 #[cfg(test)]
@@ -260,9 +260,12 @@ impl NativeRunDispatcherConfig {
 pub enum NativeRunDispatcherShutdown {
     /// The dispatcher and its single engine owner joined cleanly.
     Joined,
-    /// The configured shutdown budget elapsed, but the join was still
-    /// awaited to resolve owner custody.
+    /// The configured shutdown budget elapsed; the dispatcher stopped
+    /// waiting for the join so shutdown itself stays bounded.
     BudgetExceeded,
+    /// The dispatcher joined, but its engine owner quarantined and retained
+    /// child custody beyond the bounded settle grace.
+    Quarantined,
     /// The dispatcher task or owner task was lost.
     TaskLost,
 }
@@ -517,35 +520,29 @@ impl NativeRunDispatcher {
         self.catalog_client.clone()
     }
 
-    /// Stops claims, drains admission, and awaits the owner. A budget breach
-    /// is reported after the join is nevertheless awaited so child custody is
-    /// never detached from this shutdown path.
+    /// Stops claims, drains admission, and awaits the owner within the
+    /// configured budget. A budget breach or an owner quarantine is reported
+    /// typed instead of awaiting the join without a bound.
     pub(crate) async fn shutdown(&mut self) -> NativeRunDispatcherShutdown {
         self.stop.cancel();
         if let Some(observed) = self.observed {
             return observed;
         }
-        let Some(join) = self.join.take() else {
+        let Some(mut join) = self.join.take() else {
             self.observed = Some(NativeRunDispatcherShutdown::Joined);
             return NativeRunDispatcherShutdown::Joined;
         };
-        let mut join = join;
-        let result = tokio::time::timeout(self.shutdown_budget, &mut join).await;
-        let (budget_exceeded, join_result) = match result {
-            Ok(join_result) => (false, join_result),
-            Err(_) => (true, join.await),
-        };
-        let outcome = match join_result {
-            Ok(DispatchLoopExit {
+        let outcome = match tokio::time::timeout(self.shutdown_budget, &mut join).await {
+            Ok(Ok(DispatchLoopExit {
                 owner: EngineOwnerShutdown::Joined,
-            }) if !budget_exceeded => NativeRunDispatcherShutdown::Joined,
-            Ok(DispatchLoopExit {
-                owner: EngineOwnerShutdown::Joined,
-            }) => NativeRunDispatcherShutdown::BudgetExceeded,
-            Ok(DispatchLoopExit {
-                owner: EngineOwnerShutdown::Quarantined | EngineOwnerShutdown::TaskLost,
-            })
-            | Err(_) => NativeRunDispatcherShutdown::TaskLost,
+            })) => NativeRunDispatcherShutdown::Joined,
+            Ok(Ok(DispatchLoopExit {
+                owner: EngineOwnerShutdown::Quarantined,
+            })) => NativeRunDispatcherShutdown::Quarantined,
+            Ok(Ok(DispatchLoopExit {
+                owner: EngineOwnerShutdown::TaskLost,
+            }) | Err(_)) => NativeRunDispatcherShutdown::TaskLost,
+            Err(_) => NativeRunDispatcherShutdown::BudgetExceeded,
         };
         self.observed = Some(outcome);
         outcome
@@ -695,9 +692,11 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
 
     run_final_recovery_page(&repository, &config, &origin).await;
 
-    let owner_shutdown = shutdown_owner_until_settled(&mut owner).await;
-    // The owner shutdown loop above does not complete while unresolved child
-    // custody remains, so releasing these leases is safe at this boundary.
+    let owner_shutdown = shutdown_owner_bounded(&mut owner).await;
+    // The owner shutdown observation is bounded even while unresolved child
+    // custody remains (typed `Quarantined`), so the retained activity leases
+    // are released at this boundary; the parked owner task keeps the exact
+    // custody and stays observable through the owner facade.
     drop(retained_activity);
     DispatchLoopExit {
         owner: owner_shutdown,

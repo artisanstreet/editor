@@ -1177,12 +1177,12 @@ async fn acp_zero_budget_settles_the_quarantine_path_bounded() {
     )
     .await
     .expect("zero-budget teardown returns bounded");
-    match settled {
-        AcpShutdown::ReapedAfterKill(_) | AcpShutdown::Retained(_) => {}
-        AcpShutdown::ReapedWithoutKill(_) => {
-            panic!("live sleeper must not reap without kill")
-        }
-    }
+    // The defined post-kill grace must observe the terminated sleeper: a
+    // zero budget never collapses the kill into a bare poll/quarantine.
+    assert!(
+        matches!(settled, AcpShutdown::ReapedAfterKill(_)),
+        "zero-budget acp teardown must reap after kill, got {settled:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

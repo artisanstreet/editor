@@ -12,11 +12,13 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
+use super::super::codex::CodexLineError;
 use super::super::codex::codex_response_id;
 use super::super::codex::codex_response_id_matches;
 use super::super::codex::codex_turn_id;
 use super::super::codex::is_codex_result_for;
 use super::super::codex::read_codex_line;
+use super::super::codex::read_codex_line_bounded;
 use super::super::codex::write_codex_line;
 use super::super::observation::EngineObservation;
 use super::super::observation::TerminalState;
@@ -35,6 +37,7 @@ use super::core::SteerError;
 use super::core::settle_steers_closed;
 use super::turn_common::ConfiguredRuntime;
 use super::turn_common::ConfiguredTurnRequest;
+use super::turn_common::finish_quarantined_open;
 use super::turn_common::finish_turn_result;
 use super::turn_common::phase_deadline;
 use super::turn_common::wait_for_authorization;
@@ -113,8 +116,8 @@ pub(super) async fn execute_codex_turn(
         .input
         .prompt
         .text()
-        .map(|text| text.as_str().to_owned())
-        .unwrap_or_default();
+        .map(|text| text.as_str().to_owned());
+    let prompt_text = prompt_text.unwrap_or_default();
     let open_input = EngineOpenInput {
         working_directory: request.input.project_root.as_str().to_owned(),
         prompt: prompt_text.clone(),
@@ -176,7 +179,6 @@ pub(super) async fn execute_codex_turn(
     } = request;
     let CodexDriveSession {
         mut parts,
-        mut stdin,
         mut reader,
         thread_id,
         mut next_id,
@@ -190,7 +192,6 @@ pub(super) async fn execute_codex_turn(
         .send(Ok(PreparedSession::new(thread_id.clone())))
         .is_err()
     {
-        drop(stdin);
         return finish_turn_result(
             parts,
             Err(EngineOperationError::Cancelled),
@@ -202,7 +203,6 @@ pub(super) async fn execute_codex_turn(
     if let Err(error) =
         wait_for_authorization(&mut parts, &mut authorize, deadline, shutdown, &control).await
     {
-        drop(stdin);
         return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
     }
 
@@ -221,8 +221,10 @@ pub(super) async fn execute_codex_turn(
     let turn_request_id = next_id;
     let turn_line = codex_runtime::request_line(next_id, "turn/start", &turn_params);
     next_id += 1;
-    if write_codex_line(&mut stdin, &turn_line).await.is_err() {
-        drop(stdin);
+    if write_codex_line(&mut parts.lifeline, &turn_line)
+        .await
+        .is_err()
+    {
         return finish_turn_result(
             parts,
             Err(EngineOperationError::ProviderRequestFailed),
@@ -287,7 +289,6 @@ pub(super) async fn execute_codex_turn(
         CodexTurnWait::Accepted(turn_id) => turn_id,
         CodexTurnWait::Terminal(state) => {
             settle_steers_closed(&mut steer_rx, &mut pending_steers, &mut no_pending_acks);
-            drop(stdin);
             drop(observations);
             return finish_turn_result(
                 parts,
@@ -299,7 +300,6 @@ pub(super) async fn execute_codex_turn(
         }
         CodexTurnWait::Failed(error) => {
             settle_steers_closed(&mut steer_rx, &mut pending_steers, &mut no_pending_acks);
-            drop(stdin);
             return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
         }
     };
@@ -314,7 +314,7 @@ pub(super) async fn execute_codex_turn(
         HashMap::new();
     for delivery in std::mem::take(&mut pending_steers) {
         service_codex_steer_delivery(
-            &mut stdin,
+            &mut parts.lifeline,
             &mut next_id,
             thread_id.as_str(),
             Some(provider_turn_id.as_str()),
@@ -330,7 +330,6 @@ pub(super) async fn execute_codex_turn(
     last_activity = Instant::now();
     let terminal = codex_pump_loop(
         &mut reader,
-        &mut stdin,
         &mut parts,
         &mut line,
         &input.run_id,
@@ -350,8 +349,6 @@ pub(super) async fn execute_codex_turn(
         &mut next_id,
     )
     .await;
-    drop(stdin);
-    let _ = next_id;
     match terminal {
         CodexPumpOutcome::Terminal(state) => {
             drop(observations);
@@ -388,23 +385,6 @@ const fn map_codex_open_error(error: EngineOpenError) -> EngineOperationError {
         EngineOpenError::Cancelled => EngineOperationError::Cancelled,
         EngineOpenError::Deadline => EngineOperationError::Deadline,
     }
-}
-
-/// Settles one failed open whose child could not be reaped as quarantined
-/// custody, mirroring the drive phase's retained-cleanup settlement.
-fn finish_quarantined_open(
-    request: ConfiguredTurnRequest,
-    error: EngineOperationError,
-    retained: Box<RetainedEngine>,
-) -> Execution {
-    let ConfiguredTurnRequest {
-        prepared, respond, ..
-    } = request;
-    let _ = prepared.send(Err(error.clone()));
-    let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring {
-        primary: Box::new(error),
-    }));
-    Execution::Quarantined(retained)
 }
 
 enum CodexPumpOutcome {
@@ -491,6 +471,9 @@ async fn codex_await_turn_start(
                     }
                     if Instant::now() >= deadline {
                         return CodexTurnWait::Failed(EngineOperationError::Deadline);
+                    }
+                    if result == Err(CodexLineError::FrameTooLarge) {
+                        return CodexTurnWait::Failed(EngineOperationError::FrameTooLarge);
                     }
                     return CodexTurnWait::Failed(EngineOperationError::ProviderRequestFailed);
                 }
@@ -602,7 +585,6 @@ pub(crate) fn ack_codex_steer_response(
 #[allow(clippy::too_many_arguments)]
 async fn codex_pump_loop(
     reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
-    stdin: &mut tokio::process::ChildStdin,
     parts: &mut ChildParts,
     line: &mut String,
     run_id: &artisan_domain::RunId,
@@ -623,7 +605,6 @@ async fn codex_pump_loop(
 ) -> CodexPumpOutcome {
     let outcome = codex_pump_loop_inner(
         reader,
-        stdin,
         parts,
         line,
         run_id,
@@ -658,7 +639,6 @@ async fn codex_pump_loop(
 #[allow(clippy::too_many_arguments)]
 async fn codex_pump_loop_inner(
     reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
-    stdin: &mut tokio::process::ChildStdin,
     parts: &mut ChildParts,
     line: &mut String,
     run_id: &artisan_domain::RunId,
@@ -678,7 +658,6 @@ async fn codex_pump_loop_inner(
     next_id: &mut u64,
 ) -> CodexPumpOutcome {
     use super::super::codex as codex_runtime;
-    use tokio::io::AsyncBufReadExt as _;
 
     loop {
         if shutdown.is_cancelled() {
@@ -688,9 +667,13 @@ async fn codex_pump_loop_inner(
             // Best-effort provider interrupt before reporting cancellation.
             if let Some(turn_id) = active_turn.clone() {
                 let mut request_id = u64::MAX;
-                let _ =
-                    codex_runtime::interrupt_live_turn(stdin, &mut request_id, thread_id, &turn_id)
-                        .await;
+                let _ = codex_runtime::interrupt_live_turn(
+                    &mut parts.lifeline,
+                    &mut request_id,
+                    thread_id,
+                    &turn_id,
+                )
+                .await;
             }
             return CodexPumpOutcome::Terminal(TerminalState::Cancelled);
         }
@@ -716,7 +699,10 @@ async fn codex_pump_loop_inner(
             () = control.wait() => {
                 if let Some(turn_id) = active_turn.clone() {
                     let mut request_id = u64::MAX;
-                    let _ = codex_runtime::interrupt_live_turn(stdin, &mut request_id, thread_id, &turn_id).await;
+                    let _ = codex_runtime::interrupt_live_turn(
+                        &mut parts.lifeline, &mut request_id, thread_id, &turn_id,
+                    )
+                    .await;
                 }
                 return CodexPumpOutcome::Terminal(TerminalState::Cancelled);
             }
@@ -750,7 +736,7 @@ async fn codex_pump_loop_inner(
                 // split ownership: the dispatch arm drains observations
                 // while awaiting, and this loop keeps polling both sides.
                 service_codex_steer_delivery(
-                    stdin,
+                    &mut parts.lifeline,
                     next_id,
                     thread_id,
                     active_turn.as_deref(),
@@ -759,7 +745,7 @@ async fn codex_pump_loop_inner(
                 )
                 .await;
             }
-            read = reader.read_line(line) => {
+            read = read_codex_line_bounded(reader, line) => {
                 match read {
                     Ok(0) => {
                         // External kill: interruption, never cancel/failure.
@@ -800,6 +786,9 @@ async fn codex_pump_loop_inner(
                         {
                             return CodexPumpOutcome::Terminal(terminal);
                         }
+                    }
+                    Err(CodexLineError::FrameTooLarge) => {
+                        return CodexPumpOutcome::Failed(EngineOperationError::FrameTooLarge);
                     }
                     Err(_) => return CodexPumpOutcome::Failed(EngineOperationError::StreamFailed),
                 }

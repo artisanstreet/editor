@@ -119,11 +119,11 @@ pub(super) async fn run_final_recovery_page(
     let _ = perform_live_recovery_page(repository, config, operated_at).await;
 }
 
-pub(super) async fn shutdown_owner_until_settled(owner: &mut EngineOwner) -> EngineOwnerShutdown {
-    loop {
-        let outcome = owner.shutdown().await;
-        if !matches!(outcome, EngineOwnerShutdown::Quarantined) {
-            return outcome;
-        }
-    }
+/// Shuts the owner down exactly once and returns its bounded verdict.
+///
+/// `EngineOwner::shutdown` already bounds an already-quarantined tail, so
+/// looping on `Quarantined` would spin forever on retained custody and
+/// re-introduce the very dispatcher shutdown hang this path exists to avoid.
+pub(super) async fn shutdown_owner_bounded(owner: &mut EngineOwner) -> EngineOwnerShutdown {
+    owner.shutdown().await
 }

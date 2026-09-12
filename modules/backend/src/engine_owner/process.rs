@@ -577,26 +577,17 @@ pub(crate) fn spawn_claude_engine(
     EngineChild::spawn(command, true)
 }
 
-/// The taken sole stdin writer kept open for the whole operation.
+mod lifeline;
+
+pub(crate) use lifeline::LifelineWriter;
+
+/// Minimum observation window after a termination request.
 ///
-/// The writer is removed from the [`EngineChild`] immediately after spawn so the
-/// child's own `wait()` can never close it implicitly; it closes exactly
-/// when the owner drops it.
-pub(crate) struct LifelineWriter(Option<ChildStdin>);
-
-impl LifelineWriter {
-    /// Takes the child's piped stdin as the sole lifeline writer.
-    pub(crate) fn take(child: &mut EngineChild) -> Self {
-        Self(child.stdin.take())
-    }
-
-    /// Closes the sole writer end explicitly.
-    ///
-    /// Every abnormal teardown calls this before waiting or killing.
-    pub(crate) fn close(&mut self) {
-        self.0 = None;
-    }
-}
+/// The close budget may already be exhausted (or explicitly ZERO) when the
+/// kill is requested; without this window the post-kill poll collapses to a
+/// single probe and a live child decays into quarantine. The grace bounds
+/// how long one cleanup may keep the owner busy after the kill.
+pub(crate) const POST_KILL_GRACE: Duration = Duration::from_millis(250);
 
 /// Count-only stderr draining state.
 ///
@@ -732,8 +723,9 @@ pub(crate) struct ChildParts {
 /// Windows groups request whole-job termination at that point, before their
 /// bounded wait; other launches wait up to the caller-supplied `close_budget`
 /// and request termination with `start_kill` only if no exit was observed.
-/// The remaining budget is then used for one more wait (or one immediate poll
-/// when the budget is already expired). Pipe resources are released only
+/// The remaining budget — never less than [`POST_KILL_GRACE`], so a ZERO or
+/// already-expired close budget cannot skip the kill's fair observation
+/// window — then bounds one more wait. Pipe resources are released only
 /// together with a successful observed reap or moved whole into
 /// [`RetainedEngine`].
 pub(crate) async fn cleanup_after_abort(
@@ -775,27 +767,19 @@ pub(crate) async fn cleanup_after_abort(
         witness_kill_requested();
         let _termination_error = child.start_kill();
     }
-    // Second wait: remaining budget, or one immediate poll when ZERO/expired.
-    let remaining = deadline
+    // Second wait: the remaining budget when it exceeds the defined grace,
+    // otherwise the grace itself. A killed child therefore always gets a real
+    // observation window instead of one bare poll that ends in quarantine.
+    let post_kill = deadline
         .and_then(|d| d.checked_duration_since(tokio::time::Instant::now()))
-        .unwrap_or(Duration::ZERO);
-    let second_deadline = tokio::time::Instant::now().checked_add(remaining);
-    let second_wait = if remaining == Duration::ZERO {
-        // Observe once without waiting.
-        match tokio::time::timeout(Duration::from_millis(0), child.wait()).await {
-            Ok(result) => result,
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "zero close budget expired",
-            )),
-        }
-    } else if let Some(deadline) = second_deadline {
-        wait_until(&mut child, deadline).await
-    } else {
-        Err(io::Error::new(
+        .unwrap_or(Duration::ZERO)
+        .max(POST_KILL_GRACE);
+    let second_wait = match tokio::time::Instant::now().checked_add(post_kill) {
+        Some(deadline) => wait_until(&mut child, deadline).await,
+        None => Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "remaining budget unrepresentable",
-        ))
+            "post-kill budget unrepresentable",
+        )),
     };
     if let Ok(status) = second_wait {
         witness_reaped(status);

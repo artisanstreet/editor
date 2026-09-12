@@ -9,7 +9,9 @@ use tokio::time::Instant;
 use artisan_transport::CancelHandle;
 
 use super::super::observation::EngineObservation;
-use super::super::process::{ChildParts, CleanupObservation, StderrState, cleanup_after_abort};
+use super::super::process::{
+    ChildParts, CleanupObservation, RetainedEngine, StderrState, cleanup_after_abort,
+};
 use super::super::{EngineBounds, EngineLimits, InternalTurnInput};
 use super::core::{EngineOperationError, Execution, PreparedSession, SteerDelivery, TurnResult};
 pub(super) struct ConfiguredTurnRequest {
@@ -187,6 +189,9 @@ pub(super) async fn finish_turn_result(
         stdout: None,
         stderr_counter,
     };
+    // ZERO grants no further graceful wait, but it never skips the kill: the
+    // cleanup still requests termination and applies its defined post-kill
+    // observation grace before reporting retained custody.
     match cleanup_after_abort(parts, Duration::ZERO).await {
         CleanupObservation::ReapedWithoutKill(status)
         | CleanupObservation::ReapedAfterKill(status) => {
@@ -218,4 +223,21 @@ pub(super) async fn finish_configured_start(
     } = request;
     let _ = prepared.send(Err(error.clone()));
     finish_turn_result(parts, Err(error), respond, close_budget).await
+}
+
+/// Settles one failed open whose child could not be reaped as quarantined
+/// custody, mirroring the drive phase's retained-cleanup settlement.
+pub(super) fn finish_quarantined_open(
+    request: ConfiguredTurnRequest,
+    error: EngineOperationError,
+    retained: Box<RetainedEngine>,
+) -> Execution {
+    let ConfiguredTurnRequest {
+        prepared, respond, ..
+    } = request;
+    let _ = prepared.send(Err(error.clone()));
+    let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring {
+        primary: Box::new(error),
+    }));
+    Execution::Quarantined(retained)
 }

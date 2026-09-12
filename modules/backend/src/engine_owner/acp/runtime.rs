@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
-use tokio::time::{Instant, timeout, timeout_at};
+use tokio::time::{Instant, timeout_at};
 
 #[cfg(windows)]
 use command_group::AsyncCommandGroup;
@@ -20,6 +20,7 @@ use command_group::AsyncCommandGroup;
 #[cfg(windows)]
 use super::super::consts::CREATE_NO_WINDOW;
 
+use super::super::process::POST_KILL_GRACE;
 use super::{
     ACP_CLIENT_NAME, ACP_CLIENT_VERSION, ACP_PROTOCOL_VERSION, AcpBounds, AcpEnvelope, AcpError,
     AcpFramer, AcpId, AcpResponsePayload, InitializeResult, METHOD_AUTHENTICATE, METHOD_INITIALIZE,
@@ -266,7 +267,8 @@ impl fmt::Debug for AcpRetainedChild {
 
 /// How ACP teardown ended, mirroring the `process.rs` cleanup order:
 /// close the lifeline first, bounded wait, `start_kill` only when no exit
-/// was observed, one more wait on the remaining budget, else quarantine.
+/// was observed, one more wait on the remaining budget (never less than the
+/// defined post-kill grace), else quarantine.
 #[derive(Debug)]
 pub(crate) enum AcpShutdown {
     ReapedWithoutKill(ExitStatus),
@@ -301,21 +303,15 @@ pub(crate) async fn shutdown_acp_child(child: AcpChild, close_budget: Duration) 
         return AcpShutdown::ReapedWithoutKill(status);
     }
     let _ignored = inner.start_kill();
+    // The kill always gets the defined observation grace, even when the
+    // caller supplied ZERO or the close budget is already consumed, so a
+    // terminated child cannot decay into quarantine on a bare poll.
     let remaining = deadline
         .checked_duration_since(Instant::now())
-        .unwrap_or(Duration::ZERO);
-    let settled = if remaining.is_zero() {
-        match timeout(Duration::ZERO, inner.wait()).await {
-            Ok(result) => result,
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "zero acp close budget expired",
-            )),
-        }
-    } else {
-        let second = Instant::now().checked_add(remaining).unwrap_or(deadline);
-        wait_for_child(&mut inner, second).await
-    };
+        .unwrap_or(Duration::ZERO)
+        .max(POST_KILL_GRACE);
+    let second = Instant::now().checked_add(remaining).unwrap_or(deadline);
+    let settled = wait_for_child(&mut inner, second).await;
     match settled {
         Ok(status) => AcpShutdown::ReapedAfterKill(status),
         Err(_) => AcpShutdown::Retained(Box::new(AcpRetainedChild { inner })),

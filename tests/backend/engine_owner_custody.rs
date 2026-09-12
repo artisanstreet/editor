@@ -300,6 +300,51 @@ async fn shutdown_after_generation_quarantine_prefers_settled_join() {
     assert_eq!(owner.health(), EngineOwnerHealth::Quarantined);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn already_quarantined_shutdown_returns_promptly_and_replays_completion() {
+    reset_witnesses();
+    // Controlled owner: health is ALREADY Quarantined (so no watch change can
+    // ever fire again) and the owner task parks until the test releases it,
+    // exactly like a custody-retaining quarantine tail that never settles on
+    // its own. Before the fix, `shutdown()` armed `changed()` and waited
+    // forever on the parked join.
+    let (jobs, _pending) = tokio::sync::mpsc::channel::<crate::engine_owner::operation::Job>(1);
+    let shutdown_signal = std::sync::Arc::new(artisan_transport::CancelHandle::new());
+    let (health_sender, health) =
+        tokio::sync::watch::channel(crate::engine_owner::operation::HealthState::Quarantined);
+    // The sender is dropped: the value stays readable but no update can ever
+    // be published, the exact shape of a pre-existing quarantine.
+    drop(health_sender);
+    let (release, parked) = tokio::sync::oneshot::channel::<()>();
+    let join = tokio::spawn(async move {
+        let _released = parked.await;
+    });
+    let mut owner = EngineOwner {
+        jobs,
+        shutdown: shutdown_signal,
+        health,
+        join,
+        observed_join: None,
+    };
+
+    let report = tokio::time::timeout(Duration::from_secs(2), owner.shutdown())
+        .await
+        .expect("an already-quarantined shutdown must return promptly");
+    assert_eq!(report, EngineOwnerShutdown::Quarantined);
+    assert_eq!(owner.health(), EngineOwnerHealth::Quarantined);
+
+    // Eventual completion stays observable: release the parked task and the
+    // next call replays the settled join instead of the quarantine.
+    release
+        .send(())
+        .expect("controlled owner task should still be parked");
+    let settled = tokio::time::timeout(Duration::from_secs(2), owner.shutdown())
+        .await
+        .expect("eventual completion must stay observable");
+    assert_eq!(settled, EngineOwnerShutdown::Joined);
+    assert_eq!(witness_counts().spawned, 0);
+}
+
 // ---------------------------------------------------------------------------
 // 7. Dropping unpolled accepted operation signals control; dropping facade raises shutdown
 // ---------------------------------------------------------------------------

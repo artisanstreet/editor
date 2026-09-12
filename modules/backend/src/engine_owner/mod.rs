@@ -42,6 +42,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 pub(crate) mod acp;
 pub(crate) mod acp_bridges;
+pub(crate) mod bounded_line;
 pub(crate) mod catalog;
 pub(crate) mod claude;
 pub(crate) mod codex;
@@ -57,6 +58,7 @@ pub(crate) mod opencode_event;
 pub(crate) mod operation;
 mod process;
 pub mod readiness;
+mod shutdown;
 pub(crate) mod socket;
 pub(crate) mod stream;
 pub(crate) mod usage;
@@ -865,50 +867,17 @@ impl EngineOwner {
     /// raised here, before the returned future exists, so admission stops
     /// and orderly teardown starts even if that future is never polled.
     ///
-    /// The returned future retains both wake sources across `Pending` polls —
-    /// the owned health-watch `changed()` waiter and the owner `JoinHandle` —
-    /// so a quarantine arriving while the join is parked wakes it
-    /// immediately. Completion wins when both sources settle together, and
-    /// the consumed join verdict is cached exactly once, so repeated calls
-    /// honestly replay the observed ending. On a quarantined observation the
-    /// report is explicitly incomplete: the facade and its join handle are
+    /// The returned future reads the CURRENT health before arming any watch
+    /// waiter, so an owner that had already quarantined can never park it
+    /// forever. Arriving quarantine wakes it immediately; a join that settles
+    /// (or an already-quarantined tail that settles inside the bounded
+    /// settle grace) wins, and the consumed verdict is cached exactly once so
+    /// repeated calls honestly replay the observed ending. A quarantined
+    /// report is explicitly incomplete: the facade and its join handle stay
     /// untouched and later calls may still observe eventual completion.
     pub fn shutdown(&mut self) -> impl Future<Output = EngineOwnerShutdown> + '_ {
         self.shutdown.cancel();
-        let read_rx = self.health.clone();
-        let mut wait_rx = self.health.clone();
-        async move {
-            let mut changed = Box::pin(wait_rx.changed());
-            loop {
-                if let Some(joined_cleanly) = self.observed_join {
-                    return if joined_cleanly {
-                        EngineOwnerShutdown::Joined
-                    } else {
-                        EngineOwnerShutdown::TaskLost
-                    };
-                }
-                tokio::select! {
-                    biased;
-
-                    joined = &mut self.join => {
-                        let joined_cleanly = joined.is_ok();
-                        self.observed_join = Some(joined_cleanly);
-                        return if joined_cleanly {
-                            EngineOwnerShutdown::Joined
-                        } else {
-                            EngineOwnerShutdown::TaskLost
-                        };
-                    }
-                    _ = &mut changed => {
-                        drop(changed);
-                        if *read_rx.borrow() == OwnerHealth::Quarantined {
-                            return EngineOwnerShutdown::Quarantined;
-                        }
-                        changed = Box::pin(wait_rx.changed());
-                    }
-                }
-            }
-        }
+        shutdown::observe(self)
     }
 
     /// Crate-private admission: controls installed before `try_send`.

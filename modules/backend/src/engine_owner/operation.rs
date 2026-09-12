@@ -45,6 +45,9 @@ pub(crate) use self::core::{
 
 // Steer helpers re-exported so the `engine_owner::operation::*` paths keep
 // resolving for the `#[path]` engine-owner suites.
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use self::claude::read_claude_line;
 #[allow(unused_imports)]
 pub(crate) use self::claude::service_claude_steer_delivery;
 #[allow(unused_imports)]

@@ -296,6 +296,9 @@ pub(super) async fn finish_success(
             stdout: None,
             stderr_counter,
         };
+        // ZERO grants no further graceful wait, but it never skips the kill:
+        // the cleanup still requests termination and applies its defined
+        // post-kill observation grace before reporting retained custody.
         match cleanup_after_abort(parts, Duration::ZERO).await {
             CleanupObservation::ReapedWithoutKill(status)
             | CleanupObservation::ReapedAfterKill(status) => {

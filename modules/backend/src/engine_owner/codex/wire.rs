@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use artisan_transport::CancelHandle;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
-use tokio::process::{ChildStdin, ChildStdout};
+use tokio::io::AsyncWriteExt as _;
 
+use super::super::bounded_line::{BoundedLineError, read_bounded_line};
 use super::protocol::CODEX_MAX_FRAME_BYTES;
 
 /// Why one bounded wire interaction failed.
@@ -29,6 +29,8 @@ pub(crate) enum CodexLineError {
     Cancelled,
     /// The absolute phase deadline elapsed.
     Deadline,
+    /// One provider line exceeded the configured frame bound.
+    FrameTooLarge,
     /// The transport failed or ended.
     StreamFailed,
 }
@@ -37,11 +39,12 @@ pub(crate) enum CodexLineError {
 ///
 /// # Errors
 ///
-/// Returns [`CodexLineError::StreamFailed`] when the write or flush fails.
-pub(crate) async fn write_codex_line(
-    stdin: &mut ChildStdin,
-    line: &str,
-) -> Result<(), CodexLineError> {
+/// Returns [`CodexLineError::StreamFailed`] when the write or flush fails
+/// (including a write to an already-closed lifeline).
+pub(crate) async fn write_codex_line<W>(stdin: &mut W, line: &str) -> Result<(), CodexLineError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     stdin
         .write_all(line.as_bytes())
         .await
@@ -59,28 +62,60 @@ pub(crate) async fn write_codex_line(
 
 /// Reads one line while racing shutdown, cancellation, and the deadline.
 ///
+/// The underlying read is bounded by [`CODEX_MAX_FRAME_BYTES`] *while*
+/// consuming the stream, so an oversized or unterminated provider line never
+/// lands in memory whole.
+///
 /// # Errors
 ///
 /// Returns the winning [`CodexLineError`]: shutdown, cancellation, deadline,
-/// or a failed/ended transport.
-pub(crate) async fn read_codex_line(
-    reader: &mut tokio::io::BufReader<ChildStdout>,
+/// an oversized frame, or a failed/ended transport.
+pub(crate) async fn read_codex_line<R>(
+    reader: &mut R,
     line: &mut String,
     deadline: tokio::time::Instant,
     shutdown: &Arc<CancelHandle>,
     control: &Arc<CancelHandle>,
-) -> Result<(), CodexLineError> {
+) -> Result<(), CodexLineError>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
     line.clear();
     tokio::select! {
         biased;
         () = shutdown.wait() => Err(CodexLineError::Shutdown),
         () = control.wait() => Err(CodexLineError::Cancelled),
         () = tokio::time::sleep_until(deadline) => Err(CodexLineError::Deadline),
-        read = reader.read_line(line) => match read {
-            Ok(0) | Err(_) => Err(CodexLineError::StreamFailed),
+        read = read_codex_line_bounded(reader, line) => match read {
+            Ok(0) => Err(CodexLineError::StreamFailed),
             Ok(_) => Ok(()),
+            Err(error) => Err(error),
         },
     }
+}
+
+/// Reads one bounded line without control racing.
+///
+/// Used by select arms that already carry their own cancellation branches.
+/// Returns the number of bytes pushed into `line`, with `Ok(0)` meaning EOF.
+///
+/// # Errors
+///
+/// [`CodexLineError::FrameTooLarge`] for an over-bound line, otherwise
+/// [`CodexLineError::StreamFailed`].
+pub(crate) async fn read_codex_line_bounded<R>(
+    reader: &mut R,
+    line: &mut String,
+) -> Result<usize, CodexLineError>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    read_bounded_line(reader, line, CODEX_MAX_FRAME_BYTES)
+        .await
+        .map_err(|error| match error {
+            BoundedLineError::LineTooLong => CodexLineError::FrameTooLarge,
+            BoundedLineError::Io | BoundedLineError::InvalidUtf8 => CodexLineError::StreamFailed,
+        })
 }
 
 /// Returns whether one handshake line is the result for the request id.

@@ -10,6 +10,9 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
+use super::super::bounded_line::BoundedLineError;
+use super::super::bounded_line::read_bounded_line;
+use super::super::claude::CLAUDE_MAX_FRAME_BYTES;
 use super::super::observation::EngineObservation;
 use super::super::observation::SubagentLifecycleRow;
 use super::super::observation::SubagentTranscriptRow;
@@ -117,12 +120,13 @@ pub(super) async fn execute_claude_turn(
     else {
         return request.fail(EngineOperationError::SpawnFailed);
     };
-    let stdin_opt = child.stdin.take();
-    let stdout_opt = child.stdout.take();
-    let stderr_opt = child.stderr.take();
+    // The sole stdin lifeline is taken before any failure cleanup can run;
+    // the prompt and every steer write borrow this exact handle, so cleanup's
+    // `close()` is always the one true EOF for the child.
     let lifeline = LifelineWriter::take(&mut child);
-    let stderr_counter = StderrCounter::new(stderr_opt, runtime.bounds.stderr_cap_bytes);
-    let (Some(mut stdin), Some(stdout)) = (stdin_opt, stdout_opt) else {
+    let stdout_opt = child.stdout.take();
+    let stderr_counter = StderrCounter::new(child.stderr.take(), runtime.bounds.stderr_cap_bytes);
+    let Some(stdout) = stdout_opt else {
         let parts = ChildParts {
             child,
             lifeline,
@@ -155,7 +159,10 @@ pub(super) async fn execute_claude_turn(
         .map(|text| text.as_str().to_owned())
     {
         let line = claude_runtime::ClaudeSettings::user_message_line(&session, &prompt_text);
-        if claude_runtime::write_line(&mut stdin, &line).await.is_err() {
+        if claude_runtime::write_line(&mut parts.lifeline, &line)
+            .await
+            .is_err()
+        {
             return finish_configured_start(
                 request,
                 parts,
@@ -227,7 +234,6 @@ pub(super) async fn execute_claude_turn(
         .send(Ok(PreparedSession::new(session_id.clone())))
         .is_err()
     {
-        drop(stdin);
         return finish_turn_result(
             parts,
             Err(EngineOperationError::Cancelled),
@@ -239,12 +245,10 @@ pub(super) async fn execute_claude_turn(
     if let Err(error) =
         wait_for_authorization(&mut parts, &mut authorize, deadline, shutdown, &control).await
     {
-        drop(stdin);
         return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
     }
 
     // streaming pump ----------------------------------------------------------
-    let mut stdin = Some(stdin);
     let mut tracker = claude_runtime::ClaudePendingTracker::new();
     let mut active_turn: Option<String> = None;
     let mut frame_sequence: u64 = 0;
@@ -271,7 +275,6 @@ pub(super) async fn execute_claude_turn(
             });
     let terminal = claude_pump_loop(
         &mut reader,
-        &mut stdin,
         &mut parts,
         &mut line,
         &input.run_id,
@@ -289,7 +292,6 @@ pub(super) async fn execute_claude_turn(
         &mut steer_rx,
     )
     .await;
-    drop(stdin);
     match terminal {
         ClaudePumpOutcome::Terminal {
             state,
@@ -406,28 +408,25 @@ async fn forward_subagent_rows(
     }
 }
 
-/// Services one claude steer delivery from the pump's owned stdin.
+/// Services one claude steer delivery from the pump's owned lifeline.
 ///
 /// Writes the stream-input fold line and resolves the delivery from the
 /// transport-write outcome: `Ok(())` means the exact bytes reached the
 /// provider stdin, never mere channel enqueue. The fold has no correlated
 /// provider result — fold timing stays CLI-owned — so the write is the
-/// ack. No observation emission precedes it. A closed stdin rejects
+/// ack. No observation emission precedes it. A closed lifeline rejects
 /// typed. Exactly one write attempt is made per delivery, never a retry
 /// of an ambiguous write.
 pub(crate) async fn service_claude_steer_delivery<W: tokio::io::AsyncWrite + Unpin>(
-    stdin: &mut Option<W>,
+    stdin: &mut W,
     session_id: &str,
     delivery: SteerDelivery,
 ) {
     use super::super::claude as claude_runtime;
 
-    let wrote = match stdin.as_mut() {
-        Some(stdin) => claude_runtime::steer_live_turn(stdin, session_id, &delivery.text)
-            .await
-            .is_ok(),
-        None => false,
-    };
+    let wrote = claude_runtime::steer_live_turn(stdin, session_id, &delivery.text)
+        .await
+        .is_ok();
     let _ = delivery.ack.send(if wrote {
         Ok(())
     } else {
@@ -438,7 +437,6 @@ pub(crate) async fn service_claude_steer_delivery<W: tokio::io::AsyncWrite + Unp
 #[allow(clippy::too_many_arguments)]
 async fn claude_pump_loop(
     reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
-    stdin: &mut Option<tokio::process::ChildStdin>,
     parts: &mut ChildParts,
     line: &mut String,
     run_id: &artisan_domain::RunId,
@@ -457,7 +455,6 @@ async fn claude_pump_loop(
 ) -> ClaudePumpOutcome {
     let outcome = claude_pump_loop_inner(
         reader,
-        stdin,
         parts,
         line,
         run_id,
@@ -491,7 +488,6 @@ async fn claude_pump_loop(
 #[allow(clippy::too_many_arguments)]
 async fn claude_pump_loop_inner(
     reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
-    stdin: &mut Option<tokio::process::ChildStdin>,
     parts: &mut ChildParts,
     line: &mut String,
     run_id: &artisan_domain::RunId,
@@ -509,7 +505,6 @@ async fn claude_pump_loop_inner(
     steer_rx: &mut Option<mpsc::Receiver<SteerDelivery>>,
 ) -> ClaudePumpOutcome {
     use super::super::claude as claude_runtime;
-    use tokio::io::AsyncBufReadExt as _;
 
     let mut exited: Option<std::process::ExitStatus> = None;
     // Emission buffer beside the text channel: drained per applied frame so
@@ -526,9 +521,9 @@ async fn claude_pump_loop_inner(
         }
         if control.is_cancelled() {
             // No provider interrupt verb exists on this transport (the
-            // adapter settles cancel without one); closing stdin is the only
-            // turn-side signal before reporting cancellation.
-            drop(stdin.take());
+            // adapter settles cancel without one); closing the lifeline is
+            // the only turn-side signal before reporting cancellation.
+            parts.lifeline.close();
             return ClaudePumpOutcome::Terminal {
                 state: TerminalState::Cancelled,
                 subagent_rows: std::mem::take(&mut subagent_rows),
@@ -565,7 +560,7 @@ async fn claude_pump_loop_inner(
                 };
             }
             () = control.wait() => {
-                drop(stdin.take());
+                parts.lifeline.close();
                 return ClaudePumpOutcome::Terminal {
                     state: TerminalState::Cancelled,
                     subagent_rows: std::mem::take(&mut subagent_rows),
@@ -604,7 +599,8 @@ async fn claude_pump_loop_inner(
                 // Servicing resolves from the transport write alone and
                 // touches neither the observation channel nor the provider
                 // read side, so a suspended dispatch drain cannot wedge it.
-                service_claude_steer_delivery(stdin, expected_session, delivery).await;
+                service_claude_steer_delivery(&mut parts.lifeline, expected_session, delivery)
+                    .await;
             }
             status = parts.child.wait(), if exited.is_none() => {
                 match status {
@@ -617,7 +613,7 @@ async fn claude_pump_loop_inner(
                     }
                 }
             }
-            read = reader.read_line(line) => {
+            read = read_bounded_line(reader, line, CLAUDE_MAX_FRAME_BYTES) => {
                 match read {
                     Ok(0) => {
                         // EOF is the observed close: a `result` before it is
@@ -671,7 +667,7 @@ async fn claude_pump_loop_inner(
                                         // `result` seen: EndInput
                                         // equivalent, then the CLI exits
                                         // and EOF classifies the turn.
-                                        drop(stdin.take());
+                                        parts.lifeline.close();
                                     }
                                 }
                                 claude_runtime::ClaudeApplyOutcome::Terminal(state) => {
@@ -682,6 +678,12 @@ async fn claude_pump_loop_inner(
                                 }
                             }
                         }
+                    }
+                    Err(BoundedLineError::LineTooLong) => {
+                        return ClaudePumpOutcome::Failed {
+                            error: EngineOperationError::FrameTooLarge,
+                            subagent_rows: std::mem::take(&mut subagent_rows),
+                        };
                     }
                     Err(_) => {
                         return ClaudePumpOutcome::Failed {
@@ -695,23 +697,28 @@ async fn claude_pump_loop_inner(
     }
 }
 
-async fn read_claude_line(
-    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+pub(crate) async fn read_claude_line<R>(
+    reader: &mut R,
     line: &mut String,
     deadline: Instant,
     shutdown: &Arc<CancelHandle>,
     control: &Arc<CancelHandle>,
-) -> Result<(), EngineOperationError> {
-    use tokio::io::AsyncBufReadExt as _;
+) -> Result<(), EngineOperationError>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
     line.clear();
     tokio::select! {
         biased;
         () = shutdown.wait() => Err(EngineOperationError::Shutdown),
         () = control.wait() => Err(EngineOperationError::Cancelled),
         () = tokio::time::sleep_until(deadline) => Err(EngineOperationError::Deadline),
-        read = reader.read_line(line) => match read {
-            Ok(0) | Err(_) => Err(EngineOperationError::ProviderRequestFailed),
+        read = read_bounded_line(reader, line, CLAUDE_MAX_FRAME_BYTES) => match read {
+            Ok(0) | Err(BoundedLineError::Io | BoundedLineError::InvalidUtf8) => {
+                Err(EngineOperationError::ProviderRequestFailed)
+            }
             Ok(_) => Ok(()),
+            Err(BoundedLineError::LineTooLong) => Err(EngineOperationError::FrameTooLarge),
         },
     }
 }

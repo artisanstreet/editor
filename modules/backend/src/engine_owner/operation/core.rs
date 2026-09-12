@@ -123,6 +123,9 @@ pub(crate) enum EngineOperationError {
     ProviderRequestFailed,
     /// The authenticated observation stream did not settle normally.
     StreamFailed,
+    /// One provider line exceeded the configured frame bound while it was
+    /// read; the oversized bytes were never held whole in memory.
+    FrameTooLarge,
     /// Cleanup could not observe the child's death and no primary cause
     /// existed to preserve alongside it.
     ReapUnresolved,
