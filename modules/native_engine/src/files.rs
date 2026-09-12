@@ -226,10 +226,10 @@ fn native_file_id_from_file(file: &File) -> Result<NativeFileIdentity, NativeFil
         use std::os::unix::fs::MetadataExt;
 
         let metadata = file.metadata().map_err(|_| NativeFileError::Io)?;
-        return Ok(NativeFileIdentity {
+        Ok(NativeFileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
-        });
+        })
     }
     #[cfg(windows)]
     {
@@ -610,7 +610,13 @@ pub fn ensure_private_directory(path: &Path) -> Result<(), NativeFileError> {
 /// unavailable, or does not have the required private permissions.
 pub fn validate_private_directory(path: &Path) -> Result<(), NativeFileError> {
     check_ancestors_all(path, true)?;
-    let metadata = fs::symlink_metadata(path).map_err(|_| NativeFileError::Io)?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            NativeFileError::NotFound
+        } else {
+            NativeFileError::Io
+        }
+    })?;
     if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(NativeFileError::UnsafePath);
     }
