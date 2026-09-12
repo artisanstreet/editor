@@ -103,6 +103,7 @@ rust_library(
         "src/wake_lock_policy.rs",
         "src/project_repository_service.rs",
         "src/rich_link_service.rs",
+        "src/rich_link_service/host_policy.rs",
         "src/engine_owner/acp/mod.rs",
         "src/engine_owner/acp/definition.rs",
         "src/engine_owner/acp/runtime.rs",
