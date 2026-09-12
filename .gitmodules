@@ -1,4 +1,0 @@
-[submodule "vendor/gpui-ce"]
-	path = vendor/gpui-ce
-	url = https://github.com/artisanstreet/gpui-ce
-	branch = main

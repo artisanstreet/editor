@@ -393,7 +393,6 @@ rust_clippy(
         "//tests/ui:toggle_test",
         "//tests/ui:theme_tokens_test",
         "//tests/ui:tooltip_test",
-        "//third_party:backdrop_blur_demo",
         "//third_party:screen_demo",
     ],
 )
@@ -754,7 +753,6 @@ rustfmt_test(
         "//tests/ui:toggle_test",
         "//tests/ui:theme_tokens_test",
         "//tests/ui:tooltip_test",
-        "//third_party:backdrop_blur_demo",
         "//third_party:screen_demo",
     ],
     transitive = True,
