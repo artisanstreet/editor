@@ -15,8 +15,6 @@
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-#[cfg(not(windows))]
-use std::process::Child;
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
@@ -24,7 +22,6 @@ use std::time::{Duration, Instant};
 
 use artisan_domain::{EngineUsageAuth, EngineUsageAuthentication, QuotaSurface};
 
-#[cfg(windows)]
 use command_group::CommandGroup as _;
 
 pub use super::account_usage_resolve::{
@@ -263,16 +260,13 @@ impl ProviderUsage {
 
 /// Process-group custody for one provider child.
 ///
-/// Windows holds a `command-group` Job Object exactly like the owned
+/// Every platform holds a `command-group` child exactly like the owned
 /// engine-owner launches: killing it terminates the whole descendant tree
-/// and closes inherited pipes, so drain threads always observe EOF and no
-/// reader can stay blocked past teardown. Other platforms hold the direct
-/// child, matching the existing owned custody split.
+/// (Windows Job Object, Unix process group) and closes inherited pipes, so
+/// drain threads always observe EOF and no reader can stay blocked past
+/// teardown.
 pub(crate) struct ChildCustody {
-    #[cfg(windows)]
     grouped: command_group::GroupChild,
-    #[cfg(not(windows))]
-    direct: Child,
 }
 
 impl ChildCustody {
@@ -289,50 +283,24 @@ impl ChildCustody {
         }
         #[cfg(not(windows))]
         {
-            Ok(Self {
-                direct: command.spawn()?,
-            })
+            let grouped = command.group().kill_on_drop(true).spawn()?;
+            Ok(Self { grouped })
         }
     }
 
     pub(crate) fn take_pipes(
         &mut self,
     ) -> (Option<ChildStdin>, Option<ChildStdout>, Option<ChildStderr>) {
-        #[cfg(windows)]
-        {
-            let inner = self.grouped.inner();
-            (inner.stdin.take(), inner.stdout.take(), inner.stderr.take())
-        }
-        #[cfg(not(windows))]
-        {
-            (
-                self.direct.stdin.take(),
-                self.direct.stdout.take(),
-                self.direct.stderr.take(),
-            )
-        }
+        let inner = self.grouped.inner();
+        (inner.stdin.take(), inner.stdout.take(), inner.stderr.take())
     }
 
     pub(crate) fn kill(&mut self) -> std::io::Result<()> {
-        #[cfg(windows)]
-        {
-            self.grouped.kill()
-        }
-        #[cfg(not(windows))]
-        {
-            self.direct.kill()
-        }
+        self.grouped.kill()
     }
 
     pub(crate) fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
-        #[cfg(windows)]
-        {
-            self.grouped.try_wait()
-        }
-        #[cfg(not(windows))]
-        {
-            self.direct.try_wait()
-        }
+        self.grouped.try_wait()
     }
 }
 

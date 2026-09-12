@@ -31,10 +31,7 @@ use super::consts::CREATE_NO_WINDOW;
 use super::consts::WATCHDOG_FAILURE_EXIT;
 #[cfg(test)]
 use base64::Engine as _;
-#[cfg(windows)]
 use command_group::AsyncCommandGroup;
-#[cfg(not(windows))]
-use tokio::process::Child;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
 use artisan_domain::RootPath;
@@ -66,19 +63,17 @@ pub(crate) enum LaunchRecipe {
 
 /// Internal process custody for one engine launch.
 ///
-/// Windows stores the `command-group` child itself so the Job Object remains
-/// the authority for termination and completion. The pipe handles are taken
-/// out through the grouped child's non-consuming `inner()` view only so the
-/// operation layer can keep its existing stdin/stdout/stderr surface; the
-/// grouped child is never converted back into a raw Tokio child.
+/// The `command-group` child is the authority for termination and completion
+/// on every platform: a Windows Job Object on Windows, a Unix process group
+/// elsewhere. The pipe handles are taken out through the grouped child's
+/// non-consuming `inner()` view only so the operation layer can keep its
+/// existing stdin/stdout/stderr surface; the grouped child is never converted
+/// back into a raw Tokio child.
 pub(crate) struct EngineChild {
-    #[cfg(windows)]
     inner: command_group::AsyncGroupChild,
-    #[cfg(not(windows))]
-    inner: Child,
-    /// Configured Windows launches must terminate the whole Job Object before
-    /// an abort wait, because a leader exit can otherwise precede its
-    /// descendant's completion notification.
+    /// Configured launches must terminate the whole group before an abort
+    /// wait, because a leader exit can otherwise precede its descendant's
+    /// completion notification.
     terminate_group_before_abort_wait: bool,
     /// The child stdin pipe, until the owner moves it into `LifelineWriter`.
     pub(crate) stdin: Option<ChildStdin>,
@@ -109,14 +104,13 @@ impl EngineChild {
 
         #[cfg(not(windows))]
         {
-            command.kill_on_drop(true);
-            let child = Self::from_direct(command.spawn()?, terminate_group_before_abort_wait);
+            let grouped = command.group().kill_on_drop(true).spawn()?;
+            let child = Self::from_grouped(grouped, terminate_group_before_abort_wait);
             witness_spawned();
             Ok(child)
         }
     }
 
-    #[cfg(windows)]
     fn from_grouped(
         mut inner: command_group::AsyncGroupChild,
         terminate_group_before_abort_wait: bool,
@@ -125,20 +119,6 @@ impl EngineChild {
             let child = inner.inner();
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         };
-        Self {
-            inner,
-            terminate_group_before_abort_wait,
-            stdin,
-            stdout,
-            stderr,
-        }
-    }
-
-    #[cfg(not(windows))]
-    fn from_direct(mut inner: Child, terminate_group_before_abort_wait: bool) -> Self {
-        let stdin = inner.stdin.take();
-        let stdout = inner.stdout.take();
-        let stderr = inner.stderr.take();
         Self {
             inner,
             terminate_group_before_abort_wait,
@@ -158,10 +138,14 @@ impl EngineChild {
         self.inner.start_kill()
     }
 
-    /// Requests configured Windows group termination before an abort wait.
+    /// Requests configured pre-wait group termination before an abort wait.
     ///
-    /// The caller must close the lifeline first. Non-Windows and legacy
-    /// launches intentionally keep the existing wait-first cleanup sequence.
+    /// The caller must close the lifeline first. Windows configured launches
+    /// terminate the Job Object before the wait because a leader exit can
+    /// otherwise precede its descendant's completion notification. Unix
+    /// keeps the wait-first sequence: the fallback kill still signals the
+    /// whole process group, so a stuck descendant cannot hold inherited pipes
+    /// past the post-kill grace.
     fn request_group_termination_before_abort_wait(&mut self) -> bool {
         if !self.terminate_group_before_abort_wait {
             return false;

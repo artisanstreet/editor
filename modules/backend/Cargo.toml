@@ -33,9 +33,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 zeroize.workspace = true
+command-group.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-command-group.workspace = true
 native-dialog.workspace = true
 winapi-util.workspace = true
 

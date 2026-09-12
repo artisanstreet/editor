@@ -14,7 +14,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::time::{Instant, timeout_at};
 
-#[cfg(windows)]
 use command_group::AsyncCommandGroup;
 
 #[cfg(windows)]
@@ -103,37 +102,25 @@ pub(crate) struct AcpPipes {
 }
 
 enum ChildInner {
-    #[cfg(windows)]
     Grouped(command_group::AsyncGroupChild),
-    #[cfg(not(windows))]
-    Direct(tokio::process::Child),
 }
 
 impl ChildInner {
     async fn wait(&mut self) -> io::Result<ExitStatus> {
         match self {
-            #[cfg(windows)]
             Self::Grouped(grouped) => grouped.wait().await,
-            #[cfg(not(windows))]
-            Self::Direct(direct) => direct.wait().await,
         }
     }
 
     fn start_kill(&mut self) -> io::Result<()> {
         match self {
-            #[cfg(windows)]
             Self::Grouped(grouped) => grouped.start_kill(),
-            #[cfg(not(windows))]
-            Self::Direct(direct) => direct.start_kill(),
         }
     }
 
     fn id(&self) -> Option<u32> {
         match self {
-            #[cfg(windows)]
             Self::Grouped(grouped) => grouped.id(),
-            #[cfg(not(windows))]
-            Self::Direct(direct) => direct.id(),
         }
     }
 }
@@ -217,28 +204,25 @@ pub(crate) fn spawn_acp_child(
 
     #[cfg(not(windows))]
     {
-        command.kill_on_drop(true);
-        let mut direct = command.spawn()?;
-        let pipes = match (
-            direct.stdin.take(),
-            direct.stdout.take(),
-            direct.stderr.take(),
-        ) {
-            (Some(stdin), Some(stdout), Some(stderr)) => AcpPipes {
-                stdin,
-                stdout,
-                stderr,
-            },
-            _ => {
-                let _ignored = direct.start_kill();
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "acp stdio unavailable",
-                ));
+        let mut grouped = command.group().kill_on_drop(true).spawn()?;
+        let pipes = {
+            let raw = grouped.inner();
+            let stdin = raw.stdin.take();
+            let stdout = raw.stdout.take();
+            let stderr = raw.stderr.take();
+            if let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) {
+                AcpPipes {
+                    stdin,
+                    stdout,
+                    stderr,
+                }
+            } else {
+                let _ignored = grouped.start_kill();
+                return Err(io::Error::other("acp stdio unavailable"));
             }
         };
         Ok(AcpChild {
-            inner: ChildInner::Direct(direct),
+            inner: ChildInner::Grouped(grouped),
             pipes: Some(pipes),
         })
     }
