@@ -295,6 +295,21 @@ fn pointer_click_uses_the_mouse_activation_path_and_focuses(cx: &mut TestAppCont
     let (view, cx) =
         cx.add_window_view(|_, cx| ButtonProbe::new(cx, false, FocusVisibility::Visible));
 
+    cx.update(|window, app| {
+        window.dispatch_event(
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("right").expect("valid key"),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            app,
+        );
+        let focus = view.read(app).focus.clone();
+        window.focus(&focus, app);
+    });
+    cx.run_until_parked();
+    cx.update(|_, app| assert!(view.read(app).state.focus_ring_visible.get()));
+
     let bounds = cx
         .debug_bounds(BUTTON_SELECTOR)
         .expect("button must paint inspectable bounds");
@@ -308,6 +323,7 @@ fn pointer_click_uses_the_mouse_activation_path_and_focuses(cx: &mut TestAppCont
         assert!(focus.is_focused(window));
         let probe = view.read(app);
         assert_eq!(probe.state.pointer_activations.get(), 1);
+        assert!(!probe.state.focus_ring_visible.get());
         assert_eq!(probe.state.keyboard_activations.get(), 0);
     });
 }
@@ -389,6 +405,14 @@ fn focus_ring_requires_actual_focus_and_visible_focus_intent(cx: &mut TestAppCon
 
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
+        window.dispatch_event(
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("right").expect("valid key"),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            app,
+        );
         window.focus(&focus, app);
     });
     cx.run_until_parked();

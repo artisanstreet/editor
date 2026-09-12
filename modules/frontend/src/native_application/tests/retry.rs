@@ -99,6 +99,14 @@ fn retry_button_is_labeled_focused_and_has_deterministic_tab_stop(cx: &mut TestA
         assert_eq!(application.message_retry_focus_handle.tab_index, 2);
         assert!(application.message_retry_focus_handle.tab_stop);
         let focus = application.message_retry_focus_handle.clone();
+        window.dispatch_event(
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("right").expect("valid key"),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            app,
+        );
         window.focus(&focus, app);
         Button::new(
             NATIVE_MESSAGE_RETRY_SELECTOR,

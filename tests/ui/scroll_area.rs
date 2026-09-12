@@ -253,6 +253,15 @@ fn caller_style_refinement_wins_for_both_root_and_viewport(cx: &mut TestAppConte
         assert!(!area.focus_ring_visible(window));
 
         window.focus(&focus, app);
+        assert!(!area.focus_ring_visible(window));
+        window.dispatch_event(
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("right").expect("valid key"),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            app,
+        );
         assert!(area.focus_ring_visible(window));
         assert!(
             !area

@@ -1418,7 +1418,7 @@ impl ContextMenu {
             .text_size(style.item_text_size)
             .line_height(style.item_line_height)
             .shadow(style.menu_shadows())
-            .focus(move |focused| focused.shadow(vec![menu_shadow, menu_ring, focus_ring]))
+            .focus_visible(move |focused| focused.shadow(vec![menu_shadow, menu_ring, focus_ring]))
             .debug_selector(|| CONTEXT_MENU_CONTENT_SELECTOR.to_string())
             .child(bounds_probe);
 

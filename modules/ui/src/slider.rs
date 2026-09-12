@@ -458,6 +458,7 @@ impl Slider {
     pub fn focus_ring_visible(&self, window: &Window) -> bool {
         !self.disabled
             && self.focus_visibility == FocusVisibility::Visible
+            && window.last_input_was_keyboard()
             && self.focus.is_focused(window)
     }
 }
@@ -574,7 +575,7 @@ fn apply_slider_focus_ring(track: Div, focus: &FocusHandle, style: &SliderStyle)
     let focus_ring = style.focus_ring_color;
     let focus_ring_width = style.focus_ring_width;
     track
-        .focus(move |focused| {
+        .focus_visible(move |focused| {
             focused.border_color(focus_border).shadow(vec![BoxShadow {
                 color: focus_ring,
                 offset: point(px(0.0), px(0.0)),

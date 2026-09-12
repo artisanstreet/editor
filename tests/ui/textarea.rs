@@ -367,6 +367,15 @@ fn focus_ring_requires_actual_focus_and_visibility_intent(cx: &mut TestAppContex
             "value\nwith newline",
         )
         .focus_visibility(FocusVisibility::Visible);
+        assert!(!visible.focus_ring_visible(window));
+        window.dispatch_event(
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("right").expect("valid key"),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            app,
+        );
         assert!(visible.focus_ring_visible(window));
 
         let hidden = Textarea::new(

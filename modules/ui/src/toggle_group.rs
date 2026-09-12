@@ -786,7 +786,7 @@ impl<V: ToggleValue> ToggleGroupRenderContext<'_, V> {
             });
 
         if self.focus_visibility == FocusVisibility::Visible {
-            item_element = item_element.focus(move |focused| {
+            item_element = item_element.focus_visible(move |focused| {
                 focused
                     .border_color(style.focus_border)
                     .shadow(vec![BoxShadow {

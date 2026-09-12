@@ -44,13 +44,10 @@ pub enum ButtonSize {
     IconSmall,
 }
 
-/// Whether the owner determined that current focus should be visibly painted.
-///
-/// GPUI 0.2.2 exposes focus handles but no browser-style `:focus-visible`
-/// input-modality heuristic. The application focus coordinator therefore
-/// supplies this explicit decision. The button still gates the ring on its
-/// actual [`FocusHandle`] being focused, so visible metadata alone cannot
-/// paint a ring on an unfocused control.
+/** Whether a control permits a keyboard focus indicator.
+ * Visible indicators require both actual focus and GPUI's keyboard input
+ * modality. Pointer focus keeps the control interactive without painting a ring.
+ */
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum FocusVisibility {
     /// Pointer/programmatic focus without a visible ring.
@@ -448,6 +445,7 @@ impl Button {
     pub fn focus_ring_visible(&self, window: &Window) -> bool {
         !self.disabled
             && self.focus_visibility == FocusVisibility::Visible
+            && window.last_input_was_keyboard()
             && self.focus.is_focused(window)
     }
 }
@@ -504,7 +502,7 @@ impl RenderOnce for Button {
 
         root = root
             .when(focus_visibility == FocusVisibility::Visible, |element| {
-                element.focus(move |focused| {
+                element.focus_visible(move |focused| {
                     focused
                         .border_color(style.focus_border)
                         .shadow(vec![BoxShadow {

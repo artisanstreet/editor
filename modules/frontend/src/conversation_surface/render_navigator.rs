@@ -299,7 +299,7 @@ impl ConversationSurface {
                 .justify_end()
                 .gap(theme.spacing.steps(3.0))
                 .debug_selector(move || control_selector.clone())
-                .focus(move |focused| {
+                .focus_visible(move |focused| {
                     focused.shadow(vec![BoxShadow {
                         color: focus_ring_color,
                         offset: point(px(0.0), px(0.0)),

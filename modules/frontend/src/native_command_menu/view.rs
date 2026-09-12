@@ -565,11 +565,13 @@ impl NativeCommandMenu {
             .px(px(8.0))
             .rounded(px(6.0))
             .border_1()
-            .border_color(if self.input_focus.is_focused(window) {
-                self.desktop_theme.secondary
-            } else {
-                self.desktop_theme.field_line
-            })
+            .border_color(
+                if self.input_focus.is_focused(window) && window.last_input_was_keyboard() {
+                    self.desktop_theme.secondary
+                } else {
+                    self.desktop_theme.field_line
+                },
+            )
             .bg(self.desktop_theme.field)
             .child(
                 asset_glyph(AssetId::TABLER_SEARCH)

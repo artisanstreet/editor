@@ -404,10 +404,20 @@ fn focus_ring_requires_actual_focus_and_visible_intent(cx: &mut TestAppContext) 
 
     cx.update(|window, app| {
         assert!(!is_ring_visible(window, app));
-        window.focus(&view.read(app).focus, app);
+        let focus = view.read(app).focus.clone();
+        window.focus(&focus, app);
     });
     cx.run_until_parked();
     cx.update(|window, app| {
+        assert!(!is_ring_visible(window, app));
+        window.dispatch_event(
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("right").expect("valid key"),
+                is_held: false,
+                prefer_character_input: false,
+            }),
+            app,
+        );
         assert!(is_ring_visible(window, app));
     });
 

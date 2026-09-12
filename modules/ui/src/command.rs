@@ -1242,7 +1242,7 @@ fn render_palette(parts: CommandRenderParts) -> impl IntoElement + 'static {
     );
 
     if focus_visibility == FocusVisibility::Visible {
-        root = root.focus(move |focused| {
+        root = root.focus_visible(move |focused| {
             focused.shadow(vec![BoxShadow {
                 color: style.focus_ring,
                 offset: point(px(0.0), px(0.0)),

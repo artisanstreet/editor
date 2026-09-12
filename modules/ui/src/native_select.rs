@@ -600,6 +600,7 @@ impl NativeSelect {
     pub fn focus_ring_visible(&self, window: &Window) -> bool {
         !self.disabled
             && self.focus_visibility == FocusVisibility::Visible
+            && window.last_input_was_keyboard()
             && self.focus.is_focused(window)
     }
 }
@@ -726,7 +727,7 @@ impl RenderOnce for NativeSelect {
         }
 
         if focus_visibility == FocusVisibility::Visible {
-            root = root.focus(move |focused| {
+            root = root.focus_visible(move |focused| {
                 focused
                     .border_color(style.focus_border)
                     .shadow(vec![BoxShadow {

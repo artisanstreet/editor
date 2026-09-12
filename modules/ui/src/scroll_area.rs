@@ -185,6 +185,7 @@ impl ScrollArea {
     #[must_use]
     pub fn focus_ring_visible(&self, window: &Window) -> bool {
         self.focus_visibility == FocusVisibility::Visible
+            && window.last_input_was_keyboard()
             && self
                 .focus_handle
                 .as_ref()
@@ -233,7 +234,7 @@ impl RenderOnce for ScrollArea {
         if let Some(focus_handle) = focus_handle {
             viewport = viewport.track_focus(&focus_handle);
             if focus_visibility == FocusVisibility::Visible {
-                viewport = viewport.focus(move |focused| {
+                viewport = viewport.focus_visible(move |focused| {
                     focused.shadow(vec![BoxShadow {
                         color: style.focus_ring_color,
                         offset: point(px(0.0), px(0.0)),
