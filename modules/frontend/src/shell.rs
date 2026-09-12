@@ -216,7 +216,7 @@ pub const LEGACY_INSPECTOR_TITLE_GAP_PX: f32 = 16.0;
 pub const LEGACY_TITLE_BAR_CONTROL_WIDTH_PX: f32 = 46.0;
 
 /// Caption-glyph edge: the shared icon-button glyph size (`ButtonStyle`
-/// `icon_size`, 16 px; `image_viewer.rs:614` paints `TABLER_X` at 16 px).
+/// `icon_size`, 16 px).
 pub const LEGACY_TITLE_BAR_CONTROL_GLYPH_PX: f32 = 16.0;
 
 /// Rail pill width: legacy `w-10` (`sectioned-panel.svelte:182,256`) — 40 px.

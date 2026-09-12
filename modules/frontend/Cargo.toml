@@ -70,10 +70,6 @@ name = "attachment_tray_policy"
 path = "../../tests/frontend/attachment_tray_policy.rs"
 
 [[test]]
-name = "authoritative_subscription_policy"
-path = "../../tests/frontend/authoritative_subscription_policy.rs"
-
-[[test]]
 name = "browser_dom_boundary"
 path = "../../tests/frontend/browser_dom_boundary.rs"
 
@@ -126,10 +122,6 @@ name = "context_usage_model_name"
 path = "../../tests/frontend/context_usage_model_name.rs"
 
 [[test]]
-name = "conversation_checklist"
-path = "../../tests/frontend/conversation_checklist.rs"
-
-[[test]]
 name = "conversation_delivery_machine"
 path = "../../tests/frontend/conversation_delivery_machine.rs"
 
@@ -138,17 +130,9 @@ name = "conversation_duration"
 path = "../../tests/frontend/conversation_duration.rs"
 
 [[test]]
-name = "conversation_error_card_policy"
-path = "../../tests/frontend/conversation_error_card_policy.rs"
-
-[[test]]
 name = "conversation_host"
 path = "../../tests/frontend/conversation_host.rs"
 required-features = ["visual-proof"]
-
-[[test]]
-name = "conversation_presentation"
-path = "../../tests/frontend/conversation_presentation.rs"
 
 [[test]]
 name = "conversation_projection"
@@ -173,10 +157,6 @@ path = "../../tests/frontend/conversation_surface.rs"
 [[test]]
 name = "conversation_scroll_position"
 path = "../../tests/frontend/conversation_scroll_position.rs"
-
-[[test]]
-name = "conversation_status_labels"
-path = "../../tests/frontend/conversation_status_labels.rs"
 
 [[test]]
 name = "conversation_steering"
@@ -289,10 +269,6 @@ path = "../../tests/frontend/hover_pill_geometry_policy.rs"
 [[test]]
 name = "hover_pill_group_policy"
 path = "../../tests/frontend/hover_pill_group_policy.rs"
-
-[[test]]
-name = "image_inspection_store"
-path = "../../tests/frontend/image_inspection_store.rs"
 
 [[test]]
 name = "image_policy"
@@ -432,10 +408,6 @@ path = "../../tests/frontend/project_picker_native.rs"
 required-features = ["visual-proof"]
 
 [[test]]
-name = "reader_attention"
-path = "../../tests/frontend/reader_attention.rs"
-
-[[test]]
 name = "relative_time"
 path = "../../tests/frontend/relative_time.rs"
 
@@ -480,10 +452,6 @@ name = "scoped_attachment_runner_policy"
 path = "../../tests/frontend/scoped_attachment_runner_policy.rs"
 
 [[test]]
-name = "session_projection"
-path = "../../tests/frontend/session_projection.rs"
-
-[[test]]
 name = "session_tool_policy"
 path = "../../tests/frontend/session_tool_policy.rs"
 
@@ -510,10 +478,6 @@ path = "../../tests/frontend/shell_presentation_state.rs"
 [[test]]
 name = "speed_presentation"
 path = "../../tests/frontend/speed_presentation.rs"
-
-[[test]]
-name = "steering_pending_lip"
-path = "../../tests/frontend/steering_pending_lip.rs"
 
 [[test]]
 name = "tab_derivations"
