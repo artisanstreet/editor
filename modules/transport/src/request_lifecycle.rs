@@ -120,6 +120,10 @@ impl ResolvedRequest {
 }
 
 /// The matched server answer carried by a [`ResolvedRequest`].
+#[expect(
+    clippy::large_enum_variant,
+    reason = "boxing would change the public outcome type consumed by the CLI and frontend; one outcome is materialized per completed request"
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RequestOutcome {
     /// Forge answered the request successfully.

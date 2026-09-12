@@ -296,7 +296,7 @@ where
 #[derive(Debug)]
 pub(super) enum SettledReply {
     /// Successful correlated response.
-    Response(ServerResponse),
+    Response(Box<ServerResponse>),
     /// Correlated typed peer rejection; an ordinary outcome, not a local
     /// error.
     Failure(ProtocolFailure),
@@ -370,7 +370,7 @@ pub(super) fn classify_reply(
     match &reply.body {
         WireEnvelopeBody::Response(response) => {
             if &response.request_id == expected {
-                Ok(SettledReply::Response(response.clone()))
+                Ok(SettledReply::Response(Box::new(response.clone())))
             } else {
                 Err(ReplyRejection::DifferentCorrelation)
             }
