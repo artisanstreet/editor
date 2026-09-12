@@ -925,10 +925,11 @@ impl FixtureScript {
         }
         #[cfg(not(windows))]
         {
+            use std::os::unix::fs::PermissionsExt as _;
+
             let script = format!("#!/bin/sh\ncat \"$(dirname \"$0\")/responses.jsonl\"\n{tail}\n");
             let path = directory.join("fixture.sh");
             std::fs::write(&path, script).expect("script");
-            use std::os::unix::fs::PermissionsExt as _;
             let mut permissions = std::fs::metadata(&path).expect("meta").permissions();
             permissions.set_mode(0o700);
             std::fs::set_permissions(&path, permissions).expect("chmod");

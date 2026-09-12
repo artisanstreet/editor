@@ -4,6 +4,8 @@
 //! `tests/native_engine/BUILD.bazel` gains a `rust_test` target for
 //! `codex_discovery.rs` depending on `//modules/native_engine:native_engine`.
 
+#![cfg(windows)]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

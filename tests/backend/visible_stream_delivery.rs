@@ -667,11 +667,19 @@ fn batch_has_assistant(batch: &artisan_domain::PatchBatch) -> bool {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "the shared live-stream fixture future is large by design; boxing would obscure the linear test"
+)]
 async fn live_connection_streams_admission_chunks_and_observation_before_terminal() {
     assert_live_stream_before_terminal("steer_burst").await;
 }
 
 #[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "the shared live-stream fixture future is large by design; boxing would obscure the linear test"
+)]
 async fn short_burst_flushes_while_provider_is_held_below_count_threshold() {
     // Three deltas cannot reach the count or byte threshold. With no terminal
     // event, only the timer can deliver the pending suffix to the subscriber.

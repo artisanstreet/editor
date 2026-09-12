@@ -198,7 +198,7 @@ enum FixtureKind {
 #[cfg(unix)]
 fn fixture_command(kind: &FixtureKind) -> (PathBuf, Vec<String>) {
     let script = match kind {
-        FixtureKind::Normal => r#"printf 'codex-cli 0.145.0\n'"#,
+        FixtureKind::Normal => r"printf 'codex-cli 0.145.0\n'",
         FixtureKind::StdoutFlood => "cat /dev/zero | head -c 300000",
         FixtureKind::StderrFlood => "cat /dev/zero | head -c 300000 >&2",
         FixtureKind::Slow => "sleep 30",
