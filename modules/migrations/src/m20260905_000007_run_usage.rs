@@ -7,7 +7,7 @@
 
 use sea_orm_migration::prelude::*;
 
-const RUN_USAGE_TABLE: &str = r#"
+const RUN_USAGE_TABLE: &str = r"
 CREATE TABLE run_usage (
     run_id TEXT NOT NULL PRIMARY KEY,
     thread_id TEXT NOT NULL,
@@ -54,7 +54,7 @@ CREATE TABLE run_usage (
         AND context_window_tokens BETWEEN 1 AND 9223372036854775807)),
     CHECK (typeof(observed_at_ms) = 'integer')
 )
-"#;
+";
 
 /// Creates the bounded current usage record after the model-favorites leaf.
 #[derive(DeriveMigrationName)]

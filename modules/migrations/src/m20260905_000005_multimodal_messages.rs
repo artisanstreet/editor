@@ -19,7 +19,7 @@ impl MigrationTrait for Migration {
         let connection = manager.get_connection();
         connection
             .execute_unprepared(
-                r#"CREATE TABLE message_image_attachments (
+                r"CREATE TABLE message_image_attachments (
                     message_id TEXT NOT NULL,
                     position INTEGER NOT NULL,
                     mime_type TEXT NOT NULL,
@@ -33,7 +33,7 @@ impl MigrationTrait for Migration {
                     CHECK (length(name) BETWEEN 1 AND 256),
                     CHECK (size_bytes BETWEEN 1 AND 5242880),
                     CHECK (typeof(bytes) = 'blob' AND length(bytes) = size_bytes)
-                )"#,
+                )",
             )
             .await?;
         connection
@@ -63,7 +63,7 @@ async fn rebuild_command_receipts(connection: &SchemaManagerConnection<'_>) -> R
         .await?;
     connection
         .execute_unprepared(
-            r#"CREATE TABLE command_receipts (
+            r"CREATE TABLE command_receipts (
                 request_id TEXT NOT NULL PRIMARY KEY,
                 command_kind TEXT NOT NULL,
                 directory_id TEXT NULL,
@@ -87,7 +87,7 @@ async fn rebuild_command_receipts(connection: &SchemaManagerConnection<'_>) -> R
                     (command_kind = 'queue_message' AND directory_id IS NULL AND project_id IS NULL AND thread_id IS NOT NULL AND title IS NULL AND message_id IS NOT NULL AND (body IS NULL OR (typeof(body) = 'text' AND length(body) <= 65536)) AND engine_run_config_version IS NULL AND engine_run_config IS NULL AND engine_run_config_expected_revision IS NULL AND engine_run_config_result_revision IS NULL) OR
                     (command_kind = 'set_thread_engine_config' AND directory_id IS NULL AND project_id IS NULL AND thread_id IS NOT NULL AND title IS NULL AND message_id IS NULL AND body IS NULL AND typeof(engine_run_config_version) = 'integer' AND engine_run_config_version = 1 AND typeof(engine_run_config) = 'blob' AND length(engine_run_config) BETWEEN 1 AND 65536 AND (engine_run_config_expected_revision IS NULL OR (typeof(engine_run_config_expected_revision) = 'integer' AND engine_run_config_expected_revision BETWEEN 1 AND 9223372036854775807)) AND typeof(engine_run_config_result_revision) = 'integer' AND engine_run_config_result_revision BETWEEN 1 AND 9223372036854775807)
                 )
-            )"#,
+            )",
         )
         .await?;
     connection
@@ -108,7 +108,7 @@ async fn restore_command_receipts(connection: &SchemaManagerConnection<'_>) -> R
         .await?;
     connection
         .execute_unprepared(
-            r#"CREATE TABLE command_receipts (
+            r"CREATE TABLE command_receipts (
                 request_id TEXT NOT NULL PRIMARY KEY,
                 command_kind TEXT NOT NULL,
                 directory_id TEXT NULL,
@@ -131,7 +131,7 @@ async fn restore_command_receipts(connection: &SchemaManagerConnection<'_>) -> R
                     (command_kind = 'queue_first_message' AND directory_id IS NULL AND project_id IS NULL AND thread_id IS NOT NULL AND title IS NULL AND message_id IS NOT NULL AND body IS NOT NULL AND engine_run_config_version IS NULL AND engine_run_config IS NULL AND engine_run_config_expected_revision IS NULL AND engine_run_config_result_revision IS NULL) OR
                     (command_kind = 'set_thread_engine_config' AND directory_id IS NULL AND project_id IS NULL AND thread_id IS NOT NULL AND title IS NULL AND message_id IS NULL AND body IS NULL AND typeof(engine_run_config_version) = 'integer' AND engine_run_config_version = 1 AND typeof(engine_run_config) = 'blob' AND length(engine_run_config) BETWEEN 1 AND 65536 AND (engine_run_config_expected_revision IS NULL OR (typeof(engine_run_config_expected_revision) = 'integer' AND engine_run_config_expected_revision BETWEEN 1 AND 9223372036854775807)) AND typeof(engine_run_config_result_revision) = 'integer' AND engine_run_config_result_revision BETWEEN 1 AND 9223372036854775807)
                 )
-            )"#,
+            )",
         )
         .await?;
     connection

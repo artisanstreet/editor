@@ -36,7 +36,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
         connection
-            .execute_unprepared(&format!(
+            .execute_unprepared(
                 "CREATE TABLE model_favorites_state (\
                     state_id INTEGER NOT NULL PRIMARY KEY,\
                     revision INTEGER NOT NULL DEFAULT 0,\
@@ -44,8 +44,8 @@ impl MigrationTrait for Migration {
                     CHECK (state_id = 1),\
                     CHECK (typeof(revision) = 'integer' AND revision BETWEEN 0 AND 9223372036854775807),\
                     CHECK (typeof(updated_at_ms) = 'integer')\
-                )"
-            ))
+                )",
+            )
             .await?;
         connection
             .execute_unprepared(

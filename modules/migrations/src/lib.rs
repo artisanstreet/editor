@@ -64,7 +64,7 @@ pub struct MigrationError {
 ///
 /// The whole set runs inside ONE owned transaction on ONE pooled
 /// connection: one connection, one atomic migration set, explicit
-/// rollback on failure. SeaORM's migrator does not wrap SQLite
+/// rollback on failure. The `SeaORM` migrator does not wrap SQLite
 /// migrations itself.
 ///
 /// Calling this function after the schema is current is a no-op. Forge calls
