@@ -319,6 +319,7 @@ pub struct Button {
     content: ButtonContent,
     icon_slot: Option<gpui::AnyElement>,
     disabled: bool,
+    bare: bool,
     corner_radius_override: Option<Pixels>,
     tint: Option<ButtonTint>,
     on_activate: Option<ActivationHandler>,
@@ -367,6 +368,7 @@ impl Button {
             content,
             icon_slot: None,
             disabled: false,
+            bare: false,
             corner_radius_override: None,
             tint: None,
             on_activate: None,
@@ -427,6 +429,13 @@ impl Button {
         self
     }
 
+    /// Uses the content's natural dimensions without padding, border, or background.
+    #[must_use]
+    pub const fn bare(mut self) -> Self {
+        self.bare = true;
+        self
+    }
+
     /// Adds a stable selector for GPUI inspection and behavior tests.
     #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
@@ -464,6 +473,7 @@ impl RenderOnce for Button {
     fn render(self, _window: &mut Window, _: &mut App) -> impl IntoElement {
         let style = self.visual_style();
         let disabled = self.disabled;
+        let bare = self.bare;
         let focus_visibility = self.focus_visibility;
         let focus = self.focus.clone();
         let on_activate = self.on_activate;
@@ -479,18 +489,21 @@ impl RenderOnce for Button {
             .flex_row()
             .items_center()
             .justify_center()
-            .h(style.height)
-            .px(style.horizontal_padding)
             .gap(style.content_gap)
-            .rounded(style.corner_radius)
-            .border_1()
-            .border_color(style.border)
-            .bg(style.background)
+            .when(!bare, |element| {
+                element
+                    .h(style.height)
+                    .px(style.horizontal_padding)
+                    .rounded(style.corner_radius)
+                    .border_1()
+                    .border_color(style.border)
+                    .bg(style.background)
+                    .when_some(style.width, gpui::Styled::w)
+            })
             .text_color(foreground)
             .text_size(self.theme.typography.control_text)
             .font_weight(FontWeight::MEDIUM)
             .whitespace_nowrap()
-            .when_some(style.width, gpui::Styled::w)
             .when(disabled, |element| element.opacity(style.disabled_opacity))
             .when_some(self.debug_selector, |element, selector| {
                 element.debug_selector(move || selector.to_string())
@@ -526,9 +539,12 @@ impl RenderOnce for Button {
                 })
             })
             .hover(move |hover| {
-                hover
-                    .bg(style.hover_background)
-                    .text_color(hover_foreground)
+                let hover = hover.text_color(hover_foreground);
+                if bare {
+                    hover
+                } else {
+                    hover.bg(style.hover_background)
+                }
             })
             .when_some(style.pressed_offset_y, |element, offset| {
                 element.active(move |active| active.relative().top(offset))

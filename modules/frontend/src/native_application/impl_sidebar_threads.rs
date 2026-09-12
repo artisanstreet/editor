@@ -217,7 +217,7 @@ impl NativeApplication {
         let key_thread = thread.thread_id.clone();
         let color = self.theme.colors.muted.to_paint();
         let hover_id = thread.thread_id.as_str().to_owned();
-        let mut row = div()
+        div()
             .id(SharedString::from(selector.clone()))
             .track_focus(&focus)
             .tab_index(0)
@@ -250,14 +250,21 @@ impl NativeApplication {
             ))
             .focus_visible(move |style| style.bg(color))
             .debug_selector(move || selector.clone())
-            .child(desktop_nav_glyph(
-                if thread.has_active_work {
-                    AssetId::TABLER_LOADER_2
+            .child(
+                desktop_nav_glyph(
+                    if thread.has_active_work {
+                        AssetId::TABLER_LOADER_2
+                    } else {
+                        AssetId::TABLER_MESSAGE_CIRCLE
+                    },
+                    self.desktop_theme,
+                )
+                .text_color(if selected {
+                    self.desktop_theme.foreground
                 } else {
-                    AssetId::TABLER_MESSAGE_CIRCLE
-                },
-                self.desktop_theme,
-            ))
+                    self.desktop_theme.secondary
+                }),
+            )
             .child(div().flex_1().min_w(px(0.0)).truncate().child(title))
             .on_click(cx.listener(move |app, _, window, cx| {
                 window.focus(&focus, cx);
@@ -268,11 +275,7 @@ impl NativeApplication {
                     cx.stop_propagation();
                     app.open_thread_from_sidebar(key_thread.clone(), cx);
                 }
-            }));
-        if selected {
-            row = row.bg(color);
-        }
-        row
+            }))
     }
 }
 

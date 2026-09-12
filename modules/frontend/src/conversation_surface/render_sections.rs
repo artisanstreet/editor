@@ -765,6 +765,7 @@ impl ConversationSurface {
         .map(|button| {
             button
                 .icon_slot(copy_icon)
+                .bare()
                 .focus_visibility(FocusVisibility::Visible)
                 .tint(
                     theme.colors.muted_foreground.to_paint(),

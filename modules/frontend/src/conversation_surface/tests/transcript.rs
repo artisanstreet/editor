@@ -549,6 +549,11 @@ fn settled_toolbar_stays_in_the_message_column_and_short_chat_does_not_scroll(
     let turn = cx
         .debug_bounds("artisan-conversation-surface-turn-turn_a")
         .unwrap();
+    let copy = cx
+        .debug_bounds("artisan-conversation-surface-turn-turn_a-footer-footer-copy")
+        .unwrap();
+    assert_eq!(copy.left(), body.left());
+    assert_eq!(copy.size, size(px(16.0), px(16.0)));
     assert_eq!(footer.left(), body.left());
     assert_eq!(footer.top() - body.bottom(), px(4.0));
     assert!(footer.bottom() <= turn.bottom());
