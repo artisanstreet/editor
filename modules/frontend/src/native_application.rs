@@ -259,9 +259,9 @@ actions!(
 fn sidebar_hover_probe(
     hover: Rc<RefCell<SlidingHoverState>>,
     surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
-    id: &'static str,
+    id: impl Into<String>,
 ) -> gpui::Canvas<()> {
-    let measured_id = id.to_owned();
+    let measured_id = id.into();
     canvas(
         |_, _, _| {},
         move |bounds, (), window, cx| {

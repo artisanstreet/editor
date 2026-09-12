@@ -1170,3 +1170,16 @@ fn provider_wait_paints_without_group_or_disclosure(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[test]
+fn copy_confirmation_enters_holds_and_returns_with_reduced_motion_endpoints() {
+    let progress = |ms, motion| copy_feedback_progress(Duration::from_millis(ms), motion);
+    assert_eq!(progress(0, MotionPolicy::Full), 0.0);
+    assert!((progress(125, MotionPolicy::Full) - 0.5).abs() < 0.01);
+    assert_eq!(progress(250, MotionPolicy::Full), 1.0);
+    assert_eq!(progress(1400, MotionPolicy::Full), 1.0);
+    assert!((progress(1625, MotionPolicy::Full) - 0.5).abs() < 0.01);
+    assert_eq!(progress(1750, MotionPolicy::Full), 0.0);
+    assert_eq!(progress(0, MotionPolicy::Reduced), 1.0);
+    assert_eq!(progress(1500, MotionPolicy::Reduced), 0.0);
+}

@@ -7,6 +7,8 @@ use std::time::Instant;
 #[derive(Default)]
 pub(super) struct SidebarThreadsState {
     focus: HashMap<ThreadId, FocusHandle>,
+    hover: Rc<RefCell<SlidingHoverState>>,
+    bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     generation: u64,
     pending: Option<(ProjectId, u64)>,
     next_read: Option<Instant>,
@@ -122,9 +124,33 @@ impl NativeApplication {
                 .iter()
                 .any(|thread| &thread.thread_id == id)
         });
+        let hover_ids = listing
+            .threads()
+            .iter()
+            .map(|thread| thread.thread_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        self.sidebar_threads
+            .hover
+            .borrow_mut()
+            .clear_if_missing(&hover_ids);
+        let bounds_state = Rc::clone(&self.sidebar_threads.bounds);
+        let probe = canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                if *bounds_state.borrow() != Some(bounds) {
+                    *bounds_state.borrow_mut() = Some(bounds);
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
         let (working, settled) = thread_groups(&listing);
         let mut groups = div()
             .id("artisan-sidebar-threads")
+            .relative()
             .flex_1()
             .min_h(px(0.0))
             .min_w(px(0.0))
@@ -136,9 +162,19 @@ impl NativeApplication {
             .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
                 if *hovered {
                     app.sidebar_hover.borrow_mut().hide();
-                    cx.notify();
+                } else {
+                    app.sidebar_threads.hover.borrow_mut().clear();
                 }
-            }));
+                cx.notify();
+            }))
+            .child(probe)
+            .child(render_picker_hover_pill(
+                &self.theme,
+                &self.sidebar_threads.hover,
+                "sidebar-threads",
+                px(6.0),
+                cx.reduce_motion(),
+            ));
         for (name, rows) in [("working", working), ("settled", settled)] {
             if rows.is_empty() {
                 continue;
@@ -180,6 +216,7 @@ impl NativeApplication {
         let click_thread = thread.thread_id.clone();
         let key_thread = thread.thread_id.clone();
         let color = self.theme.colors.muted.to_paint();
+        let hover_id = thread.thread_id.as_str().to_owned();
         let mut row = div()
             .id(SharedString::from(selector.clone()))
             .track_focus(&focus)
@@ -196,7 +233,21 @@ impl NativeApplication {
             .cursor_pointer()
             .text_size(px(14.0))
             .text_color(self.desktop_theme.foreground)
-            .hover(move |style| style.bg(color))
+            .relative()
+            .on_hover(cx.listener(move |app, hovered: &bool, _, cx| {
+                let mut hover = app.sidebar_threads.hover.borrow_mut();
+                if *hovered {
+                    hover.set_active(hover_id.clone());
+                } else if hover.active_id() == Some(hover_id.as_str()) {
+                    hover.hide();
+                }
+                cx.notify();
+            }))
+            .child(sidebar_hover_probe(
+                Rc::clone(&self.sidebar_threads.hover),
+                Rc::clone(&self.sidebar_threads.bounds),
+                thread.thread_id.as_str().to_owned(),
+            ))
             .focus_visible(move |style| style.bg(color))
             .debug_selector(move || selector.clone())
             .child(desktop_nav_glyph(
@@ -310,6 +361,13 @@ mod tests {
         let row = cx
             .debug_bounds("artisan-sidebar-thread-idle-thread")
             .expect("thread row");
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let hover = view.read(app).sidebar_threads.hover.borrow();
+            assert_eq!(hover.active_id(), Some("idle-thread"));
+            assert!(hover.visible());
+        });
         cx.simulate_click(row.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         cx.update(|_, app| {

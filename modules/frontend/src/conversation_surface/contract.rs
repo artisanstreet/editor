@@ -688,6 +688,8 @@ pub struct TurnFooterMirror {
     pub relative_age: String,
     /// Reader-facing copy status; empty unless a clipboard write failed.
     pub copy_message: String,
+    /// Local feedback starts only after the clipboard adapter reports success.
+    pub copied_at: Option<std::time::Instant>,
 }
 
 /// Returns the stable status badge text for a changed-file status.
@@ -699,4 +701,25 @@ pub const fn file_change_status_label(status: FileChangeStatus) -> &'static str 
         FileChangeStatus::Removed => "Removed",
         FileChangeStatus::Renamed => "Renamed",
     }
+}
+
+/// Copy confirmation uses the shared icon-swap recipe, holds, then returns.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "unit opacity is bounded before narrowing to GPUI f32"
+)]
+pub(super) fn copy_feedback_progress(elapsed: Duration, motion: MotionPolicy) -> f32 {
+    let hold_until = Duration::from_millis(1500);
+    let MotionPlan::Animate(animation) = motion.resolve(MotionRecipe::IconSwap) else {
+        return if elapsed < hold_until { 1.0 } else { 0.0 };
+    };
+    let duration = animation.duration().as_secs_f64();
+    let progress = if elapsed < animation.duration() {
+        elapsed.as_secs_f64() / duration
+    } else if elapsed < hold_until {
+        1.0
+    } else {
+        1.0 - (elapsed.saturating_sub(hold_until).as_secs_f64() / duration).min(1.0)
+    };
+    animation.curve().sample(progress) as f32
 }

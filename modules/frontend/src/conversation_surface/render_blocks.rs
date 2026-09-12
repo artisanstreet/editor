@@ -231,9 +231,15 @@ impl ConversationSurface {
             TurnBlock::TurnStatus(block) => {
                 self.render_status(turn_id, block, selector, theme, status_motion)
             }
-            TurnBlock::TurnFooter(block) => {
-                self.render_footer(turn_id, block, selector, entity, theme, window)
-            }
+            TurnBlock::TurnFooter(block) => self.render_footer(
+                turn_id,
+                block,
+                selector,
+                entity,
+                theme,
+                window,
+                status_motion,
+            ),
         }
     }
 

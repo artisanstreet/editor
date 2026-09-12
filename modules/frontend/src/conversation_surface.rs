@@ -6,7 +6,8 @@
 //! display text; this module only paints those already-decided values and
 //! reports typed interaction observations back to its controller.
 //!
-//! No durable state, domain records, network work, or clock reads belong here.
+//! No durable state, domain records, or network work belongs here. Clipboard
+//! confirmation uses a local presentation clock.
 //! Message-body Markdown parsing is delegated to the shared renderer, and
 //! local disclosure state never becomes a second source of truth. A
 //! replacement scene is the only source of truth after a disclosure request
@@ -393,16 +394,14 @@ impl Render for ConversationSurface {
         // End-space height lives in framework window-local state, not on the
         // entity: two windows showing one surface measure different
         // viewports, and a shared scalar could never converge for both.
-        let end_space = window.use_state(cx, |_, _| TRANSCRIPT_END_SPACE_PX);
+        let end_space = window.use_state(cx, |_, _| 0.0_f32);
         let end_space_px = *end_space.read(cx);
         // The reader's current navigator marker is geometry-derived like
         // end space, so it lives in the same window-local state: two
         // windows sharing one surface converge independently.
         let navigator_active = window.use_state(cx, |_, _| None::<String>);
-        // Reference rhythm keeps 32 px (`gap-8`) between turn groups; the
-        // settled footer's absolute reveal lives inside that room instead of
-        // overlapping the next turn. No per-turn pad is added, so unsettled
-        // turns carry no phantom gap.
+        // Keep 32 px between turns. Settled footer controls occupy their own
+        // flow row inside each turn's padded reading column.
         let wheel_surface = entity.downgrade();
         let mut transcript = div()
             .w_full()
@@ -447,15 +446,14 @@ impl Render for ConversationSurface {
                 }
             }
             self.finish_transcript_window(&built);
-            // Base end space keeps scrollable room after the last turn so an
-            // anchored turn can reach the viewport top inset. The height
-            // grows from live measurement via [`end_space_height`] once the
-            // viewport lane supplies it; until then the reference base holds
-            // with no invented cap.
+            // Long transcripts reserve anchoring room. Short conversations
+            // keep zero end space. Cancel the inter-turn gap before this
+            // spacer so a zero-height spacer cannot create overflow.
             transcript = transcript.child(
                 div()
                     .w_full()
                     .h(px(end_space_px))
+                    .mt(-theme.spacing.steps(8.0))
                     .debug_selector(|| TRANSCRIPT_END_SPACE_SELECTOR.to_owned()),
             );
         }

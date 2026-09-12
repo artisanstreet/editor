@@ -317,6 +317,7 @@ pub struct Button {
     variant: ButtonVariant,
     size: ButtonSize,
     content: ButtonContent,
+    icon_slot: Option<gpui::AnyElement>,
     disabled: bool,
     corner_radius_override: Option<Pixels>,
     tint: Option<ButtonTint>,
@@ -364,6 +365,7 @@ impl Button {
             variant,
             size,
             content,
+            icon_slot: None,
             disabled: false,
             corner_radius_override: None,
             tint: None,
@@ -414,6 +416,14 @@ impl Button {
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_activate = Some(Box::new(handler));
+        self
+    }
+
+    /// Supplies an animated icon face while preserving the button's label and input behavior.
+    /// Used only by icon-only buttons; the caller owns the fixed-size icon slot.
+    #[must_use]
+    pub fn icon_slot(mut self, icon: impl IntoElement) -> Self {
+        self.icon_slot = Some(icon.into_any_element());
         self
     }
 
@@ -488,9 +498,10 @@ impl RenderOnce for Button {
 
         root = match self.content {
             ButtonContent::Text(label) => root.child(label),
-            ButtonContent::IconOnly { icon, .. } => {
-                root.child(asset_glyph(icon).size(style.icon_size))
-            }
+            ButtonContent::IconOnly { icon, .. } => root.child(
+                self.icon_slot
+                    .unwrap_or_else(|| asset_glyph(icon).size(style.icon_size).into_any_element()),
+            ),
             ButtonContent::IconText { icon, label } => root
                 .child(asset_glyph(icon).size(style.icon_size))
                 .child(label),

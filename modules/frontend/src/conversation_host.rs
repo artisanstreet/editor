@@ -700,13 +700,19 @@ impl ConversationHost {
             return SurfaceRouteDecision::Accepted;
         };
         let policy = self.sync_footer_policy(turn, settled_at, response_text);
-        if let TurnFooterAction::CopyResponse { text } = policy.start_copy() {
+        let copied = if let TurnFooterAction::CopyResponse { text } = policy.start_copy() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             policy.settle_copy(CopyOutcome::Succeeded);
-        }
+            true
+        } else {
+            false
+        };
         let message = policy.copy_message().to_owned();
         surface.update(cx, |surface, surface_cx| {
             surface.set_footer_copy_message(turn, message, surface_cx);
+            if copied {
+                surface.confirm_footer_copy(turn, surface_cx);
+            }
         });
         SurfaceRouteDecision::Accepted
     }

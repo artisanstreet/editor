@@ -8,10 +8,8 @@ fn end_space_matches_the_reference_anchoring_formula() {
 }
 
 #[gpui::test]
-fn end_space_grows_short_content_to_the_top_inset(cx: &mut TestAppContext) {
-    // One short turn in a tall window: the painted spacer must equal the
-    // anchoring formula applied to live geometry, proving the observer
-    // drives the spacer instead of the fixed base.
+fn short_conversation_has_no_artificial_scroll_room(cx: &mut TestAppContext) {
+    // A short conversation fits without a scrollable spacer.
     let user_scene = ConversationScene::build(
         vec![SceneTurn::new(
             turn_id("turn_a"),
@@ -49,13 +47,11 @@ fn end_space_grows_short_content_to_the_top_inset(cx: &mut TestAppContext) {
         cx.update(|_, app| f64::from(surface.read(app).scroll_handle().bounds().size.height));
     // Window and content spaces agree on differences: the element offset
     // cancels out of the formula exactly like the scroll-offset path.
-    let expected = end_space_height(
-        viewport_height,
-        f64::from(turn_bounds.origin.y),
-        f64::from(spacer_bounds.origin.y),
-    );
-    assert!(expected >= 192.0);
-    assert!((f64::from(spacer_bounds.size.height) - expected).abs() < 1.0);
+    assert!(f64::from(turn_bounds.size.height) < viewport_height);
+    assert_eq!(spacer_bounds.size.height, px(0.0));
+    cx.update(|_, app| {
+        assert_eq!(surface.read(app).scroll_handle().max_offset().y, px(0.0));
+    });
     cx.update(|_, app| {
         // Settling the viewport legitimately emits viewport observations;
         // drain them and prove nothing else is pending.
@@ -520,4 +516,41 @@ fn scroll_target_queue_retains_fifo_head_at_bounded_capacity(cx: &mut TestAppCon
             assert_eq!(surface.pending_scroll_targets.first(), Some(&first));
         });
     });
+}
+
+#[gpui::test]
+fn settled_toolbar_stays_in_the_message_column_and_short_chat_does_not_scroll(
+    cx: &mut TestAppContext,
+) {
+    let mut transcript = scene(vec![item(
+        "assistant-a",
+        1,
+        SceneItemKind::AssistantMessage {
+            body: "A short response".to_owned(),
+            phase: AssistantPhase::Final,
+        },
+        None,
+    )]);
+    assert!(transcript.set_turn_footer_settlement(
+        &turn_id("turn_a"),
+        TurnFooterSettlement::new("A short response".to_owned(), 99).unwrap()
+    ));
+    let (surface, cx) =
+        cx.add_window_view(|_, cx| ConversationSurface::new(transcript, ThemeMode::Dark, cx));
+    cx.simulate_resize(size(px(720.0), px(600.0)));
+    settle(cx);
+    settle(cx);
+    let body = cx
+        .debug_bounds("artisan-conversation-surface-turn-turn_a-block-assistant-assistant-a")
+        .unwrap();
+    let footer = cx
+        .debug_bounds("artisan-conversation-surface-turn-turn_a-footer")
+        .unwrap();
+    let turn = cx
+        .debug_bounds("artisan-conversation-surface-turn-turn_a")
+        .unwrap();
+    assert_eq!(footer.left(), body.left());
+    assert_eq!(footer.top() - body.bottom(), px(4.0));
+    assert!(footer.bottom() <= turn.bottom());
+    cx.update(|_, app| assert_eq!(surface.read(app).scroll_handle().max_offset().y, px(0.0)));
 }

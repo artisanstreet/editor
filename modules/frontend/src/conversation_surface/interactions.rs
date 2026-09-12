@@ -241,6 +241,26 @@ impl ConversationSurface {
         }
     }
 
+    /// Starts visual confirmation only after the clipboard write has succeeded.
+    pub fn confirm_footer_copy(&mut self, turn_id: &TurnId, cx: &mut Context<Self>) {
+        let mirror = self.footer_mirrors.entry(footer_key(turn_id)).or_default();
+        let now = std::time::Instant::now();
+        let elapsed = mirror.copied_at.map(|at| now.saturating_duration_since(at));
+        // Repeated copies extend the hold or reverse the return at its current
+        // opacity; they never flash back to the copy icon.
+        let entered = elapsed.map_or(Duration::ZERO, |elapsed| {
+            if elapsed < Duration::from_millis(250) {
+                elapsed
+            } else if elapsed < Duration::from_millis(1500) {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_millis(1750).saturating_sub(elapsed)
+            }
+        });
+        mirror.copied_at = now.checked_sub(entered);
+        cx.notify();
+    }
+
     /// Sets the shared theme mode and repaints the surface when it changes.
     pub fn set_theme_mode(&mut self, theme_mode: ThemeMode, cx: &mut Context<Self>) {
         if self.theme_mode != theme_mode {
@@ -849,7 +869,13 @@ impl ConversationSurface {
         element_offset_y: f64,
     ) -> Option<f32> {
         let (end_space, turns) = children_bounds.split_last()?;
+        let first = turns.first()?;
         let last = turns.last()?;
+        let content_height =
+            f64::from(end_space.origin.y - first.origin.y) + f64::from(TRANSCRIPT_PAD_TOP_PX);
+        if content_height <= viewport_height {
+            return Some(0.0);
+        }
         let item_top = f64::from(last.origin.y) - element_offset_y;
         let end_space_top = f64::from(end_space.origin.y) - element_offset_y;
         let measured = end_space_height(viewport_height, item_top, end_space_top);

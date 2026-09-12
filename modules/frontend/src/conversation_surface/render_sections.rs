@@ -685,8 +685,8 @@ impl ConversationSurface {
 
     /// Renders the hover/focus-only settled footer for one turn.
     ///
-    /// Parity with `conversation-turn-footer.svelte`: an absolute row below
-    /// the turn (`top_full` plus a quarter-rem margin), invisible until turn
+    /// A flow row inside the message column, four pixels below the response,
+    /// invisible until turn
     /// hover or copy-button focus, carrying the ghost copy control and the
     /// relative age. Only an eligible settlement paints; unsettled turns keep
     /// no placeholder and no gap slot. Hover and focus emit
@@ -698,6 +698,10 @@ impl ConversationSurface {
         clippy::too_many_lines,
         reason = "one GPUI builder composes the footer reveal, copy control, and relative-age mirror in visual order"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "footer receives the shared renderer context and effective motion preference"
+    )]
     pub(super) fn render_footer(
         &self,
         turn_id: &TurnId,
@@ -706,6 +710,7 @@ impl ConversationSurface {
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
         window: &mut Window,
+        motion: MotionPolicy,
     ) -> Option<AnyElement> {
         let settlement = footer_settlement(block)?;
         let key = footer_key(turn_id);
@@ -723,6 +728,31 @@ impl ConversationSurface {
         let copy_turn = turn_id.clone();
         let copy_text = settlement.response_text().to_owned();
         let copy_label = AccessibleLabel::new(COPY_RESPONSE_LABEL).ok()?;
+        let copied_elapsed = mirror
+            .and_then(|mirror| mirror.copied_at)
+            .map(|at| at.elapsed());
+        let copied = copied_elapsed.map_or(0.0, |elapsed| {
+            if elapsed < Duration::from_millis(1750) {
+                window.request_animation_frame();
+            }
+            copy_feedback_progress(elapsed, motion)
+        });
+        let icon_face = |asset, opacity: f32| {
+            div()
+                .absolute()
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(opacity)
+                .blur(px(2.0 * (1.0 - opacity)))
+                .child(asset_glyph(asset).size(px(16.0 * (0.25 + 0.75 * opacity))))
+        };
+        let copy_icon = div()
+            .relative()
+            .size(px(16.0))
+            .child(icon_face(AssetId::TABLER_COPY, 1.0 - copied))
+            .child(icon_face(AssetId::TABLER_CHECK, copied));
         let copy_button = Button::new(
             SharedString::from(format!("{selector}-copy")),
             handle,
@@ -734,6 +764,7 @@ impl ConversationSurface {
         )
         .map(|button| {
             button
+                .icon_slot(copy_icon)
                 .focus_visibility(FocusVisibility::Visible)
                 .tint(
                     theme.colors.muted_foreground.to_paint(),
@@ -761,10 +792,7 @@ impl ConversationSurface {
         let time_selector = format!("{selector}-time-{}", settlement.settled_at_ms());
         let mut footer = div()
             .id(format!("{selector}-footer"))
-            .absolute()
-            .left(px(0.0))
-            .top_full()
-            .mt(theme.spacing.steps(1.0))
+            .mt(-theme.spacing.steps(5.0))
             .flex()
             .flex_row()
             .items_center()
