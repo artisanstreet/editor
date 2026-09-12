@@ -1,4 +1,4 @@
-//! OpenCode2 profile registry, registration, and verified launch resolution.
+//! `OpenCode2` profile registry, registration, and verified launch resolution.
 //!
 //! The bounded registry codec lives in [`registry`], registry-facing authority
 //! operations in [`authority`], and verified launch capabilities in [`launch`].
