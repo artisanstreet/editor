@@ -797,7 +797,7 @@ impl ConversationSurface {
             .flex()
             .flex_row()
             .items_center()
-            .gap(theme.spacing.steps(1.0))
+            .gap(theme.spacing.steps(4.0))
             .text_size(theme.typography.control_text)
             .font_weight(ProseTypography::BODY_WEIGHT)
             .letter_spacing(px(ProseTypography::body_tracking_px(14.0)))
