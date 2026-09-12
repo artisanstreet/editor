@@ -831,9 +831,7 @@ pub(super) fn install_atomic(
     sync_directory(dir)?;
     #[cfg(unix)]
     {
-        if let Err(e) = check_file_mode(&dest) {
-            return Err(e);
-        }
+        check_file_mode(&dest)?;
     }
     #[cfg(windows)]
     {

@@ -281,6 +281,10 @@ public static class ArtisanShortcutProperties {
 "#;
 
 #[cfg(not(windows))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the Unix shortcut writer is an explicit no-op behind the shared signature"
+)]
 fn write(_target: &ShortcutTarget) -> Result<()> {
     Ok(())
 }

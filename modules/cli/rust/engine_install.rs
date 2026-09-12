@@ -308,10 +308,10 @@ fn file_identity(file: &File) -> Result<FileIdentity, NativeOpenCode2InstallErro
         let metadata = file
             .metadata()
             .map_err(|_| NativeOpenCode2InstallError::LockUnavailable)?;
-        return Ok(FileIdentity {
+        Ok(FileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
-        });
+        })
     }
     #[cfg(windows)]
     {

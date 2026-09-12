@@ -195,8 +195,7 @@ pub fn cursor_auth_file_default() -> PathBuf {
         let base = std::env::var("XDG_CONFIG_HOME")
             .ok()
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir().join(".config"));
+            .map_or_else(|| home_dir().join(".config"), PathBuf::from);
         base.join("cursor").join("auth.json")
     }
 }

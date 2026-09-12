@@ -46,6 +46,13 @@ pub fn expected_protocol(stable_ae: &Path) -> Result<OwnedIntegration> {
     })
 }
 
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "cross-platform signature; the Unix protocol integration is an explicit no-op"
+    )
+)]
 pub fn prepare_protocol(
     platform: &Platform,
     stable_ae: &Path,
@@ -70,6 +77,13 @@ pub fn prepare_protocol(
     unreachable!("Windows protocol integration is only compiled on Windows")
 }
 
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "cross-platform signature; the Unix protocol integration is an explicit no-op"
+    )
+)]
 pub fn apply_protocol(
     platform: &Platform,
     stable_ae: &Path,
@@ -101,6 +115,13 @@ pub fn apply_protocol(
     unreachable!("Windows protocol integration is only compiled on Windows")
 }
 
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "cross-platform signature; the Unix protocol integration is an explicit no-op"
+    )
+)]
 pub fn verify_protocol(
     platform: &Platform,
     stable_ae: &Path,
@@ -130,6 +151,13 @@ pub fn verify_protocol(
     unreachable!("Windows protocol integration is only compiled on Windows")
 }
 
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "cross-platform signature; the Unix protocol integration is an explicit no-op"
+    )
+)]
 pub fn remove_protocol(
     platform: &Platform,
     stable_ae: &Path,

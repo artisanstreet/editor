@@ -175,10 +175,10 @@ fn readiness_file_identity(file: &File) -> Option<ReadinessFileIdentity> {
         use std::os::unix::fs::MetadataExt;
 
         let metadata = file.metadata().ok()?;
-        return Some(ReadinessFileIdentity {
+        Some(ReadinessFileIdentity {
             first: metadata.dev(),
             second: metadata.ino(),
-        });
+        })
     }
     #[cfg(windows)]
     {
