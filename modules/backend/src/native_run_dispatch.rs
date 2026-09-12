@@ -1,8 +1,7 @@
 //! Durable execution for configured native engine profiles.
 //!
-//! Claims queued messages, binds provider sessions before prompt authorization,
-//! and persists bounded observations before notifying subscribers. The engine
-//! owner handles process lifecycle and network transcript delivery.
+//! Claims queued messages and authorizes prompts only after binding provider
+//! sessions. Persists bounded observations before notifying subscribers.
 
 #![forbid(unsafe_code)]
 
