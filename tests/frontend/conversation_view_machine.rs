@@ -1,23 +1,17 @@
 //! Black-box tests for the registered conversation disclosure and viewport
 //! state-machine API.
 
-use artisan_domain::ItemId;
 use artisan_frontend::conversation_view_machine::{
     CompletionRejection, Disclosure, DisclosureController, DisclosureEffect, DisclosureEvent,
-    DisclosureState, ViewportAnchor, ViewportController, ViewportEffect, ViewportEvent,
-    ViewportGeneration, ViewportState,
+    DisclosureState, ViewportController, ViewportEffect, ViewportEvent, ViewportGeneration,
+    ViewportState,
 };
-
-fn item_id(value: &str) -> ItemId {
-    ItemId::parse(value).expect("test item id must be valid")
-}
 
 fn request_generation(effects: &[ViewportEffect]) -> ViewportGeneration {
     effects
         .iter()
         .find_map(|effect| match effect {
-            ViewportEffect::RequestBottomScroll { generation }
-            | ViewportEffect::RequestAnchorRestore { generation, .. } => Some(*generation),
+            ViewportEffect::RequestBottomScroll { generation } => Some(*generation),
             ViewportEffect::None
             | ViewportEffect::ShowJumpToLatest
             | ViewportEffect::HideJumpToLatest
@@ -175,101 +169,13 @@ fn detached_content_changes_never_emit_scroll_commands() {
     assert_eq!(vp.state(), ViewportState::Detached);
 
     let effects = vp.handle(ViewportEvent::ExtentChanged);
-    assert!(!effects.iter().any(|effect| matches!(
-        effect,
-        ViewportEffect::RequestBottomScroll { .. } | ViewportEffect::RequestAnchorRestore { .. }
-    )));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::RequestBottomScroll { .. }))
+    );
     assert_eq!(vp.state(), ViewportState::Detached);
 }
-
-#[test]
-fn exact_item_anchor_offset_restoration_survives_extent_changes() {
-    let anchor = item_id("msg-123");
-    let mut vp = ViewportController::anchored(anchor.clone(), -42);
-    assert!(matches!(
-        vp.state(),
-        ViewportState::Anchored { anchor_id, offset }
-            if anchor_id == anchor && offset == -42
-    ));
-
-    let effects = vp.handle(ViewportEvent::ExtentChanged);
-    let (restored_anchor, restored_offset, generation) = effects
-        .iter()
-        .find_map(|effect| match effect {
-            ViewportEffect::RequestAnchorRestore {
-                anchor_id,
-                offset,
-                generation,
-            } => Some((anchor_id.clone(), *offset, *generation)),
-            ViewportEffect::None
-            | ViewportEffect::RequestBottomScroll { .. }
-            | ViewportEffect::ShowJumpToLatest
-            | ViewportEffect::HideJumpToLatest
-            | ViewportEffect::InvalidateRender
-            | ViewportEffect::CompletionRejected { .. }
-            | ViewportEffect::GenerationExhausted => None,
-        })
-        .expect("anchored extent must emit anchor restore");
-    assert_eq!(restored_anchor, anchor);
-    assert_eq!(restored_offset, -42);
-    assert!(generation.value() > 0);
-    assert_eq!(
-        vp.state(),
-        ViewportState::Anchored {
-            anchor_id: anchor,
-            offset: -42,
-        }
-    );
-
-    let second_generation = request_generation(&vp.handle(ViewportEvent::ExtentChanged));
-    assert!(second_generation.value() > generation.value());
-}
-
-#[test]
-fn viewport_anchor_and_events_use_domain_item_ids() {
-    let anchor = ViewportAnchor::new(item_id("anchor-A"), 10);
-    assert_eq!(anchor.anchor_id, item_id("anchor-A"));
-    assert_eq!(anchor.offset, 10);
-
-    let event = ViewportEvent::anchor_observed(item_id("anchor-A"), 10);
-    assert_eq!(
-        event,
-        ViewportEvent::AnchorObserved {
-            anchor_id: item_id("anchor-A"),
-            offset: 10,
-        }
-    );
-}
-
-#[test]
-fn exact_item_anchor_removal_detaches_without_guessing_a_neighbor() {
-    let anchor = item_id("anchor-A");
-    let mut vp = ViewportController::anchored(anchor.clone(), 10);
-    let effects = vp.handle(ViewportEvent::anchor_removed(anchor.clone()));
-
-    assert_eq!(vp.state(), ViewportState::Detached);
-    assert!(
-        effects
-            .iter()
-            .any(|effect| matches!(effect, ViewportEffect::ShowJumpToLatest))
-    );
-
-    let mut vp2 = ViewportController::anchored(anchor.clone(), 10);
-    let effects2 = vp2.handle(ViewportEvent::anchor_removed(item_id("other")));
-    assert_eq!(
-        vp2.state(),
-        ViewportState::Anchored {
-            anchor_id: anchor,
-            offset: 10,
-        }
-    );
-    assert!(
-        !effects2
-            .iter()
-            .any(|effect| matches!(effect, ViewportEffect::ShowJumpToLatest))
-    );
-}
-
 #[test]
 fn jump_to_bottom_uses_generation_fenced_scrolling_settling_following() {
     let mut vp = ViewportController::new();
@@ -390,17 +296,7 @@ fn generation_overflow_never_wraps() {
             .iter()
             .any(|effect| matches!(effect, ViewportEffect::GenerationExhausted))
     );
-
-    let mut anchored = ViewportController::seeded_for_test(max);
-    anchored.handle(ViewportEvent::anchor_observed(item_id("a"), 0));
-    let effects3 = anchored.handle(ViewportEvent::ExtentChanged);
-    assert!(
-        effects3
-            .iter()
-            .any(|effect| matches!(effect, ViewportEffect::GenerationExhausted))
-    );
-    assert_eq!(anchored.generation(), max);
-    assert!(matches!(anchored.state(), ViewportState::Anchored { .. }));
+    assert_eq!(vp.generation(), max);
 }
 
 #[test]
@@ -414,16 +310,11 @@ fn no_viewport_state_can_be_two_leaves_at_once() {
         ViewportState::Settling {
             generation: ViewportGeneration::new(1),
         },
-        ViewportState::Anchored {
-            anchor_id: item_id("x"),
-            offset: 0,
-        },
         ViewportState::Closed,
     ] {
         let true_count = [
             state.is_following(),
             state.is_detached(),
-            state.is_anchored(),
             state.is_scrolling(),
             state.is_settling(),
             state.is_closed(),

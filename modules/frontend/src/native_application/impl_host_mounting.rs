@@ -507,8 +507,7 @@ impl NativeApplication {
             crate::conversation_view_machine::ViewportEffect::None
             | crate::conversation_view_machine::ViewportEffect::InvalidateRender
             | crate::conversation_view_machine::ViewportEffect::CompletionRejected { .. } => {}
-            crate::conversation_view_machine::ViewportEffect::RequestAnchorRestore { .. }
-            | crate::conversation_view_machine::ViewportEffect::GenerationExhausted => {
+            crate::conversation_view_machine::ViewportEffect::GenerationExhausted => {
                 self.set_failure(invalid_service_failure(), cx);
                 return false;
             }
