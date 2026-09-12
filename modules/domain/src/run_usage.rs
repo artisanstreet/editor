@@ -1,6 +1,6 @@
 //! Bounded provider-token usage attributed to one durable assistant run.
 //!
-//! OpenCode2's usage envelope carries a provider session and durable source
+//! `OpenCode2`'s usage envelope carries a provider session and durable source
 //! sequence, but no Artisan run, thread, or model identity. The engine owner
 //! supplies those immutable launch-context values; this module validates and
 //! stores the resulting typed report without retaining the provider payload.
@@ -25,7 +25,7 @@ pub const RUN_USAGE_MAX_TOKEN_COUNT: u64 = i64::MAX as u64;
 /// Provider usage accounting basis.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunUsageBasis {
-    /// OpenCode2 reports the usage for the completed step as a delta.
+    /// `OpenCode2` reports the usage for the completed step as a delta.
     Delta,
     /// A future provider may report a cumulative total.
     Cumulative,
@@ -45,6 +45,10 @@ impl RunUsageBasis {
     }
 
     /// Parses the stable database spelling.
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "database callers depend on the Option-returning spelling parser; `FromStr` requires a `Result` error type for a value that is expected to be absent"
+    )]
     #[must_use]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
@@ -114,6 +118,13 @@ pub struct RunUsageReport {
 impl RunUsageReport {
     /// Builds a report after validating provider identities and bounded
     /// integer fields. `Some(0)` is deliberately distinct from `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunUsageReportError`] when the provider session or turn
+    /// identity is empty, contains whitespace or control scalars, or exceeds
+    /// its byte bound; when the source sequence or a token count leaves the
+    /// SQLite integer range; or when the context window is zero.
     pub fn new(input: RunUsageReportInput) -> Result<Self, RunUsageReportError> {
         validate_provider_text(
             &input.provider_session_id,

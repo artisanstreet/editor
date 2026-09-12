@@ -16,7 +16,7 @@ pub const MODEL_FAVORITES_MAX_MODELS: usize = 1_024;
 
 /// Maximum UTF-8 byte length of one stable catalog model id.
 ///
-/// OpenCode2 catalog ids are URL-safe base64url encodings of a JSON route /
+/// `OpenCode2` catalog ids are URL-safe base64url encodings of a JSON route /
 /// model / variant tuple. They therefore do not share the smaller generic
 /// request-id ceiling.
 pub const MODEL_FAVORITE_ID_MAX_BYTES: usize = 4_096;
@@ -25,7 +25,7 @@ pub const MODEL_FAVORITE_ID_MAX_BYTES: usize = 4_096;
 ///
 /// This remains a finite storage and wire boundary for the full ordered
 /// snapshot. It is deliberately independent from the generic request-id
-/// bound because ordinary OpenCode2 ids can exceed 128 bytes.
+/// bound because ordinary `OpenCode2` ids can exceed 128 bytes.
 pub const MODEL_FAVORITES_MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
 /// A stable model id from the catalog.
@@ -358,7 +358,7 @@ mod tests {
     fn realistic_opencode2_catalog_id_over_128_bytes_roundtrips() {
         let id = "opencode2:eyJtb2RlbF9pZCI6IngtcHJldmlldy1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbSIsInByb3ZpZGVyX3JvdXRlX2lkIjoib3BlbmNvZGUiLCJ2YXJpYW50X2lkIjoiaGlnaCJ9";
         assert!(id.len() > 128);
-        assert_eq!(ModelFavoriteId::parse(id.clone()).unwrap().as_str(), id);
+        assert_eq!(ModelFavoriteId::parse(id).unwrap().as_str(), id);
     }
 
     #[test]

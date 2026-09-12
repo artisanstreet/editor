@@ -31,6 +31,7 @@ pub mod bounds;
 pub mod commands;
 pub mod conversation;
 pub mod engine_config;
+pub mod engine_socket;
 pub mod events;
 pub mod identifiers;
 mod legacy_workspace_id;
@@ -78,6 +79,11 @@ pub use engine_config::{
     EngineSelection, FilesystemAccess, FiniteMillis, GrokPermissionMode, GrokReasoningEffort,
     GrokSelection, HermesPermissionMode, HermesReasoningEffort, HermesSelection, NetworkAccess,
     OpenCode2Selection, WebSearchAccess,
+};
+pub use engine_socket::{
+    EngineCapabilityName, EngineCapabilityState, EngineCommandTag, EngineDescriptor,
+    EngineObservationTag, EngineOpenError, EngineOpenInput, EngineOpenResult, EngineProbe,
+    EngineResumeToken, EngineRun, EngineRunTerminalState, EngineSocket,
 };
 pub use events::{
     EngineObservationAttribution, EngineObservationEvent, Event, FirstMessageQueued, ProjectAttached,

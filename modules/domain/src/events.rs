@@ -49,6 +49,10 @@ pub struct FirstMessageQueued {
 ///
 /// `Eq` is absent by necessity: the engine arm carries [`Observation`],
 /// whose usage rows hold a finite `f64` cost. See the module docs.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "boxing would change the public payload type consumed across crates; events are built one at a time, not stored in bulk"
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// See [`ProjectAttached`].

@@ -30,6 +30,11 @@ impl AuthoredText {
     pub const MAX_BYTES: usize = MESSAGE_BODY_MAX_BYTES;
 
     /// Creates authored text after enforcing the shared body bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoredTextError::TooLong`] when the value exceeds
+    /// [`AuthoredText::MAX_BYTES`] UTF-8 bytes.
     pub fn parse(value: impl Into<String>) -> Result<Self, AuthoredTextError> {
         let value = value.into();
         if value.len() > Self::MAX_BYTES {
@@ -105,6 +110,11 @@ impl ImageMimeType {
     }
 
     /// Parses one of the four explicitly accepted image MIME types.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImageMimeTypeError`] when the value is not one of the four
+    /// accepted image MIME types or exceeds the MIME byte ceiling.
     pub fn parse(value: &str) -> Result<Self, ImageMimeTypeError> {
         if value.len() > MESSAGE_IMAGE_ATTACHMENT_MIME_MAX_BYTES {
             return Err(ImageMimeTypeError);
@@ -156,6 +166,14 @@ impl fmt::Debug for ImageAttachment {
 impl ImageAttachment {
     /// Creates one validated image attachment from its wire MIME spelling,
     /// owned bytes, and display name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImageAttachmentError::UnsupportedMimeType`] for an
+    /// unrecognized spelling, [`ImageAttachmentError::EmptyBytes`] for empty
+    /// content, [`ImageAttachmentError::BytesTooLarge`] past the per-image
+    /// ceiling, or [`ImageAttachmentError::InvalidName`] /
+    /// [`ImageAttachmentError::NameTooLong`] for the display name.
     pub fn new(
         mime_type: impl AsRef<str>,
         bytes: Vec<u8>,
@@ -244,6 +262,13 @@ pub struct ImageAttachmentRef {
 
 impl ImageAttachmentRef {
     /// Builds one validated byte-free reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImageAttachmentRefError::UnsupportedMimeType`] for an
+    /// unrecognized spelling, [`ImageAttachmentRefError::InvalidSize`] when
+    /// `size_bytes` is zero or exceeds the per-image ceiling, or
+    /// [`ImageAttachmentRefError::InvalidName`] for the display name.
     pub fn new(
         message_id: MessageId,
         thread_id: ThreadId,
@@ -363,6 +388,13 @@ impl QueueMessagePayload {
     /// At least one nonblank text value or one image is required. Empty text
     /// remains representable when images are present so the wire can preserve
     /// the difference between an absent text field and authored empty text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueueMessagePayloadError::TooManyAttachments`] past the image
+    /// count ceiling, [`QueueMessagePayloadError::AttachmentsTooLarge`] past
+    /// the aggregate byte ceiling, or [`QueueMessagePayloadError::Empty`] when
+    /// neither visible text nor an image is present.
     pub fn new(
         text: Option<AuthoredText>,
         attachments: Vec<ImageAttachment>,
@@ -397,6 +429,11 @@ impl QueueMessagePayload {
     }
 
     /// Builds a text-only payload while retaining the general validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueueMessagePayloadError::Text`] when the text exceeds the
+    /// shared authored-text byte bound.
     pub fn text_only(text: impl Into<String>) -> Result<Self, QueueMessagePayloadError> {
         let text = AuthoredText::parse(text).map_err(QueueMessagePayloadError::Text)?;
         Self::new(Some(text), Vec::new())
@@ -547,7 +584,7 @@ mod tests {
             2,
             attachment.mime_type_str(),
             attachment.name().to_owned(),
-            attachment.byte_len() as u32,
+            u32::try_from(attachment.byte_len()).expect("image bytes fit the u32 reference field"),
             [9; 32],
         )
         .expect("reference metadata is valid");

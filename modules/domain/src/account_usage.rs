@@ -283,7 +283,7 @@ fn validate_usage_text(
             reason: "value must not be empty",
         });
     }
-    if value.chars().any(|character| character.is_control()) {
+    if value.chars().any(char::is_control) {
         return Err(EngineUsageError::Text {
             field,
             reason: "value must not contain control characters",
@@ -352,10 +352,10 @@ impl EngineUsageWindow {
         if let Some(resets_at) = resets_at.as_deref() {
             validate_iso_timestamp(resets_at, "resets_at")?;
         }
-        if let Some(minutes) = window_minutes {
-            if minutes == 0 {
-                return Err(EngineUsageError::NonPositiveWindowMinutes);
-            }
+        if let Some(minutes) = window_minutes
+            && minutes == 0
+        {
+            return Err(EngineUsageError::NonPositiveWindowMinutes);
         }
         Ok(Self {
             id,
@@ -485,7 +485,7 @@ impl EngineUsageReport {
         let engine_id = engine_id.into();
         validate_usage_id(&engine_id)?;
         if let Some(email) = account_email.as_deref() {
-            if email.chars().any(|character| character.is_control()) {
+            if email.chars().any(char::is_control) {
                 return Err(EngineUsageError::Text {
                     field: "account_email",
                     reason: "value must not contain control characters",
@@ -767,7 +767,16 @@ pub fn validate_iso_timestamp(value: &str, field: &'static str) -> Result<(), En
         }
     }
     let zone = &bytes[cursor..];
-    if zone == [b'Z'] {
+    validate_iso_zone(zone, field)?;
+    Ok(())
+}
+
+/// Validates the trailing `Z` or `±HH:MM` zone of an ISO-8601 timestamp.
+///
+/// Callers have already proven the cursor points one past the seconds field.
+fn validate_iso_zone(zone: &[u8], field: &'static str) -> Result<(), EngineUsageError> {
+    let invalid = |reason: &'static str| EngineUsageError::Timestamp { field, reason };
+    if zone == *b"Z" {
         return Ok(());
     }
     if zone.len() == 6 && (zone[0] == b'+' || zone[0] == b'-') && zone[3] == b':' {
@@ -838,6 +847,11 @@ pub fn utc_ymd(millis: i64) -> (i64, u32, u32) {
     civil_from_days(seconds.div_euclid(86_400))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the civil-from-days inversion yields day 1..=31 and month 1..=12"
+)]
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     // Inverts days-from-civil for the proleptic Gregorian calendar.
     let shifted = days + 719_468;
@@ -873,6 +887,10 @@ mod tests {
         .expect("fixture window should validate")
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "clamp bounds and pass-through must be bit-exact"
+    )]
     #[test]
     fn percentages_clamp_while_non_finite_values_are_rejected() {
         assert_eq!(window(142.5).percent_used(), 100.0);
