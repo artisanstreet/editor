@@ -1,7 +1,7 @@
 //! Fail-run settlement: error-carrying terminal co-commit and replay.
 
 use artisan_domain::{AssistantBody, AssistantMessagePhase, ItemId, PatchId, Revision, UnixMillis};
-use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement};
 use thiserror::Error;
 
 use crate::entities::{
@@ -195,10 +195,10 @@ impl Repository {
     /// `InvalidError` for malformed error codes/messages.
     pub async fn fail_run(&self, command: FailRun<'_>) -> Result<FailRunOutcome, FailRunError> {
         validate_fail(&command)?;
-        let transaction =
-            self.database.begin().await.map_err(|source| {
-                FailRunError::Repository(database_error("begin fail run", source))
-            })?;
+        let transaction = self
+            .begin_write()
+            .await
+            .map_err(|source| FailRunError::Repository(database_error("begin fail run", source)))?;
         match execute_fail(&transaction, &command).await {
             Ok(FailExecution::Persisted(receipt)) => {
                 transaction.commit().await.map_err(|source| {

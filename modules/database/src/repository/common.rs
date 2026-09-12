@@ -6,10 +6,33 @@
 
 use artisan_domain::{AssistantMessagePhase, ConversationLifecycle, ThreadId};
 use sea_orm::{
-    ConnectionTrait, DatabaseTransaction, DbBackend, DbErr, QueryResult, Statement, TryGetable,
+    ConnectionTrait, DatabaseTransaction, DbBackend, DbErr, QueryResult, SqliteTransactionMode,
+    Statement, TransactionOptions, TransactionTrait, TryGetable,
 };
 
-use super::RepositoryError;
+use crate::sqlite_write_retry::retry_write_operation;
+
+use super::{Repository, RepositoryError};
+
+/// Begins one read-then-write transaction with SQLite `BEGIN IMMEDIATE`.
+///
+/// Taking the writer fence before the first statement means a concurrent
+/// commit cannot invalidate a read snapshot the transaction later upgrades,
+/// so the `SQLITE_BUSY_SNAPSHOT` class cannot surface from a repository
+/// transaction. Writer-fence contention that still reaches the driver after
+/// `busy_timeout` is retried on the shared bounded schedule; every other
+/// failure is returned unchanged for the caller's typed boundary.
+impl Repository {
+    pub(crate) async fn begin_write(&self) -> Result<DatabaseTransaction, DbErr> {
+        retry_write_operation(|| {
+            self.database.begin_with_options(TransactionOptions {
+                sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
+                ..Default::default()
+            })
+        })
+        .await
+    }
+}
 
 /// Thread projection shared by the conversation snapshot and patch replay reads.
 pub(crate) const THREAD_QUERY: &str = "SELECT thread_id, CAST(created_at_ms AS TEXT), CAST(updated_at_ms AS TEXT) \

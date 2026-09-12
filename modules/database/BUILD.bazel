@@ -15,6 +15,7 @@ rust_library(
         "@crates//:sqlx-sqlite",
         "@crates//:subtle",
         "@crates//:thiserror",
+        "@crates//:tokio",
         "@crates//:zeroize",
     ],
     edition = "2024",

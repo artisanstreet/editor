@@ -17,6 +17,7 @@ sha2.workspace = true
 sqlx-sqlite.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
 zeroize.workspace = true
 
 [dev-dependencies]

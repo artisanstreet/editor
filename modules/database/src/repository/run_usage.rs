@@ -145,7 +145,7 @@ impl Repository {
         command: RecordRunUsage<'_>,
     ) -> Result<RecordRunUsageOutcome, RunUsageRepositoryError> {
         validate_command_scope(&command)?;
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             repository_error(database_error("begin run usage transaction", source))
         })?;
 

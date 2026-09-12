@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, QueryResult, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, QueryResult, Statement};
 
 use artisan_domain::{MessageId, UnixMillis};
 
@@ -100,8 +100,7 @@ impl Repository {
         let operated_at_ms = millis(command.operated_at);
         let encoded_owner = command.owner.to_storage();
         let transaction = self
-            .database
-            .begin()
+            .begin_write()
             .await
             .map_err(|source| database_error("begin message-dispatch completion", source))?;
         let statement = Statement::from_sql_and_values(
@@ -189,10 +188,10 @@ impl Repository {
         let operated_at_ms = millis(command.operated_at);
         let encoded_owner = command.owner.to_storage();
         let reason = command.reason.as_str().to_owned();
-        let transaction =
-            self.database.begin().await.map_err(|source| {
-                database_error("begin message-dispatch terminal failure", source)
-            })?;
+        let transaction = self
+            .begin_write()
+            .await
+            .map_err(|source| database_error("begin message-dispatch terminal failure", source))?;
         let statement = Statement::from_sql_and_values(
             DbBackend::Sqlite,
             FAIL_DISPATCH_SQL,
@@ -284,8 +283,7 @@ impl Repository {
         let encoded_owner = command.owner.to_storage();
         let reason = command.reason.as_str().to_owned();
         let transaction = self
-            .database
-            .begin()
+            .begin_write()
             .await
             .map_err(|source| database_error("begin message-dispatch requeue", source))?;
         let statement = Statement::from_sql_and_values(

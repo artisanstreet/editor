@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, QueryResult, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, QueryResult, Statement};
 
 use artisan_domain::{MessageId, UnixMillis};
 
@@ -71,8 +71,7 @@ impl Repository {
         }
         let encoded_owner = owner.to_storage();
         let transaction = self
-            .database
-            .begin()
+            .begin_write()
             .await
             .map_err(|source| database_error("begin message-dispatch lease renewal", source))?;
         let statement = Statement::from_sql_and_values(

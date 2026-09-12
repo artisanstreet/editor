@@ -1,7 +1,7 @@
 //! Complete-run settlement: dispatch, run, item, turn, and patch co-commit.
 
 use artisan_domain::{AssistantBody, AssistantMessagePhase, ItemId, PatchId, Revision, UnixMillis};
-use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement};
 use thiserror::Error;
 
 use crate::entities::{
@@ -205,7 +205,7 @@ impl Repository {
         command: CompleteRun<'_>,
     ) -> Result<CompleteRunOutcome, CompleteRunError> {
         validate_complete(&command)?;
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             CompleteRunError::Repository(database_error("begin complete run", source))
         })?;
         match execute_complete(&transaction, &command).await {

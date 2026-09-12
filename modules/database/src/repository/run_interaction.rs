@@ -26,7 +26,7 @@ use artisan_domain::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Set,
-    Statement, TransactionTrait,
+    Statement,
 };
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -577,7 +577,7 @@ impl Repository {
         requested_at: UnixMillis,
         binding_version: i64,
     ) -> Result<RecordInteractionOutcome, RunInteractionError> {
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             RunInteractionError::Repository(database_error("begin record interaction", source))
         })?;
         let existing = pending_run_interaction::Entity::find()
@@ -658,7 +658,7 @@ impl Repository {
         answers: &[String],
         scope: &ResolveScope,
     ) -> Result<ResolveInteractionOutcome, RunInteractionError> {
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             RunInteractionError::Repository(database_error("begin resolve interaction", source))
         })?;
         if let Some(row) = run_interaction_receipt::Entity::find_by_id(request_id.as_str())

@@ -5,7 +5,7 @@ use std::fmt;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction,
-    EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
+    EntityTrait, QueryFilter, QueryOrder,
 };
 use sha2::{Digest, Sha256};
 
@@ -141,8 +141,7 @@ impl Repository {
         }
 
         let transaction = self
-            .database
-            .begin()
+            .begin_write()
             .await
             .map_err(|source| database_error("begin queue-message transaction", source))?;
         let thread = thread_row_by_id(&transaction, &input.thread_id)

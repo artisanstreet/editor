@@ -1,7 +1,7 @@
 //! Cancellation and interruption of running bound runs.
 
 use artisan_domain::{AssistantBody, AssistantMessagePhase, ItemId, PatchId, Revision, UnixMillis};
-use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement};
 use thiserror::Error;
 
 use crate::entities::{
@@ -279,7 +279,7 @@ impl Repository {
     ) -> Result<CancelRunOutcome, CancelRunError> {
         let auxiliary = AuxiliaryTerminal::Cancel(&command);
         validate_auxiliary(&auxiliary)?;
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             AuxiliaryTerminalError::Repository(database_error("begin cancel run", source))
         })?;
         match execute_auxiliary(&transaction, &auxiliary).await {
@@ -331,7 +331,7 @@ impl Repository {
     ) -> Result<InterruptRunOutcome, InterruptRunError> {
         let auxiliary = AuxiliaryTerminal::Interrupt(&command);
         validate_auxiliary(&auxiliary)?;
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             AuxiliaryTerminalError::Repository(database_error("begin interrupt run", source))
         })?;
         match execute_auxiliary(&transaction, &auxiliary).await {

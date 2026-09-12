@@ -6,8 +6,14 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use artisan_database::sqlite_write_retry::{
+    INITIAL_RETRY_DELAY, SqliteWriteRetryDecision, decide_write_retry, is_retryable_write_error,
+};
 use artisan_database::{ConnectError, SqliteConfig, connect};
-use sea_orm::{ConnectionTrait, DbBackend, Statement};
+use sea_orm::{
+    ConnectionTrait, DbBackend, SqliteTransactionMode, Statement, TransactionOptions,
+    TransactionTrait,
+};
 
 struct TempDatabase {
     directory: PathBuf,
@@ -304,5 +310,95 @@ async fn connect_treats_an_existing_empty_file_as_a_fresh_database() -> Result<(
     let database = connect(SqliteConfig::file(temp.database()).sqlx_logging(false)).await?;
     assert_eq!(pragma_i64(&database, "auto_vacuum").await?, 2);
     database.close().await?;
+    Ok(())
+}
+
+/// Reproduces the WAL `SQLITE_BUSY_SNAPSHOT` upgrade deterministically and
+/// proves the immediate fence that every read-then-write repository
+/// transaction now takes cannot reach it.
+#[tokio::test]
+async fn deferred_snapshot_upgrade_fails_busy_snapshot_while_immediate_begin_succeeds()
+-> Result<(), Box<dyn Error>> {
+    let temp = TempDatabase::new("wal-busy-snapshot")?;
+    let reader = connect(
+        SqliteConfig::file(temp.database())
+            .min_connections(1)
+            .max_connections(1)
+            .sqlx_logging(false),
+    )
+    .await?;
+    let writer = connect(
+        SqliteConfig::file(temp.database())
+            .min_connections(1)
+            .max_connections(1)
+            .sqlx_logging(false),
+    )
+    .await?;
+
+    reader
+        .execute_unprepared("CREATE TABLE probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+        .await?;
+    reader
+        .execute_unprepared("INSERT INTO probe (id, value) VALUES (1, 'initial')")
+        .await?;
+
+    // A deferred read opens a snapshot without the writer fence.
+    let deferred = reader.begin().await?;
+    deferred
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT value FROM probe WHERE id = 1".to_owned(),
+        ))
+        .await?;
+
+    // A concurrent commit advances the WAL past that snapshot.
+    writer
+        .execute_unprepared("UPDATE probe SET value = 'concurrent' WHERE id = 1")
+        .await?;
+
+    // Upgrading the stale snapshot to a write fails deterministically with
+    // SQLITE_BUSY_SNAPSHOT, a failure class no busy_timeout covers.
+    let upgrade = deferred
+        .execute_unprepared("UPDATE probe SET value = 'stale' WHERE id = 1")
+        .await;
+    let error = upgrade.expect_err("a stale snapshot upgrade must fail");
+    assert!(
+        is_retryable_write_error(&error),
+        "SQLITE_BUSY_SNAPSHOT must classify as retryable writer contention: {error}"
+    );
+    assert_eq!(
+        decide_write_retry(&error, 0),
+        SqliteWriteRetryDecision::Retry {
+            repetition: 0,
+            delay: INITIAL_RETRY_DELAY,
+        }
+    );
+    deferred.rollback().await?;
+
+    // BEGIN IMMEDIATE takes the writer fence before any read, so the same
+    // interleaving cannot invalidate a snapshot the transaction later
+    // upgrades.
+    let immediate = reader
+        .begin_with_options(TransactionOptions {
+            sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
+            ..Default::default()
+        })
+        .await?;
+    immediate
+        .execute_unprepared("UPDATE probe SET value = 'fenced' WHERE id = 1")
+        .await?;
+    immediate.commit().await?;
+
+    let row = reader
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT value FROM probe WHERE id = 1".to_owned(),
+        ))
+        .await?
+        .ok_or_else(|| std::io::Error::other("probe row disappeared"))?;
+    assert_eq!(row.try_get_by_index::<String>(0)?, "fenced");
+
+    reader.close().await?;
+    writer.close().await?;
     Ok(())
 }

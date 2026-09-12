@@ -12,7 +12,6 @@
 use artisan_domain::{PatchId, UnixMillis};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DbBackend, EntityTrait, Statement,
-    TransactionTrait,
 };
 use thiserror::Error;
 
@@ -183,7 +182,7 @@ impl Repository {
     ) -> Result<StartupReconciliationDispositionOutcome, StartupReconciliationDispositionError>
     {
         validate_disposition(&command)?;
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             StartupReconciliationDispositionError::Repository(database_error(
                 "begin startup reconciliation disposition",
                 source,

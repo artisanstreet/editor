@@ -1,7 +1,7 @@
 //! Batch commit transaction core and its private helpers.
 
 use artisan_domain::{AssistantBody, ItemId, PatchId, Revision};
-use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement};
 use serde_json::Value;
 
 use crate::entities::{
@@ -56,7 +56,7 @@ impl Repository {
         command: CommitRunBatch<'_>,
     ) -> Result<CommitRunBatchOutcome, RunObservationError> {
         let digest = batch::validate_and_digest(&command)?;
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             RunObservationError::Repository(database_error("begin run batch commit", source))
         })?;
         match execute_batch(&transaction, &command, &digest).await {

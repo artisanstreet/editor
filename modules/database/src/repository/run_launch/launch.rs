@@ -11,7 +11,7 @@ use artisan_domain::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait,
-    QueryFilter, Statement, TransactionTrait,
+    QueryFilter, Statement,
 };
 
 use crate::entities;
@@ -190,7 +190,7 @@ impl Repository {
         }
 
         let encoded_owner = claimed.owner.to_storage();
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             RunLaunchError::Repository(database_error("begin run launch", source))
         })?;
 

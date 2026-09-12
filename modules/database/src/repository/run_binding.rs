@@ -17,7 +17,7 @@
 //! run fence; that tentative dispatch write is still rolled back.
 
 use artisan_domain::{MessageId, RunId, ThreadId, UnixMillis};
-use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement};
 use thiserror::Error;
 use zeroize::Zeroize;
 
@@ -243,7 +243,7 @@ impl Repository {
         let receipt = command.receipt;
 
         let encoded_owner = claimed.owner.to_storage();
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             RunBindingError::Repository(database_error("begin run binding", source))
         })?;
 

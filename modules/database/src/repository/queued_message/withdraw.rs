@@ -2,10 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use sea_orm::{
-    ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, SqliteTransactionMode, Statement,
-    TransactionOptions, TransactionTrait, Value,
-};
+use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, Statement, Value};
 
 use artisan_domain::{
     CommandReceipt, MessageId, QueuedMessageWithdrawalOutcome, ReceiptDisposition, RequestId,
@@ -103,11 +100,7 @@ impl Repository {
         input: WithdrawQueuedMessage,
     ) -> Result<WithdrawQueuedMessageResult, QueuedMessageRepositoryError> {
         let transaction = self
-            .database
-            .begin_with_options(TransactionOptions {
-                sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
-                ..Default::default()
-            })
+            .begin_write()
             .await
             .map_err(|source| database_error("begin queued-message withdrawal", source))?;
 

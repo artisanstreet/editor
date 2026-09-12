@@ -4,7 +4,7 @@
 
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder,
-    QueryResult, Statement, TransactionTrait,
+    QueryResult, Statement,
 };
 
 use artisan_domain::{MessageId, RequestId, UnixMillis};
@@ -81,8 +81,7 @@ impl Repository {
 
         let encoded_owner = claim.owner.to_storage();
         let transaction = self
-            .database
-            .begin()
+            .begin_write()
             .await
             .map_err(|source| database_error("begin message-dispatch claim", source))?;
         let statement = Statement::from_sql_and_values(

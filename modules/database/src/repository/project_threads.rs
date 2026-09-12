@@ -3,7 +3,7 @@
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, TransactionTrait,
+    QueryOrder, QuerySelect,
 };
 
 use artisan_domain::{
@@ -95,8 +95,7 @@ impl Repository {
         }
 
         let transaction = self
-            .database
-            .begin()
+            .begin_write()
             .await
             .map_err(|source| database_error("begin attach-project transaction", source))?;
         let inserted = insert_project(&transaction, &input).await?;
@@ -208,8 +207,7 @@ impl Repository {
         }
 
         let transaction = self
-            .database
-            .begin()
+            .begin_write()
             .await
             .map_err(|source| database_error("begin create-thread transaction", source))?;
         let summary = input.thread_summary();

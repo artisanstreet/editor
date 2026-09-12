@@ -1,9 +1,7 @@
 //! Atomic persistence for durable thread engine configuration.
 
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, DbBackend, EntityTrait, Statement, TransactionTrait, Value,
-};
+use sea_orm::{ActiveValue::Set, ConnectionTrait, DbBackend, EntityTrait, Statement, Value};
 
 use artisan_domain::{
     CommandReceipt, EngineConfigRevision, EngineConfigUpdatePrecondition, EngineRunConfig,
@@ -132,8 +130,7 @@ impl Repository {
         }
 
         let transaction = self
-            .database
-            .begin()
+            .begin_write()
             .await
             .map_err(|source| database_error("begin engine-config transaction", source))?;
 

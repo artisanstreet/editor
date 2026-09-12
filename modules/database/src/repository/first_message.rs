@@ -3,7 +3,7 @@
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction,
-    EntityTrait, QueryFilter, TransactionTrait,
+    EntityTrait, QueryFilter,
 };
 
 use artisan_domain::{
@@ -94,8 +94,7 @@ impl Repository {
         }
 
         let transaction = self
-            .database
-            .begin()
+            .begin_write()
             .await
             .map_err(|source| database_error("begin first-message transaction", source))?;
         let inserted_message = insert_first_message(&transaction, &input).await?;

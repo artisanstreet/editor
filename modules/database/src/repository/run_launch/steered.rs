@@ -9,7 +9,7 @@ use artisan_domain::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait,
-    QueryFilter, Statement, TransactionTrait,
+    QueryFilter, Statement,
 };
 
 use crate::entities;
@@ -97,7 +97,7 @@ impl Repository {
         command: ProjectSteeredMessage<'_>,
     ) -> Result<ProjectSteeredMessageOutcome, RunLaunchError> {
         let operated_at_ms = millis(command.operated_at);
-        let transaction = self.database.begin().await.map_err(|source| {
+        let transaction = self.begin_write().await.map_err(|source| {
             RunLaunchError::Repository(database_error("begin steered projection", source))
         })?;
         let message = entities::message::Entity::find_by_id(command.message_id.as_str())

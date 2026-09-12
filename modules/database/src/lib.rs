@@ -11,6 +11,7 @@ mod connection;
 mod engine_run_config;
 pub mod entities;
 mod repository;
+pub mod sqlite_write_retry;
 
 pub use artisan_domain::WorkspaceId;
 pub use connection::{ConnectError, SqliteConfig, connect};

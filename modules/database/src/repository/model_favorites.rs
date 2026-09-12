@@ -4,10 +4,7 @@
 //! runnable-engine policy belong to the backend caller; the database owns
 //! bounded durable state, revisions, and exact request-id replay.
 
-use sea_orm::{
-    ConnectionTrait, DatabaseTransaction, DbBackend, DbErr, SqliteTransactionMode, Statement,
-    TransactionOptions, TransactionTrait, Value,
-};
+use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, DbErr, Statement, Value};
 use thiserror::Error;
 
 use artisan_domain::{
@@ -212,11 +209,7 @@ impl Repository {
         }
 
         let transaction = self
-            .database
-            .begin_with_options(TransactionOptions {
-                sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
-                ..Default::default()
-            })
+            .begin_write()
             .await
             .map_err(|source| database_error("begin model-favorites transaction", source))?;
 
