@@ -16,7 +16,7 @@ rust_binary(
     crate_name = "payload_manifest_generator",
     deps = [
         "@crates//:serde_json",
-        "@crates//:sha2-0.10.9",
+        "@crates//:sha2-0.11.0",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",

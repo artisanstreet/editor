@@ -334,6 +334,7 @@ rust_test(
     name = "conversation_host_test",
     srcs = ["conversation_host.rs"],
     crate_name = "conversation_host_test",
+    crate_features = ["visual-proof"],
     deps = [
         "//modules/domain:domain",
         "//modules/frontend:frontend",
@@ -1572,6 +1573,7 @@ rust_test(
     name = "project_picker_native_test",
     srcs = ["project_picker_native.rs"],
     crate_name = "project_picker_native_test",
+    crate_features = ["visual-proof"],
     deps = [
         "//modules/domain:domain",
         "//modules/frontend:frontend",

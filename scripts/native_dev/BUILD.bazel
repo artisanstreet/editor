@@ -26,7 +26,7 @@ rust_library(
         "//modules/cli:cli",
         "@crates//:fs2",
         "@crates//:serde_json",
-        "@crates//:sha2-0.10.9",
+        "@crates//:sha2-0.11.0",
         "@crates//:thiserror",
     ],
     edition = "2024",

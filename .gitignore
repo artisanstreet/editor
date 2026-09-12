@@ -6,3 +6,12 @@
 /.vscode/
 *.user
 /.dist/
+/evidence/
+*.db
+*.pdb
+*.exe
+*.dll
+*.jsonl
+*.log
+*.sqlite3
+*.bin
