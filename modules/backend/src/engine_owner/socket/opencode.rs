@@ -6,23 +6,25 @@
 //! the owner's `InternalLaunch::Verified` carries). The descriptor mirrors
 //! `OpenCode2EngineDescriptor` in `modules/engines/src/opencode2/engine.ts`;
 //! `probe` reports the certified launch version without performing I/O;
-//! `open` is deliberately unwired and returns
-//! [`EngineOpenError::Unimplemented`].
+//! `open` is deliberately unwired and returns a failed [`EngineOpenOutcome`]
+//! with [`EngineOpenError::Unimplemented`].
 //!
-//! The next packet forwards [`EngineOpenInput`] into the existing owner
+//! A later packet forwards [`EngineOpenInput`] into the existing owner
 //! executors
 //! [`execute_authorized_configured_turn`](super::super::operation::execute_authorized_configured_turn)
 //! with
 //! [`create_configured_session`](super::super::operation::create_configured_session)
-//! (`modules/backend/src/engine_owner/operation.rs`) and replaces the
-//! [`EngineSocket::open`] stub. The live configured-turn dispatch constructs this adapter through `socket::adapter_for`; `open` stays unimplemented until the per-engine open/drive split lands.
+//! (`modules/backend/src/engine_owner/operation.rs`) and replaces this stub.
+//! The live configured-turn dispatch constructs this adapter through
+//! `socket::adapter_for`; Codex is the first engine wired through the
+//! open/drive split.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_domain::{
     EngineCapabilityName, EngineCapabilityState, EngineDescriptor, EngineOpenError,
-    EngineOpenInput, EngineOpenResult, EngineProbe, EngineSocket,
+    EngineOpenFuture, EngineOpenInput, EngineOpenOutcome, EngineProbe, EngineSocket,
 };
 use artisan_native_engine::VerifiedOpenCode2ProfileLaunch;
 
@@ -162,8 +164,9 @@ impl EngineSocket for OpenCode2SocketAdapter<'_> {
 
     /// Fails closed until the open wiring packet forwards to
     /// `execute_authorized_configured_turn` / `create_configured_session`.
-    fn open(&self, input: EngineOpenInput) -> EngineOpenResult {
-        let _ = input;
-        Err(EngineOpenError::Unimplemented)
+    fn open(&self, _input: EngineOpenInput) -> EngineOpenFuture<'_> {
+        Box::pin(std::future::ready(EngineOpenOutcome::failed(
+            EngineOpenError::Unimplemented,
+        )))
     }
 }

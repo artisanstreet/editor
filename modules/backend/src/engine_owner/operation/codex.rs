@@ -1,22 +1,31 @@
-//! Codex executor seam: one finite `codex app-server --stdio` turn,
-//! its bounded preflight and turn-start waits, JSON-RPC pumps, and
+//! Codex executor seam: one finite `codex app-server --stdio` turn, its
+//! bounded provider open through the socket seam, JSON-RPC pumps, and
 //! steer delivery plumbing.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use artisan_domain::{EngineOpenError, EngineOpenInput, EngineOpenOutcome, EngineResumeToken};
 use artisan_transport::CancelHandle;
-use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
+use super::super::codex::codex_response_id;
+use super::super::codex::codex_response_id_matches;
+use super::super::codex::codex_turn_id;
+use super::super::codex::is_codex_result_for;
+use super::super::codex::read_codex_line;
+use super::super::codex::write_codex_line;
 use super::super::observation::EngineObservation;
 use super::super::observation::TerminalState;
 use super::super::process::ChildParts;
-use super::super::process::LifelineWriter;
-use super::super::process::StderrCounter;
+use super::super::process::RetainedEngine;
+use super::super::socket::SocketTurnContext;
+use super::super::socket::adapter_for;
+use super::super::socket::codex_session::CodexDriveSession;
+use super::super::socket::codex_session::CodexOpenSession;
 use super::core::EngineOperationError;
 use super::core::EngineTurnResult;
 use super::core::Execution;
@@ -26,7 +35,6 @@ use super::core::SteerError;
 use super::core::settle_steers_closed;
 use super::turn_common::ConfiguredRuntime;
 use super::turn_common::ConfiguredTurnRequest;
-use super::turn_common::finish_configured_start;
 use super::turn_common::finish_turn_result;
 use super::turn_common::phase_deadline;
 use super::turn_common::wait_for_authorization;
@@ -34,12 +42,15 @@ use super::turn_common::wait_for_authorization;
 /// Executes one finite Codex turn over `codex app-server --stdio`.
 ///
 /// Single-owner match arm beside the `OpenCode2` executor: no second task, no
-/// second queue. Performs initialize, thread/start (or `thread/resume` for a
-/// gated continuation that reopens the same provider thread), the bind
-/// authorization gate, then turn/start plus the streaming pump. Text deltas
-/// normalize onto the shared S1a vocabulary; token-usage frames project
-/// best-effort to cumulative usage observations without blocking the turn;
-/// approval/question frames populate the pending tracker with no
+/// second queue. The open phase runs through the provider-neutral socket
+/// seam: [`CodexSocketAdapter::open`](super::super::socket::codex::CodexSocketAdapter)
+/// spawns the child and performs initialize, thread/start (or `thread/resume`
+/// for a gated continuation that reopens the same provider thread), returning
+/// the opened session that this drive phase consumes. The drive phase then
+/// applies the bind authorization gate, turn/start plus the streaming pump.
+/// Text deltas normalize onto the shared S1a vocabulary; token-usage frames
+/// project best-effort to cumulative usage observations without blocking the
+/// turn; approval/question frames populate the pending tracker with no
 /// control-flow side effect; child-thread frames never adopt the root turn.
 /// External-kill EOF maps to `Interrupted`, explicit cancel to `Cancelled`,
 /// and stall/failure to `Failed`. Teardown terminates the whole process
@@ -47,7 +58,7 @@ use super::turn_common::wait_for_authorization;
 /// unobserved reaps.
 #[expect(
     clippy::too_many_lines,
-    reason = "one configured turn is a single linear protocol sequence over the spawned child; extraction would thread the full child state"
+    reason = "one configured turn is a single linear protocol sequence over the opened session; extraction would thread the full session state"
 )]
 pub(super) async fn execute_codex_turn(
     request: ConfiguredTurnRequest,
@@ -55,7 +66,6 @@ pub(super) async fn execute_codex_turn(
     shutdown: &Arc<CancelHandle>,
 ) -> Execution {
     use super::super::codex as codex_runtime;
-    use super::super::process::spawn_codex_engine;
 
     let artisan_domain::EngineSelection::Codex(selection) =
         request.input.settings.config().selection()
@@ -68,20 +78,25 @@ pub(super) async fn execute_codex_turn(
     if settings.profile_id() != request.input.launch.profile_id() {
         return request.fail(EngineOperationError::Configuration);
     }
-    let super::super::InternalLaunch::Codex(launch) = &request.input.launch else {
+    if !matches!(
+        &request.input.launch,
+        super::super::InternalLaunch::Codex(_)
+    ) {
         return request.fail(EngineOperationError::Configuration);
-    };
+    }
     // X3 continuation gate: same-engine is fenced by the dispatcher (codex
     // bindings only); the owner additionally requires an explicit target
     // model and CLI >= 0.145.0. Anything else is typed incompatible — never
     // a silent fresh start and never a cross-engine resume.
-    let resume_stored_thread_id: Option<String> = match &request.input.continuation {
+    let resume_token: Option<EngineResumeToken> = match &request.input.continuation {
         None => None,
         Some(continuation) => {
             let gate = codex_runtime::check_codex_native_continuation(
                 &codex_runtime::CodexContinuationGateInput {
                     cli_version: request.input.launch.version(),
-                    target_model: selection.model_id().map(artisan_domain::EngineModelId::as_str),
+                    target_model: selection
+                        .model_id()
+                        .map(artisan_domain::EngineModelId::as_str),
                     advertised_models: None,
                     same_engine: true,
                 },
@@ -89,201 +104,66 @@ pub(super) async fn execute_codex_turn(
             if !matches!(gate, codex_runtime::CodexContinuationDecision::Compatible) {
                 return request.fail(EngineOperationError::Configuration);
             }
-            Some(continuation.provider_session_id().to_owned())
+            Some(EngineResumeToken {
+                native_thread_id: continuation.provider_session_id().to_owned(),
+            })
         }
     };
-    let Ok(mut child) = spawn_codex_engine(launch.as_ref(), &request.input.project_root) else {
-        return request.fail(EngineOperationError::SpawnFailed);
+    let prompt_text = request
+        .input
+        .prompt
+        .text()
+        .map(|text| text.as_str().to_owned())
+        .unwrap_or_default();
+    let open_input = EngineOpenInput {
+        working_directory: request.input.project_root.as_str().to_owned(),
+        prompt: prompt_text.clone(),
+        resume: resume_token,
     };
-    let stdin_opt = child.stdin.take();
-    let stdout_opt = child.stdout.take();
-    let stderr_opt = child.stderr.take();
-    let lifeline = LifelineWriter::take(&mut child);
-    let stderr_counter = StderrCounter::new(stderr_opt, runtime.bounds.stderr_cap_bytes);
-    let (Some(mut stdin), Some(stdout)) = (stdin_opt, stdout_opt) else {
-        let parts = ChildParts {
-            child,
-            lifeline,
-            stdout: None,
-            stderr_counter,
-        };
-        return finish_configured_start(
-            request,
-            parts,
-            EngineOperationError::SpawnFailed,
-            runtime.limits.close,
-        )
-        .await;
-    };
-    let mut parts = ChildParts {
-        child,
-        lifeline,
-        stdout: None,
-        stderr_counter,
-    };
-    let mut reader = tokio::io::BufReader::new(stdout);
-    let mut next_id: u64 = 1;
-
-    // initialize ---------------------------------------------------------
-    let init_line = codex_runtime::request_line(
-        next_id,
-        "initialize",
-        &codex_runtime::initialize_params("artisan-editor", "0.3.0"),
+    // The live configured path opens through the provider-neutral socket
+    // seam: the adapter performs the real spawn and preflight handshake under
+    // the persisted budgets, whole-attempt deadline, and cancellation
+    // signals, and the returned session carries the child custody the drive
+    // phase consumes instead of spawning a second child.
+    let socket = adapter_for(
+        &request.input.launch,
+        SocketTurnContext {
+            settings: &request.input.settings,
+            limits: runtime.limits,
+            bounds: runtime.bounds,
+            attempt_deadline: request.deadline,
+            shutdown,
+            control: &request.control,
+        },
     );
-    next_id += 1;
-    if write_codex_line(&mut stdin, &init_line).await.is_err() {
-        return finish_configured_start(
-            request,
-            parts,
-            EngineOperationError::ProviderRequestFailed,
-            runtime.limits.close,
-        )
-        .await;
-    }
-    let mut line = String::new();
-    // Correlated wait: the server may emit notifications before the
-    // `initialize` result, so the reply is matched by request id.
-    match codex_await_preflight_result(
-        &mut reader,
-        &mut line,
-        1,
-        phase_deadline(runtime.limits.prompt, request.deadline),
-        shutdown,
-        &request.control,
-    )
-    .await
-    {
-        CodexPreflightWait::Ready => {}
-        CodexPreflightWait::Failed(error) => {
-            return finish_configured_start(request, parts, error, runtime.limits.close).await;
-        }
-    }
-    // Official handshake order (`Handshake` in
-    // `modules/engines/src/codex/app-server-session.ts`): the client notifies
-    // `initialized` (no id, no params) once the `initialize` result arrives,
-    // before any `thread/*` request. A notification never consumes a request
-    // id, so `next_id` still names the `thread/*` request below.
-    let initialized_line = codex_runtime::notification_line("initialized");
-    if write_codex_line(&mut stdin, &initialized_line)
-        .await
-        .is_err()
-    {
-        return finish_configured_start(
-            request,
-            parts,
-            EngineOperationError::ProviderRequestFailed,
-            runtime.limits.close,
-        )
-        .await;
-    }
-    // thread/start or thread/resume ---------------------------------------
-    // A gated continuation reopens the stored provider thread
-    // (`thread/resume` over the same options a fresh start would use); the
-    // response must name the same thread id or the turn fails closed. Fresh
-    // turns start exactly one thread. Either way provider-owned state is
-    // resumed, never invented, and a restart never duplicates provider
-    // effects with a second thread.
-    let thread_id = if let Some(stored) = resume_stored_thread_id.as_deref() {
-        let Some(resume_params) =
-            codex_runtime::thread_resume_params(&settings, &request.input.project_root, stored)
-        else {
-            return finish_configured_start(
-                request,
-                parts,
-                EngineOperationError::Configuration,
-                runtime.limits.close,
-            )
-            .await;
-        };
-        let thread_request_id = next_id;
-        let resume_line =
-            codex_runtime::request_line(thread_request_id, "thread/resume", &resume_params);
-        next_id += 1;
-        if write_codex_line(&mut stdin, &resume_line).await.is_err() {
-            return finish_configured_start(
-                request,
-                parts,
-                EngineOperationError::ProviderRequestFailed,
-                runtime.limits.close,
-            )
-            .await;
-        }
-        // Correlated wait: notifications arrive before the `thread/resume`
-        // result, so the reply is matched by request id; a mismatch or a
-        // matching error fails closed without a silent fresh start.
-        match codex_await_preflight_result(
-            &mut reader,
-            &mut line,
-            thread_request_id,
-            phase_deadline(runtime.limits.prompt, request.deadline),
-            shutdown,
-            &request.control,
-        )
-        .await
-        {
-            CodexPreflightWait::Ready => {}
-            CodexPreflightWait::Failed(error) => {
-                return finish_configured_start(request, parts, error, runtime.limits.close).await;
+    let open_outcome = socket.open(open_input).await;
+    drop(socket);
+    let session = match open_outcome {
+        EngineOpenOutcome::Opened(run) => {
+            match run.session.into_any().downcast::<CodexOpenSession>() {
+                Ok(session) => *session,
+                Err(_) => return request.fail(EngineOperationError::Configuration),
             }
         }
-        let Some(thread_id) = codex_resumed_thread_id(&line, thread_request_id, stored) else {
-            return finish_configured_start(
-                request,
-                parts,
-                EngineOperationError::ProviderRequestFailed,
-                runtime.limits.close,
-            )
-            .await;
-        };
-        thread_id
-    } else {
-        let thread_request_id = next_id;
-        let thread_line = codex_runtime::request_line(
-            thread_request_id,
-            "thread/start",
-            &settings.thread_params(&request.input.project_root),
-        );
-        next_id += 1;
-        if write_codex_line(&mut stdin, &thread_line).await.is_err() {
-            return finish_configured_start(
-                request,
-                parts,
-                EngineOperationError::ProviderRequestFailed,
-                runtime.limits.close,
-            )
-            .await;
+        EngineOpenOutcome::Failed {
+            error,
+            custody: None,
+        } => {
+            return request.fail(map_codex_open_error(error));
         }
-        // Correlated wait, matching the resume branch above.
-        match codex_await_preflight_result(
-            &mut reader,
-            &mut line,
-            thread_request_id,
-            phase_deadline(runtime.limits.prompt, request.deadline),
-            shutdown,
-            &request.control,
-        )
-        .await
-        {
-            CodexPreflightWait::Ready => {}
-            CodexPreflightWait::Failed(error) => {
-                return finish_configured_start(request, parts, error, runtime.limits.close).await;
-            }
+        EngineOpenOutcome::Failed {
+            error,
+            custody: Some(custody),
+        } => {
+            let error = map_codex_open_error(error);
+            return match custody.into_any().downcast::<RetainedEngine>() {
+                Ok(retained) => finish_quarantined_open(request, error, retained),
+                Err(_) => request.fail(error),
+            };
         }
-        let Some(thread_id) = codex_thread_id(&line, thread_request_id) else {
-            return finish_configured_start(
-                request,
-                parts,
-                EngineOperationError::ProviderRequestFailed,
-                runtime.limits.close,
-            )
-            .await;
-        };
-        thread_id
     };
-
-    // Bind authorization gate: the dispatcher binds the native thread id
-    // before exactly one prompt is authorized. Destructure here so the
-    // prepared session carries the exact native identity.
+    // Destructure here so the prepared session carries the exact native
+    // identity returned by the open phase.
     let ConfiguredTurnRequest {
         input,
         deadline,
@@ -294,6 +174,18 @@ pub(super) async fn execute_codex_turn(
         respond,
         mut steer_rx,
     } = request;
+    let CodexDriveSession {
+        mut parts,
+        mut stdin,
+        mut reader,
+        thread_id,
+        mut next_id,
+        settings,
+    } = session.into_drive();
+    let mut line = String::new();
+
+    // Bind authorization gate: the dispatcher binds the native thread id
+    // before exactly one prompt is authorized.
     if prepared
         .send(Ok(PreparedSession::new(thread_id.clone())))
         .is_err()
@@ -315,21 +207,16 @@ pub(super) async fn execute_codex_turn(
     }
 
     // turn/start + streaming pump -----------------------------------------
-    // The request binds the exact native thread id from `thread/start` (or
-    // `thread/resume`); the real server rejects a missing `threadId` with
-    // `-32600`. The reply is awaited with a bounded notification-aware wait:
-    // the real server emits interleaved notifications (for example
-    // `thread/started`) between the `thread/*` result and the `turn/start`
-    // result, so lines are correlated by request id instead of assuming the
-    // next line is the reply. Interleaved notifications are processed through
-    // the same event pipeline (never discarded), a matching error envelope
-    // fails the turn fast, and anything else keeps waiting inside the same
-    // absolute phase deadline.
-    let prompt_text = input
-        .prompt
-        .text()
-        .map(|text| text.as_str().to_owned())
-        .unwrap_or_default();
+    // The request binds the exact native thread id from the open phase's
+    // `thread/start` (or `thread/resume`); the real server rejects a missing
+    // `threadId` with `-32600`. The reply is awaited with a bounded
+    // notification-aware wait: the real server emits interleaved
+    // notifications (for example `thread/started`) between the `thread/*`
+    // result and the `turn/start` result, so lines are correlated by request
+    // id instead of assuming the next line is the reply. Interleaved
+    // notifications are processed through the same event pipeline (never
+    // discarded), a matching error envelope fails the turn fast, and
+    // anything else keeps waiting inside the same absolute phase deadline.
     let turn_params = settings.turn_start_params(thread_id.as_str(), &prompt_text);
     let turn_request_id = next_id;
     let turn_line = codex_runtime::request_line(next_id, "turn/start", &turn_params);
@@ -482,67 +369,47 @@ pub(super) async fn execute_codex_turn(
     }
 }
 
+/// Maps one typed socket open failure onto the owner operation error.
+///
+/// The mapping preserves the pre-split executor contract exactly:
+/// configuration-class open failures stay `Configuration`, provider spawn
+/// fails stay `SpawnFailed`, handshake and resume rejections stay
+/// `ProviderRequestFailed`, and control outcomes keep their own distinction.
+const fn map_codex_open_error(error: EngineOpenError) -> EngineOperationError {
+    match error {
+        EngineOpenError::InvalidInput | EngineOpenError::Unimplemented => {
+            EngineOperationError::Configuration
+        }
+        EngineOpenError::SpawnFailed => EngineOperationError::SpawnFailed,
+        EngineOpenError::HandshakeFailed | EngineOpenError::ResumeRejected => {
+            EngineOperationError::ProviderRequestFailed
+        }
+        EngineOpenError::Shutdown => EngineOperationError::Shutdown,
+        EngineOpenError::Cancelled => EngineOperationError::Cancelled,
+        EngineOpenError::Deadline => EngineOperationError::Deadline,
+    }
+}
+
+/// Settles one failed open whose child could not be reaped as quarantined
+/// custody, mirroring the drive phase's retained-cleanup settlement.
+fn finish_quarantined_open(
+    request: ConfiguredTurnRequest,
+    error: EngineOperationError,
+    retained: Box<RetainedEngine>,
+) -> Execution {
+    let ConfiguredTurnRequest {
+        prepared, respond, ..
+    } = request;
+    let _ = prepared.send(Err(error.clone()));
+    let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring {
+        primary: Box::new(error),
+    }));
+    Execution::Quarantined(retained)
+}
+
 enum CodexPumpOutcome {
     Terminal(super::super::observation::TerminalState),
     Failed(EngineOperationError),
-}
-
-/// Outcome of one bounded preflight reply wait.
-enum CodexPreflightWait {
-    /// The matching result arrived; the raw line stays in the caller's buffer
-    /// for id-specific extraction.
-    Ready,
-    /// Shutdown, cancellation, deadline, EOF, or a matching error envelope.
-    Failed(EngineOperationError),
-}
-
-/// Waits for one preflight reply (`initialize`, `thread/start`,
-/// `thread/resume`) while surviving interleaved traffic.
-///
-/// The real server emits notifications (for example `remoteControl/*`,
-/// `deprecationNotice`, `mcpStartup`, `threadStatus`, `thread/started`)
-/// before the matching result, so every line is correlated by request id
-/// instead of assuming the next line is the reply. Non-matching traffic —
-/// method notifications, uncorrelated results/errors, unparseable lines —
-/// keeps the wait alive inside the same absolute phase deadline; the turn
-/// is not yet authorized, so nothing is forwarded to the observation sink.
-/// A matching error envelope fails fast. Shutdown, cancellation, deadline,
-/// and EOF map exactly like the previous single-read sites, and a failed
-/// resume never falls back to a fresh start.
-async fn codex_await_preflight_result(
-    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
-    line: &mut String,
-    expected_id: u64,
-    deadline: Instant,
-    shutdown: &Arc<CancelHandle>,
-    control: &Arc<CancelHandle>,
-) -> CodexPreflightWait {
-    use super::super::codex as codex_runtime;
-
-    loop {
-        if read_codex_line(reader, line, deadline, shutdown, control)
-            .await
-            .is_err()
-        {
-            let error = if shutdown.is_cancelled() {
-                EngineOperationError::Shutdown
-            } else if control.is_cancelled() {
-                EngineOperationError::Cancelled
-            } else {
-                EngineOperationError::ProviderRequestFailed
-            };
-            return CodexPreflightWait::Failed(error);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
-        if codex_runtime::is_codex_error_response(&trimmed)
-            && codex_response_id_matches(&trimmed, expected_id)
-        {
-            return CodexPreflightWait::Failed(EngineOperationError::ProviderRequestFailed);
-        }
-        if is_codex_result_for(&trimmed, expected_id) {
-            return CodexPreflightWait::Ready;
-        }
-    }
 }
 
 /// Outcome of the bounded `turn/start` reply wait.
@@ -655,27 +522,6 @@ async fn codex_await_turn_start(
             }
         }
     }
-}
-
-/// Extracts the JSON-RPC response id of one inbound line, if it carries one.
-///
-/// Method envelopes (notifications and server requests) carry no id and
-/// yield `None`; numeric and string id forms both correlate. Used to route
-/// correlated `turn/steer` replies to their pending delivery instead of
-/// misparsing a steer response as turn completion.
-fn codex_response_id(line: &str) -> Option<u64> {
-    if line.len() > super::super::codex::CODEX_MAX_FRAME_BYTES {
-        return None;
-    }
-    let value: Value = serde_json::from_str(line).ok()?;
-    if value.get("method").is_some() {
-        return None;
-    }
-    let id = value.get("id")?;
-    if let Some(numeric) = id.as_u64() {
-        return Some(numeric);
-    }
-    id.as_str()?.parse::<u64>().ok()
 }
 
 /// Services one codex steer delivery from the pump's owned stdin.
@@ -960,158 +806,4 @@ async fn codex_pump_loop_inner(
             }
         }
     }
-}
-
-async fn write_codex_line(
-    stdin: &mut tokio::process::ChildStdin,
-    line: &str,
-) -> Result<(), EngineOperationError> {
-    use tokio::io::AsyncWriteExt as _;
-    stdin
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|_| EngineOperationError::ProviderRequestFailed)?;
-    stdin
-        .write_all(b"\n")
-        .await
-        .map_err(|_| EngineOperationError::ProviderRequestFailed)?;
-    stdin
-        .flush()
-        .await
-        .map_err(|_| EngineOperationError::ProviderRequestFailed)?;
-    Ok(())
-}
-
-async fn read_codex_line(
-    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
-    line: &mut String,
-    deadline: Instant,
-    shutdown: &Arc<CancelHandle>,
-    control: &Arc<CancelHandle>,
-) -> Result<(), EngineOperationError> {
-    use tokio::io::AsyncBufReadExt as _;
-    line.clear();
-    tokio::select! {
-        biased;
-        () = shutdown.wait() => Err(EngineOperationError::Shutdown),
-        () = control.wait() => Err(EngineOperationError::Cancelled),
-        () = tokio::time::sleep_until(deadline) => Err(EngineOperationError::Deadline),
-        read = reader.read_line(line) => match read {
-            Ok(0) | Err(_) => Err(EngineOperationError::ProviderRequestFailed),
-            Ok(_) => Ok(()),
-        },
-    }
-}
-
-/// Returns whether one handshake line is the result for the request id.
-///
-/// Bounds the line before parsing and requires a `result` member; anything
-/// else fails the handshake closed without spawning further phases.
-pub(crate) fn is_codex_result_for(line: &str, id: u64) -> bool {
-    if line.len() > super::super::codex::CODEX_MAX_FRAME_BYTES {
-        return false;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return false;
-    };
-    let matches_id = value.get("id").is_some_and(|candidate| {
-        candidate.as_u64() == Some(id)
-            || candidate
-                .as_str()
-                .is_some_and(|text| text == id.to_string())
-    });
-    matches_id && value.get("result").is_some()
-}
-
-/// Extracts the exact native thread identity from a `thread/start` result.
-///
-/// Returns `None` on id mismatch, missing thread, or out-of-bound identity
-/// so the dispatcher never binds a corrupt session.
-pub(crate) fn codex_thread_id(line: &str, id: u64) -> Option<String> {
-    if line.len() > super::super::codex::CODEX_MAX_FRAME_BYTES {
-        return None;
-    }
-    let value: Value = serde_json::from_str(line).ok()?;
-    let matches_id = value.get("id").is_some_and(|candidate| {
-        candidate.as_u64() == Some(id)
-            || candidate
-                .as_str()
-                .is_some_and(|text| text == id.to_string())
-    });
-    if !matches_id {
-        return None;
-    }
-    let thread = value.get("result")?.get("thread")?;
-    let id = thread.get("id")?.as_str()?;
-    if id.is_empty() || id.len() > 256 {
-        return None;
-    }
-    Some(id.to_owned())
-}
-
-/// Extracts the exact native turn identity from a `turn/start` result.
-///
-/// Returns `None` on id mismatch, on a JSON-RPC error envelope (for example
-/// `-32600` for a missing `threadId`), or on a missing/out-of-bound turn
-/// identity, so the dispatcher fails the turn fast instead of pumping a turn
-/// that the server never started.
-pub(crate) fn codex_turn_id(line: &str, id: u64) -> Option<String> {
-    if line.len() > super::super::codex::CODEX_MAX_FRAME_BYTES {
-        return None;
-    }
-    let value: Value = serde_json::from_str(line).ok()?;
-    let matches_id = value.get("id").is_some_and(|candidate| {
-        candidate.as_u64() == Some(id)
-            || candidate
-                .as_str()
-                .is_some_and(|text| text == id.to_string())
-    });
-    if !matches_id {
-        return None;
-    }
-    if value.get("error").is_some() {
-        return None;
-    }
-    let turn = value.get("result")?.get("turn")?;
-    let id = turn.get("id")?.as_str()?;
-    if id.is_empty() || id.len() > 256 {
-        return None;
-    }
-    Some(id.to_owned())
-}
-
-/// Returns whether one inbound line carries a JSON-RPC response id equal to
-/// the supplied request id (numeric or string form).
-///
-/// Used to correlate error envelopes with their pending request: only the
-/// matching reply fails its phase fast, while uncorrelated lines keep the
-/// bounded wait alive.
-pub(crate) fn codex_response_id_matches(line: &str, id: u64) -> bool {
-    if line.len() > super::super::codex::CODEX_MAX_FRAME_BYTES {
-        return false;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return false;
-    };
-    value.get("id").is_some_and(|candidate| {
-        candidate.as_u64() == Some(id)
-            || candidate
-                .as_str()
-                .is_some_and(|text| text == id.to_string())
-    })
-}
-
-/// Extracts the resumed native thread identity, requiring the same thread.
-///
-/// `thread/resume` reopens provider-owned state only: a result naming any
-/// other thread fails closed (`None`) instead of adopting a foreign session,
-/// so resume reopens the same thread id and a restart replays the durable
-/// prefix without duplicating provider effects.
-pub(crate) fn codex_resumed_thread_id(
-    line: &str,
-    id: u64,
-    stored_thread_id: &str,
-) -> Option<String> {
-    let resumed = codex_thread_id(line, id)?;
-    (resumed.as_str() == stored_thread_id).then_some(resumed)
 }

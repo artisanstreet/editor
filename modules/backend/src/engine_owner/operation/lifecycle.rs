@@ -187,9 +187,20 @@ pub(super) async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle
 
     // The live dispatch asks the provider-neutral socket seam for the engine
     // identity instead of matching `InternalLaunch` variants directly. The
-    // adapters borrow the admitted capability, so the launch is neither
-    // cloned nor re-resolved and the executor keeps custody.
-    let dispatch_engine = super::super::socket::adapter_for(&request.input.launch)
+    // adapters borrow the admitted capability and this turn's immutable
+    // context, so the launch is neither cloned nor re-resolved and the
+    // executor keeps custody. The Codex executor calls `open` on the same
+    // adapter before it drives, so the spawn and handshake run through the
+    // seam.
+    let socket_context = super::super::socket::SocketTurnContext {
+        settings: &request.input.settings,
+        limits: runtime.limits,
+        bounds: runtime.bounds,
+        attempt_deadline: request.deadline,
+        shutdown,
+        control: &request.control,
+    };
+    let dispatch_engine = super::super::socket::adapter_for(&request.input.launch, socket_context)
         .descriptor()
         .id;
     match dispatch_engine.as_str() {

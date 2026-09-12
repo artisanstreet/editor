@@ -48,9 +48,14 @@ pub(crate) use self::core::{
 #[allow(unused_imports)]
 pub(crate) use self::claude::service_claude_steer_delivery;
 #[allow(unused_imports)]
-pub(crate) use self::codex::{
-    ack_codex_steer_response, codex_response_id_matches, codex_resumed_thread_id, codex_thread_id,
-    codex_turn_id, is_codex_result_for, service_codex_steer_delivery,
+pub(crate) use self::codex::{ack_codex_steer_response, service_codex_steer_delivery};
+// Shared Codex wire helpers live in the codex leaf module; re-exported so the
+// `engine_owner::operation::*` paths keep resolving for the `#[path]`
+// engine-owner suites.
+#[allow(unused_imports)]
+pub(crate) use super::codex::{
+    codex_response_id_matches, codex_resumed_thread_id, codex_thread_id, codex_turn_id,
+    is_codex_result_for,
 };
 // Owner entry points re-exported for `engine_owner::mod` and the seeded owner
 // tests.

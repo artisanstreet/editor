@@ -21,13 +21,24 @@
 //!
 //! Deliberate boundaries:
 //!
-//! - The [`EngineSocket`] seam and its first payload shapes exist; they are
-//!   pure data and route nothing by themselves.
+//! - The [`EngineSocket`] seam is live: [`EngineSocket::open`] is an
+//!   object-safe boxed future and a wired adapter performs the real provider
+//!   I/O. Unwired adapters fail closed with [`EngineOpenError::Unimplemented`]
+//!   and perform no I/O.
+//! - Opened-run custody crosses the seam type-erased through
+//!   [`EngineSocketSession`]: the dependency-free domain names no process,
+//!   pipe, or runtime type, so the opening runtime recovers its concrete
+//!   session with one checked [`Any`](std::any::Any) downcast.
 //! - These are closed vocabularies: every variant is valid by construction,
 //!   so there is no parsing or validation here.
 //! - No transport, serialization, async runtime, or I/O.
 //! - Variant order mirrors the TypeScript unions so both lists read side by
 //!   side during review.
+
+use std::any::Any;
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 
 use thiserror::Error;
 
@@ -255,36 +266,137 @@ pub struct EngineOpenInput {
     pub resume: Option<EngineResumeToken>,
 }
 
+/// Runtime-owned custody of one opened engine run.
+///
+/// [`EngineSocket::open`] performs real provider I/O, so the opened run owns
+/// resources the dependency-free domain cannot name: a child process, its
+/// pipes, and the protocol state between them. The session is therefore
+/// type-erased. The opening runtime boxes its concrete session and the
+/// driving runtime recovers it with one checked
+/// [`Any`](std::any::Any) downcast; no `unsafe` code, runtime handle, or
+/// transport type crosses this seam.
+pub trait EngineSocketSession: Send + 'static {
+    /// Moves this session out as a type-erased box for the owning runtime's
+    /// checked downcast.
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
+}
+
 /// Handle of one open engine run.
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineRun {
     /// Provider-owned native thread identity.
     pub native_thread_id: EngineResumeToken,
     /// Observation tag associated with this run.
     pub observation_tag: EngineObservationTag,
+    /// Runtime-owned custody established by the open phase. The drive phase
+    /// consumes this session and never spawns a second provider child.
+    pub session: Box<dyn EngineSocketSession>,
+}
+
+impl fmt::Debug for EngineRun {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EngineRun")
+            .field("native_thread_id", &self.native_thread_id)
+            .field("observation_tag", &self.observation_tag)
+            .field("session", &"<runtime-owned>")
+            .finish()
+    }
 }
 
 /// Failure opening one engine run.
 ///
-/// Skeleton adapters return [`EngineOpenError::Unimplemented`]; typed
-/// transport failures arrive with the wiring packets.
+/// Payload-free and typed: raw provider bytes, paths, and operating-system
+/// strings never cross this boundary. [`EngineOpenError::Unimplemented`]
+/// remains for adapters whose open wiring packet has not landed; the wired
+/// Codex adapter returns only the typed transport failures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum EngineOpenError {
     /// The adapter has no wired open path yet.
     #[error("engine socket open is not implemented yet")]
     Unimplemented,
+    /// The caller-supplied open input is invalid for this adapter.
+    #[error("engine open input is invalid")]
+    InvalidInput,
+    /// The verified provider child could not be spawned.
+    #[error("engine provider spawn failed")]
+    SpawnFailed,
+    /// The provider handshake failed, ended, or exceeded its phase budget.
+    #[error("engine provider handshake failed")]
+    HandshakeFailed,
+    /// The provider rejected the stored native thread on resume.
+    #[error("engine provider rejected the stored native thread")]
+    ResumeRejected,
+    /// The owning runtime shut down while the run was opening.
+    #[error("engine runtime shut down while opening")]
+    Shutdown,
+    /// The caller cancelled while the run was opening.
+    #[error("engine open was cancelled")]
+    Cancelled,
+    /// The bounded open deadline elapsed.
+    #[error("engine open deadline elapsed")]
+    Deadline,
+}
+
+/// Outcome of opening one engine run.
+///
+/// The failure arm carries optional type-erased custody for the exact case
+/// the owner custody contract already handles: a spawned child whose death
+/// could not be observed inside the close budget. Dropping that custody
+/// silently is never allowed; the runtime must quarantine it.
+pub enum EngineOpenOutcome {
+    /// The run opened; the session carries runtime-owned custody.
+    Opened(EngineRun),
+    /// The run failed to open.
+    Failed {
+        /// Typed, payload-free failure.
+        error: EngineOpenError,
+        /// Unobserved custody retained by the failed open, when present.
+        custody: Option<Box<dyn EngineSocketSession>>,
+    },
+}
+
+impl EngineOpenOutcome {
+    /// Builds one typed failure without retained custody.
+    #[must_use]
+    pub fn failed(error: EngineOpenError) -> Self {
+        Self::Failed {
+            error,
+            custody: None,
+        }
+    }
+}
+
+impl fmt::Debug for EngineOpenOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Opened(run) => formatter.debug_tuple("Opened").field(run).finish(),
+            Self::Failed { error, custody } => formatter
+                .debug_struct("Failed")
+                .field("error", error)
+                .field(
+                    "custody",
+                    &custody.as_ref().map(|_custody| "<runtime-owned>"),
+                )
+                .finish(),
+        }
+    }
 }
 
 /// Result of opening one engine run.
-pub type EngineOpenResult = Result<EngineRun, EngineOpenError>;
+pub type EngineOpenResult = EngineOpenOutcome;
 
-/// Provider-neutral synchronous engine socket.
+/// Object-safe future returned by [`EngineSocket::open`].
+///
+/// Boxed so the trait stays object-safe and every future stays `Send`.
+pub type EngineOpenFuture<'a> = Pin<Box<dyn Future<Output = EngineOpenResult> + Send + 'a>>;
+
+/// Provider-neutral asynchronous engine socket.
 ///
 /// One adapter per provider implements this seam on top of its verified
-/// launch capability. The owner keeps serving every live path through its
-/// existing executors until a later packet routes them through this trait;
-/// the skeleton adapters return [`EngineOpenError::Unimplemented`] from
-/// [`EngineSocket::open`] and perform no I/O anywhere.
+/// launch capability. A wired adapter's [`EngineSocket::open`] performs the
+/// real spawn and handshake and returns the opened session for the drive
+/// phase to consume; an unwired adapter returns
+/// [`EngineOpenError::Unimplemented`] without any I/O.
 pub trait EngineSocket: Send {
     /// Returns the immutable provider descriptor.
     #[must_use]
@@ -296,12 +408,10 @@ pub trait EngineSocket: Send {
 
     /// Opens one run and returns its provider-native handle.
     ///
-    /// # Errors
-    ///
-    /// Returns [`EngineOpenError`] when the adapter cannot open a run. The
-    /// skeleton adapters always return [`EngineOpenError::Unimplemented`]
-    /// until their wiring packets land.
-    fn open(&self, input: EngineOpenInput) -> EngineOpenResult;
+    /// The boxed future resolves to [`EngineOpenOutcome::Failed`] when the
+    /// adapter cannot open a run. Unwired adapters always fail with
+    /// [`EngineOpenError::Unimplemented`].
+    fn open(&self, input: EngineOpenInput) -> EngineOpenFuture<'_>;
 }
 
 #[cfg(test)]
@@ -550,5 +660,44 @@ mod tests {
         let cloned = token.clone();
         assert_eq!(cloned, token);
         assert_eq!(cloned.native_thread_id, "native-thread-1");
+    }
+
+    #[test]
+    fn engine_run_carries_a_type_erased_session() {
+        struct DummySession;
+
+        impl EngineSocketSession for DummySession {
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+                self
+            }
+        }
+
+        let run = EngineRun {
+            native_thread_id: EngineResumeToken {
+                native_thread_id: "native-thread-1".to_owned(),
+            },
+            observation_tag: EngineObservationTag::RunState,
+            session: Box::new(DummySession),
+        };
+        let EngineRun {
+            native_thread_id,
+            observation_tag,
+            session,
+        } = run;
+        assert_eq!(native_thread_id.native_thread_id, "native-thread-1");
+        assert_eq!(observation_tag, EngineObservationTag::RunState);
+        assert!(session.into_any().downcast::<DummySession>().is_ok());
+    }
+
+    #[test]
+    fn failed_open_outcome_carries_a_typed_error_without_custody() {
+        let outcome = EngineOpenOutcome::failed(EngineOpenError::SpawnFailed);
+        assert!(matches!(
+            outcome,
+            EngineOpenOutcome::Failed {
+                error: EngineOpenError::SpawnFailed,
+                custody: None,
+            }
+        ));
     }
 }

@@ -6,21 +6,23 @@
 //! `InternalLaunch::Cursor` carries). The descriptor mirrors
 //! `CursorEngineDescriptor` in `modules/engines/src/cursor/engine.ts`;
 //! `probe` reports the launch version (the C1 unprobed sentinel) without
-//! performing I/O; `open` is deliberately unwired and returns
-//! [`EngineOpenError::Unimplemented`].
+//! performing I/O; `open` is deliberately unwired and returns a failed
+//! [`EngineOpenOutcome`] with [`EngineOpenError::Unimplemented`].
 //!
-//! The next packet forwards [`EngineOpenInput`] into the existing owner
+//! A later packet forwards [`EngineOpenInput`] into the existing owner
 //! executor
 //! [`execute_cursor_turn`](super::super::operation::execute_cursor_turn)
-//! (`modules/backend/src/engine_owner/operation.rs`) and replaces the
-//! [`EngineSocket::open`] stub. The live configured-turn dispatch constructs this adapter through `socket::adapter_for`; `open` stays unimplemented until the per-engine open/drive split lands.
+//! (`modules/backend/src/engine_owner/operation.rs`) and replaces this stub.
+//! The live configured-turn dispatch constructs this adapter through
+//! `socket::adapter_for`; Codex is the first engine wired through the
+//! open/drive split.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_domain::{
     EngineCapabilityName, EngineCapabilityState, EngineDescriptor, EngineOpenError,
-    EngineOpenInput, EngineOpenResult, EngineProbe, EngineSocket,
+    EngineOpenFuture, EngineOpenInput, EngineOpenOutcome, EngineProbe, EngineSocket,
 };
 
 use super::super::consts::CURSOR_ENGINE_ID;
@@ -159,8 +161,9 @@ impl EngineSocket for CursorSocketAdapter<'_> {
 
     /// Fails closed until the open wiring packet forwards to
     /// `execute_cursor_turn`.
-    fn open(&self, input: EngineOpenInput) -> EngineOpenResult {
-        let _ = input;
-        Err(EngineOpenError::Unimplemented)
+    fn open(&self, _input: EngineOpenInput) -> EngineOpenFuture<'_> {
+        Box::pin(std::future::ready(EngineOpenOutcome::failed(
+            EngineOpenError::Unimplemented,
+        )))
     }
 }

@@ -82,8 +82,9 @@ pub use engine_config::{
 };
 pub use engine_socket::{
     EngineCapabilityName, EngineCapabilityState, EngineCommandTag, EngineDescriptor,
-    EngineObservationTag, EngineOpenError, EngineOpenInput, EngineOpenResult, EngineProbe,
-    EngineResumeToken, EngineRun, EngineRunTerminalState, EngineSocket,
+    EngineObservationTag, EngineOpenError, EngineOpenFuture, EngineOpenInput, EngineOpenOutcome,
+    EngineOpenResult, EngineProbe, EngineResumeToken, EngineRun, EngineRunTerminalState,
+    EngineSocket, EngineSocketSession,
 };
 pub use events::{
     EngineObservationAttribution, EngineObservationEvent, Event, FirstMessageQueued, ProjectAttached,
