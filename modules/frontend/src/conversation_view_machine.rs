@@ -703,8 +703,7 @@ mod viewport_statig {
         ) -> Outcome<State> {
             let Event::Public(event) = event;
             match event {
-                ViewportEvent::ExtentChanged
-                | ViewportEvent::UserScrolled { at_bottom: false } => {
+                ViewportEvent::ExtentChanged | ViewportEvent::UserScrolled { at_bottom: false } => {
                     context.none();
                     Handled
                 }

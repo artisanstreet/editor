@@ -29,8 +29,8 @@ use crate::conversation_delivery_machine::{
 };
 use crate::conversation_scene::{
     AssistantPhase, ConversationScene, ItemProvenance, SceneBuildError, SceneDisclosure, SceneId,
-    SceneItem, SceneItemKind, SceneTurn, TurnFooterSettlement,
-    TurnNarration as SceneTurnNarration, TurnNarrationEntry, session_anchor_id,
+    SceneItem, SceneItemKind, SceneTurn, TurnFooterSettlement, TurnNarration as SceneTurnNarration,
+    TurnNarrationEntry, session_anchor_id,
 };
 use crate::conversation_turn_machine::{
     ConversationTurnController, StateKind, TurnError, TurnEvent, TurnNarration,
