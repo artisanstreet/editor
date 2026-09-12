@@ -384,11 +384,6 @@ impl NativeApplication {
     )]
     pub(super) fn handle_composer_state_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::FooterUsage { query, result } => {
-                if let Some(host) = self.conversation_host.clone() {
-                    host.update(cx, |host, cx| host.accept_footer_usage(&query, result, cx));
-                }
-            }
             Event::QueuedMessages {
                 thread_id,
                 generation,

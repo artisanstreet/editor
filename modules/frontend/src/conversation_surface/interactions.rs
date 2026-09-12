@@ -225,20 +225,6 @@ impl ConversationSurface {
         }
     }
 
-    /// Mirrors validated request throughput without manufacturing absent measurements.
-    pub(crate) fn set_footer_speed(
-        &mut self,
-        turn: &TurnId,
-        speed: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let mirror = self.footer_mirrors.entry(footer_key(turn)).or_default();
-        if mirror.token_speed != speed {
-            mirror.token_speed = speed;
-            cx.notify();
-        }
-    }
-
     /// Mirrors the reader-facing copy status for one settled footer.
     ///
     /// An empty message clears a previous failure notice.

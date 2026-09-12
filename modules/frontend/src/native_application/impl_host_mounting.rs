@@ -441,16 +441,6 @@ impl NativeApplication {
                         }
                         self.conversation_effects.remove(0);
                     }
-                    ConversationHostEffect::ReadFooterUsage { query } => {
-                        let command = crate::native_transport_service::ComposerStateCommand::ReadFooterUsage { query };
-                        if self
-                            .submit_command(NativeTransportCommand::ComposerState(command))
-                            .is_err()
-                        {
-                            return;
-                        }
-                        self.conversation_effects.remove(0);
-                    }
                     ConversationHostEffect::RichLinkRequests { urls } => {
                         if !self.submit_rich_link_requests(urls, cx) {
                             return;

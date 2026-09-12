@@ -32,7 +32,6 @@ rust_library(
         "src/conversation_diff_stat.rs",
         "src/conversation_duration.rs",
         "src/conversation_host.rs",
-        "src/conversation_token_speed.rs",
         "src/conversation_observation_projection.rs",
         "src/conversation_projection.rs",
         "src/conversation_projection/validation.rs",

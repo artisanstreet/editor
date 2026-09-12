@@ -7,7 +7,6 @@
 //! split; visibility was widened to `pub(super)` for parent-owned methods.
 
 use super::*;
-use gpui::{AppContext as _, prelude::FluentBuilder as _};
 
 impl ConversationSurface {
     pub(super) fn render_compaction(
@@ -846,24 +845,8 @@ impl ConversationSurface {
         if !relative_age.is_empty() {
             footer = footer.child(
                 div()
-                    .id(format!("{time_selector}-throughput"))
                     .debug_selector(move || time_selector.clone())
-                    .when(
-                        mirror.is_some_and(|mirror| mirror.token_speed.is_some()),
-                        |element| {
-                            let theme = *theme;
-                            element
-                                .tooltip(move |_, cx| cx.new(|_| FooterSpeedTooltip(theme)).into())
-                        },
-                    )
-                    .child(
-                        match mirror.and_then(|mirror| mirror.token_speed.as_deref()) {
-                            Some(speed) => {
-                                format!("{} • {speed}", relative_age.trim_end_matches(" ago"))
-                            }
-                            None => relative_age.trim_end_matches(" ago").to_owned(),
-                        },
-                    ),
+                    .child(relative_age.trim_end_matches(" ago").to_owned()),
             );
         }
         Some(footer.into_any_element())
@@ -918,16 +901,5 @@ impl ConversationSurface {
         let card = anchors.attach(card, Some(&id), item_id.as_ref());
         let card = card.debug_selector(move || selector.clone());
         card.child(collapsible).into_any_element()
-    }
-}
-
-struct FooterSpeedTooltip(ArtisanTheme);
-
-impl gpui::Render for FooterSpeedTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        artisan_ui::tooltip::tooltip_content(
-            artisan_ui::tooltip::TooltipStyle::resolve(self.0),
-            "Estimated reply throughput, including queue, startup and first-token latency. Not raw model generation speed.",
-        )
     }
 }
