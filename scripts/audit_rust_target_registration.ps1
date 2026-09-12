@@ -1124,7 +1124,82 @@ $rustBinaries = @($rustRules | Where-Object Kind -eq 'rust_binary')
 $rustTests = @($rustRules | Where-Object Kind -eq 'rust_test')
 $rootClippyCount = if ($rootClippy.Count -eq 1) { @(Get-AggregateMembers $rootClippy[0] 'deps').Count } else { 0 }
 $rootFormatCount = if ($rootFormat.Count -eq 1) { @(Get-AggregateMembers $rootFormat[0] 'targets').Count } else { 0 }
+
+# Cross-driver registration checks. The registration surfaces must agree:
+# every Cargo [[test]] needs a rust_test target compiling its path, every
+# rust_test must be a member of the root //:tests aggregate, and a rust_test's
+# crate_name must stay in lockstep with its target label.
+$rustTestSourceOwners = @{}
+foreach ($rustTest in $rustTests) {
+    foreach ($sourceFile in $rustTest.SourceFiles) {
+        if (-not $rustTestSourceOwners.ContainsKey($sourceFile)) {
+            $rustTestSourceOwners[$sourceFile] = [Collections.Generic.List[object]]::new()
+        }
+        [void]$rustTestSourceOwners[$sourceFile].Add($rustTest)
+    }
+}
+
+$cargoTestsWithoutBazel = 0
+foreach ($cargoTarget in @($cargoTargets | Where-Object Kind -eq 'test')) {
+    if ($null -eq $cargoTarget.ResolvedPath) {
+        continue
+    }
+    if (-not $rustTestSourceOwners.ContainsKey($cargoTarget.ResolvedPath)) {
+        $cargoTestsWithoutBazel++
+        Add-Finding "$($cargoTarget.Manifest):$($cargoTarget.Line): Cargo [[test]] $($cargoTarget.Name) ($($cargoTarget.Path)) is not compiled by any rust_test target"
+    }
+}
+
+$suiteTestMembers = @{}
+$rootTestSuites = @($Rules | Where-Object { $_.Package -eq '' -and $_.Kind -eq 'test_suite' -and $_.Name -eq 'tests' })
+if ($rootTestSuites.Count -ne 1) {
+    Add-Finding "Expected exactly one root //:tests test_suite, found $($rootTestSuites.Count)"
+} else {
+    $suite = $rootTestSuites[0]
+    $suiteLabels = @(Get-AggregateMembers $suite 'tests')
+    foreach ($duplicate in ($suiteLabels | Group-Object | Where-Object Count -gt 1)) {
+        Add-Finding "$($suite.Path):$($suite.Line): duplicate //:tests member $($duplicate.Name)"
+    }
+    foreach ($labelText in $suiteLabels) {
+        $label = Resolve-Label $labelText $suite.Package
+        if ($null -eq $label -or -not $script:RulesByLabel.ContainsKey($label)) {
+            Add-Finding "$($suite.Path):$($suite.Line): //:tests references unknown target $labelText"
+            continue
+        }
+        $member = $script:RulesByLabel[$label]
+        if ($member.Kind -notin @('rust_test', 'rustfmt_test')) {
+            Add-Finding "$($suite.Path):$($suite.Line): //:tests references non-test target $labelText"
+            continue
+        }
+        if ($member.Kind -eq 'rust_test') {
+            $suiteTestMembers[$label] = $true
+        }
+    }
+    foreach ($rustTest in $rustTests) {
+        if (-not $suiteTestMembers.ContainsKey($rustTest.Label)) {
+            Add-Finding "$($rustTest.Path):$($rustTest.Line): rust_test $($rustTest.Label) is not a member of the root //:tests test_suite"
+        }
+    }
+}
+
+$crateNameMismatches = 0
+foreach ($rustTest in $rustTests) {
+    if (-not $rustTest.Attributes.ContainsKey('crate_name')) {
+        continue
+    }
+    $crateNames = @(Get-StringLiterals $rustTest.Attributes['crate_name'])
+    if ($crateNames.Count -ne 1) {
+        Add-Finding "$($rustTest.Path):$($rustTest.Line): rust_test $($rustTest.Label) must declare one literal crate_name"
+        continue
+    }
+    if ($crateNames[0] -ne $rustTest.Name) {
+        $crateNameMismatches++
+        Add-Finding "$($rustTest.Path):$($rustTest.Line): rust_test $($rustTest.Label) declares crate_name $($crateNames[0]); it must match the target name"
+    }
+}
+
 Write-Output ("Rust target registration audit: {0} libraries, {1} binaries, {2} tests; {3} Cargo bin/test paths." -f $rustLibraries.Count, $rustBinaries.Count, $rustTests.Count, $cargoTargets.Count)
+Write-Output ("Cargo [[test]] entries without a Bazel rust_test: {0}; root //:tests rust_test members: {1}; crate_name mismatches: {2}." -f $cargoTestsWithoutBazel, $suiteTestMembers.Count, $crateNameMismatches)
 Write-Output ("Root //:clippy direct members: {0}; root //:format_test direct roots: {1}." -f $rootClippyCount, $rootFormatCount)
 Write-Output ("Checked {0} package-level rust_clippy/rustfmt_test aggregates, source ownership, BUILD source paths, and Cargo target paths." -f @($qualityAggregates | Where-Object Package -ne '').Count)
 

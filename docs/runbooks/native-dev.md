@@ -172,6 +172,59 @@ identity are never re-minted by a restart.
 | `path must be absolute` | Relative `--dev-dir` | Pass an absolute path |
 | `invalid arguments: ...` | Unknown flag | See `--help` |
 
+## Test drivers and registration
+
+Two drivers compile Rust tests. They are not equivalent, and the suite only
+counts as run when the authoritative one has run.
+
+**Bazel is authoritative.** `bazel test //...` is the full suite: every
+rust_test target plus every other test rule in the repository, with no
+exclusions. `bazel test //:tests` is the registered aggregate — it now carries
+every `rust_test` target in the repository plus `//:format_test`, and
+`scripts/audit_rust_target_registration.ps1` fails if a new `rust_test` is not
+added to it. Both commands are honest about coverage; `//:tests` is the faster
+entry point when only Rust tests changed, `//...` is what CI and release gates
+must use.
+
+**Cargo is a per-suite convenience driver.** Every `[[test]]` declared in a
+module `Cargo.toml` is mirrored by exactly one Bazel `rust_test` (the audit
+fails on any Cargo test without a Bazel target), so `cargo test -p <module>`
+is a legitimate way to iterate on those suites locally. The reverse does not
+hold: Bazel also owns suites with no Cargo declaration — the private
+`#[cfg(test)]` crate tests (`//tests/backend:backend_unit_test`,
+`//modules/frontend:frontend_unit_test`), shared harness modules
+(`tests/transport/harness.rs`, `tests/ui/gpui_harness.rs`), and GPUI display
+tests. Pass `--lib` for the crate unit tests and name the test binary for a
+manifest-declared suite (for example
+`cargo test -p artisan-frontend --lib`). Do not treat a green
+`cargo test --workspace` as the full gate.
+
+**Backend fixture suites need the parity runfiles manifest under Cargo.**
+`//tests/backend:backend_unit_test` compiles the backend crate in test mode
+and its fixture helpers (`tests/backend/engine_owner_configured.rs`,
+`engine_owner_codex.rs`, and friends) spawn the `engine_owner_fixture` and
+`codex_wire_fixture` executables. Under Bazel the target declares those
+binaries as `data` and passes them through `env` rlocationpaths. Cargo has no
+runfiles tree, so before `cargo test -p artisan-backend` set:
+
+```text
+RUNFILES_MANIFEST_FILE=<workspace>/evidence/parity-runfiles-manifest.txt
+ARTISAN_ENGINE_OWNER_FIXTURE=artisan_editor/tests/backend/engine_owner_fixture.exe
+ARTISAN_CODEX_WIRE_FIXTURE=<cargo-target-dir>/debug/examples/codex-wire-fixture.exe
+```
+
+and build the fixture examples first
+(`cargo build -p artisan-backend --examples`). Without the manifest the
+helpers either panic with `ARTISAN_ENGINE_OWNER_FIXTURE must be set via
+rlocationpath` or fall back to `target/debug` discovery, which is only
+correct when the fixtures were built into the same target directory.
+
+Run `pwsh -NoProfile -File scripts/audit_rust_target_registration.ps1` after
+moving, renaming, adding, or deleting any Rust test or target. It checks
+Cargo `[[test]]` ↔ Bazel `rust_test` coverage, root `//:tests` membership,
+`crate_name`/target-name agreement, clippy/rustfmt aggregate membership, and
+BUILD source paths.
+
 ## Acceptance procedure (root gate)
 
 1. `bazel build //:dev` — both binaries built as dependencies.
