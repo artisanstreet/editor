@@ -35,6 +35,8 @@ fn thread_id(index: usize) -> ThreadId {
 
 fn summary(index: usize) -> ThreadSummary {
     ThreadSummary {
+        has_active_work: false,
+        last_message_at: None,
         thread_id: thread_id(index),
         project_id: project(index / 2),
         title: ThreadTitle::parse(format!("Thread {index:03}")).expect("fixture title"),

@@ -38,6 +38,7 @@ impl NativeApplication {
         for event in events {
             self.handle_service_event(event, cx);
         }
+        self.refresh_sidebar_threads();
         self.retry_thread_switch_if_admitted(cx);
         self.try_mount_pending_thread(cx);
         self.sync_composer_availability(cx);
@@ -102,6 +103,13 @@ impl NativeApplication {
                 project_id,
                 listing,
             } => self.handle_threads(&project_id, &listing, cx),
+            NativeTransportEvent::SidebarThreads {
+                project_id,
+                generation,
+                result,
+            } => {
+                self.receive_sidebar_threads(&project_id, generation, result, cx);
+            }
             NativeTransportEvent::Snapshot(snapshot) => self.handle_snapshot(snapshot, cx),
             NativeTransportEvent::ProjectIntakeProgress(stage) => {
                 self.handle_intake_progress(stage, cx);

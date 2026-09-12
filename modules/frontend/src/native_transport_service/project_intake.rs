@@ -544,6 +544,13 @@ pub(super) fn contains_exact_project(projects: &ProjectListing, expected: &Proje
     projects.projects().contains(expected)
 }
 
+/// Verify durable creation fields; live catalog metadata can change after creation.
 pub(super) fn contains_exact_thread(threads: &ThreadListing, expected: &ThreadSummary) -> bool {
-    threads.threads().contains(expected)
+    threads.threads().iter().any(|thread| {
+        thread.thread_id == expected.thread_id
+            && thread.project_id == expected.project_id
+            && thread.title == expected.title
+            && thread.created_at == expected.created_at
+            && thread.updated_at == expected.updated_at
+    })
 }

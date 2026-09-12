@@ -436,7 +436,7 @@ impl NativeApplication {
         // One shared hover surface for the whole sidebar column: the same
         // sliding pill travels among New thread, Marketplace, and the
         // profile footer, measured against these bounds. Rows hide the pill
-        // on departure and the spacer hides it on entry, all retaining
+        // on departure and the thread area hides it on entry, all retaining
         // geometry so row-to-row keeps sliding; leaving the column clears
         // it as well.
         let navigation = div()
@@ -471,19 +471,7 @@ impl NativeApplication {
                     .child(nav)
                     .child(marketplace),
             )
-            .child(
-                div()
-                    .id("artisan-sidebar-spacer")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .debug_selector(|| "artisan-sidebar-spacer".to_owned())
-                    .on_hover(cx.listener(|app: &mut Self, hovered: &bool, _, cx| {
-                        if *hovered {
-                            app.sidebar_hover.borrow_mut().hide();
-                            cx.notify();
-                        }
-                    })),
-            )
+            .child(self.desktop_sidebar_threads(cx))
             .child(
                 div()
                     .w_full()

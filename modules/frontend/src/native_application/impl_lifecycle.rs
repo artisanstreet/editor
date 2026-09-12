@@ -203,6 +203,7 @@ impl NativeApplication {
             titlebar_repository: None,
             titlebar_repository_project: None,
             thread_listing: None,
+            sidebar_threads: impl_sidebar_threads::SidebarThreadsState::default(),
             selected_thread: None,
             pending_thread: None,
             thread_picker: None,

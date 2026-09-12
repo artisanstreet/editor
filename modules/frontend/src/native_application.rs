@@ -389,6 +389,7 @@ pub struct NativeApplication {
     titlebar_repository_project: Option<ProjectId>,
     /// The latest authoritative thread listing for `selected_project`.
     thread_listing: Option<ThreadListing>,
+    sidebar_threads: impl_sidebar_threads::SidebarThreadsState,
     selected_thread: Option<ThreadId>,
     pending_thread: Option<ThreadId>,
     thread_picker: Option<Entity<NativeThreadPicker>>,
@@ -451,3 +452,6 @@ mod native_composer_models;
 
 #[path = "native_composer_queue_application.rs"]
 mod composer_queue_application;
+
+#[path = "native_application/impl_sidebar_threads.rs"]
+mod impl_sidebar_threads;

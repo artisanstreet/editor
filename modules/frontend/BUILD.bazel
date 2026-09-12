@@ -243,6 +243,7 @@ rust_library(
         "src/native_application/impl_service_events.rs",
         "src/native_application/impl_sidebar_and_menus.rs",
         "src/native_application/impl_surfaces.rs",
+        "src/native_application/impl_sidebar_threads.rs",
         "src/native_application/presentation.rs",
         "src/native_application/profile_motion.rs",
         "src/native_application/selectors.rs",

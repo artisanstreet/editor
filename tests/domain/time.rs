@@ -64,6 +64,8 @@ fn summaries_carry_schema_timestamps() {
     assert_eq!(project.attached_at.as_millis(), -3_600_000);
 
     let thread = ThreadSummary {
+        has_active_work: false,
+        last_message_at: None,
         thread_id: ThreadId::parse("th-time").expect("the fixture is valid"),
         project_id: project.project_id.clone(),
         title: ThreadTitle::parse("New thread").expect("the fixture is valid"),
@@ -75,6 +77,8 @@ fn summaries_carry_schema_timestamps() {
 
     // No cross-field ordering is enforced between created and updated.
     let inverted = ThreadSummary {
+        has_active_work: false,
+        last_message_at: None,
         thread_id: ThreadId::parse("th-inverted").expect("the fixture is valid"),
         project_id: project.project_id,
         title: thread.title.clone(),

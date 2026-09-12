@@ -233,6 +233,11 @@ struct ThreadSummary {
 
   # Last observed activity time. Signed Unix milliseconds.
   updatedAtMillis @4 :Int64;
+
+  # Live, nonterminal run owned by Forge.
+  hasActiveWork @5 :Bool;
+  hasLastMessage @6 :Bool;
+  lastMessageAtMillis @7 :Int64;
 }
 
 # Answer to a project thread listing request.

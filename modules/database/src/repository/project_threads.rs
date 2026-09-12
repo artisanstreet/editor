@@ -286,10 +286,36 @@ impl Repository {
             .all(&self.database)
             .await
             .map_err(|source| database_error("list project threads", source))?;
-        let summaries = rows
+        let mut summaries = rows
             .into_iter()
             .map(thread_summary)
             .collect::<Result<Vec<_>, _>>()?;
+        if !summaries.is_empty() {
+            let latest = entities::message::Entity::find()
+                .select_only()
+                .column(entities::message::Column::ThreadId)
+                .column_as(
+                    entities::message::Column::AcceptedAtMs.max(),
+                    "last_message_at",
+                )
+                .filter(
+                    entities::message::Column::ThreadId
+                        .is_in(summaries.iter().map(|thread| thread.thread_id.as_str())),
+                )
+                .group_by(entities::message::Column::ThreadId)
+                .into_tuple::<(String, i64)>()
+                .all(&self.database)
+                .await
+                .map_err(|source| database_error("list thread message recency", source))?
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            for thread in &mut summaries {
+                thread.last_message_at = latest
+                    .get(thread.thread_id.as_str())
+                    .copied()
+                    .map(UnixMillis::from_millis);
+            }
+        }
         ThreadListing::new(summaries).map_err(|source| RepositoryError::ThreadListing { source })
     }
 }
@@ -308,6 +334,8 @@ impl AttachProjectInput {
 impl CreateThreadInput {
     fn thread_summary(&self) -> ThreadSummary {
         ThreadSummary {
+            has_active_work: false,
+            last_message_at: None,
             thread_id: self.thread_id.clone(),
             project_id: self.project_id.clone(),
             title: self.title.clone(),
@@ -525,6 +553,8 @@ pub(super) fn project_summary(
 
 fn thread_summary(row: entities::Thread) -> Result<ThreadSummary, RepositoryError> {
     Ok(ThreadSummary {
+        has_active_work: false,
+        last_message_at: None,
         thread_id: ThreadId::parse(row.thread_id)
             .map_err(|error| corrupt_data("threads", "thread_id", error))?,
         project_id: ProjectId::parse(row.project_id)

@@ -126,6 +126,11 @@ pub enum NativeTransportCommand {
     RetryProjectIntake,
     /// Select an existing Forge-owned project.
     SelectProject(ProjectId),
+    /// Refresh the sidebar without selecting a project or mounting a conversation.
+    ReadSidebarThreads {
+        project_id: ProjectId,
+        generation: u64,
+    },
     /// Create a new task in an existing, authoritative project.
     CreateTask(ProjectId),
     /// Request a real snapshot for a host mounted on a known thread.
@@ -238,6 +243,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::BeginProjectIntake => "BeginProjectIntake",
             Self::RetryProjectIntake => "RetryProjectIntake",
             Self::SelectProject(_) => "SelectProject",
+            Self::ReadSidebarThreads { .. } => "ReadSidebarThreads",
             Self::CreateTask(_) => "CreateTask",
             Self::RequestSnapshot(_) => "RequestSnapshot",
             Self::ReadMessageImage(_) => "ReadMessageImage",
@@ -339,6 +345,12 @@ pub enum NativeTransportEvent {
         project_id: ProjectId,
         /// Real thread listing.
         listing: ThreadListing,
+    },
+    /// Background catalog read, fenced independently from navigation.
+    SidebarThreads {
+        project_id: ProjectId,
+        generation: u64,
+        result: Result<ThreadListing, ServiceFailure>,
     },
     /// Real bounded conversation state.
     Snapshot(ConversationSnapshot),

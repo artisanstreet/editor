@@ -509,6 +509,8 @@ fn uncorrelated_failure() -> Result<WireEnvelope, Box<dyn Error>> {
 /// Builds the scripted thread summary used by event and patch fixtures.
 fn thread_summary() -> Result<ThreadSummary, Box<dyn Error>> {
     Ok(ThreadSummary {
+        has_active_work: false,
+        last_message_at: None,
         thread_id: ThreadId::parse("fixture-thread")?,
         project_id: ProjectId::parse("fixture-project")?,
         title: ThreadTitle::parse("fixture title")?,

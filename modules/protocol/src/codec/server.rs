@@ -293,6 +293,11 @@ pub(crate) fn encode_thread(
     mut builder: artisan_capnp::thread_summary::Builder<'_>,
     value: &ThreadSummary,
 ) {
+    builder.set_has_active_work(value.has_active_work);
+    builder.set_has_last_message(value.last_message_at.is_some());
+    if let Some(at) = value.last_message_at {
+        builder.set_last_message_at_millis(at.as_millis());
+    }
     builder.set_thread_id(value.thread_id.as_str());
     builder.set_project_id(value.project_id.as_str());
     builder.set_title(value.title.as_str());
@@ -627,6 +632,10 @@ pub(crate) fn decode_thread(
     value: artisan_capnp::thread_summary::Reader<'_>,
 ) -> Result<ThreadSummary, ProtocolDecodeError> {
     Ok(ThreadSummary {
+        has_active_work: value.get_has_active_work(),
+        last_message_at: value
+            .get_has_last_message()
+            .then(|| UnixMillis::from_millis(value.get_last_message_at_millis())),
         thread_id: parse_thread_id(
             read_text(value.get_thread_id(), "thread.threadId")?,
             "thread.threadId",

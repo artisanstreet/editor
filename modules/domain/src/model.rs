@@ -257,7 +257,7 @@ impl ProjectListing {
 /// One project-scoped thread as the list surfaces need it.
 ///
 /// Deliberate subset of the legacy projection (`ThreadListItem` in
-/// `modules/protocol/src/thread.ts`): live statuses, attention and reader
+/// `modules/protocol/src/thread.ts`): attention and reader
 /// cursors, affinity scores, rename/rehome suggestions, pins, and archive
 /// state all belong to later slices and are cut explicitly here rather than
 /// silently. Creation and update instants travel as signed Unix epoch
@@ -265,6 +265,10 @@ impl ProjectListing {
 /// `updatedAtMillis` fields; ordering between them is not enforced here.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ThreadSummary {
+    /// Whether Forge currently owns a nonterminal run for this thread.
+    pub has_active_work: bool,
+    /// Most recent accepted user message, absent before the first message.
+    pub last_message_at: Option<UnixMillis>,
     /// Forge-minted thread identity.
     pub thread_id: ThreadId,
     /// Owning project identity.

@@ -4995,3 +4995,51 @@ async fn steer_inbox_full_is_transient_and_row_stays_open_for_retry() {
 
     storage.close().await.expect("storage should close");
 }
+
+#[tokio::test]
+async fn sidebar_listing_tracks_live_ownership_and_latest_message() {
+    let (_temporary, storage) = opened_storage("sidebar-listing").await;
+    seed_conversation(storage.repository(), "thread-sidebar", "sidebar").await;
+    let registry = RunCancellationRegistry::new(2).expect("capacity");
+    let handler = RequestHandler::new(storage.repository().clone())
+        .with_run_cancellation_registry(registry.clone());
+    let query = ClientRequest::Query(Query::ListProjectThreads(ListProjectThreads {
+        project_id: ProjectId::parse("project-sidebar").expect("project"),
+    }));
+    let response = handler
+        .respond(&request("sidebar-idle"), &query)
+        .await
+        .expect("listing");
+    let ResponsePayload::ThreadListing(listing) = response.payload else {
+        panic!("thread listing")
+    };
+    assert!(!listing.threads()[0].has_active_work);
+    assert_eq!(
+        listing.threads()[0].last_message_at,
+        Some(message_input("r", "t", "m", "body").accepted_at)
+    );
+    let lease = registry
+        .register(
+            ThreadId::parse("thread-sidebar").expect("thread"),
+            RunId::parse("run-sidebar").expect("run"),
+        )
+        .expect("registration");
+    let response = handler
+        .respond(&request("sidebar-working"), &query)
+        .await
+        .expect("listing");
+    let ResponsePayload::ThreadListing(listing) = response.payload else {
+        panic!("thread listing")
+    };
+    assert!(listing.threads()[0].has_active_work);
+    drop(lease);
+    let response = handler
+        .respond(&request("sidebar-settled"), &query)
+        .await
+        .expect("listing");
+    let ResponsePayload::ThreadListing(listing) = response.payload else {
+        panic!("thread listing")
+    };
+    assert!(!listing.threads()[0].has_active_work);
+    storage.close().await.expect("close");
+}

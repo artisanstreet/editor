@@ -274,6 +274,9 @@ pub(super) async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::RetryProjectIntake) => {
                         retry_project_intake(runtime, frames, events).await?;
                     }
+                    Some(NativeTransportCommand::ReadSidebarThreads { project_id, generation }) => {
+                        handlers::read_sidebar_threads(runtime, frames, events, project_id, generation).await?;
+                    }
                     Some(NativeTransportCommand::SelectProject(project_id)) => {
                         select_project(runtime, frames, events, project_id).await?;
                     }

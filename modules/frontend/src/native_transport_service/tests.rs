@@ -54,6 +54,8 @@ fn project(value: &str, name: &str) -> ProjectSummary {
 
 fn thread(value: &str, project_id: &str) -> ThreadSummary {
     ThreadSummary {
+        has_active_work: false,
+        last_message_at: None,
         thread_id: ThreadId::parse(value).expect("valid thread"),
         project_id: ProjectId::parse(project_id).expect("valid project"),
         title: artisan_domain::ThreadTitle::parse(value).expect("valid title"),
@@ -682,6 +684,13 @@ fn authoritative_refreshes_require_full_summary_equality() {
     let same_identity_different_thread = thread("thread-a", "project-a");
     let threads = ThreadListing::new(vec![created.clone()]).expect("threads");
     assert!(contains_exact_thread(&threads, &created));
+    let live_threads = ThreadListing::new(vec![ThreadSummary {
+        has_active_work: true,
+        last_message_at: Some(UnixMillis::from_millis(500)),
+        ..created.clone()
+    }])
+    .expect("live listing");
+    assert!(contains_exact_thread(&live_threads, &created));
     assert!(!contains_exact_thread(
         &threads,
         &ThreadSummary {

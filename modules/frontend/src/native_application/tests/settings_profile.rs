@@ -328,15 +328,15 @@ fn sidebar_task_links_share_sliding_hover_surface(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn sidebar_footer_shares_sliding_hover_and_spacer_clears(cx: &mut TestAppContext) {
+fn sidebar_footer_shares_sliding_hover_and_thread_area_clears(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
     cx.run_until_parked();
     let trigger = cx
         .debug_bounds("artisan-desktop-profile-trigger")
         .expect("profile footer trigger");
     let spacer = cx
-        .debug_bounds("artisan-sidebar-spacer")
-        .expect("sidebar spacer");
+        .debug_bounds("artisan-sidebar-threads")
+        .expect("sidebar thread area");
     let marketplace = cx
         .debug_bounds("artisan-marketplace-navigation")
         .expect("Marketplace navigation");

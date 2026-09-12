@@ -677,3 +677,42 @@ fn finish_engine_config_save(
         NativeTransportEvent::ThreadEngineConfigSet(result, Box::new(retained)),
     )
 }
+
+/// Refreshes only catalog data; it never publishes selection/empty-state events.
+pub(super) async fn read_sidebar_threads(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    project_id: ProjectId,
+    generation: u64,
+) -> Result<(), ServiceFailure> {
+    let result = match runtime
+        .request(
+            frames,
+            threads_request(project_id.clone()),
+            ExpectedResponse::Threads(project_id.clone()),
+        )
+        .await
+    {
+        Ok(ResponsePayload::ThreadListing(listing)) => {
+            runtime.known_threads.clear();
+            runtime.known_threads.extend(
+                listing
+                    .threads()
+                    .iter()
+                    .map(|thread| thread.thread_id.clone()),
+            );
+            Ok(listing)
+        }
+        Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+        Err(failure) => Err(failure.into()),
+    };
+    publish(
+        events,
+        NativeTransportEvent::SidebarThreads {
+            project_id,
+            generation,
+            result,
+        },
+    )
+}

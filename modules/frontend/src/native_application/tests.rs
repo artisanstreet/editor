@@ -77,6 +77,8 @@ fn project(id: &str, name: &str) -> ProjectSummary {
 
 fn thread(id: &str, project_id: &str, title: &str) -> ThreadSummary {
     ThreadSummary {
+        has_active_work: false,
+        last_message_at: None,
         thread_id: ThreadId::parse(id).expect("thread"),
         project_id: ProjectId::parse(project_id).expect("project"),
         title: ThreadTitle::parse(title).expect("title"),

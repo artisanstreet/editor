@@ -176,6 +176,26 @@ impl RequestHandler {
                     .list_threads(&listing.project_id)
                     .await
                     .map_err(|error| repository_failure(&error, request_id))?;
+                let mut rows = threads.threads().to_vec();
+                if let Some(registry) = self.run_cancellation.as_ref() {
+                    for thread in &mut rows {
+                        let run = registry
+                            .active_run(&thread.thread_id)
+                            .map_err(|error| run_cancellation_failure(error, request_id))?;
+                        if let Some(run) = run {
+                            thread.has_active_work = self
+                                .repository
+                                .read_assistant_run_status(&thread.thread_id, &run)
+                                .await
+                                .map_err(|error| repository_failure(&error, request_id))?
+                                .is_some_and(|(lifecycle, _)| {
+                                    run_live_status(&lifecycle).is_some()
+                                });
+                        }
+                    }
+                }
+                let threads = artisan_domain::ThreadListing::new(rows)
+                    .expect("enriching existing rows preserves listing identities and bounds");
                 Ok(outcome(request_id, ResponsePayload::ThreadListing(threads)))
             }
             Query::ListDirectories(browse) => match &browse.parent {
