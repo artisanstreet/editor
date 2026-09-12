@@ -60,7 +60,7 @@ use gpui::{
 };
 
 use crate::conversation_delivery_machine::ConversationDeliveryEvent;
-use crate::conversation_host::{ConversationHost, ConversationHostError};
+use crate::conversation_host::ConversationHost;
 use crate::conversation_scene::{ConversationScene, SceneId, TurnBlock};
 use crate::conversation_state_machine::{
     ConversationStateEvent, SceneFact, SceneFactCommand, SceneFactKind,

@@ -295,6 +295,7 @@ rust_library(
         "//modules/transport:transport",
         "//modules/ui:ui",
         "@crates//:gpui-ce",
+        "@crates//:gpui_platform",
         "@crates//:base64",
         "@crates//:image",
         "@crates//:serde_json",

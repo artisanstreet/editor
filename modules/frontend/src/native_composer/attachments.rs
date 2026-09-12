@@ -78,7 +78,7 @@ impl NativeComposer {
         None
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "visual-proof"))]
     /// Returns the number of live attachment slots, including pending reads.
     pub(crate) fn attachment_count(&self) -> usize {
         self.attachments.len()
