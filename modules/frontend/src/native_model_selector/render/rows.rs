@@ -1012,6 +1012,11 @@ fn render_option_tooltip_surface(
     description: Option<String>,
 ) -> AnyElement {
     let advisory = advisory.filter(|text| !text.is_empty());
+    let advisory_color = if advisory.as_deref() == Some("Additional info:") {
+        theme.colors.banner_info
+    } else {
+        theme.colors.destructive
+    };
     let description = description.filter(|text| !text.is_empty());
     let mut text = String::new();
     let mut advisory_end = 0;
@@ -1031,7 +1036,7 @@ fn render_option_tooltip_surface(
         StyledText::new(SharedString::from(text)).with_highlights([(
             0..advisory_end,
             HighlightStyle {
-                color: Some(theme.colors.destructive.to_paint()),
+                color: Some(advisory_color.to_paint()),
                 font_weight: Some(FontWeight::MEDIUM),
                 ..Default::default()
             },

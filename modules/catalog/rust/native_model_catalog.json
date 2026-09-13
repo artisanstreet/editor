@@ -222,18 +222,18 @@
       "capabilities": {
         "context_window": {
           "availability": "configurable",
-          "default": "standard",
+          "default": "extended",
           "options": [
             {
-              "description": "What Codex resolves for every GPT-5 model. Compacts near 245K.",
+              "description": "Compacts history sooner to help limit usage.",
               "id": "standard",
               "label": "272K",
               "native_suffix": "",
               "tokens": 272000
             },
             {
-              "advisory": "Not recommended.",
-              "description": "Input past 272K bills at about twice the standard rate, and it is the whole conversation that is re-sent on every turn — so the premium applies again to the same tokens with each message, not once. Compaction moving to ~945K means far more context is carried into far more turns. Reach for it only when a task genuinely cannot be split, and expect a turn near the ceiling to cost multiples of the same turn under 272K.",
+              "advisory": "Additional info:",
+              "description": "Keeps more history before compaction. Astra has no extra long-context multiplier in Codex, but longer conversations can still use more of your allowance. API-key billing has separate long-context rates.",
               "id": "extended",
               "label": "1M",
               "native_config": {
@@ -350,8 +350,8 @@
               "tokens": 272000
             },
             {
-              "advisory": "Not recommended.",
-              "description": "Input past 272K bills at about twice the standard rate, and it is the whole conversation that is re-sent on every turn — so the premium applies again to the same tokens with each message, not once. Compaction moving to ~945K means far more context is carried into far more turns. Reach for it only when a task genuinely cannot be split, and expect a turn near the ceiling to cost multiples of the same turn under 272K.",
+              "advisory": "Higher usage:",
+              "description": "Keeps more history before compaction. Above 272K tokens, input rates double and output rates rise by 50%. Long conversations can use your allowance faster. Choose 272K for lower usage.",
               "id": "extended",
               "label": "1M",
               "native_config": {
@@ -468,8 +468,8 @@
               "tokens": 272000
             },
             {
-              "advisory": "Not recommended.",
-              "description": "Input past 272K bills at about twice the standard rate, and it is the whole conversation that is re-sent on every turn — so the premium applies again to the same tokens with each message, not once. Compaction moving to ~945K means far more context is carried into far more turns. Reach for it only when a task genuinely cannot be split, and expect a turn near the ceiling to cost multiples of the same turn under 272K.",
+              "advisory": "Higher usage:",
+              "description": "Keeps more history before compaction. Above 272K tokens, input rates double and output rates rise by 50%. Long conversations can use your allowance faster. Choose 272K for lower usage.",
               "id": "extended",
               "label": "1M",
               "native_config": {
@@ -586,8 +586,8 @@
               "tokens": 272000
             },
             {
-              "advisory": "Not recommended.",
-              "description": "Input past 272K bills at about twice the standard rate, and it is the whole conversation that is re-sent on every turn — so the premium applies again to the same tokens with each message, not once. Compaction moving to ~945K means far more context is carried into far more turns. Reach for it only when a task genuinely cannot be split, and expect a turn near the ceiling to cost multiples of the same turn under 272K.",
+              "advisory": "Higher usage:",
+              "description": "Keeps more history before compaction. Above 272K tokens, input rates double and output rates rise by 50%. Long conversations can use your allowance faster. Choose 272K for lower usage.",
               "id": "extended",
               "label": "1M",
               "native_config": {

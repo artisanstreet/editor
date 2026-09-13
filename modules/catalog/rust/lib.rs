@@ -47,6 +47,24 @@ mod tests {
     }
 
     #[test]
+    fn astra_defaults_to_extended_context_while_56_keeps_standard() {
+        let catalog = offline();
+        let astra = catalog.selection_policy_for_model("codex-astra").unwrap();
+        let context = astra.context_window.unwrap();
+        assert_eq!(context.id, "extended");
+        assert_eq!(
+            context.native_config.unwrap().model_context_window,
+            1_050_000
+        );
+        for model in catalog.manifest.models.iter().filter(|model| {
+            model.harness == "codex" && model.native_model_id.starts_with("gpt-5.6")
+        }) {
+            let policy = catalog.selection_policy_for_model(&model.id).unwrap();
+            assert_eq!(policy.context_window.unwrap().id, "standard");
+        }
+    }
+
+    #[test]
     fn offline_models_are_readable_but_not_runnable() {
         let catalog = offline();
         let row = catalog
