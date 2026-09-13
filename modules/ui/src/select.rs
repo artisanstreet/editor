@@ -323,6 +323,13 @@ impl<V: SelectValue> Select<V> {
         self
     }
 
+    /// Retains list scrolling across owner redraws.
+    #[must_use]
+    pub fn with_scroll_handle(mut self, handle: ScrollHandle) -> Self {
+        self.scroll_handle = handle;
+        self
+    }
+
     /// Installs the committed-value notification.
     #[must_use]
     pub fn on_change(

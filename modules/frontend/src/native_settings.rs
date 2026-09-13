@@ -195,6 +195,7 @@ pub struct SettingsScreen {
 #[derive(Default)]
 struct FrameRateControl {
     open: bool,
+    scroll: gpui::ScrollHandle,
     interaction: std::rc::Rc<std::cell::RefCell<artisan_ui::select::SelectState>>,
     error: Option<String>,
 }

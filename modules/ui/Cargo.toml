@@ -70,3 +70,7 @@ path = "../../tests/ui/inline_code_text.rs"
 [[test]]
 name = "shimmer_text"
 path = "../../tests/ui/shimmer_text.rs"
+
+[[test]]
+name = "select"
+path = "../../tests/ui/select.rs"

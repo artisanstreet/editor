@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 
 use artisan_assets::AssetId;
 use gpui::{
-    App, ClickEvent, Div, ElementId, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseDownEvent, ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, deferred, div, px, transparent_black,
+    AnchoredPositionMode, App, ClickEvent, Div, ElementId, FocusHandle, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseDownEvent, ParentElement, Pixels, RenderOnce, ScrollHandle,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, anchored, deferred, div,
+    point, px, transparent_black,
 };
 
 use crate::icon::{IconSize, IconStyle, IconTint, icon};
@@ -518,7 +519,7 @@ impl<V: SelectValue> SelectFrame<V> {
         let content_selector = format!("{selector_root}-content");
         let mut content = div()
             .id(content_id.clone())
-            .w_full()
+            .w(style.content_min_width)
             .rounded(style.content_corner_radius)
             .bg(style.content_background)
             .text_color(style.content_foreground)
@@ -584,7 +585,15 @@ impl<V: SelectValue> SelectFrame<V> {
                     }
                     cx.stop_propagation();
                 })
-                .child(deferred(content).with_priority(20));
+                .child(
+                    deferred(
+                        anchored()
+                            .position_mode(AnchoredPositionMode::Local)
+                            .position(point(px(0.0), self.style.trigger_height + px(4.0)))
+                            .child(content),
+                    )
+                    .with_priority(20),
+                );
         }
 
         if let Some(selector) = debug_selector {
@@ -596,7 +605,7 @@ impl<V: SelectValue> SelectFrame<V> {
 }
 
 impl<V: SelectValue> RenderOnce for Select<V> {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let Select {
             id,
             focus,
@@ -614,7 +623,14 @@ impl<V: SelectValue> RenderOnce for Select<V> {
             debug_selector,
             interaction_state,
         } = self;
-        let style = SelectStyle::resolve(theme, size);
+        let mut style = SelectStyle::resolve(theme, size);
+        style.content_max_height = style.content_max_height.min(
+            (window.viewport_size().height - px(16.0) - style.scroll_button_height * 2.0)
+                .max(px(1.0)),
+        );
+        style.content_min_width = style
+            .content_min_width
+            .min((window.viewport_size().width - px(16.0)).max(px(1.0)));
         let enabled = entry_enabled_flags(&entries);
         let selected_idx = selected_index(&entries, selected.as_ref());
         let state = interaction_state.unwrap_or_else(|| {

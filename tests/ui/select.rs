@@ -7,7 +7,7 @@ use artisan_ui::select::{
     item_debug_selector, stable_value_selector_suffix,
 };
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
-use gpui::{Component, Context, FocusHandle, IntoElement, Render, TestAppContext, Window};
+use gpui::{Context, FocusHandle, IntoElement, ParentElement as _, Render, TestAppContext, Window};
 
 fn test_focus(cx: &mut TestAppContext) -> FocusHandle {
     cx.update(|app| app.focus_handle())
@@ -51,7 +51,7 @@ impl Render for SelectProbe {
         let changes = Rc::clone(&self.changes);
         let open_changes = Rc::clone(&self.open_changes);
 
-        Component::new(
+        gpui::div().child(
             Select::new(
                 "select-test",
                 self.focus.clone(),
@@ -386,4 +386,55 @@ fn gpui_trigger_open_close_commit_and_focus_restore(cx: &mut TestAppContext) {
 
     assert_eq!(&*open_changes.borrow(), &[true, false, false]);
     cx.update(|window, _| assert!(focus.is_focused(window)));
+}
+
+#[gpui::test]
+fn popup_fits_short_window_and_keeps_scroll_on_redraw(cx: &mut TestAppContext) {
+    use gpui::{ParentElement as _, Styled as _, div, px};
+    struct PopupProbe {
+        focus: FocusHandle,
+        state: Rc<RefCell<SelectState>>,
+        scroll: gpui::ScrollHandle,
+    }
+    impl Render for PopupProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(180.0)).pt(px(100.0)).child(
+                Select::new(
+                    "short-select",
+                    self.focus.clone(),
+                    ArtisanTheme::for_mode(ThemeMode::Dark),
+                    None,
+                    (0..20)
+                        .map(|value| SelectEntry::item(value, format!("Option {value}")))
+                        .collect(),
+                )
+                .open(true)
+                .debug_selector("short-select")
+                .with_interaction_state(Rc::clone(&self.state))
+                .with_scroll_handle(self.scroll.clone()),
+            )
+        }
+    }
+    let (view, cx) = cx.add_window_view(|_, cx| PopupProbe {
+        focus: cx.focus_handle(),
+        state: Rc::default(),
+        scroll: gpui::ScrollHandle::new(),
+    });
+    cx.simulate_resize(gpui::size(px(320.0), px(220.0)));
+    cx.run_until_parked();
+    let content = cx.debug_bounds("short-select-content").unwrap();
+    assert!(content.top() >= px(0.0));
+    assert!(content.bottom() <= px(220.0));
+    cx.update(|window, app| {
+        let probe = view.read(app);
+        assert!(probe.scroll.max_offset().y > px(0.0));
+        probe.scroll.scroll_to_bottom();
+        window.refresh();
+    });
+    cx.run_until_parked();
+    let offset = cx.update(|_, app| view.read(app).scroll.offset());
+    assert!(offset.y < px(0.0));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    cx.update(|_, app| assert_eq!(view.read(app).scroll.offset(), offset));
 }

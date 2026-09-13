@@ -588,6 +588,7 @@ impl SettingsScreen {
         )
         .open(self.frame_rate_control.open)
         .with_interaction_state(self.frame_rate_control.interaction.clone())
+        .with_scroll_handle(self.frame_rate_control.scroll.clone())
         .debug_selector("settings-frame-rate-limit")
         .on_open_change(move |open, window, cx| on_open(&open, window, cx))
         .on_change(move |limit, _, window, cx| on_change(&limit, window, cx));
@@ -603,7 +604,13 @@ impl SettingsScreen {
                     theme,
                     "FPS limit",
                     "Limit animation and scrolling redraws. Unlimited follows your monitor's refresh rate.",
-                    Some(select.into_any_element()),
+                    Some(
+                        div()
+                            .w(px(144.0))
+                            .flex_shrink_0()
+                            .child(select)
+                            .into_any_element(),
+                    ),
                 )],
             ),
         )

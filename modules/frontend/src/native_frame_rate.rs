@@ -101,7 +101,7 @@ mod tests {
             app.set_global(FrameRatePreference {
                 limit: FrameRateLimit::default(),
                 path: Some(path.clone()),
-            })
+            });
         });
         let (_, cx) = cx.add_window_view(|_, cx| {
             crate::native_settings::SettingsScreen::new(
@@ -115,6 +115,7 @@ mod tests {
         cx.run_until_parked();
         for value in ["120", "Unlimited"] {
             let limit = FrameRateLimit::parse(value).unwrap();
+            let section_before = cx.debug_bounds("settings-section-performance").unwrap();
             let trigger = cx
                 .debug_bounds("settings-frame-rate-limit-trigger")
                 .expect("FPS select trigger");
@@ -124,6 +125,17 @@ mod tests {
                 cx.debug_bounds("settings-frame-rate-limit-content")
                     .is_some()
             );
+            let section_open = cx.debug_bounds("settings-section-performance").unwrap();
+            assert_eq!(
+                section_before, section_open,
+                "opening options must not resize the card"
+            );
+            let content = cx
+                .debug_bounds("settings-frame-rate-limit-content")
+                .unwrap();
+            assert!(content.top() >= gpui::px(0.0));
+            assert!(content.bottom() <= gpui::px(1800.0));
+            assert!(trigger.size.width <= gpui::px(144.0));
             if value == "120" {
                 cx.simulate_keystrokes("home down down enter");
             } else {

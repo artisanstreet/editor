@@ -61,5 +61,5 @@ invalidates it even when the revision string is unchanged. The preview reuses
 that projection instead of sorting and cloning the full harness list again.
 Interaction tests cover these invalidations and verify that harness transitions
 stop requesting frames after settling. These tests do not measure Windows GPU
-performance. The FPS overlay averages redraw arrivals, so gaps between separate
-short animations can depress its reading without representing a slow draw.
+performance. The FPS overlay samples scheduled animation and shows IDLE between
+animations, excluding gaps between independent event-driven redraws.
