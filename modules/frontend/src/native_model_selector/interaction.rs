@@ -22,12 +22,15 @@ impl NativeModelSelector {
         mode: ThemeMode,
         cx: &mut Context<Self>,
     ) -> Self {
+        let virtual_model_scroll = gpui::UniformListScrollHandle::new();
+        let menu_scroll = virtual_model_scroll.0.borrow().base_handle.clone();
         Self {
             state: NativeModelSelectorState::new(snapshot, policy),
             theme: ArtisanTheme::for_mode(mode),
             trigger_focus: cx.focus_handle().tab_index(1).tab_stop(true),
             menu_focus: cx.focus_handle(),
-            menu_scroll: ScrollHandle::new(),
+            menu_scroll,
+            virtual_model_scroll,
             axis_menu_scroll: ScrollHandle::new(),
             trigger_origin: Rc::new(RefCell::new(None)),
             menu_bounds: Rc::new(RefCell::new(None)),
@@ -702,8 +705,22 @@ impl NativeModelSelector {
     }
 
     fn reveal_highlight(&mut self) {
-        if let Some(index) = self.state.highlighted_index() {
-            self.menu_scroll.scroll_to_item(index);
+        let groups = self.state.model_groups();
+        let headers = groups.len() > 1 || groups.first().is_some_and(|group| group.id != "default");
+        let mut index = 0;
+        for group in groups.iter() {
+            index += usize::from(headers);
+            if self.state.group_collapsed(&group.id) {
+                continue;
+            }
+            for model in &group.models {
+                if Some(model.id.as_str()) == self.state.highlighted_model_id() {
+                    self.virtual_model_scroll
+                        .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+                    return;
+                }
+                index += 1;
+            }
         }
     }
 }

@@ -220,6 +220,7 @@ pub struct NativeModelSelectorState {
     open_axis: Option<NativePolicyAxis>,
     local_error: Option<String>,
     model_groups_cache: RefCell<Option<ModelGroupsCache>>,
+    collapsed_groups: std::collections::HashSet<(String, String)>,
 }
 
 /// Catalog projections survive animation frames; their inputs change only on interaction.
@@ -260,6 +261,7 @@ pub struct NativeModelSelector {
     trigger_focus: FocusHandle,
     menu_focus: FocusHandle,
     menu_scroll: ScrollHandle,
+    virtual_model_scroll: gpui::UniformListScrollHandle,
     axis_menu_scroll: ScrollHandle,
     trigger_origin: Rc<RefCell<Option<Point<Pixels>>>>,
     menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,

@@ -219,6 +219,7 @@ impl NativeModelSelectorState {
             open_axis: None,
             local_error: None,
             model_groups_cache: RefCell::new(None),
+            collapsed_groups: std::collections::HashSet::new(),
         };
         state.refresh_preview_and_highlight();
         state
@@ -438,10 +439,28 @@ impl NativeModelSelectorState {
         {
             return Rc::clone(&cached.groups);
         }
-        let groups: Rc<[_]> = self
-            .snapshot
-            .route_groups_for_engine(&self.active_engine, &self.query, selected_model_id)
-            .into();
+        let mut groups = self.snapshot.route_groups_for_engine(
+            &self.active_engine,
+            &self.query,
+            selected_model_id,
+        );
+        for group in &mut groups {
+            let mut families: Vec<NativeModelView> = Vec::new();
+            for model in std::mem::take(&mut group.models) {
+                if let Some(existing) = families
+                    .iter_mut()
+                    .find(|existing| same_model_family(existing, &model))
+                {
+                    if model.selected || (!existing.selected && model.variant_label.is_none()) {
+                        *existing = model;
+                    }
+                } else {
+                    families.push(model);
+                }
+            }
+            group.models = families;
+        }
+        let groups: Rc<[_]> = groups.into();
         *cache = Some(ModelGroupsCache {
             engine: self.active_engine.clone(),
             query: self.query.clone(),
@@ -449,6 +468,21 @@ impl NativeModelSelectorState {
             groups: Rc::clone(&groups),
         });
         groups
+    }
+
+    pub(super) fn group_collapsed(&self, id: &str) -> bool {
+        self.query.is_empty()
+            && self
+                .collapsed_groups
+                .contains(&(self.active_engine.clone(), id.to_owned()))
+    }
+
+    pub(super) fn toggle_group(&mut self, id: &str) {
+        let key = (self.active_engine.clone(), id.to_owned());
+        if !self.collapsed_groups.remove(&key) {
+            self.collapsed_groups.insert(key);
+        }
+        self.refresh_preview_and_highlight();
     }
 
     /// Returns the source-order index of the highlighted visible row.
@@ -676,8 +710,11 @@ impl NativeModelSelectorState {
     }
 
     fn visible_models(&self) -> Vec<NativeModelView> {
-        self.snapshot
-            .models_for_engine(&self.active_engine, &self.query, self.selected_model_id())
+        self.model_groups()
+            .iter()
+            .filter(|group| !self.group_collapsed(&group.id))
+            .flat_map(|group| group.models.iter().cloned())
+            .collect()
     }
 
     fn refresh_preview_and_highlight(&mut self) {

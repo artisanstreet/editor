@@ -901,3 +901,84 @@ fn harness_switch_animation_settles_without_rebuilding_catalog(cx: &mut gpui::Te
         });
     }
 }
+
+#[gpui::test]
+fn large_catalog_groups_variants_virtualizes_rows_and_collapses(cx: &mut gpui::TestAppContext) {
+    cx.update(|app| app.set_reduce_motion(true));
+    let mut catalog = NativeModelCatalog::offline().unwrap();
+    let template = catalog.manifest.models[0].clone();
+    catalog.manifest.models = vec![template.clone()];
+    for index in 0..300 {
+        for variant in [None, Some("low"), Some("high")] {
+            let mut model = template.clone();
+            model.id = format!("fixture-{index}-{}", variant.unwrap_or("default"));
+            model.name = format!("Model {index}");
+            model.native_model_id = format!("model-{index}");
+            model.native_selection = Some(artisan_catalog::NativeModelSelection {
+                model_id: model.native_model_id.clone(),
+                provider_route_id: "go".to_owned(),
+                variant_id: variant.map(str::to_owned),
+            });
+            catalog.manifest.models.push(model);
+        }
+    }
+    let (view, cx) =
+        cx.add_window_view(|_, cx| NativeModelSelector::new(catalog, None, ThemeMode::Dark, cx));
+    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.run_until_parked();
+    let trigger = cx
+        .debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR)
+        .unwrap();
+    cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = view.read(app);
+        let groups = picker.state.model_groups();
+        assert_eq!(
+            groups
+                .iter()
+                .find(|group| group.id == "go")
+                .unwrap()
+                .models
+                .len(),
+            300
+        );
+    });
+    assert!(
+        cx.debug_bounds("artisan-native-model-selector-row-fixture-299-default")
+            .is_none(),
+        "offscreen rows must not be rendered"
+    );
+    let engine_tab = cx
+        .debug_bounds("artisan-native-model-selector-engine-codex")
+        .unwrap();
+    let before_scroll = cx.update(|_, app| view.read(app).menu_scroll.offset());
+    cx.simulate_event(ScrollWheelEvent {
+        position: engine_tab.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(-120.0), px(-120.0))),
+        modifiers: gpui::Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.debug_bounds("artisan-native-model-selector-engine-codex")
+            .unwrap(),
+        engine_tab
+    );
+    cx.update(|_, app| assert_eq!(view.read(app).menu_scroll.offset(), before_scroll));
+    let header = cx.debug_bounds("model-group-go").unwrap();
+    cx.simulate_click(header.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|_, app| assert!(view.read(app).state.group_collapsed("go")));
+    assert!(
+        cx.debug_bounds("artisan-native-model-selector-row-fixture-0-default")
+            .is_none()
+    );
+    let header = cx.debug_bounds("model-group-go").unwrap();
+    cx.simulate_click(header.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("artisan-native-model-selector-row-fixture-0-default")
+            .is_some()
+    );
+}

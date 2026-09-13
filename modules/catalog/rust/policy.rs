@@ -603,6 +603,30 @@ impl NativeModelCatalog {
         rows
     }
 
+    /// Projects only variants of one routed model, avoiding full-catalog clones during preview redraws.
+    #[must_use]
+    pub fn variants_for_model(&self, model: &NativeModelView) -> Vec<NativeModelView> {
+        let route = model
+            .native_selection
+            .as_ref()
+            .map(|selection| selection.provider_route_id.as_str());
+        self.manifest
+            .models
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                candidate.harness == model.engine_id
+                    && candidate.native_model_id == model.native_model_id
+                    && candidate
+                        .native_selection
+                        .as_ref()
+                        .map(|selection| selection.provider_route_id.as_str())
+                        == route
+            })
+            .map(|(index, candidate)| self.model_view(candidate, index, Some(&model.id)))
+            .collect()
+    }
+
     /// Returns route-aware grouped rows for an engine.
     #[must_use]
     pub fn route_groups_for_engine(

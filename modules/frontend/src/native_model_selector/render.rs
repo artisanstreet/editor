@@ -9,9 +9,7 @@
 use super::*;
 
 use super::interaction::{option_tooltip_key, option_tooltip_text};
-use super::state::{
-    fallback_model_view, fallback_model_view_from_state, humanize_variant, same_model_family,
-};
+use super::state::{fallback_model_view, fallback_model_view_from_state, humanize_variant};
 
 #[path = "render/menu.rs"]
 mod menu;

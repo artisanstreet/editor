@@ -191,7 +191,7 @@ impl NativeModelSelector {
             .gap(px(4.0))
             .p(px(4.0))
             .rounded(px(10.0))
-            .overflow_x_scroll()
+            .overflow_x_hidden()
             .overflow_y_hidden()
             .scrollbar_width(px(0.0))
             .bg(source_control_gradient(&self.theme))

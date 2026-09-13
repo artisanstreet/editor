@@ -53,9 +53,7 @@ impl NativeModelSelector {
             .min_w(px(0.0))
             .h(px(MODEL_PANEL_HEIGHT_PX))
             .min_h(px(0.0))
-            .overflow_y_scroll()
-            .scrollbar_width(px(0.0))
-            .track_scroll(&self.menu_scroll)
+            .overflow_hidden()
             .child(surface_probe)
             .child(render_picker_hover_pill(
                 &self.theme,
@@ -70,46 +68,78 @@ impl NativeModelSelector {
         }
         let show_group_headers =
             groups.len() > 1 || groups.first().is_some_and(|group| group.id != "default");
-        let mut content = div()
-            .relative()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w(px(0.0))
-            .flex_shrink_0()
-            .gap(px(3.0))
-            .on_scroll_wheel(cx.listener(Self::handle_model_scroll_wheel));
-        for group in groups.iter() {
-            let mut section = div().flex().flex_col().gap(px(2.0));
+        let mut entries = Vec::new();
+        for (group_index, group) in groups.iter().enumerate() {
             if show_group_headers {
-                let header = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .rounded(px(10.0))
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(self.theme.colors.muted_foreground.to_paint())
-                    .child(
-                        icon(IconStyle::resolve(
-                            self.theme,
-                            AssetId::TABLER_CHEVRON_RIGHT,
-                            IconSize::Compact,
-                            IconTint::Muted,
-                        ))
-                        .size(px(14.0)),
-                    )
-                    .child(group.label.clone());
-                section = section.child(header);
+                entries.push((group_index, None));
             }
-            for model in &group.models {
-                section = section.child(self.render_model_row(model, cx));
+            if !self.state.group_collapsed(&group.id) {
+                entries.extend((0..group.models.len()).map(|index| (group_index, Some(index))));
             }
-            content = content.child(section);
         }
-        list = list.child(content);
+        let entity = cx.entity();
+        let virtual_list =
+            gpui::uniform_list("model-virtual-list", entries.len(), move |range, _, app| {
+                entity.update(app, |view, cx| {
+                    range
+                        .map(|index| {
+                            let (group_index, model_index) = entries[index];
+                            let group = &groups[group_index];
+                            let row = if let Some(model_index) = model_index {
+                                view.render_model_row(&group.models[model_index], cx)
+                                    .into_any_element()
+                            } else {
+                                let id = group.id.clone();
+                                div()
+                                    .id(format!("model-group-{}", group.id))
+                                    .debug_selector({
+                                        let id = format!("model-group-{}", group.id);
+                                        move || id.clone()
+                                    })
+                                    .h(px(MODEL_ROW_HEIGHT_PX))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .px(px(10.0))
+                                    .cursor_pointer()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(view.theme.colors.muted_foreground.to_paint())
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.state.toggle_group(&id);
+                                        view.model_hover.borrow_mut().clear_if_missing(&[]);
+                                        view.menu_scroll.set_offset(point(px(0.0), px(0.0)));
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        icon(IconStyle::resolve(
+                                            view.theme,
+                                            if view.state.group_collapsed(&group.id) {
+                                                AssetId::TABLER_CHEVRON_RIGHT
+                                            } else {
+                                                AssetId::TABLER_CHEVRON_DOWN
+                                            },
+                                            IconSize::Compact,
+                                            IconTint::Muted,
+                                        ))
+                                        .size(px(14.0)),
+                                    )
+                                    .child(group.label.clone())
+                                    .into_any_element()
+                            };
+                            div()
+                                .h(px(MODEL_ROW_HEIGHT_PX + 3.0))
+                                .w_full()
+                                .on_scroll_wheel(cx.listener(Self::handle_model_scroll_wheel))
+                                .child(row)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .track_scroll(&self.virtual_model_scroll)
+            .h(px(MODEL_PANEL_HEIGHT_PX))
+            .w_full();
+        list = list.child(virtual_list);
         let scroll = self.menu_scroll.clone();
         let top = self
             .theme
@@ -825,9 +855,8 @@ impl NativeModelSelector {
             NativePolicyAxis::Variant => self
                 .state
                 .snapshot()
-                .models_for_engine(&model.engine_id, "", Some(model.id.as_str()))
+                .variants_for_model(model)
                 .into_iter()
-                .filter(|candidate| same_model_family(model, candidate))
                 .map(|candidate| SelectorOption {
                     id: candidate.id.clone(),
                     label: candidate
