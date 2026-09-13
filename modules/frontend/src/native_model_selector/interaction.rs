@@ -248,6 +248,7 @@ impl NativeModelSelector {
     }
 
     fn begin_menu_open(&mut self, cx: &mut Context<Self>) {
+        cx.emit(NativeModelSelectorEvent::RefreshCatalog);
         if self.axis_menu_motion.borrow().phase() == PickerMenuPhase::Closing {
             self.axis_menu_motion.borrow_mut().hide();
             self.axis_menu_motion_axis = None;

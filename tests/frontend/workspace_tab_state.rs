@@ -1,7 +1,7 @@
 //! Direct tests for the dependency-free workspace tab state boundary.
 //!
 //! The source is loaded directly so these focused tests do not require shared
-//! module registration, Cargo, Bazel, or host/runtime dependencies.
+//! module registration, Cargo, or host/runtime dependencies.
 
 #[path = "../../modules/frontend/src/workspace_tab_state.rs"]
 mod workspace_tab_state;

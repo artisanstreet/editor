@@ -1,7 +1,4 @@
-/bazel-*
 /target/
-/.rules_rust_analyzer/
-/rust-project.json
 /.idea/
 /.vscode/
 *.user
@@ -15,3 +12,7 @@
 *.log
 *.sqlite3
 *.bin
+/result
+/result-*
+/.direnv/
+__pycache__/

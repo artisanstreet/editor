@@ -1,0 +1,20 @@
+[package]
+name = "artisan-screen-demo"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "screen-demo"
+path = "screen_demo.rs"
+
+[dependencies]
+artisan-domain = { path = "../../modules/domain" }
+artisan-frontend = { path = "../../modules/frontend" }
+artisan-ui = { path = "../../modules/ui" }
+gpui.workspace = true
+gpui_platform.workspace = true
+
+[lints]
+workspace = true

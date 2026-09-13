@@ -57,7 +57,7 @@ const fn embedded_anchor() -> Option<ReleaseAnchor> {
 }
 
 /// The trust posture of the running binary, derived from compile-time inputs:
-/// Bazel sets an explicit mode marker; Cargo falls back to its profile.
+/// Explicit mode markers take precedence over the Cargo profile.
 pub const fn build_trust() -> BuildTrust {
     if EXPLICIT_RELEASE_BUILD {
         BuildTrust::Release {

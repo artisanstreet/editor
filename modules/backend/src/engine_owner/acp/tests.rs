@@ -1134,3 +1134,31 @@ fn prompt_content_image_modes() {
         AcpError::InvalidContent
     );
 }
+
+#[test]
+fn generated_title_metadata_is_scoped_and_optional() {
+    let session = SessionId::parse("root", 128).unwrap();
+    let params = serde_json::json!({"sessionId":"root","update":{"sessionUpdate":"session_info_update","title":"List project files"}});
+    let update = parse_session_update(&params, &session, 128)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        update.update.summary_title().unwrap().as_str(),
+        "List project files"
+    );
+    let foreign = serde_json::json!({"sessionId":"child","update":{"sessionUpdate":"session_info_update","title":"Wrong thread"}});
+    assert!(
+        parse_session_update(&foreign, &session, 128)
+            .unwrap()
+            .is_none()
+    );
+    let other = serde_json::json!({"sessionId":"root","update":{"sessionUpdate":"tool_call","title":"Not a session title"}});
+    assert!(
+        parse_session_update(&other, &session, 128)
+            .unwrap()
+            .unwrap()
+            .update
+            .summary_title()
+            .is_none()
+    );
+}

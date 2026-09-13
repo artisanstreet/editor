@@ -1,5 +1,7 @@
 # Artisan Editor Rust port plan
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](runbooks/native-dev.md).
+
 ## Purpose
 
 Build a new native Artisan Editor repository in Rust. The repository will contain a GPUI desktop frontend and a standalone Rust backend (Forge), connected through an Artisan application protocol encoded with Cap'n Proto and carried directly over QUIC with Quinn. The backend owns SQLite through SeaORM.

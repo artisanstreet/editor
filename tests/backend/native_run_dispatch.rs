@@ -294,15 +294,24 @@ impl Drop for TempDatabase {
 }
 
 fn registered_fixture_program() -> PathBuf {
-    let mapping = std::env::var("ARTISAN_ENGINE_OWNER_FIXTURE")
-        .expect("ARTISAN_ENGINE_OWNER_FIXTURE must be set via rlocationpath");
-    let runfiles =
-        runfiles::Runfiles::create().expect("official runfiles discovery should succeed");
-    let path = runfiles::rlocation!(runfiles, mapping.as_str())
-        .unwrap_or_else(|| panic!("declared fixture artifact must resolve: {mapping}"));
+    let path = std::env::var_os("ARTISAN_ENGINE_OWNER_FIXTURE").map_or_else(
+        || {
+            let test = std::env::current_exe().expect("test executable path");
+            test.parent()
+                .expect("test output directory")
+                .parent()
+                .expect("Cargo profile directory")
+                .join("examples")
+                .join(format!(
+                    "engine-owner-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        },
+        std::path::PathBuf::from,
+    );
     assert!(
-        path.is_file(),
-        "declared fixture artifact must be a regular file: {}",
+        path.is_absolute() && path.is_file(),
+        "build fixture with cargo build -p artisan-backend --examples or set ARTISAN_ENGINE_OWNER_FIXTURE to an absolute file: {}",
         path.display()
     );
     path
@@ -3988,6 +3997,7 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
     )
     .await;
     let mut cursor1 = SubagentCommitCursor {
+        assistant_phase: artisan_domain::AssistantMessagePhase::Unspecified,
         scope: artisan_database::RunBatchScope {
             claimed: &claimed1,
             launched: &launched1,
@@ -4167,6 +4177,7 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
         .await
         .expect("second assistant batch should commit");
     let mut cursor2 = SubagentCommitCursor {
+        assistant_phase: artisan_domain::AssistantMessagePhase::Unspecified,
         scope: artisan_database::RunBatchScope {
             claimed: &claimed2,
             launched: &launched2,

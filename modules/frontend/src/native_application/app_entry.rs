@@ -4,6 +4,7 @@
 //! Extracted verbatim from `native_application.rs` during the phase-5 module
 //! split; the test-facing action binding was widened to `pub(super)`.
 
+use super::workspace::NativeWorkspace;
 use super::*;
 
 pub(super) fn bind_native_actions(cx: &mut App) {
@@ -13,6 +14,8 @@ pub(super) fn bind_native_actions(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("ctrl-shift-f12", ToggleFrameCounter, None),
+        KeyBinding::new("ctrl-shift-m", OpenMachines, Some(NATIVE_KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-m", OpenMachines, Some(NATIVE_KEY_CONTEXT)),
         KeyBinding::new("cmd-k", OpenCommandMenu, Some(NATIVE_KEY_CONTEXT)),
         KeyBinding::new("ctrl-k", OpenCommandMenu, Some(NATIVE_KEY_CONTEXT)),
         KeyBinding::new("tab", NextTabStop, Some(NATIVE_KEY_CONTEXT)),
@@ -22,14 +25,14 @@ pub(super) fn bind_native_actions(cx: &mut App) {
 
 fn request_app_shutdown(
     cx: &mut App,
-    service: Option<Arc<NativeTransportService>>,
+    services: Vec<Arc<NativeTransportService>>,
     shutdown_started: &Arc<AtomicBool>,
 ) {
     if shutdown_started.swap(true, Ordering::AcqRel) {
         return;
     }
     let task = cx.spawn(async move |cx| {
-        if let Some(service) = service {
+        for service in services {
             let timer_executor = cx.background_executor().clone();
             loop {
                 if service.is_finished() {
@@ -47,13 +50,12 @@ fn request_app_shutdown(
 }
 
 fn prepare_application_shutdown(
-    view: &Rc<RefCell<Option<Entity<NativeApplication>>>>,
+    view: &Rc<RefCell<Option<Entity<NativeWorkspace>>>>,
     cx: &mut App,
-) {
-    let view = view.borrow().clone();
-    if let Some(view) = view {
-        view.update(cx, NativeApplication::prepare_shutdown);
-    }
+) -> Vec<Arc<NativeTransportService>> {
+    view.borrow().clone().map_or_else(Vec::new, |view| {
+        view.update(cx, NativeWorkspace::prepare_shutdown)
+    })
 }
 
 /// Logs which GPU renderer backs the opened window.
@@ -79,6 +81,9 @@ fn report_renderer(_window: &mut Window) {}
 /// Launches the real native application window.
 #[must_use]
 pub fn run() -> ExitCode {
+    if let Some(code) = crate::native_hosts::headless() {
+        return code;
+    }
     let service = NativeTransportService::spawn().ok().map(Arc::new);
     let shutdown_started = Arc::new(AtomicBool::new(false));
     let launched = Rc::new(Cell::new(false));
@@ -96,21 +101,19 @@ pub fn run() -> ExitCode {
 
             bind_native_actions(cx);
 
-            let service_for_action = service.clone();
             let shutdown_for_action = Arc::clone(&shutdown_started);
             let view_for_action = Rc::clone(&application_view);
             cx.on_action(move |_: &Quit, cx| {
-                prepare_application_shutdown(&view_for_action, cx);
-                request_app_shutdown(cx, service_for_action.clone(), &shutdown_for_action);
+                let services = prepare_application_shutdown(&view_for_action, cx);
+                request_app_shutdown(cx, services, &shutdown_for_action);
             });
 
-            let service_for_close = service.clone();
             let shutdown_for_close = Arc::clone(&shutdown_started);
             let view_for_close = Rc::clone(&application_view);
             cx.on_window_closed(move |cx, _window_id| {
                 if cx.windows().is_empty() {
-                    prepare_application_shutdown(&view_for_close, cx);
-                    request_app_shutdown(cx, service_for_close.clone(), &shutdown_for_close);
+                    let services = prepare_application_shutdown(&view_for_close, cx);
+                    request_app_shutdown(cx, services, &shutdown_for_close);
                 }
             })
             .detach();
@@ -122,7 +125,15 @@ pub fn run() -> ExitCode {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some(WINDOW_TITLE.into()),
+                        title: Some(
+                            format!(
+                                "{WINDOW_TITLE} — {}",
+                                crate::native_hosts::label(
+                                    crate::native_hosts::selected_home().as_deref()
+                                )
+                            )
+                            .into(),
+                        ),
                         // CE keeps native resizing; desktop_shell supplies caption hit areas.
                         appears_transparent: true,
                         ..Default::default()
@@ -131,10 +142,20 @@ pub fn run() -> ExitCode {
                 },
                 move |window, cx| {
                     crate::native_frame_rate::initialize(window, cx);
-                    let view =
-                        cx.new(|view_cx| NativeApplication::new(service_for_view, window, view_cx));
+                    let view = cx.new(|view_cx| {
+                        NativeWorkspace::new(
+                            crate::native_hosts::selected_home(),
+                            service_for_view,
+                            window,
+                            view_cx,
+                        )
+                    });
                     view_for_registration.borrow_mut().replace(view.clone());
-                    view.update(cx, NativeApplication::start_polling);
+                    if std::env::args_os().any(|argument| argument == "--machines") {
+                        view.update(cx, |view, cx| {
+                            view.open_machines(window, cx);
+                        });
+                    }
                     frame_capture::start(window);
                     view
                 },
@@ -147,7 +168,7 @@ pub fn run() -> ExitCode {
                 }
                 cx.activate(true);
             } else {
-                request_app_shutdown(cx, service.clone(), &shutdown_started);
+                request_app_shutdown(cx, service.clone().into_iter().collect(), &shutdown_started);
             }
         });
 

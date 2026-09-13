@@ -1,7 +1,6 @@
 //! One-command native development installation.
 //!
-//! `bazel run //:dev` builds the Editor and Forge binaries through the
-//! authoritative Bazel graph, stages them into an isolated development
+//! `python3 scripts/dev.py` builds with Cargo and stages an isolated
 //! installation under `<workspace>/.dist/dev`, provisions that home through
 //! the existing CLI custody APIs (installation manifest, payload integrity,
 //! Forge credentials, native instance configuration), and launches the
@@ -22,15 +21,16 @@
 #![forbid(unsafe_code)]
 
 pub mod args;
+pub mod binaries;
 pub mod error;
 pub mod launch;
 pub mod manifest;
 pub mod paths;
 pub mod provision;
-pub mod runfiles;
 pub mod stage;
 
 pub use args::{Action, DevArgs, usage};
+pub use binaries::{BinarySet, locate_binaries, locate_in_dir};
 pub use error::DevError;
 pub use launch::{
     DEV_STARTUP_POLL_MS, DEV_STARTUP_TIMEOUT_MS, MAX_RECEIPT_TEXT, ReadinessReconcile,
@@ -52,10 +52,6 @@ pub use provision::{
     DEV_RUN_PROMPT_DELIVERY, DEV_RUN_QUEUE_CAPACITY, DEV_RUN_RETRY_BACKOFF_MS,
     DEV_RUN_SHUTDOWN_BUDGET_MS, DEV_RUN_STREAM_AFTER, InstanceOutcome, dev_listener_config,
     dev_run_config, provision_forge_home,
-};
-pub use runfiles::{
-    BinarySet, RUNFILES_DIR_ENV, RUNFILES_MANIFEST_ENV, find_in_manifest,
-    find_prefixed_in_manifest, locate_binaries, locate_in_dir, runfiles_candidates,
 };
 pub use stage::{
     DevLock, StageCounts, hash_file, stage_binaries, staged_relative_names, write_atomic,

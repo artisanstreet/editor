@@ -37,3 +37,27 @@ path = "../../tests/transport/request_correlation.rs"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "deadline"
+path = "../../tests/transport/deadline.rs"
+
+[[test]]
+name = "event_sequence"
+path = "../../tests/transport/event_sequence.rs"
+
+[[test]]
+name = "handshake"
+path = "../../tests/transport/handshake.rs"
+
+[[test]]
+name = "loopback"
+path = "../../tests/transport/loopback.rs"
+
+[[test]]
+name = "pinning"
+path = "../../tests/transport/pinning.rs"
+
+[[test]]
+name = "protocol_stream"
+path = "../../tests/transport/protocol_stream.rs"

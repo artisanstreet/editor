@@ -2,7 +2,7 @@
 //!
 //! The production module is path-linked deliberately: this packet does not
 //! edit shared frontend registration, so it can be checked with plain `rustc`
-//! and no Cargo, Bazel, notification, transport, or UI dependencies.
+//! and no Cargo, notification, transport, or UI dependencies.
 
 #[path = "../../modules/frontend/src/composer_action_failure.rs"]
 mod composer_action_failure;

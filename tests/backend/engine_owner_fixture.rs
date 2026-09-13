@@ -1,6 +1,6 @@
 //! TEST-ONLY engine-owner protocol child fixture.
 //!
-//! One ordinary `main` in a `testonly` Bazel `rust_binary`: no libtest
+//! One ordinary `main` in a `testonly` Cargo `rust_binary`: no libtest
 //! harness, no banner, never shipped. It implements nine frozen scenarios:
 //! six P0 first-wave readiness/health cases, one finite P4 transport
 //! prerequisite `prompt_text_then_terminal` that serves a bounded

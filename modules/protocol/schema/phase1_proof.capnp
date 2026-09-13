@@ -1,6 +1,6 @@
 # Phase 1 feasibility fixture only.
 #
-# This schema exists to prove that Bazel owns Cap'n Proto code generation as
+# This schema exists to prove that Cargo owns Cap'n Proto code generation as
 # an explicit hermetic action feeding Rust compilation inputs. It encodes no
 # product API decisions; the Phase 2 protocol design replaces or removes it.
 #

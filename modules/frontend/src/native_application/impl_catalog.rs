@@ -11,10 +11,15 @@ impl NativeApplication {
         // The Forge publishes a scope-free catalog snapshot (static baseline
         // plus live discovery) for surfaces without a thread-scoped runtime
         // read; fall back to the bundled manifest when it is absent.
-        let catalog = scope_free_catalog_snapshot().unwrap_or_else(|| {
-            NativeModelCatalog::offline()
-                .expect("the bundled model catalog is validated at the native boundary")
-        });
+        let catalog = self
+            .machine_home
+            .is_none()
+            .then(scope_free_catalog_snapshot)
+            .flatten()
+            .unwrap_or_else(|| {
+                NativeModelCatalog::offline()
+                    .expect("the bundled model catalog is validated at the native boundary")
+            });
         self.model_selector.update(cx, |selector, cx| {
             selector.set_snapshot(catalog, cx);
             selector.set_policy(None, cx);
@@ -114,18 +119,13 @@ impl NativeApplication {
         scope: &NativeCatalogScope,
         cx: &mut Context<Self>,
     ) {
-        let service = self.service.clone();
         if self.catalog_controller.catalog_request_needed(scope) {
             let command = NativeTransportCommand::ReadComposerCatalog {
                 thread_id: scope.thread_id.clone(),
                 profile_id: scope.profile_id.clone(),
                 generation: scope.generation,
             };
-            let outcome = service
-                .as_ref()
-                .map_or(Err(CommandSendError::Stopped), |service| {
-                    service.submit(command)
-                });
+            let outcome = self.submit_command(command);
             match outcome {
                 Ok(()) => {
                     if !self.catalog_controller.mark_catalog_admitted(scope) {
@@ -145,11 +145,7 @@ impl NativeApplication {
                 profile_id: scope.profile_id.clone(),
                 generation: scope.generation,
             };
-            let outcome = service
-                .as_ref()
-                .map_or(Err(CommandSendError::Stopped), |service| {
-                    service.submit(command)
-                });
+            let outcome = self.submit_command(command);
             match outcome {
                 Ok(()) => {
                     if !self.catalog_controller.mark_favorites_admitted(scope) {
@@ -216,24 +212,6 @@ impl NativeApplication {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
-        // A saved native configuration owns the independent probed/static
-        // path: never request managed OpenCode discovery or favorites for
-        // it. Clear an obsolete managed scope if one is selected, then
-        // restore the saved-policy projection and status after the reset;
-        // static admission comes from the probed usage verdict alone.
-        if let Some(config) = self.engine_settings.authoritative_config()
-            && !matches!(
-                config.selection(),
-                artisan_domain::EngineSelection::OpenCode2(_)
-            )
-        {
-            if self.catalog_controller.scope().is_some() {
-                self.reset_composer_catalog(cx);
-            }
-            self.sync_composer_model_policy(cx);
-            self.ensure_profile_usage(false, None, cx);
-            return;
-        }
         let profile = self
             .engine_settings
             .authoritative_config()
@@ -253,6 +231,8 @@ impl NativeApplication {
             return;
         };
         self.discover_composer_catalog(thread_id, profile_id, cx);
+        self.sync_composer_model_policy(cx);
+        self.ensure_profile_usage(false, None, cx);
     }
 
     pub(super) fn sync_composer_catalog_status(&mut self, cx: &mut Context<Self>) {

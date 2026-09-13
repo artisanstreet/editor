@@ -259,6 +259,7 @@ fn real_gpui_surface_scrolls_256_rows_and_restores_focus_after_pointer_activatio
             .picker
             .read(app)
             .trigger_focus()
+            .clone()
             .focus(window, app);
     });
     cx.run_until_parked();

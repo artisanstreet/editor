@@ -171,21 +171,27 @@ impl Drop for StreamTempRoot {
 
 /// Resolves the built Codex wire-fixture executable.
 fn stream_fixture_program() -> PathBuf {
-    if let Ok(path) = std::env::var("ARTISAN_CODEX_WIRE_FIXTURE") {
-        let mapping = PathBuf::from(&path);
-        let path = if mapping.is_absolute() {
-            mapping
-        } else {
-            let runfiles = runfiles::Runfiles::create().expect("runfiles discovery");
-            runfiles::rlocation!(runfiles, path.as_str()).expect("wire fixture runfile")
-        };
-        assert!(
-            path.is_file(),
-            "declared wire fixture must be a regular file"
-        );
-        return path;
-    }
-    panic!("wire fixture binary not found; set ARTISAN_CODEX_WIRE_FIXTURE");
+    let path = std::env::var_os("ARTISAN_CODEX_WIRE_FIXTURE").map_or_else(
+        || {
+            let test = std::env::current_exe().expect("test executable path");
+            test.parent()
+                .expect("test output directory")
+                .parent()
+                .expect("Cargo profile directory")
+                .join("examples")
+                .join(format!(
+                    "codex-wire-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        },
+        std::path::PathBuf::from,
+    );
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "build fixture with cargo build -p artisan-backend --examples or set ARTISAN_CODEX_WIRE_FIXTURE to an absolute file: {}",
+        path.display()
+    );
+    path
 }
 
 /// Copies the built fixture to a per-test executable whose basename names
@@ -1148,15 +1154,16 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
                 .expect("conversation items should read");
             let assistant = items
                 .iter()
-                .find(|item| {
+                .filter(|item| {
                     matches!(
                         item.item_kind,
                         artisan_database::entities::ConversationItemKind::AssistantMessage
                     )
                 })
+                .max_by_key(|item| item.ordinal)
                 .expect("assistant item must exist");
             assert!(
-                assistant.body.starts_with("hello wire\n\nburst-00 burst-01 "),
+                assistant.body.starts_with("burst-00 burst-01 "),
                 "the first coalesced threshold run must be durable, got {:?}",
                 assistant.body
             );

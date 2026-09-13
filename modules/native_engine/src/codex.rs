@@ -224,7 +224,11 @@ impl NativeCodexAuthority {
                     if entry.as_os_str().is_empty() {
                         continue;
                     }
-                    let candidate = entry.join(file_name);
+                    // npm and Nix expose CLI entry points through symlinks. Resolve
+                    // discovery candidates, then certify and retain the real file.
+                    let Ok(candidate) = std::fs::canonicalize(entry.join(file_name)) else {
+                        continue;
+                    };
                     if verify_regular_executable(&candidate).is_ok() {
                         return Ok(candidate);
                     }

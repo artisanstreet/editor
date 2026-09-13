@@ -31,8 +31,8 @@ pub const STRIPPED_DEV_HOME_ENV: &str = "ARTISAN_DEV_FORGE_HOME";
 /// Companion override stripped alongside [`STRIPPED_DEV_HOME_ENV`].
 pub const STRIPPED_DEV_READY_ENV: &str = "ARTISAN_DEV_FORGE_READY_FILE";
 
-/// Bazel workspace directory marker honored for the default dev directory.
-pub const WORKSPACE_ENV: &str = "BUILD_WORKSPACE_DIRECTORY";
+/// Explicit workspace directory override honored for the default dev directory.
+pub const WORKSPACE_ENV: &str = "ARTISAN_WORKSPACE_DIRECTORY";
 
 /// Dev-directory leaf holding the isolated installation.
 pub const DIST_DEV_LEAF: &str = ".dist/dev";

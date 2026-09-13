@@ -42,7 +42,6 @@ winapi-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
-runfiles = "0.3.0"
 
 [[test]]
 name = "activated_conversation_replay"
@@ -172,3 +171,63 @@ path = "../../tests/backend/engine_owner_fixture.rs"
 [[example]]
 name = "codex-wire-fixture"
 path = "../../tests/backend/codex_wire_fixture.rs"
+
+[[test]]
+name = "backend_agent_name_allocation_policy"
+path = "../../tests/backend/agent_name_allocation_policy.rs"
+
+[[test]]
+name = "backend_builtin_tool_capabilities_policy"
+path = "../../tests/backend/builtin_tool_capabilities_policy.rs"
+
+[[test]]
+name = "backend_graph_advancement_policy"
+path = "../../tests/backend/graph_advancement_policy.rs"
+
+[[test]]
+name = "backend_host_identity_policy"
+path = "../../tests/backend/host_identity_policy.rs"
+
+[[test]]
+name = "backend_host_suspend_detection_policy"
+path = "../../tests/backend/host_suspend_detection_policy.rs"
+
+[[test]]
+name = "backend_orchestration_intake_policy"
+path = "../../tests/backend/orchestration_intake_policy.rs"
+
+[[test]]
+name = "backend_credential_authority"
+path = "../../tests/backend/credential_authority.rs"
+
+[[test]]
+name = "backend_storage"
+path = "../../tests/backend/storage.rs"
+
+[[test]]
+name = "backend_product_telemetry_capture_policy"
+path = "../../tests/backend/product_telemetry_capture_policy.rs"
+
+[[test]]
+name = "backend_sqlite_write_retry_policy"
+path = "../../tests/backend/sqlite_write_retry_policy.rs"
+
+[[test]]
+name = "backend_telemetry_preferences_control_policy"
+path = "../../tests/backend/telemetry_preferences_control_policy.rs"
+
+[[test]]
+name = "backend_thread_liveness_policy"
+path = "../../tests/backend/thread_liveness_policy.rs"
+
+[[test]]
+name = "backend_thread_resource_quiescence_policy"
+path = "../../tests/backend/thread_resource_quiescence_policy.rs"
+
+[[test]]
+name = "backend_wake_lock_policy"
+path = "../../tests/backend/wake_lock_policy.rs"
+
+[[example]]
+name = "directory-controller-fixture"
+path = "../../tests/backend/directory_controller_fixture.rs"

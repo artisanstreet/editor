@@ -35,7 +35,7 @@ runtime, or browser.
 | Runtime-rendered SVG pipeline (Mermaid) | 1 (renderer-deferred, §5) |
 | CSS/data-URL SVG payloads | nested base64 `<image>` inside the two app icons only; favicon is empty `data:,` (§8) |
 | Packaging resources reaching into `src/lib/assets/**` | PNG/ICO only — no SVG packaging resource exists (§9) |
-| **Vendored assets** | **104 files / 104 manifest entries** |
+| **Vendored assets** | **103 files / 103 manifest entries** |
 
 Reachability axis: production builds stub five development-only surfaces
 (`modules/frontend/vite.config.ts` `development_only_surfaces()`):
@@ -315,7 +315,7 @@ Consequence: any future cleanup of `src/lib/assets/**` must keep
 literal paints among `fill`/`stroke`/`stop-color` attributes and style-block
 declarations (excluding `none`, `currentColor`, `inherit`, `url(...)`; ignoring
 subtrees of `<mask>`/`<clipPath>`) total ≤ 1, with no `<image>` and no gradient
-element present. The Bazel test re-derives and compares.
+element present. The Cargo test re-derives and compares.
 
 Legacy call sites record a *different* predicate: `EngineMark.monochrome` /
 `RepositoryMark.monochrome` mean "single-color logo that must invert with the
@@ -355,17 +355,17 @@ declares or imports `anyhow`.
   path, channel, reachability, classification, linked asset(s)).
 - `modules/assets/src/lib.rs` — typed `AssetId` lookup API exposing embedded SVG
   source and metadata; no npm/Svelte/browser/filesystem access at runtime.
-- `tests/assets/assets_validation.rs` — hermetic Bazel `rust_test` proving
+- `tests/assets/assets_validation.rs` — Cargo integration test proving
   manifest↔API set equality, ID uniqueness and grammar, normalized paths, XML/SVG
   root and viewBox well-formedness, recorded sha256 vs recomputed digest,
   monochrome re-derivation, license-file references, use-site closure (every
   static-vendored use resolves to a manifest entry and every entry is used), and
   representative metadata fixtures.
 
-Commands (Bazel authoritative):
+Commands (Cargo authoritative):
 
 ```text
-bazel test //tests/assets:assets_validation_test
-bazel build //modules/assets:assets
-cargo check -p artisan-assets --locked --offline   # supplement only
+cargo test --locked -p artisan-assets
+cargo build --locked -p artisan-assets
+cargo check -p artisan-assets --locked --offline
 ```

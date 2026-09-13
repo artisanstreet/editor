@@ -67,8 +67,7 @@ use std::time::{Duration, Instant};
 
 use artisan_protocol::{ConnectionId, FrameId, LocalCapability, ProtocolValueError};
 use artisan_transport::{
-    CancelHandle, DeadlineError, OperationKind, TransportError, bind_loopback_server,
-    run_with_deadline, shutdown,
+    CancelHandle, DeadlineError, OperationKind, TransportError, run_with_deadline, shutdown,
 };
 use quinn::{Connection, ConnectionError, Endpoint, ServerConfig, VarInt};
 use thiserror::Error;
@@ -89,6 +88,7 @@ const LISTENER_CLOSE_CODE: VarInt = VarInt::from_u32(0x01);
 /// Fixed secret-free reason paired with [`LISTENER_CLOSE_CODE`].
 const LISTENER_CLOSE_REASON: &[u8] = b"forge listener released";
 
+mod binding;
 #[cfg(test)]
 #[path = "../../../tests/backend/listener_configuration.rs"]
 mod listener_configuration;
@@ -427,72 +427,6 @@ pub struct ForgeListener {
 }
 
 impl ForgeListener {
-    /// Validates limits, applies the approved pending-peer bounds, and binds
-    /// the loopback endpoint.
-    ///
-    /// The supplied configuration keeps every caller-selected TLS and
-    /// established-transport setting; before binding, exactly three approved
-    /// pending-peer mutations are applied (`max_incoming(8)`,
-    /// `incoming_buffer_size(65_536)`,
-    /// `incoming_buffer_size_total(524_288)` — methods verified against the
-    /// pinned Quinn sources). They bound outstanding queued peers and their
-    /// buffered bytes; each queued peer's first packet and all other
-    /// allocation overhead are excluded, so this is not a total
-    /// endpoint-memory cap.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ListenerError::UnrepresentableLimits`] before binding when
-    /// any limit cannot produce a future instant, and
-    /// [`ListenerError::Bind`] when the loopback socket cannot be bound.
-    pub fn bind(
-        server_config: ServerConfig,
-        bootstrap: LocalCapability,
-        origin: Box<dyn CommandOrigin>,
-        limits: ListenerLimits,
-        admission_capacity: NonZeroU32,
-        requests_per_connection: NonZeroU32,
-    ) -> Result<Self, ListenerError> {
-        Self::bind_with_lifecycle(
-            server_config,
-            bootstrap,
-            origin,
-            limits,
-            admission_capacity,
-            requests_per_connection,
-            LifecycleController::new(),
-        )
-    }
-
-    /// Binds a listener with a crate-local lifecycle controller.
-    pub(crate) fn bind_with_lifecycle(
-        server_config: ServerConfig,
-        bootstrap: LocalCapability,
-        origin: Box<dyn CommandOrigin>,
-        limits: ListenerLimits,
-        admission_capacity: NonZeroU32,
-        requests_per_connection: NonZeroU32,
-        lifecycle: LifecycleController,
-    ) -> Result<Self, ListenerError> {
-        if !limits.representable() {
-            return Err(ListenerError::UnrepresentableLimits);
-        }
-
-        let bounded_config = apply_approved_pending_peer_limits(server_config);
-
-        let endpoint = bind_loopback_server(bounded_config).map_err(ListenerError::Bind)?;
-
-        Ok(Self {
-            endpoint,
-            authority: CredentialAuthority::new(bootstrap),
-            origin,
-            limits,
-            admission_remaining: admission_capacity.get(),
-            requests_per_connection,
-            lifecycle,
-        })
-    }
-
     /// Reads back the bound loopback address honestly.
     ///
     /// # Errors

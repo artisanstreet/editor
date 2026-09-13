@@ -487,3 +487,88 @@ impl Drop for TemporaryDatabase {
         }
     }
 }
+
+#[tokio::test]
+async fn generated_titles_survive_catalog_reads_and_preserve_manual_names() {
+    let (_, repository) = memory_repository().await;
+    attach_project(&repository).await;
+    for (id, initial, expected) in [
+        ("automatic-title", "New thread", "List project files"),
+        ("manual-title", "My chosen title", "My chosen title"),
+    ] {
+        repository
+            .create_thread(create_input(id, id, "project-1", initial, 200))
+            .await
+            .unwrap();
+        repository
+            .record_generated_thread_title(&thread_id(id), &title("List project files"))
+            .await
+            .unwrap();
+        let listing = repository
+            .list_threads(&project_id("project-1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            listing
+                .threads()
+                .iter()
+                .find(|thread| thread.thread_id == thread_id(id))
+                .unwrap()
+                .title
+                .as_str(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn first_message_fallback_does_not_block_the_harness_title() {
+    let (database, repository) = memory_repository().await;
+    attach_project(&repository).await;
+    repository
+        .create_thread(create_input(
+            "fallback",
+            "fallback",
+            "project-1",
+            "New thread",
+            200,
+        ))
+        .await
+        .unwrap();
+    entities::message::ActiveModel {
+        message_id: Set("first-message".to_owned()),
+        thread_id: Set("fallback".to_owned()),
+        ordinal: Set(0),
+        body: Set("Hello   do `ls`\n".to_owned()),
+        accepted_at_ms: Set(201),
+    }
+    .insert(&database)
+    .await
+    .unwrap();
+    let listing = repository
+        .list_threads(&project_id("project-1"))
+        .await
+        .unwrap();
+    assert_eq!(listing.threads()[0].title.as_str(), "Hello do `ls`");
+    assert_eq!(
+        entities::thread::Entity::find_by_id("fallback")
+            .one(&database)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "New thread"
+    );
+    repository
+        .record_generated_thread_title(&thread_id("fallback"), &title("List repository contents"))
+        .await
+        .unwrap();
+    let listing = repository
+        .list_threads(&project_id("project-1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        listing.threads()[0].title.as_str(),
+        "List repository contents"
+    );
+}

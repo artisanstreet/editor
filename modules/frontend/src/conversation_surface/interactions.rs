@@ -7,12 +7,51 @@
 use super::*;
 
 impl ConversationSurface {
+    pub(crate) fn set_composer_clearance(
+        &mut self,
+        window: gpui::WindowId,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if !height.is_finite() || height < 0.0 {
+            return;
+        }
+        if self
+            .composer_clearance
+            .get(&window)
+            .is_some_and(|old| (*old - height).abs() < 0.5)
+        {
+            return;
+        }
+        self.composer_clearance.insert(window, height);
+        cx.notify();
+    }
+
+    pub(crate) fn has_pending_messages(&self) -> bool {
+        !self.pending_messages.is_empty()
+    }
+
+    pub(crate) fn set_pending_messages(
+        &mut self,
+        rows: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.pending_messages != rows {
+            self.pending_messages = rows;
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     /// Creates a surface with keyboard-focusable transcript and disclosure
     /// handles. The surface starts with the supplied scene and no actions.
     #[must_use]
     pub fn new(scene: ConversationScene, theme_mode: ThemeMode, cx: &mut Context<Self>) -> Self {
         let navigator_markers = Rc::new(loaded_turn_navigator_markers(&scene));
         let mut surface = Self {
+            composer_clearance: HashMap::new(),
+            pending_messages: Vec::new(),
             scene,
             navigator_markers,
             transcript_window: RefCell::new(TranscriptWindowState::default()),

@@ -51,9 +51,13 @@ name = "dev_instance"
 path = "../../tests/native_dev/dev_instance.rs"
 
 [[test]]
-name = "dev_runfiles"
-path = "../../tests/native_dev/dev_runfiles.rs"
+name = "dev_binaries"
+path = "../../tests/native_dev/dev_binaries.rs"
 
 [[test]]
 name = "dev_stage"
 path = "../../tests/native_dev/dev_stage.rs"
+
+[[bin]]
+name = "forge-host"
+path = "src/forge_host.rs"

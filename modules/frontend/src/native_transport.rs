@@ -356,6 +356,16 @@ impl NativeCatalogController {
         true
     }
 
+    /// Requests refreshed capabilities while keeping the current snapshot visible.
+    pub fn refresh_catalog(&mut self) -> Option<NativeCatalogScope> {
+        if self.catalog_in_flight {
+            return None;
+        }
+        let scope = self.current_scope.clone()?;
+        self.catalog_phase = NativeCatalogPhase::Offline;
+        Some(scope)
+    }
+
     /// Returns the current failed scope for an explicit retry.
     #[must_use]
     pub fn retry_catalog(&self) -> Option<NativeCatalogScope> {

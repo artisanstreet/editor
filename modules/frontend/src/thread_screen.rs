@@ -746,6 +746,49 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn composer_clearance_keeps_the_last_message_reachable_after_resize(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("clearance-proof", EXPANDED_WIDE_CONTENT, cx)
+        });
+        let surface = cx.update(|_, app| {
+            let screen = view.read(app).screen.read(app);
+            screen.host.read(app).surface().clone()
+        });
+        cx.update(|_, app| {
+            surface.update(app, |surface, cx| {
+                surface
+                    .set_pending_messages(vec![("last line\n".repeat(40), "Sending…".into())], cx);
+            })
+        });
+        for (width, height) in [(500.0, 400.0), (900.0, 700.0), (500.0, 450.0)] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            cx.run_until_parked();
+            cx.update(|_, app| {
+                surface.update(app, |surface, cx| {
+                    let handle = surface.scroll_handle().clone();
+                    assert!(handle.max_offset().y > px(0.0));
+                    handle.set_offset(gpui::point(px(0.0), -handle.max_offset().y));
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            let spacer = cx
+                .debug_bounds("artisan-conversation-surface-end-space")
+                .expect("tail clearance");
+            let composer = cx
+                .debug_bounds(THREAD_SCREEN_COMPOSER_CARD_SELECTOR)
+                .expect("composer");
+            assert!(
+                spacer.top() + px(1.0) < composer.top(),
+                "last content must scroll above the card"
+            );
+            assert!(spacer.size.height >= composer.size.height + px(24.0));
+        }
+    }
+
     /// Clicks landing on the composer dock never route into the
     /// transcript: the dock paints and hit-tests in the mounted screen
     /// without queueing any surface scroll intent.

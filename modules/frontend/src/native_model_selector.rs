@@ -116,6 +116,8 @@ pub struct SetFavorite {
 )]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeModelSelectorEvent {
+    /// Refresh host capabilities when the menu opens.
+    RefreshCatalog,
     /// Request that the owner persist and apply a complete model policy.
     SelectPolicy(SelectPolicy),
     /// Request that the owner persist one favorite mutation.

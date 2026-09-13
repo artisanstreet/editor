@@ -674,6 +674,10 @@ async fn build_ledger_inserts(
 }
 
 /// Validates one declared change and stages its tentative effects.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one exhaustive change table stages atomic item and patch updates"
+)]
 async fn plan_change(
     transaction: &sea_orm::DatabaseTransaction,
     command: &CommitRunBatch<'_>,
@@ -683,6 +687,27 @@ async fn plan_change(
     let operated_at_ms = millis(command.operated_at);
     let launched = command.scope.launched;
     match change {
+        AssistantChange::Finish {
+            item_id,
+            expected_revision,
+            patch_id,
+        } => {
+            let target =
+                load_batch_target(transaction, command, item_id, *expected_revision).await?;
+            ensure_patch_vacant(transaction, patch_id.as_str()).await?;
+            let revision = next_revision("conversation_items", target.revision)?;
+            accumulator.patch_sequence =
+                next_counter(accumulator.patch_sequence, "patch sequence")?;
+            let mut row =
+                existing_item_row(&target, revision, target.body.clone(), operated_at_ms)?;
+            row.lifecycle = EntityLifecycle::Completed;
+            accumulator.patches.push(item_upsert_patch(
+                patch_id,
+                accumulator.patch_sequence,
+                &row,
+            ));
+            accumulator.items_to_update.push(row);
+        }
         AssistantChange::Start {
             item_id,
             phase,

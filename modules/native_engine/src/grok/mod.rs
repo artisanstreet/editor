@@ -26,7 +26,7 @@
 //! `[[test]] grok_discovery` / `[[test]] grok_probe` targets pointing at
 //! `tests/native_engine/grok_*.rs` (Cargo `[[test]]` entries in
 //! `modules/native_engine/Cargo.toml` and `rust_test` targets in a new
-//! `tests/native_engine/BUILD.bazel` following the `tests/cli` pattern).
+//! `modules/native_engine/Cargo.toml` following the `tests/cli` pattern).
 
 pub mod discovery;
 pub mod probe;

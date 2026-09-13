@@ -50,6 +50,7 @@ impl NativeApplication {
     }
 
     pub(super) fn sync_composer_controls(&mut self, cx: &mut Context<Self>) {
+        self.sync_local_sends(cx);
         let mut snapshot = self.composer_controls.read(cx).snapshot().clone();
         snapshot.send_ready =
             self.message_submission_is_admissible(cx) && self.composer.read(cx).send_ready();
@@ -62,6 +63,7 @@ impl NativeApplication {
                 && self.command_submission_is_available()
                 && self.composer.read(cx).capture_recall_target().is_some(),
         );
+        snapshot.pending_steering.clear();
         // Reference behavior (thread-composer.svelte:381-382, audit D4/C5):
         // Forge-held rows surface ONLY as pending-steering lip rows
         // (projected above) and refusals surface as the Dismiss failure
@@ -85,7 +87,11 @@ impl NativeApplication {
                 notice.id,
                 "Could not send message",
                 failure_note.clone().unwrap_or_else(|| {
-                    "Your draft is preserved. Check the connection and try again.".to_owned()
+                    match notice.failure.category {
+                        ServiceFailureCategory::Peer => "Forge could not accept this message. Your draft is preserved; review the model settings and try again.",
+                        ServiceFailureCategory::InvalidConfiguration => "The selected settings could not be used. Your draft is preserved; review the model settings and try again.",
+                        _ => "Your draft is preserved. Check the connection and try again.",
+                    }.to_owned()
                 }),
                 failure_retryable,
             )
@@ -186,8 +192,8 @@ impl NativeApplication {
     }
 
     /// Admits a first send on a thread without a persisted engine
-    /// configuration. Persistence is owned by selection time (the
-    /// proactive typed save in [`Self::handle_composer_model_event`]);
+    /// configuration. Selection-time saves are reused; an inherited default
+    /// is saved here before submitting the message.
     /// this gate never holds a send visibly for a save. The backend accept
     /// transaction snapshots durable settings and refuses unconfigured
     /// sends typed â€” never a silent queue â€” so the send proceeds whenever
@@ -216,8 +222,38 @@ impl NativeApplication {
         if let Some(engine_id) = displayed_engine.as_deref() {
             self.ensure_profile_usage(false, Some(engine_id), cx);
         }
-        if let Err(message) = self.first_send_config(cx) {
-            self.composer_model_run_error = Some(message);
+        let config = match self.first_send_config(cx) {
+            Ok(config) => config,
+            Err(message) => {
+                self.composer_model_run_error = Some(message);
+                self.sync_composer_controls(cx);
+                cx.notify();
+                return FirstSendAdmission::Held;
+            }
+        };
+        if self
+            .engine_settings
+            .pending_save()
+            .is_some_and(|(_, pending)| pending != &config)
+        {
+            self.composer_model_run_error = Some(
+                "The selected model settings are still saving. Your draft is preserved; try again once saving finishes.".to_owned(),
+            );
+            self.sync_composer_controls(cx);
+            cx.notify();
+            return FirstSendAdmission::Held;
+        }
+        // A default/inherited picker choice emits no selection event. Save
+        // it on the same ordered command stream before the first message.
+        // The message still appears optimistically without waiting for an ack.
+        if self.engine_settings.pending_save_request_id().is_none()
+            && let Some(thread) = self.selected_thread.clone()
+            && !self.submit_direct_save(thread, config)
+        {
+            self.composer_model_run_error = Some(
+                "Could not save the selected model settings. Your draft is preserved; try again."
+                    .to_owned(),
+            );
             self.sync_composer_controls(cx);
             cx.notify();
             return FirstSendAdmission::Held;
@@ -357,6 +393,7 @@ impl NativeApplication {
                     engine_label,
                     token,
                 });
+                self.stage_local_send();
             }
             Err(error) => {
                 self.reject_message_submission(token, command_failure(error), cx);
@@ -479,6 +516,7 @@ impl NativeApplication {
                     engine_label: retry_label,
                     token,
                 });
+                self.stage_local_send();
             }
             Err(CommandSendError::Busy) => {
                 self.finish_composer_submission(token, DraftDisposition::Retained, cx);
@@ -526,6 +564,8 @@ impl NativeApplication {
 
     pub(super) fn retain_message_flight(&mut self, cx: &mut Context<Self>) {
         if let Some(flight) = self.message_flight.take() {
+            self.optimistic_messages
+                .retain(|row| row.request != flight.request_id);
             self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
         }
         self.clear_message_retry();
@@ -574,6 +614,13 @@ impl NativeApplication {
             .message_flight
             .take()
             .expect("flight was checked above");
+        if let Some(row) = self
+            .optimistic_messages
+            .iter_mut()
+            .find(|row| row.request == receipt.request_id)
+        {
+            row.message = Some(receipt.message_id.clone());
+        }
         let message_id = receipt.message_id.clone();
         let steer_run_id = flight
             .steer_target
@@ -638,6 +685,8 @@ impl NativeApplication {
             .message_flight
             .take()
             .expect("flight was checked above");
+        self.optimistic_messages
+            .retain(|row| row.request != flight.request_id);
         self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
         self.message_retry = Some(NativeMessageRetry {
             thread_id: flight.thread_id,

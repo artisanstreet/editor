@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 mod certificates;
+pub mod hosts;
 mod keychain;
 mod storage;
 mod validation;

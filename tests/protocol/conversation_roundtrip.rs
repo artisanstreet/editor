@@ -1,7 +1,7 @@
 //! Phase 2 conversation replay raw-wire proof.
 //!
 //! Round-trips every conversation arm appended to `schema/artisan.capnp`
-//! through the Bazel-generated bindings (`artisan_protocol::artisan_capnp`):
+//! through the Cargo-generated bindings (`artisan_protocol::artisan_capnp`):
 //! the query, subscribe, and unsubscribe requests with bounded window/range
 //! reads and fresh/resume subscriptions; the snapshot, subscription-started,
 //! and subscription-stopped responses; the envelope-level patch-batch frame;
@@ -562,6 +562,9 @@ fn assert_full_snapshot_response(bytes: &[u8], message_id: &str) -> capnp::Resul
                     let items = snapshot.get_items()?;
                     assert_eq!(items.len(), 1);
                     match items.get(0).which()? {
+                        conversation_item::Which::MultimodalUserMessage(_) => {
+                            panic!("unexpected multimodal item in text fixture")
+                        }
                         conversation_item::Which::UserMessage(item) => {
                             assert_user_message(
                                 item?,
@@ -868,6 +871,9 @@ fn round_trips_upsert_patch_variants_in_one_batch() -> capnp::Result<()> {
                     assert_eq!(patch.get_patch_id()?, PATCH_ID_ITEM_UPSERT);
                     assert_eq!(patch.get_sequence(), 6);
                     match item?.which()? {
+                        conversation_item::Which::MultimodalUserMessage(_) => {
+                            panic!("unexpected multimodal item in text fixture")
+                        }
                         conversation_item::Which::UserMessage(message) => {
                             assert_user_message(
                                 message?,
@@ -1316,6 +1322,9 @@ fn duplicate_identity_snapshots_stay_representable() -> capnp::Result<()> {
                 assert_eq!(items.len(), 2);
                 for item in items {
                     match item.which()? {
+                        conversation_item::Which::MultimodalUserMessage(_) => {
+                            panic!("unexpected multimodal item in text fixture")
+                        }
                         conversation_item::Which::UserMessage(message) => {
                             assert_eq!(message?.get_item_id()?, ITEM_ID_A);
                         }
@@ -1387,6 +1396,9 @@ fn unknown_turn_reference_snapshot_stays_representable() -> capnp::Result<()> {
                 let items = snapshot.get_items()?;
                 assert_eq!(items.len(), 1);
                 match items.get(0).which()? {
+                    conversation_item::Which::MultimodalUserMessage(_) => {
+                        panic!("unexpected multimodal item in text fixture")
+                    }
                     conversation_item::Which::UserMessage(message) => {
                         let message = message?;
                         assert_eq!(message.get_item_id()?, ITEM_ID_B);

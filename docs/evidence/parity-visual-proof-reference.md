@@ -1,5 +1,7 @@
 # Parity visual-proof reference (worker lane)
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](../runbooks/native-dev.md).
+
 Scope: `NATIVE_VISUAL_PARITY_TASKLIST.md` visual-verification row only.
 No product, manifest, Svelte, vendor, backend, or generated file was touched.
 New files in this packet: `modules/frontend/src/parity_visual_proof.rs`

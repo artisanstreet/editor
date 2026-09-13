@@ -1,5 +1,7 @@
 # Phase 1 implementation packet: Quinn loopback proof
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](../../runbooks/native-dev.md).
+
 You are a bounded implementation worker in an isolated Git worktree. Do not spawn subagents.
 
 Read `docs/PLAN.md` completely and then read the reconnaissance report at `%TEMP%\artisan-editor-opencode-phase1-current\quic-capnp.report.md`. Treat the report as input, not authority: verify relevant APIs against installed crate sources or primary upstream sources.

@@ -34,3 +34,31 @@ workspace = true
 [[test]]
 name = "conversation"
 path = "../../tests/domain/conversation.rs"
+
+[[test]]
+name = "domain_identifiers"
+path = "../../tests/domain/identifiers.rs"
+
+[[test]]
+name = "domain_workspace_id"
+path = "../../tests/domain/workspace_id.rs"
+
+[[test]]
+name = "domain_text"
+path = "../../tests/domain/text.rs"
+
+[[test]]
+name = "domain_time"
+path = "../../tests/domain/time.rs"
+
+[[test]]
+name = "domain_workflow"
+path = "../../tests/domain/workflow.rs"
+
+[[test]]
+name = "domain_project_listing"
+path = "../../tests/domain/project_listing.rs"
+
+[[test]]
+name = "policy_dependencies"
+path = "../../tests/policy/dependencies.rs"

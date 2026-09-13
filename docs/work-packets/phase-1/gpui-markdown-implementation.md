@@ -1,5 +1,7 @@
 # Phase 1 implementation packet: upstream GPUI and Markdown engine proof
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](../../runbooks/native-dev.md).
+
 You are a bounded implementation worker in an isolated Git worktree. Do not spawn subagents.
 
 Read `docs/PLAN.md` completely, especially the first-party error-policy and streaming Markdown sections. Then read `%TEMP%\artisan-editor-opencode-phase1-current\bazel-gpui.report.md` as reconnaissance input rather than authority. Correct it where the current plan supersedes it.

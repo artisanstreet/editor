@@ -22,7 +22,7 @@ pub struct DevArgs {
     /// Explicit dev directory; defaults to `<workspace>/.dist/dev`.
     pub dev_dir: Option<PathBuf>,
     /// Explicit directory holding prebuilt `ae`/`editor`/`forge`/`installer`
-    /// binaries; defaults to the Bazel runfiles search.
+    /// binaries; defaults to the directory containing the launcher.
     pub bin_dir: Option<PathBuf>,
     /// Stage and provision only; do not launch the Editor.
     pub stage_only: bool,

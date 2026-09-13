@@ -23,7 +23,7 @@ use std::borrow::Borrow;
 /// as one arrives; a display surface that has the message evidence and not yet
 /// the refined listing applies the same replacement through
 /// [`refined_thread_title`].
-pub const UNNAMED_THREAD_TITLE: &str = "New task";
+pub const UNNAMED_THREAD_TITLE: &str = "New thread";
 
 /// The reader's preference for naming a thread.
 ///
@@ -192,7 +192,7 @@ pub fn refined_thread_title<'a>(
     latest_user_text: Option<&'a str>,
 ) -> &'a str {
     match latest_user_text {
-        Some(latest) if stored_title == UNNAMED_THREAD_TITLE => {
+        Some(latest) if matches!(stored_title, UNNAMED_THREAD_TITLE | "New task") => {
             let trimmed = latest.trim();
             if trimmed.is_empty() {
                 stored_title

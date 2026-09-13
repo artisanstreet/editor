@@ -598,6 +598,43 @@ pub(crate) async fn apply_event(
     usage: Option<&CodexUsageScope<'_>>,
 ) -> Option<TerminalState> {
     match event {
+        CodexEvent::AgentMessageSnapshot {
+            thread_id,
+            item_id,
+            text,
+            phase,
+        } => {
+            if tracker.native_thread_id() != Some(thread_id.as_str()) {
+                return None;
+            }
+            let snapshot = super::super::observation::TextSnapshot::new(
+                run_id.clone(),
+                frame_sequence,
+                item_id,
+                text,
+            )
+            .with_phase(phase);
+            if observations
+                .send(EngineObservation::TextSnapshot(snapshot))
+                .await
+                .is_err()
+            {
+                return Some(TerminalState::Interrupted);
+            }
+            None
+        }
+        CodexEvent::ThreadName { thread_id, title } => {
+            if tracker.native_thread_id() == Some(thread_id.as_str()) {
+                let _ = observations
+                    .send(EngineObservation::SummaryTitle {
+                        run_id: run_id.clone(),
+                        title,
+                    })
+                    .await;
+            }
+            None
+        }
+
         CodexEvent::AgentMessageDelta {
             item_id,
             turn_id,
@@ -943,4 +980,32 @@ pub(crate) fn terminal_observation(
     state: TerminalState,
 ) -> TerminalObservation {
     TerminalObservation::new(run_id.clone(), sequence, state, None, None)
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+    #[tokio::test]
+    async fn generated_title_ignores_other_native_threads() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let run = RunId::parse("title-run").unwrap();
+        let mut tracker = CodexPendingTracker::new();
+        tracker.bind_native_thread("root");
+        let mut active = None;
+        for thread in ["child", "root"] {
+            let frame = format!(
+                r#"{{"method":"thread/name/updated","params":{{"threadId":"{thread}","threadName":"List project files"}}}}"#
+            );
+            let event = super::super::protocol::parse_frame(&frame, 1).unwrap();
+            assert!(
+                apply_event(event, &run, &mut tracker, &mut active, &tx, 1, None)
+                    .await
+                    .is_none()
+            );
+        }
+        assert!(
+            matches!(rx.try_recv().unwrap(), EngineObservation::SummaryTitle { title, .. } if title.as_str() == "List project files")
+        );
+        assert!(rx.try_recv().is_err());
+    }
 }

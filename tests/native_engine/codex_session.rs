@@ -1,7 +1,7 @@
 //! Codex app-server session probe fixtures.
 //!
 //! Registration (controller-owned, not part of this packet):
-//! `tests/native_engine/BUILD.bazel` gains a `rust_test` target for
+//! `modules/native_engine/Cargo.toml` gains a `rust_test` target for
 //! `codex_session.rs` depending on `//modules/native_engine:native_engine`.
 //!
 //! The live exchange needs a real `codex` binary, so these tests drive the

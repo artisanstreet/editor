@@ -1,6 +1,6 @@
 //! Hermetic generator for the per-version payload integrity manifest.
 //!
-//! The action receives only explicitly declared Bazel files. It hashes those
+//! The action receives only explicitly declared Cargo files. It hashes those
 //! bytes, validates their canonical archive names, and serializes the same
 //! compact, lexically ordered JSON shape written by the installer staging
 //! code. It does not inspect a directory, runfiles tree, environment, or
@@ -9,6 +9,12 @@
 use std::{collections::BTreeMap, env, fmt::Write as _, fs, path::PathBuf, process};
 
 use sha2::{Digest, Sha256};
+
+#[derive(serde::Serialize)]
+struct PayloadManifest {
+    format_version: u8,
+    files: BTreeMap<String, String>,
+}
 
 const PAYLOAD_MANIFEST_NAME: &str = "payload-manifest.json";
 const SAFE_MEMBER_CHARS: &str =
@@ -82,10 +88,10 @@ fn run() -> Result<(), String> {
         return Err("at least one payload file must be declared".to_owned());
     }
 
-    let document = serde_json::json!({
-        "format_version": 1,
-        "files": files,
-    });
+    let document = PayloadManifest {
+        format_version: 1,
+        files,
+    };
     let bytes = serde_json::to_vec(&document)
         .map_err(|error| format!("serialize payload manifest: {error}"))?;
     fs::write(&config.output, bytes)
@@ -289,10 +295,10 @@ mod tests {
         for (member, bytes) in entries {
             add_digest(&mut files, &mut folded_names, member, bytes)?;
         }
-        serde_json::to_vec(&serde_json::json!({
-            "format_version": 1,
-            "files": files,
-        }))
+        serde_json::to_vec(&super::PayloadManifest {
+            format_version: 1,
+            files,
+        })
         .map_err(|error| error.to_string())
     }
 

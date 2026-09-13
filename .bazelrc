@@ -1,8 +1,0 @@
-common --enable_bzlmod
-common --announce_rc
-common --lockfile_mode=error
-
-build --incompatible_strict_action_env
-build --action_env=SYSTEMROOT
-
-test --test_output=errors

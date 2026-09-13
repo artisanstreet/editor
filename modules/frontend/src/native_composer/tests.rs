@@ -1213,3 +1213,23 @@ fn clicking_painted_placeholder_uses_editor_selection_surface(cx: &mut TestAppCo
         assert!(!composer.selection_reversed);
     });
 }
+
+#[gpui::test]
+fn eager_accept_removes_sent_images_without_clearing_new_typing(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+    cx.update(|_, app| {
+        view.update(app, |composer, cx| {
+            composer
+                .attachments
+                .push(ready_attachment("sent-image", &[1, 2, 3]));
+            composer.set_attachment_delivery_enabled(true, cx);
+            composer.set_draft("original");
+            let (_, token) = composer.begin_payload_submission().expect("send");
+            assert_eq!(composer.draft(), "");
+            composer.set_draft("new typing");
+            composer.finish_submission(token, DraftDisposition::Accepted, cx);
+            assert_eq!(composer.draft(), "new typing");
+            assert!(composer.attachments.is_empty());
+        });
+    });
+}

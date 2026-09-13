@@ -1,7 +1,7 @@
 //! Direct dependency-free parity tests for model policy-controls presentation.
 //!
 //! The production module is included by path so this harness exercises the
-//! public API without Cargo, Bazel, catalog registration, or UI dependencies.
+//! public API without Cargo, catalog registration, or UI dependencies.
 
 #[path = "../../modules/frontend/src/model_policy_controls_presentation.rs"]
 mod model_policy_controls_presentation;

@@ -159,6 +159,7 @@ struct ActiveFlight {
     /// the user truly touched. Starts `false` with each newly begun flight
     /// and is never inherited by a later one.
     changed_since_begin: bool,
+    eager: bool,
 }
 
 /// Toolkit-neutral state for one composer: its draft text plus the
@@ -312,8 +313,21 @@ impl ComposerState {
             token,
             body: text.to_owned(),
             changed_since_begin: false,
+            eager: false,
         });
         Ok(token)
+    }
+
+    pub(crate) fn submission_is_eager(&self) -> bool {
+        self.flight.as_ref().is_some_and(|flight| flight.eager)
+    }
+
+    /// Clears the submitted draft while retaining its exact rollback custody.
+    pub(crate) fn present_submission_eagerly(&mut self) {
+        if let Some(flight) = self.flight.as_mut() {
+            flight.eager = true;
+            self.draft.clear();
+        }
     }
 
     /// Ends exactly the flight identified by `token`, applying the given
@@ -339,6 +353,13 @@ impl ComposerState {
             return;
         };
 
+        if flight.eager && !flight.changed_since_begin {
+            if disposition == DraftDisposition::Retained {
+                self.draft = flight.body;
+            }
+            return;
+        }
+
         if disposition == DraftDisposition::Accepted
             && !flight.changed_since_begin
             && self.draft == flight.body.as_str()
@@ -359,6 +380,37 @@ mod multimodal_tests {
             vec![ImageAttachment::new("image/png", vec![1], "capture.png").expect("image")],
         )
         .expect("payload")
+    }
+
+    #[test]
+    fn eager_send_rolls_back_only_its_untouched_draft() {
+        for disposition in [DraftDisposition::Accepted, DraftDisposition::Retained] {
+            let mut composer = ComposerState::new();
+            composer.set_draft("original");
+            let (_, token) = composer.begin_submission().unwrap();
+            composer.present_submission_eagerly();
+            assert_eq!(composer.draft(), "");
+            composer.finish_submission(token, disposition);
+            assert_eq!(
+                composer.draft(),
+                if disposition == DraftDisposition::Retained {
+                    "original"
+                } else {
+                    ""
+                }
+            );
+            composer.set_draft("next");
+            let (_, next) = composer.begin_submission().unwrap();
+            composer.present_submission_eagerly();
+            composer.set_draft("new typing");
+            composer.finish_submission(token, disposition);
+            assert!(
+                composer.is_submitting(),
+                "stale completion must not end a newer send"
+            );
+            composer.finish_submission(next, disposition);
+            assert_eq!(composer.draft(), "new typing");
+        }
     }
 
     #[test]

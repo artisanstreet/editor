@@ -297,6 +297,15 @@ impl NativeApplication {
     }
 
     pub(super) fn submit_intake_command(&mut self, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        if !self.intake_retry_available {
+            if let Some(distribution) =
+                crate::native_hosts::presentation(self.machine_home.as_deref()).wsl_distribution
+            {
+                self.choose_wsl_project(distribution, cx);
+                return;
+            }
+        }
         let retryable = self.intake_retry_available;
         match self.submit_command(intake_command(retryable)) {
             Ok(()) => {

@@ -121,7 +121,11 @@ impl NativeApplication {
             application.observe_composer_change(&composer, cx);
         });
         let command_menu = cx.new(|menu_cx| {
-            NativeCommandMenu::new(vec![CommandMenuGroup::actions()], ThemeMode::Dark, menu_cx)
+            NativeCommandMenu::new(
+                vec![CommandMenuGroup::actions(), crate::native_hosts::group()],
+                ThemeMode::Dark,
+                menu_cx,
+            )
         });
         let command_menu_observation = cx.observe(&command_menu, |application, menu, cx| {
             application.route_command_action(&menu, cx);
@@ -134,6 +138,10 @@ impl NativeApplication {
             .filter(|name| !name.is_empty())
             .or_else(|| profile_hostname.clone());
         let mut application = Self {
+            machine_error: None,
+            machine_home: None,
+            machine_label: "This computer".into(),
+            machine_menu: impl_machines::MachineMenu::new(cx),
             theme: ArtisanTheme::for_mode(ThemeMode::Dark),
             desktop_theme: DesktopTheme::neutral_dark(),
             focus_handle,
@@ -147,6 +155,7 @@ impl NativeApplication {
             composer_controls,
             model_selector,
             composer_model_choice: None,
+            deferred_composer_policy: None,
             composer_model_run_error: None,
             pending_failed_recovery: None,
             catalog_controller: NativeCatalogController::new(),
@@ -162,7 +171,6 @@ impl NativeApplication {
             ]),
             profile_focus: cx.focus_handle(),
             profile_origin: Rc::new(Cell::new(Bounds::default())),
-            profile_picture: None,
             profile_name,
             profile_hostname,
             profile_usage: NativeProfileUsageState::default(),
@@ -190,6 +198,7 @@ impl NativeApplication {
             sidebar_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             sidebar_hover_surface_bounds: Rc::new(RefCell::new(None)),
             message_flight: None,
+            optimistic_messages: Vec::new(),
             message_retry: None,
             message_receipt: None,
             message_failure: None,
@@ -250,18 +259,6 @@ impl NativeApplication {
         });
         application.sync_command_menu_groups(cx);
         application.sync_composer_availability(cx);
-        #[cfg(not(test))]
-        cx.spawn(async move |view, cx| {
-            let picture = cx
-                .background_executor()
-                .spawn(async { crate::shell::local_account_picture() })
-                .await;
-            let _ = view.update(cx, |app, cx| {
-                app.profile_picture = picture;
-                cx.notify();
-            });
-        })
-        .detach();
         // The Forge publishes its scope-free catalog snapshot shortly after it
         // starts (discovery warms in the background); its first discovery is
         // cold, so an older snapshot may already exist on disk. Watch through
@@ -287,7 +284,7 @@ impl NativeApplication {
                 }
                 applied = Some(revision);
                 let _ = view.update(cx, |app, cx| {
-                    if app.selected_thread.is_none() {
+                    if app.machine_home.is_none() && app.selected_thread.is_none() {
                         app.reset_model_selector_offline(cx);
                         cx.notify();
                     }

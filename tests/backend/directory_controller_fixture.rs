@@ -1,6 +1,6 @@
 //! TEST-ONLY directory-controller protocol child fixture.
 //!
-//! One ordinary `main` in a `testonly` Bazel `rust_binary`: no libtest
+//! One ordinary `main` in a `testonly` Cargo `rust_binary`: no libtest
 //! harness, no banner, never shipped. It path-links the ACTUAL shared
 //! private codec (`directory_helper_codec.rs`) so both wire directions are
 //! proven against the single real encoder/decoder, and it speaks the exact

@@ -1,0 +1,95 @@
+name: Cargo and Nix
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux-checks:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [rustfmt, nixfmt, workflows, python, file-sizes, codegen, registration, clippy, tests, packaging, visual-fixtures, doc-tests, remote-hosts]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            max-jobs = 1
+            cores = 2
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          skipPush: true
+      - run: nix build -L .#checks.x86_64-linux.${{ matrix.check }} --no-link
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - run: rustup show
+      - run: cargo fmt --all -- --check
+      - run: python scripts/audit_rust_target_registration.py
+      - run: cargo clippy --locked --workspace --all-targets --features artisan-frontend/visual-proof
+      - run: cargo build --locked --workspace --bins --examples --features artisan-frontend/visual-proof
+      - run: python scripts/check.py --tests-only --bin-dir target/debug
+      - run: cargo test --locked --workspace --doc
+  packages:
+    needs: [linux-checks, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            max-jobs = 1
+            cores = 2
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        if: vars.CACHIX_CACHE != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          skipPush: true
+      - name: Build exact unsigned artifacts
+        run: |
+          nix build -L .#nix-payload --out-link result-payload
+          nix build -L .#unsigned-release --out-link result-manifest
+          nix build -L .#closure --out-link result-closure
+          nix build -L .#dev-dependencies --out-link result-dev-deps
+          nix build -L .#release-dependencies --out-link result-release-deps
+          mkdir artifacts
+          cp -L result-payload artifacts/artisan-nix-payload.zip
+          cp -L result-manifest artifacts/unsigned-release.json
+          mapfile -t closure_paths < result-closure/store-paths
+          nix-store --export "${closure_paths[@]}" > artifacts/artisan-linux.nar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: artisan-linux-x64-nix-unsigned
+          path: artifacts/
+          if-no-files-found: error
+      - name: Cache successful outputs from the default branch
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && vars.CACHIX_CACHE != ''
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_CACHE: ${{ vars.CACHIX_CACHE }}
+        run: |
+          test -n "$CACHIX_AUTH_TOKEN"
+          nix path-info --recursive ./result-payload ./result-manifest ./result-closure ./result-dev-deps ./result-release-deps | cachix push "$CACHIX_CACHE"

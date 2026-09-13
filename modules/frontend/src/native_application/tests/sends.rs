@@ -357,7 +357,7 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
 }
 
 #[gpui::test]
-fn queued_rows_surface_as_lip_without_banner_copy(cx: &mut TestAppContext) {
+fn queued_rows_surface_in_timeline_with_dispatch_diagnostics(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("queued-unconfigured-task").expect("thread");
     let (view, cx) =
         cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
@@ -411,8 +411,17 @@ fn queued_rows_surface_as_lip_without_banner_copy(cx: &mut TestAppContext) {
             // Reference C5: entries present surface as lip rows only.
             // No count/status banner copy exists anymore, while the
             // dispatcher's diagnostic stays recorded on the queue entry.
-            assert_eq!(snapshot.pending_steering.len(), 1);
-            assert_eq!(snapshot.pending_steering[0].text, "queued text");
+            assert!(snapshot.pending_steering.is_empty());
+            assert!(
+                application
+                    .conversation_host
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .surface()
+                    .read(cx)
+                    .has_pending_messages()
+            );
             assert_eq!(
                 application.composer_queue.state.entries()[0].dispatch_error(),
                 Some("engine unconfigured")
@@ -463,7 +472,7 @@ fn save_ack_seats_config_without_touching_the_unheld_send(cx: &mut TestAppContex
             );
             assert!(application.engine_settings.authoritative_config().is_some());
             assert!(application.composer_model_run_error.is_none());
-            assert_eq!(application.composer.read(cx).draft(), "keep my draft");
+            assert_eq!(application.composer.read(cx).draft(), "");
         });
     });
     let commands = commands.borrow();
@@ -521,7 +530,7 @@ fn save_failure_does_not_hold_the_first_send(cx: &mut TestAppContext) {
                 .expect("send not held by save failure");
             assert_eq!(flight.thread_id, thread_id);
             assert!(application.composer.read(cx).is_submitting());
-            assert_eq!(application.composer.read(cx).draft(), "keep my draft");
+            assert_eq!(application.composer.read(cx).draft(), "");
         });
     });
     // The unheld send queued despite the failed save. The admitted
@@ -879,7 +888,7 @@ fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
                     .snapshot()
                     .pending_steering
                     .len(),
-                1
+                0
             );
             // Canonical snapshot baseline, then the echo: the item id
             // differs from the message id on purpose.
@@ -1818,4 +1827,147 @@ fn each_new_message_submission_mints_a_fresh_request_id() {
     assert_ne!(first, second);
     assert!(first.as_str().starts_with("native-message-"));
     assert!(second.as_str().starts_with("native-message-"));
+}
+
+#[gpui::test]
+fn first_send_persists_displayed_one_million_window_before_queueing(cx: &mut TestAppContext) {
+    let thread = ThreadId::parse("default-extended-window").unwrap();
+    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (sink, commands) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            install_ready_message_surface(application, cx, thread.clone(), "Hello", sink);
+            admit_probed_codex_usage(application, cx);
+            let mut policy = application
+                .model_selector
+                .read(cx)
+                .state()
+                .snapshot()
+                .selection_policy_for_model("codex-sol")
+                .unwrap();
+            policy.context_window = Some(crate::native_model_catalog::NativeContextSelection {
+                id: "extended".to_owned(),
+                native_suffix: "1m".to_owned(),
+                native_config: Some(crate::native_model_catalog::NativeContextConfig {
+                    model_context_window: 1_050_000,
+                }),
+            });
+            application.composer_model_choice = Some((Some(thread), policy));
+            application.begin_message_submission(cx);
+            assert!(application.message_flight.is_some(), "send should be eager");
+        })
+    });
+    let commands = commands.borrow();
+    let save = commands
+        .iter()
+        .position(|command| matches!(command, NativeTransportCommand::SetThreadEngineConfig(_)))
+        .expect("default choice must be saved");
+    let queue = commands
+        .iter()
+        .position(|command| matches!(command, NativeTransportCommand::QueueMessage(_)))
+        .unwrap();
+    assert!(save < queue);
+    let NativeTransportCommand::SetThreadEngineConfig(command) = &commands[save] else {
+        unreachable!()
+    };
+    let artisan_domain::EngineSelection::Codex(selection) = command.config().selection() else {
+        unreachable!()
+    };
+    assert_eq!(selection.model_context_window().unwrap().get(), 1_050_000);
+}
+
+#[gpui::test]
+fn context_change_during_save_is_persisted_after_ack(cx: &mut TestAppContext) {
+    let thread = ThreadId::parse("coalesced-context").unwrap();
+    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (sink, commands) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            install_ready_message_surface(application, cx, thread.clone(), "Hello", sink);
+            admit_probed_codex_usage(application, cx);
+            let base = application
+                .model_selector
+                .read(cx)
+                .state()
+                .snapshot()
+                .selection_policy_for_model("codex-sol")
+                .unwrap();
+            application.handle_composer_model_event(
+                &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(base.clone()),
+                cx,
+            );
+            let first_request = admitted_save_request(application);
+            let first_config = application
+                .engine_settings
+                .pending_save()
+                .unwrap()
+                .1
+                .clone();
+            let mut extended = base;
+            extended.context_window = Some(crate::native_model_catalog::NativeContextSelection {
+                id: "extended".to_owned(),
+                native_suffix: "1m".to_owned(),
+                native_config: Some(crate::native_model_catalog::NativeContextConfig {
+                    model_context_window: 1_050_000,
+                }),
+            });
+            application.handle_composer_model_event(
+                &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(extended),
+                cx,
+            );
+            application.begin_message_submission(cx);
+            assert!(
+                application.message_flight.is_none(),
+                "must not run the superseded base configuration"
+            );
+            assert_eq!(application.composer.read(cx).draft(), "Hello");
+            application.handle_engine_config_set(
+                &artisan_protocol::SetThreadEngineConfigResult {
+                    request_id: first_request,
+                    thread_id: thread.clone(),
+                    revision: artisan_domain::EngineConfigRevision::new(1).unwrap(),
+                    disposition: artisan_domain::ReceiptDisposition::Accepted,
+                },
+                first_config,
+                cx,
+            );
+            let next_request = admitted_save_request(application);
+            let next_config = application
+                .engine_settings
+                .pending_save()
+                .expect("latest choice is saved after ack")
+                .1
+                .clone();
+            let artisan_domain::EngineSelection::Codex(selection) = next_config.selection() else {
+                unreachable!()
+            };
+            assert_eq!(selection.model_context_window().unwrap().get(), 1_050_000);
+            application.handle_engine_config_set(
+                &artisan_protocol::SetThreadEngineConfigResult {
+                    request_id: next_request,
+                    thread_id: thread.clone(),
+                    revision: artisan_domain::EngineConfigRevision::new(2).unwrap(),
+                    disposition: artisan_domain::ReceiptDisposition::Accepted,
+                },
+                next_config.clone(),
+                cx,
+            );
+            assert!(
+                application.engine_settings.pending_save().is_none(),
+                "ack must not cause a save loop"
+            );
+            assert_eq!(
+                application.engine_settings.authoritative_config(),
+                Some(&next_config)
+            );
+        })
+    });
+    assert_eq!(
+        commands
+            .borrow()
+            .iter()
+            .filter(|command| matches!(command, NativeTransportCommand::SetThreadEngineConfig(_)))
+            .count(),
+        2
+    );
 }

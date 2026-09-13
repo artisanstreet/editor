@@ -1,5 +1,7 @@
 # Native engine first workflow — architecture and packet plan
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](../runbooks/native-dev.md).
+
 Status: architecture plan authored 2026-08-26 against immutable HEAD
 `e9bb11888d2e6225d6679962ddb0f8ced4e3ca55`. This document designs the
 smallest coherent real first workflow — one real assistant turn with a

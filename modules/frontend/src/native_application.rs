@@ -45,16 +45,16 @@ use gpui::Focusable as _;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
     FocusHandle, FontWeight, HighlightStyle, KeyBinding, Render, ScrollHandle, ScrollWheelEvent,
-    SharedString, Stateful, StatefulInteractiveElement, StyledImage as _, StyledText, Subscription,
-    Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, canvas, div,
+    SharedString, Stateful, StatefulInteractiveElement, StyledText, Subscription, Task,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, canvas, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
 };
 
 use crate::composer::{DraftDisposition, SubmissionToken};
 use crate::desktop_shell::{
-    DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, DesktopShellStyle, desktop_muted,
-    desktop_nav_glyph, desktop_shell,
+    DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, DesktopShellStyle, desktop_nav_glyph,
+    desktop_shell,
 };
 use crate::editor_route_screen::{EditorScreen, EditorScreenIdentity, EditorSurfaceState};
 use crate::home_project_picker::{
@@ -149,6 +149,11 @@ mod presentation;
 
 #[path = "native_application/impl_lifecycle.rs"]
 mod impl_lifecycle;
+mod impl_machines;
+mod machine_submenu;
+mod workspace;
+#[cfg(windows)]
+mod wsl_project_picker;
 
 #[path = "native_application/impl_profile_menu.rs"]
 mod impl_profile_menu;
@@ -256,6 +261,7 @@ actions!(
         NextTabStop,
         PreviousTabStop,
         OpenCommandMenu,
+        OpenMachines,
         ToggleFrameCounter
     ]
 );
@@ -301,6 +307,10 @@ type ProfileTipAnchor = Option<((String, String), HoverRect)>;
     reason = "independent window, sidebar, and profile flags are tracked separately by the paint tree; packing them would conflate distinct render states"
 )]
 pub struct NativeApplication {
+    machine_error: Option<String>,
+    machine_home: Option<std::path::PathBuf>,
+    machine_label: String,
+    machine_menu: impl_machines::MachineMenu,
     theme: ArtisanTheme,
     desktop_theme: DesktopTheme,
     focus_handle: FocusHandle,
@@ -313,6 +323,7 @@ pub struct NativeApplication {
     composer_queue: composer_queue_application::QueueApplicationState,
     composer_controls: Entity<NativeComposerControls>,
     model_selector: Entity<NativeModelSelector>,
+    deferred_composer_policy: Option<(ThreadId, crate::native_model_selector::SelectPolicy)>,
     composer_model_choice: Option<(
         Option<ThreadId>,
         crate::native_model_catalog::NativeModelPolicy,
@@ -329,7 +340,6 @@ pub struct NativeApplication {
     profile_menu: DropdownMenuState,
     profile_focus: FocusHandle,
     profile_origin: Rc<Cell<Bounds<gpui::Pixels>>>,
-    profile_picture: Option<std::path::PathBuf>,
     profile_name: Option<String>,
     profile_hostname: Option<String>,
     profile_usage: NativeProfileUsageState,
@@ -370,6 +380,7 @@ pub struct NativeApplication {
     sidebar_hover: Rc<RefCell<SlidingHoverState>>,
     sidebar_hover_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     message_flight: Option<NativeMessageFlight>,
+    optimistic_messages: Vec<optimistic_messages::LocalSend>,
     message_retry: Option<NativeMessageRetry>,
     message_receipt: Option<QueueMessageReceipt>,
     message_failure: Option<NativeMessageFailure>,
@@ -462,3 +473,5 @@ mod composer_queue_application;
 
 #[path = "native_application/impl_sidebar_threads.rs"]
 mod impl_sidebar_threads;
+
+mod optimistic_messages;

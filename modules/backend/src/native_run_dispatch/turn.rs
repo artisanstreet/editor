@@ -73,6 +73,11 @@ pub(super) struct TurnConsumptionState<'a> {
     pub(super) assistant_revision: Revision,
     pub(super) assistant_parts: OrderedAssistantText,
     pub(super) assistant_body: String,
+    pub(super) assistant_phase: AssistantMessagePhase,
+    pub(super) active_part: Option<String>,
+    pub(super) last_part: Option<String>,
+    pub(super) parked_parts:
+        std::collections::BTreeMap<String, super::message_parts::MessageCursor>,
     /// Byte-exact append fragments waiting for one coalesced batch commit.
     pub(super) coalescer: DeltaCoalescer,
     pub(super) last_usage: Option<artisan_domain::RunUsageReport>,
@@ -93,6 +98,10 @@ impl<'a> TurnConsumptionState<'a> {
             assistant_revision: Revision::new(0),
             assistant_parts: OrderedAssistantText::default(),
             assistant_body: String::new(),
+            assistant_phase: AssistantMessagePhase::Unspecified,
+            active_part: None,
+            last_part: None,
+            parked_parts: std::collections::BTreeMap::new(),
             coalescer: DeltaCoalescer::default(),
             last_usage: None,
             streaming_speed: super::streaming_speed::StreamingSpeed::default(),
@@ -194,6 +203,9 @@ pub(super) async fn consume_turn(
     // settlement: an abort, an owner failure, or a held stream must not drop
     // bytes that a per-delta commit would already have written.
     let _ = flush_pending_deltas(&context, &mut state, &mut turn).await;
+    if !state.progress_uncertain {
+        let _ = super::message_parts::finish_history(&context, &mut state, &mut turn).await;
+    }
     let owner_result = turn.finish().await;
     if is_unresolved_reap(&owner_result) {
         return true;
@@ -250,6 +262,18 @@ pub(super) async fn handle_observation(
     observation: EngineObservation,
 ) {
     match observation {
+        EngineObservation::SummaryTitle { run_id, title } => {
+            if run_id == state.scope.launched.run_id {
+                let _ = context
+                    .repository
+                    .record_generated_thread_title(&state.scope.launched.thread_id, &title)
+                    .await;
+                let _ = context
+                    .config
+                    .notifier
+                    .publish(&state.scope.launched.thread_id);
+            }
+        }
         EngineObservation::TextDelta(delta) => {
             if delta.run_id() == &state.scope.launched.run_id {
                 state.streaming_speed.push(&delta);
@@ -264,6 +288,17 @@ pub(super) async fn handle_observation(
             handle_usage(context, state, turn, usage).await;
         }
         EngineObservation::Terminal(observation) => {
+            if observation.run_id() != &state.scope.launched.run_id {
+                return;
+            }
+            if let Some(title) = observation.summary_title()
+                && let Ok(title) = artisan_domain::ThreadTitle::parse(title.to_owned())
+            {
+                let _ = context
+                    .repository
+                    .record_generated_thread_title(&state.scope.launched.thread_id, &title)
+                    .await;
+            }
             state.terminal = Some(observation.state());
             if state.forced_interrupted || state.forced_cancelled {
                 turn.cancel();
@@ -785,6 +820,7 @@ async fn handle_subagent_row(
         assistant_item: state.assistant_item.clone(),
         assistant_revision: state.assistant_revision,
         assistant_body: state.assistant_body.clone(),
+        assistant_phase: state.assistant_phase,
     };
     if !commit_subagent_observation(
         context.repository,
@@ -839,6 +875,7 @@ async fn handle_activity_observation(
         assistant_item: state.assistant_item.clone(),
         assistant_revision: state.assistant_revision,
         assistant_body: state.assistant_body.clone(),
+        assistant_phase: state.assistant_phase,
     };
     if !commit_activity_observation(
         context.repository,
@@ -909,14 +946,25 @@ async fn handle_text_snapshot(
     if !flush_pending_deltas(context, state, turn).await {
         return;
     }
-    let current = state.assistant_body.clone();
-    let Some(next_body) = state.assistant_parts.replace_snapshot(&snapshot) else {
+    if state.assistant_parts.replace_snapshot(&snapshot).is_none() {
         mark_interrupted(state, turn, true);
         return;
-    };
-    if next_body == current {
+    }
+    if !super::message_parts::select_part(context, state, turn, snapshot.part_id()).await {
         return;
     }
+    let next_body = state
+        .assistant_parts
+        .part_body(snapshot.part_id())
+        .to_owned();
+    let next_phase = snapshot.phase().unwrap_or(state.assistant_phase);
+    if next_body == state.assistant_body
+        && next_phase == state.assistant_phase
+        && state.assistant_item.is_some()
+    {
+        return;
+    }
+    state.assistant_phase = next_phase;
     state.streaming_speed = super::streaming_speed::StreamingSpeed::default();
     state.assistant_body = next_body;
     if state.assistant_item.is_none() {
@@ -941,12 +989,20 @@ async fn handle_text_delta(
         }
         return;
     }
-    let Some(appended) = state.assistant_parts.append_delta(&delta) else {
+    if state.assistant_parts.append_delta(&delta).is_none() {
         mark_interrupted(state, turn, true);
         return;
-    };
-    let appended_exactly = appended.appended_exactly;
-    state.assistant_body = appended.body;
+    }
+    let part = delta.part_id().unwrap_or("fixture-text-part");
+    if !super::message_parts::select_part(context, state, turn, part).await {
+        return;
+    }
+    let next_body = state.assistant_parts.part_body(part).to_owned();
+    let phase = delta.phase().unwrap_or(state.assistant_phase);
+    let appended_exactly = phase == state.assistant_phase
+        && next_body.strip_prefix(&state.assistant_body) == Some(delta.delta());
+    state.assistant_phase = phase;
+    state.assistant_body = next_body;
     if !appended_exactly {
         // A separator entered the assembled body (a new provider part), so
         // the delta is not a byte-exact append: persist the whole body as one
@@ -1060,7 +1116,9 @@ async fn settle_terminal(
     let Some(operated_at) = at_or_after(context.origin, scope.expected_updated_at) else {
         return;
     };
-    let phase = if matches!(terminal, TerminalState::Completed) {
+    let phase = if state.assistant_phase == AssistantMessagePhase::Commentary {
+        AssistantMessagePhase::Commentary
+    } else if matches!(terminal, TerminalState::Completed) {
         AssistantMessagePhase::Final
     } else {
         AssistantMessagePhase::Unspecified

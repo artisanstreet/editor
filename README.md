@@ -62,3 +62,15 @@ Connect Artisan Editor to any device running Artisan Forge. Add a host once, the
 </td>
 </tr>
 </table>
+
+## Development
+
+```sh
+nix develop
+python3 scripts/dev.py
+```
+
+Cargo owns the workspace; Nix provides pinned environments, builds, packages and checks.
+Use `nix run .#dev` for a Nix-built launch and `nix flake check` for the isolated gates.
+`python3 scripts/check.py` runs the incremental Cargo gates. See the
+[development runbook](docs/runbooks/native-dev.md) for packaging, tests, and Windows.

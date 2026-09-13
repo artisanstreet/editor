@@ -127,6 +127,7 @@ fn compact_style_pins_exact_audited_values() {
         assert_eq!(style.ring_spread, px(1.0));
 
         let expected_ring = BoxShadow {
+            inset: false,
             color: theme.colors.foreground.with_alpha(0.10).to_paint(),
             offset: point(px(0.0), px(0.0)),
             blur_radius: px(0.0),

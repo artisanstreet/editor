@@ -45,3 +45,27 @@ workspace = true
 [[test]]
 name = "native_engine_profile"
 path = "../../tests/cli/native_engine_profile.rs"
+
+[[test]]
+name = "cli_native_credentials"
+path = "../../tests/cli/native_credentials.rs"
+
+[[test]]
+name = "cli_native_reconnect_capability"
+path = "../../tests/cli/native_reconnect_capability.rs"
+
+[[test]]
+name = "cli_native_instance"
+path = "../../tests/cli/native_instance.rs"
+
+[[test]]
+name = "cli_native_opencode2_authority"
+path = "../../tests/cli/native_opencode2_authority.rs"
+
+[[test]]
+name = "cli_native_opencode2_install"
+path = "../../tests/cli/native_opencode2_install.rs"
+
+[[test]]
+name = "cli_native_lifecycle"
+path = "../../tests/cli/native_lifecycle.rs"

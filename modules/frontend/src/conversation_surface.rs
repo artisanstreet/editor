@@ -149,6 +149,8 @@ use transcript_window::TranscriptWindowState;
     reason = "independent viewport/disclosure flags are tracked separately by the render loop; packing them would conflate distinct fence states"
 )]
 pub struct ConversationSurface {
+    composer_clearance: HashMap<gpui::WindowId, f32>,
+    pending_messages: Vec<(String, String)>,
     scene: ConversationScene,
     /// Loaded user-message markers, rebuilt only when the scene changes.
     ///
@@ -395,7 +397,12 @@ impl Render for ConversationSurface {
         // entity: two windows showing one surface measure different
         // viewports, and a shared scalar could never converge for both.
         let end_space = window.use_state(cx, |_, _| 0.0_f32);
-        let end_space_px = *end_space.read(cx);
+        let end_space_px = (*end_space.read(cx)).max(
+            self.composer_clearance
+                .get(&window.window_handle().window_id())
+                .copied()
+                .unwrap_or(0.0),
+        );
         // The reader's current navigator marker is geometry-derived like
         // end space, so it lives in the same window-local state: two
         // windows sharing one surface converge independently.
@@ -446,6 +453,33 @@ impl Render for ConversationSurface {
                 }
             }
             self.finish_transcript_window(&built);
+            for (index, (text, status)) in self.pending_messages.iter().enumerate() {
+                let selector = format!("local-send-{index}");
+                let block = UserMessageBlock {
+                    id: SceneId::parse(selector.clone()).expect("bounded local row identity"),
+                    body: text.clone(),
+                    attachments: Vec::new(),
+                    disclosure: None,
+                };
+                transcript = transcript.child(
+                    div()
+                        .w_full()
+                        .max_w(px(TRANSCRIPT_PROSE_WIDTH_PX))
+                        .mx_auto()
+                        .px(px(TRANSCRIPT_GUTTER_PX))
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap(px(8.0))
+                        .child(self.render_user_message(&block, selector, &theme, cx))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.colors.muted_foreground.to_paint())
+                                .child(status.clone()),
+                        ),
+                );
+            }
             // Long transcripts reserve anchoring room. Short conversations
             // keep zero end space. Cancel the inter-turn gap before this
             // spacer so a zero-height spacer cannot create overflow.

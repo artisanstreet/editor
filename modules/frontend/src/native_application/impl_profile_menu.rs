@@ -480,25 +480,6 @@ impl NativeApplication {
             .flex()
             .flex_col();
 
-        if !self.profile_usage_connected() {
-            return section
-                .gap(px(3.0))
-                .px(px(8.0))
-                .py(px(6.0))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(theme.foreground)
-                        .child("Usage"),
-                )
-                .child(
-                    desktop_muted(theme, "Connect to Forge to see usage.")
-                        .line_height(px(14.0))
-                        .text_size(px(11.0)),
-                );
-        }
-
         let visible = self.profile_usage.visible_usage_entries();
         self.profile_refresh_focus.borrow_mut().retain(|(id, _)| {
             visible
@@ -510,18 +491,6 @@ impl NativeApplication {
                 .iter()
                 .any(|entry| entry.engine_id.as_str() == id.as_str())
         });
-        if visible.is_empty() {
-            return section.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .text_size(px(12.0))
-                    .line_height(px(16.0))
-                    .text_color(theme.secondary)
-                    .child("No engine accounts connected."),
-            );
-        }
-
         let now_ms = profile_usage_now_ms();
         let mut section = section.px(px(4.0)).py(px(4.0));
         for (index, entry) in visible.iter().enumerate() {
@@ -1069,31 +1038,17 @@ impl NativeApplication {
     )]
     pub(super) fn desktop_profile(&self, window: &mut Window, cx: &Context<Self>) -> Div {
         let theme = self.desktop_theme;
+        let show_usage = self.profile_usage_visible();
         let origin = self.profile_origin.clone();
+        let host_identity = crate::native_hosts::presentation(self.machine_home.as_deref());
         let render_avatar = || {
-            let avatar_theme = self.theme;
-            let name = self.profile_name.clone();
-            let hostname = self.profile_hostname.clone();
-            let fallback = move || {
-                crate::shell::profile_avatar(
-                    &avatar_theme,
-                    crate::shell::RailIdentity::new(name.as_deref(), hostname.as_deref()),
-                )
-                .rounded(px(8.0))
-                .overflow_hidden()
-                .into_any_element()
-            };
-            if let Some(path) = self.profile_picture.clone() {
-                gpui::img(path)
-                    .size(px(32.0))
-                    .rounded(px(8.0))
-                    .object_fit(gpui::ObjectFit::Cover)
-                    .with_fallback(fallback.clone())
-                    .with_loading(fallback)
-                    .into_any_element()
-            } else {
-                fallback()
-            }
+            crate::shell::profile_avatar(
+                &self.theme,
+                crate::shell::RailIdentity::new(Some(&host_identity.avatar_seed), None),
+            )
+            .rounded(px(8.0))
+            .overflow_hidden()
+            .into_any_element()
         };
         let avatar = render_avatar();
         let focus_ring = vec![gpui::BoxShadow {
@@ -1162,11 +1117,7 @@ impl NativeApplication {
                             .line_height(px(16.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
-                            .child(
-                                self.profile_name
-                                    .clone()
-                                    .map_or_else(|| "User".into(), |name| capitalize_label(&name)),
-                            ),
+                            .child(self.profile_display_name(cx)),
                     )
                     .child(
                         div()
@@ -1174,11 +1125,7 @@ impl NativeApplication {
                             .text_size(px(10.0))
                             .line_height(px(12.0))
                             .text_color(theme.secondary)
-                            .child(
-                                self.profile_hostname
-                                    .clone()
-                                    .unwrap_or_else(|| "This computer".into()),
-                            ),
+                            .child(self.machine_label.clone()),
                     )
             }))
             .children((!self.sidebar_collapsed).then(|| {
@@ -1208,6 +1155,14 @@ impl NativeApplication {
                     }
                 }
                 cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &NextTabStop, window, cx| {
+                if app.profile_menu.is_open() {
+                    app.focus_machine_trigger(window, cx);
+                    cx.stop_propagation();
+                } else {
+                    window.focus_next(cx);
+                }
             }))
             .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
@@ -1261,6 +1216,9 @@ impl NativeApplication {
                             }
                         }
                     }
+                    "tab" if app.profile_menu.is_open() && !event.keystroke.modifiers.shift => {
+                        app.focus_machine_trigger(window, cx);
+                    }
                     "tab" => {
                         let was_open = app.profile_menu.is_open();
                         let _ = app.profile_menu.dismiss();
@@ -1305,13 +1263,6 @@ impl NativeApplication {
             };
             // Source `bg-border/50` resolved from the shared border token.
             let separator = self.profile_separator_paint();
-            // The machine line only paints when the hostname differs from
-            // the profile name, matching `show_hostname` in source.
-            let show_profile_hostname = self.profile_hostname.as_deref().is_some_and(|hostname| {
-                self.profile_name
-                    .as_deref()
-                    .is_none_or(|name| name != hostname)
-            });
             let tip_surface = Rc::clone(&self.profile_tip_surface_bounds);
             let tip_surface_probe = canvas(
                 |_, _, _| {},
@@ -1334,119 +1285,6 @@ impl NativeApplication {
             .top_0()
             .left_0()
             .size_full();
-            let mut panel = div()
-                .id("artisan-desktop-profile-menu")
-                .debug_selector(|| "artisan-desktop-profile-menu".to_string())
-                .min_w(px(256.0))
-                .max_w(px(352.0))
-                .rounded(RadiusTokens::value(RadiusStep::X2l))
-                .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
-                .bg(glass_foreground_base(&self.theme))
-                .border_1()
-                .border_color(theme.line)
-                .shadow(glass_card_shadows())
-                .flex()
-                .flex_col()
-                .relative()
-                .child(glass_material_layer(
-                    GlassStrength::Quiet,
-                    RadiusTokens::value(RadiusStep::X2l),
-                ))
-                .child(glass_highlight_layer(
-                    GlassStrength::Quiet,
-                    RadiusTokens::value(RadiusStep::X2l),
-                ))
-                .child(tip_surface_probe)
-                .block_mouse_except_scroll()
-                .on_mouse_down_out(cx.listener(|app, event: &gpui::MouseDownEvent, _, cx| {
-                    let trigger = app.profile_origin.get();
-                    if !trigger.contains(&event.position) {
-                        let was_open = app.profile_menu.is_open();
-                        let _ = app.profile_menu.dismiss();
-                        app.clear_profile_hover();
-                        app.cancel_profile_usage_scroll();
-                        if was_open {
-                            app.begin_profile_menu_close(cx);
-                        }
-                        cx.notify();
-                    }
-                }))
-                .child(
-                    div()
-                        .debug_selector(|| "artisan-desktop-profile-header".to_owned())
-                        .px(px(12.0))
-                        .py(px(16.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(12.0))
-                        .child(
-                            div()
-                                .size(px(32.0))
-                                .flex_shrink_0()
-                                .rounded(px(8.0))
-                                .overflow_hidden()
-                                .child(render_avatar()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(0.0))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(14.0))
-                                        .line_height(px(20.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme.foreground)
-                                        .child(self.profile_name.clone().map_or_else(
-                                            || "Not connected".into(),
-                                            |name| capitalize_label(&name),
-                                        )),
-                                )
-                                .children(show_profile_hostname.then(|| {
-                                    div()
-                                        .truncate()
-                                        .text_size(px(12.0))
-                                        .line_height(px(16.0))
-                                        .text_color(theme.secondary)
-                                        .child(
-                                            self.profile_hostname
-                                                .clone()
-                                                .unwrap_or_else(|| "This computer".to_owned()),
-                                        )
-                                })),
-                        ),
-                )
-                .child(div().h(px(1.0)).bg(separator).my(px(4.0)))
-                .child(
-                    div()
-                        .id("artisan-profile-usage-scroll")
-                        .debug_selector(|| "artisan-profile-usage-scroll".to_owned())
-                        .min_h(px(0.0))
-                        .max_h(self.profile_usage_max_height(window))
-                        .overflow_y_scroll()
-                        .track_scroll(&self.profile_usage_scroll)
-                        .child(
-                            div()
-                                .w_full()
-                                .flex()
-                                .flex_col()
-                                .min_w(px(0.0))
-                                .flex_shrink_0()
-                                .on_scroll_wheel(
-                                    cx.listener(Self::handle_profile_usage_scroll_wheel),
-                                )
-                                .child(self.desktop_profile_usage(theme, window, cx)),
-                        ),
-                )
-                .child(div().h(px(1.0)).bg(separator).my(px(4.0)));
-            self.profile_hover.borrow_mut().clear_if_missing(&[
-                PROFILE_SETTINGS_HOVER_ID.to_owned(),
-                PROFILE_USAGE_HOVER_ID.to_owned(),
-            ]);
             let profile_hover = Rc::clone(&self.profile_hover);
             let profile_hover_surface = Rc::clone(&self.profile_hover_surface_bounds);
             let profile_surface_probe = {
@@ -1473,6 +1311,139 @@ impl NativeApplication {
                 .left_0()
                 .size_full()
             };
+            let mut panel = div()
+                .id("artisan-desktop-profile-menu")
+                .debug_selector(|| "artisan-desktop-profile-menu".to_string())
+                .min_w(px(256.0))
+                .max_w(px(352.0))
+                .rounded(RadiusTokens::value(RadiusStep::X2l))
+                .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
+                .bg(glass_foreground_base(&self.theme))
+                .border_1()
+                .border_color(theme.line)
+                .shadow(glass_card_shadows())
+                .flex()
+                .flex_col()
+                .relative()
+                .child(glass_material_layer(
+                    GlassStrength::Quiet,
+                    RadiusTokens::value(RadiusStep::X2l),
+                ))
+                .child(glass_highlight_layer(
+                    GlassStrength::Quiet,
+                    RadiusTokens::value(RadiusStep::X2l),
+                ))
+                .child(tip_surface_probe)
+                .child(profile_surface_probe)
+                .child(render_picker_hover_pill(
+                    &self.theme,
+                    &profile_hover,
+                    "profile",
+                    RadiusTokens::value(RadiusStep::Xl),
+                    cx.reduce_motion(),
+                ))
+                .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
+                    if !*hovered && !app.profile_hover_keyboard.get() && !app.machine_menu.is_open()
+                    {
+                        app.profile_hover.borrow_mut().clear();
+                        cx.notify();
+                    }
+                }))
+                .block_mouse_except_scroll()
+                .on_mouse_down_out(cx.listener(|app, event: &gpui::MouseDownEvent, _, cx| {
+                    if app.machine_menu.is_open() {
+                        return;
+                    }
+                    let trigger = app.profile_origin.get();
+                    if !trigger.contains(&event.position) {
+                        let was_open = app.profile_menu.is_open();
+                        let _ = app.profile_menu.dismiss();
+                        app.clear_profile_hover();
+                        app.cancel_profile_usage_scroll();
+                        if was_open {
+                            app.begin_profile_menu_close(cx);
+                        }
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    div()
+                        .debug_selector(|| "artisan-desktop-profile-header".to_owned())
+                        .p(px(4.0))
+                        .child(
+                            self.machine_trigger(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.0))
+                                    .child(
+                                        div()
+                                            .size(px(32.0))
+                                            .flex_shrink_0()
+                                            .rounded(px(8.0))
+                                            .overflow_hidden()
+                                            .child(render_avatar()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(0.0))
+                                            .child(
+                                                div()
+                                                    .truncate()
+                                                    .text_size(px(14.0))
+                                                    .line_height(px(20.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.foreground)
+                                                    .child(self.profile_display_name(cx)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .truncate()
+                                                    .text_size(px(12.0))
+                                                    .line_height(px(16.0))
+                                                    .text_color(theme.secondary)
+                                                    .child(self.machine_label.clone()),
+                                            ),
+                                    )
+                                    .into_any_element(),
+                                cx,
+                            ),
+                        ),
+                )
+                .child(div().h(px(1.0)).bg(separator).my(px(4.0)))
+                .children(show_usage.then(|| {
+                    div()
+                        .id("artisan-profile-usage-scroll")
+                        .debug_selector(|| "artisan-profile-usage-scroll".to_owned())
+                        .min_h(px(0.0))
+                        .max_h(self.profile_usage_max_height(window))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.profile_usage_scroll)
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .min_w(px(0.0))
+                                .flex_shrink_0()
+                                .on_scroll_wheel(
+                                    cx.listener(Self::handle_profile_usage_scroll_wheel),
+                                )
+                                .child(self.desktop_profile_usage(theme, window, cx)),
+                        )
+                }))
+                .children(show_usage.then(|| div().h(px(1.0)).bg(separator).my(px(4.0))));
+            self.profile_hover.borrow_mut().clear_if_missing(&[
+                PROFILE_SETTINGS_HOVER_ID.to_owned(),
+                PROFILE_USAGE_HOVER_ID.to_owned(),
+                "profile-host".to_owned(),
+            ]);
             let profile_row_hover = Rc::clone(&profile_hover);
             let profile_row_surface = Rc::clone(&profile_hover_surface);
             let profile_hover_probe = move |id: &'static str| {
@@ -1508,21 +1479,7 @@ impl NativeApplication {
                 .w_full()
                 .flex()
                 .flex_col()
-                .p(px(4.0))
-                .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
-                    if !*hovered && !app.profile_hover_keyboard.get() {
-                        app.profile_hover.borrow_mut().clear();
-                        cx.notify();
-                    }
-                }))
-                .child(profile_surface_probe)
-                .child(render_picker_hover_pill(
-                    &self.theme,
-                    &profile_hover,
-                    "profile",
-                    RadiusTokens::value(RadiusStep::Xl),
-                    cx.reduce_motion(),
-                ));
+                .p(px(4.0));
             for (index, (label, icon, hover_id)) in [
                 (
                     "Settings",
@@ -1537,6 +1494,7 @@ impl NativeApplication {
             ]
             .into_iter()
             .enumerate()
+            .filter(|(index, _)| show_usage || *index == 0)
             {
                 let row_selector = format!("artisan-desktop-profile-action-{index}");
                 let row_probe = profile_hover_probe(hover_id);
@@ -1562,8 +1520,12 @@ impl NativeApplication {
                                 .text_color(theme.foreground)
                                 .child(label),
                         )
-                        .on_hover(cx.listener(move |app, hovered: &bool, _, cx| {
+                        .on_hover(cx.listener(move |app, hovered: &bool, window, cx| {
                             if *hovered {
+                                if app.machine_menu.is_open() {
+                                    app.profile_focus.focus(window, cx);
+                                }
+                                app.dismiss_machine_submenu();
                                 app.set_profile_highlight(index);
                                 app.profile_hover
                                     .borrow_mut()

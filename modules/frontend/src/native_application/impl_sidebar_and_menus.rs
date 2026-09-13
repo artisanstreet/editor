@@ -11,7 +11,7 @@ use super::*;
 )]
 impl NativeApplication {
     pub(super) fn sync_command_menu_groups(&mut self, cx: &mut Context<Self>) {
-        let mut groups = vec![CommandMenuGroup::actions()];
+        let mut groups = vec![CommandMenuGroup::actions(), crate::native_hosts::group()];
         if !self.project_options.is_empty() {
             groups.push(CommandMenuGroup::new(
                 "projects",
@@ -78,6 +78,8 @@ impl NativeApplication {
             return;
         };
         match action {
+            CommandMenuAction::AddHost => Self::add_host(cx),
+            CommandMenuAction::OpenHost { home } => cx.emit(impl_machines::SelectMachine(home)),
             CommandMenuAction::NewThread => self.begin_new_task(cx),
             CommandMenuAction::OpenSettings => {
                 self.navigate(

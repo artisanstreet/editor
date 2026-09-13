@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use artisan_transport::PinnedIdentity;
 use thiserror::Error;
 
-use super::{READY_SCHEMA, configure_no_reparse_open, is_reparse_point, is_required_loopback};
+use super::{READY_SCHEMA, configure_no_reparse_open, is_reparse_point};
 use crate::file_identity_policy::{FileIdentity, read_file_identity, same_file_identity};
 
 /// Typed readiness receipt failures. All variants are payload-free with
@@ -137,7 +137,7 @@ impl ReadinessReceipt {
         address: SocketAddr,
         identity: PinnedIdentity,
     ) -> Result<Self, ReadinessError> {
-        if !is_required_loopback(address) {
+        if address.port() == 0 || address.ip().is_multicast() {
             return Err(ReadinessError::InvalidEndpoint { address });
         }
         let parent = path.parent().ok_or_else(|| ReadinessError::ParentMissing {

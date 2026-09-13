@@ -63,7 +63,8 @@ impl ThreadScreen {
         theme: &ArtisanTheme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let empty = show_empty_transcript(self.host.read(cx).controller_view().turn_views.len());
+        let empty = show_empty_transcript(self.host.read(cx).controller_view().turn_views.len())
+            && !self.host.read(cx).surface().read(cx).has_pending_messages();
         let mut column = div()
             .relative()
             .min_h_0()
@@ -464,7 +465,8 @@ impl ThreadScreen {
     /// The frame paints after the transcript, so it sits above it. Tail
     /// clearance below the card is the transcript end space (surface lane,
     /// pending): this frame reserves nothing itself.
-    fn render_composer_overlay(&self, pad_bottom_px: f32) -> impl IntoElement {
+    fn render_composer_overlay(&self, pad_bottom_px: f32, cx: &Context<Self>) -> impl IntoElement {
+        let surface = self.host.read(cx).surface().clone();
         div()
             .absolute()
             .left(px(0.0))
@@ -476,6 +478,19 @@ impl ThreadScreen {
             .px(px(COLUMN_PAD_X_PX))
             .pb(px(pad_bottom_px))
             .debug_selector(|| THREAD_SCREEN_COMPOSER_SELECTOR.to_owned())
+            .on_children_prepainted(move |children, window, app| {
+                let Some(card) = children.first() else {
+                    return;
+                };
+                let height = f32::from(card.size.height) + pad_bottom_px + 24.0;
+                let id = window.window_handle().window_id();
+                let surface = surface.clone();
+                window.defer(app, move |_, app| {
+                    surface.update(app, |surface, cx| {
+                        surface.set_composer_clearance(id, height, cx);
+                    });
+                });
+            })
             .child(
                 div()
                     .w_full()
@@ -600,7 +615,7 @@ impl ThreadScreen {
             .min_h(px(0.0))
             .bg(shell_black())
             .child(self.render_transcript_column(theme, cx))
-            .child(self.render_composer_overlay(pad_bottom));
+            .child(self.render_composer_overlay(pad_bottom, cx));
         let mut row = div()
             .flex()
             .flex_row()

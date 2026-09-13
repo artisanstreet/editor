@@ -74,3 +74,111 @@ path = "../../tests/ui/shimmer_text.rs"
 [[test]]
 name = "select"
 path = "../../tests/ui/select.rs"
+
+[[test]]
+name = "ui_theme_tokens"
+path = "../../tests/ui/theme_tokens.rs"
+
+[[test]]
+name = "ui_asset_seam"
+path = "../../tests/ui/asset_seam.rs"
+
+[[test]]
+name = "ui_accordion"
+path = "../../tests/ui/accordion.rs"
+
+[[test]]
+name = "ui_alert"
+path = "../../tests/ui/alert.rs"
+
+[[test]]
+name = "ui_alert_dialog"
+path = "../../tests/ui/alert_dialog.rs"
+
+[[test]]
+name = "ui_gpui_harness"
+path = "../../tests/ui/gpui_harness.rs"
+
+[[test]]
+name = "ui_input"
+path = "../../tests/ui/input.rs"
+
+[[test]]
+name = "ui_motion_policy"
+path = "../../tests/ui/motion_policy.rs"
+
+[[test]]
+name = "ui_switch"
+path = "../../tests/ui/switch.rs"
+
+[[test]]
+name = "ui_collapsible"
+path = "../../tests/ui/collapsible.rs"
+
+[[test]]
+name = "ui_context_menu"
+path = "../../tests/ui/context_menu.rs"
+
+[[test]]
+name = "ui_dialog"
+path = "../../tests/ui/dialog.rs"
+
+[[test]]
+name = "ui_fade_arc"
+path = "../../tests/ui/fade_arc.rs"
+
+[[test]]
+name = "ui_tabs"
+path = "../../tests/ui/tabs.rs"
+
+[[test]]
+name = "ui_toggle_group"
+path = "../../tests/ui/toggle_group.rs"
+
+[[test]]
+name = "ui_toggle"
+path = "../../tests/ui/toggle.rs"
+
+[[test]]
+name = "ui_card"
+path = "../../tests/ui/card.rs"
+
+[[test]]
+name = "ui_lip_card"
+path = "../../tests/ui/lip_card.rs"
+
+[[test]]
+name = "ui_link_preview"
+path = "../../tests/ui/link_preview.rs"
+
+[[test]]
+name = "ui_avatar"
+path = "../../tests/ui/avatar.rs"
+
+[[test]]
+name = "ui_badge"
+path = "../../tests/ui/badge.rs"
+
+[[test]]
+name = "ui_scroll_area"
+path = "../../tests/ui/scroll_area.rs"
+
+[[test]]
+name = "ui_separator"
+path = "../../tests/ui/separator.rs"
+
+[[test]]
+name = "ui_sheet"
+path = "../../tests/ui/sheet.rs"
+
+[[test]]
+name = "ui_popover"
+path = "../../tests/ui/popover.rs"
+
+[[test]]
+name = "ui_skeleton"
+path = "../../tests/ui/skeleton.rs"
+
+[[test]]
+name = "ui_native_select"
+path = "../../tests/ui/native_select.rs"

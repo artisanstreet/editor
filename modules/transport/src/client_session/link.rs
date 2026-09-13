@@ -50,14 +50,14 @@ pub(super) fn close_code(code: u32) -> VarInt {
     VarInt::from_u32(code)
 }
 
-/// One freshly bound loopback client endpoint plus, once installed, its
+/// One freshly bound client endpoint plus, once installed, its
 /// single connection.
 ///
 /// Deliberately implements neither [`Clone`] nor [`Copy`]: the pair is
 /// the exclusive transport owned by one session establishment or, after
 /// [`SessionLink::disband`], one live session.
 pub(super) struct SessionLink {
-    /// Privately owned client endpoint bound to `127.0.0.1:0`. Held as
+    /// Privately owned client endpoint bound for the selected routing scope. Held as
     /// an option only so [`SessionLink::disband`] can move both fields
     /// out of a [`Drop`] type; it is always present until then.
     endpoint: Option<Endpoint>,
@@ -71,11 +71,14 @@ impl SessionLink {
     ///
     /// # Errors
     ///
-    /// Returns [`TransportError::Bind`] when the loopback socket cannot
+    /// Returns [`TransportError::Bind`] when the client socket cannot
     /// be bound.
-    pub(super) fn bind(config: ClientConfig) -> Result<Self, TransportError> {
+    pub(super) fn bind(
+        config: ClientConfig,
+        target: std::net::SocketAddr,
+    ) -> Result<Self, TransportError> {
         Ok(Self {
-            endpoint: Some(crate::bind_loopback_client(config)?),
+            endpoint: Some(crate::endpoint::bind_client_for(config, target)?),
             connection: None,
         })
     }

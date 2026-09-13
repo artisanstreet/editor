@@ -12,7 +12,7 @@ use artisan_ui::dialog::{DialogFocusTransition, DialogState, focus_transition};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::{
-    Bounds, ColorExt as _, Context, FocusHandle, Hsla, InteractiveElement, IntoElement,
+    Bounds, ColorExt as _, Context, FocusHandle, InteractiveElement, IntoElement,
     ParentElement as _, Render, Styled, TestAppContext, Window, div, point, px, size,
 };
 
@@ -209,7 +209,7 @@ fn style_resolves_overlay_theme_radius_and_intent_tokens() {
 
     assert_eq!(
         default_style.overlay,
-        Hsla::black().opacity(ALERT_BACKDROP_OPACITY)
+        gpui::black().opacity(ALERT_BACKDROP_OPACITY)
     );
     assert_eq!(
         default_style.overlay_opacity.to_bits(),
@@ -296,26 +296,27 @@ fn focus_intent_applies_entry_and_restore_once_per_controlled_edge(cx: &mut Test
 
     cx.update(|window, app| {
         let probe = view.read(app);
-        let intent =
-            artisan_ui::dialog::DialogFocusIntent::new(probe.entry.clone(), probe.restore.clone());
+        let entry = probe.entry.clone();
+        let restore = probe.restore.clone();
+        let intent = artisan_ui::dialog::DialogFocusIntent::new(entry.clone(), restore.clone());
 
         assert_eq!(
             intent.apply(false, true, window, app),
             DialogFocusTransition::Enter
         );
-        assert!(probe.entry.is_focused(window));
+        assert!(entry.is_focused(window));
 
         assert_eq!(
             intent.apply(true, true, window, app),
             DialogFocusTransition::Unchanged
         );
-        assert!(probe.entry.is_focused(window));
+        assert!(entry.is_focused(window));
 
         assert_eq!(
             intent.apply(true, false, window, app),
             DialogFocusTransition::Restore
         );
-        assert!(probe.restore.is_focused(window));
+        assert!(restore.is_focused(window));
     });
 }
 

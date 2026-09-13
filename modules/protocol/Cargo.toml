@@ -65,3 +65,11 @@ path = "../../tests/protocol/run_interaction.rs"
 [[test]]
 name = "conversation_codec"
 path = "../../tests/protocol/conversation_codec.rs"
+
+[[test]]
+name = "protocol_conversation_roundtrip"
+path = "../../tests/protocol/conversation_roundtrip.rs"
+
+[[test]]
+name = "protocol_conversation_activity"
+path = "../../tests/protocol/conversation_activity.rs"

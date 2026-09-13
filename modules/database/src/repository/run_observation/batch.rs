@@ -170,6 +170,7 @@ fn validate_changes(command: &CommitRunBatch<'_>) -> Result<(), RunObservationEr
             });
         }
         match change {
+            AssistantChange::Finish { .. } => {}
             AssistantChange::Start { body, .. } | AssistantChange::Replace { body, .. } => {
                 let length = body.as_str().len();
                 if length > AssistantBody::MAX_BYTES {
@@ -194,6 +195,9 @@ fn validate_changes(command: &CommitRunBatch<'_>) -> Result<(), RunObservationEr
         }
         | AssistantChange::Replace {
             expected_revision, ..
+        }
+        | AssistantChange::Finish {
+            expected_revision, ..
         } = change
             && i64::try_from(expected_revision.get()).is_err()
         {
@@ -215,6 +219,9 @@ fn change_identities<'a>(change: &'a AssistantChange<'a>) -> (&'a str, &'a str) 
             item_id, patch_id, ..
         }
         | AssistantChange::Replace {
+            item_id, patch_id, ..
+        }
+        | AssistantChange::Finish {
             item_id, patch_id, ..
         } => (item_id.as_str(), patch_id.as_str()),
     }
@@ -288,6 +295,16 @@ fn canonical_digest(command: &CommitRunBatch<'_>) -> [u8; 32] {
 
 fn write_change(hasher: &mut Sha256, change: &AssistantChange<'_>) {
     match change {
+        AssistantChange::Finish {
+            item_id,
+            expected_revision,
+            patch_id,
+        } => {
+            hasher.update([3u8]);
+            write_str(hasher, item_id.as_str());
+            write_i64(hasher, revision_digest_value(expected_revision.get()));
+            write_str(hasher, patch_id.as_str());
+        }
         AssistantChange::Start {
             item_id,
             phase,

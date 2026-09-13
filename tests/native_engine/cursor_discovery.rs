@@ -1,7 +1,7 @@
 //! Cursor executable discovery precedence and version-parsing fixtures.
 //!
 //! Registration (controller-owned, not part of this packet):
-//! `tests/native_engine/BUILD.bazel` gains a `rust_test` target for
+//! `modules/native_engine/Cargo.toml` gains a `rust_test` target for
 //! `cursor_discovery.rs` depending on `//modules/native_engine:native_engine`,
 //! plus a Cargo `[[test]] cursor_discovery` entry in
 //! `modules/native_engine/Cargo.toml`.

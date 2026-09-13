@@ -1,0 +1,41 @@
+name: Desktop capture (explicit host)
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        type: choice
+        options: [linux, windows]
+        required: true
+permissions:
+  contents: read
+jobs:
+  linux:
+    if: inputs.platform == 'linux'
+    runs-on: [self-hosted, Linux, artisan-desktop]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: nix run .#capture-screen-demo -- --software --output evidence/visual/screen-demo.png
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-visual-proof
+          path: evidence/visual/
+          if-no-files-found: error
+  windows:
+    if: inputs.platform == 'windows'
+    runs-on: [self-hosted, Windows, artisan-desktop]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: python scripts/dev.py --stage-only
+      - shell: pwsh
+        run: |
+          $env:ARTISAN_HOME = (Resolve-Path .dist/dev/home).Path
+          ./scripts/verify_visual.ps1 -Name ci -ExePath .dist/dev/home/versions/dev/bin/editor.exe
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-visual-proof
+          path: evidence/*.png
+          if-no-files-found: error

@@ -730,7 +730,11 @@ impl RequestHandler {
                 false,
                 request_id,
             )),
-            ClientRequest::PickDirectory => self.pick_directory_outcome(request_id).await,
+            ClientRequest::ValidateDirectory(path) => {
+                self.pick_directory_outcome(request_id, Some(path.as_str()))
+                    .await
+            }
+            ClientRequest::PickDirectory => self.pick_directory_outcome(request_id, None).await,
             ClientRequest::ResolveRichLink(request) => {
                 self.resolve_rich_link_outcome(request_id, request).await
             }

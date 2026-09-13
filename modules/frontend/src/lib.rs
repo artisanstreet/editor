@@ -8,7 +8,6 @@
 //! interactive workflow slices.
 
 pub mod active_thread_light_policy;
-mod native_frame_rate;
 pub mod activity_status_labels;
 pub mod approval_presentation;
 pub mod artisan_error_code;
@@ -90,6 +89,7 @@ pub mod model_policy_controller;
 pub mod model_policy_controls_presentation;
 pub mod model_selection_presentation;
 pub mod motion_spring;
+pub mod native_account_identity;
 pub mod native_application;
 pub mod native_command_menu;
 pub mod native_composer;
@@ -97,6 +97,7 @@ pub mod native_composer_controls;
 mod native_composer_material;
 pub mod native_composer_visuals;
 pub mod native_context_usage;
+mod native_frame_rate;
 pub mod native_hover_rail_card;
 pub mod native_new_thread_surface;
 pub mod native_project_menu;
@@ -190,3 +191,5 @@ mod native_composer_queue;
 
 #[cfg(test)]
 mod native_composer_layout_tests;
+
+mod native_hosts;

@@ -6,14 +6,9 @@
 //! crate, so parent-side assertions reach the actual public controller API
 //! and the private witnesses on the true owner/spawn/pipe/reap path.
 //!
-//! The child role is the declared TEST-ONLY
-//! `//tests/backend:directory_controller_fixture` executable (one ordinary
-//! `main`, `testonly = True`, never shipped): it is resolved exclusively
-//! through the pinned official Bazel runfiles library from the exact
-//! rlocationpath exported by `backend_unit_test.env`. No sibling, PATH,
-//! source-tree fallback, homemade manifest parser, or guessed output
-//! directory exists, the parent environment is never mutated, no chooser
-//! opens, and an unknown or non-Unicode child scenario fails nonzero.
+//! The child is the test-only `directory-controller-fixture` Cargo example.
+//! Tests use its Cargo output path or an explicit absolute override. The
+//! parent environment is never mutated and no native chooser opens.
 //!
 //! Every scenario holds one process-local serialization lock so global
 //! witness counts stay attributable, establishes causal readiness through
@@ -39,7 +34,6 @@ use artisan_protocol::{
     ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome, ErrorCode, ResponsePayload,
 };
 use artisan_transport::CancelHandle;
-use runfiles::{Runfiles, rlocation};
 
 use super::process::WitnessCounts;
 use super::{
@@ -65,11 +59,6 @@ fn serialize_child_scenarios() -> MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-
-/// Environment name carrying the fixture's exact rlocationpath; declared by
-/// `backend_unit_test.env` and resolved ONLY through the pinned official
-/// runfiles library below.
-const FIXTURE_MAPPING_ENV: &str = "ARTISAN_DIRECTORY_CONTROLLER_FIXTURE";
 
 /// Generous default budget for operations expected to succeed.
 const SUCCESS_BUDGET: Duration = Duration::from_secs(30);
@@ -128,15 +117,29 @@ impl Drop for TemporaryDirectory {
 // Parent-side harness helpers driving the REAL controller
 // ---------------------------------------------------------------------------
 
-/// Resolves the ONE declared fixture artifact through the pinned official
-/// runfiles library. Missing environment mapping or runfile resolution is a
-/// hard test failure; there is deliberately no other discovery path.
+/// Resolves the Cargo example or an explicit absolute fixture override.
 fn resolved_fixture_program() -> PathBuf {
-    let mapping = std::env::var(FIXTURE_MAPPING_ENV)
-        .expect("backend_unit_test must export the fixture rlocationpath");
-    let runfiles = Runfiles::create().expect("official runfiles discovery should succeed");
-    let resolved = rlocation!(runfiles, mapping.as_str());
-    resolved.unwrap_or_else(|| panic!("declared fixture artifact must resolve: {mapping}"))
+    let path = std::env::var_os("ARTISAN_DIRECTORY_CONTROLLER_FIXTURE").map_or_else(
+        || {
+            let test = std::env::current_exe().expect("test executable path");
+            test.parent()
+                .expect("test output directory")
+                .parent()
+                .expect("Cargo profile directory")
+                .join("examples")
+                .join(format!(
+                    "directory-controller-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        },
+        std::path::PathBuf::from,
+    );
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "build fixture with cargo build -p artisan-backend --examples or set ARTISAN_DIRECTORY_CONTROLLER_FIXTURE to an absolute file: {}",
+        path.display()
+    );
+    path
 }
 
 /// Builds the caller-owned runtime; the controller never creates one.
@@ -281,7 +284,7 @@ fn request_handler_composes_picker_attach_replay_and_cancellation() {
     let handler = composition_handler(&runtime, &storage, "pick_success");
 
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        assert_successful_project_intake(&runtime, &handler);
+        assert_successful_project_intake(&runtime, &handler, ClientRequest::PickDirectory);
     }));
     let storage = finish_composition_handler(&runtime, handler, storage, caught);
 
@@ -293,6 +296,30 @@ fn request_handler_composes_picker_attach_replay_and_cancellation() {
     runtime
         .block_on(storage.close())
         .expect("composition storage should close");
+}
+
+#[test]
+fn client_selected_directory_uses_helper_validation_and_one_use_admission() {
+    let _guard = serialize_child_scenarios();
+    let runtime = build_runtime();
+    let storage = runtime
+        .block_on(ForgeStorage::open(
+            SqliteConfig::in_memory().sqlx_logging(false),
+        ))
+        .unwrap();
+    let anchor = TemporaryDirectory::new("client-selected-project");
+    let handler = composition_handler(&runtime, &storage, "validate_success");
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_successful_project_intake(
+            &runtime,
+            &handler,
+            ClientRequest::ValidateDirectory(
+                artisan_domain::RootPath::parse(anchor.text()).unwrap(),
+            ),
+        );
+    }));
+    let storage = finish_composition_handler(&runtime, handler, storage, caught);
+    runtime.block_on(storage.close()).unwrap();
 }
 
 fn composition_handler(
@@ -307,12 +334,21 @@ fn composition_handler(
     )
 }
 
-fn assert_successful_project_intake(runtime: &tokio::runtime::Runtime, handler: &RequestHandler) {
+fn assert_successful_project_intake(
+    runtime: &tokio::runtime::Runtime,
+    handler: &RequestHandler,
+    selection: ClientRequest,
+) {
     runtime.block_on(async {
-        let pick_request_id =
-            RequestId::parse("frame-composition-pick").expect("pick frame id should be valid");
+        let prefix = if matches!(selection, ClientRequest::ValidateDirectory(_)) {
+            "validated"
+        } else {
+            "picked"
+        };
+        let pick_request_id = RequestId::parse(format!("frame-composition-{prefix}"))
+            .expect("pick frame id should be valid");
         let (picked, receipt) = handler
-            .respond_with_receipt(&pick_request_id, &ClientRequest::PickDirectory)
+            .respond_with_receipt(&pick_request_id, &selection)
             .await
             .into_parts();
         assert!(receipt.is_no_work());
@@ -324,8 +360,8 @@ fn assert_successful_project_intake(runtime: &tokio::runtime::Runtime, handler: 
         assert!(!directory_id.as_str().contains('/'));
         assert!(!directory_id.as_str().contains('\\'));
 
-        let attach_request_id =
-            RequestId::parse("request-composition-attach").expect("attach id should be valid");
+        let attach_request_id = RequestId::parse(format!("request-composition-attach-{prefix}"))
+            .expect("attach id should be valid");
         let attach = ClientRequest::Command(Command::AttachProject(AttachProject {
             request_id: attach_request_id.clone(),
             directory_id: directory_id.clone(),

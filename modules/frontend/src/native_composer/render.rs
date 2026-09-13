@@ -517,7 +517,7 @@ impl Render for NativeComposer {
                 });
             });
 
-        if self.attachments.is_empty() {
+        if self.attachments.is_empty() || self.state.submission_is_eager() {
             self.tray_was_open = false;
             if let Some(error) = self.attachment_error.clone() {
                 root = root.child(

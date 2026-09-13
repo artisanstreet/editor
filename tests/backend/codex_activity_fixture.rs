@@ -1,7 +1,7 @@
 //! Finite Codex rich-activity fixture stream (visual parity, owner side).
 //!
 //! NOTE: registration is owned by root (not yet wired into
-//! `modules/backend/src/engine_owner/mod.rs` or `BUILD.bazel`): until root
+//! `modules/backend/src/engine_owner/mod.rs` or `Cargo.toml`): until root
 //! adds the `#[path]` module plus the `tests/backend` export and the backend
 //! `srcs` entry, this file does not compile into any target. It is written
 //! as a sibling of `engine_owner_codex.rs`, so `super::codex` and
@@ -158,7 +158,8 @@ async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
                 stable_ids.push(row.observation_id().as_str().to_owned());
             }
             EngineObservation::Terminal(_) => panic!("terminal travels as state, not a row"),
-            EngineObservation::TextSnapshot(_)
+            EngineObservation::SummaryTitle { .. }
+            | EngineObservation::TextSnapshot(_)
             | EngineObservation::Usage(_)
             | EngineObservation::Subagent(_)
             | EngineObservation::SubagentTranscript(_) => {

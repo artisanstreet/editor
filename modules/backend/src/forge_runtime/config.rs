@@ -1,6 +1,9 @@
 //! Explicit Forge launch contract: the exact long-form argument grammar,
 //! typed launch configuration, and credential material loading.
 
+mod arguments;
+use arguments::{parse_option, recognized_option};
+
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, Metadata};
@@ -69,6 +72,9 @@ const NATIVE_STREAM_AFTER_OPTION: &str = "--native-run-stream-after";
 #[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ForgeConfigError {
+    /// The explicitly selected interface is malformed or cannot receive unicast traffic.
+    #[error("Forge --listen requires a unicast or wildcard IP:port")]
+    InvalidListen,
     /// An option was supplied without its required value.
     #[error("Forge option {option} is missing its value")]
     MissingValue { option: &'static str },
@@ -166,6 +172,7 @@ pub struct ForgeLaunchConfigInput {
 /// process path, limit, capacity, and cancellation owner explicitly.
 #[allow(clippy::module_name_repetitions)]
 pub struct ForgeLaunchConfig {
+    pub(super) listen: std::net::SocketAddr,
     pub(super) database: PathBuf,
     pub(super) custody: PathBuf,
     pub(super) certificate_der: Vec<PathBuf>,
@@ -183,6 +190,7 @@ impl fmt::Debug for ForgeLaunchConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ForgeLaunchConfig")
+            .field("listen", &self.listen)
             .field("database", &self.database)
             .field("custody", &self.custody)
             .field("certificate_der", &self.certificate_der)
@@ -238,6 +246,7 @@ impl ForgeLaunchConfig {
         let bootstrap_capability = explicit_path(BOOTSTRAP_OPTION, bootstrap_capability)?;
         let ready_file = explicit_path(READY_FILE_OPTION, ready_file)?;
         Ok(Self {
+            listen: std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
             database,
             custody,
             certificate_der,
@@ -355,6 +364,7 @@ impl ParsedNativeRunArguments {
 }
 
 struct ParsedForgeArguments {
+    listen: Option<std::net::SocketAddr>,
     database: Option<PathBuf>,
     custody: Option<PathBuf>,
     certificate_der: Vec<PathBuf>,
@@ -373,6 +383,7 @@ struct ParsedForgeArguments {
 impl ParsedForgeArguments {
     fn empty() -> Self {
         Self {
+            listen: None,
             database: None,
             custody: None,
             certificate_der: Vec::new(),
@@ -429,58 +440,6 @@ where
     Ok(parsed)
 }
 
-fn parse_option(
-    parsed: &mut ParsedForgeArguments,
-    option: &'static str,
-    raw_value: OsString,
-) -> Result<(), ForgeConfigError> {
-    if option.starts_with("--native-run-") {
-        return parse_native_option(&mut parsed.native_run, option, raw_value);
-    }
-    match option {
-        DATABASE_OPTION => set_path(&mut parsed.database, option, raw_value),
-        CUSTODY_OPTION => set_path(&mut parsed.custody, option, raw_value),
-        CERTIFICATE_OPTION => {
-            parsed
-                .certificate_der
-                .push(explicit_path(option, raw_value.into())?);
-            Ok(())
-        }
-        PRIVATE_KEY_OPTION => set_path(&mut parsed.private_key_der, option, raw_value),
-        BOOTSTRAP_OPTION => set_path(&mut parsed.bootstrap_capability, option, raw_value),
-        READY_FILE_OPTION => set_path(&mut parsed.ready_file, option, raw_value),
-        ADMISSION_TIMEOUT_OPTION => set_duration(
-            &mut parsed.admission_timeout_ms,
-            option,
-            raw_value.as_os_str(),
-        ),
-        HANDSHAKE_TIMEOUT_OPTION => set_duration(
-            &mut parsed.handshake_timeout_ms,
-            option,
-            raw_value.as_os_str(),
-        ),
-        REQUEST_TIMEOUT_OPTION => set_duration(
-            &mut parsed.request_timeout_ms,
-            option,
-            raw_value.as_os_str(),
-        ),
-        DRAIN_TIMEOUT_OPTION => {
-            set_duration(&mut parsed.drain_timeout_ms, option, raw_value.as_os_str())
-        }
-        ADMISSION_CAPACITY_OPTION => set_capacity(
-            &mut parsed.admission_capacity,
-            option,
-            raw_value.as_os_str(),
-        ),
-        REQUESTS_PER_CONNECTION_OPTION => set_capacity(
-            &mut parsed.requests_per_connection,
-            option,
-            raw_value.as_os_str(),
-        ),
-        _ => Err(ForgeConfigError::UnknownOption),
-    }
-}
-
 fn parse_native_option(
     parsed: &mut ParsedNativeRunArguments,
     option: &'static str,
@@ -522,6 +481,7 @@ fn build_launch_config(
     cancel: Arc<CancelHandle>,
 ) -> Result<ForgeLaunchConfig, ForgeConfigError> {
     let ParsedForgeArguments {
+        listen,
         database,
         custody,
         certificate_der,
@@ -566,7 +526,7 @@ fn build_launch_config(
         },
     )
     .map_err(|source| ForgeConfigError::NativeRunConfiguration { source })?;
-    ForgeLaunchConfig::new(ForgeLaunchConfigInput {
+    let mut config = ForgeLaunchConfig::new(ForgeLaunchConfigInput {
         database: required(database, DATABASE_OPTION)?,
         custody: required(custody, CUSTODY_OPTION)?,
         certificate_der: if certificate_der.is_empty() {
@@ -598,7 +558,11 @@ fn build_launch_config(
         requests_per_connection: required(requests_per_connection, REQUESTS_PER_CONNECTION_OPTION)?,
         native_run,
         cancel,
-    })
+    })?;
+    if let Some(listen) = listen {
+        config.listen = listen;
+    }
+    Ok(config)
 }
 
 /// Typed failures raised while reading explicit credential material.
@@ -852,32 +816,6 @@ fn explicit_path(option: &'static str, path: PathBuf) -> Result<PathBuf, ForgeCo
         return Err(ForgeConfigError::NotAFilePath { option });
     }
     Ok(path)
-}
-
-fn recognized_option(option: &OsStr) -> Option<&'static str> {
-    match option.to_str()? {
-        DATABASE_OPTION => Some(DATABASE_OPTION),
-        CUSTODY_OPTION => Some(CUSTODY_OPTION),
-        CERTIFICATE_OPTION => Some(CERTIFICATE_OPTION),
-        PRIVATE_KEY_OPTION => Some(PRIVATE_KEY_OPTION),
-        BOOTSTRAP_OPTION => Some(BOOTSTRAP_OPTION),
-        READY_FILE_OPTION => Some(READY_FILE_OPTION),
-        ADMISSION_TIMEOUT_OPTION => Some(ADMISSION_TIMEOUT_OPTION),
-        HANDSHAKE_TIMEOUT_OPTION => Some(HANDSHAKE_TIMEOUT_OPTION),
-        REQUEST_TIMEOUT_OPTION => Some(REQUEST_TIMEOUT_OPTION),
-        DRAIN_TIMEOUT_OPTION => Some(DRAIN_TIMEOUT_OPTION),
-        ADMISSION_CAPACITY_OPTION => Some(ADMISSION_CAPACITY_OPTION),
-        REQUESTS_PER_CONNECTION_OPTION => Some(REQUESTS_PER_CONNECTION_OPTION),
-        NATIVE_CLAIM_LEASE_OPTION => Some(NATIVE_CLAIM_LEASE_OPTION),
-        NATIVE_POLL_INTERVAL_OPTION => Some(NATIVE_POLL_INTERVAL_OPTION),
-        NATIVE_RETRY_BACKOFF_OPTION => Some(NATIVE_RETRY_BACKOFF_OPTION),
-        NATIVE_SHUTDOWN_BUDGET_OPTION => Some(NATIVE_SHUTDOWN_BUDGET_OPTION),
-        NATIVE_QUEUE_CAPACITY_OPTION => Some(NATIVE_QUEUE_CAPACITY_OPTION),
-        NATIVE_MAX_COMMAND_RETRIES_OPTION => Some(NATIVE_MAX_COMMAND_RETRIES_OPTION),
-        NATIVE_PROMPT_DELIVERY_OPTION => Some(NATIVE_PROMPT_DELIVERY_OPTION),
-        NATIVE_STREAM_AFTER_OPTION => Some(NATIVE_STREAM_AFTER_OPTION),
-        _ => None,
-    }
 }
 
 fn set_path(

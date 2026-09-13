@@ -3,7 +3,7 @@
 //! These tests run under the existing cargo frontend `[[test]]` harness, the
 //! same harness the current frontend unit tests use: plain `#[test]`
 //! functions against the production `artisan_frontend` and `artisan_domain`
-//! APIs, with no Bazel-only or display dependencies.
+//! APIs, with no build-tool-specific or display dependencies.
 
 use artisan_domain::{
     AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalObservation,

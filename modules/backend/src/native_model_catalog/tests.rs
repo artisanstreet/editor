@@ -468,8 +468,16 @@ fn discovery_overlays_reported_fields_and_preserves_codex_context_policy() {
         option
             .native_config
             .as_ref()
-            .is_some_and(|config| config.model_context_window == 1_050_000)
+            .is_some_and(|config| config.model_context_window == 872_000)
     }));
+
+    let extended = context
+        .options
+        .iter()
+        .find(|option| option.id == "extended")
+        .unwrap();
+    assert_eq!(extended.label, "872K");
+    assert_eq!(extended.tokens, 872_000);
 
     let stealth = catalog
         .manifest

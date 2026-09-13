@@ -239,7 +239,7 @@ async fn current_catalog(
     // discovered rows.
     crate::model_discovery::warm_discovery();
     let discovery = crate::model_discovery::cached_bundle();
-    match result {
+    let mut catalog = match result {
         Some(result) => match discovery {
             Some(discovery) => crate::native_model_catalog::from_catalog_result_with_discovery(
                 result, &discovery, &favorites,
@@ -253,7 +253,19 @@ async fn current_catalog(
             ),
         },
     }
-    .map_err(|_| ComposerCatalogHandlerError::InvalidCatalog)
+    .map_err(|_| ComposerCatalogHandlerError::InvalidCatalog)?;
+    if catalog.scope.is_none() {
+        let root = repository
+            .read_thread_project_root(thread)
+            .await
+            .map_err(|_| ComposerCatalogHandlerError::CatalogPersistence)?;
+        catalog.scope = Some(artisan_catalog::NativeCatalogScope {
+            profile_id: profile.as_str().to_owned(),
+            working_directory: root.as_str().to_owned(),
+            workspace_trust: "safe".to_owned(),
+        });
+    }
+    Ok(catalog)
 }
 
 fn service_error(error: ComposerCatalogServiceError) -> ComposerCatalogHandlerError {

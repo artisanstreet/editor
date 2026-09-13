@@ -46,19 +46,20 @@ mod claim;
 mod commit_retry;
 #[path = "native_run_dispatch/delta_coalescer.rs"]
 mod delta_coalescer;
-mod streaming_speed;
 #[path = "native_run_dispatch/dispatch_policy.rs"]
 mod dispatch_policy;
 #[path = "native_run_dispatch/dispatch_support.rs"]
 mod dispatch_support;
 #[path = "native_run_dispatch/interaction_intent.rs"]
 mod interaction_intent;
+mod message_parts;
 #[path = "native_run_dispatch/observation_commit.rs"]
 mod observation_commit;
 #[path = "native_run_dispatch/recovery.rs"]
 mod recovery;
 #[path = "native_run_dispatch/steer.rs"]
 mod steer;
+mod streaming_speed;
 #[path = "native_run_dispatch/text_projection.rs"]
 mod text_projection;
 #[path = "native_run_dispatch/turn.rs"]

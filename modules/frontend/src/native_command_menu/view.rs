@@ -458,12 +458,7 @@ impl NativeCommandMenu {
     }
 
     fn entry_icon(entry: &CommandMenuEntry) -> AssetId {
-        match &entry.action {
-            CommandMenuAction::NewThread => AssetId::TABLER_EDIT,
-            CommandMenuAction::OpenSettings => AssetId::TABLER_SETTINGS,
-            CommandMenuAction::OpenProject { .. } => AssetId::TABLER_FOLDER,
-            CommandMenuAction::OpenThread { .. } => AssetId::TABLER_MESSAGE_CIRCLE,
-        }
+        entry.action.icon()
     }
 
     fn render_row(
@@ -798,6 +793,10 @@ impl Render for NativeCommandMenu {
         let dialog = self.render_dialog(window, cx);
         div()
             .id("native-command-menu-root")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
             .debug_selector(|| COMMAND_MENU_SELECTOR.to_owned())
             .child(deferred(dialog))
             .into_any_element()

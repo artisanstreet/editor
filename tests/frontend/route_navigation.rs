@@ -1,7 +1,7 @@
 //! Dependency-free coverage for the native route-navigation value boundary.
 //!
 //! The implementation is included directly so this packet can run with plain
-//! Rust 1.98 without changing frontend module, Cargo, or Bazel registration.
+//! Rust 1.98 without changing frontend module, Cargo registration.
 
 #[path = "../../modules/frontend/src/route_navigation.rs"]
 mod route_navigation;

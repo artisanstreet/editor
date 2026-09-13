@@ -30,46 +30,27 @@ use artisan_migrations::migrate_to_current;
 // ---------------------------------------------------------------------------
 
 fn fixture_program_path() -> PathBuf {
-    if let Ok(mapping) = std::env::var("ARTISAN_ENGINE_OWNER_FIXTURE") {
-        let runfiles =
-            runfiles::Runfiles::create().expect("official runfiles discovery should succeed");
-        let path = runfiles::rlocation!(runfiles, mapping.as_str())
-            .unwrap_or_else(|| panic!("declared fixture artifact must resolve: {mapping}"));
-        assert!(
-            path.is_file(),
-            "declared fixture artifact must be regular file: {}",
-            path.display()
-        );
-        return path;
-    }
-    if std::env::var_os("TEST_SRCDIR").is_some()
-        || std::env::var_os("RUNFILES_DIR").is_some()
-        || std::env::var_os("RUNFILES_MANIFEST_FILE").is_some()
-    {
-        panic!("ARTISAN_ENGINE_OWNER_FIXTURE must be set via rlocationpath");
-    }
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_engine_owner_fixture") {
-        let p = PathBuf::from(path);
-        if p.is_file() {
-            return p;
-        }
-    }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for candidate in [
-        manifest.join("../../target/debug/engine_owner_fixture"),
-        manifest.join("../../target/debug/engine_owner_fixture.exe"),
-        manifest.join("../target/debug/engine_owner_fixture"),
-        manifest.join("../target/debug/engine_owner_fixture.exe"),
-        PathBuf::from("target/debug/engine_owner_fixture"),
-        PathBuf::from("target/debug/engine_owner_fixture.exe"),
-    ] {
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    panic!(
-        "fixture binary not found; set ARTISAN_ENGINE_OWNER_FIXTURE or build //tests/backend:engine_owner_fixture"
+    let path = std::env::var_os("ARTISAN_ENGINE_OWNER_FIXTURE").map_or_else(
+        || {
+            let test = std::env::current_exe().expect("test executable path");
+            test.parent()
+                .expect("test output directory")
+                .parent()
+                .expect("Cargo profile directory")
+                .join("examples")
+                .join(format!(
+                    "engine-owner-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        },
+        std::path::PathBuf::from,
     );
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "build fixture with cargo build -p artisan-backend --examples or set ARTISAN_ENGINE_OWNER_FIXTURE to an absolute file: {}",
+        path.display()
+    );
+    path
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +258,8 @@ async fn collect_happy_path_observations(turn: &mut AcceptedTurn) -> (bool, bool
                 saw_text = true;
                 text_deltas.push(delta.delta().to_owned());
             }
-            EngineObservation::TextSnapshot(_)
+            EngineObservation::SummaryTitle { .. }
+            | EngineObservation::TextSnapshot(_)
             | EngineObservation::Usage(_)
             | EngineObservation::Activity(_)
             | EngineObservation::Subagent(_)

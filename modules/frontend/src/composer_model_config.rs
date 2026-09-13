@@ -402,15 +402,32 @@ fn policy_for_codex(
                 None => continue,
             },
         };
-        // A saved base window carries no override, so the projection keeps
-        // the preview default (the canonical `standard` identity) instead
-        // of clearing the axis: both rebuild the same saved configuration.
-        if let Some(wanted) = window {
-            policy.context_window = match window_option(model, wanted) {
+        policy.context_window = if let Some(wanted) = window {
+            match window_option(model, wanted) {
                 Some(option) => Some(option),
                 None => continue,
-            };
-        }
+            }
+        } else {
+            // Saved absence means the provider's base window, even when the
+            // catalog recommends the extended window for new selections.
+            model
+                .capabilities
+                .context_window
+                .as_ref()
+                .and_then(|capability| {
+                    capability
+                        .options
+                        .iter()
+                        .find(|option| {
+                            option.native_config.is_none() && option.native_suffix.is_empty()
+                        })
+                        .map(|option| artisan_catalog::NativeContextSelection {
+                            id: option.id.clone(),
+                            native_suffix: option.native_suffix.clone(),
+                            native_config: None,
+                        })
+                })
+        };
         if let Ok(verified) = permission_by_rebuild(catalog, "codex", &mut policy, saved) {
             return Ok(verified);
         }
@@ -1091,6 +1108,31 @@ mod tests {
         );
         assert_eq!(selection.permission().network(), NetworkAccess::Disabled);
         assert!(validate_run_choice(&catalog, &policy, Some(&config)).is_ok());
+    }
+
+    #[test]
+    fn saved_base_window_does_not_inherit_an_extended_catalog_default() {
+        let mut catalog = NativeModelCatalog::offline().unwrap();
+        let mut policy = profiled_policy(&catalog, "codex-sol");
+        policy.context_window = None;
+        let saved = config_for_policy(&catalog, &policy, None).unwrap();
+        catalog
+            .manifest
+            .models
+            .iter_mut()
+            .find(|model| model.id == "codex-sol")
+            .unwrap()
+            .capabilities
+            .context_window
+            .as_mut()
+            .unwrap()
+            .default = "extended".to_owned();
+        let restored = policy_for_selection(&catalog, &saved).unwrap();
+        assert_eq!(restored.context_window.as_ref().unwrap().id, "standard");
+        assert_eq!(
+            config_for_policy(&catalog, &restored, Some(&saved)).unwrap(),
+            saved
+        );
     }
 
     #[test]

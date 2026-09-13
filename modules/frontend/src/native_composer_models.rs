@@ -12,6 +12,14 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         match event {
+            NativeModelSelectorEvent::RefreshCatalog => {
+                self.ensure_profile_usage(false, None, cx);
+                if let Some(scope) = self.catalog_controller.refresh_catalog() {
+                    self.submit_composer_catalog_reads(&scope, cx);
+                } else if self.catalog_controller.scope().is_none() {
+                    self.discover_composer_catalog_for_settings(cx);
+                }
+            }
             NativeModelSelectorEvent::Retry => {
                 // The retry behind every composer error refreshes the
                 // backend-probed account verdict first, so a recovered
@@ -40,7 +48,7 @@ impl NativeApplication {
         self.refresh_settings_engine_snapshot(cx);
     }
 
-    fn handle_composer_policy_selection(
+    pub(super) fn handle_composer_policy_selection(
         &mut self,
         policy: &crate::native_model_selector::SelectPolicy,
         cx: &mut Context<Self>,
@@ -52,11 +60,14 @@ impl NativeApplication {
         self.composer_model_choice = Some((self.selected_thread.clone(), policy.clone()));
         self.composer_model_run_error = None;
         self.sync_composer_controls(cx);
-        if self.selected_thread.is_none()
-            || self.engine_settings.pending_save_request_id().is_some()
-        {
+        let Some(thread) = self.selected_thread.clone() else {
+            return;
+        };
+        if self.engine_settings.pending_save_request_id().is_some() {
+            self.deferred_composer_policy = Some((thread, policy));
             return;
         }
+        self.deferred_composer_policy = None;
         let catalog = self.effective_catalog_snapshot(cx);
         let outcome = crate::composer_model_config::config_for_policy(
             &catalog,
@@ -65,6 +76,10 @@ impl NativeApplication {
         );
         match outcome {
             Ok(config) => {
+                if self.engine_settings.authoritative_config() == Some(&config) {
+                    self.sync_composer_model_policy(cx);
+                    return;
+                }
                 if matches!(
                     config.selection(),
                     artisan_domain::EngineSelection::OpenCode2(_)

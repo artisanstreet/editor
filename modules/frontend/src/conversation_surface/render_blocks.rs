@@ -336,8 +336,8 @@ impl ConversationSurface {
     ) -> AnyElement {
         // Parity with conversation-message.svelte assistant branch: chromeless
         // markdown at prose width, no card, no title. The reply body reads in
-        // the foreground token per product direction; detail prose keeps the
-        // reference muted body. Shaping stays inside the per-row render
+        // the foreground token, including assistant prose in work history.
+        // Shaping stays inside the per-row render
         // budget so one pathological body cannot parse every frame.
         let rendered_body = self.render_budgeted_markdown(
             &block.body,
@@ -884,7 +884,7 @@ impl ConversationSurface {
                             body,
                             theme,
                             format!("{selector}-markdown"),
-                            MarkdownBodyTone::Muted,
+                            MarkdownBodyTone::Foreground,
                         );
                         div()
                             .w_full()

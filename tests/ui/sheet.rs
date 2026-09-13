@@ -12,7 +12,7 @@ use artisan_ui::sheet::{
 };
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::{
-    Bounds, ColorExt as _, Context, FocusHandle, Hsla, InteractiveElement, IntoElement, Modifiers,
+    Bounds, ColorExt as _, Context, FocusHandle, InteractiveElement, IntoElement, Modifiers,
     ParentElement, Render, Styled, TestAppContext, Window, div, point, px, size,
 };
 
@@ -281,7 +281,7 @@ fn style_resolves_overlay_theme_border_button_and_motion_tokens() {
 
     assert_eq!(
         light_style.overlay,
-        Hsla::black().opacity(SHEET_OVERLAY_OPACITY)
+        gpui::black().opacity(SHEET_OVERLAY_OPACITY)
     );
     assert_eq!(
         light_style.overlay_opacity.to_bits(),

@@ -1,7 +1,7 @@
 //! Dependency-free coverage for the native object-URL lifecycle boundary.
 //!
 //! The implementation is included directly so this packet can run with plain
-//! Rust 1.98 without changing frontend module, Cargo, or Bazel registration.
+//! Rust 1.98 without changing frontend module, Cargo registration.
 
 #[path = "../../modules/frontend/src/object_url_boundary.rs"]
 mod object_url_boundary;

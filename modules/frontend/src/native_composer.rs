@@ -730,6 +730,9 @@ impl NativeComposer {
         let payload = artisan_domain::QueueMessagePayload::new(text, images)
             .map_err(|_| SubmissionBlocked::Disabled)?;
         let token = self.state.begin_payload_submission(&payload)?;
+        self.state.present_submission_eagerly();
+        self.layout = None;
+        self.selection = 0..0;
         self.active_attachment_submission = Some(active_snapshot);
         self.active_submission_draft_revision = Some(self.draft_revision);
         Ok((payload, token))
@@ -772,13 +775,14 @@ impl NativeComposer {
     ) {
         let was_submitting = self.state.is_submitting();
         let active_snapshot = self.active_attachment_submission.clone();
+        let eager = self.state.submission_is_eager();
         let clean_text = self
             .active_submission_draft_revision
             .is_some_and(|revision| revision == self.draft_revision);
         self.state.finish_submission(token, disposition);
         if was_submitting && !self.state.is_submitting() {
             if disposition == DraftDisposition::Accepted
-                && clean_text
+                && (clean_text || eager)
                 && let Some(snapshot) = active_snapshot.as_ref()
             {
                 self.clear_submitted_attachment_values(snapshot);

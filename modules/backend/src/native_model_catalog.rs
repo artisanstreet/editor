@@ -598,6 +598,12 @@ fn overlay_reported(model: &mut NativeModelDefinition, row: &DiscoveredModel) {
     model.capabilities.context_window_tokens = row
         .context_window_tokens
         .or(model.capabilities.context_window_tokens);
+    if row.engine_id == "codex"
+        && row.context_window_tokens.is_some()
+        && row.max_context_window_tokens.is_some()
+    {
+        model.capabilities.context_window = discovered_context_policy(row, model);
+    }
     model.capabilities.output_tokens = row.output_tokens.or(model.capabilities.output_tokens);
     model.capabilities.image_input = row.image_input;
     model.capabilities.local_tools = row.tools;
@@ -673,7 +679,28 @@ fn discovered_context_policy(
             .is_some_and(|tokens| tokens >= 1_000_000),
         _ => false,
     };
-    applies.then(|| template.capabilities.context_window.clone())?
+    let mut policy = applies.then(|| template.capabilities.context_window.clone())??;
+    if row.engine_id == "codex" {
+        let base = row.context_window_tokens?;
+        let max = row.max_context_window_tokens?;
+        for option in &mut policy.options {
+            let tokens = if let Some(config) = option.native_config.as_mut() {
+                config.model_context_window = max;
+                max
+            } else {
+                base
+            };
+            if option.tokens != tokens {
+                option.label = if tokens.is_multiple_of(1_000) {
+                    format!("{}K", tokens / 1_000)
+                } else {
+                    tokens.to_string()
+                };
+            }
+            option.tokens = tokens;
+        }
+    }
+    Some(policy)
 }
 
 fn thinking_from_discovery(

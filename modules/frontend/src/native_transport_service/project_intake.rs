@@ -17,7 +17,7 @@ pub(super) async fn begin_project_intake(
     events: &SyncSender<NativeTransportEvent>,
 ) -> Result<(), ServiceFailure> {
     runtime.intake.reset();
-    pick_directory(runtime, frames, events).await
+    pick_directory(runtime, frames, events, None).await
 }
 
 pub(super) async fn retry_project_intake(
@@ -29,10 +29,11 @@ pub(super) async fn retry_project_intake(
         return Ok(());
     };
     match retry {
+        IntakeRetry::Validate(path) => begin_project_intake_at(runtime, frames, events, path).await,
         IntakeRetry::Pick => {
             runtime.intake.selected_directory = None;
             runtime.intake.projects = None;
-            pick_directory(runtime, frames, events).await
+            pick_directory(runtime, frames, events, None).await
         }
         IntakeRetry::Attach(mutation) => {
             attach_project_with_mutation(runtime, frames, events, mutation, true).await
@@ -73,10 +74,21 @@ pub(super) async fn retry_project_intake(
     }
 }
 
+pub(super) async fn begin_project_intake_at(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    path: String,
+) -> Result<(), ServiceFailure> {
+    runtime.intake.reset();
+    pick_directory(runtime, frames, events, Some(path)).await
+}
+
 async fn pick_directory(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
+    selected_path: Option<String>,
 ) -> Result<(), ServiceFailure> {
     runtime.intake.selected_directory = None;
     runtime.intake.projects = None;
@@ -84,12 +96,15 @@ async fn pick_directory(
         events,
         NativeTransportEvent::ProjectIntakeProgress(NativeProjectIntakeStage::PickingDirectory),
     )?;
+    let request = match selected_path.as_ref() {
+        Some(path) => ClientRequest::ValidateDirectory(
+            artisan_domain::RootPath::parse(path.clone())
+                .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?,
+        ),
+        None => ClientRequest::PickDirectory,
+    };
     let payload = match runtime
-        .request(
-            frames,
-            ClientRequest::PickDirectory,
-            ExpectedResponse::Directory,
-        )
+        .request(frames, request, ExpectedResponse::Directory)
         .await
     {
         Ok(payload) => payload,
@@ -99,7 +114,7 @@ async fn pick_directory(
                 events,
                 NativeProjectIntakeOperation::PickDirectory,
                 error,
-                Some(IntakeRetry::Pick),
+                Some(selected_path.map_or(IntakeRetry::Pick, IntakeRetry::Validate)),
                 true,
             );
         }

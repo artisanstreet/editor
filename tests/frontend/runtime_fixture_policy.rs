@@ -2,7 +2,7 @@
 //!
 //! The production module is path-linked deliberately: this packet does not
 //! edit shared frontend registration, so the policy can be checked with plain
-//! Rust and no Cargo or Bazel dependencies.
+//! Rust and no Cargo dependencies.
 
 #[path = "../../modules/frontend/src/runtime_fixture_policy.rs"]
 mod runtime_fixture_policy;

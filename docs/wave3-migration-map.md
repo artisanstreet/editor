@@ -1,5 +1,7 @@
 # Wave 3 migration map — gpui 0.2.2 → gpui-ce (explorer output, 2026-09-04)
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](runbooks/native-dev.md).
+
 > Canonical checkout: master @ `287da9b8`. Old API: gpui 0.2.2 (registry source).
 > New API: `artisanstreet/gpui-ce` main (vendor pin `0b84630e`, branch `artisan/backdrop-blur` ≈ main).
 > Vendor lane: `wt-wave3-vendor` @ `agent/wave3-vendor-vp1` — uncommitted diff = 72 files, 1890+/1660−. `DONE-BY-VENDOR` refers to that diff; compiles only after §4-P0.

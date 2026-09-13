@@ -52,12 +52,27 @@ const REQUESTED_AT_ONE_MS: i64 = 2_000_000;
 const REQUESTED_AT_TWO_MS: i64 = 2_001_000;
 
 fn registered_fixture_program() -> PathBuf {
-    let mapping = std::env::var("ARTISAN_ENGINE_OWNER_FIXTURE")
-        .expect("ARTISAN_ENGINE_OWNER_FIXTURE must be set via rlocationpath");
-    let runfiles =
-        runfiles::Runfiles::create().expect("official runfiles discovery should succeed");
-    runfiles::rlocation!(runfiles, mapping.as_str())
-        .unwrap_or_else(|| panic!("declared fixture artifact must resolve: {mapping}"))
+    let path = std::env::var_os("ARTISAN_ENGINE_OWNER_FIXTURE").map_or_else(
+        || {
+            let test = std::env::current_exe().expect("test executable path");
+            test.parent()
+                .expect("test output directory")
+                .parent()
+                .expect("Cargo profile directory")
+                .join("examples")
+                .join(format!(
+                    "engine-owner-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        },
+        std::path::PathBuf::from,
+    );
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "build fixture with cargo build -p artisan-backend --examples or set ARTISAN_ENGINE_OWNER_FIXTURE to an absolute file: {}",
+        path.display()
+    );
+    path
 }
 
 fn temp_database(label: &str) -> (PathBuf, PathBuf) {

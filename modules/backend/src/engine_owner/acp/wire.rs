@@ -487,6 +487,14 @@ impl SessionId {
 pub(crate) struct WireUpdate(Value);
 
 impl WireUpdate {
+    /// ACP session metadata is optional; never interpret tool or plan titles as a thread name.
+    pub(crate) fn summary_title(&self) -> Option<artisan_domain::ThreadTitle> {
+        if self.0.get("sessionUpdate")?.as_str()? != "session_info_update" {
+            return None;
+        }
+        artisan_domain::ThreadTitle::parse(self.0.get("title")?.as_str()?.to_owned()).ok()
+    }
+
     /// Returns the opaque update value for A2 interpretation.
     #[must_use]
     pub(crate) fn value(&self) -> &Value {

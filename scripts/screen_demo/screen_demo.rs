@@ -1,7 +1,7 @@
 //! Visual-proof harness: mock transcript screen for screenshots.
 //!
 //! Renders two turns (user question + assistant markdown reply with a code
-//! fence, then a follow-up) through the real ConversationSurface. No Forge,
+//! fence, then a follow-up) through the real `ConversationSurface`. No Forge,
 //! no network: scene data is hardcoded. Run it, screenshot it, compare
 //! against the old TS app. NOT shipped in any payload.
 
@@ -13,8 +13,8 @@ use artisan_frontend::conversation_scene::{
 use artisan_frontend::conversation_surface::ConversationSurface;
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    App, Application, Bounds, Context, Entity, IntoElement, Render, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, size,
+    App, Bounds, Context, Entity, IntoElement, Render, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, size,
 };
 
 fn scene_id(value: &str) -> SceneId {
@@ -85,26 +85,28 @@ impl Render for TranscriptDemo {
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
-        // Register the same bundled typefaces the product ships, so the
-        // screenshot harness renders real product typography.
-        artisan_ui::fonts::register_bundled_fonts(cx).expect("bundled fonts must register");
-        let bounds = Bounds::centered(None, size(px(1100.0), px(700.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_, cx| {
-                cx.new(|cx| {
-                    let surface =
-                        cx.new(|cx| ConversationSurface::new(mock_scene(), ThemeMode::Dark, cx));
-                    TranscriptDemo { surface }
-                })
-            },
-        )
-        .unwrap();
+    gpui_platform::application()
+        .with_assets(artisan_ui::asset_seam::CatalogAssetSource)
+        .run(|cx: &mut App| {
+            // Register the same bundled typefaces the product ships, so the
+            // screenshot harness renders real product typography.
+            artisan_ui::fonts::register_bundled_fonts(cx).expect("bundled fonts must register");
+            let bounds = Bounds::centered(None, size(px(1100.0), px(700.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |_, cx| {
+                    cx.new(|cx| {
+                        let surface = cx
+                            .new(|cx| ConversationSurface::new(mock_scene(), ThemeMode::Dark, cx));
+                        TranscriptDemo { surface }
+                    })
+                },
+            )
+            .unwrap();
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }

@@ -122,7 +122,6 @@ impl ComposerQueueEntry {
 
     /// Returns the latest dispatcher diagnostic for this row, if the
     /// dispatcher has claimed and requeued it at least once.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn dispatch_error(&self) -> Option<&str> {
         self.last_error

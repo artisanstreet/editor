@@ -1,7 +1,7 @@
 //! Standalone parent smoke for the TEST-ONLY engine-owner fixture.
 //!
 //! One integration test crate independent of `backend/engine_owner`:
-//! `std` + pinned `tokio` 1.53.1 + `serde_json` + official `runfiles` only.
+//! `std` + pinned `tokio` 1.53.1 + `serde_json` only.
 //! Seven actual children run serially with absolute `15s` hard / `10s` probe +
 //! `5s` cleanup deadlines, remaining-capacity reads, and one common
 //! `CaseState` + finalizer. No detached task, no raw diagnostic.
@@ -10,14 +10,12 @@ use std::net::SocketAddr;
 use std::process::Stdio;
 use std::time::Duration;
 
-use runfiles::{Runfiles, rlocation};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::time::Instant;
 
-const FIXTURE_ENV: &str = "ARTISAN_ENGINE_OWNER_FIXTURE";
 const SCENARIO_ENV: &str = "ARTISAN_ENGINE_OWNER_TEST_SCENARIO";
 const AUTH_ENV: &str = "ARTISAN_ENGINE_OWNER_TEST_AUTHORIZATION";
 
@@ -42,11 +40,27 @@ const LIFELINE_EXIT: i32 = 3;
 const ABRUPT_EXIT: i32 = 7;
 
 fn resolved_fixture_program() -> std::path::PathBuf {
-    let mapping = std::env::var(FIXTURE_ENV)
-        .unwrap_or_else(|_| panic!("test env {FIXTURE_ENV} must be set via rlocationpath"));
-    let runfiles = Runfiles::create().expect("official runfiles discovery should succeed");
-    rlocation!(runfiles, mapping.as_str())
-        .unwrap_or_else(|| panic!("declared fixture artifact must resolve: {mapping}"))
+    let path = std::env::var_os("ARTISAN_ENGINE_OWNER_FIXTURE").map_or_else(
+        || {
+            let test = std::env::current_exe().expect("test executable path");
+            test.parent()
+                .expect("test output directory")
+                .parent()
+                .expect("Cargo profile directory")
+                .join("examples")
+                .join(format!(
+                    "engine-owner-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        },
+        std::path::PathBuf::from,
+    );
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "build fixture with cargo build -p artisan-backend --examples or set ARTISAN_ENGINE_OWNER_FIXTURE to an absolute file: {}",
+        path.display()
+    );
+    path
 }
 
 fn build_runtime() -> tokio::runtime::Runtime {

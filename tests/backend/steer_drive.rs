@@ -99,27 +99,27 @@ impl Drop for SteerTempRoot {
 
 /// Resolves the built wire-fixture executable, mirroring the wire tests.
 fn steer_fixture_program() -> PathBuf {
-    if let Ok(path) = std::env::var("ARTISAN_CODEX_WIRE_FIXTURE") {
-        let mapping = PathBuf::from(&path);
-        let path = if mapping.is_absolute() {
-            mapping
-        } else {
-            let runfiles = runfiles::Runfiles::create().expect("runfiles discovery");
-            runfiles::rlocation!(runfiles, path.as_str()).expect("wire fixture runfile")
-        };
-        assert!(
-            path.is_file(),
-            "declared wire fixture must be a regular file"
-        );
-        return path;
-    }
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_codex_wire_fixture") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return path;
-        }
-    }
-    panic!("wire fixture binary not found; set ARTISAN_CODEX_WIRE_FIXTURE");
+    let path = std::env::var_os("ARTISAN_CODEX_WIRE_FIXTURE").map_or_else(
+        || {
+            let test = std::env::current_exe().expect("test executable path");
+            test.parent()
+                .expect("test output directory")
+                .parent()
+                .expect("Cargo profile directory")
+                .join("examples")
+                .join(format!(
+                    "codex-wire-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        },
+        std::path::PathBuf::from,
+    );
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "build fixture with cargo build -p artisan-backend --examples or set ARTISAN_CODEX_WIRE_FIXTURE to an absolute file: {}",
+        path.display()
+    );
+    path
 }
 
 /// Copies the built fixture to a per-test executable whose basename names
@@ -572,17 +572,16 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
             .expect("conversation items should read");
         let assistant = items
             .iter()
-            .find(|item| {
+            .filter(|item| {
                 matches!(
                     item.item_kind,
                     database_entities::ConversationItemKind::AssistantMessage
                 )
             })
+            .max_by_key(|item| item.ordinal)
             .expect("assistant item must exist");
         assert!(
-            assistant
-                .body
-                .starts_with("hello wire\n\nburst-00 burst-01 "),
+            assistant.body.starts_with("burst-00 burst-01 "),
             "the coalesced threshold run must persist in order, got {:?}",
             assistant.body
         );
@@ -803,20 +802,20 @@ async fn codex_burst_terminal_coalesces_to_exact_transcript_with_bounded_commits
             .expect("conversation items should read");
         let assistant = items
             .iter()
-            .find(|item| {
+            .filter(|item| {
                 matches!(
                     item.item_kind,
                     database_entities::ConversationItemKind::AssistantMessage
                 )
             })
+            .max_by_key(|item| item.ordinal)
             .expect("assistant item must exist");
         let mut bursts = String::new();
         for index in 0..64 {
             write!(bursts, "burst-{index:02} ").expect("writing to a String cannot fail");
         }
         assert_eq!(
-            assistant.body,
-            format!("hello wire\n\n{bursts}"),
+            assistant.body, bursts,
             "the coalesced transcript must equal the uncoalesced concatenation"
         );
 
@@ -1453,4 +1452,119 @@ fn steer_ledger_preflight_records_only_post_ack() {
             )
             .is_err()
     );
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "complete wire-to-database regression fixture"
+)]
+#[tokio::test]
+async fn codex_message_history_preserves_parts_phases_and_late_corrections() {
+    tokio::time::timeout(STEER_DEADLINE, async {
+        let fixture = steer_fixture_program();
+        let temp = SteerTempRoot::new("burst-terminal");
+        let program = steer_scenario_program(&fixture, &temp.dir, "message_history");
+        let database = connect(SqliteConfig::file(&temp.db_path).sqlx_logging(false))
+            .await
+            .expect("file database should open");
+        migrate_to_current(&database)
+            .await
+            .expect("migrations should apply");
+        let repository = Repository::new(database.clone());
+        let thread_id = ThreadId::parse("thread-fixture-1").expect("thread id");
+        let seed = seed_steer_run(
+            &repository,
+            &thread_id,
+            "burst-terminal",
+            "run-burst-terminal",
+            "turn-burst-terminal",
+        )
+        .await;
+
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch_with_executable(
+                &temp.db_path,
+                &EngineProfileId::parse("codex-fixture").expect("profile id"),
+                &program,
+                "codex-cli 0.145.0",
+            )
+            .expect("wire launch resolves");
+        let mut owner = EngineOwner::start_configured(
+            NonZeroUsize::new(1).expect("one slot"),
+            &tokio::runtime::Handle::current(),
+        );
+        let mut turn = owner
+            .admit_codex_turn(
+                EngineCodexTurnInput {
+                    run_id: seed.run_id.clone(),
+                    thread_id: thread_id.clone(),
+                    project_root: temp.root.clone(),
+                    prompt_id: "prompt-burst-terminal".to_owned(),
+                    prompt: QueueMessagePayload::text_only("hello steer").expect("payload"),
+                    settings: seed.settings.clone(),
+                    launch,
+                    continuation: None,
+                    prompt_delivery: "immediate".to_owned(),
+                    stream_after: 0,
+                    control_capacity: 1,
+                },
+                Duration::from_secs(50),
+            )
+            .expect("wire turn admits");
+        turn.prepare().await.expect("wire turn prepares");
+        turn.authorize().expect("wire turn authorizes once");
+
+        let config = test_dispatcher_config();
+        let origin = SystemCommandOrigin;
+        let stop = CancelHandle::new();
+        let process_cancel = CancelHandle::new();
+        let run_cancel = CancelHandle::new();
+        let context = TurnConsumptionContext {
+            repository: &repository,
+            config: &config,
+            origin: &origin,
+            stop: &stop,
+            process_cancel: &process_cancel,
+            run_cancel: &run_cancel,
+        };
+        let scope = RunBatchScope {
+            claimed: &seed.claimed,
+            launched: &seed.launched,
+            bound: &seed.bound,
+            run_start_key: &seed.run_start_key,
+            credentials: &seed.credentials,
+            expected_launch_at: UnixMillis::from_millis(seed.launch_op_ms),
+            expected_updated_at: UnixMillis::from_millis(seed.bound_op_ms),
+        };
+        assert!(!super::consume_turn(context, turn, scope, EngineId::Codex, None).await);
+        let mut items: Vec<_> = database_entities::conversation_item::Entity::find()
+            .all(&database)
+            .await
+            .expect("items")
+            .into_iter()
+            .filter(|item| {
+                matches!(
+                    item.item_kind,
+                    database_entities::ConversationItemKind::AssistantMessage
+                )
+            })
+            .collect();
+        items.sort_by_key(|item| item.ordinal);
+        assert_eq!(items.len(), 2, "each provider message owns a durable row");
+        assert_eq!(items[0].body, "I checked.");
+        assert_eq!(
+            items[0].phase,
+            Some(database_entities::RenderPhase::Commentary)
+        );
+        assert_eq!(items[1].body, "The result is ready.");
+        assert_eq!(items[1].phase, Some(database_entities::RenderPhase::Final));
+        assert!(
+            items
+                .iter()
+                .all(|item| item.lifecycle == database_entities::EntityLifecycle::Completed)
+        );
+        assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    })
+    .await
+    .expect("history settles");
 }

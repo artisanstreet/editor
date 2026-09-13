@@ -11,7 +11,7 @@
 #![forbid(unsafe_code)]
 
 use artisan_database::AssistantChange;
-use artisan_domain::{AssistantBody, AssistantMessagePhase, IncrementalText, Revision};
+use artisan_domain::{AssistantBody, IncrementalText, Revision};
 
 use crate::engine_owner::operation::AcceptedTurn;
 
@@ -124,7 +124,7 @@ pub(super) async fn replace_assistant_body(
         item_id: &item_id,
         expected_revision: state.assistant_revision,
         body: &body,
-        phase: AssistantMessagePhase::Unspecified,
+        phase: state.assistant_phase,
         patch_id: &patch_id,
     }];
     let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
@@ -188,7 +188,7 @@ pub(super) async fn start_assistant_item(
     };
     let changes = [AssistantChange::Start {
         item_id: &item_id,
-        phase: AssistantMessagePhase::Unspecified,
+        phase: state.assistant_phase,
         body: &body,
         patch_id: &patch_id,
     }];
@@ -202,7 +202,10 @@ pub(super) async fn start_assistant_item(
         scope: &state.scope,
         batch_sequence: state.batch_sequence,
         operated_at,
-        activate_turn_patch_id: Some(&activation_patch_id),
+        activate_turn_patch_id: state
+            .parked_parts
+            .is_empty()
+            .then_some(&activation_patch_id),
         changes: &changes,
         checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
@@ -250,7 +253,7 @@ pub(super) async fn ensure_assistant_item(
     };
     let changes = [AssistantChange::Start {
         item_id: &item_id,
-        phase: AssistantMessagePhase::Unspecified,
+        phase: state.assistant_phase,
         body: &body,
         patch_id: &patch_id,
     }];

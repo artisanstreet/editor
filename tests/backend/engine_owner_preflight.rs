@@ -24,14 +24,27 @@ use crate::engine_owner::process::{
 use artisan_domain::RootPath;
 
 fn fixture_program_path() -> PathBuf {
-    let mapping = std::env::var("ARTISAN_ENGINE_OWNER_FIXTURE")
-        .expect("ARTISAN_ENGINE_OWNER_FIXTURE must be set via rlocationpath");
-    if let Ok(runfiles) = runfiles::Runfiles::create()
-        && let Some(path) = runfiles::rlocation!(runfiles, mapping.as_str())
-    {
-        return path;
-    }
-    PathBuf::from(mapping)
+    let path = std::env::var_os("ARTISAN_ENGINE_OWNER_FIXTURE").map_or_else(
+        || {
+            let test = std::env::current_exe().expect("test executable path");
+            test.parent()
+                .expect("test output directory")
+                .parent()
+                .expect("Cargo profile directory")
+                .join("examples")
+                .join(format!(
+                    "engine-owner-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        },
+        std::path::PathBuf::from,
+    );
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "build fixture with cargo build -p artisan-backend --examples or set ARTISAN_ENGINE_OWNER_FIXTURE to an absolute file: {}",
+        path.display()
+    );
+    path
 }
 
 fn assert_fixture_program_is_regular_file(fixture: &Path) {

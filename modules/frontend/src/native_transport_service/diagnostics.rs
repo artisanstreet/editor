@@ -64,6 +64,8 @@ impl std::fmt::Display for ServiceFailureStage {
 /// Redacted category of a service failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ServiceFailureCategory {
+    /// Another editor currently owns the host connection credential.
+    ConnectionBusy,
     /// The local installation or service was unavailable.
     Unavailable,
     /// A local value failed validation.
@@ -87,6 +89,7 @@ pub enum ServiceFailureCategory {
 impl std::fmt::Display for ServiceFailureCategory {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let text = match self {
+            Self::ConnectionBusy => "already connected in another window",
             Self::Unavailable => "unavailable",
             Self::InvalidConfiguration => "invalid configuration",
             Self::Integrity => "integrity",
@@ -239,6 +242,9 @@ pub enum PrivateDelivery {
 /// service event.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum StartupError {
+    /// Another local editor holds this host's exclusive reconnect lease.
+    #[error("host connection is already in use")]
+    ConnectionBusy,
     /// The active payload did not have exact verified health.
     #[error("native payload was not verified")]
     PayloadUnverified,
@@ -250,6 +256,10 @@ pub enum StartupError {
 impl StartupError {
     pub(crate) const fn failure(self) -> ServiceFailure {
         match self {
+            Self::ConnectionBusy => ServiceFailure::new(
+                ServiceFailureStage::Credentials,
+                ServiceFailureCategory::ConnectionBusy,
+            ),
             Self::PayloadUnverified => ServiceFailure::new(
                 ServiceFailureStage::Payload,
                 ServiceFailureCategory::Integrity,

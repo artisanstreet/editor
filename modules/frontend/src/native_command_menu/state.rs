@@ -11,6 +11,13 @@ use super::*;
 /// this surface never routes or mutates host state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandMenuAction {
+    /// Import an explicitly trusted host invitation.
+    AddHost,
+    /// Open an isolated window for a saved host, or the local machine.
+    OpenHost {
+        /// Private host registration home; absent selects the local installation.
+        home: Option<std::path::PathBuf>,
+    },
     /// Jump to the root new-thread draft (legacy `StartNewThread`).
     NewThread,
     /// Open the settings surface (legacy `/settings/models` link).
@@ -527,5 +534,18 @@ impl CommandMenuState {
             action: action.clone(),
         });
         Some(action)
+    }
+}
+
+impl CommandMenuAction {
+    pub(super) fn icon(&self) -> AssetId {
+        match self {
+            CommandMenuAction::NewThread => AssetId::TABLER_EDIT,
+            CommandMenuAction::AddHost
+            | CommandMenuAction::OpenHost { .. }
+            | CommandMenuAction::OpenSettings => AssetId::TABLER_SETTINGS,
+            CommandMenuAction::OpenProject { .. } => AssetId::TABLER_FOLDER,
+            CommandMenuAction::OpenThread { .. } => AssetId::TABLER_MESSAGE_CIRCLE,
+        }
     }
 }

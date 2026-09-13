@@ -29,12 +29,6 @@ pub use self::startup::{
 use crate::ListenerLimits;
 
 use std::fs::{Metadata, OpenOptions};
-use std::net::{IpAddr, SocketAddr};
-
-fn is_required_loopback(address: SocketAddr) -> bool {
-    address.port() != 0 && address.ip() == IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-}
-
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 

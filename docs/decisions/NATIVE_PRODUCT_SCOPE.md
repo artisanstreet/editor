@@ -10,7 +10,7 @@ the native design remains idiomatic Rust, Quinn, SeaORM, and GPUI.
 ## Shipping target
 
 The shipping target is a native desktop Artisan product built and packaged by
-Bazel:
+Cargo:
 
 - a GPUI editor process;
 - a Rust Forge process;
@@ -128,14 +128,14 @@ the historical Drizzle layout into a parity requirement.
 
 - The normal packaged lifecycle is editor-owned sibling Forge with explicit
   readiness, authenticated handoff, bounded shutdown, and orphan containment.
-- Forge remains a separately executable Bazel binary; the UI is not its process
+- Forge remains a separately executable Cargo binary; the UI is not its process
   supervisor abstraction.
 - Phase 9 first proves a relocatable deterministic portable archive. Installer,
   signing, updater, release-channel, and distribution-service choices remain
   deferred until that artifact and clean-host workflow are proven.
-- Runtime resources come only from declared Bazel inputs and the typed assets
+- Runtime resources come only from declared Cargo inputs and the typed assets
   crate. Production code does not fall back to source-tree paths or depend on a
-  Bazel runfiles layout.
+  build-output directory layout.
 
 ## Completion meaning
 

@@ -14,7 +14,7 @@ The native Artisan Editor port is a full product rewrite delivered as a long sta
 - PRs remain drafts until their own implementation and evidence are ready. Automation never merges them; the maintainer decides when and how to merge.
 - The controlling agent creates, edits, inspects, and closes PRs with `gh`. Git remains responsible for local commits, branches, rebases, and pushes.
 - Parallel work happens in isolated worktrees with disjoint ownership. Its commits are reviewed and integrated serially on candidate stack branches so shared manifests and interfaces keep one history. Verify and publish each candidate PR before advancing local `master` to it.
-- Root Bazel/Cargo state, lockfiles, shared schemas, and public crate interfaces have one integrating writer at a time.
+- Root Cargo/Nix state, lockfiles, shared schemas, and public crate interfaces have one integrating writer at a time.
 - Every PR body names its immediate dependency, scope, exclusions, tests, and remaining known work. A later PR must not hide an unfinished requirement in an earlier one.
 - When the maintainer merges a lower PR, rebase the next live branch onto the new `master`, retarget its PR with `gh`, and then repair the branches above it in order.
 
@@ -41,7 +41,7 @@ Those families describe decomposition, not bulk milestones. A protocol schema, a
 ## Current bottom of stack
 
 1. Native port plan.
-2. Bazel-native Rust workspace foundation.
+2. Cargo-native Rust workspace foundation.
 3. This stack policy.
 
 Feasibility and product packets continue above this point. The list is intentionally open-ended.

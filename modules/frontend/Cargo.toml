@@ -561,3 +561,38 @@ path = "../../tests/frontend/workspace_tab_state.rs"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "frontend_command_ranking"
+path = "../../tests/frontend/command_ranking.rs"
+
+[[test]]
+name = "frontend_context_usage_tone"
+path = "../../tests/frontend/context_usage_tone.rs"
+
+[[test]]
+name = "frontend_conversation_diff_stat"
+path = "../../tests/frontend/conversation_diff_stat.rs"
+
+[[test]]
+name = "frontend_native_subscription_bridge"
+path = "../../tests/frontend/native_subscription_bridge.rs"
+
+[[test]]
+name = "frontend_native_thread_picker"
+path = "../../tests/frontend/native_thread_picker.rs"
+
+[[test]]
+name = "frontend_new_thread_surface"
+path = "../../tests/frontend/new_thread_surface.rs"
+
+[[test]]
+name = "frontend_notification_web_presenter_policy"
+path = "../../tests/frontend/notification_web_presenter_policy.rs"
+
+[[test]]
+name = "frontend_reasoning_display"
+path = "../../tests/frontend/reasoning_display.rs"
+
+[target.'cfg(windows)'.dependencies]
+native-dialog.workspace = true

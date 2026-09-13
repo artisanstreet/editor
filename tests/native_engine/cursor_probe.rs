@@ -2,7 +2,7 @@
 //! startup-failure classification, and real subprocess bounds.
 //!
 //! Registration (controller-owned, not part of this packet):
-//! `tests/native_engine/BUILD.bazel` gains a `rust_test` target for
+//! `modules/native_engine/Cargo.toml` gains a `rust_test` target for
 //! `cursor_probe.rs` depending on `//modules/native_engine:native_engine`,
 //! plus a Cargo `[[test]] cursor_probe` entry in
 //! `modules/native_engine/Cargo.toml`.

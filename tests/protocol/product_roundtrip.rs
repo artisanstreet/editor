@@ -1,7 +1,7 @@
 //! Phase 2 product schema proof.
 //!
 //! Exercises every message family of `schema/artisan.capnp` through its
-//! Bazel-generated bindings (`artisan_protocol::artisan_capnp`): hello and
+//! Cargo-generated bindings (`artisan_protocol::artisan_capnp`): hello and
 //! welcome negotiation across both credential kinds with reconnect rotation,
 //! negotiated lifecycle feature bits and status/stop control, every request
 //! and response arm with optional-parent, place, entry, and attached-project

@@ -836,6 +836,9 @@ struct Request {
     # Bounded repository-identity read for named attached projects. Appended
     # after resolveRichLink; fresh ordinal, existing ordinals frozen.
     queryProjectRepository @30 :ProjectRepositoryQuery;
+    # Authenticated client-side chooser result. Forge canonicalizes and validates
+    # this host-native path before issuing the usual one-use DirectoryId.
+    validateDirectory @31 :Text;
   }
 }
 

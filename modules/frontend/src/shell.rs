@@ -1346,58 +1346,6 @@ pub fn legacy_shell_frame(props: LegacyShellProps<'_>, content: AnyElement) -> D
         )
 }
 
-/// Resolve the current local OS account picture off the UI thread.
-/// Missing account metadata is an ordinary avatar-fallback case.
-#[cfg(not(test))]
-pub(crate) fn local_account_picture() -> Option<std::path::PathBuf> {
-    #[cfg(target_os = "windows")]
-    let output = {
-        use std::os::windows::process::CommandExt as _;
-        std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", r#"
-                $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-                $account = Get-ItemProperty -LiteralPath ("Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AccountPicture\Users\" + $sid) -ErrorAction SilentlyContinue
-                foreach ($size in @('Image96','Image192','Image448','Image32')) {
-                    $path = $account.$size
-                    if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
-                        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-                        [Console]::Write($path)
-                        break
-                    }
-                }
-            "#]).creation_flags(0x0800_0000).output().ok()?
-    };
-    #[cfg(target_os = "macos")]
-    let output = std::process::Command::new("/usr/bin/dscl")
-        .args([
-            ".",
-            "-read",
-            &format!("/Users/{}", std::env::var("USER").ok()?),
-            "Picture",
-        ])
-        .output()
-        .ok()?;
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    {
-        if !output.status.success() {
-            return None;
-        }
-        let text = String::from_utf8(output.stdout).ok()?;
-        let path = text
-            .trim()
-            .strip_prefix("Picture:")
-            .unwrap_or(text.trim())
-            .trim();
-        if path.is_empty() {
-            return None;
-        }
-        let path = std::path::PathBuf::from(path);
-        path.is_file().then_some(path)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    None
-}
-
 #[cfg(test)]
 mod legacy_shell_tests {
     #![expect(

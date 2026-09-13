@@ -204,16 +204,12 @@ fn settings_model_choice_saves_acknowledges_and_reloads(cx: &mut TestAppContext)
             );
         });
     });
-    // A saved native configuration restores from the independent
-    // probed/static path: the reload must never request managed
-    // OpenCode catalog discovery or favorites.
     assert!(
-        commands.borrow().iter().all(|command| !matches!(
-            command,
-            NativeTransportCommand::ReadComposerCatalog { .. }
-                | NativeTransportCommand::ReadModelFavorites { .. }
-        )),
-        "native reload must not request managed catalog discovery"
+        commands
+            .borrow()
+            .iter()
+            .any(|command| matches!(command, NativeTransportCommand::ReadComposerCatalog { .. })),
+        "native threads must read their host's runtime catalog"
     );
 }
 
@@ -392,8 +388,22 @@ fn sidebar_footer_shares_sliding_hover_and_thread_area_clears(cx: &mut TestAppCo
 #[gpui::test]
 fn profile_actions_share_sliding_hover_and_keyboard_syncs_pill(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (sink, _) = command_sink([]);
     cx.update(|window, app| {
-        view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        view.update(app, |view, cx| {
+            view.test_command_sink = Some(sink);
+            view.profile_usage.entries.push(reported_usage_entry(
+                "visible-test",
+                "Test",
+                vec![reported_usage_window(
+                    "session",
+                    NativeUsageCadence::Session,
+                    None,
+                    40.0,
+                )],
+            ));
+            window.focus(&view.profile_focus, cx);
+        });
     });
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -500,8 +510,22 @@ fn profile_actions_share_sliding_hover_and_keyboard_syncs_pill(cx: &mut TestAppC
 #[gpui::test]
 fn profile_usage_small_content_keeps_natural_height(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (sink, _) = command_sink([]);
     cx.update(|window, app| {
-        view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        view.update(app, |view, cx| {
+            view.test_command_sink = Some(sink);
+            view.profile_usage.entries.push(reported_usage_entry(
+                "visible-test",
+                "Test",
+                vec![reported_usage_window(
+                    "session",
+                    NativeUsageCadence::Session,
+                    None,
+                    40.0,
+                )],
+            ));
+            window.focus(&view.profile_focus, cx);
+        });
     });
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -1311,7 +1335,7 @@ fn profile_menu_keyboard_opens_settings_and_closes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn profile_menu_usage_action_keeps_menu_open_and_never_invents_readings(cx: &mut TestAppContext) {
+fn profile_menu_without_forge_omits_usage_and_never_invents_readings(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
     cx.update(|window, app| {
         view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
@@ -1329,15 +1353,12 @@ fn profile_menu_usage_action_keeps_menu_open_and_never_invents_readings(cx: &mut
             .filter_map(|entry| entry.as_item())
             .map(|item| item.id.as_ref())
             .collect::<Vec<_>>();
-        assert_eq!(item_ids, vec!["settings", "usage"]);
+        assert_eq!(item_ids, vec!["settings"]);
     });
     assert!(
         cx.debug_bounds(crate::native_profile_usage::PROFILE_USAGE_SELECTOR)
-            .is_some()
+            .is_none()
     );
-    cx.simulate_keystrokes("end enter");
-    cx.run_until_parked();
-    assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!cx.update(|_, app| view.read(app).profile_menu.is_open()));

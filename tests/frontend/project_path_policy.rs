@@ -1,7 +1,7 @@
 //! Exhaustive direct coverage for the compact project-path policy.
 //!
 //! The production module is included directly so this focused harness can be
-//! compiled with Rust 1.98 using `rustc --test`, without Cargo, Bazel, or
+//! compiled with Rust 1.98 using `rustc --test`, without Cargo, or
 //! frontend registration changes.
 
 #![forbid(unsafe_code)]

@@ -1,7 +1,7 @@
 //! Dependency-free transition coverage for the active-thread light policy.
 //!
 //! The production module is included directly so these tests cover the pure
-//! state boundary without Cargo, Bazel, browser APIs, or frontend
+//! state boundary without Cargo, browser APIs, or frontend
 //! registration.
 
 #![allow(clippy::float_cmp)]

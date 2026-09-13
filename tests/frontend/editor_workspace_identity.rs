@@ -1,7 +1,7 @@
 //! Exhaustive dependency-free coverage for the editor workspace identity policy.
 //!
 //! The implementation is included directly so this focused harness does not
-//! require frontend module, protocol, navigation, Cargo, or Bazel registration.
+//! require frontend module, protocol, navigation, Cargo registration.
 
 #[path = "../../modules/frontend/src/editor_workspace_identity.rs"]
 mod editor_workspace_identity;

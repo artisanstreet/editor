@@ -1672,3 +1672,19 @@ fn invalid_wire_text_returns_field_specific_utf8_error() {
         })
     ));
 }
+
+#[test]
+fn selected_directory_path_roundtrips_with_domain_bounds() -> Result<(), Box<dyn Error>> {
+    assert_roundtrip(&envelope(
+        "selected-directory",
+        WireEnvelopeBody::Request(ClientRequest::ValidateDirectory(
+            artisan_domain::RootPath::parse("/home/sander/My Project")?,
+        )),
+    ))?;
+    assert!(artisan_domain::RootPath::parse(" ").is_err());
+    assert!(
+        artisan_domain::RootPath::parse("x".repeat(artisan_domain::ROOT_PATH_MAX_BYTES + 1))
+            .is_err()
+    );
+    Ok(())
+}

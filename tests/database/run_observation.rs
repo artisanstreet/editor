@@ -461,6 +461,19 @@ const fn digest_phase_tag(phase: AssistantMessagePhase) -> u8 {
 fn digest_encode_changes(h: &mut Sha256, changes: &[AssistantChange<'_>]) {
     for change in changes {
         match change {
+            AssistantChange::Finish {
+                item_id,
+                expected_revision,
+                patch_id,
+            } => {
+                h.update([3u8]);
+                digest_write_str(h, item_id.as_str());
+                digest_encode_i64(
+                    h,
+                    i64::try_from(expected_revision.get()).unwrap_or(i64::MAX),
+                );
+                digest_write_str(h, patch_id.as_str());
+            }
             AssistantChange::Start {
                 item_id,
                 phase,
@@ -2619,4 +2632,85 @@ async fn redaction_errors_never_contain_secret_or_checkpoint_bytes() {
         !m2.contains("cafe") && !m2.contains("CAFE"),
         "error should not leak checkpoint bytes"
     );
+}
+
+#[tokio::test]
+async fn finishing_intermediate_message_seals_only_that_message() {
+    let pair = seeded_pair().await;
+    // first progress
+    let scope1 = batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS));
+    let body = assistant_body("start");
+    let item_id = ItemId::parse("assistant-1").expect("id");
+    let pt = PatchId::parse("p-act-1").expect("p");
+    let pi = PatchId::parse("p-start-1").expect("p");
+    pair.repository
+        .commit_run_batch(CommitRunBatch {
+            scope: scope1,
+            batch_sequence: 1,
+            operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
+            activate_turn_patch_id: Some(&pt),
+            changes: &[AssistantChange::Start {
+                item_id: &item_id,
+                phase: AssistantMessagePhase::Commentary,
+                body: &body,
+                patch_id: &pi,
+            }],
+            checkpoint: CheckpointUpdate::Keep,
+        })
+        .await
+        .expect("first");
+    let patch = PatchId::parse("finish-intermediate").expect("patch");
+    let change = [AssistantChange::Finish {
+        item_id: &item_id,
+        expected_revision: Revision::new(0),
+        patch_id: &patch,
+    }];
+    for _ in 0..2 {
+        pair.repository
+            .commit_run_batch(CommitRunBatch {
+                scope: batch_scope(&pair, UnixMillis::from_millis(BATCH_OPERATED_AT_MS)),
+                batch_sequence: 2,
+                operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS_2),
+                activate_turn_patch_id: None,
+                changes: &change,
+                checkpoint: CheckpointUpdate::Keep,
+            })
+            .await
+            .expect("finish and exact replay");
+    }
+    let rows = persisted_rows(&pair.database).await;
+    let item = rows
+        .items
+        .iter()
+        .find(|item| item.item_id == item_id.as_str())
+        .expect("message");
+    assert_eq!(item.lifecycle, EntityLifecycle::Completed);
+    assert_eq!(item.phase, Some(RenderPhase::Commentary));
+    assert_eq!(item.body, "start");
+    assert_eq!(item.revision, 1);
+    assert!(
+        rows.turns
+            .iter()
+            .any(|turn| turn.lifecycle == EntityLifecycle::Active)
+    );
+    let before = persisted_rows(&pair.database).await;
+    assert!(
+        pair.repository
+            .commit_run_batch(CommitRunBatch {
+                scope: batch_scope(&pair, UnixMillis::from_millis(BATCH_OPERATED_AT_MS_2)),
+                batch_sequence: 3,
+                operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS_2 + 1),
+                activate_turn_patch_id: None,
+                changes: &[AssistantChange::Append {
+                    item_id: &item_id,
+                    expected_revision: Revision::new(1),
+                    text: &incremental_text("late"),
+                    patch_id: &PatchId::parse("late-append").expect("patch"),
+                }],
+                checkpoint: CheckpointUpdate::Keep,
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(before, persisted_rows(&pair.database).await);
 }

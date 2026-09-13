@@ -1,7 +1,7 @@
 //! Dependency-free coverage for the thread-route gate policy.
 //!
 //! The implementation is included directly so these tests exercise the leaf
-//! without Cargo, Bazel, transport, protocol, Svelte, or a DOM runtime.
+//! without Cargo, transport, protocol, Svelte, or a DOM runtime.
 
 #![forbid(unsafe_code)]
 

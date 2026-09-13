@@ -1,5 +1,7 @@
 # Phase 1 implementation packet: SeaORM SQLite proof
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](../../runbooks/native-dev.md).
+
 You are a bounded implementation worker in an isolated Git worktree. Do not spawn subagents.
 
 Read `docs/PLAN.md` completely and then read the completed reconnaissance report at `%TEMP%\artisan-editor-opencode-phase1-current\seaorm-tests.report.md`. Treat the report as evidence to verify, not as authority. Check relevant APIs against installed crate sources or primary upstream sources before writing code.

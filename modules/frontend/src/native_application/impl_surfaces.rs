@@ -26,19 +26,48 @@ impl NativeApplication {
             .pb(px(24.0))
             .debug_selector(|| DESKTOP_HOME_SELECTOR.to_string())
             .child(self.home_emblem());
-        if matches!(&self.state, NativeViewState::Failure(_)) {
+        if let NativeViewState::Failure(failure) = &self.state {
+            let (heading, detail) = match failure.category {
+                ServiceFailureCategory::ConnectionBusy => (
+                    "Host is already connected",
+                    "Another editor window is using this host. Close that connection, then retry here.",
+                ),
+                ServiceFailureCategory::Authentication => (
+                    "Could not authenticate with Forge",
+                    "The host connection credentials could not be used. Retry, or add a fresh invitation from the host.",
+                ),
+                _ => (
+                    "Forge is offline",
+                    "The editor could not connect to Forge. Existing project and task data will remain available when it reconnects.",
+                ),
+            };
             return root
-                .child(self.home_heading("Forge is offline"))
+                .child(self.home_heading(heading))
                 .child(
                     div()
                         .mt(px(8.0))
                         .max_w(px(440.0))
                         .text_size(px(15.0))
                         .text_color(self.desktop_theme.secondary)
-                        .child(
-                            "Forge is offline. Existing project and task data will remain visible when it reconnects."
-                                .to_owned(),
-                        ),
+                        .child(detail),
+                )
+                .child(
+                    div()
+                        .id("retry-forge-connection")
+                        .debug_selector(|| "retry-forge-connection".into())
+                        .cursor_pointer()
+                        .mt(px(16.0))
+                        .px(px(16.0))
+                        .py(px(8.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(self.desktop_theme.line)
+                        .child("Retry connection")
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            cx.emit(super::impl_machines::SelectMachine(
+                                app.machine_home.clone(),
+                            ));
+                        })),
                 );
         }
         match self.selected_project_name() {
@@ -178,6 +207,8 @@ impl NativeApplication {
             .child(
                 div()
                     .id("artisan-brand-home")
+                    .block_mouse_except_scroll()
+                    .line_height(px(22.0))
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.navigate(NativeRoute::NewThread { project: None }, cx);

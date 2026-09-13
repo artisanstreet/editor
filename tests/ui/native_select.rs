@@ -212,12 +212,18 @@ fn semantics_keep_controlled_value_placeholder_and_disabled_state(cx: &mut TestA
     assert_eq!(semantics.value.as_str(), "");
     assert_eq!(semantics.selected_label, None);
     assert_eq!(
-        semantics.placeholder.as_ref().map(|v| v.as_str()),
+        semantics
+            .placeholder
+            .as_ref()
+            .map(gpui::SharedString::as_str),
         Some("Pick a fruit")
     );
     assert_eq!(semantics.option_count, 3);
     assert_eq!(
-        semantics.semantic_label.as_ref().map(|v| v.as_str()),
+        semantics
+            .semantic_label
+            .as_ref()
+            .map(gpui::SharedString::as_str),
         Some("Fruit")
     );
 
@@ -236,7 +242,10 @@ fn semantics_keep_controlled_value_placeholder_and_disabled_state(cx: &mut TestA
     assert!(matched.flags.has_value());
     assert!(!matched.flags.shows_placeholder());
     assert_eq!(
-        matched.selected_label.as_ref().map(|v| v.as_str()),
+        matched
+            .selected_label
+            .as_ref()
+            .map(gpui::SharedString::as_str),
         Some("Banana")
     );
     assert!(!matched.selected_is_disabled);
@@ -562,7 +571,10 @@ fn identity_and_accessibility_metadata_are_stable(cx: &mut TestAppContext) {
         .debug_selector("custom-select")
         .semantics();
         assert_eq!(
-            first.semantic_label.as_ref().map(|v| v.as_str()),
+            first
+                .semantic_label
+                .as_ref()
+                .map(gpui::SharedString::as_str),
             Some("Fruit picker")
         );
 
@@ -592,11 +604,15 @@ fn identity_and_accessibility_metadata_are_stable(cx: &mut TestAppContext) {
         )
         .expect("options valid");
         assert_eq!(
-            select.option_for("banana").map(|o| o.label()),
+            select
+                .option_for("banana")
+                .map(artisan_ui::native_select::NativeSelectOption::label),
             Some("Banana")
         );
         assert_eq!(
-            select.option_for("banana").map(|o| o.label()),
+            select
+                .option_for("banana")
+                .map(artisan_ui::native_select::NativeSelectOption::label),
             Some("Banana")
         );
         assert_eq!(select.options().len(), 3);

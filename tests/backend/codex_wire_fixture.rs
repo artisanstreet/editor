@@ -232,6 +232,23 @@ fn main() {
                             "delta": DELTA_TEXT,
                         }}),
                     );
+                    if scenario == "message_history" {
+                        for (item_id, phase, text) in [
+                            (STEER_OPEN_ITEM_ID, "commentary", "I will check."),
+                            ("final-history", "final_answer", "The result is ready."),
+                            (STEER_OPEN_ITEM_ID, "commentary", "I checked."),
+                        ] {
+                            emit(
+                                &mut output,
+                                &serde_json::json!({
+                                    "method": "item/completed", "params": {
+                                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                                        "item": {"type": "agentMessage", "id": item_id, "phase": phase, "text": text}
+                                    }
+                                }),
+                            );
+                        }
+                    }
                     // The terminating burst scenario streams a bounded chunk
                     // run on a second provider part and then closes normally:
                     // the coalesced transcript is provable with no cancel and
@@ -445,7 +462,7 @@ fn scenario_from_basename(argv0: &str) -> Option<String> {
     let scenario = stem.strip_prefix(SCENARIO_PREFIX)?;
     match scenario {
         "strict" | "reject_always" | "interleave" | "resume_interleave" | "resume_mismatch"
-        | "steer_burst" | "steer_short" | "steer_reject" | "burst_terminal" => {
+        | "steer_burst" | "steer_short" | "steer_reject" | "burst_terminal" | "message_history" => {
             Some(scenario.to_owned())
         }
         _ => None,

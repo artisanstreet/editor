@@ -385,6 +385,26 @@ fn controller_refusal_is_atomic_and_retained_as_a_typed_effect(cx: &mut TestAppC
     });
 }
 
+fn assert_host_work_group_disclosure(
+    host: &ConversationHost,
+    app: &gpui::App,
+    expected: SceneDisclosure,
+) {
+    let work_group = host.surface().read(app).scene().turn_scenes()[0]
+        .blocks()
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::WorkGroup(group) => Some(group.clone()),
+            _ => None,
+        })
+        .expect("session work group remains in the scene");
+    assert_eq!(
+        work_group.session.as_ref().map(SceneId::as_str),
+        Some("session-turn_a")
+    );
+    assert_eq!(work_group.disclosure, Some(expected));
+}
+
 #[gpui::test]
 fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestAppContext) {
     const TRIGGER: &str =
@@ -445,19 +465,7 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
             .expect("auto-registered session disclosure view remains visible");
         assert_eq!(disclosure.state, DisclosureState::UserOpen);
         assert!(host.surface().read(app).pending_actions().is_empty());
-        let work_group = host.surface().read(app).scene().turn_scenes()[0]
-            .blocks()
-            .iter()
-            .find_map(|block| match block {
-                TurnBlock::WorkGroup(group) => Some(group.clone()),
-                _ => None,
-            })
-            .expect("session work group remains in the scene");
-        assert_eq!(
-            work_group.session.as_ref().map(|id| id.as_str()),
-            Some("session-turn_a")
-        );
-        assert_eq!(work_group.disclosure, Some(SceneDisclosure::Open));
+        assert_host_work_group_disclosure(host, app, SceneDisclosure::Open);
     });
 
     let trigger = cx
@@ -474,19 +482,7 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
             .find(|view| view.scene_id.as_str() == "session-turn_a")
             .expect("auto-registered session disclosure view remains visible");
         assert_eq!(disclosure.state, DisclosureState::UserClosed);
-        let work_group = host.surface().read(app).scene().turn_scenes()[0]
-            .blocks()
-            .iter()
-            .find_map(|block| match block {
-                TurnBlock::WorkGroup(group) => Some(group.clone()),
-                _ => None,
-            })
-            .expect("session work group remains in the scene");
-        assert_eq!(
-            work_group.session.as_ref().map(|id| id.as_str()),
-            Some("session-turn_a")
-        );
-        assert_eq!(work_group.disclosure, Some(SceneDisclosure::Closed));
+        assert_host_work_group_disclosure(host, app, SceneDisclosure::Closed);
     });
     // Toggling disclosure open then closed never remounts or shifts the
     // shared header row: its ancestry is identical in both states.

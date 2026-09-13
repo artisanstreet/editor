@@ -5,10 +5,7 @@
 .DESCRIPTION
     Builds the four product binaries plus the native dev runner in one
     `cargo build --locked --jobs=1` invocation, then runs the same
-    `scripts/native_dev` runner the Bazel `//:dev` target uses, pointed at
-    the repo `.dist/dev` installation. This script is an honest build
-    driver for developers without Bazel on PATH; it is never wired into
-    Bazel, which remains the authoritative build.
+    Cargo native development runner, pointed at the repo .dist/dev installation.
 
 .EXAMPLE
     scripts/dev.ps1

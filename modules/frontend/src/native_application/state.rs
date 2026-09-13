@@ -107,7 +107,6 @@ pub(super) struct NativeMessageRetry {
 
 #[derive(Clone, Copy)]
 pub(super) struct NativeMessageFailure {
-    #[cfg(test)]
     pub(super) failure: ServiceFailure,
     pub(super) id: u64,
 }
@@ -119,13 +118,7 @@ impl NativeMessageFailure {
                 value.checked_add(1)
             })
             .expect("failure identity exhausted");
-        #[cfg(not(test))]
-        let _ = failure;
-        Self {
-            #[cfg(test)]
-            failure,
-            id,
-        }
+        Self { failure, id }
     }
 }
 

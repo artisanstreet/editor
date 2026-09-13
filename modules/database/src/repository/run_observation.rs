@@ -151,6 +151,15 @@ pub enum CheckpointUpdate<'a> {
 /// Closed RUN-SCOPED assistant mutation vocabulary applied in declared order.
 #[derive(Clone, Copy)]
 pub enum AssistantChange<'a> {
+    /// Completes an intermediate message without settling its owning run.
+    Finish {
+        /// Message owned by this run.
+        item_id: &'a ItemId,
+        /// Revision observed by the dispatcher.
+        expected_revision: Revision,
+        /// Fresh identity for the complete item upsert.
+        patch_id: &'a PatchId,
+    },
     /// Creates a fresh Streaming assistant item at revision zero with a fresh
     /// renderer ordinal allocated from `conversation_state`.
     Start {

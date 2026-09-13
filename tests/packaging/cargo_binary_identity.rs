@@ -4,7 +4,7 @@
 //! `//modules/cli:Cargo.toml`, `//modules/installer:Cargo.toml`,
 //! `//modules/frontend:Cargo.toml`, and `//modules/backend:Cargo.toml`.
 //! This proof reads only the closed `[[bin]]` name/path surface. It does not
-//! build a Cargo or Bazel binary, touch the filesystem, launch a process, or
+//! build a Cargo binary, touch the filesystem, launch a process, or
 //! inspect the environment; those are separate packaging decisions.
 
 const CARGO_MANIFESTS: &[(&str, &str, &str, &str)] = &[

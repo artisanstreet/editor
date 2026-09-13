@@ -268,6 +268,9 @@ pub(super) async fn command_loop_with_delivery(
             cmd = commands.recv() => {
                 match cmd {
                     Some(NativeTransportCommand::Shutdown) | None => return Ok(()),
+                    Some(NativeTransportCommand::BeginProjectIntakeAt(path)) => {
+                        project_intake::begin_project_intake_at(runtime, frames, events, path).await?;
+                    }
                     Some(NativeTransportCommand::BeginProjectIntake) => {
                         begin_project_intake(runtime, frames, events).await?;
                     }

@@ -436,12 +436,12 @@ fn conversation_header_paints_summary_then_stored_title(cx: &mut TestAppContext)
     });
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("artisan-desktop-route-title:New task")
+        cx.debug_bounds("artisan-desktop-route-title:New thread")
             .is_some(),
         "the titlebar header paints the stored title before a summary exists"
     );
     assert!(
-        cx.debug_bounds("artisan-thread-screen-title:New task")
+        cx.debug_bounds("artisan-thread-screen-title:New thread")
             .is_none(),
         "the conversation screen carries no duplicate title header"
     );

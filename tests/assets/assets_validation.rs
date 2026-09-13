@@ -1,34 +1,4 @@
-//! Hermetic validation of the sealed vendored-asset foundation.
-//!
-//! Proves, with the standard library plus the pinned `sha2`, `toml`, and
-//! `roxmltree` crates and only Bazel-wired `data` (no network, `node_modules`,
-//! npm, Python, browser, or ambient filesystem access beyond declared
-//! runfiles):
-//!
-//! - portable runfiles resolution through pure helpers exercised on synthetic
-//!   layouts: directory trees under `RUNFILES_DIR` or an executable-sibling
-//!   `.runfiles` probed across `TEST_WORKSPACE`, `artisan_editor`, and `_main`
-//!   prefixes, `RUNFILES_MANIFEST_FILE` accepted only when it actually maps
-//!   the probe artifact, and a bounded local-review source-root fallback
-//!   (`ARTISAN_ASSETS_SOURCE_ROOT`);
-//! - four-way bijection among physical SVG runfiles, the explicit BUILD
-//!   `ASSET_SOURCES` list, manifest `source_path` rows, and `Asset.source_path`
-//!   — catching missing *and* extra files;
-//! - physical bytes exactly equal to embedded `Asset::source`, to
-//!   `MANIFEST_TOML.as_bytes()`, and to recorded raw-byte sha256 digests
-//!   (`.gitattributes` pins LF);
-//! - manifest schema via the pinned `toml` crate: duplicate keys rejected by
-//!   the parser itself, exact field sets per row kind, id/family grammar,
-//!   normalized no-escape paths (origins included), use-site closure;
-//! - catalog presentation policy independent of the validator-derived
-//!   `monochrome` property: monochrome-derived default with exactly the two
-//!   evidenced authored-color brand exceptions, deterministic across lookups
-//!   for every one of the 104 ids;
-//! - standalone-SVG validity and policy via `roxmltree` document parsing:
-//!   DOCTYPE/ENTITY declarations, script/foreignObject elements, every `on*`
-//!   event attribute, and non-allowlisted href/src values are rejected, while
-//!   XML declarations, comments, internal fragment links, and nested base64
-//!   data-image payloads pass.
+//! Validate vendored asset bytes, catalog coverage, licenses, and SVG policy.
 
 use core::fmt::Write as _;
 
@@ -38,242 +8,27 @@ use artisan_assets::{
     AssetId, LICENSE_FILES, MANIFEST_TOML, Presentation, get as catalog_get, license, lookup,
 };
 
-// ------------------------------------------------------------ runfiles
-
-const SOURCE_ROOT_ENV: &str = "ARTISAN_ASSETS_SOURCE_ROOT";
-const PROBE_REL: &str = "modules/assets/manifest.toml";
-
-/// Workspace prefixes accepted in runfile keys, priority order preserved:
-/// nonempty `TEST_WORKSPACE`, then this module's name, then Bazel's
-/// canonical `_main`. Duplicates are dropped on insertion; the order of
-/// first appearance is never reordered.
-fn build_prefixes(test_workspace: Option<&str>) -> Vec<String> {
-    let mut prefixes = Vec::new();
-    let mut push_unique = |candidate: String| {
-        if !prefixes.contains(&candidate) {
-            prefixes.push(candidate);
-        }
-    };
-    if let Some(ws) = test_workspace
-        && !ws.is_empty()
-    {
-        push_unique(String::from(ws));
-    }
-    push_unique(String::from("artisan_editor"));
-    push_unique(String::from("_main"));
-    prefixes
+struct Resolver {
+    root: std::path::PathBuf,
 }
-
-/// Returns the first prefix under which `root` actually serves [`PROBE_REL`].
-/// A directory that merely exists without serving the artifact yields `None`.
-fn probe_tree_prefix(root: &std::path::Path, prefixes: &[String]) -> Option<String> {
-    prefixes.iter().find_map(|prefix| {
-        let candidate = root.join(prefix).join(PROBE_REL);
-        candidate.is_file().then(|| prefix.clone())
-    })
-}
-
-/// True when `map` resolves [`PROBE_REL`] under one of the workspace
-/// prefixes (or unprefixed). A merely non-empty unrelated manifest fails
-/// this gate and must not win layout selection.
-fn manifest_serves_probe(
-    map: &std::collections::BTreeMap<String, String>,
-    prefixes: &[String],
-) -> bool {
-    prefixes
-        .iter()
-        .any(|prefix| map.contains_key(&format!("{prefix}/{PROBE_REL}")))
-        || map.contains_key(PROBE_REL)
-}
-
-/// Resolves repository-relative paths (`modules/assets/...`) through Bazel
-/// runfiles, falling back to a bounded source root for local review runs.
-#[derive(Clone, Debug)]
-enum Resolver {
-    /// Directory-backed runfiles; `prefix` is the verified workspace dir.
-    Tree {
-        root: std::path::PathBuf,
-        prefix: String,
-    },
-    /// `RUNFILES_MANIFEST_FILE` mappings from runfile path to real path.
-    Manifest {
-        map: std::collections::BTreeMap<String, String>,
-    },
-    /// Local review checkout root (env `ARTISAN_ASSETS_SOURCE_ROOT`).
-    SourceRoot { root: std::path::PathBuf },
-}
-
 impl Resolver {
-    /// Picks a layout from explicit options; pure apart from filesystem
-    /// probing, so synthetic tests can drive it without touching process env.
-    ///
-    /// Precedence: a manifest that serves the probe artifact wins over any
-    /// directory layout; a directory layout must serve the artifact under
-    /// some workspace prefix; the source root is last.
-    fn pick(
-        manifest: Option<std::collections::BTreeMap<String, String>>,
-        runfiles_dir: Option<&std::path::Path>,
-        prefixes: &[String],
-    ) -> Option<Resolver> {
-        if let Some(map) = manifest.filter(|map| manifest_serves_probe(map, prefixes)) {
-            return Some(Resolver::Manifest { map });
-        }
-        if let Some(dir) = runfiles_dir
-            && let Some(prefix) = probe_tree_prefix(dir, prefixes)
-        {
-            return Some(Resolver::Tree {
-                root: dir.to_path_buf(),
-                prefix,
-            });
-        }
-        None
-    }
-
-    /// Detects the layout from the process environment.
-    fn detect() -> Resolver {
-        let prefixes = workspace_prefixes_for_tests();
-        let manifest = std::env::var("RUNFILES_MANIFEST_FILE")
-            .ok()
-            .and_then(|path| {
-                std::fs::read_to_string(path)
-                    .ok()
-                    .map(|text| parse_runfiles_manifest(&text))
-            });
-        let runfiles_dir = std::env::var("RUNFILES_DIR")
-            .ok()
-            .map(std::path::PathBuf::from);
-        if let Some(resolver) = Self::pick(manifest, runfiles_dir.as_deref(), &prefixes) {
-            return resolver;
-        }
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(dir) = exe.parent()
-        {
-            let root = dir.join(format!(
-                "{}.runfiles",
-                exe.file_stem().and_then(|s| s.to_str()).unwrap_or_default()
-            ));
-            if let Some(prefix) = probe_tree_prefix(&root, &prefixes) {
-                return Resolver::Tree { root, prefix };
-            }
-        }
-        // Bounded local-review fallback: an explicit source checkout root,
-        // used only when no runfiles layout exists.
-        if let Ok(root) = std::env::var(SOURCE_ROOT_ENV)
-            && std::path::Path::new(&root).join(PROBE_REL).is_file()
-        {
-            return Resolver::SourceRoot {
-                root: std::path::PathBuf::from(root),
-            };
-        }
-        panic!(
-            "no usable runfiles layout found and ${SOURCE_ROOT_ENV} is unset or \
-             does not point at this checkout root"
-        );
-    }
-
-    fn resolve(&self, repo_rel: &str) -> std::path::PathBuf {
-        match self {
-            Resolver::Tree { root, prefix } => root.join(prefix).join(repo_rel),
-            Resolver::SourceRoot { root } => root.join(repo_rel),
-            Resolver::Manifest { map } => {
-                for prefix in workspace_prefixes_for_tests() {
-                    if let Some(path) = map.get(&format!("{prefix}/{repo_rel}")) {
-                        return std::path::PathBuf::from(path);
-                    }
-                }
-                if let Some(path) = map.get(repo_rel) {
-                    return std::path::PathBuf::from(path);
-                }
-                panic!("runfiles manifest lacks entry for {repo_rel}");
-            }
+    fn detect() -> Self {
+        Self {
+            root: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
         }
     }
-
-    /// True when the resolver sees the whole checkout, so legacy-tree
-    /// existence can be asserted.
-    fn is_local_review(&self) -> bool {
-        matches!(self, Resolver::SourceRoot { .. })
+    fn resolve(&self, relative: &str) -> std::path::PathBuf {
+        self.root.join(relative)
     }
-
-    /// Physical SVG files as package-relative `svg/<family>/<file>` paths,
-    /// deduplicated. Tree/source modes walk the directory; manifest mode
-    /// enumerates the manifest's own keys under every supported workspace
-    /// prefix, so extra files remain detectable there too.
     fn physical_svgs(&self) -> Vec<String> {
-        let mut files = match self {
-            Resolver::Manifest { map } => {
-                let mut files = Vec::new();
-                for key in map.keys() {
-                    for rel in strip_workspace_prefixes(key) {
-                        push_if_svg(&mut files, &rel);
-                    }
-                }
-                files
-            }
-            Resolver::Tree { root, prefix } => {
-                let mut files = Vec::new();
-                let base = root.join(prefix).join("modules/assets/svg");
-                collect_svg_files(&base, &base, &mut files);
-                files
-            }
-            Resolver::SourceRoot { root } => {
-                let mut files = Vec::new();
-                let base = root.join("modules/assets/svg");
-                collect_svg_files(&base, &base, &mut files);
-                files
-            }
-        };
+        let base = self.root.join("modules/assets/svg");
+        let mut files = Vec::new();
+        collect_svg_files(&base, &base, &mut files);
         files.sort();
-        files.dedup();
         files
     }
 }
 
-/// Expands one runfile key into the logical repo-relative suffixes implied by
-/// each matching workspace prefix (at most one per prefix, plus bare).
-fn strip_workspace_prefixes(key: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for prefix in workspace_prefixes_for_tests() {
-        let headed = format!("{prefix}/");
-        if let Some(rest) = key.strip_prefix(&headed)
-            && let Some(rel) = rest.strip_prefix("modules/assets/")
-        {
-            out.push(String::from(rel));
-        }
-    }
-    if let Some(rel) = key.strip_prefix("modules/assets/") {
-        out.push(String::from(rel));
-    }
-    out
-}
-
-fn workspace_prefixes_for_tests() -> Vec<String> {
-    build_prefixes(std::env::var("TEST_WORKSPACE").ok().as_deref())
-}
-
-fn push_if_svg(files: &mut Vec<String>, package_rel: &str) {
-    // Case-sensitive on purpose: the normalized corpus uses lowercase .svg.
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
-    let is_svg = package_rel.ends_with(".svg");
-    if is_svg && package_rel.starts_with("svg/") && !files.contains(&String::from(package_rel)) {
-        files.push(String::from(package_rel));
-    }
-}
-
-fn parse_runfiles_manifest(text: &str) -> std::collections::BTreeMap<String, String> {
-    let mut map = std::collections::BTreeMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        let Some((key, value)) = line.split_once(' ') else {
-            continue;
-        };
-        map.insert(String::from(key), String::from(value));
-    }
-    map
-}
-
-/// Recursively collects `.svg` files under `root`, returning
-/// package-relative paths (`svg/<family>/<file>.svg`).
 fn collect_svg_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
     let entries =
         std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
@@ -379,26 +134,6 @@ fn parse_manifest(text: &str) -> (Vec<toml::Value>, Vec<toml::Value>) {
     assert!(!assets.is_empty(), "no [[asset]] rows parsed");
     (assets, uses)
 }
-
-// --------------------------------------------------------- BUILD list parser
-
-/// Extracts an explicit `NAME = [ "a", "b", ... ]` list from BUILD.bazel text.
-fn parse_build_list(build_text: &str, name: &str) -> Vec<String> {
-    let marker = format!("{name} = [");
-    let start = build_text
-        .find(&marker)
-        .unwrap_or_else(|| panic!("{marker} missing from BUILD.bazel"));
-    let end = build_text[start..]
-        .find(']')
-        .unwrap_or_else(|| panic!("{name} list unterminated"));
-    let body = &build_text[start + marker.len()..start + end];
-    body.split(',')
-        .map(|item| item.trim().trim_matches('"').to_owned())
-        .filter(|item| !item.is_empty())
-        .collect()
-}
-
-// ------------------------------------------------- roxmltree SVG validation
 
 /// Parses and policy-checks one vendored SVG document.
 ///
@@ -643,120 +378,6 @@ fn frontend_site(path: &str, label: &str) {
     );
 }
 
-// --------------------------------------------------- resolver layout tests
-
-/// Creates `<root>/<prefix>/modules/assets/manifest.toml` with placeholder
-/// bytes so tree probing has a real artifact to find. Uses disposable temp
-/// directories only — never junctions into the repository.
-fn make_tree_layout(root: &std::path::Path, prefix: &str) {
-    let probe = root.join(prefix).join(PROBE_REL);
-    std::fs::create_dir_all(probe.parent().expect("probe parent")).expect("create synthetic tree");
-    std::fs::write(&probe, b"schema_version = 1\n").expect("write probe");
-}
-
-fn synthetic_prefixes(custom: Option<&str>) -> Vec<String> {
-    build_prefixes(custom)
-}
-
-#[test]
-fn tree_layout_resolves_under_artisan_editor() {
-    let prefixes = synthetic_prefixes(None);
-    let root = std::env::temp_dir().join("artisan_assets_tree_ws_default");
-    let _ = std::fs::remove_dir_all(&root);
-    make_tree_layout(&root, "artisan_editor");
-
-    assert_eq!(
-        probe_tree_prefix(&root, &prefixes).as_deref(),
-        Some("artisan_editor")
-    );
-    std::fs::remove_dir_all(&root).expect("cleanup synthetic tree");
-}
-
-#[test]
-fn tree_layout_resolves_under_main() {
-    let prefixes = synthetic_prefixes(None);
-    let root = std::env::temp_dir().join("artisan_assets_tree_ws_main");
-    let _ = std::fs::remove_dir_all(&root);
-    // Only _main exists; the more specific name is absent.
-    make_tree_layout(&root, "_main");
-
-    assert_eq!(
-        probe_tree_prefix(&root, &prefixes).as_deref(),
-        Some("_main")
-    );
-    std::fs::remove_dir_all(&root).expect("cleanup synthetic tree");
-}
-
-#[test]
-fn test_workspace_prefix_wins_over_defaults() {
-    let prefixes = synthetic_prefixes(Some("custom_test_ws"));
-    assert_eq!(prefixes.first().map(String::as_str), Some("custom_test_ws"));
-    assert!(
-        prefixes.windows(2).all(|pair| pair[0] != pair[1]),
-        "prefixes must be unique"
-    );
-
-    let root = std::env::temp_dir().join("artisan_assets_tree_ws_custom");
-    let _ = std::fs::remove_dir_all(&root);
-    // Both custom and default layouts exist; specificity must win.
-    make_tree_layout(&root, "_main");
-    make_tree_layout(&root, "custom_test_ws");
-
-    assert_eq!(
-        probe_tree_prefix(&root, &prefixes).as_deref(),
-        Some("custom_test_ws")
-    );
-    std::fs::remove_dir_all(&root).expect("cleanup synthetic tree");
-}
-
-#[test]
-fn partial_runfiles_dir_never_serves_a_probe() {
-    let prefixes = synthetic_prefixes(None);
-    let empty = std::env::temp_dir().join("artisan_assets_tree_empty");
-    let _ = std::fs::remove_dir_all(&empty);
-    std::fs::create_dir_all(&empty).expect("create empty dir");
-
-    assert_eq!(probe_tree_prefix(&empty, &prefixes), None);
-    std::fs::remove_dir_all(&empty).expect("cleanup empty dir");
-}
-
-#[test]
-fn prefixes_preserve_exact_priority_order() {
-    // Nonempty TEST_WORKSPACE first, then the module name, then _main.
-    assert_eq!(
-        synthetic_prefixes(Some("custom_test_ws")),
-        vec![
-            String::from("custom_test_ws"),
-            String::from("artisan_editor"),
-            String::from("_main")
-        ]
-    );
-    // Without TEST_WORKSPACE the defaults follow in the same relative order.
-    assert_eq!(
-        synthetic_prefixes(None),
-        vec![String::from("artisan_editor"), String::from("_main")]
-    );
-}
-
-#[test]
-fn duplicate_workspaces_collapse_without_reordering() {
-    // TEST_WORKSPACE equal to a default collapses onto that default; later
-    // defaults that are not yet present are still appended after it.
-    assert_eq!(
-        synthetic_prefixes(Some("artisan_editor")),
-        vec![String::from("artisan_editor"), String::from("_main")]
-    );
-    assert_eq!(
-        synthetic_prefixes(Some("_main")),
-        vec![String::from("_main"), String::from("artisan_editor")]
-    );
-    // Empty TEST_WORKSPACE is treated as absent.
-    assert_eq!(
-        build_prefixes(Some("")),
-        vec![String::from("artisan_editor"), String::from("_main")]
-    );
-}
-
 #[test]
 fn currentcolor_is_ignored_not_counted_as_a_paint() {
     let monochrome_for = |body: &str| {
@@ -790,72 +411,6 @@ fn currentcolor_is_ignored_not_counted_as_a_paint() {
     );
 }
 #[test]
-fn manifest_mode_maps_prefixed_keys_for_every_workspace() {
-    for prefix in ["artisan_editor", "_main", "custom_test_ws"] {
-        let map = std::collections::BTreeMap::from([(
-            format!("{prefix}/{PROBE_REL}"),
-            String::from("ignored-for-gating"),
-        )]);
-        assert!(
-            manifest_serves_probe(&map, &synthetic_prefixes(Some(prefix))),
-            "{prefix}: manifest gate failed"
-        );
-        // An unprefixed key is equally acceptable.
-        let bare = std::collections::BTreeMap::from([(String::from(PROBE_REL), String::from("x"))]);
-        assert!(manifest_serves_probe(
-            &bare,
-            &synthetic_prefixes(Some(prefix))
-        ));
-    }
-}
-
-#[test]
-fn unrelated_manifest_does_not_gate_the_layout() {
-    let unrelated = std::collections::BTreeMap::from([(
-        String::from("some_other_workspace/other.txt"),
-        String::from("x"),
-    )]);
-    assert!(
-        !manifest_serves_probe(&unrelated, &synthetic_prefixes(None)),
-        "an unrelated non-empty manifest must not count as serving the probe"
-    );
-}
-
-#[test]
-fn valid_manifest_beats_partial_runfiles_dir() {
-    let prefixes = synthetic_prefixes(None);
-
-    // Partial dir: exists but serves nothing.
-    let partial = std::env::temp_dir().join("artisan_assets_tree_partial");
-    let _ = std::fs::remove_dir_all(&partial);
-    std::fs::create_dir_all(&partial).expect("create partial dir");
-
-    // Valid manifest maps the probe under a supported workspace prefix.
-    let manifest = Some(std::collections::BTreeMap::from([(
-        format!("artisan_editor/{PROBE_REL}"),
-        String::from("nowhere"),
-    )]));
-
-    match Resolver::pick(manifest.clone(), Some(&partial), &prefixes) {
-        Some(Resolver::Manifest { .. }) => {}
-        other => panic!("manifest must beat a partial dir, got {other:?}"),
-    }
-
-    // Without the manifest the same partial dir yields no layout at all.
-    assert!(Resolver::pick(None, Some(&partial), &prefixes).is_none());
-
-    // A directory that does serve the probe wins when no manifest exists.
-    make_tree_layout(&partial, "artisan_editor");
-    match Resolver::pick(None, Some(&partial), &prefixes) {
-        Some(Resolver::Tree { prefix, .. }) => assert_eq!(prefix, "artisan_editor"),
-        other => panic!("expected tree layout, got {other:?}"),
-    }
-    std::fs::remove_dir_all(&partial).expect("cleanup partial dir");
-}
-
-// ------------------------------------------------------------------- tests
-
-#[test]
 fn sha256_vectors_hold_for_the_pinned_crate() {
     use sha2::Digest as _;
     assert_eq!(
@@ -877,7 +432,7 @@ fn sha256_vectors_hold_for_the_pinned_crate() {
 #[test]
 fn catalog_is_sorted_unique_and_totally_covered_by_constants() {
     let all = artisan_assets::ALL;
-    assert_eq!(all.len(), 104, "catalog size drifted");
+    assert_eq!(all.len(), 103, "catalog size drifted");
     for pair in all.windows(2) {
         assert!(
             pair[0].id.as_str() < pair[1].id.as_str(),
@@ -973,7 +528,7 @@ fn manifest_rows_have_exact_fields_and_unique_ids_and_paths() {
     );
     let text = std::str::from_utf8(&raw).expect("manifest utf-8");
     let (assets, uses) = parse_manifest(text);
-    assert_eq!(assets.len(), 104);
+    assert_eq!(assets.len(), 103);
     assert_eq!(uses.len(), 91);
 
     let mut asset_ids: Vec<&str> = Vec::new();
@@ -1094,8 +649,8 @@ fn all_recorded_paths_are_normalized_without_escape() {
             "{id}: odd license path"
         );
 
-        // Origins are normalized for every row regardless of kind; only
-        // existence stays gated to the local-review checkout.
+        // Origins are normalized for every row regardless of kind; historical origin and use-site paths are provenance,
+        // while the vendored source and license bytes must exist today.
         let origin_path = field(row, "origin_path");
         normalized_repo_rel(origin_path, id);
         if field(row, "origin_kind") == "local" {
@@ -1103,12 +658,6 @@ fn all_recorded_paths_are_normalized_without_escape() {
                 origin_path.starts_with("modules/frontend/src/"),
                 "{id}: local origin outside legacy tree: {origin_path}"
             );
-            if resolver.is_local_review() {
-                assert!(
-                    resolver.resolve(origin_path).exists(),
-                    "{id}: origin path does not exist: {origin_path}"
-                );
-            }
         }
     }
 
@@ -1116,12 +665,6 @@ fn all_recorded_paths_are_normalized_without_escape() {
         let id = field(row, "id");
         for site in array_field(row, "sites") {
             frontend_site(&site, id);
-            if resolver.is_local_review() {
-                assert!(
-                    resolver.resolve(&site).exists(),
-                    "{id}: use-site path does not exist: {site}"
-                );
-            }
         }
     }
 }
@@ -1131,11 +674,6 @@ fn physical_files_biject_with_build_manifest_and_api() {
     let resolver = Resolver::detect();
 
     let physical = resolver.physical_svgs();
-
-    let build_text = std::fs::read_to_string(resolver.resolve("modules/assets/BUILD.bazel"))
-        .expect("BUILD.bazel runfile readable");
-    let mut build_sources = parse_build_list(&build_text, "ASSET_SOURCES");
-    build_sources.sort();
 
     let text = std::fs::read_to_string(resolver.resolve("modules/assets/manifest.toml"))
         .expect("manifest readable");
@@ -1152,12 +690,10 @@ fn physical_files_biject_with_build_manifest_and_api() {
         .collect();
     api_paths.sort_unstable();
 
-    assert_eq!(physical.len(), 104, "physical svg count");
-    assert_eq!(build_sources.len(), 104, "BUILD ASSET_SOURCES count");
-    assert_eq!(manifest_paths.len(), 104, "manifest source_path count");
-    assert_eq!(api_paths.len(), 104, "API source_path count");
+    assert_eq!(physical.len(), 103, "physical svg count");
+    assert_eq!(manifest_paths.len(), 103, "manifest source_path count");
+    assert_eq!(api_paths.len(), 103, "API source_path count");
 
-    assert_eq!(physical, build_sources, "physical vs BUILD ASSET_SOURCES");
     assert_eq!(
         physical, manifest_paths,
         "physical vs manifest source_paths"
@@ -1275,12 +811,12 @@ fn presentation_policy_is_independent_of_monochrome_with_exactly_two_exceptions(
         "authored-color overrides beyond the evidenced brand marks"
     );
 
-    // Exhaustive counts over all 104 ids: 12 polychrome artworks plus the two
+    // Exhaustive counts over all 103 ids: 12 polychrome artworks plus the two
     // authored-color exceptions render full-color; every other asset tints.
-    assert_eq!(artisan_assets::ALL.len(), 104);
+    assert_eq!(artisan_assets::ALL.len(), 103);
     assert_eq!(full_color, 14);
-    assert_eq!(tinted, 90);
-    assert_eq!(monochrome_tinted, 90);
+    assert_eq!(tinted, 89);
+    assert_eq!(monochrome_tinted, 89);
 
     // The exceptions really carry their authored single-hue colors in the
     // embedded bytes while their structural monochrome stays true.
@@ -1330,7 +866,7 @@ fn use_sites_reference_known_assets_and_link_the_whole_catalog() {
     ];
 
     let (assets, uses) = parse_manifest(MANIFEST_TOML);
-    assert_eq!(assets.len(), 104);
+    assert_eq!(assets.len(), 103);
     let mut linked: Vec<String> = Vec::new();
     let mut shader_deferred = 0usize;
 
@@ -1389,15 +925,7 @@ fn use_sites_reference_known_assets_and_link_the_whole_catalog() {
 #[test]
 fn license_documents_are_exact_resolvable_and_nonempty() {
     let resolver = Resolver::detect();
-    let build_text = std::fs::read_to_string(resolver.resolve("modules/assets/BUILD.bazel"))
-        .expect("read BUILD");
-    let mut build_docs = parse_build_list(&build_text, "LICENSE_DOCS");
-    build_docs.sort();
-
-    let mut api_docs: Vec<&str> = LICENSE_FILES.iter().map(|d| d.path).collect();
-    api_docs.sort_unstable();
-    assert_eq!(build_docs.len(), 9, "BUILD LICENSE_DOCS count");
-    assert_eq!(build_docs, api_docs, "BUILD vs API license doc sets");
+    assert_eq!(LICENSE_FILES.len(), 9, "license document count");
 
     for doc in LICENSE_FILES {
         assert!(!doc.contents.is_empty(), "{}: empty", doc.path);
@@ -1432,8 +960,8 @@ fn license_documents_are_exact_resolvable_and_nonempty() {
             "{id}: odd license path {file}"
         );
         assert!(
-            build_docs.contains(&String::from(file)),
-            "{id}: license file {file} absent from BUILD LICENSE_DOCS"
+            LICENSE_FILES.iter().any(|doc| doc.path == file),
+            "{id}: license file {file} absent from license catalog"
         );
         assert!(license(file).is_some(), "{id}: license not embedded");
     }

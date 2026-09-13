@@ -1653,6 +1653,7 @@ async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
     let config = subagent_test_dispatcher_config();
     let origin = SystemCommandOrigin;
     let mut cursor = SubagentCommitCursor {
+        assistant_phase: artisan_domain::AssistantMessagePhase::Unspecified,
         scope: RunBatchScope {
             claimed: &claimed,
             launched: &receipt,

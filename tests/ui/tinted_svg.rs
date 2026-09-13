@@ -3,7 +3,7 @@
 //!
 //! This file is linked under `cfg(test)` as a child module of
 //! `crate::asset_seam` (see the linkage there and the
-//! `tinted_svg_unit_test` Bazel target), which is what grants access to the
+//! `tinted_svg_unit_test` Cargo target), which is what grants access to the
 //! private `TintedSvg` wrapper and the ONE unconditional scoped-delegation
 //! helper exercised here. These are tests OF the real production code — not
 //! a duplicate of it.

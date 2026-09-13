@@ -19,7 +19,7 @@ use super::config::{
     EXIT_CODE_CONFIGURATION, EXIT_CODE_CUSTODY, EXIT_CODE_SERVER_STARTUP, EXIT_CODE_SERVICE,
     EXIT_CODE_SHUTDOWN, ForgeConfigError, ForgeLaunchConfig, LoadedMaterial, load_material,
 };
-use super::is_required_loopback;
+
 use super::readiness::{ReadinessError, ReadinessReceipt};
 use crate::{
     CommandOrigin, CommandOriginClockError, ForgeApp, ForgeConfig, ForgeListener,
@@ -334,6 +334,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         private_key_der: _,
         bootstrap_capability: _,
         ready_file,
+        listen,
         limits,
         admission_capacity,
         requests_per_connection,
@@ -362,6 +363,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         material,
         database,
         ready_file,
+        listen,
         limits,
         admission_capacity,
         requests_per_connection,
@@ -403,6 +405,7 @@ struct ForgeRunContext {
     material: LoadedMaterial,
     database: PathBuf,
     ready_file: PathBuf,
+    listen: SocketAddr,
     limits: ListenerLimits,
     admission_capacity: NonZeroU32,
     requests_per_connection: NonZeroU32,
@@ -456,6 +459,7 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
         material,
         database,
         ready_file,
+        listen,
         limits,
         admission_capacity,
         requests_per_connection,
@@ -516,6 +520,7 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
             material,
             database,
             ready_file,
+            listen,
             limits,
             admission_capacity,
             requests_per_connection,
@@ -539,6 +544,7 @@ struct ForgeListenerStartupError {
 }
 
 fn prepare_forge_listener(
+    listen: SocketAddr,
     material: LoadedMaterial,
     limits: ListenerLimits,
     admission_capacity: NonZeroU32,
@@ -560,7 +566,7 @@ fn prepare_forge_listener(
             }));
         }
     };
-    let listener = match ForgeListener::bind_with_lifecycle(
+    let listener = match ForgeListener::bind_at_with_lifecycle(
         server,
         bootstrap,
         Box::new(SystemCommandOrigin),
@@ -568,6 +574,7 @@ fn prepare_forge_listener(
         admission_capacity,
         requests_per_connection,
         lifecycle,
+        listen,
     ) {
         Ok(listener) => listener,
         Err(error) => {
@@ -578,13 +585,15 @@ fn prepare_forge_listener(
         }
     };
     let address = match listener.local_addr() {
-        Ok(address) if is_required_loopback(address) => address,
+        Ok(address) if address.port() != 0 && address.ip() == listen.ip() => address,
         Ok(address) => {
             return Err(Box::new(ForgeListenerStartupError {
                 listener: Some(listener),
                 error: Box::new(ForgeRuntimeError::Address(io::Error::new(
                     io::ErrorKind::AddrNotAvailable,
-                    format!("Forge listener address is not required loopback: {address}"),
+                    format!(
+                        "Forge listener address does not match the configured interface: {address}"
+                    ),
                 ))),
             }));
         }
@@ -616,6 +625,7 @@ async fn run_with_handler(
         material,
         database,
         ready_file,
+        listen,
         limits,
         admission_capacity,
         requests_per_connection,
@@ -645,6 +655,7 @@ async fn run_with_handler(
         address,
         leaf,
     } = match prepare_forge_listener(
+        listen,
         material,
         limits,
         admission_capacity,

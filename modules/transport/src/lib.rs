@@ -54,3 +54,6 @@ pub use server_dispatch::{
     IncomingRequest, ReplyValidationError, ServerDispatchError, dispatch_server_request,
     dispatch_server_request_with_receipt,
 };
+
+mod session_target;
+pub use session_target::SessionTarget;

@@ -1,7 +1,7 @@
 //! Direct, dependency-free coverage for the shared hover-pill group policy.
 //!
 //! The production module is included directly so this focused harness can be
-//! compiled with pinned Rust 1.98 without Cargo, Bazel, or frontend
+//! compiled with pinned Rust 1.98 without Cargo, or frontend
 //! registration changes.
 
 #[path = "../../modules/frontend/src/hover_pill_group_policy.rs"]

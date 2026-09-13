@@ -509,7 +509,7 @@ mod tests {
                     .unwrap(),
                 );
                 cx.notify();
-            })
+            });
         });
         cx.run_until_parked();
         let working = cx
@@ -583,7 +583,7 @@ mod tests {
                 application.receive_sidebar_threads(&project, 2, Ok(empty_thread_listing()), cx);
                 assert_eq!(application.thread_listing, Some(rows));
                 assert!(application.sidebar_threads.pending.is_none());
-            })
+            });
         });
     }
 }

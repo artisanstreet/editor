@@ -1,0 +1,39 @@
+[package]
+name = "artisan-packaging"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "payload-manifest-generator"
+path = "portable/rust/payload_manifest.rs"
+
+[[bin]]
+name = "release-tool"
+path = "release/rust/release_tool.rs"
+
+[dependencies]
+base64.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+ed25519-dalek = "=2.2.0"
+semver = "=1.0.28"
+serde = { version = "=1.0.229", features = ["derive"] }
+zip = { version = "=4.6.1", default-features = false, features = ["deflate"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "versioned_layout"
+path = "../tests/packaging/versioned_layout.rs"
+
+[[test]]
+name = "cargo_binary_identity"
+path = "../tests/packaging/cargo_binary_identity.rs"
+
+[[test]]
+name = "portable_archive"
+path = "../tests/packaging/portable_archive.rs"

@@ -52,7 +52,7 @@ const STDERR_CHUNK: usize = 512;
 /// Production always launches the caller-supplied absolute Forge executable
 /// with only the helper-mode flag. The `cfg(test)` variant exists solely for
 /// the private headless fixtures described in the root contract: it targets
-/// the declared test-only protocol binary, resolved through Bazel runfiles,
+/// the declared test-only protocol binary, resolved through Cargo fixture paths,
 /// with a child-only scenario environment variable. It is never constructed
 /// outside tests, and production argv/environment behavior is untouched.
 pub(crate) enum LaunchRecipe {

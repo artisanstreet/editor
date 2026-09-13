@@ -31,6 +31,8 @@ pub enum ClientRequest {
     /// implements neither duplicate-request suppression nor cancellation
     /// propagation.
     PickDirectory,
+    /// Validate a host-native directory chosen by the authenticated editor.
+    ValidateDirectory(artisan_domain::RootPath),
     /// Negotiated native lifecycle status or stop control.
     Lifecycle(LifecycleRequest),
     /// Bounded rich-link metadata read for one absolute HTTP(S) URL.

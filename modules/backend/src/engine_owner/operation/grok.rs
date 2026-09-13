@@ -463,7 +463,11 @@ async fn grok_pump_loop(
                 let _ = event;
             }
             update = transport.next_update(session, prompt) => match update {
-                Ok(UpdateEvent::SessionUpdate(_)) => {}
+                Ok(UpdateEvent::SessionUpdate(update)) => {
+                    if let Some(title) = update.update.summary_title() {
+                        let _ = observations.send(EngineObservation::SummaryTitle { run_id: run_id.clone(), title }).await;
+                    }
+                }
                 Ok(UpdateEvent::AgentRequest { id, method, params }) => {
                     note_grok_agent_request(bridges, &id, &method, &params);
                 }

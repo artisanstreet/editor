@@ -122,6 +122,8 @@ pub enum NativeTransportCommand {
     RespondQuestion(Box<RespondQuestion>),
     /// Start a fresh opaque-directory project intake.
     BeginProjectIntake,
+    /// A host-native path chosen in the local Windows WSL folder dialog.
+    BeginProjectIntakeAt(String),
     /// Continue the one retained retry plan for project intake.
     RetryProjectIntake,
     /// Select an existing Forge-owned project.
@@ -241,6 +243,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::RespondApproval(_) => "RespondApproval",
             Self::RespondQuestion(_) => "RespondQuestion",
             Self::BeginProjectIntake => "BeginProjectIntake",
+            Self::BeginProjectIntakeAt(_) => "BeginProjectIntakeAt",
             Self::RetryProjectIntake => "RetryProjectIntake",
             Self::SelectProject(_) => "SelectProject",
             Self::ReadSidebarThreads { .. } => "ReadSidebarThreads",
@@ -615,6 +618,7 @@ pub struct NativeTransportService {
 /// complete command identity; reads and the picker are intentionally retried
 /// with fresh frames.
 enum IntakeRetry {
+    Validate(String),
     Pick,
     Attach(StableMutation),
     RefreshProjects {
@@ -650,11 +654,12 @@ impl IntakeState {
 }
 
 struct ServiceRuntime {
+    preserve_reconnect: bool,
     session: Option<ClientSession>,
     reconnect_lease: Option<ReconnectSessionLease>,
     reconnect_binding: ReconnectBinding,
     certificate: CertificateDer<'static>,
-    target: LoopbackTarget,
+    target: artisan_transport::SessionTarget,
     pinned_identity: PinnedIdentity,
     limits: ClientSessionLimits,
     lease: Option<ForgeProcessLease>,
@@ -735,6 +740,7 @@ pub use response_validation::{
     UniDelivery, validate_started_correlation, validate_stopped_correlation, validate_uni_envelope,
 };
 
+mod remote;
 #[path = "native_transport_service/service_lifecycle.rs"]
 mod service_lifecycle;
 

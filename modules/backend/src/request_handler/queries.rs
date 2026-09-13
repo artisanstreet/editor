@@ -28,14 +28,21 @@ impl RequestHandler {
     pub(super) async fn pick_directory_outcome(
         &self,
         request_id: &RequestId,
+        selected_path: Option<&str>,
     ) -> Result<ServerResponse, ProtocolFailure> {
         let Some(directory_picker) = self.directory_picker.as_ref() else {
             return Err(unbacked_failure(request_id, "native directory picking"));
         };
 
-        let pick_result = directory_picker
-            .controller
-            .pick_directory(directory_picker.budget)
+        let operation = match selected_path {
+            Some(path) => directory_picker
+                .controller
+                .validate_directory(directory_picker.budget, path),
+            None => directory_picker
+                .controller
+                .pick_directory(directory_picker.budget),
+        };
+        let pick_result = operation
             .map_err(|error| directory_admission_failure(error, request_id))?
             .await
             .map_err(|error| helper_operation_failure(&error, request_id))?;

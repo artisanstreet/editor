@@ -1,0 +1,16 @@
+{
+  "format-version": "1",
+  "product-version": "0.0.0",
+  "editor-forge-compatibility-version": "0.0.0",
+  "channel": "nightly",
+  "signing-key-id": "development",
+  "algorithm": "ed25519",
+  "minimum-installer-version": "0.0.0",
+  "minimum-cli-version": "0.0.0",
+  "artifact-id": "windows-x64",
+  "platform": "windows",
+  "architecture": "x64",
+  "libc": "",
+  "archive-format": "zip",
+  "file-name": "artisan-editor-versioned-payload.zip"
+}

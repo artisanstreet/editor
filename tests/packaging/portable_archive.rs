@@ -1,11 +1,10 @@
 //! Deterministic version-payload archive proof.
 //!
 //! The archive is extracted directly into `versions/<version>`. This proof
-//! therefore validates the five payload-root members, their exact Bazel input
+//! therefore validates the five payload-root members, their exact Cargo input
 //! bytes, and the manifest generated from those bytes. It also exercises the
 //! pure rejection helpers used for negative producer fixtures.
 
-use runfiles::{Runfiles, rlocation};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,8 +18,8 @@ const EOCD_SIG: u32 = 0x0605_4b50;
 const CDH_SIG: u32 = 0x0201_4b50;
 const LFH_SIG: u32 = 0x0403_4b50;
 const FIXED_DOS_TIMESTAMP: u32 = 0x3c21_0000;
-const ZIPPER_VERSION_MADE_BY: u16 = 0x0300;
-const ZIPPER_VERSION_NEEDED: u16 = 10;
+const ZIP_VERSION_MADE_BY: u16 = 0x0300;
+const ZIP_VERSION_NEEDED: u16 = 10;
 const REQUIRED_MEMBER_COUNT: u16 = 5;
 
 #[derive(Debug)]
@@ -547,11 +546,11 @@ fn canonical_manifest(payloads: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
         .iter()
         .map(|(name, bytes)| (name.clone(), sha256_hex(bytes)))
         .collect::<BTreeMap<_, _>>();
-    serde_json::to_vec(&serde_json::json!({
-        "format_version": 1,
-        "files": files,
-    }))
-    .expect("manifest serialization")
+    format!(
+        "{{\"format_version\":1,\"files\":{}}}",
+        serde_json::to_string(&files).expect("manifest files serialization")
+    )
+    .into_bytes()
 }
 
 fn validate_manifest(manifest: &[u8], payloads: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
@@ -594,8 +593,7 @@ fn validate_manifest(manifest: &[u8], payloads: &BTreeMap<String, Vec<u8>>) -> R
 
 fn resolve_env(key: &str) -> PathBuf {
     let location = std::env::var(key).unwrap_or_else(|_| panic!("missing environment {key}"));
-    let runfiles = Runfiles::create().expect("runfiles create");
-    rlocation!(runfiles, location.as_str()).unwrap_or_else(|| panic!("missing runfile {location}"))
+    std::path::PathBuf::from(location)
 }
 
 fn read_bytes_from_env(key: &str) -> Vec<u8> {
@@ -610,7 +608,7 @@ fn parse_test_archive() -> (Vec<u8>, Eocd, Vec<CentralEntry>, Vec<LocalEntry>) {
 }
 
 #[test]
-fn independently_named_bazel_archives_are_byte_identical() {
+fn independently_named_cargo_archives_are_byte_identical() {
     let archive = read_bytes_from_env("ARTISAN_VERSIONED_PAYLOAD_ARCHIVE");
     let fixture = read_bytes_from_env("ARTISAN_VERSIONED_PAYLOAD_ARCHIVE_REPRODUCIBILITY");
     assert_eq!(
@@ -632,15 +630,15 @@ fn archive_has_exact_sorted_version_payload_members() {
 fn archive_metadata_is_fixed_stored_and_unencrypted() {
     let (archive, eocd, centrals, locals) = parse_test_archive();
     for central in &centrals {
-        assert_eq!(central.version_made_by, ZIPPER_VERSION_MADE_BY);
-        assert_eq!(central.version_needed, ZIPPER_VERSION_NEEDED);
+        assert_eq!(central.version_made_by, ZIP_VERSION_MADE_BY);
+        assert_eq!(central.version_needed, ZIP_VERSION_NEEDED);
         assert_eq!(central.method, 0, "central method must be stored");
         assert_eq!(central.flags, 0, "central flags must be empty");
         assert_eq!(central.dos_timestamp, FIXED_DOS_TIMESTAMP);
         assert_eq!((central.external_attr >> 16) & 0o777, 0o777);
     }
     for local in &locals {
-        assert_eq!(local.version_needed, ZIPPER_VERSION_NEEDED);
+        assert_eq!(local.version_needed, ZIP_VERSION_NEEDED);
         assert_eq!(local.method, 0, "local method must be stored");
         assert_eq!(local.flags, 0, "local flags must be empty");
         assert_eq!(local.dos_timestamp, FIXED_DOS_TIMESTAMP);
@@ -670,7 +668,7 @@ fn archive_headers_have_matching_stored_crc_sizes_and_names() {
 }
 
 #[test]
-fn every_executable_member_matches_its_authoritative_bazel_input() {
+fn every_executable_member_matches_its_authoritative_cargo_input() {
     let (archive, _eocd, centrals, locals) = parse_test_archive();
     assert_member_contract(&centrals, &locals);
     let suffix = if cfg!(target_os = "windows") {

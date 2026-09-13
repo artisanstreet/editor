@@ -36,6 +36,7 @@ pub(crate) struct TextDelta {
     sequence: u64,
     chunk_id: String,
     part_id: Option<String>,
+    phase: Option<artisan_domain::AssistantMessagePhase>,
     delta: String,
     received_at: std::time::Instant,
 }
@@ -73,6 +74,15 @@ impl TextDelta {
     pub(crate) fn with_part_id(mut self, part_id: String) -> Self {
         self.part_id = Some(part_id);
         self
+    }
+
+    pub(crate) fn with_phase(mut self, phase: artisan_domain::AssistantMessagePhase) -> Self {
+        self.phase = Some(phase);
+        self
+    }
+
+    pub(crate) fn phase(&self) -> Option<artisan_domain::AssistantMessagePhase> {
+        self.phase
     }
 
     #[must_use]
@@ -116,6 +126,7 @@ pub(crate) fn chunk_text(
                 sequence: durable_sequence,
                 chunk_id,
                 part_id: None,
+                phase: None,
                 delta,
                 received_at,
             });
@@ -134,6 +145,7 @@ pub(crate) fn chunk_text(
             sequence: durable_sequence,
             chunk_id,
             part_id: None,
+            phase: None,
             delta,
             received_at,
         });
@@ -229,6 +241,7 @@ pub(crate) struct TextSnapshot {
     sequence: u64,
     part_id: String,
     text: String,
+    phase: Option<artisan_domain::AssistantMessagePhase>,
 }
 
 #[allow(dead_code)]
@@ -240,6 +253,7 @@ impl TextSnapshot {
             sequence,
             part_id,
             text,
+            phase: None,
         }
     }
 
@@ -261,6 +275,15 @@ impl TextSnapshot {
     #[must_use]
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn with_phase(mut self, phase: artisan_domain::AssistantMessagePhase) -> Self {
+        self.phase = Some(phase);
+        self
+    }
+
+    pub(crate) fn phase(&self) -> Option<artisan_domain::AssistantMessagePhase> {
+        self.phase
     }
 }
 
@@ -343,6 +366,10 @@ impl SubagentTranscriptRow {
 /// delivery plus matching need only [`PartialEq`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum EngineObservation {
+    SummaryTitle {
+        run_id: RunId,
+        title: artisan_domain::ThreadTitle,
+    },
     TextDelta(TextDelta),
     TextSnapshot(TextSnapshot),
     Usage(UsageObservation),

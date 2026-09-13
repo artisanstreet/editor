@@ -493,7 +493,6 @@ impl ComposerQueueState {
     }
 
     /// Returns the byte-free rows in the authoritative page order.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn entries(&self) -> &[ComposerQueueEntry] {
         &self.entries

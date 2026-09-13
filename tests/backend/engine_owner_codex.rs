@@ -2040,47 +2040,27 @@ impl Drop for WireTempRoot {
 
 /// Resolves the built wire-fixture executable without touching global state.
 fn codex_wire_fixture_program() -> PathBuf {
-    if let Ok(path) = std::env::var("ARTISAN_CODEX_WIRE_FIXTURE") {
-        let mapping = PathBuf::from(&path);
-        let path = if mapping.is_absolute() {
-            mapping
-        } else {
-            let runfiles = runfiles::Runfiles::create().expect("runfiles discovery");
-            runfiles::rlocation!(runfiles, path.as_str()).expect("wire fixture runfile")
-        };
-        assert!(
-            path.is_file(),
-            "declared wire fixture must be a regular file"
-        );
-        return path;
-    }
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_codex_wire_fixture") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return path;
-        }
-    }
-    let test_executable = std::env::current_exe().expect("test executable path");
-    let cargo_example = test_executable
-        .parent()
-        .and_then(|deps| deps.parent())
-        .expect("Cargo target directory")
-        .join("examples")
-        .join(format!(
-            "codex-wire-fixture{}",
-            std::env::consts::EXE_SUFFIX
-        ));
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for candidate in [
-        cargo_example,
-        manifest.join("../../target/debug/codex_wire_fixture"),
-        manifest.join("../../target/debug/codex_wire_fixture.exe"),
-    ] {
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    panic!("wire fixture binary not found; build the codex-wire-fixture example");
+    let path = std::env::var_os("ARTISAN_CODEX_WIRE_FIXTURE").map_or_else(
+        || {
+            let test = std::env::current_exe().expect("test executable path");
+            test.parent()
+                .expect("test output directory")
+                .parent()
+                .expect("Cargo profile directory")
+                .join("examples")
+                .join(format!(
+                    "codex-wire-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        },
+        std::path::PathBuf::from,
+    );
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "build fixture with cargo build -p artisan-backend --examples or set ARTISAN_CODEX_WIRE_FIXTURE to an absolute file: {}",
+        path.display()
+    );
+    path
 }
 
 /// Copies the built fixture to a per-test executable whose basename names

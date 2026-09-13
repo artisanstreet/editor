@@ -1,5 +1,7 @@
 # E4 — Native Engine Process Owner (Backend)
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](../runbooks/native-dev.md).
+
 Status: reviewed proposal against immutable `52ee041` ([PR #120](https://github.com/artisanstreet/editor/pull/120), `DirectoryController`/`ForgeListener`). This plan is not a runtime implementation or shipping approval.
 Prerequisite: [native engine-first workflow](NATIVE_ENGINE_FIRST_WORKFLOW.md), published in [PR #122](https://github.com/artisanstreet/editor/pull/122). References to `frozen-e1` below mean its settled E1 contract in section 3; proposed APIs remain implementation work.
 

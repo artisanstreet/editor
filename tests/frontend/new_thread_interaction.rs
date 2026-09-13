@@ -2,7 +2,7 @@
 //!
 //! The production module is path-linked deliberately: this packet does not
 //! edit the shared frontend module registration, so the harness can run with
-//! plain `rustc --test` and no Cargo or Bazel dependencies.
+//! plain `rustc --test` and no Cargo dependencies.
 
 #[path = "../../modules/frontend/src/new_thread_interaction.rs"]
 mod new_thread_interaction;

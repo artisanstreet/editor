@@ -52,6 +52,9 @@ pub enum ProtocolEncodeError {
 /// Failure while reading and validating one external protocol frame.
 #[derive(Debug, Error)]
 pub enum ProtocolDecodeError {
+    /// A client-selected host path exceeded domain bounds.
+    #[error("invalid selected directory: {0}")]
+    DirectoryPath(#[from] artisan_domain::RootPathError),
     #[error("invalid composer state: {0}")]
     ComposerState(#[from] crate::composer_state_codec::ComposerStateCodecError),
 

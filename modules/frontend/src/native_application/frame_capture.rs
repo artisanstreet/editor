@@ -10,6 +10,13 @@ use gpui::{
     profiler::{self, FrameEvent, FrameTimingCollector},
 };
 
+fn selected_view(window: &Window, cx: &App) -> Option<gpui::Entity<super::NativeApplication>> {
+    window
+        .root::<super::workspace::NativeWorkspace>()
+        .flatten()
+        .map(|workspace| workspace.read(cx).selected_view())
+}
+
 pub(super) fn start(window: &mut Window) {
     let Some(path) = std::env::var_os("ARTISAN_FRAME_CAPTURE") else {
         return;
@@ -63,7 +70,7 @@ struct Capture {
 
 impl Capture {
     fn scroll_frame(&mut self, window: &mut Window, cx: &mut App) {
-        let Some(view) = window.root::<super::NativeApplication>().flatten() else {
+        let Some(view) = selected_view(window, cx) else {
             return;
         };
         let Some(host) = view.read(cx).conversation_host.as_ref() else {
@@ -101,7 +108,7 @@ impl Capture {
 
     fn select_capture_chat(&mut self, window: &mut Window, cx: &mut App) {
         if self.select_chat
-            && let Some(Some(view)) = window.root::<super::NativeApplication>()
+            && let Some(view) = selected_view(window, cx)
         {
             self.select_chat = !view.update(cx, |app, cx| {
                 if !app.project_picker_action_is_admissible() {
@@ -178,7 +185,7 @@ impl Capture {
                 "screenshot_error": screenshot_error,
                 "window_active": window.is_window_active(),
                 "gpu": window.gpu_specs(),
-                "route": window.root::<super::NativeApplication>().flatten().map(|view| format!("{:?}", view.read(cx).route())),
+                "route": selected_view(window, cx).map(|view| format!("{:?}", view.read(cx).route())),
                 "viewport": format!("{:?}", window.viewport_size()),
                 "elapsed_seconds": elapsed_seconds,
                 "workload": if self.original_size.is_some() { "Continuous synthetic wheel input after thirty seconds of warmup; no forced redraws during measurement" } else { "Full-window redraws after thirty seconds of warmup; no synthetic input" },

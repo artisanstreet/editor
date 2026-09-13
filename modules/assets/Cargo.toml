@@ -12,3 +12,7 @@ toml.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "assets_assets_validation"
+path = "../../tests/assets/assets_validation.rs"

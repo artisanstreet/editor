@@ -1,4 +1,4 @@
-//! Bazel tool wrapper for the upstream `capnpc-rust` compiler plugin.
+//! Cargo tool wrapper for the upstream `capnpc-rust` compiler plugin.
 
 use std::io;
 use std::path::Path;

@@ -1,280 +1,196 @@
-# Native dev runbook — `bazel run //:dev` / `scripts/dev.ps1`
+# Native development with Cargo and Nix
 
-One command builds the native Editor frontend and the Forge backend,
-stages them into an isolated development installation under
-`<workspace>/.dist/dev`, provisions that home through the existing CLI
-custody APIs, and launches the **staged** Editor. The Editor then runs its
-shipping startup plus one opt-in step: it starts its newly owned Forge,
-connects over authenticated QUIC, completes its initial queries, and
-writes the startup receipt the launcher waits for. The launcher reports
-an honest result — ready, failed with stage, or timeout — and stops the
-Editor it owns when startup is not confirmed.
+Cargo owns the Rust workspace and dependency graph. The flake pins Rust, native
+libraries, Crane, build tools, generated bindings, packages and quality gates.
+It defines Linux x86_64 and aarch64 outputs. Local validation is on x86_64 WSL;
+aarch64 needs a native builder. A real desktop session is required for rendering.
 
-## Usage
+## Start working
 
-Authoritative (Bazel owns the build):
+Install Nix with flakes enabled on Linux/WSL, then:
 
-```text
-bazel run //:dev
-bazel run //:dev -- --stage-only
-bazel run //:dev -- --dev-dir C:\scratch\artisan-dev --stage-only
-bazel run //:dev -- --bin-dir <dir-with-ae-editor-forge-installer> --stage-only
+```sh
+nix develop
+python3 scripts/dev.py
 ```
 
-Windows developer convenience (same runner, cargo-built binaries; never
-wired into Bazel):
+This is the incremental Cargo workflow. It stages the four product binaries under
+`.dist/dev/home`, preserving the database and credentials. Use `--stage-only` to
+stage without launching, `--profile performance` for optimized rendering, or
+`--dev-dir /absolute/path` for an isolated installation. The Editor starts its
+owned Forge through the product APIs. `CARGO_TARGET_DIR` is respected; do not
+share target directories across worktrees.
 
-```text
-scripts/dev.ps1
-scripts/dev.ps1 -Release -StageOnly
-scripts/dev.ps1 -DevDir C:\scratch\artisan-dev
+For automatic activation, install direnv, add its hook to your shell, and run
+`direnv allow` in this checkout. `.envrc` enters the flake shell; it does not build
+or launch the Editor. Configure nix-direnv on the host for cached activation.
+
+The shell defaults to two Cargo jobs. Override `CARGO_BUILD_JOBS` when appropriate.
+Nix builder concurrency is separate: on this WSL machine use `--max-jobs 1 --cores 2`.
+
+## Build and launch Nix outputs
+
+```sh
+nix build .#development --max-jobs 1 --cores 2
+nix run .#dev -- --stage-only
+nix run .#dev
+nix build .#release --max-jobs 1 --cores 2
+nix run .#editor
 ```
 
-`dev` flags (after the `--` Bazel passthrough separator):
+The `dev` and `editor` apps use the existing staging launcher and keep state under
+`${XDG_STATE_HOME:-$HOME/.local/state}/artisan/{dev,release}`. Set `ARTISAN_DEV_DIR`
+to an absolute path to override it. Store outputs remain immutable. Individual
+raw `editor`, `forge`, `ae`, and `installer` packages are also available;
+use the layout-aware app to launch the Editor. Helpers (`dev-launcher`,
+`payload-manifest-generator`, `release-tool`, `capnp-codegen`) build independently.
 
-| Flag | Effect |
-| --- | --- |
-| `--dev-dir PATH` | Isolated root. Default: `<workspace>/.dist/dev` (`BUILD_WORKSPACE_DIRECTORY`, else current directory). Must be absolute. |
-| `--bin-dir PATH` | Use prebuilt `ae`/`editor`/`forge`/`installer` binaries from `PATH` instead of the Bazel runfiles search. `dev.ps1` and root validation use this. |
-| `--stage-only` | Stage and provision without launching the Editor. |
-| `--help` / `-h` | Print usage. Exit code 2 on invalid flags, 1 on stage failure. |
+Release installers embed the public values in
+`modules/installer/release/trust_anchor.env`. The checked-in anchor is for
+pre-release development only. Rotate it before production; see
+[installer trust](../../modules/installer/RELEASE_TRUST.md). Missing anchors remain
+compile errors. Private signing keys are never derivation inputs.
 
-## What one run does
+Crane vendors Cargo.lock dependencies, builds offline, and caches artifacts per
+compatible Cargo profile. Embedded fonts, licenses, schemas, catalog JSON,
+external tests and packaging contracts are included. Build products, evidence
+and the local handoff ledger are excluded.
 
-Seven plain-text stages, no TTY codes, suitable for piping:
+## Quality gates
 
-1. **resolve** — derive `<dev>`, `<dev>/home`, `<dev>/home/versions/dev`.
-2. **binaries** — locate `ae`, `editor`, `forge`, `installer` (`--bin-dir`,
-   then `$RUNFILES_DIR` with Bzlmod `_main`, legacy workspace, and flat
-   layouts, then `$RUNFILES_MANIFEST_FILE` with the same prefixes, then
-   the `bazel-bin` sibling layout). Under `bazel run`, these are `data`
-   dependencies of `//scripts/native_dev:dev`, so both product binaries
-   build before staging.
-3. **lock** — acquire the inter-run OS lock (auto-released if the stager
-   dies) and refuse while the dev readiness receipt identifies a Forge
-   running the **staged** binary.
-4. **provision** — `credentials::provision_or_load` plus a
-   `NativeInstanceConfig` write. Reuses the existing instance identity,
-   credentials, database, and dev data on repeat runs; mints only on first
-   run. Runs before activation, so a failed provision never strands a
-   `complete` manifest.
-5. **stage** — copy changed binaries into `versions/dev.staging`, write
-   and verify the payload manifest there, then swap it into
-   `versions/dev` (previous tree retained until the swap completes, then
-   removed). Identical trees skip activation entirely, so a running dev
-   session is never disturbed. A failed update leaves the active version,
-   manifest, and data exactly as they were.
-6. **manifest** — write `<home>/installation.json` (`active`/`complete`,
-   `active_version: "dev"`) last and validate it with the shipping
-   `InstallationManifest::load` (previous manifest restored on failure).
-7. **startup/launch** — Mint a per-launch receipt path
-   (`startup-receipt-<pid>.json`, so a stale receipt can never confirm a
-   new launch), fail closed when a stale file cannot be removed, reconcile
-   a stale Forge readiness receipt (below), then spawn the **staged**
-   Editor with `ARTISAN_HOME=<home>`, `ARTISAN_DEV_STARTUP_RECEIPT=<dev>/
-   startup-receipt.json`, and the manual-forge escape hatches stripped.
-   Wait up to 90 seconds for the receipt: `ready` (authenticated QUIC +
-   initial project/thread queries complete) prints `ok` and the launcher
-   keeps waiting for normal Editor exit; `failed` (secret-free stage),
-   timeout, or early Editor exit stops the owned Editor — releasing the
-   owned Forge through its lease and Job Object containment — and fails
-   the stage honestly.
-
-## Relation to the Electron dev runner and checklist
-
-The legacy `.scripts/dev/runner.ts` supervised a Forge Rolldown watcher
-plus the Vite frontend with worktree-derived ports, a pairing secret, and
-`@artisanstreet/checklist` lane presentation. The native counterpart keeps
-the shape but not the machinery:
-
-| Electron runner | Native `dev` |
-| --- | --- |
-| Forge watcher build + Vite dev server | Bazel `data` deps on `//modules/backend:forge` + `//modules/frontend:editor` (or one `cargo build` in `dev.ps1`) |
-| Worktree-derived ports | No ports: QUIC loopback endpoint comes from the owned readiness receipt |
-| Pairing secret / same-origin codes | No secret: QUIC bootstrap capability + certificate pin from provisioned custody; startup confirmation reuses the owned session's own receipt, never a separate probe |
-| `@artisanstreet/checklist` TUI lanes | Numbered `dev: stage i/N ... ok` plain lines (no TTY codes by design) |
-| Manual `ARTISAN_DEV_FORGE_HOME` backend | Owned Forge started by the staged Editor itself; the manual escape hatch is stripped |
-
-No Node/Cargo wrapper performs the authoritative build: Bazel owns it
-(`dev.ps1` is a developer convenience with an honest build driver), and
-the only new executable is the small native `scripts/native_dev` crate,
-as the Rust port plan allows.
-
-## Listener budgets and prompt delivery
-
-`requests_per_connection` and `admission_capacity` are **lifetime**
-budgets, not concurrency limits: the backend closes a connection after
-that many completed requests (`BudgetReached`). There is no codified
-production default (the installer never provisions instance values; `ae
-setup` takes explicit args), so dev uses large bounded values —
-admission `1024`, per-connection `65536` — that survive usage polling,
-catalog refreshes, and a full day of composer use. A value like 32 would
-disconnect normal use after a few dozen requests.
-
-`prompt_delivery` accepts any nonempty string up to 256 bytes without
-control characters or line breaks; the Forge enforces the identical rule
-(`native_run_dispatch`), and `queue` is the value the CLI fixtures use.
-The `dev_instance` suite asserts the dev value is accepted and the
-rejections hold.
-
-## Repeat invocation and updates
-
-- Rebuilding (new binary bytes) then re-running stages the new binaries
-  through verify-then-swap while preserving the dev database,
-  credentials, and instance identity. Close the previous dev Editor
-  first: staging refuses while its Forge is live.
-- To start over, delete `.dist/dev` (or pass a fresh `--dev-dir`).
-- The real installed application is never addressed: `Layout::discover`
-  inside the staged Editor sees only the explicit `ARTISAN_HOME`, and the
-  debug CLI guard additionally refuses the installed home.
-
-## Restarting the same dev installation
-
-Closing the Editor kills its owned Forge, which then cannot remove its
-readiness receipt — and the Forge's no-clobber publish refuses to
-overwrite it, so the next launch died at stage 7 with a readiness
-failure. The dev runner reconciles this under the staging lock before
-spawning, and only with two independent proofs:
-
-1. The receipt must parse as valid Forge readiness (schema, loopback
-   endpoint, certificate pin, nonzero pid) but name no live staged
-   Forge — a live one is refused outright. Symlinks, reparse points,
-   directories, oversized, or malformed bytes are preserved and refuse
-   the launch.
-2. Every ancestor of the receipt must be a regular directory (no
-   symlink, reparse point, or missing component), and the home's Forge
-   custody lock must be acquirable nonblocking and is retained while the
-   receipt is rechecked byte-identical and removed. A live Forge holds
-   that lock from startup until after shutdown, so same-home live Forge
-   removal is impossible even when pid queries are unavailable; a held
-   lock refuses and preserves the receipt.
-
-Publish temporaries are never swept: a stale temporary cannot block the
-next publish, and deleting files by pattern would violate preservation.
-The runtime and CLI no-clobber invariants are unchanged — the runner
-never writes a receipt — and credentials, database, and instance
-identity are never re-minted by a restart.
-
-## Failure behavior
-
-| Symptom | Meaning | Action |
-| --- | --- | --- |
-| `dev binary missing: ...` | Not launched via `bazel run` and no `--bin-dir` | Use `bazel run //:dev`, `dev.ps1`, or pass `--bin-dir` |
-| `dev staging is locked ...` | Another `dev` run is staging | Wait, or remove the lock only when no run is active |
-| `previous dev Forge still running with pid ...` | Stale dev session owns the home | Close the previous dev Editor/Forge, then retry |
-| `staged payload is not verified: ...` | Scratch tree drifted | Active version untouched; fix the cause and retry |
-| `shipping manifest loader rejected the dev home: ...` | Manifest would not launch | Previous manifest restored; report |
-| `existing dev instance is invalid: ...` | `instance-v2.json` corrupted | Delete the file (a fresh identity is minted; dev data stays) |
-| `cannot clear stale startup receipt ...` | Unremovable file at the per-launch receipt path | Remove it by hand; the launch refuses rather than reading stale `ready` |
-| `forge custody is held at ...` | Another owner holds the home's Forge custody | A live Forge may be running; receipt preserved, close it and retry |
-| `stale readiness at ... is malformed / is not a regular file / exceeds its size bound` | Unparseable or unsafe Forge receipt | Preserved; remove it by hand after confirming no Forge runs on the home |
-| `editor startup not confirmed ...` / `stage 7/7 startup ... failed` | Receipt `failed`, timeout, or early exit | Stage detail names the phase; owned Editor already stopped |
-| `path must be absolute` | Relative `--dev-dir` | Pass an absolute path |
-| `invalid arguments: ...` | Unknown flag | See `--help` |
-
-## Test drivers and registration
-
-Two drivers compile Rust tests. They are not equivalent, and the suite only
-counts as run when the authoritative one has run.
-
-**Bazel is authoritative.** `bazel test //...` is the full suite: every
-rust_test target plus every other test rule in the repository, with no
-exclusions. `bazel test //:tests` is the registered aggregate — it now carries
-every `rust_test` target in the repository plus `//:format_test`, and
-`scripts/audit_rust_target_registration.ps1` fails if a new `rust_test` is not
-added to it. Both commands are honest about coverage; `//:tests` is the faster
-entry point when only Rust tests changed, `//...` is what CI and release gates
-must use.
-
-**Cargo is a per-suite convenience driver.** Every `[[test]]` declared in a
-module `Cargo.toml` is mirrored by exactly one Bazel `rust_test` (the audit
-fails on any Cargo test without a Bazel target), so `cargo test -p <module>`
-is a legitimate way to iterate on those suites locally. The reverse does not
-hold: Bazel also owns suites with no Cargo declaration — the private
-`#[cfg(test)]` crate tests (`//tests/backend:backend_unit_test`,
-`//modules/frontend:frontend_unit_test`), shared harness modules
-(`tests/transport/harness.rs`, `tests/ui/gpui_harness.rs`), and GPUI display
-tests. Pass `--lib` for the crate unit tests and name the test binary for a
-manifest-declared suite (for example
-`cargo test -p artisan-frontend --lib`). Do not treat a green
-`cargo test --workspace` as the full gate.
-
-**Backend fixture suites need the parity runfiles manifest under Cargo.**
-`//tests/backend:backend_unit_test` compiles the backend crate in test mode
-and its fixture helpers (`tests/backend/engine_owner_configured.rs`,
-`engine_owner_codex.rs`, and friends) spawn the `engine_owner_fixture` and
-`codex_wire_fixture` executables. Under Bazel the target declares those
-binaries as `data` and passes them through `env` rlocationpaths. Cargo has no
-runfiles tree, so before `cargo test -p artisan-backend` set:
-
-```text
-RUNFILES_MANIFEST_FILE=<workspace>/evidence/parity-runfiles-manifest.txt
-ARTISAN_ENGINE_OWNER_FIXTURE=artisan_editor/tests/backend/engine_owner_fixture.exe
-ARTISAN_CODEX_WIRE_FIXTURE=<cargo-target-dir>/debug/examples/codex-wire-fixture.exe
+```sh
+nix flake check --keep-going --max-jobs 1 --cores 2 -L
+nix build .#checks.x86_64-linux.codegen -L
+nix fmt
+# Incremental Cargo equivalent:
+python3 scripts/check.py --runner nextest
 ```
 
-and build the fixture examples first
-(`cargo build -p artisan-backend --examples`). Without the manifest the
-helpers either panic with `ARTISAN_ENGINE_OWNER_FIXTURE must be set via
-rlocationpath` or fall back to `target/debug` discovery, which is only
-correct when the fixtures were built into the same target directory.
+Independent checks cover Rust/Nix formatting, Clippy, test registration, Python
+tooling tests, the file-size ratchet, schema drift, serial unit/integration tests,
+and documentation tests. The Nix test gate uses pinned Nextest, one test process at
+a time, with a two-minute per-test timeout; timeouts fail the gate. Native
+Windows can use the default Cargo runner (`python scripts/check.py`). Visual-proof compilation explicitly enables its Cargo
+feature. Test fixtures use absolute paths to the three built backend examples;
+packaging tests use bounded inputs and the real payload generator. The Python
+check command stops at the first failed gate; Nix `--keep-going` reports independent
+failures. No additional product tests are skipped. The timeout and process isolation behavior is
+provided by [Nextest](https://nexte.st/docs/features/slow-tests/).
 
-Run `pwsh -NoProfile -File scripts/audit_rust_target_registration.ps1` after
-moving, renaming, adding, or deleting any Rust test or target. It checks
-Cargo `[[test]]` ↔ Bazel `rust_test` coverage, root `//:tests` membership,
-`crate_name`/target-name agreement, clippy/rustfmt aggregate membership, and
-BUILD source paths.
+For individual Cargo backend tests, first build
+`cargo build --locked -p artisan-backend --examples`. Fixtures are discovered
+under the active profile's `examples` directory, or supplied through absolute
+`ARTISAN_ENGINE_OWNER_FIXTURE`, `ARTISAN_CODEX_WIRE_FIXTURE`, and
+`ARTISAN_DIRECTORY_CONTROLLER_FIXTURE` variables. Packaging tests require the
+artifact variables that `scripts/check.py` supplies.
 
-## Acceptance procedure (root gate)
+The file-size allowance can only shrink: run
+`python3 scripts/file_size_ratchet.py --update` after extracting modules. Growth
+or new oversized files fail even with `--update`. Existing baseline violations
+and installer/UI failures remain visible until fixed in the product code.
 
-1. `bazel build //:dev` — both binaries built as dependencies.
-2. `bazel test //tests/native_dev/...` — args, layout, launch/receipt,
-   manifest, instance-preservation, runfiles, and stage-coherence suites
-   green (includes different source/staged directories, failed-update
-   preservation, lock contention, receipt failure/timeout, `_main`
-   runfiles and paths with spaces).
-3. `bazel run //:dev -- --stage-only` — stages 1–6 print `ok`; rerun
-   prints reused/preserved with no activation.
-4. `bazel run //:dev` (or `scripts/dev.ps1`) — Editor window opens,
-   stage 7 confirms `ready` (authenticated + initial queries), projects/
-   threads load over QUIC. Exercise more than 32 requests (usage
-   refreshes, catalog reads, composer sends) to prove the lifetime
-   budget. Close the Editor; Forge stops; exit 0.
-5. Kill the Editor process mid-startup once: stage 7 must fail honestly
-   (timeout/early exit) with no orphan Forge.
-6. Confirm `%LOCALAPPDATA%\Artisan Street` (or platform equivalent)
-   untouched, and no `ARTISAN_DEV_FORGE_HOME` process remains.
+## Schemas and maintenance
 
-No live end-to-end run is claimed by this packet: the real build,
-launch, and QUIC connection await the root native gate.
+```sh
+nix build .#generated-bindings
+nix run .#codegen                 # from the repository root; updates all 3 schemas
+nix run .#codegen -- --check      # compares without modifying files
+nix run .#verify-gpui-pin         # runtime GitHub access; gh auth may be required
+nix develop .#maintenance
+nix flake update                # deliberately update pinned Nix inputs
+```
 
-## Ownership
+Review generated bindings with schema changes. `Cargo.lock` pins Rust crates and
+the compiler plugin; `rust-toolchain.toml` pins Rust; `flake.lock` pins Nixpkgs,
+the Rust overlay and Crane. Update those separately and rerun the gates.
 
-- Owned: `scripts/native_dev/**`, `scripts/dev.ps1`,
-  `tests/native_dev/**`, this runbook, root `BUILD.bazel` alias +
-  aggregate entries, root `Cargo.toml` member, `/.dist/` ignore.
-- Boundary edits to existing product code (explicit, minimal):
-  - `modules/frontend/src/dev_startup_receipt.rs` (new): opt-in receipt,
-    no-op without `ARTISAN_DEV_STARTUP_RECEIPT`, secret-free by
-    construction, inline unit tests.
-  - `modules/frontend/src/native_transport_service.rs`: four hook calls
-    in `service_main` (ready after initial catalog; failed on delivery /
-    catalog / startup errors) plus `StartupError::failure` widened to
-    `pub(crate)`.
-  - `modules/frontend/src/lib.rs` + `modules/frontend/BUILD.bazel`: one
-    module registration line each.
-  - The release installer's stage/activate machinery stays untouched: it
-    serves signed releases (different schema, private API); the dev
-    crate mirrors its tmp/previous/rename discipline locally instead of
-    extracting it.
-- `modules/cli`, `modules/installer` logic, and `native_profile_usage`
-  are untouched.
-- Known follow-ups for the root/Bazel worker: `cargo generate-lockfile`
-  + `Cargo.Bazel.lock` repin for the new member (workspace-pinned
-  `serde_json`/`thiserror`/`fs2`, `sha2 = "=0.10.9"`); then run the
-  acceptance procedure above. `dev.ps1` (both its `cargo metadata
-  --locked` target-dir probe and its `--locked` build) requires the
-  re-resolved lock first. `dev.ps1` resolves the real Cargo target
-  directory from metadata, so `CARGO_TARGET_DIR`, config `target-dir`
-  (including relative dirs and paths with spaces), and the shared
-  vendor cache all work.
+## Packaging and signing
+
+```sh
+nix build .#nix-payload --out-link result-payload
+nix build .#unsigned-release --out-link result-manifest
+nix run .#export-closure -- "$PWD/artisan-linux.nar"
+nix run .#sign-release -- --manifest "$PWD/result-manifest" \
+  --key-file /absolute/private/seed --key-id development --output /absolute/signed.json
+```
+
+`nix-payload` is a deterministic ZIP of the four Nix-linked binaries and their
+integrity manifest. It requires their Nix store closure; it is **not a standalone
+Linux portable distribution**. `unsigned-release` describes this exact archive
+with Linux, the matching CPU architecture and glibc metadata. No private key is
+used. `export-closure` writes a NAR export containing the release app and runtime
+closure; import it on a compatible Nix machine with `nix-store --import < file`.
+Keep an installed profile or GC root for outputs you need to retain.
+
+For native non-Nix packaging, use `python3 scripts/package.py --profile release`
+in a suitable native build environment with the public trust variables exported.
+That workflow keeps the existing archive contract; validate runtime dependencies
+on the destination platform. The scripts also accept `--bin-dir`, `--generator`,
+`--layout`, or `--tool` to consume prebuilt inputs without invoking Cargo.
+`scripts/release_manifest.py` requires public metadata matching those binaries;
+`packaging/release/development.json` is the Windows x64 example.
+
+## Desktop and performance tools
+
+```sh
+nix run .#screen-demo
+nix run .#capture-screen-demo -- --software --output evidence/visual/screen-demo.png
+nix develop .#visual
+nix develop .#performance
+ARTISAN_FRAME_CAPTURE="$PWD/evidence/frame-capture.json" nix run .#performance
+```
+
+`capture-screen-demo` launches the synthetic transcript harness through X11 or
+XWayland and captures only its own process's window. This path was validated on WSLg with
+a 1100×700 software-rendered capture. It closes that process after
+capture, has a 45-second window-discovery deadline, and uses pinned xdotool and
+ImageMagick. `--software` selects pinned Mesa lavapipe; omit it to exercise the
+host GPU. This is an OS window capture, not GPUI's internal readback proof.
+
+The `parity-visual-proof` package and `visual-proof`/`visual-proof-software` apps
+compile the explicit case/viewport harness and retain its 45-second external
+timeout. The pinned GPUI fork currently returns `render_to_image not implemented
+for this platform` on Linux: those apps cannot yet produce its internal PNG
+proof here. Its 17 fixture tests pass independently. Use the Linux window-capture
+app or the native Windows capture workflow for current screenshots.
+
+Graphical wrappers include pinned Mesa and add WSLg/NixOS driver library locations
+when present. Embedded fonts are pinned by the source. Performance captures remain
+outside the store; record GPU, driver, display refresh, workload and environment
+alongside results. Performance packages retain debug line tables. The performance shell supplies perf and hyperfine; WSL kernel
+restrictions may limit perf. See [native performance](../native-performance.md).
+
+## Windows, CI, caches and deployment
+
+Native Windows uses Rust 1.98, Visual Studio C++ tools, Python 3.11+ and
+`scripts/dev.ps1`. Nix manages WSL/Linux dependencies; the Windows SDK and Win32
+capture remain native. CI runs a Windows Cargo lane and independent Linux flake
+checks. Artifact jobs depend on both passing. Manual desktop workflows require
+self-hosted runners labelled `artisan-desktop`, logged into a real desktop;
+use only trusted refs on those hosts.
+
+Optional cache setup: set repository variable `CACHIX_CACHE` to your cache name
+and secret `CACHIX_AUTH_TOKEN` to its push token. CI configures that cache for
+reads, then pushes successful outputs only after all gates on the default branch.
+No cache account or token has been configured by this change. Developers can
+configure that same cache with `cachix use <name>` after checking its public key.
+Keep credentials in host/CI secret storage. The flake does not add unknown cache
+keys to machine trust settings.
+
+Remote builders are optional host configuration. For example, after setting up a
+trusted SSH Nix builder, use
+`nix build .#release --builders 'ssh-ng://builder x86_64-linux - 2 1'`.
+An aarch64 output needs an aarch64 builder or explicitly configured emulation.
+Do not commit SSH credentials or host-specific builder addresses.
+
+`nix build .#forge-container` produces a container image with its runtime closure.
+Load it with Docker/Podman, mount a writable `/data` owned by UID 65532, provision
+credentials at absolute runtime paths, and supply Forge's complete argument list.
+No ports, credentials, or deployment policy are invented by the image.
+
+`nixosModules.forge` is opt-in. Import it, enable `services.artisan-forge`, supply
+absolute **string** paths for `certificateFile`, `privateKeyFile` and
+`bootstrapCapabilityFile`, and set every listener/native-run option in `policy`.
+Systemd loads credentials at runtime; the module owns `/var/lib/artisan-forge`
+and `/run/artisan-forge`. It preserves Forge's existing listener/custody contract.
+No service has been deployed. Select and validate policy on the target host.

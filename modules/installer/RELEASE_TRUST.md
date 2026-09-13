@@ -8,8 +8,6 @@ that lets a release build choose a different one.
 | Build | Mode marker | Embedded anchor | Runtime `--public-key` |
 | --- | --- | --- | --- |
 | Cargo dev / `cargo test` | debug profile (`debug_assertions`) | none | required, unpinned |
-| Bazel `fastbuild` / `dbg` | `ARTISAN_INSTALLER_DEVELOPMENT=1` | none | required, unpinned |
-| Bazel `-c opt` | `ARTISAN_INSTALLER_RELEASE=1` | `release/trust_anchor.env` | refused (typed error) |
 | `cargo build --release` | `debug_assertions` off | `ARTISAN_RELEASE_KEY_ID` + `ARTISAN_RELEASE_PUBLIC_KEY_HEX` | refused (typed error) |
 
 A release build whose anchor is missing is a compile error (`manifest.rs`), not
@@ -30,10 +28,9 @@ A manifest signed by any other key id is rejected with
    `installation.json`) and `ARTISAN_RELEASE_PUBLIC_KEY_HEX` (the raw 32-byte
    Ed25519 public key as lowercase hex; the RFC 8410 SubjectPublicKeyInfo
    encoding is also accepted).
-3. Sign the release manifest with `//packaging/release:release_tool` using the
+3. Sign the release manifest with `cargo run --locked -p artisan-packaging --bin release-tool -- sign` using the
    same key id.
-4. Build the release installer through `bazel build -c opt
-   //modules/installer:installer`, or `cargo build --release` with
+4. Build the release installer through `cargo build --locked -p ae-installer --release` with
    `ARTISAN_RELEASE_KEY_ID` and `ARTISAN_RELEASE_PUBLIC_KEY_HEX` exported.
 5. Verify the produced installer only accepts manifests signed by the pinned
    key and refuses `--public-key`/`ARTISAN_INSTALLER_PUBLIC_KEY`.
@@ -54,3 +51,5 @@ tree whose payload manifest is missing, unsafe, or does not cover exactly the
 signed entries is refused with `UnverifiedRelease`. Nothing from the existing
 tree is executed, copied to the stable launcher, or registered as an
 integration before that verification succeeds.
+
+Nix release outputs read the two public anchor values from `release/trust_anchor.env` as explicit derivation inputs and set the release marker. `nix build .#unsigned-release` generates metadata for the exact Nix-linked Linux archive; `nix run .#sign-release -- ...` signs at runtime using a caller-supplied key file. Private signing material must never be a Nix source or derivation input.

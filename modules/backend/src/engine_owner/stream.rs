@@ -480,7 +480,8 @@ async fn deliver_events(
     for observation in normalized {
         let receipt_state = match &observation {
             EngineObservation::Terminal(terminal) => Some(terminal.state()),
-            EngineObservation::TextDelta(_)
+            EngineObservation::SummaryTitle { .. }
+            | EngineObservation::TextDelta(_)
             | EngineObservation::TextSnapshot(_)
             | EngineObservation::Usage(_)
             // Activity rows are progress observations committed by the

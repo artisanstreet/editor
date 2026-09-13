@@ -1,7 +1,7 @@
 //! Focused dependency-free coverage for the thread hover-rail policy.
 //!
 //! The production module is included directly so this harness can be checked
-//! with pinned Rust without Cargo, Bazel, or shared module registration.
+//! with pinned Rust without Cargo, or shared module registration.
 
 #![forbid(unsafe_code)]
 

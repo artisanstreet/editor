@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "packaging",
+    "scripts/screen_demo",
     "modules/assets",
     "modules/backend",
     "modules/catalog",

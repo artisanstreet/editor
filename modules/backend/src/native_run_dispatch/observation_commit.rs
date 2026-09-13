@@ -35,6 +35,7 @@ pub(crate) struct SubagentCommitCursor<'a> {
     pub assistant_item: Option<ItemId>,
     pub assistant_revision: Revision,
     pub assistant_body: String,
+    pub assistant_phase: AssistantMessagePhase,
 }
 
 /// Commits one re-sequenced subagent observation through the S1b batch path.
@@ -109,7 +110,7 @@ pub(crate) async fn commit_subagent_observation(
             item_id: &item_id,
             expected_revision: cursor.assistant_revision,
             body: &body,
-            phase: AssistantMessagePhase::Unspecified,
+            phase: cursor.assistant_phase,
             patch_id: &patch_id,
         }];
         if commit_batch_with_retry(CommitBatchRequest {
@@ -141,7 +142,7 @@ pub(crate) async fn commit_subagent_observation(
         };
         let changes = [AssistantChange::Start {
             item_id: &item_id,
-            phase: AssistantMessagePhase::Unspecified,
+            phase: cursor.assistant_phase,
             body: &body,
             patch_id: &patch_id,
         }];
@@ -283,7 +284,7 @@ pub(crate) async fn commit_activity_observation(
             item_id: &item_id,
             expected_revision: cursor.assistant_revision,
             body: &body,
-            phase: AssistantMessagePhase::Unspecified,
+            phase: cursor.assistant_phase,
             patch_id: &patch_id,
         }];
         if commit_batch_with_retry(CommitBatchRequest {
@@ -315,7 +316,7 @@ pub(crate) async fn commit_activity_observation(
         };
         let changes = [AssistantChange::Start {
             item_id: &item_id,
-            phase: AssistantMessagePhase::Unspecified,
+            phase: cursor.assistant_phase,
             body: &body,
             patch_id: &patch_id,
         }];

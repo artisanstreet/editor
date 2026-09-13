@@ -299,6 +299,16 @@ impl CodexQuestionRequest {
 /// observable as unit variants without disturbing the turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CodexEvent {
+    ThreadName {
+        thread_id: String,
+        title: artisan_domain::ThreadTitle,
+    },
+    AgentMessageSnapshot {
+        thread_id: String,
+        item_id: String,
+        text: String,
+        phase: artisan_domain::AssistantMessagePhase,
+    },
     AgentMessageDelta {
         item_id: String,
         turn_id: String,
@@ -552,6 +562,24 @@ fn nested_text(item: &serde_json::Map<String, Value>, field: &str) -> Option<Str
 )]
 fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
     match method {
+        "thread/name/updated" => {
+            match (
+                params.get("threadId").and_then(Value::as_str),
+                params.get("threadName").and_then(Value::as_str),
+            ) {
+                (Some(thread_id), Some(title)) if !thread_id.is_empty() => {
+                    artisan_domain::ThreadTitle::parse(title.to_owned()).map_or(
+                        CodexEvent::UnknownMethod,
+                        |title| CodexEvent::ThreadName {
+                            thread_id: thread_id.to_owned(),
+                            title,
+                        },
+                    )
+                }
+                _ => CodexEvent::UnknownMethod,
+            }
+        }
+
         "item/agentMessage/delta" => {
             let item_id = raw_text(params, "itemId").unwrap_or_default();
             let turn_id = raw_text(params, "turnId").unwrap_or_default();
@@ -832,8 +860,8 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
 /// Only item types with a valid existing domain observation normalize:
 /// reasoning (published summary only), tool (`mcpToolCall` /
 /// `dynamicToolCall`), `commandExecution`, `fileChange`, `webSearch`, and
-/// plan. Agent-message items stay on the plain delta path, user-message and
-/// subagent items stay on the tracker path, and compaction items have no
+/// plan. Agent messages preserve authoritative text and phase alongside the
+/// delta path. User and subagent items stay on the tracker path; compaction has no
 /// owner channel, so all of those remain [`CodexEvent::UnknownMethod`]
 /// without disturbing the turn.
 #[expect(
@@ -850,6 +878,23 @@ fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
     let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
     let item_id = nested_text(item, "id").unwrap_or_default();
     match item_type {
+        "agentMessage" if !item_id.is_empty() => {
+            let phase = match item.get("phase").and_then(Value::as_str) {
+                Some("commentary") => artisan_domain::AssistantMessagePhase::Commentary,
+                Some("final_answer") => artisan_domain::AssistantMessagePhase::Final,
+                _ => artisan_domain::AssistantMessagePhase::Unspecified,
+            };
+            CodexEvent::AgentMessageSnapshot {
+                thread_id,
+                item_id,
+                text: item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                phase,
+            }
+        }
         "reasoning" => {
             if item_id.is_empty() {
                 return CodexEvent::UnknownMethod;

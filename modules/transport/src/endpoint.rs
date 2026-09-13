@@ -320,3 +320,18 @@ pub async fn shutdown(
     }
     Ok(())
 }
+
+/// Binds a client to the address family and routing scope of the selected host.
+pub(crate) fn bind_client_for(
+    config: ClientConfig,
+    target: SocketAddr,
+) -> Result<Endpoint, TransportError> {
+    let ip = match target.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_loopback() => Ipv4Addr::LOCALHOST.into(),
+        std::net::IpAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
+        std::net::IpAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
+    };
+    let mut endpoint = Endpoint::client(SocketAddr::new(ip, 0)).map_err(TransportError::Bind)?;
+    endpoint.set_default_client_config(config);
+    Ok(endpoint)
+}

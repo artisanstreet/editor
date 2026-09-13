@@ -13,10 +13,10 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    binaries::BinarySet,
     error::DevError,
     manifest::{verify_payload_dir, write_payload_manifest},
     paths::{DevPaths, exe_name},
-    runfiles::BinarySet,
 };
 
 /// Lowercase hex SHA-256 of one file.

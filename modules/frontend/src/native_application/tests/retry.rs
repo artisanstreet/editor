@@ -17,6 +17,18 @@ fn correlated_failure_retains_exact_retry_identity_and_body(cx: &mut TestAppCont
             );
             install_configured_engine_settings(application, application_cx);
             application.begin_message_submission(application_cx);
+            assert_eq!(application.composer.read(application_cx).draft(), "");
+            assert_eq!(application.optimistic_messages.len(), 1);
+            assert!(
+                application
+                    .conversation_host
+                    .as_ref()
+                    .unwrap()
+                    .read(application_cx)
+                    .surface()
+                    .read(application_cx)
+                    .has_pending_messages()
+            );
             let flight = application
                 .message_flight
                 .as_ref()
@@ -39,6 +51,8 @@ fn correlated_failure_retains_exact_retry_identity_and_body(cx: &mut TestAppCont
             );
 
             assert!(application.message_flight.is_none());
+            assert!(application.optimistic_messages.is_empty());
+            assert!(application.message_failure.is_some());
             let retry = application.message_retry.as_ref().expect("retry record");
             assert_eq!(retry.thread_id, thread_id);
             assert_eq!(retry.request_id, request_id);
@@ -276,10 +290,7 @@ fn retry_receipts_settle_only_matching_flights_and_stale_results_are_inert(
             );
             assert!(application.message_flight.is_some());
             assert!(application.message_retry.is_none());
-            assert_eq!(
-                application.composer.read(application_cx).draft(),
-                "accepted retry body"
-            );
+            assert_eq!(application.composer.read(application_cx).draft(), "");
             application.handle_service_event(
                 NativeTransportEvent::MessageQueued(first_receipt(
                     "retry-accepted-request",
@@ -834,10 +845,7 @@ fn stale_queue_results_do_not_clear_a_newer_draft(cx: &mut TestAppContext) {
                 application_cx,
             );
             assert!(application.message_flight.is_some());
-            assert_eq!(
-                application.composer.read(application_cx).draft(),
-                "newer draft"
-            );
+            assert_eq!(application.composer.read(application_cx).draft(), "");
         });
     });
 }

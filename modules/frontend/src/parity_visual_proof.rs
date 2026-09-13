@@ -178,8 +178,11 @@ impl ProofSceneCase {
 fn system_now_millis() -> Result<i64, String> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
         .map_err(|error| format!("fixture clock unavailable: {error:?}"))
+        .and_then(|elapsed| {
+            i64::try_from(elapsed.as_millis())
+                .map_err(|error| format!("fixture clock out of range: {error}"))
+        })
 }
 
 fn proof_turn_id() -> TurnId {
@@ -366,6 +369,10 @@ fn make_assistant(
 /// derives turn drive from snapshot lifecycles plus registered facts, with no
 /// manual turn registration. Active turns tick from their own `created_at`;
 /// terminal turns settle on their own `updated_at` span:
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep the parallel visual fixture cases together for comparison"
+)]
 fn case_snapshot(
     case: ProofSceneCase,
     thread: &ThreadId,
@@ -639,10 +646,10 @@ fn navigator_candidates(scene: &ConversationScene) -> Vec<ConversationSurfaceTar
     let mut targets = Vec::new();
     for turn in scene.turn_scenes() {
         for block in turn.blocks() {
-            if let TurnBlock::UserMessage(message) = block {
-                if let Ok(item) = ItemId::parse(message.id.as_str()) {
-                    targets.push(ConversationSurfaceTarget::Item(item));
-                }
+            if let TurnBlock::UserMessage(message) = block
+                && let Ok(item) = ItemId::parse(message.id.as_str())
+            {
+                targets.push(ConversationSurfaceTarget::Item(item));
             }
         }
     }
@@ -759,9 +766,8 @@ fn print_capture_geometry(
     println!(
         "parity-proof geometry {slug}: requested={requested_width}x{requested_height} \
          actual={actual_width}x{actual_height} scale={scale} \
-         sidebar={} titlebar={} content={content_width} inspector={state} \
+         sidebar={DESKTOP_SIDEBAR_WIDTH_PX} titlebar={DESKTOP_TITLEBAR_HEIGHT_PX} content={content_width} inspector={state} \
          title=\"Parity proof thread\"",
-        DESKTOP_SIDEBAR_WIDTH_PX, DESKTOP_TITLEBAR_HEIGHT_PX,
     );
     debug_assert!(sidebar_matches && titlebar_matches);
 }
@@ -811,14 +817,14 @@ impl ParityProofShell {
     /// Returns the mount refusal, or the first controller refusal while
     /// seeding, as a message bound to the case.
     pub fn mount(
-        thread_id: ThreadId,
+        thread_id: &ThreadId,
         content_width_px: f32,
         case: ProofSceneCase,
         cx: &mut App,
     ) -> Result<Entity<Self>, String> {
         let screen = ThreadScreen::mount_proof(thread_id.clone(), content_width_px, cx)
             .map_err(|error| format!("mount refused: {error:?}"))?;
-        seed_case(&screen, case, &thread_id, cx)?;
+        seed_case(&screen, case, thread_id, cx)?;
         print_case_manifest(&screen, case, cx);
         Ok(cx.new(|_| Self { screen }))
     }
@@ -865,11 +871,11 @@ impl ProofCapture {
     /// File stem encoding case and exact logical viewport.
     fn file_stem(&self) -> String {
         format!(
-            "parity-proof-{}-{}-{}x{}",
+            "parity-proof-{}-{}-{:.0}x{:.0}",
             self.case.slug(),
             self.viewport_slug,
-            self.width as u32,
-            self.height as u32
+            self.width,
+            self.height
         )
     }
 }
@@ -903,13 +909,28 @@ fn parse_selection(args: &[String]) -> Result<ProofCapture, String> {
     })
 }
 
+/// Convert only finite, positive, representable rounded pixel dimensions.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the rounded float is validated against the exact u32 bounds before conversion"
+)]
+fn physical_pixels(logical: f32, scale: f32) -> Option<u32> {
+    let pixels = (logical * scale).round();
+    if pixels.is_finite() && pixels >= 1.0 && f64::from(pixels) <= f64::from(u32::MAX) {
+        Some(pixels as u32)
+    } else {
+        None
+    }
+}
+
 /// Opens the one selected hidden window, drives it to the requested size,
 /// draws it synchronously with no present, saves the PNG, and maps success
 /// onto the exit code.
 ///
 /// Capture lifecycle: mount + seed through the controller, open hidden and
 /// unfocused, then poll — `Window::resize` (the `show: false` open stores
-/// bounds without applying them, leaving CW_USEDEFAULT) until platform
+/// bounds without applying them, leaving `CW_USEDEFAULT`) until platform
 /// bounds match, syncing gpui-side scale/viewport via `bounds_changed` —
 /// publish the live content width, then settle the frame with bounded
 /// refreshed redraws and yields: `Window::draw` (no present),
@@ -917,6 +938,13 @@ fn parse_selection(args: &[String]) -> Result<ProofCapture, String> {
 /// `ArenaClearNeeded::clear` on the same context, save, quit.
 /// Requires `Window::render_to_image` (root-owned `test-support`
 /// enablement) and the capture lane's shipping-wgpu readback.
+///
+/// # Panics
+/// Panics if a hard-coded fixture identifier or fixture payload is invalid.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the UI callback keeps capture state and its ordered lifecycle in one scope"
+)]
 #[must_use]
 pub fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -955,7 +983,7 @@ pub fn run() -> ExitCode {
             ))
             .expect("fixture thread id is valid");
             let shell = match ParityProofShell::mount(
-                thread_id,
+                &thread_id,
                 capture.width - DESKTOP_SIDEBAR_WIDTH_PX,
                 capture.case,
                 cx,
@@ -1003,7 +1031,6 @@ pub fn run() -> ExitCode {
                     let failed_flag = Rc::clone(&failed);
                     cx.spawn(async move |cx| {
                         let clock = cx.background_executor().clone();
-                        let mut cx = cx;
                         let mut warmup_draws = 0u32;
                         let navigator_focused = Rc::new(Cell::new(false));
                         for _ in 0..RESIZE_MAX_POLLS {
@@ -1089,8 +1116,13 @@ pub fn run() -> ExitCode {
                                 let quads = window.painted_quads().len();
                                 let capture_result = window.render_to_image();
                                 println!("parity-proof paint {stem}: quads={quads}");
-                                let expected_width = (capture.width * scale).round() as u32;
-                                let expected_height = (capture.height * scale).round() as u32;
+                                let (Some(expected_width), Some(expected_height)) = (
+                                    physical_pixels(capture.width, scale),
+                                    physical_pixels(capture.height, scale),
+                                ) else {
+                                    eprintln!("parity-proof invalid pixel dimensions for {stem}");
+                                    return ResizePoll::Done(true);
+                                };
                                 let mut failed = quads == 0;
                                 if failed {
                                     eprintln!(
@@ -1138,7 +1170,7 @@ pub fn run() -> ExitCode {
                             match outcome {
                                 Ok(ResizePoll::Done(failed)) => {
                                     cx.update(|cx| {
-                                        settle_slot(&settled_flag, &failed_flag, failed, cx)
+                                        settle_slot(&settled_flag, &failed_flag, failed, cx);
                                     });
                                     return;
                                 }
@@ -1183,316 +1215,4 @@ pub fn run() -> ExitCode {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        NARROW_LOGICAL_WIDTH, ProofSceneCase, case_facts, case_snapshot, navigator_candidates,
-        parse_selection, reference_run_id,
-    };
-    use crate::conversation_delivery_machine::ConversationDeliveryEvent;
-    use crate::conversation_scene::{
-        ConversationScene, TurnBlock, TurnNarration, WorkGroupBlock, WorkGroupLabel,
-    };
-    use crate::conversation_state_machine::{
-        ConversationStateController, ConversationStateEvent, SceneFactCommand, SceneFactKind,
-    };
-    use crate::conversation_surface::ConversationSurfaceTarget;
-    use artisan_domain::{ItemId, ThreadId, UnixMillis};
-
-    fn thread() -> ThreadId {
-        ThreadId::parse("parity-proof-test").expect("fixture thread id is valid")
-    }
-
-    fn now() -> UnixMillis {
-        UnixMillis::from_millis(1_700_000_000_000)
-    }
-
-    /// Drives one case through the real aggregate exactly as the runner's
-    /// `seed_case` does, minus the GPUI surface: snapshot then facts through
-    /// the delivery-owned path, then the projected scene.
-    fn project(case: ProofSceneCase) -> ConversationScene {
-        let thread = thread();
-        let mut controller = ConversationStateController::new(thread.clone());
-        let snapshot = case_snapshot(case, &thread, now())
-            .expect("snapshot builds")
-            .expect("case carries a snapshot");
-        controller
-            .dispatch(ConversationStateEvent::Delivery(
-                ConversationDeliveryEvent::SnapshotReceived(snapshot),
-            ))
-            .expect("snapshot accepted");
-        for fact in case_facts(case).expect("facts build") {
-            controller
-                .dispatch(ConversationStateEvent::Fact(SceneFactCommand::Register(
-                    fact,
-                )))
-                .expect("fact accepted");
-        }
-        controller.scene().expect("scene projects")
-    }
-
-    /// Returns the run-attributed session group of a single-turn scene.
-    fn session_group(scene: &ConversationScene) -> &WorkGroupBlock {
-        let turn = scene.turn_scenes().first().expect("one turn");
-        turn.blocks()
-            .iter()
-            .find_map(|block| match block {
-                TurnBlock::WorkGroup(group) if group.session_run.is_some() => Some(group),
-                _ => None,
-            })
-            .expect("one run-attributed session group")
-    }
-
-    /// Returns the turn status narration of a single-turn scene.
-    fn status_narration(scene: &ConversationScene) -> TurnNarration {
-        let turn = scene.turn_scenes().first().expect("one turn");
-        turn.blocks()
-            .iter()
-            .find_map(|block| match block {
-                TurnBlock::TurnStatus(status) => Some(status.narration),
-                _ => None,
-            })
-            .expect("one status row")
-    }
-
-    #[test]
-    fn empty_case_dispatches_nothing() {
-        assert!(
-            case_snapshot(ProofSceneCase::Empty, &thread(), now())
-                .expect("empty builds")
-                .is_none()
-        );
-        assert!(
-            case_facts(ProofSceneCase::Empty)
-                .expect("empty facts")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn completed_case_needs_no_facts() {
-        assert!(
-            case_snapshot(ProofSceneCase::Completed, &thread(), now())
-                .expect("completed builds")
-                .is_some()
-        );
-        assert!(
-            case_facts(ProofSceneCase::Completed)
-                .expect("completed facts")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn thinking_case_registers_a_reasoning_fact() {
-        let facts = case_facts(ProofSceneCase::Thinking).expect("thinking facts");
-        assert_eq!(facts.len(), 1);
-        assert!(matches!(facts[0].kind, SceneFactKind::Reasoning { .. }));
-    }
-
-    #[test]
-    fn working_case_registers_an_activity_fact() {
-        let facts = case_facts(ProofSceneCase::Working).expect("working facts");
-        assert_eq!(facts.len(), 1);
-        assert!(matches!(facts[0].kind, SceneFactKind::Activity { .. }));
-    }
-
-    #[test]
-    fn streaming_case_comes_from_a_live_item_not_facts() {
-        assert!(
-            case_snapshot(ProofSceneCase::Streaming, &thread(), now())
-                .expect("streaming builds")
-                .is_some()
-        );
-        assert!(
-            case_facts(ProofSceneCase::Streaming)
-                .expect("streaming facts")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn error_case_registers_an_error_fact() {
-        let facts = case_facts(ProofSceneCase::Error).expect("error facts");
-        assert_eq!(facts.len(), 1);
-        assert!(matches!(facts[0].kind, SceneFactKind::Error { .. }));
-    }
-
-    #[test]
-    fn selection_parses_the_exact_cli_pair() {
-        let selection = parse_selection(&[
-            String::from("--case"),
-            String::from("thinking"),
-            String::from("--viewport"),
-            String::from("narrow"),
-        ])
-        .expect("exact pair parses");
-        assert_eq!(selection.case, ProofSceneCase::Thinking);
-        assert_eq!(selection.viewport_slug, "narrow");
-        assert_eq!(selection.width, NARROW_LOGICAL_WIDTH);
-    }
-
-    #[test]
-    fn selection_fails_closed_on_anything_else() {
-        let bad = [
-            vec![],
-            vec![String::from("--case")],
-            vec![
-                String::from("--case"),
-                String::from("thinking"),
-                String::from("--viewport"),
-                String::from("narrow"),
-                String::from("extra"),
-            ],
-            vec![
-                String::from("--case"),
-                String::from("nope"),
-                String::from("--viewport"),
-                String::from("narrow"),
-            ],
-            vec![
-                String::from("--case"),
-                String::from("thinking"),
-                String::from("--viewport"),
-                String::from("huge"),
-            ],
-            vec![
-                String::from("--viewport"),
-                String::from("narrow"),
-                String::from("--case"),
-                String::from("thinking"),
-            ],
-        ];
-        for args in bad {
-            assert!(
-                parse_selection(&args).is_err(),
-                "must fail closed, got {args:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn every_slug_round_trips_through_parse() {
-        for case in ProofSceneCase::all() {
-            assert_eq!(ProofSceneCase::parse(case.slug()), Some(case));
-        }
-        assert_eq!(ProofSceneCase::parse("bogus"), None);
-    }
-
-    #[test]
-    fn reference_settled_projects_session_with_thought_for_six_seconds() {
-        let scene = project(ProofSceneCase::ReferenceSettled);
-        let group = session_group(&scene);
-        assert!(
-            matches!(&group.session_run, Some(run) if *run == reference_run_id()),
-            "session group carries the attributed run"
-        );
-        assert!(group.session.is_some(), "session carries its anchor");
-        assert!(
-            matches!(
-                group.label,
-                Some(WorkGroupLabel::ThoughtFor { millis: 6_000 })
-            ),
-            "settled span is six seconds"
-        );
-        assert!(
-            group.reasoning_summary.is_none(),
-            "settled rows carry no live summary line"
-        );
-        assert_eq!(
-            status_narration(&scene),
-            TurnNarration::ThoughtFor { millis: 6_000 }
-        );
-        let reply = scene
-            .turn_scenes()
-            .first()
-            .expect("one turn")
-            .blocks()
-            .iter()
-            .find_map(|block| match block {
-                TurnBlock::AssistantMessage(message) => Some(message.body.clone()),
-                _ => None,
-            });
-        assert_eq!(reply.as_deref(), Some("Whoopty! \u{1F604} Whats up?"));
-    }
-
-    #[test]
-    fn reference_thinking_projects_live_markdown_summary() {
-        let scene = project(ProofSceneCase::ReferenceThinking);
-        let group = session_group(&scene);
-        assert!(
-            matches!(&group.session_run, Some(run) if *run == reference_run_id()),
-            "session group carries the attributed run"
-        );
-        assert_eq!(
-            group.reasoning_summary.as_deref(),
-            Some("Checking `mood` for **playful** *tone* before replying.")
-        );
-        assert_eq!(status_narration(&scene), TurnNarration::Thinking);
-    }
-
-    #[test]
-    fn reference_navigator_has_two_turns_and_many_markers() {
-        let scene = project(ProofSceneCase::ReferenceNavigator);
-        assert_eq!(scene.turn_scenes().len(), 2);
-        let user =
-            |id: &str| ConversationSurfaceTarget::Item(ItemId::parse(id).expect("item id parses"));
-        assert_eq!(
-            navigator_candidates(&scene),
-            vec![user("parity-proof-user-1"), user("parity-proof-user-4")],
-            "exactly the two user markers in transcript order"
-        );
-    }
-
-    #[test]
-    fn reference_settled_stays_single_turn() {
-        let scene = project(ProofSceneCase::ReferenceSettled);
-        assert_eq!(scene.turn_scenes().len(), 1);
-    }
-
-    #[test]
-    fn single_user_message_yields_one_collapsed_candidate() {
-        let scene = project(ProofSceneCase::ReferenceSettled);
-        let user = ItemId::parse("parity-proof-user-1").expect("item id parses");
-        assert_eq!(
-            navigator_candidates(&scene),
-            vec![ConversationSurfaceTarget::Item(user)],
-            "one user marker is the collapsed rail the capture refuses"
-        );
-    }
-
-    #[test]
-    fn reference_cases_share_one_attributed_run() {
-        for case in [
-            ProofSceneCase::ReferenceSettled,
-            ProofSceneCase::ReferenceThinking,
-        ] {
-            assert!(
-                case_snapshot(case, &thread(), now())
-                    .expect("snapshot builds")
-                    .is_some()
-            );
-            assert!(
-                !case_facts(case).expect("facts build").is_empty(),
-                "case {} must attribute its session facts",
-                case.slug()
-            );
-        }
-    }
-
-    #[test]
-    fn longform_case_carries_markdown_and_one_attachment() {
-        let snapshot = case_snapshot(ProofSceneCase::Longform, &thread(), now())
-            .expect("longform builds")
-            .expect("longform snapshot builds");
-        assert!(
-            case_facts(ProofSceneCase::Longform)
-                .expect("longform facts")
-                .is_empty()
-        );
-        let debug = format!("{snapshot:?}");
-        assert!(
-            debug.contains("MultimodalUserMessage"),
-            "longform user item must be multimodal, got {debug}"
-        );
-    }
-}
+mod tests;

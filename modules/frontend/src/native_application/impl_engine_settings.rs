@@ -137,7 +137,18 @@ impl NativeApplication {
         self.engine_settings.on_save_succeeded(result, retained);
         self.sync_composer_model_policy(cx);
         if accepted {
-            self.discover_composer_catalog_for_settings(cx);
+            // Selections made while the acknowledged save was in flight are
+            // coalesced in deferred_composer_policy. Persist the latest choice
+            // against the new revision before refreshing the catalog.
+            if let Some((thread, choice)) = self.deferred_composer_policy.take()
+                && thread == result.thread_id
+                && self.selected_thread.as_ref() == Some(&thread)
+            {
+                self.handle_composer_policy_selection(&choice, cx);
+            }
+            if self.engine_settings.pending_save_request_id().is_none() {
+                self.discover_composer_catalog_for_settings(cx);
+            }
         }
         self.refresh_settings_engine_snapshot(cx);
         cx.notify();

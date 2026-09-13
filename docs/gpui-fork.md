@@ -12,14 +12,8 @@ gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", 
 gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "<same>", features = ["wgpu"] }
 ```
 
-Bazel resolves the same packages through `crate.from_cargo` in `MODULE.bazel`;
-`@crates//:gpui-ce` is the canonical label (the versioned
-`@crates//:gpui-ce-0.2.2` alias must not be referenced from BUILD files).
-
-There is no `vendor/gpui-ce` submodule any more. A path dependency could not
-be resolved by crate_universe across workspace boundaries, and a pinned
-submodule gitlink hides whether the revision exists on the remote. The git
-dependency is the single form Cargo and Bazel both understand.
+Cargo resolves the pinned revision directly; `Cargo.lock` records its dependencies.
+The fork is fetched from Git and does not require a vendored submodule.
 
 ## Fork branches
 
@@ -51,8 +45,7 @@ All GPUI changes are commits in the fork, never patch files here:
   `SegoeUIEmoji`/Apple face precedence;
 - glass composition: outer shadows excluded from translucent samples.
 
-The editor repository carries no GPUI `.patch` file and no
-`crate.annotation(patches = ...)` for it. If a fix touches GPUI, it goes to
+The editor repository carries no GPUI `.patch` file for it. If a fix touches GPUI, it goes to
 the fork and the editor bumps the revision.
 
 ## Bump procedure
@@ -60,9 +53,8 @@ the fork and the editor bumps the revision.
 1. In the fork: merge `origin/main` into `artisan/editor`, resolve conflicts,
    run the fork's tests, push the branch.
 2. In the editor: update `rev` on both deps in `Cargo.toml`, refresh
-   `Cargo.lock` (a plain `cargo metadata` is enough), then
-   `CARGO_BAZEL_REPIN=true bazel build --nobuild //...` and commit both
-   lockfiles.
+   `Cargo.lock` with `cargo update -p gpui-ce`, then run
+   `cargo check --locked --workspace --all-targets` and commit the lockfile.
 3. Run `scripts/verify-gpui-pin.ps1` before pushing.
 
 ## Local development against the fork
@@ -99,3 +91,5 @@ Resuming animation starts a fresh sample. Long gaps during pending animation
 remain in the measurement, so real stalls are not discarded as idle time.
 The counter never requests redraws itself.
 Use PresentMon against editor.exe for independent presentation/display timing.
+
+The pinned Nix maintenance command is `nix run .#verify-gpui-pin` from the repository root. It supplies Python and `gh`, and checks the current checkout pin against the remote integration branch at runtime.

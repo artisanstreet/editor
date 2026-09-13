@@ -1,5 +1,7 @@
 # Parity Markdown reference (native list-fidelity lane)
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](runbooks/native-dev.md).
+
 Worker note for the bounded native Markdown fidelity correction. Owns only
 `modules/ui/src/markdown.rs`, `modules/ui/src/markdown_renderer.rs`,
 `tests/ui/markdown_seam.rs`, and this note. No caller was edited; the test

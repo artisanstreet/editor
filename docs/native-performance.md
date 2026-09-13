@@ -4,6 +4,11 @@ Use `scripts/dev.ps1 -Performance` on Windows when evaluating animation or
 scrolling. This selects Cargo's `performance` profile, which inherits `dev`
 and enables optimization level 2. Debug symbols and assertions remain enabled.
 The ordinary `dev` profile stays unoptimized for step-through debugging.
+The visual verification script also builds with `--profile performance` by default.
+When supplying `-ExePath`, choose `target/performance/editor.exe`; opening
+`target/debug/editor.exe` bypasses these optimizations even when the same
+VSync and scheduling fixes are compiled in. The script flags that mismatch.
+
 
 The top-right counter measures presentation submissions during scheduled
 animation and shows IDLE between animations. Unpresented CPU draws do not
@@ -92,3 +97,5 @@ median. This bounds the tested workload only, not every thread or interaction.
 The Windows wake callback now schedules dirty windows directly. The paint
 region is validated before rendering so requests raised during rendering
 survive to the next frame. Throttled retries use one timer instead of polling.
+
+Nix provides `nix run .#performance` for the performance-profile staged application and `nix develop .#performance` for pinned profiling tools. Supply an absolute `ARTISAN_FRAME_CAPTURE` path outside the store. See the [development runbook](runbooks/native-dev.md#desktop-and-performance-tools) for the launch and host requirements.

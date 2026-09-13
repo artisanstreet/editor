@@ -11,7 +11,7 @@ use artisan_ui::dialog::{
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::{
-    Bounds, ColorExt as _, Context, FocusHandle, Hsla, InteractiveElement, IntoElement, Modifiers,
+    Bounds, ColorExt as _, Context, FocusHandle, InteractiveElement, IntoElement, Modifiers,
     ParentElement, Render, Styled, TestAppContext, Window, div, point, px, size,
 };
 
@@ -183,7 +183,7 @@ fn style_resolves_overlay_theme_radius_button_and_motion_tokens() {
     let light_style = DialogStyle::resolve(light, MotionPolicy::Full);
     let dark_style = DialogStyle::resolve(dark, MotionPolicy::Reduced);
 
-    assert_eq!(light_style.overlay, Hsla::black().opacity(BACKDROP_OPACITY));
+    assert_eq!(light_style.overlay, gpui::black().opacity(BACKDROP_OPACITY));
     assert_eq!(
         light_style.overlay_opacity.to_bits(),
         BACKDROP_OPACITY.to_bits()
@@ -220,25 +220,27 @@ fn focus_intent_applies_entry_and_restore_once_per_controlled_edge(cx: &mut Test
 
     cx.update(|window, app| {
         let probe = view.read(app);
-        let intent = DialogFocusIntent::new(probe.entry.clone(), probe.restore.clone());
+        let entry = probe.entry.clone();
+        let restore = probe.restore.clone();
+        let intent = DialogFocusIntent::new(entry.clone(), restore.clone());
 
         assert_eq!(
             intent.apply(false, true, window, app),
             DialogFocusTransition::Enter
         );
-        assert!(probe.entry.is_focused(window));
+        assert!(entry.is_focused(window));
 
         assert_eq!(
             intent.apply(true, true, window, app),
             DialogFocusTransition::Unchanged
         );
-        assert!(probe.entry.is_focused(window));
+        assert!(entry.is_focused(window));
 
         assert_eq!(
             intent.apply(true, false, window, app),
             DialogFocusTransition::Restore
         );
-        assert!(probe.restore.is_focused(window));
+        assert!(restore.is_focused(window));
     });
 }
 

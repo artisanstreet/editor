@@ -1,6 +1,14 @@
 const ROOT_MANIFEST: &str = include_str!("../../Cargo.toml");
 const WORKSPACE_MANIFESTS: &[(&str, &str)] = &[
     (
+        "packaging/Cargo.toml",
+        include_str!("../../packaging/Cargo.toml"),
+    ),
+    (
+        "scripts/screen_demo/Cargo.toml",
+        include_str!("../../scripts/screen_demo/Cargo.toml"),
+    ),
+    (
         "modules/assets/Cargo.toml",
         include_str!("../../modules/assets/Cargo.toml"),
     ),

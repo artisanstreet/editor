@@ -879,15 +879,18 @@ pub(crate) async fn apply_event(
             phase,
             usage: sample,
         } => {
-            // Both verbatim phases fold to the shared delta vocabulary here;
-            // the phase stays on the typed event for later routing packets.
-            let _ = phase;
+            let phase = match phase {
+                "commentary" => artisan_domain::AssistantMessagePhase::Commentary,
+                "final" => artisan_domain::AssistantMessagePhase::Final,
+                _ => artisan_domain::AssistantMessagePhase::Unspecified,
+            };
             if active_turn.is_none() {
                 *active_turn = Some(expected_session.to_owned());
             }
             let native_id = format!("claude:{frame_sequence}");
             let part_id = tracker.stream_message_id.clone();
             for chunk in chunk_text(run_id, frame_sequence, &native_id, &delta) {
+                let chunk = chunk.with_phase(phase);
                 let chunk = match part_id.clone() {
                     Some(part) => chunk.with_part_id(part),
                     None => chunk,

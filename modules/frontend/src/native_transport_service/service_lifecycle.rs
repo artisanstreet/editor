@@ -22,6 +22,14 @@ impl NativeTransportService {
     /// Returns [`ServiceSpawnError::Thread`] if the service thread cannot be
     /// created.
     pub fn spawn() -> Result<Self, ServiceSpawnError> {
+        Self::spawn_for_host(crate::native_hosts::selected_home())
+    }
+
+    /// Starts a connection for an explicitly selected host, independently of process arguments.
+    ///
+    /// # Errors
+    /// Returns [`ServiceSpawnError::Thread`] if the service thread cannot be created.
+    pub fn spawn_for_host(home: Option<std::path::PathBuf>) -> Result<Self, ServiceSpawnError> {
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(COMMAND_CAPACITY);
         let (event_tx, event_rx) = sync_channel(EVENT_CAPACITY);
         let finished = Arc::new(AtomicBool::new(false));
@@ -35,7 +43,7 @@ impl NativeTransportService {
                         .enable_all()
                         .build()
                     {
-                        runtime.block_on(service_main(command_rx, event_tx));
+                        runtime.block_on(service_main(command_rx, event_tx, home));
                     } else {
                         let _ = event_tx.send(NativeTransportEvent::Failed(
                             ServiceFailure::unavailable(ServiceFailureStage::Handshake),
@@ -204,11 +212,12 @@ impl ServiceRuntime {
         let binding = build_reconnect_binding([9u8; 16], target, pinned_identity, 19)
             .expect("reconnect binding");
         Self {
+            preserve_reconnect: false,
             session: None,
             reconnect_lease: None,
             reconnect_binding: binding,
             certificate,
-            target,
+            target: target.into(),
             pinned_identity,
             limits: ClientSessionLimits {
                 connect: Duration::from_secs(1),
@@ -248,12 +257,18 @@ impl ServiceRuntime {
             match step {
                 CustodyStep::SessionShutdown => {
                     if let Some(session) = self.session.take()
-                        && session.shutdown(&self.cancel).await.is_err()
+                        && let Err(error) = session.shutdown(&self.cancel).await
                     {
+                        eprintln!("Forge session disconnect failed: {error}");
                         failed = true;
                     }
                 }
                 CustodyStep::ReconnectQuarantine => {
+                    // Endpoint closure never presents the next credential to Forge.
+                    // Preserve it for an external daemon even if draining times out.
+                    if self.preserve_reconnect {
+                        continue;
+                    }
                     if let Some(lease) = self.reconnect_lease.take() {
                         match lease.quarantine_for_shutdown() {
                             Ok(lease) => self.reconnect_lease = Some(lease),
@@ -283,7 +298,12 @@ impl ServiceRuntime {
     }
 }
 
-async fn start_native_service() -> Result<(ServiceRuntime, FrameFactory), StartupError> {
+async fn start_native_service(
+    home: Option<&Path>,
+) -> Result<(ServiceRuntime, FrameFactory), StartupError> {
+    if let Some(home) = home {
+        return super::remote::start(home).await;
+    }
     if let Some(home) = dev_endpoint::dev_home_from_env() {
         return start_dev_service(&home).await;
     }
@@ -326,11 +346,12 @@ async fn attach_to_owned_forge(
     let result = establish_session(home, config, &lease, credentials, frames).await;
     match result {
         Ok((session, reconnect_lease, cancel, shutdown_grace, material)) => Ok(ServiceRuntime {
+            preserve_reconnect: false,
             session: Some(session),
             reconnect_lease: Some(reconnect_lease),
             reconnect_binding: material.binding,
             certificate: material.certificate,
-            target: material.target,
+            target: material.target.into(),
             pinned_identity: material.pinned_identity,
             limits: material.limits,
             lease: Some(lease),
@@ -441,11 +462,12 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
     eprintln!("artisan dev forge: connected ({})", readiness.endpoint());
     Ok((
         ServiceRuntime {
+            preserve_reconnect: false,
             session: Some(session),
             reconnect_lease: Some(reconnect_lease),
             reconnect_binding: binding,
             certificate: trusted_certificate,
-            target,
+            target: target.into(),
             pinned_identity,
             limits,
             lease: None,
@@ -587,9 +609,10 @@ async fn establish_session(
 async fn service_main(
     mut commands: tokio::sync::mpsc::Receiver<NativeTransportCommand>,
     events: SyncSender<NativeTransportEvent>,
+    home: Option<std::path::PathBuf>,
 ) {
     let mut status = ServiceStopStatus::Clean;
-    let started = start_native_service().await;
+    let started = start_native_service(home.as_deref()).await;
     match started {
         Ok((mut runtime, mut frames)) => {
             let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(64);

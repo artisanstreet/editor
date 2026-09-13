@@ -507,7 +507,6 @@ dependencies = [
  "quinn",
  "rcgen",
  "reqwest",
- "runfiles",
  "rustls-pki-types",
  "sea-orm",
  "serde_json",
@@ -541,6 +540,7 @@ dependencies = [
  "artisan-domain",
  "artisan-migrations",
  "sea-orm",
+ "sea-orm-migration",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -602,6 +602,7 @@ dependencies = [
  "gpui-ce",
  "gpui_ce_platform",
  "image",
+ "native-dialog",
  "rustls-pki-types",
  "serde_json",
  "sha2 0.11.0",
@@ -648,6 +649,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "artisan-packaging"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
 name = "artisan-protocol"
 version = "0.0.0"
 dependencies = [
@@ -657,6 +672,17 @@ dependencies = [
  "subtle",
  "thiserror 2.0.20",
  "zeroize",
+]
+
+[[package]]
+name = "artisan-screen-demo"
+version = "0.0.0"
+dependencies = [
+ "artisan-domain",
+ "artisan-frontend",
+ "artisan-ui",
+ "gpui-ce",
+ "gpui_ce_platform",
 ]
 
 [[package]]
@@ -6346,12 +6372,6 @@ checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
 dependencies = [
  "memchr",
 ]
-
-[[package]]
-name = "runfiles"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc1beaa13fbade520858d2f6ed799f2a963d0ef32d15506ccf290b6e14dfd560"
 
 [[package]]
 name = "rust_decimal"

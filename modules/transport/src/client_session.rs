@@ -71,8 +71,9 @@
 //! closes synchronously only and promises no asynchronous drain;
 //! [`ClientSession::shutdown`] is the sole awaited-drain path.
 
+use crate::SessionTarget;
+pub use crate::session_target::{LoopbackTarget, SessionTargetError};
 use std::fmt;
-use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use artisan_domain::IdentifierError;
@@ -248,65 +249,6 @@ pub struct ClientSessionLimits {
     pub shutdown: Duration,
     /// Total successful admissions for the session's entire lifetime.
     pub admission_budget: usize,
-}
-
-/// Exact loopback dialing target validated before any network attempt.
-///
-/// The transport leaf supports exactly `127.0.0.1` with a nonzero port,
-/// matching the loopback bind primitive; everything else is rejected by
-/// [`LoopbackTarget::new`] before a socket can exist.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LoopbackTarget(SocketAddr);
-
-/// Why a candidate session target was rejected before any network
-/// attempt.
-///
-/// The discriminants separate an unsupported address from a zero port:
-/// loopback spellings this leaf cannot serve (IPv6 `::1`, other
-/// `127.x.x.x` addresses) are unsupported addresses, not remote peers.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum SessionTargetError {
-    /// The address was not exactly `127.0.0.1`: remote addresses, IPv6
-    /// (including `::1`), and every other spelling are unsupported.
-    #[error("session target must be exactly 127.0.0.1")]
-    UnsupportedAddress,
-    /// The loopback address carried port zero.
-    #[error("session target port must be nonzero")]
-    ZeroPort,
-}
-
-impl LoopbackTarget {
-    /// Validates `address` as exactly `127.0.0.1` with a nonzero port.
-    ///
-    /// The address is diagnosed ahead of the port: a non-loopback
-    /// address is unsupported however its port reads.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SessionTargetError::UnsupportedAddress`] for every
-    /// address other than IPv4 `127.0.0.1` and
-    /// [`SessionTargetError::ZeroPort`] for the loopback address with
-    /// port zero.
-    pub fn new(address: SocketAddr) -> Result<Self, SessionTargetError> {
-        let SocketAddr::V4(v4) = &address else {
-            return Err(SessionTargetError::UnsupportedAddress);
-        };
-        // `SocketAddrV4::ip` hands back a reference; compare through it
-        // explicitly so the exact-localhost rule is type-evident.
-        if *v4.ip() != Ipv4Addr::LOCALHOST {
-            return Err(SessionTargetError::UnsupportedAddress);
-        }
-        if v4.port() == 0 {
-            return Err(SessionTargetError::ZeroPort);
-        }
-        Ok(Self(address))
-    }
-
-    /// Returns the validated target address.
-    #[must_use]
-    pub fn addr(&self) -> SocketAddr {
-        self.0
-    }
 }
 
 /// Failure while establishing one client session.
@@ -487,7 +429,7 @@ impl ClientSession {
     /// and [`ClientSessionError::Handshake`] when the application
     /// handshake stage fails under its deadline.
     pub async fn connect(
-        target: LoopbackTarget,
+        target: impl Into<SessionTarget>,
         trusted_root: CertificateDer<'static>,
         pinned_identity: PinnedIdentity,
         hello: WireEnvelope,
@@ -496,13 +438,14 @@ impl ClientSession {
     ) -> Result<(Self, ServerWelcome), ClientSessionError> {
         // Budget validation precedes every resource: the registry is the
         // sole authority and rejects a zero budget immediately.
+        let target = target.into();
         let lifecycle = ClientRequestLifecycle::new(PENDING_CAPACITY, limits.admission_budget)?;
 
         // Whole connect stage under one guard: from the first bind until
         // the handshake completes, every escape closes what exists.
         let link = run_with_deadline(OperationKind::Connect, limits.connect, cancel, async {
             let config = client_config(trusted_root, pinned_identity)?;
-            let mut link = SessionLink::bind(config)?;
+            let mut link = SessionLink::bind(config, target.addr())?;
             let connection =
                 crate::endpoint::connect(link.endpoint(), target.addr(), LOOPBACK_SERVER_NAME)
                     .await?;

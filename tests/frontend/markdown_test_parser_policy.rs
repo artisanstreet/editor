@@ -1,7 +1,7 @@
 //! Focused parity tests for the dependency-free Markdown test parser plan.
 //!
 //! The production module is path-linked deliberately. This packet describes a
-//! parser composition only, so it needs no Cargo/Bazel registration, parser
+//! parser composition only, so it needs no Cargo registration, parser
 //! dependency, browser runtime, or native renderer.
 
 #[path = "../../modules/frontend/src/markdown_test_parser_policy.rs"]

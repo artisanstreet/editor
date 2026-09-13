@@ -1,5 +1,7 @@
 # Route-port work packets — GPUI visual parity with the legacy editor
 
+> Historical build notes: the current build and test workflow is documented in the [Cargo/Nix runbook](../../runbooks/native-dev.md).
+
 ## Problem
 
 The native frontend compiles and runs, but its screens do not look like the

@@ -53,6 +53,27 @@ pub struct CreateThreadResult {
 }
 
 impl Repository {
+    /// Records a harness title only while the thread retains its automatic placeholder.
+    /// A user-authored title is never overwritten by provider metadata.
+    ///
+    /// # Errors
+    /// Returns a database failure if the title cannot be stored.
+    pub async fn record_generated_thread_title(
+        &self,
+        thread: &ThreadId,
+        title: &ThreadTitle,
+    ) -> Result<(), RepositoryError> {
+        use sea_orm::sea_query::Expr;
+        entities::thread::Entity::update_many()
+            .col_expr(entities::thread::Column::Title, Expr::value(title.as_str()))
+            .filter(entities::thread::Column::ThreadId.eq(thread.as_str()))
+            .filter(entities::thread::Column::Title.is_in(["New thread", "New task"]))
+            .exec(&self.database)
+            .await
+            .map_err(|source| database_error("record generated thread title", source))?;
+        Ok(())
+    }
+
     /// Checks an attach receipt before Forge resolves the directory again.
     ///
     /// # Errors
@@ -314,6 +335,33 @@ impl Repository {
                 thread.has_started_response = started.contains(thread.thread_id.as_str());
             }
 
+            let initial_messages = entities::message::Entity::find()
+                .select_only()
+                .column(entities::message::Column::ThreadId)
+                .column_as(
+                    sea_orm::sea_query::Expr::cust("substr(body, 1, 320)"),
+                    "initial_text",
+                )
+                .filter(
+                    entities::message::Column::ThreadId
+                        .is_in(summaries.iter().map(|thread| thread.thread_id.as_str())),
+                )
+                .filter(entities::message::Column::Ordinal.eq(0))
+                .into_tuple::<(String, String)>()
+                .all(&self.database)
+                .await
+                .map_err(|source| database_error("list initial thread messages", source))?;
+            for thread in &mut summaries {
+                if matches!(thread.title.as_str(), "New thread" | "New task")
+                    && let Some(message) = initial_messages
+                        .iter()
+                        .find(|message| message.0 == thread.thread_id.as_str())
+                    && let Some(title) = initial_message_title(&message.1)
+                {
+                    thread.title = title;
+                }
+            }
+
             let latest = entities::message::Entity::find()
                 .select_only()
                 .column(entities::message::Column::ThreadId)
@@ -341,6 +389,18 @@ impl Repository {
         }
         ThreadListing::new(summaries).map_err(|source| RepositoryError::ThreadListing { source })
     }
+}
+
+// Project a useful label without persisting it: a later harness title can still
+// replace the stored placeholder, and manually named threads remain untouched.
+fn initial_message_title(body: &str) -> Option<ThreadTitle> {
+    let text = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = if text.is_empty() {
+        "Image message".to_owned()
+    } else {
+        text.chars().take(64).collect()
+    };
+    ThreadTitle::parse(title).ok()
 }
 
 impl AttachProjectInput {

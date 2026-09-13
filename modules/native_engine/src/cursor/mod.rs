@@ -24,7 +24,7 @@
 //! `[[test]] cursor_discovery` / `[[test]] cursor_probe` targets pointing at
 //! `tests/native_engine/cursor_*.rs` (Cargo `[[test]]` entries in
 //! `modules/native_engine/Cargo.toml` and `rust_test` targets in
-//! `tests/native_engine/BUILD.bazel` following the sibling engine pattern).
+//! `modules/native_engine/Cargo.toml` following the sibling engine pattern).
 
 pub mod discovery;
 pub mod model;

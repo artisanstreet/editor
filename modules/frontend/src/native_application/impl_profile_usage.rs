@@ -6,6 +6,28 @@
 use super::*;
 
 impl NativeApplication {
+    pub(super) fn sync_profile_actions(&mut self) {
+        let show_usage = self.profile_usage_visible();
+        let count = if show_usage { 2 } else { 1 };
+        if self.profile_menu.entries().len() != count {
+            let mut entries = vec![DropdownMenuEntry::item(DropdownMenuItem::new(
+                "settings", "Settings",
+            ))];
+            if show_usage {
+                entries.push(DropdownMenuEntry::item(DropdownMenuItem::new(
+                    "usage", "Usage",
+                )));
+            }
+            self.profile_menu.set_entries(entries);
+            self.clear_profile_hover();
+            self.cancel_profile_usage_scroll();
+        }
+    }
+
+    pub(super) fn profile_usage_visible(&self) -> bool {
+        self.profile_usage_connected() && !self.profile_usage.visible_usage_entries().is_empty()
+    }
+
     /// Returns whether the Forge connection can admit an account-usage read.
     pub(super) fn profile_usage_connected(&self) -> bool {
         #[cfg(test)]
@@ -17,6 +39,10 @@ impl NativeApplication {
             .is_some_and(|service| !service.is_finished())
             && !self.service_stopped
             && !self.shutdown_prepared
+            && !matches!(
+                self.state,
+                NativeViewState::Loading | NativeViewState::Failure(_)
+            )
     }
 
     /// Advances the connection scope and drops incompatible cache/pending.

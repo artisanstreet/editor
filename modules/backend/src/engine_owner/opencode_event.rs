@@ -368,6 +368,33 @@ impl OpenCodeEventAdapter {
         validate_identifier(event_type, MAX_EVENT_TYPE_BYTES)
             .map_err(|()| OpenCodeEventError::InvalidEventType)?;
 
+        if event_type == "session.updated" {
+            let metadata = envelope.get("data").or_else(|| envelope.get("properties"));
+            let metadata = metadata.and_then(|value| value.get("info").or(Some(value)));
+            let title = metadata.and_then(|value| {
+                let session = value
+                    .get("sessionID")
+                    .or_else(|| value.get("id"))?
+                    .as_str()?;
+                if session != self.session_id {
+                    return None;
+                }
+                artisan_domain::ThreadTitle::parse(value.get("title")?.as_str()?.to_owned()).ok()
+            });
+            let observations = title
+                .map(|title| EngineObservation::SummaryTitle {
+                    run_id: self.run_id.clone(),
+                    title,
+                })
+                .into_iter()
+                .collect();
+            return Ok(result(
+                None,
+                OpenCodeEventKindFlags::default(),
+                observations,
+                None,
+            ));
+        }
         let provider_cursor = provider_cursor(envelope, event_type)?;
         let kind = classify_event(event_type);
         if matches!(kind, OpenCodeEventKind::Unknown) {
@@ -908,6 +935,23 @@ mod tests {
         .expect("valid adapter")
     }
 
+    #[test]
+    fn generated_title_is_scoped_to_its_provider_session() {
+        let mut adapter =
+            OpenCodeEventAdapter::new(RunId::parse("title-run").unwrap(), "root".into()).unwrap();
+        for (session, expected) in [("child", 0), ("root", 1)] {
+            let frame = event(
+                &format!(
+                    r#"{{"type":"session.updated","data":{{"id":"{session}","title":"List project files"}}}}"#
+                ),
+                None,
+                None,
+            );
+            let result = adapter.normalize(&frame).unwrap();
+            assert_eq!(result.observations.len(), expected);
+        }
+    }
+
     fn event(payload: &str, envelope_id: Option<&str>, sse_id: Option<&str>) -> SseEvent {
         let mut frame = String::new();
         if let Some(sse_id) = sse_id {
@@ -954,7 +998,9 @@ mod tests {
             | EngineObservation::SubagentTranscript(_) => {
                 panic!("unexpected production observation in fixture")
             }
-            EngineObservation::Terminal(_) => panic!("expected text delta"),
+            EngineObservation::Terminal(_) | EngineObservation::SummaryTitle { .. } => {
+                panic!("expected text delta")
+            }
         }
     }
 

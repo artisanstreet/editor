@@ -189,6 +189,9 @@ pub(crate) fn encode_request(
                 .init_conversation_unsubscribe()
                 .set_thread_id(unsubscribe.thread_id.as_str());
         }
+        ClientRequest::ValidateDirectory(path) => {
+            builder.reborrow().set_validate_directory(path.as_str());
+        }
         ClientRequest::PickDirectory => {
             builder.reborrow().set_pick_directory(());
         }
@@ -689,6 +692,9 @@ pub(crate) fn decode_request(
             decode_conversation_unsubscribe_request(unsubscribe?)
         }
         request::Which::PickDirectory(()) => Ok(ClientRequest::PickDirectory),
+        request::Which::ValidateDirectory(path) => Ok(ClientRequest::ValidateDirectory(
+            artisan_domain::RootPath::parse(read_text(path, "request.validateDirectory")?)?,
+        )),
         request::Which::LifecycleControl(lifecycle) => decode_lifecycle_request(lifecycle?),
         request::Which::ReadThreadEngineSettings(query) => {
             decode_read_thread_engine_settings(query?)

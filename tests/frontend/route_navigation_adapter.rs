@@ -2,7 +2,7 @@
 //!
 //! The existing route-navigation values are loaded as a local sibling module
 //! because this focused harness intentionally does not change shared module,
-//! Cargo, or Bazel registration.
+//! Cargo registration.
 
 #[path = "../../modules/frontend/src/route_navigation.rs"]
 mod route_navigation;
