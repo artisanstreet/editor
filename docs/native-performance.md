@@ -52,3 +52,14 @@ divisor of the monitor refresh rate. Frame intervals still fall on display
 ticks. GPUI's existing inactive-window and thermal throttles also remain in
 effect. A failed save is shown in the settings section; the chosen limit
 still applies for the current session.
+
+## Model picker redraws
+
+The model picker retains its grouped catalog projection across animation frames.
+The cache is keyed by harness, query, and selected model; replacing the catalog
+invalidates it even when the revision string is unchanged. The preview reuses
+that projection instead of sorting and cloning the full harness list again.
+Interaction tests cover these invalidations and verify that harness transitions
+stop requesting frames after settling. These tests do not measure Windows GPU
+performance. The FPS overlay averages redraw arrivals, so gaps between separate
+short animations can depress its reading without representing a slow draw.

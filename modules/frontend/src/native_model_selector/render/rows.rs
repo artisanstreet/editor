@@ -79,7 +79,7 @@ impl NativeModelSelector {
             .flex_shrink_0()
             .gap(px(3.0))
             .on_scroll_wheel(cx.listener(Self::handle_model_scroll_wheel));
-        for group in groups {
+        for group in groups.iter() {
             let mut section = div().flex().flex_col().gap(px(2.0));
             if show_group_headers {
                 let header = div()
@@ -101,11 +101,11 @@ impl NativeModelSelector {
                         ))
                         .size(px(14.0)),
                     )
-                    .child(group.label);
+                    .child(group.label.clone());
                 section = section.child(header);
             }
-            for model in group.models {
-                section = section.child(self.render_model_row(&model, cx));
+            for model in &group.models {
+                section = section.child(self.render_model_row(model, cx));
             }
             content = content.child(section);
         }
@@ -939,6 +939,17 @@ impl NativeModelSelector {
         let Some(model) = self.state.snapshot().manifest.model(model_id) else {
             return fallback_model_view_from_state(&self.state);
         };
+        if let Some(mut row) = self
+            .state
+            .model_groups()
+            .iter()
+            .flat_map(|group| &group.models)
+            .find(|row| row.id == model_id)
+            .cloned()
+        {
+            row.selected = true;
+            return row;
+        }
         self.state
             .snapshot()
             .models_for_engine(&model.harness, "", Some(model_id))

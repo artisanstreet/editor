@@ -478,10 +478,10 @@ fn rebase_keeps_explicit_native_profile_for_saved_policies() {
 #[test]
 fn offline_rows_keep_runtime_readiness_out_of_picker_selection() {
     let mut state = state_with_offline_catalog();
-    let row = state
-        .model_groups()
-        .into_iter()
-        .flat_map(|group| group.models)
+    let groups = state.model_groups();
+    let row = groups
+        .iter()
+        .flat_map(|group| &group.models)
         .find(|model| model.id == "codex-sol")
         .expect("catalog model remains readable while offline");
     assert!(!row.available);
@@ -791,4 +791,113 @@ fn settings_scroll_only_when_the_real_options_exceed_the_viewport(cx: &mut gpui:
     cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
     cx.run_until_parked();
     cx.update(|_, app| assert_eq!(view.read(app).axis_menu_scroll.max_offset().y, px(0.0)));
+}
+
+#[test]
+fn model_projections_survive_redraws_and_preview_changes() {
+    let mut state = state_with_offline_catalog();
+    let groups = state.model_groups();
+    for model in groups.iter().flat_map(|group| &group.models) {
+        state.preview_model(&model.id);
+        assert!(Rc::ptr_eq(&groups, &state.model_groups()));
+    }
+    state.set_active_engine("claude".to_owned());
+    let switched = state.model_groups();
+    assert!(!Rc::ptr_eq(&groups, &switched));
+    assert!(
+        switched
+            .iter()
+            .flat_map(|group| &group.models)
+            .all(|model| model.engine_id == "claude")
+    );
+    assert!(Rc::ptr_eq(&switched, &state.model_groups()));
+    state.set_query("no matching model expected");
+    assert!(state.model_groups().is_empty());
+    state.set_query("");
+    assert!(!state.model_groups().is_empty());
+}
+
+#[test]
+fn model_projections_refresh_for_selection_and_authoritative_catalog_changes() {
+    let mut state = state_with_offline_catalog();
+    let before = state.model_groups();
+    let model_id = before
+        .iter()
+        .flat_map(|group| &group.models)
+        .find(|model| !model.selected && !state.model_definition_disabled(&model.id))
+        .expect("another selectable model")
+        .id
+        .clone();
+    let policy = state
+        .snapshot()
+        .selection_policy_for_model(&model_id)
+        .unwrap();
+    assert!(state.set_policy(Some(policy)));
+    let selected = state.model_groups();
+    assert!(!Rc::ptr_eq(&before, &selected));
+    assert!(
+        selected
+            .iter()
+            .flat_map(|group| &group.models)
+            .any(|model| model.id == model_id && model.selected)
+    );
+    let mut snapshot = state.snapshot().clone();
+    snapshot.favorite_ids = vec![model_id.clone()];
+    snapshot.runnable_harness_ids = vec![state.active_engine().to_owned()];
+    state.set_snapshot(snapshot);
+    let refreshed = state.model_groups();
+    assert!(!Rc::ptr_eq(&selected, &refreshed));
+    let row = refreshed
+        .iter()
+        .flat_map(|group| &group.models)
+        .find(|model| model.id == model_id)
+        .unwrap();
+    assert!(row.favorite);
+    assert!(row.available);
+}
+
+#[gpui::test]
+fn harness_switch_animation_settles_without_rebuilding_catalog(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        NativeModelSelector::new(
+            NativeModelCatalog::offline().unwrap(),
+            None,
+            ThemeMode::Dark,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.run_until_parked();
+    let trigger = cx
+        .debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR)
+        .unwrap();
+    cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    for selector in [
+        "artisan-native-model-selector-engine-claude",
+        "artisan-native-model-selector-engine-cursor",
+        "artisan-native-model-selector-engine-codex",
+    ] {
+        let tab = cx.debug_bounds(selector).unwrap();
+        cx.simulate_click(tab.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let groups = cx.update(|_, app| view.read(app).state.model_groups());
+        for _ in 0..60 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.update(|window, app| {
+                window.simulate_next_frame(app);
+            });
+            cx.run_until_parked();
+            cx.update(|_, app| {
+                assert!(Rc::ptr_eq(&groups, &view.read(app).state.model_groups()));
+            });
+        }
+        cx.update(|window, app| {
+            assert_eq!(
+                window.simulate_next_frame(app),
+                0,
+                "settled tabs must stop requesting frames"
+            );
+        });
+    }
 }

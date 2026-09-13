@@ -219,6 +219,15 @@ pub struct NativeModelSelectorState {
     highlighted_model_id: Option<String>,
     open_axis: Option<NativePolicyAxis>,
     local_error: Option<String>,
+    model_groups_cache: RefCell<Option<ModelGroupsCache>>,
+}
+
+/// Catalog projections survive animation frames; their inputs change only on interaction.
+struct ModelGroupsCache {
+    engine: String,
+    query: String,
+    selected_model_id: Option<String>,
+    groups: Rc<[crate::native_model_catalog::NativeModelGroupView]>,
 }
 
 #[derive(Clone, Copy, Debug)]

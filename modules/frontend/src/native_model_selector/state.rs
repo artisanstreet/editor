@@ -218,6 +218,7 @@ impl NativeModelSelectorState {
             highlighted_model_id: None,
             open_axis: None,
             local_error: None,
+            model_groups_cache: RefCell::new(None),
         };
         state.refresh_preview_and_highlight();
         state
@@ -259,6 +260,7 @@ impl NativeModelSelectorState {
                 })
                 .unwrap_or_default()
         };
+        self.model_groups_cache.get_mut().take();
         self.snapshot = snapshot;
         self.policy = policy;
         self.active_engine = active_engine;
@@ -426,12 +428,27 @@ impl NativeModelSelectorState {
 
     /// Returns filtered and grouped rows for the current engine.
     #[must_use]
-    pub fn model_groups(&self) -> Vec<crate::native_model_catalog::NativeModelGroupView> {
-        self.snapshot.route_groups_for_engine(
-            &self.active_engine,
-            &self.query,
-            self.selected_model_id(),
-        )
+    pub fn model_groups(&self) -> Rc<[crate::native_model_catalog::NativeModelGroupView]> {
+        let selected_model_id = self.selected_model_id();
+        let mut cache = self.model_groups_cache.borrow_mut();
+        if let Some(cached) = cache.as_ref()
+            && cached.engine == self.active_engine
+            && cached.query == self.query
+            && cached.selected_model_id.as_deref() == selected_model_id
+        {
+            return Rc::clone(&cached.groups);
+        }
+        let groups: Rc<[_]> = self
+            .snapshot
+            .route_groups_for_engine(&self.active_engine, &self.query, selected_model_id)
+            .into();
+        *cache = Some(ModelGroupsCache {
+            engine: self.active_engine.clone(),
+            query: self.query.clone(),
+            selected_model_id: selected_model_id.map(str::to_owned),
+            groups: Rc::clone(&groups),
+        });
+        groups
     }
 
     /// Returns the source-order index of the highlighted visible row.
