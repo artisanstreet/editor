@@ -54,6 +54,7 @@ fn project(value: &str, name: &str) -> ProjectSummary {
 
 fn thread(value: &str, project_id: &str) -> ThreadSummary {
     ThreadSummary {
+        has_started_response: true,
         has_active_work: false,
         last_message_at: None,
         thread_id: ThreadId::parse(value).expect("valid thread"),
@@ -685,6 +686,7 @@ fn authoritative_refreshes_require_full_summary_equality() {
     let threads = ThreadListing::new(vec![created.clone()]).expect("threads");
     assert!(contains_exact_thread(&threads, &created));
     let live_threads = ThreadListing::new(vec![ThreadSummary {
+        has_started_response: true,
         has_active_work: true,
         last_message_at: Some(UnixMillis::from_millis(500)),
         ..created.clone()

@@ -584,6 +584,14 @@ fn independent_digest(
 #[tokio::test]
 async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_receipt() {
     let pair = seeded_pair().await;
+    let project = ProjectId::parse("project-1").unwrap();
+    let drafts = pair.repository.list_threads(&project).await.unwrap();
+    assert!(
+        drafts
+            .threads()
+            .iter()
+            .all(|thread| !thread.has_started_response)
+    );
     let before = persisted_rows(&pair.database).await;
     let scope = batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS));
     let body = assistant_body("hello assistant");
@@ -614,6 +622,15 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
     assert_eq!(info.run_id.as_str(), RUN_ID);
     assert_eq!(info.batch_sequence, 1);
 
+    let started = pair.repository.list_threads(&project).await.unwrap();
+    assert!(
+        started
+            .threads()
+            .iter()
+            .find(|thread| thread.thread_id.as_str() == THREAD_ID)
+            .unwrap()
+            .has_started_response
+    );
     let after = persisted_rows(&pair.database).await;
     verify_first_progress_after(&before, &after);
     assert_eq!(before.receipts, after.receipts);

@@ -29,7 +29,9 @@ impl NativeApplication {
             let entries = listing
                 .threads()
                 .iter()
-                .filter(|thread| project_id == Some(&thread.project_id))
+                .filter(|thread| {
+                    thread.has_started_response && project_id == Some(&thread.project_id)
+                })
                 .map(|thread| {
                     // The live harness summary is known for the mounted
                     // thread; every other row keeps the stored listing title.

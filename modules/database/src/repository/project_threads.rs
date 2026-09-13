@@ -291,6 +291,29 @@ impl Repository {
             .map(thread_summary)
             .collect::<Result<Vec<_>, _>>()?;
         if !summaries.is_empty() {
+            let started = entities::conversation_item::Entity::find()
+                .select_only()
+                .column(entities::conversation_item::Column::ThreadId)
+                .filter(
+                    entities::conversation_item::Column::ThreadId
+                        .is_in(summaries.iter().map(|thread| thread.thread_id.as_str())),
+                )
+                .filter(
+                    entities::conversation_item::Column::ItemKind
+                        .eq(entities::execution_value::ConversationItemKind::AssistantMessage),
+                )
+                .filter(entities::conversation_item::Column::Body.ne(""))
+                .group_by(entities::conversation_item::Column::ThreadId)
+                .into_tuple::<String>()
+                .all(&self.database)
+                .await
+                .map_err(|source| database_error("list started threads", source))?
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            for thread in &mut summaries {
+                thread.has_started_response = started.contains(thread.thread_id.as_str());
+            }
+
             let latest = entities::message::Entity::find()
                 .select_only()
                 .column(entities::message::Column::ThreadId)
@@ -334,6 +357,7 @@ impl AttachProjectInput {
 impl CreateThreadInput {
     fn thread_summary(&self) -> ThreadSummary {
         ThreadSummary {
+            has_started_response: false,
             has_active_work: false,
             last_message_at: None,
             thread_id: self.thread_id.clone(),
@@ -553,6 +577,7 @@ pub(super) fn project_summary(
 
 fn thread_summary(row: entities::Thread) -> Result<ThreadSummary, RepositoryError> {
     Ok(ThreadSummary {
+        has_started_response: false,
         has_active_work: false,
         last_message_at: None,
         thread_id: ThreadId::parse(row.thread_id)

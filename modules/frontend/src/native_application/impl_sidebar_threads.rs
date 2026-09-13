@@ -83,7 +83,12 @@ fn fade_curve(progress: f32) -> f32 {
 /// Electron orders each group by the most recent sent message, falling back
 /// to creation for empty threads. Stable sorting preserves ties.
 fn thread_groups(listing: &ThreadListing) -> (Vec<ThreadSummary>, Vec<ThreadSummary>) {
-    let mut rows = listing.threads().to_vec();
+    let mut rows = listing
+        .threads()
+        .iter()
+        .filter(|thread| thread.has_started_response)
+        .cloned()
+        .collect::<Vec<_>>();
     rows.sort_by_key(|thread| {
         std::cmp::Reverse(
             thread
@@ -412,6 +417,7 @@ mod tests {
             thread_id: ThreadId::parse(id).unwrap(),
             project_id: ProjectId::parse("project").unwrap(),
             title: ThreadTitle::parse(id).unwrap(),
+            has_started_response: true,
             has_active_work: working,
             last_message_at: message.map(UnixMillis::from_millis),
             created_at: UnixMillis::from_millis(created),
@@ -433,12 +439,40 @@ mod tests {
         };
         assert_eq!(ids(working), ["working-new", "working-old"]);
         assert_eq!(ids(settled), ["recent", "empty", "old"]);
-        let mut rows = listing.threads().to_vec();
+        let mut rows = listing
+            .threads()
+            .iter()
+            .filter(|thread| thread.has_started_response)
+            .cloned()
+            .collect::<Vec<_>>();
         rows[3].has_active_work = false;
         let (working, settled) = thread_groups(&ThreadListing::new(rows).unwrap());
         assert_eq!(ids(working), ["working-old"]);
         assert_eq!(ids(settled), ["recent", "empty", "working-new", "old"]);
     }
+    #[test]
+    fn waiting_or_cancelled_drafts_do_not_become_sidebar_threads() {
+        let mut draft = ThreadSummary {
+            has_started_response: false,
+            has_active_work: true,
+            last_message_at: Some(UnixMillis::from_millis(2)),
+            thread_id: ThreadId::parse("draft").unwrap(),
+            project_id: ProjectId::parse("project").unwrap(),
+            title: ThreadTitle::parse("New task").unwrap(),
+            created_at: UnixMillis::from_millis(1),
+            updated_at: UnixMillis::from_millis(2),
+        };
+        for active in [true, false] {
+            draft.has_active_work = active;
+            let (working, settled) =
+                thread_groups(&ThreadListing::new(vec![draft.clone()]).unwrap());
+            assert!(working.is_empty() && settled.is_empty());
+        }
+        draft.has_started_response = true;
+        let (_, settled) = thread_groups(&ThreadListing::new(vec![draft]).unwrap());
+        assert_eq!(settled.len(), 1);
+    }
+
     #[gpui::test]
     fn sidebar_groups_have_an_inset_separator_and_rows_open_threads(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
@@ -455,6 +489,7 @@ mod tests {
                             thread_id: active.clone(),
                             project_id: project.clone(),
                             title: ThreadTitle::parse("Active thread").unwrap(),
+                            has_started_response: true,
                             has_active_work: true,
                             last_message_at: None,
                             created_at: UnixMillis::EPOCH,
@@ -464,6 +499,7 @@ mod tests {
                             thread_id: idle.clone(),
                             project_id: project.clone(),
                             title: ThreadTitle::parse("Idle thread").unwrap(),
+                            has_started_response: true,
                             has_active_work: false,
                             last_message_at: None,
                             created_at: UnixMillis::EPOCH,
@@ -527,6 +563,7 @@ mod tests {
                     thread_id: ThreadId::parse("background-thread").unwrap(),
                     project_id: project.clone(),
                     title: ThreadTitle::parse("Background work").unwrap(),
+                    has_started_response: true,
                     has_active_work: true,
                     last_message_at: None,
                     created_at: UnixMillis::EPOCH,

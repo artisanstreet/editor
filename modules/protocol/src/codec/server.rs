@@ -294,6 +294,7 @@ pub(crate) fn encode_thread(
     value: &ThreadSummary,
 ) {
     builder.set_has_active_work(value.has_active_work);
+    builder.set_has_started_response(value.has_started_response);
     builder.set_has_last_message(value.last_message_at.is_some());
     if let Some(at) = value.last_message_at {
         builder.set_last_message_at_millis(at.as_millis());
@@ -632,6 +633,7 @@ pub(crate) fn decode_thread(
     value: artisan_capnp::thread_summary::Reader<'_>,
 ) -> Result<ThreadSummary, ProtocolDecodeError> {
     Ok(ThreadSummary {
+        has_started_response: value.get_has_started_response(),
         has_active_work: value.get_has_active_work(),
         last_message_at: value
             .get_has_last_message()

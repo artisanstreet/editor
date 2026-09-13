@@ -238,6 +238,8 @@ struct ThreadSummary {
   hasActiveWork @5 :Bool;
   hasLastMessage @6 :Bool;
   lastMessageAtMillis @7 :Int64;
+  # A draft becomes a saved thread after assistant text arrives.
+  hasStartedResponse @8 :Bool;
 }
 
 # Answer to a project thread listing request.

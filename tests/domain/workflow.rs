@@ -43,6 +43,7 @@ fn place_at(index: usize) -> DirectoryPlace {
 fn thread_summary(project: ProjectId, index: usize) -> ThreadSummary {
     let offset = i64::try_from(index).expect("fixture indices fit i64");
     ThreadSummary {
+        has_started_response: true,
         has_active_work: false,
         last_message_at: None,
         thread_id: ThreadId::parse(format!("th-{index}")).expect("fixture ids are valid"),
@@ -195,6 +196,7 @@ fn events_record_only_post_acceptance_facts() {
     assert!(matches!(attached, Event::ProjectAttached(ref event) if event.project == project));
 
     let thread = ThreadSummary {
+        has_started_response: true,
         has_active_work: false,
         last_message_at: None,
         thread_id: ThreadId::parse("th-2").expect("the fixture is valid"),

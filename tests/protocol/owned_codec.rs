@@ -107,6 +107,7 @@ fn project() -> ProjectSummary {
 
 fn thread() -> ThreadSummary {
     ThreadSummary {
+        has_started_response: true,
         has_active_work: false,
         last_message_at: None,
         thread_id: ThreadId::parse("thread-1").expect("fixture thread id is valid"),
@@ -567,6 +568,7 @@ fn every_response_family_roundtrips_with_independent_server_frames() -> Result<(
         WireEnvelopeBody::Response(ServerResponse {
             request_id: request_id("request-working-thread-list"),
             payload: ResponsePayload::ThreadListing(ThreadListing::new(vec![ThreadSummary {
+                has_started_response: true,
                 has_active_work: true,
                 last_message_at: Some(UnixMillis::from_millis(12345)),
                 ..thread()

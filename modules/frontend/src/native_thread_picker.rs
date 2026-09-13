@@ -82,6 +82,7 @@ impl NativeThreadPickerState {
     /// Builds a closed picker over one bounded listing.
     #[must_use]
     pub fn new(listing: ThreadListing, selected_thread: Option<ThreadId>) -> Self {
+        let listing = saved_threads(listing);
         let groups = groups_from_listing(&listing);
         let mut selection = ThreadListSelection::new();
         selection.mount(&groups);
@@ -101,7 +102,7 @@ impl NativeThreadPickerState {
     /// Replaces the bounded listing while preserving an exact selected row
     /// whenever its [`ThreadId`] still exists.
     pub fn replace_listing(&mut self, listing: ThreadListing) {
-        self.listing = listing;
+        self.listing = saved_threads(listing);
         self.groups = groups_from_listing(&self.listing);
         self.selection.resync(&self.groups);
         let selected_thread = self.selected_thread.take();
@@ -739,4 +740,23 @@ fn menu_width_for_viewport(viewport: Size<Pixels>) -> Pixels {
 fn menu_max_height_for_viewport(viewport: Size<Pixels>) -> Pixels {
     let available = f32::from(viewport.height) - MENU_VIEWPORT_INSET_Y_PX;
     px(MENU_MAX_HEIGHT_PX.min(available.max(0.0)))
+}
+
+fn saved_threads(listing: ThreadListing) -> ThreadListing {
+    if listing
+        .threads()
+        .iter()
+        .all(|thread| thread.has_started_response)
+    {
+        return listing;
+    }
+    ThreadListing::new(
+        listing
+            .threads()
+            .iter()
+            .filter(|thread| thread.has_started_response)
+            .cloned()
+            .collect(),
+    )
+    .expect("filtering a validated listing preserves its bounds and identities")
 }

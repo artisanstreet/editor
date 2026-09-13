@@ -10,6 +10,26 @@ impl NativeApplication {
         if !self.add_project_action_is_admissible() {
             return;
         }
+        if self.pending_failed_recovery.is_none()
+            && self.selected_thread.as_ref().is_some_and(|selected| {
+                self.thread_listing.as_ref().is_some_and(|listing| {
+                    listing.threads().iter().any(|row| {
+                        &row.thread_id == selected
+                            && !row.has_started_response
+                            && row.last_message_at.is_none()
+                            && !row.has_active_work
+                    })
+                })
+            })
+        {
+            self.navigate(
+                NativeRoute::NewThread {
+                    project: self.selected_project.clone(),
+                },
+                cx,
+            );
+            return;
+        }
         if self.intake_retry_available || self.selected_project.is_none() {
             self.submit_intake_command(cx);
             if self.intake_stage.is_some() {

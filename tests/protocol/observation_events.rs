@@ -987,6 +987,7 @@ fn project_fixture() -> ProjectSummary {
 
 fn thread_fixture() -> ThreadSummary {
     ThreadSummary {
+        has_started_response: true,
         has_active_work: false,
         last_message_at: None,
         thread_id: ThreadId::parse("thread-1").expect("fixture thread id is valid"),

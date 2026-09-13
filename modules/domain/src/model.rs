@@ -265,6 +265,8 @@ impl ProjectListing {
 /// `updatedAtMillis` fields; ordering between them is not enforced here.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ThreadSummary {
+    /// Whether assistant text has started; false identifies a provisional draft.
+    pub has_started_response: bool,
     /// Whether Forge currently owns a nonterminal run for this thread.
     pub has_active_work: bool,
     /// Most recent accepted user message, absent before the first message.
