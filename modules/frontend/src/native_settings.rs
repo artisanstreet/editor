@@ -151,6 +151,7 @@ struct SettingsFocus {
     root: FocusHandle,
     /// Shared by every switch, button, and select trigger.
     control: FocusHandle,
+    fps_overlay: FocusHandle,
     /// Shared by every toggle-group item.
     group: FocusHandle,
 }

@@ -278,6 +278,7 @@ impl SettingsScreen {
             focus: SettingsFocus {
                 root: cx.focus_handle(),
                 control: cx.focus_handle(),
+                fps_overlay: cx.focus_handle(),
                 group: cx.focus_handle(),
             },
             notifications: SystemNotificationSettings::new(

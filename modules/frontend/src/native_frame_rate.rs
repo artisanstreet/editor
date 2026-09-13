@@ -38,6 +38,7 @@ impl FrameRateLimit {
 
 struct FrameRatePreference {
     limit: FrameRateLimit,
+    overlay: bool,
     path: Option<PathBuf>,
 }
 impl Global for FrameRatePreference {}
@@ -53,7 +54,16 @@ pub(crate) fn initialize(window: &mut Window, cx: &mut App) {
         .unwrap_or_default();
     window.set_max_frame_rate(limit.0);
     window.set_vsync(limit.0.is_some());
-    cx.set_global(FrameRatePreference { limit, path });
+    let overlay = path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path.with_file_name("fps-overlay")).ok())
+        .is_none_or(|value| value.trim() != "false");
+    set_overlay_mode(overlay, window);
+    cx.set_global(FrameRatePreference {
+        limit,
+        overlay,
+        path,
+    });
 }
 
 pub(crate) fn current(cx: &App) -> FrameRateLimit {
@@ -69,9 +79,11 @@ pub(crate) fn apply(
     window.set_max_frame_rate(limit.0);
     window.set_vsync(limit.0.is_some());
     let preference = cx.try_global::<FrameRatePreference>();
+    let overlay = overlay_visible(cx);
     let path = preference.and_then(|preference| preference.path.clone());
     cx.set_global(FrameRatePreference {
         limit,
+        overlay,
         path: path.clone(),
     });
     let path = path.ok_or_else(|| {
@@ -81,12 +93,53 @@ pub(crate) fn apply(
         .map_err(|_| "Applied for this session, but the FPS limit could not be saved.".to_owned())
 }
 
+pub(crate) fn overlay_visible(cx: &App) -> bool {
+    cx.try_global::<FrameRatePreference>()
+        .is_none_or(|preference| preference.overlay)
+}
+
+fn set_overlay_mode(visible: bool, window: &mut Window) {
+    window.set_debug_frame_overlay_mode(if visible {
+        gpui::DebugFrameOverlayMode::FrameRate
+    } else {
+        gpui::DebugFrameOverlayMode::Hidden
+    });
+}
+
+pub(crate) fn apply_overlay(
+    visible: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<(), String> {
+    set_overlay_mode(visible, window);
+    let limit = current(cx);
+    let path = cx
+        .try_global::<FrameRatePreference>()
+        .and_then(|preference| preference.path.clone());
+    cx.set_global(FrameRatePreference {
+        limit,
+        overlay: visible,
+        path: path.clone(),
+    });
+    let path = path.ok_or_else(|| {
+        "Applied for this session. The settings location is unavailable.".to_owned()
+    })?;
+    let path = path.with_file_name("fps-overlay");
+    save_value(&path, if visible { "true" } else { "false" }).map_err(|_| {
+        "Applied for this session, but the FPS overlay setting could not be saved.".to_owned()
+    })
+}
+
 fn save(path: &Path, limit: FrameRateLimit) -> std::io::Result<()> {
+    save_value(path, &limit.label())
+}
+
+fn save_value(path: &Path, value: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let pending = path.with_extension("pending");
-    std::fs::write(&pending, limit.label())?;
+    std::fs::write(&pending, value)?;
     std::fs::rename(pending, path)
 }
 
@@ -102,6 +155,7 @@ mod tests {
         cx.update(|app| {
             app.set_global(FrameRatePreference {
                 limit: FrameRateLimit::default(),
+                overlay: true,
                 path: Some(path.clone()),
             });
         });
@@ -149,6 +203,25 @@ mod tests {
                 assert_eq!(current(app), limit);
             });
             assert_eq!(std::fs::read_to_string(&path).unwrap(), value);
+        }
+        for visible in [false, true] {
+            let toggle = cx
+                .debug_bounds("settings-fps-overlay")
+                .expect("FPS overlay toggle");
+            cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            cx.update(|window, app| {
+                assert_eq!(overlay_visible(app), visible);
+                assert_eq!(
+                    window.debug_frame_overlay_mode() == gpui::DebugFrameOverlayMode::FrameRate,
+                    visible
+                );
+                assert_eq!(current(app), FrameRateLimit::default());
+            });
+            assert_eq!(
+                std::fs::read_to_string(path.with_file_name("fps-overlay")).unwrap(),
+                visible.to_string()
+            );
         }
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }

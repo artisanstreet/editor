@@ -592,6 +592,20 @@ impl SettingsScreen {
         .debug_selector("settings-frame-rate-limit")
         .on_open_change(move |open, window, cx| on_open(&open, window, cx))
         .on_change(move |limit, _, window, cx| on_change(&limit, window, cx));
+        let on_overlay = cx.listener(|screen, visible: &bool, window, cx| {
+            screen.frame_rate_control.error =
+                native_frame_rate::apply_overlay(*visible, window, cx).err();
+            cx.notify();
+        });
+        let overlay = Switch::new(
+            "settings-fps-overlay",
+            self.focus.fps_overlay.clone(),
+            *theme,
+            artisan_ui::switch::SwitchSize::Default,
+            native_frame_rate::overlay_visible(cx),
+        )
+        .debug_selector("settings-fps-overlay")
+        .on_change(move |visible, _, window, cx| on_overlay(&visible, window, cx));
         settings_section_shell(
             theme,
             "performance",
@@ -600,18 +614,26 @@ impl SettingsScreen {
             None,
             settings_card(
                 theme,
-                vec![settings_row(
-                    theme,
-                    "FPS limit",
-                    "Limit animation and scrolling redraws. Unlimited disables VSync and the frame cap.",
-                    Some(
-                        div()
-                            .w(px(144.0))
-                            .flex_shrink_0()
-                            .child(select)
-                            .into_any_element(),
+                vec![
+                    settings_row(
+                        theme,
+                        "FPS limit",
+                        "Limit animation and scrolling redraws. Unlimited disables VSync and the frame cap.",
+                        Some(
+                            div()
+                                .w(px(144.0))
+                                .flex_shrink_0()
+                                .child(select)
+                                .into_any_element(),
+                        ),
                     ),
-                )],
+                    settings_row(
+                        theme,
+                        "Show FPS overlay",
+                        "Display FPS and frame timings in the top-right corner.",
+                        Some(overlay.into_any_element()),
+                    ),
+                ],
             ),
         )
     }
