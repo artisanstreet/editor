@@ -135,6 +135,7 @@ pub fn run() -> ExitCode {
                     view_for_registration.borrow_mut().replace(view.clone());
                     view.update(cx, NativeApplication::start_polling);
                     window.set_debug_frame_overlay_mode(gpui::DebugFrameOverlayMode::FrameRate);
+                    frame_capture::start(window);
                     view
                 },
             );

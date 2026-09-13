@@ -12,11 +12,13 @@
 
 .EXAMPLE
     scripts/dev.ps1
+    scripts/dev.ps1 -Performance
     scripts/dev.ps1 -Release -StageOnly
 #>
 [CmdletBinding()]
 param(
     [switch]$Release,
+    [switch]$Performance,
     [switch]$StageOnly,
     [string]$DevDir = ""
 )
@@ -27,7 +29,10 @@ $repo = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($DevDir)) {
     $DevDir = Join-Path $repo ".dist/dev"
 }
-$config = if ($Release) { "release" } else { "debug" }
+if ($Release -and $Performance) {
+    throw "Choose either -Release or -Performance"
+}
+$config = if ($Release) { "release" } elseif ($Performance) { "performance" } else { "debug" }
 
 function Write-DevStep($message) {
     Write-Host "dev.ps1: $message"
@@ -106,6 +111,8 @@ function Invoke-CargoBuild {
         @("--bin", "ae", "--bin", "forge", "--bin", "editor", "--bin", "installer", "--bin", "dev")
     if ($Release) {
         $arguments += "--release"
+    } elseif ($Performance) {
+        $arguments += @("--profile", "performance")
     }
     Write-DevStep "cargo $($arguments -join ' ')"
     Push-Location $repo

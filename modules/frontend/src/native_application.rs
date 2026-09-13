@@ -197,6 +197,7 @@ mod impl_profile_usage;
 
 #[path = "native_application/app_entry.rs"]
 mod app_entry;
+mod frame_capture;
 
 #[path = "native_application/impl_route_surface.rs"]
 mod impl_route_surface;

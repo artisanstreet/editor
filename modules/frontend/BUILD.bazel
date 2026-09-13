@@ -227,6 +227,7 @@ rust_library(
         "src/conversation_surface/transcript_helpers.rs",
         "src/conversation_surface/transcript_window.rs",
         "src/native_application/app_entry.rs",
+        "src/native_application/frame_capture.rs",
         "src/native_application/impl_answer_events.rs",
         "src/native_application/impl_catalog.rs",
         "src/native_application/impl_engine_settings.rs",
