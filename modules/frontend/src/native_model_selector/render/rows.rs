@@ -1056,7 +1056,7 @@ fn render_option_tooltip_surface(
         .text_size(px(12.0))
         .line_height(px(16.0))
         .whitespace_normal()
-        .text_color(theme.colors.muted_foreground.to_paint())
+        .text_color(theme.colors.foreground.to_paint())
         .relative()
         .overflow_hidden()
         .child(glass_material_layer(GlassStrength::Strong, px(18.0)))

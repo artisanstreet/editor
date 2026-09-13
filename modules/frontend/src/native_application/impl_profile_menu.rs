@@ -1051,7 +1051,7 @@ impl NativeApplication {
                         .items_center()
                         .text_size(px(12.0))
                         .line_height(px(16.0))
-                        .text_color(theme.secondary)
+                        .text_color(theme.foreground)
                         .child("You have ")
                         .child(
                             div()
