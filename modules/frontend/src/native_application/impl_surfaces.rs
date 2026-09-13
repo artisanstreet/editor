@@ -471,7 +471,7 @@ impl NativeApplication {
                     .child(nav)
                     .child(marketplace),
             )
-            .child(self.desktop_sidebar_threads(cx))
+            .child(self.desktop_sidebar_threads(window, cx))
             .child(
                 div()
                     .w_full()

@@ -179,7 +179,12 @@ impl NativeApplication {
         cx.notify();
     }
 
-    fn animate_sidebar_selection(&mut self, rows: &[ThreadSummary], cx: &mut Context<Self>) {
+    fn animate_sidebar_selection(
+        &mut self,
+        rows: &[ThreadSummary],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let target = match self.route() {
             NativeRoute::Thread { thread, .. } | NativeRoute::Editor { thread, .. } => {
                 Some(thread.clone())
@@ -193,25 +198,23 @@ impl NativeApplication {
             && !self.sidebar_threads.selection_frame_pending
         {
             self.sidebar_threads.selection_frame_pending = true;
-            cx.spawn(async move |entity, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let _ = entity.update(cx, |app, cx| {
-                    app.sidebar_threads.selection_frame_pending = false;
-                    cx.notify();
-                });
-            })
-            .detach();
+            cx.on_next_frame(window, |app, _, cx| {
+                app.sidebar_threads.selection_frame_pending = false;
+                cx.notify();
+            });
         }
     }
 
-    pub(super) fn desktop_sidebar_threads(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn desktop_sidebar_threads(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let listing = self
             .thread_listing
             .clone()
             .unwrap_or_else(empty_thread_listing);
-        self.animate_sidebar_selection(listing.threads(), cx);
+        self.animate_sidebar_selection(listing.threads(), window, cx);
         self.sidebar_threads.focus.retain(|id, _| {
             listing
                 .threads()

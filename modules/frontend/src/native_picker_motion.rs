@@ -8,6 +8,8 @@
 
 #![forbid(unsafe_code)]
 
+use std::time::{Duration, Instant};
+
 /// A measured hover-pill rectangle in the coordinate space of its surface.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct HoverRect {
@@ -318,6 +320,7 @@ impl PickerMenuMotion {
 pub(crate) struct PickerScrollState {
     target: f32,
     active: bool,
+    last_frame: Option<Instant>,
 }
 
 impl PickerScrollState {
@@ -330,6 +333,9 @@ impl PickerScrollState {
 
     /// Adds one wheel delta, clamping to the GPUI offset range `[-max, 0]`.
     pub(crate) fn push(&mut self, current: f32, delta: f32, max: f32) {
+        if !self.active {
+            self.last_frame = Some(Instant::now());
+        }
         let base = if self.active { self.target } else { current };
         self.target = (base + delta).clamp(-max.max(0.0), 0.0);
         self.active = (self.target - current).abs() > f32::EPSILON;
@@ -340,6 +346,7 @@ impl PickerScrollState {
     pub(crate) fn cancel_to(&mut self, current: f32, max: f32) {
         self.target = current.clamp(-max.max(0.0), 0.0);
         self.active = false;
+        self.last_frame = None;
     }
 
     /// Clamps a target after content or viewport geometry changes.
@@ -347,13 +354,25 @@ impl PickerScrollState {
         self.target = self.target.clamp(-max.max(0.0), 0.0);
     }
 
-    /// Takes one bounded interpolation step toward the target.
+    /// Samples smoothing on a display frame, using elapsed time so monitor
+    /// refresh changes and dropped frames never change the scroll speed.
+    #[must_use]
+    pub(crate) fn step(&mut self, current: f32, max: f32) -> Option<f32> {
+        let now = Instant::now();
+        let elapsed = self
+            .last_frame
+            .replace(now)
+            .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
+        self.step_elapsed(current, max, elapsed)
+    }
+
+    /// Retains the original 60 Hz response curve at every refresh rate.
     #[must_use]
     #[expect(
         clippy::float_cmp,
         reason = "the settle branch returns the target only when it differs exactly from the clamped current value; an epsilon would emit a redundant identical frame"
     )]
-    pub(crate) fn step(&mut self, current: f32, max: f32) -> Option<f32> {
+    fn step_elapsed(&mut self, current: f32, max: f32, elapsed: Duration) -> Option<f32> {
         self.clamp_to_max(max);
         let current = current.clamp(-max.max(0.0), 0.0);
         let distance = self.target - current;
@@ -362,7 +381,8 @@ impl PickerScrollState {
             return (self.target != current).then_some(self.target);
         }
         self.active = true;
-        Some(current + distance * 0.28)
+        let fraction = 1.0 - 0.72_f32.powf(elapsed.as_secs_f32() * 60.0);
+        Some(current + distance * fraction)
     }
 
     /// Returns whether an interpolation frame is still required.
@@ -451,13 +471,37 @@ mod tests {
     }
 
     #[test]
+    fn scroll_response_is_independent_of_monitor_refresh_rate() {
+        let at_rate = |hz: u32| {
+            let mut scroll = PickerScrollState::default();
+            scroll.push(0.0, -500.0, 1000.0);
+            let mut offset = 0.0;
+            for _ in 0..hz / 5 {
+                offset = scroll
+                    .step_elapsed(
+                        offset,
+                        1000.0,
+                        Duration::from_secs_f32(1.0 / f32::from(u16::try_from(hz).unwrap())),
+                    )
+                    .unwrap_or(offset);
+            }
+            offset
+        };
+        for hz in [20, 60, 165, 240, 300] {
+            assert!((at_rate(hz) - at_rate(60)).abs() < 0.01, "{hz} Hz");
+        }
+    }
+
+    #[test]
     fn scroll_targets_are_bounded_and_settle_without_an_idle_loop() {
         let mut scroll = PickerScrollState::default();
         scroll.push(0.0, -500.0, 220.0);
         assert_eq!(scroll.target(), -220.0);
         let mut current = 0.0;
         for _ in 0..64 {
-            let Some(next) = scroll.step(current, 220.0) else {
+            let Some(next) =
+                scroll.step_elapsed(current, 220.0, Duration::from_secs_f32(1.0 / 60.0))
+            else {
                 break;
             };
             current = next;

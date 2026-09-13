@@ -311,6 +311,8 @@ fn transcript_wheel_queues_bounded_target_then_settles(cx: &mut TestAppContext) 
     // lands strictly between start and target, and the run settles
     // exactly onto the queued target before retiring it.
     let pump_frame = |cx: &mut VisualTestContext| {
+        // Production smoothing now measures elapsed time, not pump count.
+        std::thread::sleep(std::time::Duration::from_millis(16));
         cx.update(|window, app| {
             surface.update(app, |surface, surface_cx| {
                 surface.advance_transcript_scroll(window, surface_cx);

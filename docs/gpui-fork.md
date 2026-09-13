@@ -36,6 +36,11 @@ the fork: the pin must resolve for every clone and for CI.
 
 All GPUI changes are commits in the fork, never patch files here:
 
+- Windows wgpu frame pacing: per-window DXGI vertical-blank clocks follow
+  the monitor containing the window; FIFO presentation and a coalesced
+  render permit prevent catch-up bursts. Hidden/minimized windows pause
+  their clock. Unsupported or disconnected DXGI outputs retry with a
+  bounded 60 Hz fallback. Headless rendering bypasses the frame gate.
 - wgpu renderer: sRGB/Oklab gradient encoding, ordered Bayer dither,
   scene-texture readback for hidden-window captures;
 - native color emoji: fallback formation probing, whole-grapheme routing,
@@ -68,3 +73,13 @@ gpui_platform = { path = "../gpui-ce/crates/gpui_platform" }
 ```
 
 Never commit that patch block.
+
+## Animation scheduling
+
+Visual motion samples GPUI display-frame callbacks, using elapsed monotonic
+time for progress. Durations remain time-based so moving between 165 Hz and
+240 Hz changes smoothness, not animation speed. Shared wheel smoothing uses
+an exponential elapsed-time response instead of a fixed fraction per frame.
+Shimmer, spinner, hover, disclosure, and copy feedback already use GPUI's
+frame-driven animation machinery. One-shot tooltip/cleanup delays and the
+once-per-second elapsed-time label are not animation frame clocks.
