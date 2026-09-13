@@ -250,7 +250,13 @@ use presentation::{
 
 actions!(
     native_application,
-    [Quit, NextTabStop, PreviousTabStop, OpenCommandMenu]
+    [
+        Quit,
+        NextTabStop,
+        PreviousTabStop,
+        OpenCommandMenu,
+        ToggleFrameCounter
+    ]
 );
 
 /// Probe measuring one sidebar row against the shared sidebar hover

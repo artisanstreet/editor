@@ -34,6 +34,15 @@ impl Render for NativeApplication {
             .on_action(|_: &NextTabStop, window, cx| window.focus_next(cx))
             .on_action(|_: &PreviousTabStop, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(Self::activate_command_menu))
+            .on_action(|_: &ToggleFrameCounter, window, _| {
+                let mode =
+                    if window.debug_frame_overlay_mode() == gpui::DebugFrameOverlayMode::Hidden {
+                        gpui::DebugFrameOverlayMode::FrameRate
+                    } else {
+                        gpui::DebugFrameOverlayMode::Hidden
+                    };
+                window.set_debug_frame_overlay_mode(mode);
+            })
             .size_full()
             .debug_selector(|| NATIVE_ROOT_SELECTOR.to_string())
             .relative()

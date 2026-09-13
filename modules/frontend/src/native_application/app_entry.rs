@@ -12,6 +12,7 @@ pub(super) fn bind_native_actions(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("ctrl-shift-f12", ToggleFrameCounter, None),
         KeyBinding::new("cmd-k", OpenCommandMenu, Some(NATIVE_KEY_CONTEXT)),
         KeyBinding::new("ctrl-k", OpenCommandMenu, Some(NATIVE_KEY_CONTEXT)),
         KeyBinding::new("tab", NextTabStop, Some(NATIVE_KEY_CONTEXT)),
@@ -133,6 +134,7 @@ pub fn run() -> ExitCode {
                         cx.new(|view_cx| NativeApplication::new(service_for_view, window, view_cx));
                     view_for_registration.borrow_mut().replace(view.clone());
                     view.update(cx, NativeApplication::start_polling);
+                    window.set_debug_frame_overlay_mode(gpui::DebugFrameOverlayMode::FrameRate);
                     view
                 },
             );

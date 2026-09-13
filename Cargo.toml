@@ -33,8 +33,8 @@ capnpc = "=0.27.0"
 command-group = { version = "=5.0.1", default-features = false, features = ["with-tokio"] }
 fs2 = "=0.4.3"
 getrandom = { version = "=0.4.3", default-features = false }
-gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "2e09165f53817789172f89d6bb5130c947b18673", features = ["inspector", "test-support"] }
-gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "2e09165f53817789172f89d6bb5130c947b18673", features = ["wgpu"] }
+gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "19c4db75b6a3dc8552c138f55a520b16dd525474", features = ["inspector", "test-support", "profiler"] }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "19c4db75b6a3dc8552c138f55a520b16dd525474", features = ["wgpu"] }
 http = { version = "=1.5.0", default-features = false, features = ["std"] }
 http-body-util = { version = "=0.1.5", default-features = false }
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }

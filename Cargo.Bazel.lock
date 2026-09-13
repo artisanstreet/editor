@@ -1,5 +1,5 @@
 {
-  "checksum": "0c95e5cdb0e8a802f0dfa8049b0979f6a859bca11fda9a85544bac1396a2583b",
+  "checksum": "33856168b97a17d6c887cd73923da033331f83fd3c26e9776a7c088dd80d9531",
   "crates": {
     "accesskit 0.24.1": {
       "name": "accesskit",
@@ -7546,29 +7546,11 @@
           "**"
         ],
         "crate_features": {
-          "common": [],
-          "selects": {
-            "aarch64-apple-darwin": [
-              "default",
-              "std"
-            ],
-            "aarch64-unknown-linux-gnu": [
-              "default",
-              "std"
-            ],
-            "x86_64-pc-windows-msvc": [
-              "default",
-              "std"
-            ],
-            "x86_64-unknown-linux-gnu": [
-              "default",
-              "std"
-            ],
-            "x86_64-unknown-nixos-gnu": [
-              "default",
-              "std"
-            ]
-          }
+          "common": [
+            "default",
+            "std"
+          ],
+          "selects": {}
         },
         "edition": "2021",
         "version": "1.5.0"
@@ -10846,6 +10828,61 @@
         "data_glob": [
           "**"
         ]
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "crossbeam-channel 0.5.17": {
+      "name": "crossbeam-channel",
+      "version": "0.5.17",
+      "package_url": "https://github.com/crossbeam-rs/crossbeam",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/crossbeam-channel/0.5.17/download",
+          "sha256": "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "crossbeam_channel",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "crossbeam_channel",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "default",
+            "std"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "crossbeam-utils 0.8.22",
+              "target": "crossbeam_utils"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "0.5.17"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -18047,7 +18084,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui"
         }
@@ -18090,6 +18127,7 @@
             "font-kit",
             "inspector",
             "leak-detection",
+            "profiler",
             "proptest",
             "test-support",
             "wayland",
@@ -18176,6 +18214,10 @@
             {
               "id": "gpui_ce_util 0.2.6",
               "target": "gpui_util"
+            },
+            {
+              "id": "hdrhistogram 7.6.0",
+              "target": "hdrhistogram"
             },
             {
               "id": "heapless 0.9.3",
@@ -18425,7 +18467,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_apple"
         }
@@ -18584,7 +18626,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_collections"
         }
@@ -18648,7 +18690,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_derive_refineable"
         }
@@ -18706,7 +18748,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_linux"
         }
@@ -18943,7 +18985,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_macos"
         }
@@ -19154,7 +19196,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_macros"
         }
@@ -19222,7 +19264,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_media"
         }
@@ -19333,7 +19375,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_platform"
         }
@@ -19423,7 +19465,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_refineable"
         }
@@ -19473,7 +19515,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_scheduler"
         }
@@ -19575,7 +19617,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_shared_string"
         }
@@ -19633,7 +19675,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_sum_tree"
         }
@@ -19695,7 +19737,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_ce_util"
         }
@@ -19756,7 +19798,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_web"
         }
@@ -19881,7 +19923,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_wgpu"
         }
@@ -20050,7 +20092,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "2e09165f53817789172f89d6bb5130c947b18673"
+            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
           },
           "strip_prefix": "crates/gpui_windows"
         }
@@ -20899,6 +20941,82 @@
         "version": "0.11.1"
       },
       "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "hdrhistogram 7.6.0": {
+      "name": "hdrhistogram",
+      "version": "7.6.0",
+      "package_url": "https://github.com/HdrHistogram/HdrHistogram_rust.git",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/hdrhistogram/7.6.0/download",
+          "sha256": "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "hdrhistogram",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "hdrhistogram",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "default",
+            "serialization",
+            "sync"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "base64 0.22.1",
+              "target": "base64"
+            },
+            {
+              "id": "byteorder 1.5.0",
+              "target": "byteorder"
+            },
+            {
+              "id": "crossbeam-channel 0.5.17",
+              "target": "crossbeam_channel"
+            },
+            {
+              "id": "flate2 1.1.10",
+              "target": "flate2"
+            },
+            {
+              "id": "nom 8.0.0",
+              "target": "nom"
+            },
+            {
+              "id": "num-traits 0.2.19",
+              "target": "num_traits"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "7.6.0"
+      },
+      "license": "MIT/Apache-2.0",
       "license_ids": [
         "Apache-2.0",
         "MIT"
