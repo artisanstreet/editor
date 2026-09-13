@@ -5,10 +5,10 @@ scrolling. This selects Cargo's `performance` profile, which inherits `dev`
 and enables optimization level 2. Debug symbols and assertions remain enabled.
 The ordinary `dev` profile stays unoptimized for step-through debugging.
 
-The top-right counter measures redraw cadence, not GPU utilization or display
-refresh rate. Hovering occasionally includes the idle gaps between redraws in
-the FPS/FRAME readings. CPU measures the most recent GPUI draw. Neither a low
-idle FPS nor its change when the pointer moves establishes a rendering limit.
+The top-right counter measures presentation submissions during scheduled
+animation and shows IDLE between animations. Unpresented CPU draws do not
+increase FPS. CPU measures the most recent GPUI draw. This is not a GPU
+utilization or physical monitor-refresh measurement.
 
 ## Repeatable capture
 
@@ -25,7 +25,9 @@ to the user. Keep the same chat, window size, monitor, and visible panels for
 comparisons, and avoid interacting during the measurement.
 
 The JSON includes the GPU, viewport, route, raw frame samples, and recent
-foreground task timings. A PNG with the same stem records the final scene.
+foreground task timings. Where platform readback is supported, a PNG with the
+same stem records the final scene; otherwise `screenshot_error` reports why
+no image was saved.
 These files can contain private chat content; keep them local. Screenshot
 readback and file writing happen after the measured interval. The output
 directory must already exist.
@@ -43,9 +45,11 @@ input-to-display latency.
 Settings → Appearance → Performance provides 30, 60, 120, 144, 165, 180,
 240, 360, 500, and Unlimited. Changes apply to the current window immediately
 and are saved in `ui/frame-rate-limit` under the resolved Artisan home.
-Unlimited is the default and removes the extra application limit while
-retaining monitor synchronization. A cap above the monitor's refresh rate
-does not force additional redraws. Idle windows remain event-driven.
+Unlimited is the default. On Windows it disables the application cap and
+monitor pacing, selecting Immediate presentation when supported or Mailbox
+otherwise. Numeric limits retain monitor synchronization. A numeric cap above
+the monitor refresh rate does not force extra redraws. Idle windows remain
+event-driven; Unlimited does not create a permanent rendering loop.
 
 The limiter preserves the requested average cadence when the cap is not a
 divisor of the monitor refresh rate. Frame intervals still fall on display
@@ -63,3 +67,28 @@ Interaction tests cover these invalidations and verify that harness transitions
 stop requesting frames after settling. These tests do not measure Windows GPU
 performance. The FPS overlay samples scheduled animation and shows IDLE between
 animations, excluding gaps between independent event-driven redraws.
+
+## Continuous scrolling capture
+
+Combine `ARTISAN_FRAME_CAPTURE_SCROLL=1` and `ARTISAN_FRAME_CAPTURE_CHAT=1`
+with the capture path to send bounded wheel input through the actual transcript.
+The diagnostic temporarily uses a 1024×480 viewport, restoring its size afterward.
+`ARTISAN_FRAME_CAPTURE_VSYNC=1` or `0` overrides synchronization for the capture
+without saving a preference. Measured scrolling uses a timer to deliver input,
+with no forced redraw loop. Reports include wheel count, scroll range and
+per-event window focus. Zero scroll range is not a scrolling measurement.
+Compare active-window intervals separately from background throttling.
+
+## Windows scroll measurement, 2026-09-13
+
+On the Radeon RX 9070 XT, the optimized build with VSync disabled completed
+an active-window, ten-second wheel-only capture at 1024×480. It delivered
+639 wheel events across 738 px of scrollable content, without forced redraws.
+There were 1,845 presentations, about 184 per second. Presentation intervals
+were 5.18 ms median, 8.58 ms at the 99th percentile, and 11.11 ms maximum.
+CPU draw time was 2.73 ms median; renderer draw/submission time was 2.20 ms
+median. This bounds the tested workload only, not every thread or interaction.
+
+The Windows wake callback now schedules dirty windows directly. The paint
+region is validated before rendering so requests raised during rendering
+survive to the next frame. Throttled retries use one timer instead of polling.

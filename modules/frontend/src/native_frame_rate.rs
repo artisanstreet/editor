@@ -52,6 +52,7 @@ pub(crate) fn initialize(window: &mut Window, cx: &mut App) {
         .and_then(|value| FrameRateLimit::parse(&value))
         .unwrap_or_default();
     window.set_max_frame_rate(limit.0);
+    window.set_vsync(limit.0.is_some());
     cx.set_global(FrameRatePreference { limit, path });
 }
 
@@ -66,6 +67,7 @@ pub(crate) fn apply(
     cx: &mut App,
 ) -> Result<(), String> {
     window.set_max_frame_rate(limit.0);
+    window.set_vsync(limit.0.is_some());
     let preference = cx.try_global::<FrameRatePreference>();
     let path = preference.and_then(|preference| preference.path.clone());
     cx.set_global(FrameRatePreference {

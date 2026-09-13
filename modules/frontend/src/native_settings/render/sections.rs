@@ -603,7 +603,7 @@ impl SettingsScreen {
                 vec![settings_row(
                     theme,
                     "FPS limit",
-                    "Limit animation and scrolling redraws. Unlimited follows your monitor's refresh rate.",
+                    "Limit animation and scrolling redraws. Unlimited disables VSync and the frame cap.",
                     Some(
                         div()
                             .w(px(144.0))

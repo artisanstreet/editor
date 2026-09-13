@@ -91,10 +91,10 @@ once-per-second elapsed-time label are not animation frame clocks.
 ## Frame counter
 
 The editor enables GPUI's FrameRate overlay below the top-right window
-controls. Ctrl+Shift+F12 toggles it. FPS counts GPUI redraws during scheduled
+controls. Ctrl+Shift+F12 toggles it. FPS counts GPU presentation submissions during scheduled
 animation over the recent one-second sample; FRAME is their mean interval,
 and CPU is the last CPU draw duration. It does not measure GPU completion
-or displayed frames. When no animation frame is scheduled, it shows IDLE.
+or physical monitor refreshes. When no animation frame is scheduled, it shows IDLE.
 Resuming animation starts a fresh sample. Long gaps during pending animation
 remain in the measurement, so real stalls are not discarded as idle time.
 The counter never requests redraws itself.
