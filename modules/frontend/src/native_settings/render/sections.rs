@@ -542,7 +542,11 @@ impl SettingsScreen {
     }
 
     /// Renders the appearance section (`appearance.svelte`).
-    fn render_appearance(&self, theme: &artisan_ui::theme::ArtisanTheme) -> Div {
+    fn render_appearance(
+        &self,
+        theme: &artisan_ui::theme::ArtisanTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             .flex_col()
@@ -552,7 +556,57 @@ impl SettingsScreen {
                 SettingsSection::Appearance.description(),
             ))
             .child(self.render_appearance_top(theme))
+            .child(self.render_frame_rate(theme, cx))
             .child(self.render_appearance_bottom(theme))
+    }
+
+    fn render_frame_rate(
+        &self,
+        theme: &artisan_ui::theme::ArtisanTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        use crate::native_frame_rate::{self, FrameRateLimit};
+        use artisan_ui::select::{Select, SelectEntry};
+        let on_open = cx.listener(|screen, open: &bool, _, cx| {
+            screen.frame_rate_control.open = *open;
+            cx.notify();
+        });
+        let on_change = cx.listener(|screen, limit: &FrameRateLimit, window, cx| {
+            screen.frame_rate_control.error = native_frame_rate::apply(*limit, window, cx).err();
+            screen.frame_rate_control.open = false;
+            cx.notify();
+        });
+        let select = Select::new(
+            "settings-frame-rate-limit",
+            self.focus.control.clone(),
+            *theme,
+            Some(native_frame_rate::current(cx)),
+            FrameRateLimit::OPTIONS
+                .iter()
+                .map(|limit| SelectEntry::item(*limit, limit.label()))
+                .collect(),
+        )
+        .open(self.frame_rate_control.open)
+        .with_interaction_state(self.frame_rate_control.interaction.clone())
+        .debug_selector("settings-frame-rate-limit")
+        .on_open_change(move |open, window, cx| on_open(&open, window, cx))
+        .on_change(move |limit, _, window, cx| on_change(&limit, window, cx));
+        settings_section_shell(
+            theme,
+            "performance",
+            "Performance",
+            self.frame_rate_control.error.as_deref(),
+            None,
+            settings_card(
+                theme,
+                vec![settings_row(
+                    theme,
+                    "FPS limit",
+                    "Limit animation and scrolling redraws. Unlimited follows your monitor's refresh rate.",
+                    Some(select.into_any_element()),
+                )],
+            ),
+        )
     }
 
     /// Renders the engines page (`engine.svelte`).
@@ -1556,7 +1610,7 @@ impl SettingsScreen {
     fn render_main(&self, theme: &artisan_ui::theme::ArtisanTheme, cx: &mut Context<Self>) -> Div {
         let section = match self.section {
             SettingsRoute::Models => self.render_models(theme),
-            SettingsRoute::Appearance => self.render_appearance(theme),
+            SettingsRoute::Appearance => self.render_appearance(theme, cx),
             SettingsRoute::Engines => self.render_engine(theme, cx),
             SettingsRoute::Notifications => self.render_notifications(theme),
             SettingsRoute::Privacy => self.render_privacy(theme),

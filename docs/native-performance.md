@@ -37,3 +37,18 @@ submissions while animation is requested. Use the per-frame distributions and
 matching scene images when comparing builds. A forced full-window redraw is
 a rendering workload, not a simulation of wheel input or a measurement of
 input-to-display latency.
+
+## FPS limit
+
+Settings → Appearance → Performance provides 30, 60, 120, 144, 165, 180,
+240, 360, 500, and Unlimited. Changes apply to the current window immediately
+and are saved in `ui/frame-rate-limit` under the resolved Artisan home.
+Unlimited is the default and removes the extra application limit while
+retaining monitor synchronization. A cap above the monitor's refresh rate
+does not force additional redraws. Idle windows remain event-driven.
+
+The limiter preserves the requested average cadence when the cap is not a
+divisor of the monitor refresh rate. Frame intervals still fall on display
+ticks. GPUI's existing inactive-window and thermal throttles also remain in
+effect. A failed save is shown in the settings section; the chosen limit
+still applies for the current session.

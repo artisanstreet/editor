@@ -130,6 +130,7 @@ pub fn run() -> ExitCode {
                     ..Default::default()
                 },
                 move |window, cx| {
+                    crate::native_frame_rate::initialize(window, cx);
                     let view =
                         cx.new(|view_cx| NativeApplication::new(service_for_view, window, view_cx));
                     view_for_registration.borrow_mut().replace(view.clone());

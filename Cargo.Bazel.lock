@@ -1,5 +1,5 @@
 {
-  "checksum": "33856168b97a17d6c887cd73923da033331f83fd3c26e9776a7c088dd80d9531",
+  "checksum": "5aadef0b79e481900dd8c0d4ea0115a7f55325e87fe8424d9c646c0f3110736f",
   "crates": {
     "accesskit 0.24.1": {
       "name": "accesskit",
@@ -18084,7 +18084,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui"
         }
@@ -18467,7 +18467,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_apple"
         }
@@ -18626,7 +18626,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_collections"
         }
@@ -18690,7 +18690,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_derive_refineable"
         }
@@ -18748,7 +18748,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_linux"
         }
@@ -18985,7 +18985,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_macos"
         }
@@ -19196,7 +19196,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_macros"
         }
@@ -19264,7 +19264,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_media"
         }
@@ -19375,7 +19375,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_platform"
         }
@@ -19465,7 +19465,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_refineable"
         }
@@ -19515,7 +19515,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_scheduler"
         }
@@ -19617,7 +19617,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_shared_string"
         }
@@ -19675,7 +19675,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_sum_tree"
         }
@@ -19737,7 +19737,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_ce_util"
         }
@@ -19798,7 +19798,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_web"
         }
@@ -19923,7 +19923,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_wgpu"
         }
@@ -20092,7 +20092,7 @@
         "Git": {
           "remote": "https://github.com/artisanstreet/gpui-ce",
           "commitish": {
-            "Rev": "19c4db75b6a3dc8552c138f55a520b16dd525474"
+            "Rev": "1ba002fbb04e988b608ab13a5b6a05872a037c3e"
           },
           "strip_prefix": "crates/gpui_windows"
         }

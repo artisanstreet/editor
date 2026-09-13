@@ -8,6 +8,7 @@
 //! interactive workflow slices.
 
 pub mod active_thread_light_policy;
+mod native_frame_rate;
 pub mod activity_status_labels;
 pub mod approval_presentation;
 pub mod artisan_error_code;

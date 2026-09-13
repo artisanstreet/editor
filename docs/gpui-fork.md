@@ -36,6 +36,10 @@ the fork: the pin must resolve for every clone and for CI.
 
 All GPUI changes are commits in the fork, never patch files here:
 
+- Runtime window FPS limits: `set_max_frame_rate` gates redraws over the
+  display clock, retains fractional cadence, and discards missed deadlines.
+  Removing the limit preserves monitor synchronization. Mandatory platform
+  presentations still bypass the user limit.
 - Windows wgpu frame pacing: per-window DXGI vertical-blank clocks follow
   the monitor containing the window; FIFO presentation and a coalesced
   render permit prevent catch-up bursts. Hidden/minimized windows pause

@@ -226,6 +226,7 @@ pub struct SelectItemSemanticState {
 /// shared state with the controlled props every frame, so owner-applied
 /// updates always win while in-progress keyboard motion survives renders
 /// that change nothing.
+#[derive(gpui::IntoElement)]
 pub struct Select<V: SelectValue = SharedString> {
     id: ElementId,
     focus: FocusHandle,

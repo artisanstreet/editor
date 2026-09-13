@@ -3,6 +3,8 @@
 //! # Live vs static inventory
 //!
 //! LIVE (pure, deterministic, covered by the inline tests below):
+//! - The FPS select applies a local window limit and persists it through
+//!   `native_frame_rate`; its dropdown and keyboard interaction are tested.
 //! - Navigation selection state ([`SettingsShell::select`], [`SettingsShell::selected`]).
 //! - Route-to-section resolution ([`section_for_href`]) and per-section mount
 //!   ([`SettingsShell::outlet`], [`section_snapshot`]).
@@ -19,7 +21,7 @@
 //!   nav tab specs ([`nav_tab_specs`]).
 //!
 //! STATIC (visually present but non-functional by design; no callbacks):
-//! - Every switch, tabs, toggle group, card, collapsible, and tooltip
+//! - The fixture switches, tabs, toggle groups, cards, collapsibles, and tooltips
 //!   control. There are no activation handlers, no persistence, and no
 //!   transport calls in this module.
 //! - All section copy (titles, descriptions, anchors). The strings mirror the
@@ -182,9 +184,17 @@ pub struct SettingsScreen {
     time_format: AppearanceTimeFormat,
     path_separator: AppearancePathSeparator,
     shader_enabled: bool,
+    frame_rate_control: FrameRateControl,
     text_font: String,
     code_font: String,
     agent_dataset: String,
     engine_snapshot: Option<SettingsEngineSnapshot>,
     engines: Vec<SettingsEngineNavEntry>,
+}
+
+#[derive(Default)]
+struct FrameRateControl {
+    open: bool,
+    interaction: std::rc::Rc<std::cell::RefCell<artisan_ui::select::SelectState>>,
+    error: Option<String>,
 }

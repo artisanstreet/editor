@@ -296,6 +296,7 @@ impl SettingsScreen {
             time_format: AppearanceTimeFormat::TwelveHour,
             path_separator: AppearancePathSeparator::Backslash,
             shader_enabled: true,
+            frame_rate_control: FrameRateControl::default(),
             text_font: APPEARANCE_DEFAULT_TEXT_FONT.to_owned(),
             code_font: APPEARANCE_DEFAULT_CODE_FONT.to_owned(),
             agent_dataset: AGENT_NAME_DATASET_DEFAULT.to_owned(),
