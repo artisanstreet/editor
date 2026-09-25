@@ -85,6 +85,9 @@ pub enum ResponsePayload {
     HostCatalog(CatalogSnapshotWire),
     /// A model selection resolved into a configuration, or refused.
     ModelSelectionResolved(artisan_domain::ModelSelectionResolution),
+    /// A manual configuration document built into a configuration, or
+    /// refused.
+    EngineConfigurationResolved(artisan_domain::EngineConfigurationResolution),
     /// Complete durable model-favorites projection.
     ModelFavorites(ModelFavoritesSnapshot),
     /// Correlated favorite mutation receipt with complete post-state.

@@ -1,17 +1,16 @@
-//! Thread-bound engine settings state and validation.
+//! Thread-bound engine settings state.
 //!
 //! The controller owns no runtime or GPUI entity. It models the
 //! application-visible lifecycle for one selected real thread and
-//! retains only redacted diagnostics.
+//! retains only redacted diagnostics. The Forge builds and validates every
+//! configuration: the manual draft is resolved by the Forge before it is
+//! saved.
 
 #![forbid(unsafe_code)]
 
 use artisan_domain::{
-    ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigError, EngineConfigReason,
-    EngineConfigRevision, EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId,
-    EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection,
-    EngineVariantId, FilesystemAccess, FiniteMillis, NetworkAccess, OpenCode2Selection,
-    PermissionId, ThreadId, WebSearchAccess,
+    EngineConfigError, EngineConfigReason, EngineConfigRevision, EngineProfileId, EngineRunConfig,
+    ThreadId,
 };
 use artisan_protocol::{
     RegisteredEngineProfilesResult, SetThreadEngineConfigResult, ThreadEngineSettingsResult,
@@ -87,12 +86,56 @@ mod tests {
         }
     }
 
-    fn sample_config(profile: &str) -> EngineRunConfig {
-        let draft = sample_draft(profile);
-        let registry = RegisteredEngineProfilesResult::RegistryPresent {
-            profile_ids: vec![profile_id(profile)],
+    /// The configuration the Forge builds from `sample_draft(profile)` with
+    /// `model`.
+    fn config_with(profile: &str, model: &str) -> EngineRunConfig {
+        use artisan_domain::{
+            ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineModelId,
+            EnginePermissionPolicy, EngineRouteId, EngineRuntimeControls,
+            EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis,
+            NetworkAccess, OpenCode2Selection, PermissionId, WebSearchAccess,
         };
-        draft.build_config(Some(&registry)).expect("sample config")
+        let millis = |value| FiniteMillis::new(value).expect("millis");
+        let bytes = |value| ByteLimit::new(value).expect("bytes");
+        let count = |value| CountLimit::new(value).expect("count");
+        let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+            attempt_budget: millis(5),
+            readiness_budget: millis(1),
+            health_budget: millis(1),
+            prompt_budget: millis(1),
+            stream_budget: millis(1),
+            close_budget: millis(1),
+            max_json_body_bytes: bytes(1),
+            max_sse_line_bytes: bytes(1),
+            max_sse_event_bytes: bytes(1),
+            max_readiness_line_bytes: bytes(1),
+            max_header_count: count(1),
+            max_http_buffer_bytes: bytes(1),
+            max_stderr_bytes: bytes(1),
+            observation_capacity: count(1),
+        })
+        .expect("runtime");
+        EngineRunConfig::new(
+            EngineSelection::OpenCode2(OpenCode2Selection::new(
+                profile_id(profile),
+                EngineModelId::parse(model).expect("model"),
+                EngineRouteId::parse("route-test").expect("route"),
+                None,
+                EnginePermissionPolicy::new(
+                    PermissionId::parse("permission-test").expect("permission"),
+                    EngineAgentId::parse("agent-test").expect("agent"),
+                    ApprovalMode::Never,
+                    FilesystemAccess::None,
+                    NetworkAccess::Disabled,
+                    WebSearchAccess::Disabled,
+                ),
+            )),
+            runtime,
+        )
+    }
+
+    fn sample_config(profile: &str) -> EngineRunConfig {
+        config_with(profile, "model-test")
     }
 
     fn registered_present(ids: &[&str]) -> RegisteredEngineProfilesResult {
@@ -147,50 +190,11 @@ mod tests {
         (controller, thread, config)
     }
 
+    /// Edits the draft's model and returns the configuration the Forge
+    /// builds from it.
     fn make_dirty_config(controller: &mut EngineSettingsController) -> EngineRunConfig {
         controller.draft_mut().model_id = "model-next".to_owned();
-        controller
-            .draft()
-            .build_config(Some(&registered_present(&["default"])))
-            .expect("dirty config")
-    }
-
-    fn manual_document(draft: &EngineSettingsDraft) -> String {
-        let mut document = String::new();
-        for key in MANUAL_CONFIGURATION_KEYS {
-            let value = match key {
-                "profile_id" => &draft.profile_id,
-                "model_id" => &draft.model_id,
-                "route_id" => &draft.route_id,
-                "variant_id" => &draft.variant_id,
-                "permission_id" => &draft.permission_id,
-                "agent_id" => &draft.agent_id,
-                "approval" => &draft.approval,
-                "filesystem" => &draft.filesystem,
-                "network" => &draft.network,
-                "web_search" => &draft.web_search,
-                "attempt_budget" => &draft.attempt_budget,
-                "readiness_budget" => &draft.readiness_budget,
-                "health_budget" => &draft.health_budget,
-                "prompt_budget" => &draft.prompt_budget,
-                "stream_budget" => &draft.stream_budget,
-                "close_budget" => &draft.close_budget,
-                "max_json_body_bytes" => &draft.max_json_body_bytes,
-                "max_sse_line_bytes" => &draft.max_sse_line_bytes,
-                "max_sse_event_bytes" => &draft.max_sse_event_bytes,
-                "max_readiness_line_bytes" => &draft.max_readiness_line_bytes,
-                "max_header_count" => &draft.max_header_count,
-                "max_http_buffer_bytes" => &draft.max_http_buffer_bytes,
-                "max_stderr_bytes" => &draft.max_stderr_bytes,
-                "observation_capacity" => &draft.observation_capacity,
-                _ => unreachable!("manual field table diverged"),
-            };
-            document.push_str(key);
-            document.push('=');
-            document.push_str(value);
-            document.push('\n');
-        }
-        document
+        config_with("default", "model-next")
     }
 
     fn bridge_busy() -> ServiceFailure {
@@ -314,22 +318,6 @@ mod tests {
         assert!(matches!(controller.registry_view(), RegistryView::Present(ids) if ids.len()==2));
         load_unconfigured(&mut controller, &thread_id("thread-a"));
         assert_eq!(controller.status(), EngineSettingsStatus::Unconfigured);
-        // Valid profile must be one of returned ids.
-        controller.draft_mut().profile_id = "gamma".to_owned();
-        assert!(
-            controller
-                .draft
-                .build_config(controller.registry.as_ref())
-                .is_err()
-        );
-        controller.draft_mut().profile_id = "alpha".to_owned();
-        // Still needs other fields, but profile validation now passes.
-        assert!(
-            controller
-                .draft
-                .build_config(controller.registry.as_ref())
-                .is_err()
-        );
     }
 
     #[test]
@@ -341,17 +329,17 @@ mod tests {
         load_unconfigured(&mut controller, &tid);
         controller.draft_mut().profile_id = "default".to_owned();
         controller.draft_mut().model_id = "model-test".to_owned();
-        // Not yet complete, still dirty but cannot save.
+        // Dirty; the Forge decides whether the draft is complete.
         assert!(controller.is_dirty());
         assert_eq!(controller.status(), EngineSettingsStatus::Dirty);
-        assert!(!controller.can_save());
+        assert!(controller.can_save());
         controller.cancel();
         assert!(!controller.is_dirty());
         assert_eq!(controller.draft().profile_id, "");
     }
 
     #[test]
-    fn complete_validation_required_and_no_defaults_appear() {
+    fn saving_asks_the_forge_to_build_the_draft_and_shows_its_refusal() {
         let mut controller = EngineSettingsController::new();
         let tid = thread_id("thread-a");
         controller.select_thread(Some(&tid));
@@ -359,19 +347,46 @@ mod tests {
         load_unconfigured(&mut controller, &tid);
         assert_eq!(controller.draft().profile_id, "");
         assert!(!controller.can_save());
-        // Fill every required field explicitly.
+        assert!(controller.begin_resolution().is_none());
         let valid = sample_config("default");
         controller
             .draft_mut()
             .clone_from(&EngineSettingsDraft::from_config(&valid));
-        assert!(controller.can_save());
-        assert!(
-            controller
-                .build_save_command(request_id("request-a"))
-                .is_some()
-        );
         // Empty variant is explicit None, not synthesized.
         assert_eq!(controller.draft().variant_id, "");
+        let query = controller.begin_resolution().expect("resolution asked");
+        assert_eq!(query.thread_id, tid);
+        assert_eq!(&query.configuration, controller.draft());
+        assert_eq!(controller.status(), EngineSettingsStatus::Saving);
+        assert!(
+            controller.begin_resolution().is_none(),
+            "one resolution at a time"
+        );
+        // Another draft's late answer is not this one's.
+        let mut other = controller.draft().clone();
+        other.model_id = "model-other".to_owned();
+        assert!(!controller.finish_resolution(&tid, &other));
+        assert!(controller.finish_resolution(&tid, &query.configuration));
+        controller.on_configuration_refused("The approval value is unsupported.".to_owned());
+        assert_eq!(
+            controller.refusal(),
+            Some("The approval value is unsupported.")
+        );
+        assert_eq!(
+            controller.failure_operation(),
+            Some(EngineSettingsFailureOperation::Input)
+        );
+        controller.draft_mut().approval = "never".to_owned();
+        assert!(
+            controller
+                .apply_manual_configuration(&valid_document())
+                .is_ok()
+        );
+        assert_eq!(controller.refusal(), None);
+    }
+
+    fn valid_document() -> String {
+        sample_draft("default").to_document()
     }
 
     #[test]
@@ -379,7 +394,7 @@ mod tests {
         let (mut controller, tid, _) = ready_controller();
         let config = make_dirty_config(&mut controller);
         let request = request_id("request-a");
-        assert!(controller.begin_saving(tid.clone(), request.clone(), config.clone()));
+        assert!(controller.begin_direct_save(tid.clone(), request.clone(), config.clone()));
         assert_eq!(controller.status(), EngineSettingsStatus::Saving);
         let result = SetThreadEngineConfigResult {
             request_id: request,
@@ -404,7 +419,7 @@ mod tests {
         load_configured(&mut controller, &tid, 3, config);
         let new_config = make_dirty_config(&mut controller);
         let request = request_id("request-a");
-        assert!(controller.begin_saving(tid.clone(), request.clone(), new_config));
+        assert!(controller.begin_direct_save(tid.clone(), request.clone(), new_config));
         controller.on_conflict(tid.clone(), &request);
         assert_eq!(
             controller.status(),
@@ -465,7 +480,7 @@ mod tests {
         let (mut controller, tid, _) = ready_controller();
         let retained = make_dirty_config(&mut controller);
         let request = request_id("request-a");
-        assert!(controller.begin_saving(tid.clone(), request.clone(), retained.clone()));
+        assert!(controller.begin_direct_save(tid.clone(), request.clone(), retained.clone()));
         let stale_request = request_id("request-b");
         controller.on_save_failed(&tid, &stale_request, bridge_busy());
         controller.on_conflict(tid.clone(), &stale_request);
@@ -497,7 +512,7 @@ mod tests {
         let (mut controller, tid, _) = ready_controller();
         let retained = make_dirty_config(&mut controller);
         let draft_before = controller.draft().clone();
-        assert!(controller.begin_saving(tid, request_id("request-a"), retained,));
+        assert!(controller.begin_direct_save(tid, request_id("request-a"), retained,));
         assert!(!controller.can_cancel());
         controller.cancel();
         assert_eq!(controller.draft(), &draft_before);
@@ -546,7 +561,7 @@ mod tests {
         let (mut controller, tid, _) = ready_controller();
         let retained = make_dirty_config(&mut controller);
         let draft_before = controller.draft().clone();
-        assert!(controller.begin_saving(tid, request_id("request-a"), retained));
+        assert!(controller.begin_direct_save(tid, request_id("request-a"), retained));
         controller.on_save_admission_failed(bridge_busy());
         assert!(controller.pending_save_request_id().is_none());
         assert_eq!(controller.draft(), &draft_before);
@@ -593,7 +608,7 @@ mod tests {
         );
 
         let expected = sample_draft("default");
-        let document = manual_document(&expected);
+        let document = expected.to_document();
         assert_eq!(parse_manual_configuration(&document), Ok(expected.clone()));
 
         let unknown = template.replacen("profile_id=", "unknown=", 1);
@@ -621,22 +636,6 @@ mod tests {
         assert!(!format!("{:?}", controller.input_error()).contains("secret-profile"));
         assert_eq!(controller.draft(), &EngineSettingsDraft::default());
         assert!(!controller.can_save());
-    }
-
-    #[test]
-    fn empty_variant_is_the_only_explicit_absence() {
-        let mut draft = sample_draft("default");
-        assert!(
-            draft
-                .build_config(Some(&registered_present(&["default"])))
-                .is_ok()
-        );
-        draft.variant_id = " ".to_owned();
-        assert!(
-            draft
-                .build_config(Some(&registered_present(&["default"])))
-                .is_err()
-        );
     }
 
     #[test]

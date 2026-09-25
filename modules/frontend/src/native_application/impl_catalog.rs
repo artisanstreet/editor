@@ -57,6 +57,18 @@ impl NativeApplication {
                 selection,
                 result,
             } => return self.receive_selection_resolution(thread_id, selection, result, cx),
+            ForgeDecisionEvent::EngineConfigurationResolved {
+                thread_id,
+                configuration,
+                result,
+            } => {
+                return self.receive_configuration_resolution(
+                    &thread_id,
+                    &configuration,
+                    result,
+                    cx,
+                );
+            }
             ForgeDecisionEvent::SendRefused {
                 thread_id,
                 request_id,

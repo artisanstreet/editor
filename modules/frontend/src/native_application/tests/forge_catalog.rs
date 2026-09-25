@@ -348,3 +348,7 @@ mod forge_preferences;
 // Pushed usage and titles build on the same fixtures.
 #[path = "host_state_push.rs"]
 mod host_state_push;
+
+// The manual settings draft resolves through the Forge like a selection.
+#[path = "manual_settings.rs"]
+mod manual_settings;

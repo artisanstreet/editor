@@ -1288,3 +1288,47 @@ fn selection_resolution_round_trips_a_configuration_or_a_refusal() -> Result<(),
     }
     Ok(())
 }
+
+#[test]
+fn manual_configuration_resolution_round_trips_a_configuration_or_a_refusal()
+-> Result<(), Box<dyn Error>> {
+    let thread_id = ThreadId::parse("thread-manual")?;
+    let configuration = artisan_domain::ManualEngineConfiguration::from_config(&config(true));
+    let query = WireEnvelope {
+        protocol_version: artisan_protocol::ProtocolVersion::V1,
+        frame_id: FrameId::parse("resolve-manual")?,
+        sent_at: UnixMillis::from_millis(7),
+        body: WireEnvelopeBody::Request(ProtocolClientRequest::Query(
+            artisan_domain::Query::ResolveEngineConfiguration(
+                artisan_domain::ResolveEngineConfiguration {
+                    thread_id: thread_id.clone(),
+                    configuration: configuration.clone(),
+                },
+            ),
+        )),
+    };
+    assert!(decode_envelope(&encode_envelope(&query)?)? == query);
+    let refusal = artisan_domain::SubmissionRefusal::new(
+        artisan_domain::SubmissionRefusalKind::InvalidSelection,
+        "The approval value is unsupported. Your settings are preserved; correct it and save again.",
+    )?;
+    for outcome in [Ok(config(true)), Err(refusal)] {
+        let answer = WireEnvelope {
+            protocol_version: artisan_protocol::ProtocolVersion::V1,
+            frame_id: FrameId::parse("manual-resolved")?,
+            sent_at: UnixMillis::from_millis(8),
+            body: WireEnvelopeBody::Response(ServerResponse {
+                request_id: RequestId::parse("resolve-manual")?,
+                payload: ResponsePayload::EngineConfigurationResolved(
+                    artisan_domain::EngineConfigurationResolution {
+                        thread_id: thread_id.clone(),
+                        configuration: configuration.clone(),
+                        outcome,
+                    },
+                ),
+            }),
+        };
+        assert!(decode_envelope(&encode_envelope(&answer)?)? == answer);
+    }
+    Ok(())
+}

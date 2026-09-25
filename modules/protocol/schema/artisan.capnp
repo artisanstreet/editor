@@ -874,6 +874,10 @@ struct Request {
     readUserPreferences @42 :Void;
     recordNavigation @43 :RecordNavigationRequest;
     importLegacyPreferences @44 :ImportLegacyPreferencesRequest;
+
+    # Builds the configuration a manual settings document describes for a
+    # thread, without saving it. Fresh ordinal, existing ordinals frozen.
+    resolveEngineConfiguration @45 :ResolveEngineConfigurationRequest;
   }
 }
 
@@ -975,6 +979,9 @@ struct Response {
     # importLegacyPreferences. Fresh ordinals, existing ordinals frozen.
     userPreferences @41 :UserPreferences;
     legacyPreferencesImported @42 :LegacyPreferencesImported;
+
+    # Answer to resolveEngineConfiguration. Fresh ordinal.
+    engineConfigurationResolved @43 :EngineConfigurationResolution;
   }
 }
 
@@ -2650,4 +2657,21 @@ struct LegacyPreferencesImported {
 struct ThreadRetitled {
   threadId @0 :Text;
   title @1 :Text;
+}
+
+# A manual settings document: one `key=value` line per field, at most
+# 16 KiB. The Forge builds and validates the configuration.
+struct ResolveEngineConfigurationRequest {
+  threadId @0 :Text;
+  document @1 :Text;
+}
+
+# The document echoes the request so a late answer can be matched.
+struct EngineConfigurationResolution {
+  threadId @0 :Text;
+  document @1 :Text;
+  union {
+    resolved @2 :EngineRunConfig;
+    refused @3 :ComposerState.SubmissionRefusal;
+  }
 }

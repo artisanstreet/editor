@@ -615,65 +615,61 @@ impl NativeApplication {
         self.cancel_engine_settings(cx);
     }
 
-    /// Attempts to save the current draft when valid and visible.
+    /// Saves the manual settings draft: the Forge builds the configuration
+    /// it describes (or refuses it), and the answer is saved through the
+    /// shared direct save (`receive_configuration_resolution`).
     pub(super) fn save_engine_settings(&mut self, cx: &mut Context<Self>) {
-        let Some(thread_id) = self.selected_thread.clone() else {
+        let Some(query) = self.engine_settings.begin_resolution() else {
             return;
         };
-        if !self.engine_settings.can_save() {
+        let command = NativeTransportCommand::ForgeDecision(
+            crate::native_transport_service::ForgeDecisionCommand::ResolveEngineConfiguration(
+                query,
+            ),
+        );
+        if let Err(error) = self.submit_command(command) {
+            self.engine_settings
+                .on_save_admission_failed(command_failure(error));
+        }
+        self.sync_composer_model_policy(cx);
+        cx.notify();
+    }
+
+    /// Saves the configuration the Forge built from the manual draft, or
+    /// shows its refusal as it worded it.
+    pub(super) fn receive_configuration_resolution(
+        &mut self,
+        thread_id: &ThreadId,
+        configuration: &crate::engine_settings::EngineSettingsDraft,
+        result: Result<
+            Result<Box<artisan_domain::EngineRunConfig>, artisan_domain::SubmissionRefusal>,
+            ServiceFailure,
+        >,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .engine_settings
+            .finish_resolution(thread_id, configuration)
+        {
             return;
         }
-        let request_id = match create_save_request_id() {
-            Ok(id) => id,
-            Err(failure) => {
-                self.engine_settings.on_save_admission_failed(failure);
-                self.sync_composer_model_policy(cx);
-                cx.notify();
-                return;
-            }
-        };
-        let Some(command) = self.engine_settings.build_save_command(request_id) else {
-            self.engine_settings
-                .on_save_admission_failed(ServiceFailure {
-                    stage: ServiceFailureStage::Request,
-                    category: ServiceFailureCategory::InvalidConfiguration,
-                });
-            self.sync_composer_model_policy(cx);
-            cx.notify();
-            return;
-        };
-        let request_id = command.request_id().clone();
-        let retained_config = command.config().clone();
-        let Some(service) = self.service.clone() else {
-            self.engine_settings
-                .on_save_admission_failed(ServiceFailure {
-                    stage: ServiceFailureStage::EventBridge,
-                    category: ServiceFailureCategory::ChannelClosed,
-                });
-            self.sync_composer_model_policy(cx);
-            cx.notify();
-            return;
-        };
-        match service.submit(NativeTransportCommand::SetThreadEngineConfig(Box::new(
-            command,
-        ))) {
-            Ok(()) => {
-                if !self
-                    .engine_settings
-                    .begin_saving(thread_id, request_id, retained_config)
-                {
+        match result {
+            Ok(Ok(config)) => {
+                if !self.submit_direct_save(thread_id.clone(), *config) {
                     self.engine_settings
                         .on_save_admission_failed(ServiceFailure {
                             stage: ServiceFailureStage::Request,
-                            category: ServiceFailureCategory::Integrity,
+                            category: ServiceFailureCategory::InvalidConfiguration,
                         });
                 }
             }
-            Err(error) => self
+            Ok(Err(refusal)) => self
                 .engine_settings
-                .on_save_admission_failed(command_failure(error)),
+                .on_configuration_refused(refusal.message().to_owned()),
+            Err(failure) => self.engine_settings.on_save_admission_failed(failure),
         }
         self.sync_composer_model_policy(cx);
+        self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }
 

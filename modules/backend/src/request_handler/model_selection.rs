@@ -15,10 +15,10 @@
 use artisan_catalog::{NativeModelCatalog, NativeModelPolicy};
 use artisan_database::SetThreadEngineConfigInput;
 use artisan_domain::{
-    CatalogSelection, EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId,
-    EngineProfileId, EngineReadiness, EngineRunConfig, ModelSelectionResolution, RequestId,
-    ResolveModelSelection, RunId, SubmissionRefusal, SubmissionRefusalKind, SubmitComposerDraft,
-    ThreadId,
+    CatalogSelection, EngineConfigRevision, EngineConfigUpdatePrecondition,
+    EngineConfigurationResolution, EngineId, EngineProfileId, EngineReadiness, EngineRunConfig,
+    ModelSelectionResolution, RequestId, ResolveEngineConfiguration, ResolveModelSelection, RunId,
+    SubmissionRefusal, SubmissionRefusalKind, SubmitComposerDraft, ThreadId,
 };
 use artisan_protocol::{ProtocolFailure, ResponsePayload, RunLiveStatus, ServerResponse};
 
@@ -206,6 +206,41 @@ impl RequestHandler {
                 outcome: resolution,
             }),
         ))
+    }
+
+    /// Answers a manual configuration document: the configuration it
+    /// describes on one of the registered profiles, or the field that keeps
+    /// the Forge from building it. Nothing is saved.
+    pub(super) fn resolve_engine_configuration_outcome(
+        &self,
+        request_id: &RequestId,
+        query: &ResolveEngineConfiguration,
+    ) -> ServerResponse {
+        let registered = self
+            .registered_engine_profiles
+            .as_ref()
+            .and_then(|reader| reader.list_profiles().ok().flatten())
+            .unwrap_or_default();
+        let built =
+            crate::engine_selection::build_manual_config(&query.configuration, &registered)
+                .map_err(|error| {
+                    refusal(
+                        SubmissionRefusalKind::InvalidSelection,
+                        &format!(
+                            "The {} value is {}. Your settings are preserved; correct it and save again.",
+                            error.field(),
+                            error.reason()
+                        ),
+                    )
+                });
+        outcome(
+            request_id,
+            ResponsePayload::EngineConfigurationResolved(EngineConfigurationResolution {
+                thread_id: query.thread_id.clone(),
+                configuration: query.configuration.clone(),
+                outcome: built,
+            }),
+        )
     }
 
     /// Admits one draft submission, saving the selection's configuration

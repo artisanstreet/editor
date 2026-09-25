@@ -254,7 +254,11 @@ pub(crate) fn encode_request(
         ) => {
             encode_message_submission_request(builder, value)?;
         }
-        ClientRequest::Query(Query::ReadHostCatalog(_) | Query::ResolveModelSelection(_)) => {
+        ClientRequest::Query(
+            Query::ReadHostCatalog(_)
+            | Query::ResolveModelSelection(_)
+            | Query::ResolveEngineConfiguration(_),
+        ) => {
             encode_forge_decision_request(builder, value)?;
         }
         ClientRequest::Query(Query::ReadUserPreferences(_))
@@ -340,7 +344,9 @@ pub(crate) fn encode_response_payload(
         | ResponsePayload::ComposerDraftSubmitted(_) => {
             encode_message_submission_response(builder, payload, outer_request_id)?;
         }
-        ResponsePayload::HostCatalog(_) | ResponsePayload::ModelSelectionResolved(_) => {
+        ResponsePayload::HostCatalog(_)
+        | ResponsePayload::ModelSelectionResolved(_)
+        | ResponsePayload::EngineConfigurationResolved(_) => {
             encode_forge_decision_response(builder, payload)?;
         }
         ResponsePayload::UserPreferences(_) | ResponsePayload::LegacyPreferencesImported(_) => {
@@ -765,9 +771,9 @@ pub(crate) fn decode_request(
         | request::Which::SubmitComposerDraft(_) => {
             decode_message_submission_request(value, request_id)
         }
-        request::Which::ReadHostCatalog(()) | request::Which::ResolveModelSelection(_) => {
-            decode_forge_decision_request(value)
-        }
+        request::Which::ReadHostCatalog(())
+        | request::Which::ResolveModelSelection(_)
+        | request::Which::ResolveEngineConfiguration(_) => decode_forge_decision_request(value),
         request::Which::ReadUserPreferences(())
         | request::Which::RecordNavigation(_)
         | request::Which::ImportLegacyPreferences(_) => {
@@ -922,9 +928,9 @@ pub(crate) fn decode_response(
         | response::Which::ComposerDraftSubmitted(_) => {
             decode_message_submission_response(value, &request_id)?
         }
-        response::Which::HostCatalog(_) | response::Which::ModelSelectionResolved(_) => {
-            decode_forge_decision_response(value)?
-        }
+        response::Which::HostCatalog(_)
+        | response::Which::ModelSelectionResolved(_)
+        | response::Which::EngineConfigurationResolved(_) => decode_forge_decision_response(value)?,
         response::Which::UserPreferences(_) | response::Which::LegacyPreferencesImported(_) => {
             decode_user_preferences_response(value)?
         }

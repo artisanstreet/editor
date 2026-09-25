@@ -486,4 +486,6 @@ pub enum Query {
     ReadComposerAttachment(ReadComposerAttachment),
     /// See [`ReadUserPreferences`].
     ReadUserPreferences(ReadUserPreferences),
+    /// See [`ResolveEngineConfiguration`](crate::ResolveEngineConfiguration).
+    ResolveEngineConfiguration(crate::ResolveEngineConfiguration),
 }

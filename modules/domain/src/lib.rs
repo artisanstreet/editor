@@ -213,6 +213,12 @@ pub use composer_draft::{
 };
 pub use draft_submission::{ComposerDraftSubmitted, DraftSubmissionOutcome, SubmitComposerDraft};
 
+pub mod manual_engine_configuration;
+pub use manual_engine_configuration::{
+    EngineConfigurationResolution, MANUAL_CONFIGURATION_KEYS, MAX_MANUAL_CONFIGURATION_BYTES,
+    MAX_MANUAL_CONFIGURATION_LINES, ManualEngineConfiguration, ResolveEngineConfiguration,
+};
+
 pub mod user_preferences;
 pub use user_preferences::{
     AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,

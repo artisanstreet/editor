@@ -295,7 +295,8 @@ impl NativeTransportCommand {
             )
             | Self::ForgeDecision(
                 ForgeDecisionCommand::ReadHostCatalog
-                | ForgeDecisionCommand::ResolveModelSelection(_),
+                | ForgeDecisionCommand::ResolveModelSelection(_)
+                | ForgeDecisionCommand::ResolveEngineConfiguration(_),
             )
             | Self::Preferences(PreferencesCommand::Read)
             | Self::ReadActiveRun { .. }

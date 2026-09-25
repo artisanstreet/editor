@@ -37,6 +37,10 @@ pub struct EngineSettingsController {
     authoritative_revision: Option<EngineConfigRevision>,
     authoritative_config: Option<EngineRunConfig>,
     pending_save: Option<PendingSave>,
+    /// The draft the Forge is building into a configuration.
+    pending_resolution: Option<(ThreadId, EngineSettingsDraft)>,
+    /// Why the Forge refused the last draft, as it worded it.
+    refusal: Option<String>,
     registry_failure: Option<ServiceFailure>,
     settings_failure: Option<ServiceFailure>,
     save_failure: Option<ServiceFailure>,
@@ -61,6 +65,8 @@ impl EngineSettingsController {
             authoritative_revision: None,
             authoritative_config: None,
             pending_save: None,
+            pending_resolution: None,
+            refusal: None,
             registry_failure: None,
             settings_failure: None,
             save_failure: None,
@@ -138,7 +144,7 @@ impl EngineSettingsController {
     /// Returns the operation represented by the visible redacted failure.
     #[must_use]
     pub fn failure_operation(&self) -> Option<EngineSettingsFailureOperation> {
-        if self.input_error.is_some() {
+        if self.input_error.is_some() || self.refusal.is_some() {
             Some(EngineSettingsFailureOperation::Input)
         } else if self.save_failure.is_some() {
             Some(EngineSettingsFailureOperation::Save)
@@ -174,7 +180,7 @@ impl EngineSettingsController {
         if self.settings_load.conflict_refreshing {
             return EngineSettingsStatus::ConflictRefreshing;
         }
-        if self.pending_save.is_some() {
+        if self.pending_save.is_some() || self.pending_resolution.is_some() {
             return EngineSettingsStatus::Saving;
         }
         if self.failure_operation().is_some() {
@@ -207,11 +213,11 @@ impl EngineSettingsController {
         if !self.is_editable() || !self.is_dirty_internal() || self.input_error.is_some() {
             return false;
         }
-        let Some(RegisteredEngineProfilesResult::RegistryPresent { .. }) = self.registry.as_ref()
-        else {
-            return false;
-        };
-        self.draft.build_config(self.registry.as_ref()).is_ok()
+        // The Forge builds and validates the configuration on save.
+        matches!(
+            self.registry,
+            Some(RegisteredEngineProfilesResult::RegistryPresent { .. })
+        )
     }
 
     /// Returns whether Cancel may discard the local draft.
@@ -360,6 +366,8 @@ impl EngineSettingsController {
         self.settings_load.needed = thread_id.is_some();
         self.draft = EngineSettingsDraft::default();
         self.pending_save = None;
+        self.pending_resolution = None;
+        self.refusal = None;
         self.settings_load.conflict_refreshing = false;
         self.settings_failure = None;
         self.save_failure = None;
@@ -470,33 +478,59 @@ impl EngineSettingsController {
         true
     }
 
-    /// Marks a save in flight only after the exact command was admitted.
+    /// Starts saving the draft: the Forge first builds the configuration it
+    /// describes. Returns the resolution to ask for when Save is enabled.
     #[must_use]
-    pub fn begin_saving(
+    pub fn begin_resolution(&mut self) -> Option<artisan_domain::ResolveEngineConfiguration> {
+        if !self.can_save() {
+            return None;
+        }
+        let thread_id = self.selected_thread.clone()?;
+        self.pending_resolution = Some((thread_id.clone(), self.draft.clone()));
+        self.save_failure = None;
+        self.refusal = None;
+        Some(artisan_domain::ResolveEngineConfiguration {
+            thread_id,
+            configuration: self.draft.clone(),
+        })
+    }
+
+    /// Settles the resolution the Forge answered. Returns whether it is the
+    /// one this controller is waiting for.
+    #[must_use]
+    pub fn finish_resolution(
         &mut self,
-        pending_thread: ThreadId,
-        request_id: artisan_domain::RequestId,
-        retained: EngineRunConfig,
+        thread_id: &ThreadId,
+        configuration: &EngineSettingsDraft,
     ) -> bool {
-        if self.selected_thread.as_ref() != Some(&pending_thread)
-            || self.pending_save.is_some()
-            || !self.can_save()
+        if self
+            .pending_resolution
+            .as_ref()
+            .is_none_or(|(pending_thread, pending)| {
+                pending_thread != thread_id || pending != configuration
+            })
         {
             return false;
         }
-        self.pending_save = Some(PendingSave {
-            thread_id: pending_thread,
-            request_id,
-            retained,
-        });
-        self.save_failure = None;
-        self.input_error = None;
+        self.pending_resolution = None;
         true
+    }
+
+    /// Shows why the Forge refused the draft, as it worded it.
+    pub fn on_configuration_refused(&mut self, message: String) {
+        self.refusal = Some(message);
+    }
+
+    /// Why the Forge refused the last draft.
+    #[must_use]
+    pub fn refusal(&self) -> Option<&str> {
+        self.refusal.as_deref()
     }
 
     /// Records a Busy/Stopped save admission refusal without losing the draft.
     pub fn on_save_admission_failed(&mut self, failure: ServiceFailure) {
         self.pending_save = None;
+        self.pending_resolution = None;
         if self.selected_thread.is_some() {
             self.save_failure = Some(failure);
         }
@@ -532,6 +566,7 @@ impl EngineSettingsController {
         self.pending_save = None;
         self.save_failure = None;
         self.input_error = None;
+        self.refusal = None;
         self.settings_load.conflict_refreshing = false;
         self.needs_settings_reload = None;
     }
@@ -618,6 +653,7 @@ impl EngineSettingsController {
             self.draft = EngineSettingsDraft::default();
         }
         self.input_error = None;
+        self.refusal = None;
         self.save_failure = None;
     }
 
@@ -642,6 +678,7 @@ impl EngineSettingsController {
             && self.loading_thread.is_none()
             && self.active_settings_generation.is_none()
             && self.pending_save.is_none()
+            && self.pending_resolution.is_none()
             && !self.settings_load.conflict_refreshing
     }
 
@@ -686,47 +723,21 @@ impl EngineSettingsController {
         };
         self.draft = parsed;
         self.input_error = None;
+        self.refusal = None;
         self.save_failure = None;
         Ok(())
     }
 
-    /// Builds the pending `SetThreadEngineConfig` when Save is enabled.
+    /// Builds a pending `SetThreadEngineConfig` for a configuration the
+    /// Forge resolved (from the displayed selection or the manual draft).
     ///
     /// Caller must supply a fresh `RequestId` minted for this save. The
-    /// transport will retain it across one reconnect retry.
-    #[must_use]
-    pub fn build_save_command(
-        &self,
-        request_id: artisan_domain::RequestId,
-    ) -> Option<artisan_domain::SetThreadEngineConfig> {
-        if !self.can_save() {
-            return None;
-        }
-        let thread_id = self.selected_thread.clone()?;
-        let config = self.draft.build_config(self.registry.as_ref()).ok()?;
-        let precondition = self.authoritative_revision.map_or_else(
-            || artisan_domain::EngineConfigUpdatePrecondition::Unconfigured,
-            artisan_domain::EngineConfigUpdatePrecondition::Exact,
-        );
-        Some(artisan_domain::SetThreadEngineConfig::new(
-            request_id,
-            thread_id,
-            precondition,
-            config,
-        ))
-    }
-
-    /// Builds a pending `SetThreadEngineConfig` for an already validated
-    /// engine configuration, bypassing the `OpenCode` 2-shaped draft.
-    ///
-    /// Caller must supply a fresh `RequestId` minted for this save and a
-    /// configuration the Forge resolved from the displayed selection.
-    /// The compare-and-swap precondition is shared with
-    /// [`Self::build_save_command`]: `Unconfigured` while no authoritative
-    /// revision exists (first send), otherwise `Exact` on the authoritative
-    /// revision so a concurrent writer conflicts instead of being silently
-    /// overwritten. Returns [`None`] while no thread is selected, a save is
-    /// already in flight, or a conflict refresh is outstanding.
+    /// compare-and-swap precondition is `Unconfigured` while no
+    /// authoritative revision exists (first send), otherwise `Exact` on the
+    /// authoritative revision so a concurrent writer conflicts instead of
+    /// being silently overwritten. Returns [`None`] while no thread is
+    /// selected, a save is already in flight, or a conflict refresh is
+    /// outstanding.
     #[must_use]
     pub fn build_direct_save_command(
         &self,
