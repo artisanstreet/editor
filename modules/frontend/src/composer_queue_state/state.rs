@@ -543,7 +543,7 @@ impl ComposerQueueState {
         &mut self,
         message_id: MessageId,
         steer_run_id: Option<RunId>,
-        engine_label: Option<String>,
+        engine_label: Option<TurnEngineLabel>,
     ) {
         self.echo_watches
             .retain(|watch| watch.message_id() != &message_id);

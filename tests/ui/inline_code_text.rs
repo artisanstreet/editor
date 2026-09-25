@@ -6,8 +6,81 @@
 //! summary reduction.
 
 use artisan_ui::inline_code_text::{
-    InlineFragment, flatten_fragments, fragment_runs, inline_fragments, summary_line,
+    CLAUDE_LABEL_MAX_CHARS, InlineFragment, claude_label_line, flatten_fragments, fragment_runs,
+    inline_fragments, summary_line,
 };
+
+#[test]
+fn claude_label_accepts_unpunctuated_first_line_titles() {
+    assert_eq!(
+        claude_label_line("Recommending a modern tech stack for a SaaS product"),
+        Some("Recommending a modern tech stack for a SaaS product".to_owned())
+    );
+    // Later paragraphs never replace the first meaningful line.
+    assert_eq!(
+        claude_label_line("Checking the pair sums, 42+9=51\n\nIf interpreting the files"),
+        Some("Checking the pair sums, 42+9=51".to_owned())
+    );
+    assert_eq!(claude_label_line(""), None);
+    assert_eq!(claude_label_line("  \n\n\t"), None);
+}
+
+#[test]
+fn claude_label_skips_formatting_only_lines_and_strips_markdown() {
+    assert_eq!(
+        claude_label_line("```\n---\n***\n#\n>\n## **Planning** the `read` step\nbody"),
+        Some("Planning the read step".to_owned())
+    );
+    assert_eq!(
+        claude_label_line("- > Comparing [the margins](https://example.com/x) and ![chart](c.png)"),
+        Some("Comparing the margins and chart".to_owned())
+    );
+    assert_eq!(
+        claude_label_line("1. ~~Old~~ _new_   plan\twith   spaces"),
+        Some("Old new plan with spaces".to_owned())
+    );
+    assert_eq!(
+        claude_label_line("[ ] keep brackets [x] literal"),
+        Some("[ ] keep brackets [x] literal".to_owned())
+    );
+}
+
+#[test]
+fn claude_label_truncates_by_unicode_scalars_with_one_ellipsis() {
+    let exact = "\u{e9}".repeat(CLAUDE_LABEL_MAX_CHARS);
+    assert_eq!(claude_label_line(&exact), Some(exact.clone()));
+    let long = format!("{exact}\u{1f9e0}tail");
+    let label = claude_label_line(&long).expect("label");
+    assert_eq!(label.chars().count(), CLAUDE_LABEL_MAX_CHARS);
+    assert!(label.ends_with('\u{2026}'));
+    assert_eq!(label.matches('\u{2026}').count(), 1);
+    assert!(label.starts_with(&"\u{e9}".repeat(CLAUDE_LABEL_MAX_CHARS - 1)));
+}
+
+#[test]
+fn claude_label_grows_with_the_streaming_first_line() {
+    let arriving = [
+        "I",
+        "I'm chec",
+        "I'm checking pairw",
+        "I'm checking pairwise sums\n\nIf",
+    ];
+    let labels: Vec<String> = arriving
+        .iter()
+        .filter_map(|text| claude_label_line(text))
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            "I",
+            "I'm chec",
+            "I'm checking pairw",
+            "I'm checking pairwise sums"
+        ]
+    );
+    // The Codex reducer keeps its sentence policy for the same text.
+    assert_eq!(summary_line("I'm checking pairwise sums\n\nIf"), None);
+}
 
 fn plain(text: &str) -> InlineFragment {
     InlineFragment {

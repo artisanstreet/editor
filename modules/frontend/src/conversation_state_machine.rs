@@ -29,8 +29,8 @@ use crate::conversation_delivery_machine::{
 };
 use crate::conversation_scene::{
     AssistantPhase, ConversationScene, ItemProvenance, SceneBuildError, SceneDisclosure, SceneId,
-    SceneItem, SceneItemKind, SceneTurn, TurnFooterSettlement, TurnNarration as SceneTurnNarration,
-    TurnNarrationEntry, session_anchor_id,
+    SceneItem, SceneItemKind, SceneTurn, TurnEngineLabel, TurnFooterSettlement,
+    TurnNarration as SceneTurnNarration, TurnNarrationEntry, session_anchor_id,
 };
 use crate::conversation_turn_machine::{
     ConversationTurnController, StateKind, TurnError, TurnEvent, TurnNarration,
@@ -58,14 +58,15 @@ pub use types::*;
 pub struct ConversationStateController {
     delivery: ConversationDeliveryController,
     turns: BTreeMap<TurnId, ConversationTurnController>,
-    /// Send-time engine display labels keyed by turn.
+    /// Send-time engine metadata (typed engine plus display label) keyed
+    /// by turn.
     ///
     /// Display metadata only: labels never fabricate work, sessions, or
     /// lifecycle. Entries exist only for turns present in [`Self::turns`],
     /// so the map stays bounded by [`MAX_TURN_CONTROLLERS`]; labels for
     /// turns that leave the authoritative snapshot are pruned during
     /// synchronization.
-    turn_engine_labels: BTreeMap<TurnId, String>,
+    turn_engine_labels: BTreeMap<TurnId, TurnEngineLabel>,
     disclosures: BTreeMap<SceneId, DisclosureController>,
     facts: BTreeMap<SceneId, SceneFact>,
     viewport: ViewportController,

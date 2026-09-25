@@ -100,6 +100,10 @@ mod codex_activity_fixture;
 mod engine_owner_claude;
 
 #[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_claude_thinking.rs"]
+mod engine_owner_claude_thinking;
+
+#[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_cursor.rs"]
 mod engine_owner_cursor;
 

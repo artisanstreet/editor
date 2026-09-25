@@ -10,15 +10,17 @@ use artisan_frontend::{
 use artisan_domain::{
     AssistantBody, AssistantMessageItem, AssistantMessagePhase, ConversationCursor,
     ConversationItem, ConversationLifecycle, ConversationPatch, ConversationSnapshot,
-    ConversationTurn, IncrementalText, ItemId, ItemOrdinal, MessageBody, PatchBatch, PatchId,
-    PatchSequence, Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
+    ConversationTurn, EngineId, IncrementalText, ItemId, ItemOrdinal, MessageBody, PatchBatch,
+    PatchId, PatchSequence, Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis,
+    UserMessageItem,
 };
 
+use artisan_frontend::conversation_surface::SummaryLinePolicy;
 use conversation_delivery_machine::{
     ConversationDeliveryEffect, ConversationDeliveryEvent, DeliveryPhase,
 };
 use conversation_scene::{
-    FileChangeStatus, SceneDisclosure, SceneFileChange, SceneId, TurnBlock,
+    FileChangeStatus, SceneDisclosure, SceneFileChange, SceneId, TurnBlock, TurnEngineLabel,
     TurnNarration as SceneTurnNarration,
 };
 use conversation_state_machine::{
@@ -2307,6 +2309,91 @@ fn engine_label_names_waiting_row_and_clears() {
     let cleared = controller.drain_effects();
     assert_eq!(cleared.len(), 1);
     assert_eq!(turn_status_engine_label(&controller, TURN_A), None);
+}
+
+fn turn_status_engine(controller: &ConversationStateController, turn: &str) -> Option<EngineId> {
+    let scene = controller.scene().expect("scene builds");
+    scene
+        .turn_scene(&turn_id(turn))
+        .expect("turn present")
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            TurnBlock::TurnStatus(status) => Some(status.engine),
+            _ => None,
+        })
+        .expect("status present")
+}
+
+#[test]
+fn typed_turn_engine_travels_independently_of_its_display_label() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    delivered_snapshot(
+        &mut controller,
+        1,
+        100,
+        vec![make_turn_full(
+            TURN_A,
+            0,
+            0,
+            ConversationLifecycle::Pending,
+            90,
+            95,
+        )],
+        vec![make_user(USER_A, TURN_A, 1, "hi")],
+    );
+    // A Claude engine under another display label keeps its typed identity,
+    // so the Claude summary policy applies regardless of the label.
+    controller
+        .dispatch(ConversationStateEvent::SetTurnEngineLabel {
+            turn_id: turn_id(TURN_A),
+            engine_label: Some(TurnEngineLabel::new(
+                Some(EngineId::Claude),
+                "Codex".to_owned(),
+            )),
+        })
+        .expect("typed label sets");
+    assert_eq!(
+        turn_status_engine(&controller, TURN_A),
+        Some(EngineId::Claude)
+    );
+    assert_eq!(
+        turn_status_engine_label(&controller, TURN_A),
+        Some("Codex".to_owned())
+    );
+    assert_eq!(
+        SummaryLinePolicy::for_engine(turn_status_engine(&controller, TURN_A)),
+        SummaryLinePolicy::FirstLine
+    );
+    // And a "Claude" label on another engine keeps the sentence policy.
+    controller
+        .dispatch(ConversationStateEvent::SetTurnEngineLabel {
+            turn_id: turn_id(TURN_A),
+            engine_label: Some(TurnEngineLabel::new(
+                Some(EngineId::Codex),
+                "Claude".to_owned(),
+            )),
+        })
+        .expect("typed label replaces");
+    assert_eq!(
+        turn_status_engine(&controller, TURN_A),
+        Some(EngineId::Codex)
+    );
+    assert_eq!(
+        SummaryLinePolicy::for_engine(turn_status_engine(&controller, TURN_A)),
+        SummaryLinePolicy::Sentence
+    );
+    // A label-only update carries no engine identity at all.
+    controller
+        .on_turn_engine_label(turn_id(TURN_A), Some("Claude".to_owned()))
+        .expect("label-only sets");
+    assert_eq!(turn_status_engine(&controller, TURN_A), None);
+    // The roster constructor pairs an engine with its display name.
+    assert_eq!(
+        TurnEngineLabel::for_engine(EngineId::Claude).label(),
+        "Claude"
+    );
 }
 
 #[test]

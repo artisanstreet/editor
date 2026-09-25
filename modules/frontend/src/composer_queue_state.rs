@@ -26,6 +26,7 @@ use artisan_domain::{
     RunUsageReport, RunUsageResult, ThreadId, UnixMillis, WithdrawQueuedMessageCommand,
 };
 
+use crate::conversation_scene::TurnEngineLabel;
 use crate::native_composer::ComposerRecallTarget;
 
 // Phase-1 split submodules (see composer_queue_state/).

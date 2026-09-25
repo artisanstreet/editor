@@ -126,6 +126,32 @@ Review generated bindings with schema changes. `Cargo.lock` pins Rust crates and
 the compiler plugin; `rust-toolchain.toml` pins Rust; `flake.lock` pins Nixpkgs,
 the Rust overlay and Crane. Update those separately and rerun the gates.
 
+## Claude thinking captures
+
+Recapture before moving `CLAUDE_THINKING_DISPLAY_VERSION` or changing Claude
+thinking decoding (see the [decision](../decisions/CLAUDE_THINKING_DISPLAY.md)).
+Use the CLI Artisan resolves (`claude --version`), a signed-in account, and only
+effect-free prompts; each capture is a billed turn and adaptive thinking may
+skip a turn, so repeat until the scenario thinks.
+
+```sh
+S=$(python3 -c 'import uuid; print(uuid.uuid4())')
+python3 scripts/claude_thinking_capture.py capture --out /tmp/start.jsonl --session "$S" \
+  --prompt 'Read numbers.txt, think about which two values sum closest to 50, then answer in one sentence. Do not modify any file.'
+python3 scripts/claude_thinking_capture.py capture --out /tmp/resume.jsonl --session "$S" --resume \
+  --prompt 'Now think carefully about which pair sums closest to 60. One sentence.'
+python3 scripts/claude_thinking_capture.py capture --out /tmp/flagless.jsonl --display '' --prompt '...'
+python3 scripts/claude_thinking_capture.py sanitize /tmp/resume.jsonl \
+  tests/fixtures/claude/summarized-resume.jsonl --session fixture-session-resume
+```
+
+`capture` uses Artisan's managed argv plus `--thinking-display` and writes one
+`{"t_ms", "frame"}` record per stdout line; `sanitize` removes signatures,
+identifiers, paths, and environment inventories while keeping frame order.
+Record CLI version, model, argv, date, provider/auth category, and first-summary
+timing in `tests/fixtures/claude/manifest.json`, keep `constructed-*` edge
+fixtures labeled, then run `cargo test -p artisan-backend engine_owner_claude`.
+
 ## Packaging and signing
 
 ```sh

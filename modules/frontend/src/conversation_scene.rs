@@ -39,7 +39,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use artisan_domain::{ConversationLifecycle, ItemId, RunId, TurnId};
+use artisan_domain::{ConversationLifecycle, EngineId, ItemId, RunId, TurnId};
 use thiserror::Error;
 
 /// Maximum turn descriptors per scene (count).

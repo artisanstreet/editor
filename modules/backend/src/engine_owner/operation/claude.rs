@@ -76,6 +76,12 @@ pub(super) async fn execute_claude_turn(
     let super::super::InternalLaunch::Claude(launch) = &request.input.launch else {
         return request.fail(EngineOperationError::Configuration);
     };
+    // The effective thinking display resolves once from the verified launch
+    // capability and applies identically to fresh starts and resumes; older
+    // CLIs keep their existing arguments.
+    let settings = settings.with_thinking_display(
+        claude_runtime::ClaudeThinkingDisplay::for_support(launch.thinking_display()),
+    );
     // L3 continuation gate: same-engine is fenced by the dispatcher (claude
     // bindings only); the owner additionally requires an explicit target
     // model and CLI >= 2.1.220. Anything else is typed incompatible — never
@@ -245,7 +251,10 @@ pub(super) async fn execute_claude_turn(
     }
 
     // streaming pump ----------------------------------------------------------
-    let mut tracker = claude_runtime::ClaudePendingTracker::new();
+    // Run-local tracking: a resumed session never inherits a previous run's
+    // thinking stretches.
+    let mut tracker =
+        claude_runtime::ClaudePendingTracker::with_thinking_display(settings.thinking_display());
     let mut active_turn: Option<String> = None;
     let mut frame_sequence: u64 = 0;
     let mut last_activity = Instant::now();

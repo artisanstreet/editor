@@ -326,13 +326,13 @@ impl NativeApplication {
     /// Capture the configuration already submitted on the ordered command
     /// stream, including a first-send save whose acknowledgement is pending.
     /// The picker can change later without relabeling this send.
-    pub(super) fn send_engine_label(&self) -> Option<String> {
+    pub(super) fn send_engine_label(&self) -> Option<TurnEngineLabel> {
         let config = self
             .engine_settings
             .pending_save()
             .map(|(_, config)| config)
             .or_else(|| self.engine_settings.authoritative_config())?;
-        Some(profile_usage_display_name(config.selection().engine_id().as_str()).to_owned())
+        Some(TurnEngineLabel::for_engine(config.selection().engine_id()))
     }
 
     pub(super) fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
