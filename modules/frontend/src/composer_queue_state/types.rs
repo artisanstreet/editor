@@ -68,6 +68,10 @@ pub(crate) struct ComposerQueueEntry {
 }
 
 impl ComposerQueueEntry {
+    pub(crate) fn attachments(&self) -> &[ImageAttachmentRef] {
+        &self.attachments
+    }
+
     pub(super) fn from_summary(
         summary: &artisan_domain::QueuedMessageSummary,
         generation: u64,
@@ -161,6 +165,10 @@ pub(crate) struct FailedQueueEntry {
 }
 
 impl FailedQueueEntry {
+    pub(crate) fn accepted_at(&self) -> UnixMillis {
+        self.accepted_at
+    }
+
     pub(super) fn from_summary(summary: &FailedMessageSummary, generation: u64) -> Option<Self> {
         if summary.attachments.len() > artisan_domain::MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT {
             return None;

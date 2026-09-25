@@ -65,6 +65,20 @@ pub(crate) fn project_controls_snapshot(
     }
 }
 
+/// Suppresses old attempts without deleting the recoverable failed payloads.
+pub(crate) fn hide_failures_before(
+    state: &ComposerQueueState,
+    snapshot: &mut NativeComposerControlsSnapshot,
+    latest: Option<artisan_domain::UnixMillis>,
+) {
+    snapshot.failed_dispatches.retain(|row| {
+        state.failed_entries().iter().any(|entry| {
+            entry.identity().command_id() == row.command_id()
+                && latest.is_none_or(|latest| entry.accepted_at() >= latest)
+        })
+    });
+}
+
 fn native_context_usage_for(
     state: &ComposerQueueState,
     current_run_id: Option<&str>,
@@ -306,6 +320,32 @@ mod tests {
             }],
         )
         .expect("failed page")
+    }
+
+    #[test]
+    fn newer_accepted_message_hides_stale_failure_without_discarding_payload() {
+        let thread_id = thread("thread-a");
+        let mut state = ComposerQueueState::new();
+        state.set_scope(Some(thread_id.clone()), 9);
+        let token = state.begin_failed_refresh(true, true, false, true).unwrap();
+        state
+            .apply_failed_listing(&token, &failed_page(&thread_id))
+            .unwrap();
+        let mut snapshot = NativeComposerControlsSnapshot::default();
+        project_controls_snapshot(&state, &mut snapshot, true);
+        hide_failures_before(&state, &mut snapshot, Some(UnixMillis::EPOCH));
+        assert_eq!(
+            snapshot.failed_dispatches.len(),
+            1,
+            "current failure stays actionable"
+        );
+        hide_failures_before(&state, &mut snapshot, Some(UnixMillis::from_millis(1)));
+        assert!(snapshot.failed_dispatches.is_empty());
+        assert_eq!(
+            state.failed_entries().len(),
+            1,
+            "recovery payload remains stored"
+        );
     }
 
     #[test]

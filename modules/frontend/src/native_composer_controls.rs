@@ -936,7 +936,8 @@ impl NativeComposerControls {
             .flex()
             .flex_col()
             .gap(px(8.0));
-        for (index, row) in rows.into_iter().enumerate() {
+        for (index, row) in rows.into_iter().take(1).enumerate() {
+            let cancelled = row.reason == "run cancelled";
             let row_index = isize::try_from(index).unwrap_or(isize::MAX);
             let tab_index = 30isize.saturating_add(row_index);
             let focus = self.failed_focus(&row.identity, tab_index, cx);
@@ -983,13 +984,25 @@ impl NativeComposerControls {
                     div()
                         .text_size(theme.typography.control_text)
                         .text_color(desktop_theme.foreground)
-                        .child("Send failed"),
+                        .child(if cancelled {
+                            "Message not sent"
+                        } else {
+                            "Send failed"
+                        }),
                 )
                 .child(
                     div()
                         .text_size(theme.typography.control_text)
                         .text_color(desktop_theme.secondary)
-                        .child(row.reason.clone()),
+                        .child(if cancelled {
+                            "The run was stopped before this queued message was sent.".into()
+                        } else {
+                            if row.reason == "OpenCode2 provider turn interrupted" {
+                                "The provider session was interrupted.".into()
+                            } else {
+                                row.reason.clone()
+                            }
+                        }),
                 );
             if !row.text.is_empty() {
                 body = body.child(
@@ -1023,7 +1036,11 @@ impl NativeComposerControls {
                 .gap(px(12.0))
                 .rounded(px(14.0))
                 .border_1()
-                .border_color(theme.colors.destructive.with_alpha(0.4).to_paint())
+                .border_color(if cancelled {
+                    desktop_theme.secondary
+                } else {
+                    theme.colors.destructive.with_alpha(0.4).to_paint()
+                })
                 .bg(desktop_theme.field)
                 .px(px(16.0))
                 .py(px(12.0))

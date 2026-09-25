@@ -24,7 +24,10 @@ fn mount_composer(
         let controls = cx.new(|cx| NativeComposerControls::new(snapshot, cx));
         let picker = cx.new(|cx| {
             NativeModelSelector::new(
-                NativeModelCatalog::offline().unwrap(),
+                NativeModelCatalog::from_manifest_json(include_str!(
+                    "../../../tests/fixtures/model_catalog.json"
+                ))
+                .unwrap(),
                 None,
                 ThemeMode::Dark,
                 cx,
@@ -83,13 +86,10 @@ fn composer_controls_keep_equal_edge_insets_as_the_draft_grows(cx: &mut TestAppC
     }
 }
 
-/// Reference empty box (`thread-composer.svelte:553-587`): 8px card padding
-/// around a 64px editor base and a 32px control row under the 128px card
-/// minimum. The base sums to 8 + 64 + 32 + 8 = 112, so the minimum binds
-/// the card at 128 and the 16px slack goes entirely to the `flex-1`
-/// editor: the empty editor paints 80px, the card exactly 128px.
+/// The compact empty box keeps 8px card padding, a 64px editor, and a 32px
+/// control row. Their combined height is 112px without unused flex space.
 #[gpui::test]
-fn composer_empty_card_matches_the_reference_128px_box(cx: &mut TestAppContext) {
+fn composer_empty_card_has_no_extra_flex_space(cx: &mut TestAppContext) {
     let (_view, cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
     cx.simulate_resize(size(px(900.0), px(600.0)));
     cx.run_until_parked();
@@ -97,14 +97,14 @@ fn composer_empty_card_matches_the_reference_128px_box(cx: &mut TestAppContext) 
     let card = cx.debug_bounds("artisan-native-composer").unwrap();
     assert_eq!(
         card.size.height,
-        px(128.0),
-        "empty composer must render the 128px reference minimum, got {card:?}"
+        px(112.0),
+        "empty composer should fit its editor and controls, got {card:?}"
     );
     let editor = cx.debug_bounds(NATIVE_COMPOSER_EDITOR_SELECTOR).unwrap();
     assert_eq!(
         editor.size.height,
-        px(80.0),
-        "flex-1 editor absorbs the 16px card slack over its 64px base, got {editor:?}"
+        px(64.0),
+        "empty editor should keep its 64px base, got {editor:?}"
     );
     assert_eq!(editor.top() - card.top(), px(8.0));
     assert_eq!(editor.left() - card.left(), px(8.0));

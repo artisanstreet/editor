@@ -238,24 +238,17 @@ impl NativeComposer {
     pub(super) fn spawn_attachment_work(&mut self, work: AttachmentWork, cx: &mut Context<Self>) {
         // Task handles cancel their futures when dropped. Completed handles do
         // not need to remain in the composer, so retire them before every new
-        // piece of attachment work. The draft generation and attachment IDs
-        // below remain the authoritative completion fences for work that is
-        // still running.
+        // piece of attachment work. Its generation follows a moved prompt;
+        // restoring a different draft changes it and rejects stale results.
         self.prune_attachment_tasks();
-        let generation = self.draft_generation;
-        let thread = self.draft_thread.clone();
+        let generation = self.attachment_work_generation;
         let task = cx.spawn(async move |this, cx| {
             let outcomes = cx
                 .background_executor()
                 .spawn(async move { work.run() })
                 .await;
             this.update(cx, |composer, composer_cx| {
-                composer.apply_attachment_outcomes(
-                    thread.as_deref(),
-                    generation,
-                    outcomes,
-                    composer_cx,
-                );
+                composer.apply_attachment_outcomes(generation, outcomes, composer_cx);
             })
             .ok();
         });
@@ -264,12 +257,11 @@ impl NativeComposer {
 
     fn apply_attachment_outcomes(
         &mut self,
-        thread: Option<&str>,
         generation: u64,
         outcomes: Vec<AttachmentPreparationOutcome>,
         cx: &mut Context<Self>,
     ) {
-        if generation != self.draft_generation || thread != self.draft_thread.as_deref() {
+        if generation != self.attachment_work_generation {
             self.prune_attachment_tasks();
             return;
         }

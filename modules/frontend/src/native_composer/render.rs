@@ -492,16 +492,15 @@ impl Render for NativeComposer {
         };
 
         let drop_entity = entity.clone();
-        // Reference (`thread-composer.svelte:553`): `flex min-h-32 flex-col
-        // p-2`. No gaps: the tray carries its own open padding, the editor
-        // its own py, and the control row sits directly below.
+        // The 112px minimum fits the 64px editor, 32px controls, and 8px
+        // padding on each edge. The tray carries its own open padding.
         let mut root = div()
             .id("artisan-native-composer")
             .debug_selector(|| "artisan-native-composer".to_owned())
             .w_full()
             .flex()
             .flex_col()
-            .min_h(px(128.0))
+            .min_h(px(112.0))
             .p(px(8.0))
             .rounded(px(18.0))
             .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))

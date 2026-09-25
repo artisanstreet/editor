@@ -165,6 +165,7 @@ pub(crate) struct NativeComposer {
     active_attachment_submission: Option<NativeComposerAttachmentSnapshot>,
     active_submission_draft_revision: Option<u64>,
     attachment_tasks: Vec<Task<()>>,
+    attachment_work_generation: u64,
     next_attachment_id: u64,
     draft_store: InMemoryComposerDraftStore,
     draft_thread: Option<String>,
@@ -230,6 +231,7 @@ impl NativeComposer {
             active_attachment_submission: None,
             active_submission_draft_revision: None,
             attachment_tasks: Vec::new(),
+            attachment_work_generation: 0,
             next_attachment_id: 0,
             draft_store: InMemoryComposerDraftStore::new(),
             draft_thread: None,
@@ -276,6 +278,11 @@ impl NativeComposer {
 
     fn invalidate_component_render(cx: &mut Context<Self>) {
         cx.notify();
+    }
+
+    pub(crate) fn has_unsent_draft(&self) -> bool {
+        !self.state.is_submitting()
+            && (!self.state.draft().is_empty() || !self.attachments.is_empty())
     }
 
     #[cfg(test)]
@@ -330,6 +337,11 @@ impl NativeComposer {
         self.draft_thread == scope.thread
             && self.draft_generation == scope.draft_generation
             && self.selection_revision == scope.selection_revision
+    }
+
+    /// Changes whenever the draft content or its thread scope changes.
+    pub(crate) fn send_draft_identity(&self) -> (u64, u64) {
+        (self.draft_generation, self.draft_revision)
     }
 
     /// Captures the exact empty-composer scope that may receive one queued
@@ -447,6 +459,7 @@ impl NativeComposer {
         // this restore, but dropping the handles also cancels any clipboard
         // read that was still pending while the composer was empty.
         self.attachment_tasks.clear();
+        self.attachment_work_generation = self.attachment_work_generation.saturating_add(1);
         self.draft_generation = self.draft_generation.saturating_add(1);
         self.draft_revision = self.draft_revision.saturating_add(1);
         self.selection_revision = self.selection_revision.saturating_add(1);
@@ -496,10 +509,14 @@ impl NativeComposer {
             return;
         }
 
+        let previous_thread = self.draft_thread.clone();
         self.persist_current_draft();
         self.draft_generation = self.draft_generation.saturating_add(1);
         self.draft_thread = Some(thread.to_owned());
-        self.attachment_tasks.clear();
+        if !carry_draft {
+            self.attachment_tasks.clear();
+            self.attachment_work_generation = self.attachment_work_generation.saturating_add(1);
+        }
         self.selection_dragging = false;
         self.selection_anchor = None;
         self.clear_vertical_goal();
@@ -509,10 +526,11 @@ impl NativeComposer {
         self.clear_attachment_preview();
 
         if carry_draft {
-            // A pending source belongs to the old generation. It is not safe
-            // to let its completion enter the newly selected thread.
-            self.attachments.retain(ComposerAttachment::is_ready);
-            self.attachment_error = None;
+            // The same prompt owns its in-progress image preparation even
+            // after it moves. Ordinary thread changes cancel that work above.
+            if let Some(previous_thread) = previous_thread {
+                ComposerDraftSession::for_key(previous_thread).clear(&mut self.draft_store);
+            }
             self.persist_current_draft();
         } else {
             self.attachments.clear();
