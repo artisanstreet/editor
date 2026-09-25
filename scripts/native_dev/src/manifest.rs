@@ -47,6 +47,13 @@ pub fn write_payload_manifest(version_root: &std::path::Path) -> Result<(), DevE
         let digest = hash_file(&version_root.join(&relative))?;
         files.insert(relative, digest);
     }
+    let identity = version_root.join(artisan_build_info::RESOURCE_PATH);
+    if identity.is_file() {
+        files.insert(
+            artisan_build_info::RESOURCE_PATH.to_owned(),
+            hash_file(&identity)?,
+        );
+    }
     let document = serde_json::json!({
         "format_version": 1,
         "files": files,

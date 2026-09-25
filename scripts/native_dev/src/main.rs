@@ -9,13 +9,33 @@
 
 use std::time::Duration;
 
+use std::path::PathBuf;
+
 use native_dev::{
-    Action, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, InstanceOutcome,
-    ReadinessReconcile, StartupWait, clear_stale_receipt, fresh_receipt_path, locate_binaries,
-    provision_forge_home, provision_manifest, reconcile_stale_readiness, refuse_live_forge,
-    resolve_dev_dir, spawn_editor, stage_binaries, stage_line, staged_editor, staged_forge,
-    stop_editor, usage, wait_for_startup,
+    Action, BinarySet, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, GitState,
+    InstanceOutcome, ReadinessReconcile, StartupWait, WORKSPACE_ENV, clear_stale_receipt,
+    dev_build_info, fresh_receipt_path, locate_binaries, provision_forge_home, provision_manifest,
+    reconcile_stale_readiness, refuse_live_forge, resolve_dev_dir, spawn_editor, stage_line,
+    stage_payload, staged_editor, staged_forge, stop_editor, usage, wait_for_startup,
 };
+
+/// Checkout the staged binaries were built from: the explicit workspace,
+/// else the working directory (both scripts run from the checkout).
+fn source_checkout() -> PathBuf {
+    std::env::var_os(WORKSPACE_ENV)
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default()
+}
+
+/// Cargo output directory holding the located binaries.
+fn binaries_dir(binaries: &BinarySet) -> PathBuf {
+    binaries
+        .editor
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default()
+}
 
 /// Number of stages in a full stage-and-launch run.
 const FULL_STAGES: u32 = 7;
@@ -92,7 +112,11 @@ fn run() -> Result<u8, Outcome> {
     };
     println!("{}", stage_line(4, total, "provision", detail));
 
-    let counts = stage_binaries(&binaries, &paths).map_err(|error| {
+    let identity = dev_build_info(
+        &GitState::read(&source_checkout()),
+        &binaries_dir(&binaries),
+    );
+    let counts = stage_payload(&binaries, Some(&identity), &paths).map_err(|error| {
         eprintln!("dev: error: {error}");
         eprintln!("dev: hint: the active version is untouched; fix the cause and retry");
         Outcome::Failure
@@ -103,7 +127,10 @@ fn run() -> Result<u8, Outcome> {
             5,
             total,
             "stage",
-            &format!("{} rewritten, {} reused", counts.rewritten, counts.reused),
+            &format!(
+                "{} rewritten, {} reused; {}",
+                counts.rewritten, counts.reused, identity.version
+            ),
         )
     );
 

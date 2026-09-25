@@ -161,14 +161,34 @@ pub struct StageCounts {
 /// Returns [`DevError::Stage`] or [`DevError::PayloadUnverified`] when any
 /// step fails; the active version and dev data are left untouched.
 pub fn stage_binaries(set: &BinarySet, paths: &DevPaths) -> Result<StageCounts, DevError> {
-    let result = stage_binaries_inner(set, paths);
+    stage_payload(set, None, paths)
+}
+
+/// Stages the binaries like [`stage_binaries`] plus, when given, the build
+/// identity document at [`artisan_build_info::RESOURCE_PATH`], which the
+/// payload manifest then covers like every binary.
+///
+/// # Errors
+///
+/// Returns [`DevError::Stage`] or [`DevError::PayloadUnverified`] when any
+/// step fails; the active version and dev data are left untouched.
+pub fn stage_payload(
+    set: &BinarySet,
+    identity: Option<&artisan_build_info::BuildInfo>,
+    paths: &DevPaths,
+) -> Result<StageCounts, DevError> {
+    let result = stage_payload_inner(set, identity, paths);
     if result.is_err() {
         let _ = fs::remove_dir_all(paths.staging_root());
     }
     result
 }
 
-fn stage_binaries_inner(set: &BinarySet, paths: &DevPaths) -> Result<StageCounts, DevError> {
+fn stage_payload_inner(
+    set: &BinarySet,
+    identity: Option<&artisan_build_info::BuildInfo>,
+    paths: &DevPaths,
+) -> Result<StageCounts, DevError> {
     // Capture the source digests first: activation later asserts the
     // staged bytes equal these, so a corrupt copy or a tampered scratch
     // tree can never be "verified" against its own bytes.
@@ -203,6 +223,16 @@ fn stage_binaries_inner(set: &BinarySet, paths: &DevPaths) -> Result<StageCounts
                 stage: "stage",
                 reason: format!("staged copy does not match source: {}", staged.display()),
             });
+        }
+    }
+    if let Some(identity) = identity {
+        let bytes = identity.to_json();
+        let relative = artisan_build_info::RESOURCE_PATH;
+        write_atomic(&staging.join(relative), &bytes, "stage")?;
+        if fs::read(paths.version_root.join(relative)).is_ok_and(|current| current == bytes) {
+            reused += 1;
+        } else {
+            rewritten += 1;
         }
     }
     write_payload_manifest(&staging)?;

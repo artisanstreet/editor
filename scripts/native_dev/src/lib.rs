@@ -23,6 +23,7 @@
 pub mod args;
 pub mod binaries;
 pub mod error;
+pub mod identity;
 pub mod launch;
 pub mod manifest;
 pub mod paths;
@@ -32,6 +33,7 @@ pub mod stage;
 pub use args::{Action, DevArgs, usage};
 pub use binaries::{BinarySet, locate_binaries, locate_in_dir};
 pub use error::DevError;
+pub use identity::{GitState, dev_build_info, dev_version, profile_for_bin_dir, runner_target};
 pub use launch::{
     DEV_STARTUP_POLL_MS, DEV_STARTUP_TIMEOUT_MS, MAX_RECEIPT_TEXT, ReadinessReconcile,
     STARTUP_RECEIPT_ENV, STARTUP_RECEIPT_SCHEMA, StartupWait, clear_stale_receipt,
@@ -55,7 +57,8 @@ pub use provision::{
     dev_run_config, provision_forge_home,
 };
 pub use stage::{
-    DevLock, StageCounts, hash_file, stage_binaries, staged_relative_names, write_atomic,
+    DevLock, StageCounts, hash_file, stage_binaries, stage_payload, staged_relative_names,
+    write_atomic,
 };
 
 /// Formats one completed stage line (plain text, no TTY codes).

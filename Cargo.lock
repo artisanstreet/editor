@@ -111,6 +111,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "ae-installer"
 version = "0.0.0"
 dependencies = [
+ "artisan-build-info",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -571,6 +572,7 @@ dependencies = [
 name = "artisan-editor-cli"
 version = "0.0.0"
 dependencies = [
+ "artisan-build-info",
  "artisan-domain",
  "artisan-native-engine",
  "artisan-protocol",
@@ -636,6 +638,7 @@ dependencies = [
 name = "artisan-native-dev"
 version = "0.0.0"
 dependencies = [
+ "artisan-build-info",
  "artisan-editor-cli",
  "fs2",
  "serde_json",
