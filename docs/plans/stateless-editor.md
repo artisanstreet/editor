@@ -1,6 +1,6 @@
 # Stateless Editor, single host connection, and connection holds
 
-- Status: approved 2026-09-25; implementation in progress (steps 0, 2, 3, 4, 5 and 6 implemented)
+- Status: complete (approved 2026-09-25; steps 0 to 7 implemented)
 - Scope: where Editor state may live, how the Editor connects to exactly one Forge, and how
   in-flight work keeps that connection open until it resolves
 
@@ -307,6 +307,63 @@ Implemented (step 6), business decisions to the Forge:
 - Left for step 7: run usage is still polled while a run is live, and the OpenCode settings
   editor still saves a configuration it assembles from the managed registry.
 
+Implemented (step 7), preferences and navigation, and the step 6 gaps:
+
+- User preferences: the Forge serves one account, so its preferences are a singleton (migration
+  `m20260929_000019_user_preferences`): the default engine configuration, the last route (project
+  and open thread) and a revision that grows with every change. `navigation_projects` keeps one
+  row per used project with its recency (the revision at its last use, so the order needs no
+  clock) and the thread last open in it; deleting a project or thread clears its references.
+  Protocol: `readUserPreferences` (Request @42) and `recordNavigation` (@43) answer
+  `userPreferences` (Response @41); `importLegacyPreferences` (@44) answers
+  `legacyPreferencesImported` (@42). `UserPreferences` carries the default configuration, the
+  projects in most-recently-used order with their last threads, the route, and the account.
+- Default model: a configuration the user saves on a thread (`SetThreadEngineConfig`, or the
+  selection a send saves) becomes the default; a thread without its own configuration shows it.
+  Choosing a model writes nothing in the Editor.
+- Navigation: the Editor reads the preferences before the project listing; a new connection
+  orders its projects by the Forge's record, selects the last route's project and opens the
+  thread last open in it. Every change is reported with `RecordNavigation` once, under a
+  `Preferences` connection hold, so a report made before quitting or switching still lands.
+- Legacy import: on its first read of a host's preferences the Editor hands the older Editor's
+  `ui/last-used-model` (when the Forge has no default) and that host's project order (when the
+  Forge has no record) to the Forge and removes the files once it answered. The Forge fills only
+  what it lacks: the model is resolved against its catalog, the order is adopted only when no
+  project was used yet, unknown projects dropped. The old fallback that wrote a project order into
+  a host's credential folder is gone with `native_last_used.rs`; the file-write guard allows only
+  `editor_settings/storage.rs` and the two opt-in development writers, pinned by a test.
+- Account identity: the profile name and host come from the account the connected Forge runs as
+  (`account_profile.rs`), and `ArtisanAccountIdentity` is installed from it; the Editor no longer
+  reads `USERNAME`/`COMPUTERNAME` for them. The local machine tile's avatar seed stays the local
+  machine's name: tile presentation shown before any connection, never the account. The host
+  catalog memo (`native_hosts/catalog.rs`) is documented as a presentation cache of what the
+  credential store says, holding no domain state.
+- Pushes on the delivery stream: the Event union gains `accountUsage` @6, `userPreferences` @7,
+  `threadRetitled` @8 and `runUsage` @9. The commit notifier carries a host-state revision beside
+  its commit wakes; each delivery driver pushes every engine's usage with its readiness verdict
+  (one snapshot per engine) from the connection's first request, preferences when they change
+  after the Editor read them, a thread's display title when a wake finds it changed, and a live
+  run's usage (with its compaction threshold) when it differs from the last push. The Forge owns
+  the usage cadence: while a driver listens it re-reads each engine a minute before its 180 s
+  report goes stale. Removed from the Editor: every usage read that was not the user's (profile
+  menu, machine list, Settings, thread selection, catalog load, picker retry, refused sends) and
+  the five-second composer usage timer. The explicit refresh controls still force a read.
+- OpenCode settings editor: the manual settings document is `ManualEngineConfiguration` in the
+  domain; the Forge builds and validates a configuration from it
+  (`engine_selection/manual.rs`). `resolveEngineConfiguration` (Request @45) answers
+  `engineConfigurationResolved` (Response @43) with the built configuration or a refusal naming
+  the first invalid field; the Editor saves exactly what the Forge built through the shared save.
+- Picked images up to 32 MiB again: an image larger than one 4 MiB chunk uploads in chunks
+  (`ComposerAttachmentChunk`, `UploadComposerAttachment.chunk`) keyed by the digest of the whole
+  image under request ids derived from the stable one; the Forge keeps them in
+  `composer_attachment_upload_chunks` (migration `m20260930_000020_chunked_composer_attachments`,
+  which also raises the store bound to 32 MiB), assembles and verifies the image, and prunes an
+  abandoned upload after the 24 h grace period. `ComposerAttachmentUploaded.pendingBytes` reports
+  the bytes still missing. Reads name a window (`offset`, `maxBytes`, answered with `totalBytes`
+  and `offset`, at most one chunk) and the Editor verifies the joined image against its digest.
+  `QueueStoredMessage` fits its images to the thread's engine like a draft send, so it is no
+  longer bound to 5 MiB per image.
+
 ## 5. Forge resilience prerequisites
 
 - A single failing request must not end the Forge serve loop; fail that connection only.
@@ -323,3 +380,23 @@ Implemented (step 6), business decisions to the Forge:
 5. Forge-accepted submissions; remove optimistic, retry, pending-send and recovery state.
 6. Business decisions to the Forge.
 7. Preferences and navigation to the Forge; remove the last Editor-side domain files.
+
+## 7. Editor state inventory
+
+What the Editor keeps after step 7, and why each is not Forge state:
+
+| State | Where | Why it stays |
+| --- | --- | --- |
+| FPS limit, FPS overlay, "reopen last host" hint | Editor pool (`editor_settings`) | Device-local presentation, or needed before any Forge connection exists |
+| Host invitations, TLS pins, reconnect capabilities | Credentials module | Connection bootstrap material, neither pool |
+| Machine menu memo (name, home, subtitle, avatar seed per host) | `native_hosts/catalog.rs` | Presentation cache rebuilt from the credential store on every refresh; the local tile's avatar seed is the local machine's name |
+| Composer view: text being typed, undo and redo, thumbnails, the per-scope save chain | `native_composer*`, `composer_draft_sync.rs` | View history and in-flight saves; the Forge draft is the stored copy |
+| Last draft revision the Forge reported per scope | `composer_draft_sync.rs` | Echo of Forge data, so a send names the revision it saved |
+| Listings, catalogs, usage rows, preferences, outbox and transcript projections | Application and view state | Renders of Forge data, replaced by each read or push and dropped on switch |
+| Selection, scroll, focus, open menus, animations | View state | Ephemeral view state |
+| Connection holds and in-flight request ids | Transport | Liveness of work in flight, not stored |
+| Dev startup receipt, frame capture | Opt-in development writers | Development tooling, allowed by the file-write guard |
+
+Still pulled rather than pushed (cadence only, the data is the Forge's): the sidebar re-reads its
+project's thread listing every 1.5 s, and the host catalog is read again every five minutes and
+when an engine's verdict changes.
