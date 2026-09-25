@@ -25,8 +25,12 @@ impl GitState {
     #[must_use]
     pub fn read(directory: &Path) -> Self {
         let git = |arguments: &[&str]| -> Option<String> {
+            // The runner already builds and runs this checkout's code, so
+            // trusting it for these read-only queries adds nothing; without
+            // it Windows Git refuses checkouts on \\wsl.localhost as having
+            // "dubious ownership" and every build would lose its commit.
             let output = Command::new("git")
-                .arg("-C")
+                .args(["-c", "safe.directory=*", "-C"])
                 .arg(directory)
                 .args(arguments)
                 .output()
