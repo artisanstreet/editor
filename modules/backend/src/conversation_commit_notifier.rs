@@ -215,6 +215,15 @@ impl ConversationCommitNotifier {
         result
     }
 
+    /// Wakes every connection's delivery driver without naming a thread.
+    ///
+    /// Used after a dispatch transition whose thread the caller does not
+    /// hold (claim, requeue, terminal failure): each driver re-reads its
+    /// subscribed threads, and only a changed message outbox is pushed.
+    pub fn wake_any(&self) {
+        let _ = self.registry.any_sender.send(());
+    }
+
     /// Registers one bounded wake for any published conversation commit.
     ///
     /// The receiver retains only the latest watch generation, so the caller

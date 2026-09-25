@@ -63,18 +63,6 @@ impl RunControlsState {
             && self.active.is_some()
             && matches!(self.status, Some(RunLiveStatus::Queued))
     }
-
-    /// Returns the observed live run and engine on the selected thread, if
-    /// any. Scope-fenced like [`Self::steer_candidate`] but status-agnostic.
-    pub(super) fn observed_run(
-        &self,
-        selected_thread: Option<&ThreadId>,
-    ) -> Option<(RunId, artisan_domain::EngineId)> {
-        if self.thread.as_ref() != selected_thread {
-            return None;
-        }
-        Some((self.active.clone()?, self.engine?))
-    }
 }
 
 impl NativeApplication {
@@ -223,7 +211,7 @@ impl NativeApplication {
             self.pump_host_boundary(&host, cx);
         }
         self.sync_composer_controls(cx);
-        self.schedule_composer_queue(false, cx);
+        self.schedule_composer_queue(cx);
         if was_active && self.run_controls.active.is_none() {
             self.request_composer_usage(cx);
         }

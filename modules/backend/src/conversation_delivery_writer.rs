@@ -353,6 +353,46 @@ impl ConversationDeliveryWriter {
         ))
     }
 
+    /// Sends one thread-scoped state event (the message outbox) on the
+    /// shared delivery stream, stamped with the next connection event
+    /// cursor. Nothing is recorded in the registrar: the event carries the
+    /// complete current state, so a later one supersedes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationDeliveryError::Open`] or
+    /// [`ConversationDeliveryError::Send`]; either consumes the writer.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the per-connection event cursor wraps, which would
+    /// require 2^64 delivered events.
+    pub async fn deliver_state_event(
+        mut self,
+        stamp: ServerFrameStamp,
+        event: Event,
+    ) -> Result<Self, ConversationDeliveryError> {
+        if self.stream.is_none() {
+            let send = self.connection.open_uni().await?;
+            self.stream = Some(DeliveryStream::new(send));
+        }
+        let cursor = EventCursor::new(self.next_event_cursor)
+            .expect("a connection delivers fewer than 2^64 events");
+        let envelope = WireEnvelope {
+            protocol_version: self.protocol_version,
+            frame_id: stamp.frame_id,
+            sent_at: stamp.sent_at,
+            body: WireEnvelopeBody::Event(ServerEvent { cursor, event }),
+        };
+        let stream = self
+            .stream
+            .as_mut()
+            .expect("a state event always installs a delivery stream");
+        artisan_transport::send_envelope(&mut stream.send, &envelope).await?;
+        self.next_event_cursor = self.next_event_cursor.saturating_add(1);
+        Ok(self)
+    }
+
     /// Finishes the one opened stream, if any.
     ///
     /// No stream is opened for an owner that never published a batch. A

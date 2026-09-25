@@ -5,8 +5,8 @@ use artisan_database::{
     SaveComposerDraftInput, SqliteConfig, connect,
 };
 use artisan_domain::{
-    AuthoredText, ComposerAttachmentDigest, ComposerAttachmentRef,
-    ComposerDraftScope, ImageAttachment, ImageMimeType, ProjectId, ThreadId, UnixMillis,
+    AuthoredText, ComposerAttachmentDigest, ComposerAttachmentRef, ComposerDraftScope,
+    ImageAttachment, ImageMimeType, ProjectId, RequestId, ThreadId, UnixMillis,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::ConnectionTrait;
@@ -45,7 +45,10 @@ fn save(
     attachments: Vec<ComposerAttachmentRef>,
     saved_at: i64,
 ) -> SaveComposerDraftInput {
+    static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let save = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     SaveComposerDraftInput {
+        request_id: RequestId::parse(format!("save-{save}")).unwrap(),
         scope,
         text: AuthoredText::parse(text).unwrap(),
         attachments,

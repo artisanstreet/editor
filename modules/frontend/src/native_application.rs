@@ -22,9 +22,8 @@ use std::{
 
 use artisan_assets::AssetId;
 use artisan_domain::{
-    CatalogRevision, ConversationItem, ConversationSnapshot, EngineProfileId, MessageId,
-    ModelFavoriteId, PatchBatch, ProjectId, ProjectListing, RequestId, SetModelFavorite, ThreadId,
-    ThreadListing, TurnId,
+    CatalogRevision, ConversationItem, ConversationSnapshot, EngineProfileId, ModelFavoriteId,
+    PatchBatch, ProjectId, ProjectListing, RequestId, SetModelFavorite, ThreadId, ThreadListing,
 };
 use artisan_protocol::{ConversationSubscriptionStarted, QueueMessageReceipt, ServerEvent};
 use artisan_ui::asset_seam::asset_glyph;
@@ -96,10 +95,10 @@ use crate::native_transport::{
     NativeCatalogScope,
 };
 use crate::native_transport_service::{
-    CommandSendError, ComposerStateCommand, EventReceiveError, HoldKind,
-    NativeProjectIntakeOperation, NativeProjectIntakeStage, NativeTransportCommand,
-    NativeTransportEvent, NativeTransportService, ServiceFailure, ServiceFailureCategory,
-    ServiceFailureStage, ServiceStopStatus, SettingsLoadGeneration,
+    CommandSendError, EventReceiveError, HoldKind, NativeProjectIntakeOperation,
+    NativeProjectIntakeStage, NativeTransportCommand, NativeTransportEvent, NativeTransportService,
+    ServiceFailure, ServiceFailureCategory, ServiceFailureStage, ServiceStopStatus,
+    SettingsLoadGeneration,
 };
 use crate::onboarding_harness_presentation::{
     HarnessCatalog, HarnessSetupAction, HarnessSetupState,
@@ -165,8 +164,6 @@ mod impl_profile_menu;
 #[path = "native_application/impl_message_flight.rs"]
 mod impl_message_flight;
 
-#[path = "native_application/echo_watch.rs"]
-mod echo_watch;
 #[path = "native_application/impl_service_events.rs"]
 mod impl_service_events;
 
@@ -230,12 +227,12 @@ use selectors::{
     SIDEBAR_MARKETPLACE_HOVER_ID, SIDEBAR_NEW_THREAD_HOVER_ID, SIDEBAR_PROFILE_HOVER_ID,
     SURFACE_HEIGHT, SURFACE_WIDTH, TITLEBAR_HEADER_SELECTOR, TITLEBAR_PROJECT_FOLDER_SELECTOR,
     TITLEBAR_REPOSITORY_LABEL_SELECTOR, TITLEBAR_REPOSITORY_MARK_SELECTOR,
-    TITLEBAR_ROUTE_TITLE_SELECTOR, TITLEBAR_THREAD_SEPARATOR_SELECTOR, WINDOW_TITLE,
+    TITLEBAR_ROUTE_TITLE_SELECTOR, TITLEBAR_THREAD_SEPARATOR_SELECTOR,
 };
 #[cfg(test)]
 use selectors::{
-    NATIVE_MESSAGE_RETRY_LABEL, NATIVE_MESSAGE_RETRY_SELECTOR, NATIVE_RAIL_ADD_PROJECT_LABEL,
-    NATIVE_RAIL_ADD_PROJECT_SELECTOR, NATIVE_STATUS_SELECTOR,
+    NATIVE_RAIL_ADD_PROJECT_LABEL, NATIVE_RAIL_ADD_PROJECT_SELECTOR, NATIVE_STATUS_SELECTOR,
+    WINDOW_TITLE,
 };
 
 use profile_motion::{
@@ -246,11 +243,11 @@ use profile_motion::{
 #[cfg(test)]
 use state::NativeTestCommandSink;
 use state::{
-    FirstSendAdmission, NativeMessageFailure, NativeMessageFlight, NativeMessageRetry,
-    NativeViewState, PendingFailedRecovery, PickerRoute, ThreadSwitchFlight, ThreadSwitchPhase,
-    command_failure, create_message_request_id, create_save_request_id, empty_thread_listing,
-    intake_command, invalid_service_failure, picker_route, project_options_from_listing,
-    ready_membership_is_valid, scope_free_catalog_snapshot, submission_blocked_failure,
+    FirstSendAdmission, NativeMessageFailure, NativeMessageFlight, NativeViewState, PickerRoute,
+    ThreadSwitchFlight, ThreadSwitchPhase, command_failure, create_message_request_id,
+    create_save_request_id, empty_thread_listing, intake_command, invalid_service_failure,
+    mint_request_id, picker_route, project_options_from_listing, ready_membership_is_valid,
+    scope_free_catalog_snapshot, submission_blocked_failure,
 };
 
 #[cfg(test)]
@@ -324,7 +321,6 @@ pub struct NativeApplication {
     focus_handle: FocusHandle,
     #[cfg(test)]
     add_project_focus_handle: FocusHandle,
-    message_retry_focus_handle: FocusHandle,
     service: Option<Arc<NativeTransportService>>,
     composer: Entity<NativeComposer>,
     run_controls: composer_run_controls::RunControlsState,
@@ -339,8 +335,6 @@ pub struct NativeApplication {
     /// Last-used model preference backing new threads without saved config.
     last_used_model: Option<crate::native_last_used::StoredModelPolicy>,
     composer_model_run_error: Option<String>,
-    pending_account_send: Option<impl_profile_usage::PendingAccountSend>,
-    pending_failed_recovery: Option<PendingFailedRecovery>,
     catalog_controller: NativeCatalogController,
     host_model_catalog: Option<NativeModelCatalog>,
     connection_retry_pending: bool,
@@ -397,8 +391,6 @@ pub struct NativeApplication {
     message_flight_hold: Option<crate::native_transport_service::Hold>,
     /// Forge draft save chains and uploads of this connection.
     composer_drafts: composer_drafts::ComposerDrafts,
-    optimistic_messages: Vec<optimistic_messages::LocalSend>,
-    message_retry: Option<NativeMessageRetry>,
     message_receipt: Option<QueueMessageReceipt>,
     message_failure: Option<NativeMessageFailure>,
     /// Refusal-specific banner copy (e.g. the starting-run guard). `None`
@@ -470,6 +462,10 @@ pub struct NativeApplication {
     intake_failure_operation: Option<NativeProjectIntakeOperation>,
     intake_retry_available: bool,
     intake_restore_state: Option<NativeViewState>,
+    /// The running intake opens a thread the Forge created with its own
+    /// draft (a recovered failed prompt), so the composer's draft does not
+    /// carry into it.
+    intake_opens_forge_draft: bool,
     service_stopped: bool,
     shutdown_prepared: bool,
     #[cfg(test)]
@@ -496,4 +492,5 @@ mod impl_projects;
 #[path = "native_application/impl_sidebar_threads.rs"]
 mod impl_sidebar_threads;
 
-mod optimistic_messages;
+mod draft_send;
+mod forge_outbox;

@@ -18,7 +18,7 @@
 use crate::model::{ProjectSummary, QueuedMessage, ThreadSummary};
 use crate::observation::Observation;
 use crate::time::UnixMillis;
-use crate::{RunId, ThreadId, TurnId};
+use crate::{MessageOutbox, RunId, ThreadId, TurnId};
 
 /// One directory attach completed and its project identity was minted.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,6 +69,9 @@ pub enum Event {
     /// the provider `approval_id`/`question_id` that the later A-approve
     /// packet answers; this packet never responds to them.
     EngineObservation(EngineObservationEvent),
+    /// The thread's undelivered messages changed; the complete outbox is
+    /// pushed to the thread's subscribers (see [`MessageOutbox`]).
+    MessageOutbox(MessageOutbox),
 }
 
 /// One committed engine observation routed to its thread subscribers.

@@ -344,11 +344,6 @@ impl NativeComposer {
             && self.selection_revision == scope.selection_revision
     }
 
-    /// Changes whenever the draft content or its thread scope changes.
-    pub(crate) fn send_draft_identity(&self) -> (u64, u64) {
-        (self.draft_generation, self.draft_revision)
-    }
-
     /// Captures the exact empty-composer scope that may receive one queued
     /// message after the owning UI withdraws it.
     ///
@@ -382,6 +377,7 @@ impl NativeComposer {
         })
     }
 
+    #[cfg(test)]
     fn recall_target_is_current(&self, target: &ComposerRecallTarget) -> bool {
         self.draft_thread.as_deref() == Some(target.thread.as_str())
             && self.draft_generation == target.draft_generation
@@ -405,6 +401,7 @@ impl NativeComposer {
     /// success the text/`None` distinction is retained for the next typed
     /// submission, while image decoding and thumbnail work stays bounded and
     /// off the UI thread.
+    #[cfg(test)]
     pub(crate) fn restore_recalled_payload(
         &mut self,
         target: &ComposerRecallTarget,
@@ -704,6 +701,7 @@ impl NativeComposer {
     /// Compares a typed payload with the current authored text and complete
     /// ordered attachment bytes without beginning a submission or allocating
     /// a replacement snapshot.
+    #[cfg(test)]
     pub(crate) fn draft_matches_payload(
         &self,
         payload: &artisan_domain::QueueMessagePayload,

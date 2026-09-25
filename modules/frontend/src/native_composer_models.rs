@@ -473,26 +473,6 @@ impl NativeApplication {
     }
 }
 
-static MODEL_FAVORITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 fn create_model_favorite_request_id() -> Result<RequestId, ServiceFailure> {
-    let process_id = u64::from(std::process::id());
-    let millis = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| invalid_service_failure())?
-            .as_millis(),
-    )
-    .map_err(|_| invalid_service_failure())?;
-    let counter = MODEL_FAVORITE_COUNTER
-        .fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| current.checked_add(1),
-        )
-        .map_err(|_| invalid_service_failure())?;
-    RequestId::parse(format!(
-        "native-model-favorite-{process_id}-{millis}-{counter}"
-    ))
-    .map_err(|_| invalid_service_failure())
+    mint_request_id("native-model-favorite")
 }

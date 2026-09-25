@@ -1,9 +1,13 @@
-//! Composer submission admission, message flight, retry, send receipts, and failure handling for [`NativeApplication`].
+//! Composer submission admission, message flight, send receipts, and failure
+//! handling for [`NativeApplication`].
 //!
-//! Extracted verbatim from `native_application.rs` during the phase-2 module
-//! split; visibility was widened to `pub(super)` for parent-owned methods.
+//! A send is a request, not local state: the Forge accepts it and owns the
+//! message from then on. The flight keeps only the request identity and the
+//! connection hold until the receipt; the rows the transcript shows come
+//! from the Forge message outbox (see `forge_outbox`). There is no local
+//! retry copy: a failed request leaves the draft in the composer, and a
+//! failed delivery is retried by the Forge from its stored payload.
 
-use super::impl_profile_usage::PendingAccountSend;
 use super::*;
 
 impl NativeApplication {
@@ -53,55 +57,21 @@ impl NativeApplication {
 
     pub(super) fn sync_composer_controls(&mut self, cx: &mut Context<Self>) {
         self.settle_message_flight_hold(None);
-        if self.pending_account_send.as_ref().is_some_and(|send| {
-            send.thread != self.selected_thread
-                || send.connection != self.profile_usage_generation
-                || send.draft != self.composer.read(cx).send_draft_identity()
-                || self.displayed_send_policy(cx).as_ref() != Some(&send.policy)
-        }) {
-            self.pending_account_send = None;
-        }
-        self.sync_local_sends(cx);
+        self.sync_pending_rows(cx);
         let mut snapshot = self.composer_controls.read(cx).snapshot().clone();
-        snapshot.send_ready = self.pending_account_send.is_none()
-            && self.message_submission_is_admissible(cx)
-            && self.composer.read(cx).send_ready();
+        snapshot.send_ready =
+            self.message_submission_is_admissible(cx) && self.composer.read(cx).send_ready();
         snapshot.disabled = self.service_stopped;
         self.project_run_controls(&mut snapshot);
+        // The Forge decides which failures are still offered (a later
+        // delivered message supersedes one) and whether each is retryable;
+        // the rows are projected unfiltered.
         crate::native_composer_queue::project_controls_snapshot(
             &self.composer_queue.state,
             &mut snapshot,
             !self.service_stopped
                 && self.command_submission_is_available()
-                && self.composer.read(cx).capture_recall_target().is_some(),
-        );
-        // A failed attempt must not outlive a newer accepted user message.
-        let latest_user = self.conversation_host.as_ref().and_then(|host| {
-            host.read(cx).canonical_snapshot().and_then(|snapshot| {
-                snapshot
-                    .items()
-                    .iter()
-                    .filter_map(|item| match item {
-                        ConversationItem::UserMessage(message) => Some(message.created_at),
-                        ConversationItem::MultimodalUserMessage(message) => {
-                            Some(message.created_at)
-                        }
-                        _ => None,
-                    })
-                    .max()
-            })
-        });
-        snapshot.failed_dispatches.retain(|row| {
-            self.message_flight.is_none()
-                && self.message_receipt.as_ref().is_none_or(|receipt| {
-                    Some(&receipt.thread_id) != self.selected_thread.as_ref()
-                        || row.command_id() == receipt.request_id.as_str()
-                })
-        });
-        crate::native_composer_queue::hide_failures_before(
-            &self.composer_queue.state,
-            &mut snapshot,
-            latest_user,
+                && self.project_picker_action_is_admissible(),
         );
         snapshot.pending_steering.clear();
         // Reference behavior (thread-composer.svelte:381-382, audit D4/C5):
@@ -113,15 +83,9 @@ impl NativeApplication {
             snapshot.run_active && snapshot.send_ready && self.add_project_action_is_admissible();
         // A refusal names the attempt that produced it (reference
         // `action-failure.svelte`): the starting-run guard carries its exact
-        // copy and offers Dismiss only, while transport failures keep the
-        // generic copy with the draft-matched retry.
+        // copy. A failed request keeps the draft in the composer, so the
+        // banner offers Dismiss only and Send submits the draft again.
         let failure_note = self.message_failure_note.clone();
-        let failure_retryable = failure_note.is_none()
-            && self
-                .message_retry
-                .as_ref()
-                .is_some_and(|retry| retry.draft_matches)
-            && self.command_submission_is_available();
         snapshot.failure = self.message_failure.map(|notice| {
             crate::native_composer_controls::NativeComposerFailure::new(
                 notice.id,
@@ -133,7 +97,7 @@ impl NativeApplication {
                         _ => "Your draft is preserved. Check the connection and try again.",
                     }.to_owned()
                 }),
-                failure_retryable,
+                false,
             )
         });
         if let Some(message) = self.composer_model_run_error.clone() {
@@ -192,7 +156,7 @@ impl NativeApplication {
         });
         self.sync_composer_controls(cx);
         self.schedule_run_observation(cx);
-        self.schedule_composer_queue(false, cx);
+        self.schedule_composer_queue(cx);
     }
 
     /// Resolves the displayed model policy to its durable engine
@@ -285,7 +249,6 @@ impl NativeApplication {
         }
         // A default/inherited picker choice emits no selection event. Save
         // it on the same ordered command stream before the first message.
-        // The message still appears optimistically without waiting for an ack.
         if self.engine_settings.pending_save_request_id().is_none()
             && let Some(thread) = self.selected_thread.clone()
             && !self.submit_direct_save(thread, config)
@@ -321,20 +284,6 @@ impl NativeApplication {
         Some(artisan_domain::SteerTarget::new(run_id))
     }
 
-    /// Captures the validated routed engine display label at send time.
-    ///
-    /// Capture the configuration already submitted on the ordered command
-    /// stream, including a first-send save whose acknowledgement is pending.
-    /// The picker can change later without relabeling this send.
-    pub(super) fn send_engine_label(&self) -> Option<TurnEngineLabel> {
-        let config = self
-            .engine_settings
-            .pending_save()
-            .map(|(_, config)| config)
-            .or_else(|| self.engine_settings.authoritative_config())?;
-        Some(TurnEngineLabel::for_engine(config.selection().engine_id()))
-    }
-
     pub(super) fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
         if !self.message_submission_is_admissible(cx) || self.message_flight.is_some() {
             return;
@@ -358,28 +307,9 @@ impl NativeApplication {
             cx.notify();
             return;
         }
-        if let Some(policy) = self.displayed_send_policy(cx) {
-            self.ensure_profile_usage(false, Some(&policy.engine_id), cx);
-            if engine_readiness(
-                &self.profile_usage,
-                &policy.engine_id,
-                profile_usage_now_ms(),
-            ) == EngineReadiness::Checking
-            {
-                self.pending_account_send = Some(PendingAccountSend {
-                    thread: self.selected_thread.clone(),
-                    connection: self.profile_usage_generation,
-                    draft: self.composer.read(cx).send_draft_identity(),
-                    policy,
-                });
-                self.composer_model_run_error = None;
-                self.sync_composer_controls(cx);
-                cx.notify();
-                return;
-            }
-        }
-        self.pending_account_send = None;
-        // The choice-versus-saved check is only meaningful once a thread
+        // The Forge holds an accepted message until its engine can run it and
+        // reports the waiting reason on the outbox row, so a send is never
+        // held here for an account check. The choice-versus-saved check is only meaningful once a thread
         // carries a persisted configuration. On an unconfigured thread it
         // would always fail and strand explicit selections; admission below
         // owns unconfigured sends.
@@ -410,11 +340,27 @@ impl NativeApplication {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
-        self.clear_message_retry();
+        // The Forge sends the stored draft, so every image must be stored.
+        if !self.composer.read(cx).unstored_attachments().is_empty() {
+            self.message_failure = Some(NativeMessageFailure::new(ServiceFailure {
+                stage: ServiceFailureStage::Request,
+                category: ServiceFailureCategory::InvalidConfiguration,
+            }));
+            self.message_failure_note = Some(
+                "Images are still uploading. Your draft is preserved; send again in a moment."
+                    .to_owned(),
+            );
+            self.sync_composer_controls(cx);
+            cx.notify();
+            return;
+        }
+        // The body being sent, captured before the composer clears it.
+        self.sync_composer_draft(cx);
+        let body = self.composer.read(cx).draft_body();
         let submission = self
             .composer
             .update(cx, |composer, _| composer.begin_payload_submission());
-        let (body, token) = match submission {
+        let (_, token) = match submission {
             Ok(submission) => submission,
             Err(blocked) => {
                 if let Some(failure) = submission_blocked_failure(blocked) {
@@ -435,165 +381,20 @@ impl NativeApplication {
                 return;
             }
         };
-        let steer_target = self.observed_steer_target();
-        let engine_label = self.send_engine_label();
-        let mut queued =
-            artisan_domain::QueueMessage::new(request_id.clone(), thread_id.clone(), body.clone());
-        if let Some(target) = steer_target.clone() {
-            queued = queued.with_steer_target(target);
-        }
         let flight = NativeMessageFlight {
-            thread_id,
+            thread_id: thread_id.clone(),
             request_id,
-            payload: body,
-            steer_target,
-            engine_label,
             token,
         };
-        match self.submit_command(NativeTransportCommand::QueueMessage(Box::new(queued))) {
-            Ok(()) => self.launch_message_flight(flight, cx),
-            Err(error) => self.reject_message_submission(flight.token, command_failure(error), cx),
-        }
+        self.launch_message_flight(flight, cx);
+        self.begin_draft_submission(&thread_id, body, cx);
         self.sync_composer_availability(cx);
         cx.notify();
     }
 
-    pub(super) fn message_retry_context_is_admissible(&self, cx: &App) -> bool {
-        let Some(retry) = self.message_retry.as_ref() else {
-            return false;
-        };
-        self.selected_thread.as_ref() == Some(&retry.thread_id)
-            && self.message_flight.is_none()
-            && self.message_submission_is_admissible(cx)
-            && !self.composer.read(cx).is_submitting()
-    }
-
-    #[cfg(test)]
-    pub(super) fn message_retry_is_admissible(&self, cx: &App) -> bool {
-        self.message_retry_context_is_admissible(cx)
-            && self
-                .message_retry
-                .as_ref()
-                .is_some_and(|retry| retry.draft_matches)
-    }
-
-    pub(super) fn observe_composer_change(
-        &mut self,
-        composer: &Entity<NativeComposer>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn observe_composer_change(&mut self, cx: &mut Context<Self>) {
         self.sync_composer_controls(cx);
         self.sync_composer_draft(cx);
-        let Some(retry) = self.message_retry.as_mut() else {
-            return;
-        };
-        if self.message_flight.is_some() {
-            return;
-        }
-        let matches = composer.read(cx).draft_matches_payload(&retry.payload);
-        retry.draft_matches = matches;
-        cx.notify();
-    }
-
-    pub(super) fn clear_message_retry(&mut self) {
-        self.message_retry = None;
-        self.message_retry_focus_handle = self.message_retry_focus_handle.clone().tab_stop(false);
-    }
-
-    pub(super) fn activate_message_retry(&mut self, cx: &mut Context<Self>) {
-        if self.service_stopped || !self.command_submission_is_available() {
-            self.service_stopped = true;
-            self.set_picker_disabled(true, cx);
-            self.set_thread_picker_disabled(true, cx);
-            self.set_failure(command_failure(CommandSendError::Stopped), cx);
-            return;
-        }
-        if !self.message_retry_context_is_admissible(cx) {
-            return;
-        }
-        let Some(retry) = self.message_retry.as_ref() else {
-            return;
-        };
-        let thread_id = retry.thread_id.clone();
-        let request_id = retry.request_id.clone();
-        let retry_body = retry.payload.clone();
-        // Root freeze: a retry replays the WHOLE original command,
-        // including its steer target. It never re-resolves the current
-        // live run â€” a stale explicit target fails typed server-side with
-        // the payload preserved, never a silent fresh run.
-        let retry_target = retry.steer_target.clone();
-        let retry_label = retry.engine_label.clone();
-        let submission = self
-            .composer
-            .update(cx, |composer, _| composer.begin_payload_submission());
-        let (body, token) = match submission {
-            Ok(submission) => submission,
-            Err(blocked) => {
-                if let Some(retry) = self.message_retry.as_mut() {
-                    retry.draft_matches = false;
-                }
-                if let Some(failure) = submission_blocked_failure(blocked) {
-                    self.message_failure = Some(NativeMessageFailure::new(failure));
-                }
-                cx.notify();
-                return;
-            }
-        };
-        if body != retry_body {
-            if let Some(retry) = self.message_retry.as_mut() {
-                retry.draft_matches = false;
-            }
-            self.finish_composer_submission(token, DraftDisposition::Retained, cx);
-            self.sync_composer_availability(cx);
-            cx.notify();
-            return;
-        }
-
-        self.message_receipt = None;
-        self.message_failure = None;
-        self.message_failure_note = None;
-        let mut queued = artisan_domain::QueueMessage::new(
-            request_id.clone(),
-            thread_id.clone(),
-            retry_body.clone(),
-        );
-        if let Some(target) = retry_target.clone() {
-            queued = queued.with_steer_target(target);
-        }
-        let command = NativeTransportCommand::QueueMessage(Box::new(queued));
-        match self.submit_command(command) {
-            Ok(()) => {
-                self.clear_message_retry();
-                self.launch_message_flight(
-                    NativeMessageFlight {
-                        thread_id,
-                        request_id,
-                        payload: retry_body,
-                        steer_target: retry_target,
-                        engine_label: retry_label,
-                        token,
-                    },
-                    cx,
-                );
-            }
-            Err(CommandSendError::Busy) => {
-                self.finish_composer_submission(token, DraftDisposition::Retained, cx);
-                self.message_failure = Some(NativeMessageFailure::new(command_failure(
-                    CommandSendError::Busy,
-                )));
-            }
-            Err(CommandSendError::Stopped) => {
-                self.finish_composer_submission(token, DraftDisposition::Retained, cx);
-                self.clear_message_retry();
-                self.service_stopped = true;
-                self.set_picker_disabled(true, cx);
-                self.set_thread_picker_disabled(true, cx);
-                self.set_failure(command_failure(CommandSendError::Stopped), cx);
-                return;
-            }
-        }
-        self.sync_composer_availability(cx);
-        cx.notify();
     }
 
     pub(super) fn finish_composer_submission(
@@ -621,7 +422,8 @@ impl NativeApplication {
     }
 
     /// Starts an admitted message flight: it holds the connection until its
-    /// reply arrives and shows the optimistic local row.
+    /// reply arrives. The transcript row appears when the Forge's outbox
+    /// carries the accepted message.
     pub(super) fn launch_message_flight(
         &mut self,
         flight: NativeMessageFlight,
@@ -629,21 +431,19 @@ impl NativeApplication {
     ) {
         self.message_flight = Some(flight);
         self.message_flight_hold = self.connection_hold(HoldKind::Message);
-        self.stage_local_send(cx);
+        self.follow_transcript_tail(cx);
     }
 
     pub(super) fn retain_message_flight(&mut self, cx: &mut Context<Self>) {
         if let Some(flight) = self.message_flight.take() {
-            self.optimistic_messages
-                .retain(|row| row.request != flight.request_id);
+            let scope = artisan_domain::ComposerDraftScope::Thread(flight.thread_id.clone());
+            self.end_draft_submission(&scope);
             self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
         }
-        self.clear_message_retry();
         self.sync_composer_availability(cx);
     }
 
     pub(super) fn clear_message_presentation(&mut self) {
-        self.clear_message_retry();
         self.message_receipt = None;
         self.message_failure = None;
         self.message_failure_note = None;
@@ -651,11 +451,11 @@ impl NativeApplication {
 
     /// Clears transient service-owned state for a terminal transport failure.
     ///
-    /// In-flight queue/failed/usage reads and observed run activity die with
-    /// the service: the lip leaves a stuck Refreshing for a truthful
-    /// `TransportFailed` and the stop control stops claiming an unobservable
-    /// run. Drafts, restore candidates, failure notices, and the mounted
-    /// transcript are preserved. No retry is scheduled here.
+    /// An in-flight usage read and observed run activity die with the
+    /// service: the queue reports a truthful `TransportFailed` and the stop
+    /// control stops claiming an unobservable run. Drafts, the Forge's last
+    /// outbox rows, failure notices, and the mounted transcript are
+    /// preserved. No retry is scheduled here.
     pub(super) fn clear_transient_service_state(&mut self) {
         self.drop_transient_service_reads();
         self.run_controls.clear_transient_observation();
@@ -686,52 +486,10 @@ impl NativeApplication {
             .message_flight
             .take()
             .expect("flight was checked above");
-        if let Some(row) = self
-            .optimistic_messages
-            .iter_mut()
-            .find(|row| row.request == receipt.request_id)
-        {
-            row.message = Some(receipt.message_id.clone());
-        }
-        let message_id = receipt.message_id.clone();
-        let steer_run_id = flight
-            .steer_target
-            .as_ref()
-            .map(|target| target.run_id().clone());
-        let engine_label = flight.engine_label;
+        // The Forge owns the message now: the composer clears, and the row
+        // the transcript shows is the one its outbox carries.
         self.finish_composer_submission(flight.token, DraftDisposition::Accepted, cx);
         self.message_receipt = Some(receipt);
-        // Stage the echo watch now that the Forge message id is known: the
-        // lip retires and the engine label dispatches when the canonical
-        // user item carrying this source id projects (frozen correlation
-        // contract).
-        self.composer_queue
-            .state
-            .stage_echo_watch(message_id.clone(), steer_run_id, engine_label);
-        // The echo can already be projected (patch stream versus receipt
-        // race): scan the current canonical snapshot so an already-present
-        // echo retires immediately instead of waiting for the next batch.
-        if let Some(host) = self.conversation_host.clone()
-            && host.read(cx).controller_view().delivery.thread_id == flight.thread_id
-            && let Some(snapshot) = host.read(cx).canonical_snapshot()
-        {
-            for item in snapshot.items() {
-                let (source_id, turn_id) = match item {
-                    ConversationItem::UserMessage(message) => {
-                        (message.source_message_id.as_ref(), message.turn_id.clone())
-                    }
-                    ConversationItem::MultimodalUserMessage(message) => {
-                        (message.source_message_id.as_ref(), message.turn_id.clone())
-                    }
-                    // Assistant messages are the only other item kind and
-                    // never echo a send.
-                    ConversationItem::AssistantMessage(_) => continue,
-                };
-                if source_id == Some(&message_id) {
-                    self.retire_echo_matched(&flight.thread_id, &message_id, turn_id, &host, cx);
-                }
-            }
-        }
         self.message_failure = None;
         self.message_failure_note = None;
         self.sync_composer_availability(cx);
@@ -758,21 +516,8 @@ impl NativeApplication {
             .message_flight
             .take()
             .expect("flight was checked above");
-        self.optimistic_messages
-            .retain(|row| row.request != flight.request_id);
+        // The draft stays in the composer; sending again is a new request.
         self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
-        self.message_retry = Some(NativeMessageRetry {
-            thread_id: flight.thread_id,
-            request_id: flight.request_id,
-            payload: flight.payload,
-            steer_target: flight.steer_target,
-            engine_label: flight.engine_label,
-            draft_matches: false,
-        });
-        // A failure matches only an active flight, which never staged a
-        // watch (watches stage at receipt, which ends the flight). A retry
-        // stages its own watch at its own receipt with the preserved
-        // original label.
         self.message_receipt = None;
         self.message_failure = Some(NativeMessageFailure::new(failure));
         self.message_failure_note = None;

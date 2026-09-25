@@ -272,7 +272,6 @@ impl NativeApplication {
         });
         if selected_removed {
             self.remember_switch_listing();
-            self.clear_message_retry();
         }
         self.thread_listing = Some(listing.clone());
         let selected_thread = self.selected_thread.clone();

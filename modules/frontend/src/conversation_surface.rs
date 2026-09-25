@@ -111,6 +111,8 @@ pub use transcript_helpers::*;
 
 #[path = "conversation_surface/interactions.rs"]
 mod interactions;
+#[path = "conversation_surface/pending_rows.rs"]
+mod pending_rows;
 #[path = "conversation_surface/render_blocks.rs"]
 mod render_blocks;
 #[path = "conversation_surface/render_navigator.rs"]
@@ -140,14 +142,10 @@ mod transcript_window;
 pub use transcript_window::{TranscriptShapeLedger, TranscriptWindowReport};
 
 use disclosure::{disclosure_flight_panel, disclosure_frame};
+pub(crate) use pending_rows::PendingMessageRow;
+use pending_rows::SendEntrance;
 use scroll_anchor::{RenderedScrollAnchor, ScrollAnchorRegistry, ViewportGeometry};
 use transcript_window::TranscriptWindowState;
-
-struct SendEntrance {
-    started: Instant,
-    request: String,
-    target: Option<SceneId>,
-}
 
 /// Native GPUI transcript surface over one immutable replacement scene.
 #[expect(
@@ -156,7 +154,7 @@ struct SendEntrance {
 )]
 pub struct ConversationSurface {
     composer_clearance: HashMap<gpui::WindowId, f32>,
-    pending_messages: Vec<(String, String, Vec<artisan_domain::ImageAttachmentRef>)>,
+    pending_messages: Vec<PendingMessageRow>,
     send_entrance: Option<SendEntrance>,
     scene: ConversationScene,
     /// Loaded user-message markers, rebuilt only when the scene changes.
@@ -492,17 +490,17 @@ impl Render for ConversationSurface {
                 }
             }
             self.finish_transcript_window(&built);
-            for (index, (text, _, attachments)) in self.pending_messages.iter().enumerate() {
-                let selector = format!("local-send-{index}");
+            for (index, row) in self.pending_messages.iter().enumerate() {
+                let selector = format!("pending-send-{index}");
                 let block = UserMessageBlock {
-                    id: SceneId::parse(selector.clone()).expect("bounded local row identity"),
-                    body: text.clone(),
-                    attachments: attachments.clone(),
+                    id: SceneId::parse(selector.clone()).expect("bounded pending row identity"),
+                    body: row.text.clone(),
+                    attachments: row.attachments.clone(),
                     disclosure: None,
                 };
-                // The just-sent bubble paints with no status label beneath it:
-                // neither the transient `Sending…` state nor a dispatch error
-                // reserves label space under the optimistic row.
+                // The Forge row paints with no status label beneath it:
+                // neither its queued state nor a waiting reason reserves
+                // label space under the bubble.
                 transcript = transcript.child(
                     div()
                         .w_full()

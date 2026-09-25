@@ -759,11 +759,8 @@ mod tests {
         });
         cx.update(|_, app| {
             surface.update(app, |surface, cx| {
-                surface.set_pending_messages(
-                    vec![("last line\n".repeat(40), "Sending…".into(), Vec::new())],
-                    cx,
-                );
-            })
+                surface.show_queued_text("last line\n".repeat(40), cx);
+            });
         });
         for (width, height) in [(500.0, 400.0), (900.0, 700.0), (500.0, 450.0)] {
             cx.simulate_resize(gpui::size(px(width), px(height)));

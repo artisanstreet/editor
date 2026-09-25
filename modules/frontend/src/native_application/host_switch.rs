@@ -69,7 +69,6 @@ impl NativeApplication {
         if let Some(holds) = &holds {
             holds.seal();
         }
-        self.pending_account_send = None;
         self.host_switch = Some(HostSwitchNotice {
             target_label,
             _repaint: holds
@@ -100,7 +99,7 @@ impl NativeApplication {
         if let Some(holds) = self.connection_holds() {
             holds.unseal();
         }
-        if !self.shutdown_prepared {
+        if !self.shutdown_prepared && !self.composer_queue.state.edit_pending() {
             self.composer.update(cx, |composer, composer_cx| {
                 composer.set_disabled(false, composer_cx);
             });
@@ -157,11 +156,9 @@ impl NativeApplication {
         }
         self.flush_composer_drafts(cx);
         self.shutdown_prepared = true;
-        self.pending_account_send = None;
         self.thread_switch_flight = None;
         self.ordinary_unsubscribe_thread = None;
         self.pending_thread = None;
-        self.pending_failed_recovery = None;
         self.set_picker_disabled(true, cx);
         self.set_thread_picker_disabled(true, cx);
         self.retain_message_flight(cx);

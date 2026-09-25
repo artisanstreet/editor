@@ -174,10 +174,10 @@ fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
             // probes may be recorded on the shared boundary; the
             // meaningful assertion is that nothing queues.
             assert!(
-                commands
-                    .borrow()
-                    .iter()
-                    .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_))),
+                commands.borrow().iter().all(|command| !matches!(
+                    command,
+                    NativeTransportCommand::SubmitComposerDraft(_)
+                )),
                 "rejected offline send must never queue its message"
             );
             assert_eq!(application.composer.read(cx).draft(), "keep my draft");
@@ -192,9 +192,7 @@ fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
 }
 
 #[gpui::test]
-fn unconfigured_first_send_with_displayed_policy_blocks_and_preserves_draft(
-    cx: &mut TestAppContext,
-) {
+fn unconfigured_first_send_without_an_account_verdict_is_refused_not_held(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
@@ -220,28 +218,26 @@ fn unconfigured_first_send_with_displayed_policy_blocks_and_preserves_draft(
                     .is_some()
             );
             application.begin_message_submission(cx);
-            // Blocked with the live verdict before any transport send:
-            // no save, no flight, draft preserved. Readiness probes may
-            // be recorded on the shared boundary; the meaningful
-            // assertion is that the blocked send never queues.
+            // The Editor never holds a send for an account check: without a
+            // runnable verdict the send is refused with its reason and the
+            // draft stays. Readiness probes may be recorded on the shared
+            // boundary; the blocked send never queues.
             assert!(
-                commands
-                    .borrow()
-                    .iter()
-                    .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_))),
+                commands.borrow().iter().all(|command| !matches!(
+                    command,
+                    NativeTransportCommand::SubmitComposerDraft(_)
+                )),
                 "blocked first send must never queue its message"
             );
             assert!(application.message_flight.is_none());
             assert!(!application.composer.read(cx).is_submitting());
             assert_eq!(application.composer.read(cx).draft(), "keep my draft");
-            assert!(application.composer_model_run_error.is_none());
-            assert!(application.pending_account_send.is_some());
+            assert!(application.composer_model_run_error.is_some());
             admit_probed_codex_usage(application, cx);
-            application.resume_account_send("codex", cx);
-            assert!(application.pending_account_send.is_none());
+            application.begin_message_submission(cx);
             assert!(
                 application.message_flight.is_some(),
-                "send resumes after the account check"
+                "the next Send is admitted once the verdict is runnable"
             );
         });
     });
@@ -296,11 +292,6 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
                 .as_ref()
                 .expect("unheld first send");
             assert_eq!(flight.thread_id, thread_id);
-            assert_eq!(
-                flight.payload.text().expect("text payload").as_str(),
-                "explicit pick draft"
-            );
-            assert!(flight.steer_target.is_none());
             assert!(application.composer_model_run_error.is_none());
             // The authoritative acknowledgment only seats the durable
             // configuration; it neither creates nor continues the send.
@@ -345,16 +336,16 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
     let queued = commands
         .iter()
         .find_map(|command| match command {
-            NativeTransportCommand::QueueMessage(command) => Some(command),
+            NativeTransportCommand::SubmitComposerDraft(command) => Some(command),
             _ => None,
         })
         .expect("unheld explicit send must queue its message");
     assert_eq!(queued.thread_id, thread_id);
-    assert_eq!(
-        queued.payload.text().expect("text payload").as_str(),
-        "explicit pick draft"
+    assert!(
+        queued.draft_revision.get() > 0,
+        "the send names its stored draft"
     );
-    assert!(queued.steer_target().is_none());
+    assert!(queued.steer_target.is_none());
 }
 
 #[gpui::test]
@@ -366,62 +357,36 @@ fn queued_rows_surface_in_timeline_with_dispatch_diagnostics(cx: &mut TestAppCon
         view.update(app, |application, cx| {
             install_ready_message_surface(application, cx, thread_id.clone(), "draft", sink);
             assert!(application.engine_settings.authoritative_config().is_none());
-            // Seed one authoritative queued row, the never-claimed
-            // projection the dispatcher still retries.
-            application
-                .composer_queue
-                .state
-                .set_scope(Some(thread_id.clone()), 1);
-            // The install already forced one listing; retire its refresh
-            // so this test owns the next exact refresh token.
-            application.composer_queue.state.cancel_queue_refresh();
-            let token = application
-                .composer_queue
-                .state
-                .begin_queue_refresh(true, true, false, false, true)
-                .expect("forced queue refresh");
-            let listing = artisan_domain::QueuedMessageListing::new(
-                thread_id.clone(),
-                artisan_domain::QueuedMessageListOrder::OldestFirst,
-                1,
-                1,
-                vec![artisan_domain::QueuedMessageSummary {
-                    message_id: artisan_domain::MessageId::parse("message-a").expect("message"),
-                    thread_id: thread_id.clone(),
-                    original_request_id: artisan_domain::RequestId::parse("command-a")
-                        .expect("request"),
-                    text: Some(artisan_domain::AuthoredText::parse("queued text").expect("text")),
-                    attachments: Vec::new(),
-                    accepted_at: artisan_domain::UnixMillis::EPOCH,
-                    last_error: Some(
-                        artisan_domain::DispatchError::parse("engine unconfigured".to_owned())
-                            .expect("dispatcher diagnostic"),
-                    ),
-                }],
-            )
-            .expect("queued page");
-            application
-                .composer_queue
-                .state
-                .apply_queue_listing(&token, &listing)
-                .expect("queue page");
-            application.sync_composer_controls(cx);
+            // The Forge pushes one accepted row it is holding, with the
+            // dispatcher's reason as its status.
+            let mut row = queued_summary(
+                &thread_id,
+                "message-a",
+                artisan_domain::QueuedMessageState::Queued,
+            );
+            row.last_error = Some(
+                artisan_domain::DispatchError::parse("engine unconfigured".to_owned())
+                    .expect("dispatcher diagnostic"),
+            );
+            application.handle_service_event(
+                NativeTransportEvent::MessageOutbox(message_outbox(
+                    &thread_id,
+                    vec![row],
+                    Vec::new(),
+                )),
+                cx,
+            );
             let snapshot = application.composer_controls.read(cx).snapshot().clone();
             assert!(!snapshot.run_active);
-            // Reference C5: entries present surface as lip rows only.
-            // No count/status banner copy exists anymore, while the
-            // dispatcher's diagnostic stays recorded on the queue entry.
+            // Reference C5: rows surface in the transcript tail only; no
+            // count/status banner copy exists.
             assert!(snapshot.pending_steering.is_empty());
-            assert!(
-                application
-                    .conversation_host
-                    .as_ref()
-                    .unwrap()
-                    .read(cx)
-                    .surface()
-                    .read(cx)
-                    .has_pending_messages()
-            );
+            let host = application.conversation_host.clone().unwrap();
+            let surface = host.read(cx).surface().read(cx);
+            let rows = surface.pending_message_rows();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].message_id, "message-a");
+            assert_eq!(rows[0].status, "Waiting: engine unconfigured");
             assert_eq!(
                 application.composer_queue.state.entries()[0].dispatch_error(),
                 Some("engine unconfigured")
@@ -466,10 +431,6 @@ fn save_ack_seats_config_without_touching_the_unheld_send(cx: &mut TestAppContex
                 .as_ref()
                 .expect("send unaffected by ack");
             assert_eq!(flight.thread_id, thread_id);
-            assert_eq!(
-                flight.payload.text().expect("text payload").as_str(),
-                "keep my draft"
-            );
             assert!(application.engine_settings.authoritative_config().is_some());
             assert!(application.composer_model_run_error.is_none());
             assert_eq!(application.composer.read(cx).draft(), "");
@@ -494,14 +455,14 @@ fn save_ack_seats_config_without_touching_the_unheld_send(cx: &mut TestAppContex
     let queued = commands
         .iter()
         .find_map(|command| match command {
-            NativeTransportCommand::QueueMessage(command) => Some(command),
+            NativeTransportCommand::SubmitComposerDraft(command) => Some(command),
             _ => None,
         })
         .expect("unheld first send must queue its message");
     assert_eq!(queued.thread_id, thread_id);
-    assert_eq!(
-        queued.payload.text().expect("text payload").as_str(),
-        "keep my draft"
+    assert!(
+        queued.draft_revision.get() > 0,
+        "the send names its stored draft"
     );
 }
 
@@ -539,7 +500,7 @@ fn save_failure_does_not_hold_the_first_send(cx: &mut TestAppContext) {
         commands
             .borrow()
             .iter()
-            .any(|command| matches!(command, NativeTransportCommand::QueueMessage(_))),
+            .any(|command| matches!(command, NativeTransportCommand::SubmitComposerDraft(_))),
         "unheld first send must queue despite the save failure"
     );
 }
@@ -567,28 +528,21 @@ fn same_engine_live_run_names_the_send_as_a_steer(cx: &mut TestAppContext) {
                 artisan_domain::EngineId::Codex,
             );
             application.begin_message_submission(cx);
-            let flight = application.message_flight.as_ref().expect("named flight");
-            assert_eq!(
-                flight
-                    .steer_target
-                    .as_ref()
-                    .expect("same-engine send names its run")
-                    .run_id(),
-                &run_id
-            );
+            assert!(application.message_flight.is_some(), "named flight");
         });
     });
     let queued = commands
         .borrow()
         .iter()
         .find_map(|command| match command {
-            NativeTransportCommand::QueueMessage(command) => Some(command.clone()),
+            NativeTransportCommand::SubmitComposerDraft(command) => Some(command.clone()),
             _ => None,
         })
         .expect("named send must queue");
     assert_eq!(
         queued
-            .steer_target()
+            .steer_target
+            .as_ref()
             .expect("wire command carries the named run")
             .run_id()
             .as_str(),
@@ -621,19 +575,18 @@ fn cross_engine_selection_sends_unnamed(cx: &mut TestAppContext) {
                 artisan_domain::EngineId::Claude,
             );
             application.begin_message_submission(cx);
-            let flight = application.message_flight.as_ref().expect("unnamed flight");
-            assert!(flight.steer_target.is_none());
+            assert!(application.message_flight.is_some(), "unnamed flight");
         });
     });
     let queued = commands
         .borrow()
         .iter()
         .find_map(|command| match command {
-            NativeTransportCommand::QueueMessage(command) => Some(command.clone()),
+            NativeTransportCommand::SubmitComposerDraft(command) => Some(command.clone()),
             _ => None,
         })
         .expect("unnamed send must queue");
-    assert!(queued.steer_target().is_none());
+    assert!(queued.steer_target.is_none());
 }
 
 #[gpui::test]
@@ -681,141 +634,13 @@ fn starting_run_refuses_the_send_with_its_reason(cx: &mut TestAppContext) {
         commands
             .borrow()
             .iter()
-            .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_))),
+            .all(|command| !matches!(command, NativeTransportCommand::SubmitComposerDraft(_))),
         "starting-guard refusal must never queue"
     );
 }
 
 #[gpui::test]
-fn retry_replays_the_original_steer_target(cx: &mut TestAppContext) {
-    let thread_id = ThreadId::parse("steer-retry-task").expect("thread");
-    let run_id = RunId::parse("run-retry").expect("run");
-    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
-    let (sink, commands) = command_sink([Ok(()), Ok(())]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            install_ready_message_surface(
-                application,
-                cx,
-                thread_id.clone(),
-                "steered draft",
-                sink,
-            );
-            install_configured_engine_settings(application, cx);
-            application.seed_active_run_for_tests(
-                thread_id.clone(),
-                run_id.clone(),
-                artisan_protocol::RunLiveStatus::Waiting,
-                artisan_domain::EngineId::Codex,
-            );
-            application.begin_message_submission(cx);
-            let request_id = application
-                .message_flight
-                .as_ref()
-                .expect("named flight")
-                .request_id
-                .clone();
-            // The send fails at the transport; the retry record keeps
-            // the whole original command, including its target.
-            application.handle_message_failure(&thread_id, &request_id, message_failure(), cx);
-            let retry = application.message_retry.as_ref().expect("retry record");
-            assert_eq!(retry.request_id, request_id);
-            assert_eq!(
-                retry
-                    .steer_target
-                    .as_ref()
-                    .expect("original target")
-                    .run_id(),
-                &run_id
-            );
-            // The draft still matches the failed payload, so the retry
-            // is admissible.
-            application
-                .message_retry
-                .as_mut()
-                .expect("retry")
-                .draft_matches = true;
-            application.activate_message_retry(cx);
-            let flight = application
-                .message_flight
-                .as_ref()
-                .expect("replayed flight");
-            // Same request identity, same original target: never
-            // re-resolved against the current live run.
-            assert_eq!(flight.request_id, request_id);
-            assert_eq!(
-                flight
-                    .steer_target
-                    .as_ref()
-                    .expect("replayed target")
-                    .run_id(),
-                &run_id
-            );
-        });
-    });
-    let queued: Vec<_> = commands
-        .borrow()
-        .iter()
-        .filter_map(|command| match command {
-            NativeTransportCommand::QueueMessage(command) => Some(command.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(queued.len(), 2);
-    assert_eq!(queued[0].request_id, queued[1].request_id);
-    for command in &queued {
-        assert_eq!(
-            command
-                .steer_target()
-                .expect("both attempts carry the target")
-                .run_id()
-                .as_str(),
-            "run-retry"
-        );
-    }
-}
-
-#[gpui::test]
-fn send_captures_routed_label_not_picker_or_stale_run(cx: &mut TestAppContext) {
-    let thread_id = ThreadId::parse("label-capture-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
-    let (sink, _) = command_sink([Ok(())]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            install_ready_message_surface(
-                application,
-                cx,
-                thread_id.clone(),
-                "label my engine",
-                sink,
-            );
-            install_configured_engine_settings(application, cx);
-            // A stale observed run on another engine must not relabel
-            // this send: no exact correlation exists (unnamed fresh
-            // send, no assistant run on any turn yet).
-            application.seed_active_run_for_tests(
-                thread_id.clone(),
-                RunId::parse("run-stale").expect("run"),
-                artisan_protocol::RunLiveStatus::Running,
-                artisan_domain::EngineId::Claude,
-            );
-            application.begin_message_submission(cx);
-            let flight = application
-                .message_flight
-                .as_ref()
-                .expect("unlabeled flight");
-            assert!(flight.steer_target.is_none());
-            assert_eq!(flight.engine_label.as_deref(), Some("Codex"));
-        });
-    });
-}
-
-#[gpui::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one end-to-end scenario drives the full event chain; splitting it would hide the causal ordering the test asserts"
-)]
-fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
+fn delivered_message_turn_is_labelled_from_its_outbox_row(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("echo-task").expect("thread");
     let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
@@ -830,68 +655,30 @@ fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
             );
             install_configured_engine_settings(application, cx);
             application.begin_message_submission(cx);
-            assert!(application.message_flight.is_some());
-            // Pending before ACK: no watch staged, no lip, no failure.
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 0);
             let receipt = send_receipt_for_flight(application, &thread_id, "message-echo");
             application.handle_service_event(NativeTransportEvent::MessageQueued(receipt), cx);
-            // Accepted: composer cleared, watch staged with the
-            // send-time label.
             assert!(application.message_flight.is_none());
             assert_eq!(application.composer.read(cx).draft(), "");
-            let watch = application
-                .composer_queue
-                .state
-                .echo_watch_for(&artisan_domain::MessageId::parse("message-echo").expect("message"))
-                .expect("staged watch");
-            assert_eq!(watch.message_id().as_str(), "message-echo");
-            assert_eq!(watch.engine_label(), Some("Codex"));
-            // Seed the listed row the forced refresh would return.
-            application
-                .composer_queue
-                .state
-                .set_scope(Some(thread_id.clone()), 1);
-            application.composer_queue.state.cancel_queue_refresh();
-            let token = application
-                .composer_queue
-                .state
-                .begin_queue_refresh(true, true, false, false, true)
-                .expect("forced queue refresh");
-            let row = artisan_domain::QueuedMessageSummary {
-                message_id: artisan_domain::MessageId::parse("message-echo").expect("message"),
-                thread_id: thread_id.clone(),
-                original_request_id: artisan_domain::RequestId::parse("command-echo")
-                    .expect("request"),
-                text: Some(artisan_domain::AuthoredText::parse("visible text here").expect("text")),
-                attachments: Vec::new(),
-                accepted_at: UnixMillis::EPOCH,
-                last_error: None,
-            };
-            let page = artisan_domain::QueuedMessageListing::new(
-                thread_id.clone(),
-                artisan_domain::QueuedMessageListOrder::OldestFirst,
-                1,
-                1,
-                vec![row],
-            )
-            .expect("queued page");
-            application
-                .composer_queue
-                .state
-                .apply_queue_listing(&token, &page)
-                .expect("queue page");
-            application.sync_composer_controls(cx);
-            assert_eq!(
-                application
-                    .composer_controls
-                    .read(cx)
-                    .snapshot()
-                    .pending_steering
-                    .len(),
-                0
+            // The Forge's row names the engine its accepted configuration
+            // routes to; it differs from the picker on purpose.
+            let mut row = queued_summary(
+                &thread_id,
+                "message-echo",
+                artisan_domain::QueuedMessageState::Dispatching,
             );
-            // Canonical snapshot baseline, then the echo: the item id
-            // differs from the message id on purpose.
+            row.engine = Some(artisan_domain::EngineId::Claude);
+            application.handle_service_event(
+                NativeTransportEvent::MessageOutbox(message_outbox(
+                    &thread_id,
+                    vec![row],
+                    Vec::new(),
+                )),
+                cx,
+            );
+            let host = application.conversation_host.clone().expect("mounted host");
+            assert!(host.read(cx).surface().read(cx).has_pending_messages());
+            // The Forge delivers the transcript item before the outbox that
+            // no longer lists it.
             application.handle_service_event(
                 NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
                 cx,
@@ -909,59 +696,22 @@ fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
                 )),
                 cx,
             );
-            // Echo observed: watch retired exactly once, lip absent even
-            // though the row is still listed, canonical body present
-            // exactly once, no failure raised.
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 0);
-            assert!(
-                application
-                    .composer_controls
-                    .read(cx)
-                    .snapshot()
-                    .pending_steering
-                    .is_empty()
-            );
-            assert!(application.message_failure.is_none());
-            let canonical = application
-                .conversation_host
-                .clone()
-                .expect("mounted host")
-                .read(cx)
-                .canonical_snapshot()
-                .expect("canonical snapshot");
-            let bodies: Vec<_> = canonical
-                .items()
-                .iter()
-                .filter_map(|item| match item {
-                    ConversationItem::UserMessage(message) => {
-                        Some(message.body.as_str().to_owned())
-                    }
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(bodies, ["visible text here"]);
-            // A redelivered echo with fresh patch ids is a no-op: the
-            // watch is gone and the lip stays absent.
             application.handle_service_event(
-                NativeTransportEvent::PatchBatch(echo_batch(
+                NativeTransportEvent::MessageOutbox(message_outbox(
                     &thread_id,
-                    3,
-                    "item-echo",
-                    Some("message-echo"),
-                    "turn-echo",
-                    0,
-                    1,
-                    "visible text here",
+                    Vec::new(),
+                    Vec::new(),
                 )),
                 cx,
             );
-            assert!(
-                application
-                    .composer_controls
-                    .read(cx)
-                    .snapshot()
-                    .pending_steering
-                    .is_empty()
+            assert!(!host.read(cx).surface().read(cx).has_pending_messages());
+            let scene = staged_turn_scene(application, cx, "turn-echo");
+            assert_eq!(staged_user_bodies(&scene), ["visible text here"]);
+            assert_eq!(
+                staged_status(&scene)
+                    .and_then(|(_, label)| label)
+                    .as_deref(),
+                Some("Claude")
             );
             assert!(application.message_failure.is_none());
         });
@@ -969,7 +719,7 @@ fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn legacy_echo_without_source_id_takes_no_take_up(cx: &mut TestAppContext) {
+fn legacy_echo_without_source_id_takes_no_label(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("legacy-echo-task").expect("thread");
     let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
@@ -981,12 +731,23 @@ fn legacy_echo_without_source_id_takes_no_take_up(cx: &mut TestAppContext) {
             let receipt = send_receipt_for_flight(application, &thread_id, "message-legacy");
             application.handle_service_event(NativeTransportEvent::MessageQueued(receipt), cx);
             application.handle_service_event(
+                NativeTransportEvent::MessageOutbox(message_outbox(
+                    &thread_id,
+                    vec![queued_summary(
+                        &thread_id,
+                        "message-legacy",
+                        artisan_domain::QueuedMessageState::Dispatching,
+                    )],
+                    Vec::new(),
+                )),
+                cx,
+            );
+            application.handle_service_event(
                 NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
                 cx,
             );
-            // The item id equals the message id here, but without a
-            // source id that proves nothing: no take-up, no label, the
-            // forced queue refresh stays the fallback.
+            // The item id equals the message id here, but without a source
+            // id that proves nothing: the turn takes no label.
             application.handle_service_event(
                 NativeTransportEvent::PatchBatch(echo_batch(
                     &thread_id,
@@ -1000,7 +761,8 @@ fn legacy_echo_without_source_id_takes_no_take_up(cx: &mut TestAppContext) {
                 )),
                 cx,
             );
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 1);
+            let scene = staged_turn_scene(application, cx, "turn-legacy");
+            assert_eq!(staged_status(&scene).and_then(|(_, label)| label), None);
             assert!(application.message_failure.is_none());
         });
     });
@@ -1019,8 +781,8 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
     });
     let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
-    // Stage 1: submit + receipt. Pending before ACK, accepted with the
-    // send-time routed label staged for its echo.
+    // Stage 1: submit + receipt, then the Forge's outbox row naming the
+    // engine the accepted configuration routes to.
     cx.update(|_, app| {
         view.update(app, |application, cx| {
             install_ready_message_surface(
@@ -1032,68 +794,31 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
             );
             install_configured_engine_settings(application, cx);
             application.begin_message_submission(cx);
-            assert_eq!(
-                application
-                    .message_flight
-                    .as_ref()
-                    .expect("staged flight")
-                    .engine_label
-                    .as_deref(),
-                Some("Codex")
-            );
+            assert!(application.message_flight.is_some(), "staged flight");
             let receipt = send_receipt_for_flight(application, &thread_id, "message-staged");
             application.handle_service_event(NativeTransportEvent::MessageQueued(receipt), cx);
             assert!(application.message_flight.is_none());
             assert_eq!(application.composer.read(cx).draft(), "");
-            let watch = application
-                .composer_queue
-                .state
-                .echo_watch_for(
-                    &artisan_domain::MessageId::parse("message-staged").expect("message"),
-                )
-                .expect("staged watch");
-            assert_eq!(watch.engine_label(), Some("Codex"));
+            application.handle_service_event(
+                NativeTransportEvent::MessageOutbox(message_outbox(
+                    &thread_id,
+                    vec![queued_summary(
+                        &thread_id,
+                        "message-staged",
+                        artisan_domain::QueuedMessageState::Dispatching,
+                    )],
+                    Vec::new(),
+                )),
+                cx,
+            );
         });
     });
     cx.run_until_parked();
-    // Stage 2: listing row, canonical snapshot, echo. The lip retires on
-    // the echo even though the row is still listed; the painted user
-    // body appears exactly once with the labeled provider wait.
+    // Stage 2: canonical snapshot, the delivered item, then the outbox that
+    // no longer lists it. The painted user body appears exactly once with
+    // the provider wait labelled from the outbox row.
     let user_selector: String = cx.update(|_, app| {
         view.update(app, |application, cx| {
-            application
-                .composer_queue
-                .state
-                .set_scope(Some(thread_id.clone()), 1);
-            application.composer_queue.state.cancel_queue_refresh();
-            let token = application
-                .composer_queue
-                .state
-                .begin_queue_refresh(true, true, false, false, true)
-                .expect("forced queue refresh");
-            let page = artisan_domain::QueuedMessageListing::new(
-                thread_id.clone(),
-                artisan_domain::QueuedMessageListOrder::OldestFirst,
-                1,
-                1,
-                vec![artisan_domain::QueuedMessageSummary {
-                    message_id: artisan_domain::MessageId::parse("message-staged")
-                        .expect("message"),
-                    thread_id: thread_id.clone(),
-                    original_request_id: artisan_domain::RequestId::parse("command-staged")
-                        .expect("request"),
-                    text: Some(artisan_domain::AuthoredText::parse("staged prompt").expect("text")),
-                    attachments: Vec::new(),
-                    accepted_at: UnixMillis::EPOCH,
-                    last_error: None,
-                }],
-            )
-            .expect("queued page");
-            application
-                .composer_queue
-                .state
-                .apply_queue_listing(&token, &page)
-                .expect("queue page");
             application.handle_service_event(
                 NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
                 cx,
@@ -1111,7 +836,14 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
                 )),
                 cx,
             );
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 0);
+            application.handle_service_event(
+                NativeTransportEvent::MessageOutbox(message_outbox(
+                    &thread_id,
+                    Vec::new(),
+                    Vec::new(),
+                )),
+                cx,
+            );
             assert!(
                 application
                     .composer_controls
@@ -1385,7 +1117,7 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
     append_reply("patch-append-one", "lo ", 4, 5, 1, 13, "Hello ");
     append_reply("patch-append-two", "world", 5, 6, 2, 14, "Hello world");
     // Stage 6: terminal. Exactly one user body, settled reply, no
-    // failures, no flights, no watches.
+    // failures, no flights, no Forge rows.
     let terminal_reply: Vec<String> = cx.update(|_, app| {
         view.update(app, |application, cx| {
             application.handle_service_event(
@@ -1421,7 +1153,7 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
             assert_eq!(staged_user_bodies(&scene), ["staged prompt"]);
             assert!(application.message_failure.is_none());
             assert!(application.message_flight.is_none());
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 0);
+            assert!(application.composer_queue.state.entries().is_empty());
             assert!(
                 application
                     .composer_controls
@@ -1449,91 +1181,11 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn failed_send_preserves_label_across_retry(cx: &mut TestAppContext) {
-    let thread_id = ThreadId::parse("label-retry-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
-    let (sink, _) = command_sink([Ok(()), Ok(())]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            install_ready_message_surface(
-                application,
-                cx,
-                thread_id.clone(),
-                "labeled draft",
-                sink,
-            );
-            install_configured_engine_settings(application, cx);
-            application.begin_message_submission(cx);
-            let request_id = application
-                .message_flight
-                .as_ref()
-                .expect("labeled flight")
-                .request_id
-                .clone();
-            assert_eq!(
-                application
-                    .message_flight
-                    .as_ref()
-                    .expect("labeled flight")
-                    .engine_label
-                    .as_deref(),
-                Some("Codex")
-            );
-            application.handle_message_failure(&thread_id, &request_id, message_failure(), cx);
-            // Failures match only active flights, which never staged a
-            // watch; the retry record keeps the original label.
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 0);
-            let retry = application.message_retry.as_ref().expect("retry record");
-            assert_eq!(retry.engine_label.as_deref(), Some("Codex"));
-            application
-                .message_retry
-                .as_mut()
-                .expect("retry")
-                .draft_matches = true;
-            application.activate_message_retry(cx);
-            let flight = application
-                .message_flight
-                .as_ref()
-                .expect("replayed flight");
-            assert_eq!(flight.request_id, request_id);
-            assert_eq!(flight.engine_label.as_deref(), Some("Codex"));
-        });
-    });
-}
-
-#[gpui::test]
-fn send_label_ignores_changed_picker(cx: &mut TestAppContext) {
-    let thread_id = ThreadId::parse("picker-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
-    let (sink, _) = command_sink([Ok(())]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            install_ready_message_surface(application, cx, thread_id.clone(), "picker draft", sink);
-            install_configured_engine_settings(application, cx);
-            // A changed picker naming another engine must not relabel a
-            // send: capture reads the authoritative config only. (A send
-            // with this diverged choice would refuse at validation; the
-            // capture rule itself is what this pins.)
-            let mut policy = application
-                .model_selector
-                .read(cx)
-                .state()
-                .snapshot()
-                .selection_policy_for_model("codex-sol")
-                .expect("codex policy");
-            policy.engine_id = "claude".to_owned();
-            application.composer_model_choice = Some((Some(thread_id.clone()), policy));
-            assert_eq!(application.send_engine_label().as_deref(), Some("Codex"));
-        });
-    });
-}
-
-#[gpui::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one end-to-end scenario drives the full event chain; splitting it would hide the causal ordering the test asserts"
 )]
-fn two_sends_retire_their_echoes_independently(cx: &mut TestAppContext) {
+fn two_sends_leave_the_outbox_independently(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("two-send-task").expect("thread");
     let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(()), Ok(())]);
@@ -1553,8 +1205,27 @@ fn two_sends_retire_their_echoes_independently(cx: &mut TestAppContext) {
             application.begin_message_submission(cx);
             let receipt_two = send_receipt_for_flight(application, &thread_id, "message-two");
             application.handle_service_event(NativeTransportEvent::MessageQueued(receipt_two), cx);
-            // Receipts end flights, so both accepted sends await echo.
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 2);
+            // Receipts end flights; the Forge's outbox lists both rows.
+            application.handle_service_event(
+                NativeTransportEvent::MessageOutbox(message_outbox(
+                    &thread_id,
+                    vec![
+                        queued_summary(
+                            &thread_id,
+                            "message-one",
+                            artisan_domain::QueuedMessageState::Dispatching,
+                        ),
+                        queued_summary(
+                            &thread_id,
+                            "message-two",
+                            artisan_domain::QueuedMessageState::Queued,
+                        ),
+                    ],
+                    Vec::new(),
+                )),
+                cx,
+            );
+            assert_eq!(application.composer_queue.state.entries().len(), 2);
             application.handle_service_event(
                 NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
                 cx,
@@ -1628,8 +1299,16 @@ fn two_sends_retire_their_echoes_independently(cx: &mut TestAppContext) {
             )
             .expect("twin echo batch");
             application.handle_service_event(NativeTransportEvent::PatchBatch(batch), cx);
-            // Both watches retired independently; both bodies exact-once.
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 0);
+            application.handle_service_event(
+                NativeTransportEvent::MessageOutbox(message_outbox(
+                    &thread_id,
+                    Vec::new(),
+                    Vec::new(),
+                )),
+                cx,
+            );
+            // Both rows left with the outbox; both bodies exact-once.
+            assert!(application.composer_queue.state.entries().is_empty());
             assert!(application.message_failure.is_none());
             let canonical = application
                 .conversation_host
@@ -1649,61 +1328,6 @@ fn two_sends_retire_their_echoes_independently(cx: &mut TestAppContext) {
                 })
                 .collect();
             assert_eq!(bodies, ["first send", "second send"]);
-        });
-    });
-}
-
-#[gpui::test]
-fn echo_before_receipt_retires_from_canonical_scan(cx: &mut TestAppContext) {
-    let thread_id = ThreadId::parse("early-echo-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
-    let (sink, _) = command_sink([Ok(())]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            install_ready_message_surface(application, cx, thread_id.clone(), "early echo", sink);
-            install_configured_engine_settings(application, cx);
-            application.begin_message_submission(cx);
-            application.handle_service_event(
-                NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
-                cx,
-            );
-            // The patch stream wins the race: no watch exists yet, so
-            // nothing retires, but the host still applies the echo.
-            application.handle_service_event(
-                NativeTransportEvent::PatchBatch(echo_batch(
-                    &thread_id,
-                    1,
-                    "item-early",
-                    Some("message-early"),
-                    "turn-early",
-                    0,
-                    1,
-                    "early echo",
-                )),
-                cx,
-            );
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 0);
-            // The receipt stages its watch, then the canonical scan
-            // finds the already-projected echo and retires immediately.
-            let receipt = send_receipt_for_flight(application, &thread_id, "message-early");
-            application.handle_service_event(NativeTransportEvent::MessageQueued(receipt), cx);
-            assert_eq!(application.composer_queue.state.echo_watch_count(), 0);
-            assert!(application.message_failure.is_none());
-            let canonical = application
-                .conversation_host
-                .clone()
-                .expect("mounted host")
-                .read(cx)
-                .canonical_snapshot()
-                .expect("canonical snapshot");
-            assert_eq!(
-                canonical
-                    .items()
-                    .iter()
-                    .filter(|item| matches!(item, ConversationItem::UserMessage(_)))
-                    .count(),
-                1
-            );
         });
     });
 }
@@ -1827,6 +1451,9 @@ fn each_new_message_submission_mints_a_fresh_request_id() {
     assert_ne!(first, second);
     assert!(first.as_str().starts_with("native-message-"));
     assert!(second.as_str().starts_with("native-message-"));
+    // Random UUIDv7, not a process counter: no pid or counter suffix that a
+    // restarted Editor could repeat.
+    assert_eq!(first.as_str().len(), "native-message-".len() + 36);
 }
 
 #[gpui::test]
@@ -1856,16 +1483,6 @@ fn first_send_persists_displayed_one_million_window_before_queueing(cx: &mut Tes
             application.begin_message_submission(cx);
             assert!(application.message_flight.is_some(), "send should be eager");
             assert!(application.engine_settings.authoritative_config().is_none());
-            assert_eq!(
-                application
-                    .message_flight
-                    .as_ref()
-                    .unwrap()
-                    .engine_label
-                    .as_deref(),
-                Some("Codex"),
-                "the first send captures the submitted config before its acknowledgement",
-            );
         })
     });
     let commands = commands.borrow();
@@ -1875,7 +1492,7 @@ fn first_send_persists_displayed_one_million_window_before_queueing(cx: &mut Tes
         .expect("default choice must be saved");
     let queue = commands
         .iter()
-        .position(|command| matches!(command, NativeTransportCommand::QueueMessage(_)))
+        .position(|command| matches!(command, NativeTransportCommand::SubmitComposerDraft(_)))
         .unwrap();
     assert!(save < queue);
     let NativeTransportCommand::SetThreadEngineConfig(command) = &commands[save] else {
@@ -2033,40 +1650,7 @@ fn unconnected_application_never_offers_bundled_models(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn account_check_does_not_send_a_draft_edited_while_waiting(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
-    let (sink, commands) = command_sink([]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            install_ready_message_surface(
-                application,
-                cx,
-                ThreadId::parse("pending-account-edited").unwrap(),
-                "original draft",
-                sink,
-            );
-            application.begin_message_submission(cx);
-            assert!(application.pending_account_send.is_some());
-            application.composer.update(cx, |composer, _| {
-                composer.set_draft("edited draft".to_owned());
-            });
-            admit_probed_codex_usage(application, cx);
-            application.resume_account_send("codex", cx);
-            assert!(application.pending_account_send.is_none());
-            assert!(application.message_flight.is_none());
-            assert_eq!(application.composer.read(cx).draft(), "edited draft");
-            assert!(
-                commands
-                    .borrow()
-                    .iter()
-                    .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_)))
-            );
-        });
-    });
-}
-
-#[gpui::test]
-fn local_send_leaves_detached_viewport_and_shows_bubble_before_receipt(cx: &mut TestAppContext) {
+fn local_send_leaves_detached_viewport_before_receipt(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|_, app| {
@@ -2095,7 +1679,10 @@ fn local_send_leaves_detached_viewport_and_shows_bubble_before_receipt(cx: &mut 
             assert!(host.read(cx).controller_view().viewport_state.is_detached());
             application.begin_message_submission(cx);
             assert!(application.message_flight.is_some());
-            assert!(host.read(cx).surface().read(cx).has_pending_messages());
+            assert!(
+                !host.read(cx).surface().read(cx).has_pending_messages(),
+                "the row appears only when the Forge's outbox carries it"
+            );
             assert!(!host.read(cx).controller_view().viewport_state.is_detached());
         })
     });

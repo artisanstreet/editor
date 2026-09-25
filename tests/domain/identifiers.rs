@@ -22,6 +22,24 @@ fn accepts_representative_ids_for_every_identifier_type() {
 }
 
 #[test]
+fn minted_request_ids_are_labelled_random_uuid_v7() {
+    let ids: Vec<RequestId> = (0..256)
+        .map(|_| RequestId::mint("native-message").expect("fixed label is valid"))
+        .collect();
+    let unique: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "every minted id is distinct");
+    for id in &ids {
+        let uuid = id
+            .as_str()
+            .strip_prefix("native-message-")
+            .expect("label prefix");
+        assert_eq!(uuid.len(), 36, "hyphenated UUID");
+        assert_eq!(&uuid[14..15], "7", "version nibble is 7");
+    }
+    assert!(RequestId::mint("bad label").is_err());
+}
+
+#[test]
 fn round_trips_display_and_from_str() {
     let parsed: RequestId = "request-17".parse().expect("the fixture is valid");
 

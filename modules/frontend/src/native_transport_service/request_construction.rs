@@ -258,17 +258,15 @@ pub(super) fn first_message_stable_mutation(
     })
 }
 
-pub(super) fn message_stable_mutation(
-    command: QueueMessage,
-    stored_attachments: &HashSet<artisan_domain::ComposerAttachmentDigest>,
+pub(super) fn draft_submission_mutation(
+    command: SubmitComposerDraft,
 ) -> Result<StableMutation, ServiceFailure> {
-    let request_id = command.request_id.clone();
-    let frame_id = FrameId::parse(request_id.as_str().to_owned())
+    let frame_id = FrameId::parse(command.request_id.as_str().to_owned())
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
     let frame_request_id = frame_id
         .to_request_id()
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
-    if frame_request_id != request_id || command.request_id != request_id {
+    if frame_request_id != command.request_id {
         return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
     }
     let sent_at =
@@ -276,7 +274,7 @@ pub(super) fn message_stable_mutation(
     Ok(StableMutation {
         frame_id,
         sent_at,
-        command: super::composer_draft_operations::message_command(command, stored_attachments),
+        command: Command::SubmitComposerDraft(command),
     })
 }
 

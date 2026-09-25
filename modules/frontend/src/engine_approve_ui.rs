@@ -30,9 +30,6 @@
 //! options were offered. Only the sanitized S1c row vocabulary reaches these
 //! views; no other provider payload is retained.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use artisan_domain::{
     Command, ObservationId, ReceiptDisposition, RequestId, RespondApproval, RespondQuestion, RunId,
     RunInteractionError, ThreadId,
@@ -114,12 +111,9 @@ impl AnswerKind {
 /// Failure minting one client request identity for an answer attempt.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum AnswerIntentError {
-    /// The monotonic answer counter cannot mint another identity.
+    /// No answer request identity could be minted.
     #[error("no further answer request identity can be minted")]
     IdentityExhausted,
-    /// The platform clock could not supply an acceptance instant.
-    #[error("the platform clock could not supply an answer instant")]
-    ClockUnavailable,
 }
 
 /// Visible label of the denial affordance.
@@ -141,9 +135,6 @@ pub const QUESTION_INPUT_LABEL: &str = "Answer question";
 /// Placeholder of the free-form question input.
 pub const QUESTION_INPUT_PLACEHOLDER: &str = "Type your answer";
 
-/// Monotonic answer-attempt counter backing [`mint_answer_request_id`].
-static ANSWER_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 /// Mints one fresh client request identity for an answer attempt.
 ///
 /// Every answer attempt mints exactly one identity; an explicit retry of that
@@ -152,23 +143,10 @@ static ANSWER_COUNTER: AtomicU64 = AtomicU64::new(1);
 ///
 /// # Errors
 ///
-/// Returns [`AnswerIntentError`] when the platform clock is unavailable or
-/// the monotonic counter is exhausted.
+/// Returns [`AnswerIntentError::IdentityExhausted`] if the identity cannot be
+/// formed (never for this fixed label).
 pub fn mint_answer_request_id() -> Result<RequestId, AnswerIntentError> {
-    let millis = u64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| AnswerIntentError::ClockUnavailable)?
-            .as_millis(),
-    )
-    .map_err(|_| AnswerIntentError::ClockUnavailable)?;
-    let counter = ANSWER_COUNTER
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current.checked_add(1)
-        })
-        .map_err(|_| AnswerIntentError::IdentityExhausted)?;
-    let value = format!("native-answer-{}-{millis}-{counter}", std::process::id());
-    RequestId::parse(value).map_err(|_| AnswerIntentError::IdentityExhausted)
+    RequestId::mint("native-answer").map_err(|_| AnswerIntentError::IdentityExhausted)
 }
 
 /// Builds the domain approval command for one explicit answer gesture.

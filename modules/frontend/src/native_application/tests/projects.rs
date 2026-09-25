@@ -305,7 +305,7 @@ fn switching_to_an_empty_project_keeps_an_inflight_payload_in_its_source_thread(
             application.thread_listing = Some(listing.clone());
             application.pending_thread = Some(source.clone());
             application.try_mount_pending_thread(cx);
-            let (payload, token) = application
+            let (_, token) = application
                 .composer
                 .update(cx, |composer, cx| {
                     composer.set_disabled(false, cx);
@@ -316,9 +316,6 @@ fn switching_to_an_empty_project_keeps_an_inflight_payload_in_its_source_thread(
             application.message_flight = Some(NativeMessageFlight {
                 thread_id: source.clone(),
                 request_id: request("project-switch-send"),
-                payload,
-                steer_target: None,
-                engine_label: None,
                 token,
             });
 
@@ -340,7 +337,7 @@ fn switching_to_an_empty_project_keeps_an_inflight_payload_in_its_source_thread(
             assert!(!commands.borrow().iter().any(|command| matches!(
                 command,
                 NativeTransportCommand::CreateTask(_)
-                    | NativeTransportCommand::QueueMessage(_)
+                    | NativeTransportCommand::SubmitComposerDraft(_)
                     | NativeTransportCommand::StopRun(_)
             )));
         });

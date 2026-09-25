@@ -182,6 +182,8 @@ fn queued_listing_round_trips_ordered_metadata_and_count_state() {
         last_error: Some(
             DispatchError::parse("engine unconfigured".to_owned()).expect("diagnostic"),
         ),
+        state: artisan_domain::QueuedMessageState::Dispatching,
+        engine: Some(artisan_domain::EngineId::Codex),
     };
     let original = QueuedMessageListing::new(
         thread_id,
@@ -631,6 +633,7 @@ fn failed_summary() -> FailedMessageSummary {
             "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue".to_owned(),
         )
         .expect("diagnostic"),
+        retryable: true,
     }
 }
 

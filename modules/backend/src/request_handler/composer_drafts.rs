@@ -9,9 +9,10 @@
 
 use artisan_database::{ComposerDraftRepositoryError, SaveComposerDraftInput};
 use artisan_domain::{
-    ComposerAttachmentUploaded, ComposerDraftResult, ComposerDraftSaved, QueueMessage,
-    QueueMessagePayload, QueueStoredMessage, ReadComposerAttachment, ReadComposerDraft, RequestId,
-    SaveComposerDraft, UploadComposerAttachment,
+    AuthoredText, ComposerAttachmentUploaded, ComposerDraftResult, ComposerDraftSaved,
+    ComposerDraftScope, QueueMessage, QueueMessagePayload, QueueStoredMessage,
+    ReadComposerAttachment, ReadComposerDraft, RequestId, SaveComposerDraft, ThreadId,
+    UploadComposerAttachment,
 };
 use artisan_protocol::{ErrorCode, ProtocolFailure, ResponsePayload, ServerResponse};
 
@@ -33,6 +34,7 @@ impl RequestHandler {
         let saved = self
             .repository
             .save_composer_draft(SaveComposerDraftInput {
+                request_id: save.request_id().clone(),
                 scope: save.scope().clone(),
                 text: save.text().clone(),
                 attachments: save.attachments().to_vec(),
@@ -105,6 +107,41 @@ impl RequestHandler {
         self.queue_message_outcome(request_id, &resolved).await
     }
 
+    /// Stores a message payload as a thread's composer draft: the images go
+    /// to the attachment store and the draft references them. Used when the
+    /// Forge hands a withdrawn or failed prompt back to the user.
+    pub(super) async fn store_payload_as_draft(
+        &self,
+        request_id: &RequestId,
+        thread_id: &ThreadId,
+        payload: &QueueMessagePayload,
+    ) -> Result<(), ProtocolFailure> {
+        let saved_at = self
+            .origin
+            .acceptance_instant()
+            .map_err(|error| origin_clock_failure(error, request_id))?;
+        let mut attachments = Vec::with_capacity(payload.attachments().len());
+        for image in payload.attachments() {
+            attachments.push(
+                self.repository
+                    .store_composer_attachment(image, saved_at)
+                    .await
+                    .map_err(|error| draft_failure(&error, request_id))?,
+            );
+        }
+        self.repository
+            .save_composer_draft(SaveComposerDraftInput {
+                request_id: request_id.clone(),
+                scope: ComposerDraftScope::Thread(thread_id.clone()),
+                text: payload.text().cloned().unwrap_or_else(AuthoredText::empty),
+                attachments,
+                saved_at,
+            })
+            .await
+            .map_err(|error| draft_failure(&error, request_id))?;
+        Ok(())
+    }
+
     /// Reads one scope's stored draft.
     pub(super) async fn read_composer_draft(
         &self,
@@ -151,7 +188,10 @@ impl RequestHandler {
     }
 }
 
-fn draft_failure(error: &ComposerDraftRepositoryError, request_id: &RequestId) -> ProtocolFailure {
+pub(super) fn draft_failure(
+    error: &ComposerDraftRepositoryError,
+    request_id: &RequestId,
+) -> ProtocolFailure {
     let (code, detail, retryable) = match error {
         ComposerDraftRepositoryError::ScopeNotFound { kind, .. } => (
             if *kind == "thread" {

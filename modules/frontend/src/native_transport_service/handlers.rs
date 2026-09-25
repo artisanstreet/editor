@@ -454,84 +454,79 @@ pub(super) async fn queue_first_message(
     publish(events, NativeTransportEvent::FirstMessageQueued(receipt))
 }
 
-pub(super) async fn queue_message(
+/// Sends one thread's composer draft at the revision its body was stored
+/// under. The Forge's answer names the message (the first submission's
+/// message when this revision was already sent) or refuses a stale revision.
+pub(super) async fn submit_composer_draft(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
-    command: QueueMessage,
+    command: SubmitComposerDraft,
 ) -> Result<(), ServiceFailure> {
     let thread_id = command.thread_id.clone();
     let request_id = command.request_id.clone();
+    let failed = |failure| NativeTransportEvent::MessageFailed {
+        thread_id: thread_id.clone(),
+        request_id: request_id.clone(),
+        failure,
+    };
     if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
         return publish(
             events,
-            NativeTransportEvent::MessageFailed {
-                thread_id,
-                request_id,
-                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-            },
+            failed(ServiceFailure::invalid(ServiceFailureStage::Request)),
         );
     }
-    let mutation = match message_stable_mutation(command, &runtime.stored_attachments) {
+    let mutation = match draft_submission_mutation(command) {
         Ok(mutation) => mutation,
-        Err(failure) => {
+        Err(failure) => return publish(events, failed(failure)),
+    };
+    let expected = ExpectedResponse::DraftSubmitted {
+        thread_id: thread_id.clone(),
+        request_id: request_id.clone(),
+    };
+    let submitted = match durable_save_request(runtime, frames, &mutation, expected).await {
+        Ok(ResponsePayload::ComposerDraftSubmitted(submitted)) => submitted,
+        Ok(_) => {
             return publish(
                 events,
-                NativeTransportEvent::MessageFailed {
-                    thread_id,
-                    request_id,
-                    failure,
-                },
+                failed(ServiceFailure::invalid(ServiceFailureStage::Request)),
             );
         }
+        Err(error) => return publish(events, failed(error.into())),
     };
-    let payload = match durable_save_request(
-        runtime,
-        frames,
-        &mutation,
-        ExpectedResponse::MessageQueued {
-            thread_id: thread_id.clone(),
-            request_id: request_id.clone(),
-        },
-    )
-    .await
-    {
-        Ok(payload) => payload,
-        Err(error) => {
-            return publish(
+    let scope = artisan_domain::ComposerDraftScope::Thread(thread_id.clone());
+    match submitted.outcome {
+        artisan_domain::DraftSubmissionOutcome::Queued {
+            message_id,
+            disposition,
+            cleared_revision,
+        } => {
+            publish(
                 events,
-                NativeTransportEvent::MessageFailed {
-                    thread_id,
+                NativeTransportEvent::ComposerDraft(ComposerDraftEvent::Revision {
+                    scope,
+                    revision: cleared_revision,
+                }),
+            )?;
+            publish(
+                events,
+                NativeTransportEvent::MessageQueued(QueueMessageReceipt {
                     request_id,
-                    failure: error.into(),
-                },
-            );
+                    message_id,
+                    thread_id,
+                    disposition,
+                }),
+            )
         }
-    };
-    let ResponsePayload::MessageQueued(receipt) = payload else {
-        return publish(
+        artisan_domain::DraftSubmissionOutcome::Stale { current_revision } => publish(
             events,
-            NativeTransportEvent::MessageFailed {
+            NativeTransportEvent::MessageStale {
                 thread_id,
                 request_id,
-                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+                current_revision,
             },
-        );
-    };
-    if receipt.thread_id != thread_id || receipt.request_id != request_id {
-        return publish(
-            events,
-            NativeTransportEvent::MessageFailed {
-                thread_id,
-                request_id,
-                failure: ServiceFailure::new(
-                    ServiceFailureStage::Request,
-                    ServiceFailureCategory::Integrity,
-                ),
-            },
-        );
+        ),
     }
-    publish(events, NativeTransportEvent::MessageQueued(receipt))
 }
 
 pub(super) fn known_thread_for_queue(

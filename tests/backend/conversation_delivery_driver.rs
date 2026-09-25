@@ -531,7 +531,7 @@ async fn subscribed_client(
         artisan_transport::client_handshake(&mut control_send, &mut control_recv, hello_envelope())
             .await?;
     let (mut request_send, mut request_recv) = connection.open_bi().await?;
-    artisan_transport::send_envelope(&mut request_send, &resume_request(thread_id)).await?;
+    artisan_transport::send_envelope(&mut request_send, &resume_request(thread_id.clone())).await?;
     drop(request_send);
     let _response = tokio::time::timeout(
         TEST_DEADLINE,
@@ -548,6 +548,7 @@ async fn subscribed_client(
     if !matches!(delivery.body, WireEnvelopeBody::PatchBatch(_)) {
         return Err("expected the initial delivery batch".into());
     }
+    receive_activation_outbox(&mut delivery_stream, &thread_id).await?;
     drop(control_send);
     drop(control_recv);
     drop(request_recv);
@@ -603,6 +604,7 @@ async fn resumed_delivery_client(
         artisan_transport::receive_envelope(&mut delivery_stream),
     )
     .await??;
+    receive_activation_outbox(&mut delivery_stream, thread_id).await?;
     commit_assistant_start(repository, &seeded.run).await?;
     let expected_second = match repository
         .read_conversation_patch_replay(thread_id, first_cursor)
@@ -813,6 +815,97 @@ async fn cancellation_cleans_connection_owned_delivery() -> Result<(), Box<dyn E
         &endpoint,
         quinn::VarInt::from_u32(0),
         b"delivery cancellation test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
+
+/// Accepting a message changes the thread's outbox: the wake pushes the
+/// complete outbox with the new row in its Forge-owned state, and a wake
+/// that changes nothing pushes nothing.
+#[tokio::test]
+async fn accepted_message_pushes_the_thread_outbox() -> Result<(), Box<dyn Error>> {
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    let thread_id = seeded.thread_id.clone();
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler =
+        RequestHandler::new(repository.clone()).with_conversation_commit_notifier(notifier.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+
+    let server = async {
+        let (listener, report) = listener.serve_one(&handler, &cancel).await?;
+        assert_eq!(report.completed_requests, 1);
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let client = async {
+        let (connection, mut delivery_stream) =
+            subscribed_client(&endpoint, address, thread_id.clone()).await?;
+        repository
+            .queue_message(artisan_database::QueueMessageInput {
+                request_id: RequestId::parse("delivery-live-queue")?,
+                message_id: MessageId::parse("delivery-live-message")?,
+                thread_id: thread_id.clone(),
+                payload: artisan_domain::QueueMessagePayload::text_only("while running")?,
+                steer_run_id: None,
+                accepted_at: UnixMillis::from_millis(700),
+            })
+            .await?;
+        let _ = notifier.publish(&thread_id);
+        let frame = receive_delivery_frame(&mut delivery_stream).await?;
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected the outbox event".into());
+        };
+        let Event::MessageOutbox(outbox) = event.event else {
+            return Err("expected a message outbox".into());
+        };
+        let [row] = outbox.queued().messages() else {
+            return Err("expected exactly the accepted message".into());
+        };
+        assert_eq!(row.message_id.as_str(), "delivery-live-message");
+        assert_eq!(row.state, artisan_domain::QueuedMessageState::Queued);
+        assert_eq!(row.engine, Some(EngineId::OpenCode2));
+        assert!(outbox.failed().messages().is_empty());
+        let _ = notifier.publish(&thread_id);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                artisan_transport::receive_envelope(&mut delivery_stream),
+            )
+            .await
+            .is_err(),
+            "an unchanged outbox is not pushed again"
+        );
+        cancel.cancel();
+        drop(delivery_stream);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery outbox test complete",
         TEST_DEADLINE,
     )
     .await?;
@@ -1170,6 +1263,24 @@ async fn receive_delivery_frame(
     Ok(tokio::time::timeout(TEST_DEADLINE, artisan_transport::receive_envelope(stream)).await??)
 }
 
+/// Consumes the message outbox every activation pushes after its patches
+/// and observation history, returning its event cursor.
+async fn receive_activation_outbox(
+    stream: &mut quinn::RecvStream,
+    thread_id: &ThreadId,
+) -> Result<u64, Box<dyn Error>> {
+    let frame = receive_delivery_frame(stream).await?;
+    let kind = frame_kind(&frame.body);
+    let WireEnvelopeBody::Event(event) = frame.body else {
+        return Err(format!("expected the activation outbox, got {kind}").into());
+    };
+    let Event::MessageOutbox(outbox) = event.event else {
+        return Err("expected the activation outbox event".into());
+    };
+    assert_eq!(outbox.thread_id(), thread_id);
+    Ok(event.cursor.get())
+}
+
 /// Names the received frame shape for mismatch diagnostics without decoding
 /// or logging any payload.
 fn frame_kind(body: &WireEnvelopeBody) -> &'static str {
@@ -1335,6 +1446,10 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             return Err(format!("expected the initial replay batch, got {initial_kind}").into());
         };
         let base_cursor = initial_batch.to_cursor();
+        assert_eq!(
+            receive_activation_outbox(&mut delivery_stream, &thread_id).await?,
+            1
+        );
 
         // Ordered barrier proving the initial activation drain (patches plus
         // the still-empty observation history) finished before any commit:
@@ -1437,7 +1552,7 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             receive_delivery_frame(&mut delivery_stream).await?,
             &thread_id,
         );
-        assert_eq!(first.event_cursor, 1);
+        assert_eq!(first.event_cursor, 2);
         assert_eq!(first.delivery_sequence, 1);
         assert_eq!(first.run_id, "delivery-run");
         assert_eq!(first.turn_id, "delivery-turn");
@@ -1456,7 +1571,7 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             receive_delivery_frame(&mut delivery_stream).await?,
             &thread_id,
         );
-        assert_eq!(second.event_cursor, 2);
+        assert_eq!(second.event_cursor, 3);
         assert_eq!(second.delivery_sequence, 2);
         assert_eq!(second.run_id, "delivery-run-2");
         assert_eq!(second.turn_id, "delivery-turn-2");
@@ -1534,7 +1649,7 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             receive_delivery_frame(&mut delivery_stream).await?,
             &thread_id,
         );
-        assert_eq!(replayed_first.event_cursor, 3);
+        assert_eq!(replayed_first.event_cursor, 4);
         assert_eq!(replayed_first.delivery_sequence, 1);
         assert_eq!(replayed_first.run_id, "delivery-run");
         assert_eq!(replayed_first.committed_at_ms, 750);
@@ -1542,10 +1657,15 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             receive_delivery_frame(&mut delivery_stream).await?,
             &thread_id,
         );
-        assert_eq!(replayed_second.event_cursor, 4);
+        assert_eq!(replayed_second.event_cursor, 5);
         assert_eq!(replayed_second.delivery_sequence, 2);
         assert_eq!(replayed_second.run_id, "delivery-run-2");
         assert_eq!(replayed_second.committed_at_ms, 1_400);
+        // Every activation ends with the thread's current message outbox.
+        assert_eq!(
+            receive_activation_outbox(&mut delivery_stream, &thread_id).await?,
+            6
+        );
 
         let (mut stop_send, mut stop_recv) = connection.open_bi().await?;
         artisan_transport::send_envelope(

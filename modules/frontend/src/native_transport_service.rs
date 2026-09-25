@@ -31,10 +31,10 @@ use artisan_domain::{
     ConversationQueryBounds, ConversationRequest, ConversationSnapshot, ConversationSubscribe,
     ConversationUnsubscribe, CreateThread, DirectoryId, EngineRunConfig, ListAttachedProjects,
     ListProjectThreads, ListRegisteredEngineProfiles, PatchBatch, ProjectId, ProjectListing,
-    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, QueueMessage, ReadComposerCatalog,
+    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, ReadComposerCatalog,
     ReadModelFavorites, ReadThreadEngineSettings, RequestId, RespondApproval, RespondQuestion,
-    SetModelFavorite, SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle,
-    UnixMillis,
+    SetModelFavorite, SetThreadEngineConfig, SubmitComposerDraft, ThreadId, ThreadListing,
+    ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{
@@ -137,6 +137,14 @@ pub enum NativeTransportCommand {
     },
     /// Create a new task in an existing, authoritative project.
     CreateTask(ProjectId),
+    /// Ask the Forge to move one failed message into a new thread of its
+    /// project, then open that thread like a created task.
+    RecoverFailedMessage {
+        /// Project of the failed message's thread.
+        project_id: ProjectId,
+        /// Exact durable recovery command.
+        command: Box<artisan_domain::RecoverFailedMessage>,
+    },
     /// Request a real snapshot for a host mounted on a known thread.
     RequestSnapshot(ThreadId),
     /// Load one persisted image named by a bounded history reference.
@@ -201,8 +209,9 @@ pub enum NativeTransportCommand {
     SetModelFavorite(Box<SetModelFavorite>),
     /// Durably queue the first exact message body on one known thread.
     QueueFirstMessage(Box<QueueFirstMessage>),
-    /// Durably queue text and ordered images, including subsequent messages.
-    QueueMessage(Box<QueueMessage>),
+    /// Send one thread's composer draft at the revision its body was stored
+    /// under; the Forge queues exactly that draft once.
+    SubmitComposerDraft(Box<SubmitComposerDraft>),
     /// Resolve one assistant-authored HTTP(S) link's page title.
     ResolveRichLink {
         /// Canonical absolute URL selected by the rich-link URL policy.
@@ -251,6 +260,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::SelectProject(_) => "SelectProject",
             Self::ReadSidebarThreads { .. } => "ReadSidebarThreads",
             Self::CreateTask(_) => "CreateTask",
+            Self::RecoverFailedMessage { .. } => "RecoverFailedMessage",
             Self::RequestSnapshot(_) => "RequestSnapshot",
             Self::ReadMessageImage(_) => "ReadMessageImage",
             Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
@@ -261,7 +271,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::SetThreadEngineConfig(_) => "SetThreadEngineConfig",
             Self::SetModelFavorite(_) => "SetModelFavorite",
             Self::QueueFirstMessage(_) => "QueueFirstMessage",
-            Self::QueueMessage(_) => "QueueMessage",
+            Self::SubmitComposerDraft(_) => "SubmitComposerDraft",
             Self::ResolveRichLink { .. } => "ResolveRichLink",
             Self::QueryProjectRepository { .. } => "QueryProjectRepository",
             Self::Subscribe { .. } => "Subscribe",
@@ -564,11 +574,21 @@ pub enum NativeTransportEvent {
     },
     /// General message accepted or replayed by Forge.
     MessageQueued(QueueMessageReceipt),
-    /// General message failed; identity binds the retained complete payload.
+    /// A draft submission failed; the draft stays in the composer.
     MessageFailed {
         thread_id: ThreadId,
         request_id: RequestId,
         failure: ServiceFailure,
+    },
+    /// The Forge refused a draft submission because the draft is at another
+    /// revision; nothing was queued.
+    MessageStale {
+        /// Thread whose draft was submitted.
+        thread_id: ThreadId,
+        /// The refused submission.
+        request_id: RequestId,
+        /// The thread's current draft revision.
+        current_revision: Option<artisan_domain::ComposerDraftRevision>,
     },
     /// Authoritative thread-settings read failure with its load fence.
     ThreadEngineSettingsFailed {
@@ -604,6 +624,9 @@ pub enum NativeTransportEvent {
     /// The application pairs the observation into presentation state and owns
     /// reconnect replay ordering; the service never advances a cursor here.
     EngineObservation(ServerEvent),
+    /// The subscribed thread's complete message outbox, pushed by the Forge
+    /// whenever its undelivered messages change.
+    MessageOutbox(artisan_domain::MessageOutbox),
     /// Bounded path-free delivery loss.
     DeliveryLost(ServiceFailure),
     /// Terminal service state.
@@ -635,7 +658,6 @@ struct ServiceRuntime {
     shutdown_grace: Duration,
     known_threads: HashSet<ThreadId>,
     /// Attachments this connection uploaded or read back from the Forge store.
-    stored_attachments: HashSet<artisan_domain::ComposerAttachmentDigest>,
     intake: IntakeState,
     custody: SubscriptionCustody,
     delivery_cancel: Option<Arc<CancelHandle>>,
@@ -698,13 +720,12 @@ mod request_construction;
 use request_construction::reconnect_hello;
 use request_construction::{
     FrameFactory, StableMutation, account_usage_request, approval_stable_mutation, attach_mutation,
-    build_reconnect_binding, composer_catalog_request, create_mutation,
+    build_reconnect_binding, composer_catalog_request, create_mutation, draft_submission_mutation,
     engine_config_stable_mutation, finite_duration, first_message_stable_mutation,
-    make_request_frame, message_stable_mutation, model_favorite_stable_mutation,
-    model_favorites_request, project_repository_request, project_request, query_request,
-    question_stable_mutation, real_unix_millis, reconnect_hello_with_capability,
-    registered_profiles_request, rich_link_request, snapshot_request,
-    thread_engine_settings_request, threads_request,
+    make_request_frame, model_favorite_stable_mutation, model_favorites_request,
+    project_repository_request, project_request, query_request, question_stable_mutation,
+    real_unix_millis, reconnect_hello_with_capability, registered_profiles_request,
+    rich_link_request, snapshot_request, thread_engine_settings_request, threads_request,
 };
 
 #[path = "native_transport_service/response_validation.rs"]
@@ -764,9 +785,9 @@ mod answer_handlers;
 use answer_handlers::{respond_approval, respond_question};
 use handlers::{
     durable_save_request, known_thread_for_queue, list_registered_profiles, load_initial_catalog,
-    load_thread_engine_settings, query_project_repository, queue_first_message, queue_message,
-    read_message_image, request_snapshot, resolve_rich_link, select_project,
-    set_thread_engine_config,
+    load_thread_engine_settings, query_project_repository, queue_first_message, read_message_image,
+    request_snapshot, resolve_rich_link, select_project, set_thread_engine_config,
+    submit_composer_draft,
 };
 
 #[cfg(test)]

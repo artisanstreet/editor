@@ -13,12 +13,13 @@ use super::{
     PeerFailure, ReadinessValidationError, RequestAttemptError, RequestFailure, ServiceFailure,
     ServiceFailureCategory, StartupError, ThreadSelectionDecision, approval_stable_mutation,
     attach_mutation, build_reconnect_binding, contains_exact_project, contains_exact_thread,
-    create_command_values, create_mutation, engine_config_stable_mutation, finite_duration,
-    first_message_stable_mutation, known_thread_for_queue, make_request_frame,
-    message_stable_mutation, payload_health_decision, project_repository_request, project_request,
-    question_stable_mutation, reconnect_hello, rich_link_request, session_needs_reconnect,
-    snapshot_request, thread_engine_settings_request, thread_selection_decision, threads_request,
-    try_send_command, validate_readiness, validate_response_family,
+    create_command_values, create_mutation, draft_submission_mutation,
+    engine_config_stable_mutation, finite_duration, first_message_stable_mutation,
+    known_thread_for_queue, make_request_frame, payload_health_decision,
+    project_repository_request, project_request, question_stable_mutation, reconnect_hello,
+    rich_link_request, session_needs_reconnect, snapshot_request, thread_engine_settings_request,
+    thread_selection_decision, threads_request, try_send_command, validate_readiness,
+    validate_response_family,
 };
 use artisan_domain::UnixMillis;
 use artisan_domain::{
@@ -32,7 +33,7 @@ use artisan_editor_cli::payload::PayloadHealth;
 use artisan_protocol::{
     CatalogSnapshotWire, ClientRequest, ComposerCatalogResult, DirectoryPickOutcome, ErrorCode,
     FirstMessageReceipt, HelloCredential, ModelFavoritesSnapshot, ProjectRepository,
-    ProjectRepositoryEntry, ProjectRepositoryQueryResult, ProtocolVersion, QueueMessageReceipt,
+    ProjectRepositoryEntry, ProjectRepositoryQueryResult, ProtocolVersion,
     RECONNECT_CAPABILITY_BYTES, ReconnectCapability, RegisteredEngineProfilesResult,
     ResponsePayload, SetModelFavoriteReceipt, SetThreadEngineConfigResult, WireEnvelopeBody,
     encode_envelope,
@@ -341,58 +342,44 @@ fn first_message_response_family_requires_exact_request_and_thread() {
 }
 
 #[test]
-fn general_message_response_family_requires_exact_request_and_thread() {
+fn draft_submission_response_family_requires_exact_request_and_thread() {
     let thread_id = ThreadId::parse("thread-a").expect("thread");
     let other_thread_id = ThreadId::parse("thread-b").expect("thread");
     let request_id = RequestId::parse("native-message-a").expect("request");
     let other_request_id = RequestId::parse("native-message-b").expect("request");
-    let receipt = QueueMessageReceipt {
+    let submitted = artisan_domain::ComposerDraftSubmitted {
         request_id: request_id.clone(),
-        message_id: artisan_domain::MessageId::parse("message-a").expect("message"),
         thread_id: thread_id.clone(),
-        disposition: ReceiptDisposition::Accepted,
+        draft_revision: artisan_domain::ComposerDraftRevision::new(3).expect("revision"),
+        outcome: artisan_domain::DraftSubmissionOutcome::Queued {
+            message_id: artisan_domain::MessageId::parse("message-a").expect("message"),
+            disposition: ReceiptDisposition::Accepted,
+            cleared_revision: artisan_domain::ComposerDraftRevision::new(4).expect("revision"),
+        },
     };
-    let expected = ExpectedResponse::MessageQueued {
+    let expected = ExpectedResponse::DraftSubmitted {
         thread_id: thread_id.clone(),
         request_id: request_id.clone(),
     };
-    assert!(
-        validate_response_family(
-            expected.clone(),
-            ResponsePayload::MessageQueued(receipt.clone())
-        )
-        .is_ok()
-    );
-    assert!(
-        validate_response_family(
-            expected.clone(),
-            ResponsePayload::MessageQueued(QueueMessageReceipt {
-                disposition: ReceiptDisposition::Duplicate,
-                ..receipt.clone()
-            })
-        )
-        .is_ok()
-    );
-    assert!(
-        validate_response_family(
-            expected.clone(),
-            ResponsePayload::MessageQueued(QueueMessageReceipt {
-                request_id: other_request_id,
-                ..receipt.clone()
-            })
-        )
-        .is_err()
-    );
-    assert!(
-        validate_response_family(
-            expected.clone(),
-            ResponsePayload::MessageQueued(QueueMessageReceipt {
-                thread_id: other_thread_id,
-                ..receipt.clone()
-            })
-        )
-        .is_err()
-    );
+    let answer = |submitted| ResponsePayload::ComposerDraftSubmitted(submitted);
+    assert!(validate_response_family(expected.clone(), answer(submitted.clone())).is_ok());
+    let stale = artisan_domain::ComposerDraftSubmitted {
+        outcome: artisan_domain::DraftSubmissionOutcome::Stale {
+            current_revision: None,
+        },
+        ..submitted.clone()
+    };
+    assert!(validate_response_family(expected.clone(), answer(stale)).is_ok());
+    let other_request = artisan_domain::ComposerDraftSubmitted {
+        request_id: other_request_id,
+        ..submitted.clone()
+    };
+    assert!(validate_response_family(expected.clone(), answer(other_request)).is_err());
+    let other_thread = artisan_domain::ComposerDraftSubmitted {
+        thread_id: other_thread_id,
+        ..submitted
+    };
+    assert!(validate_response_family(expected.clone(), answer(other_thread)).is_err());
     assert!(
         validate_response_family(
             expected,
@@ -451,24 +438,16 @@ fn history_image_response_requires_exact_reference_and_content() {
 }
 
 #[test]
-fn image_message_retry_preserves_full_payload_and_wire_identity() {
-    let request_id = RequestId::parse("native-image-stable").expect("request");
+fn draft_submission_retry_keeps_its_wire_bytes_and_names_no_body() {
+    let request_id = RequestId::parse("native-message-stable").expect("request");
     let thread_id = ThreadId::parse("thread-image").expect("thread");
-    let payload = artisan_domain::QueueMessagePayload::new(
-        None,
-        vec![
-            artisan_domain::ImageAttachment::new("image/png", vec![1, 2, 3], "one.png")
-                .expect("first image"),
-            artisan_domain::ImageAttachment::new("image/webp", vec![4, 5], "two.webp")
-                .expect("second image"),
-        ],
-    )
-    .expect("image-only payload");
-    let mutation = message_stable_mutation(
-        artisan_domain::QueueMessage::new(request_id.clone(), thread_id.clone(), payload.clone()),
-        &std::collections::HashSet::new(),
-    )
-    .expect("stable image mutation");
+    let command = artisan_domain::SubmitComposerDraft {
+        request_id: request_id.clone(),
+        thread_id: thread_id.clone(),
+        draft_revision: artisan_domain::ComposerDraftRevision::new(7).expect("revision"),
+        steer_target: None,
+    };
+    let mutation = draft_submission_mutation(command.clone()).expect("stable mutation");
     let (first, first_id) = mutation.envelope(ProtocolVersion::V1).expect("first");
     let (retry, retry_id) = mutation.envelope(ProtocolVersion::V1).expect("retry");
     assert_eq!(first_id, request_id);
@@ -477,13 +456,11 @@ fn image_message_retry_preserves_full_payload_and_wire_identity() {
         encode_envelope(&first).expect("first bytes"),
         encode_envelope(&retry).expect("retry bytes")
     );
-    let WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueMessage(command))) =
-        retry.body
-    else {
-        panic!("retry must remain a general message command");
-    };
-    assert_eq!(command.thread_id, thread_id);
-    assert_eq!(command.payload, payload);
+    assert!(matches!(
+        retry.body,
+        WireEnvelopeBody::Request(ClientRequest::Command(Command::SubmitComposerDraft(sent)))
+            if sent == command
+    ));
 }
 
 #[test]

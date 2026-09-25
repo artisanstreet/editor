@@ -408,4 +408,5 @@ async fn fail_steered_row(
         .repository
         .fail_steered_dispatch(message_id, reason, operated_at)
         .await;
+    context.config.notifier.wake_any();
 }

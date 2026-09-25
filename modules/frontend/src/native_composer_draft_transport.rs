@@ -3,17 +3,16 @@
 //!
 //! Every draft command is answered by exactly one [`ComposerDraftEvent`] that
 //! names its scope, so the application can settle its per-scope save chain.
-//! Digests this connection uploaded or read back are remembered: a later
-//! message whose images are all stored is sent by reference instead of
-//! re-uploading its bytes.
+//! A message is never sent from here: the Editor sends its draft by revision
+//! (`SubmitComposerDraft`).
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_domain::{
     ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult, ComposerDraft,
-    ComposerDraftRevision, ComposerDraftScope, QueueStoredMessage, ReadComposerAttachment,
-    ReadComposerDraft, SaveComposerDraft, UploadComposerAttachment,
+    ComposerDraftRevision, ComposerDraftScope, ReadComposerAttachment, ReadComposerDraft,
+    SaveComposerDraft, UploadComposerAttachment,
 };
 
 use super::*;
@@ -68,6 +67,14 @@ pub enum ComposerDraftEvent {
         sequence: u64,
         /// Redacted failure.
         failure: ServiceFailure,
+    },
+    /// The Forge reported a scope's revision outside a save (the emptied
+    /// draft after a send).
+    Revision {
+        /// Draft scope.
+        scope: ComposerDraftScope,
+        /// Reported revision.
+        revision: ComposerDraftRevision,
     },
     /// A scope's stored draft, or its read failure.
     Read {
@@ -175,9 +182,6 @@ pub(super) async fn handle_composer_draft_command(
                 ResponsePayload::ComposerAttachmentUploaded(uploaded) => Ok(uploaded.reference),
                 _ => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
             });
-            if let Ok(reference) = &result {
-                runtime.stored_attachments.insert(*reference.digest());
-            }
             ComposerDraftEvent::Uploaded {
                 scope,
                 attachment_id,
@@ -199,9 +203,6 @@ pub(super) async fn handle_composer_draft_command(
                     ResponsePayload::ComposerAttachment(result) => Ok(Box::new(result)),
                     _ => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
                 });
-            if result.is_ok() {
-                runtime.stored_attachments.insert(digest);
-            }
             ComposerDraftEvent::AttachmentRead {
                 scope,
                 digest,
@@ -277,81 +278,4 @@ async fn mutate(
     )
     .await
     .map_err(ServiceFailure::from)
-}
-
-/// The command a general message is sent as: by stored-attachment reference
-/// when every image is already in the Forge store, otherwise with its bytes.
-pub(super) fn message_command(
-    command: QueueMessage,
-    stored: &HashSet<ComposerAttachmentDigest>,
-) -> Command {
-    let attachments = command.payload.attachments();
-    if attachments.is_empty() {
-        return Command::QueueMessage(command);
-    }
-    let references = attachments
-        .iter()
-        .map(|image| {
-            let digest = ComposerAttachmentDigest::new(Sha256::digest(image.bytes()).into());
-            stored.contains(&digest).then_some(())?;
-            let size = u32::try_from(image.byte_len()).ok()?;
-            ComposerAttachmentRef::new(digest, image.mime_type(), image.name(), size).ok()
-        })
-        .collect::<Option<Vec<_>>>();
-    let stored_message = references.and_then(|references| {
-        QueueStoredMessage::new(
-            command.request_id.clone(),
-            command.thread_id.clone(),
-            command.payload.text().cloned(),
-            references,
-            command.steer_target().cloned(),
-        )
-        .ok()
-    });
-    stored_message.map_or(Command::QueueMessage(command), Command::QueueStoredMessage)
-}
-
-#[cfg(test)]
-mod tests {
-    use artisan_domain::{
-        AuthoredText, ComposerAttachmentDigest, ImageAttachment, QueueMessagePayload, RequestId,
-        ThreadId,
-    };
-    use sha2::{Digest as _, Sha256};
-
-    use super::{Command, HashSet, QueueMessage, message_command};
-
-    fn message(images: Vec<ImageAttachment>) -> QueueMessage {
-        QueueMessage::new(
-            RequestId::parse("send-stored").unwrap(),
-            ThreadId::parse("send-thread").unwrap(),
-            QueueMessagePayload::new(Some(AuthoredText::parse("look").unwrap()), images).unwrap(),
-        )
-    }
-
-    #[test]
-    fn sends_reference_stored_attachments_instead_of_their_bytes() {
-        let image = ImageAttachment::new("image/png", vec![1, 2, 3], "shot.png").unwrap();
-        let digest = ComposerAttachmentDigest::new(Sha256::digest(image.bytes()).into());
-        let stored = HashSet::from([digest]);
-        let Command::QueueStoredMessage(sent) =
-            message_command(message(vec![image.clone()]), &stored)
-        else {
-            panic!("an uploaded image is sent by reference");
-        };
-        assert_eq!(sent.attachments()[0].digest(), &digest);
-        assert_eq!(sent.attachments()[0].name(), "shot.png");
-        assert_eq!(sent.text().map(AuthoredText::as_str), Some("look"));
-
-        // Bytes the Forge store does not hold travel inline, as does text only.
-        let other = ImageAttachment::new("image/png", vec![9], "new.png").unwrap();
-        assert!(matches!(
-            message_command(message(vec![image, other]), &stored),
-            Command::QueueMessage(_)
-        ));
-        assert!(matches!(
-            message_command(message(Vec::new()), &stored),
-            Command::QueueMessage(_)
-        ));
-    }
 }

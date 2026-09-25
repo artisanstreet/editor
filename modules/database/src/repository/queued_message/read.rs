@@ -8,9 +8,10 @@ use artisan_domain::{
     AuthoredText, DispatchError, FAILED_MESSAGE_LIST_MAX, FailedMessageListError,
     FailedMessageListing, FailedMessageSummary, ListFailedMessages, ListQueuedMessages,
     QUEUED_MESSAGE_LIST_MAX, QueuedMessageListError, QueuedMessageListOrder, QueuedMessageListing,
-    QueuedMessageSummary, ThreadId, UnixMillis,
+    QueuedMessageState, QueuedMessageSummary, ThreadId, UnixMillis,
 };
 
+use crate::repository::thread_engine_config::read_receipt_settings_in;
 use crate::repository::{Repository, corrupt_data, database_error, row_value};
 
 use super::QueuedMessageRepositoryError;
@@ -27,9 +28,7 @@ WHERE m.thread_id = ?
   AND r.command_kind = 'queue_message'
   AND r.thread_id = m.thread_id
   AND r.message_id = m.message_id
-  AND d.state = 'queued'
-  AND d.lease_owner IS NULL
-  AND d.lease_expires_at_ms IS NULL
+  AND d.state IN ('queued', 'leased')
   AND NOT EXISTS (
       SELECT 1
       FROM queued_message_withdrawals AS w
@@ -49,7 +48,8 @@ SELECT m.message_id,
        m.accepted_at_ms,
        d.queued_at_ms,
        r.accepted_at_ms,
-       d.last_error
+       d.last_error,
+       d.state
 FROM messages AS m
 JOIN message_dispatches AS d ON d.message_id = m.message_id
 JOIN command_receipts AS r ON r.request_id = d.correlation_id
@@ -57,9 +57,7 @@ WHERE m.thread_id = ?
   AND r.command_kind = 'queue_message'
   AND r.thread_id = m.thread_id
   AND r.message_id = m.message_id
-  AND d.state = 'queued'
-  AND d.lease_owner IS NULL
-  AND d.lease_expires_at_ms IS NULL
+  AND d.state IN ('queued', 'leased')
   AND NOT EXISTS (
        SELECT 1
        FROM queued_message_withdrawals AS w
@@ -81,7 +79,8 @@ SELECT m.message_id,
        m.accepted_at_ms,
        d.queued_at_ms,
        r.accepted_at_ms,
-       d.last_error
+       d.last_error,
+       d.state
 FROM messages AS m
 JOIN message_dispatches AS d ON d.message_id = m.message_id
 JOIN command_receipts AS r ON r.request_id = d.correlation_id
@@ -89,9 +88,7 @@ WHERE m.thread_id = ?
   AND r.command_kind = 'queue_message'
   AND r.thread_id = m.thread_id
   AND r.message_id = m.message_id
-  AND d.state = 'queued'
-  AND d.lease_owner IS NULL
-  AND d.lease_expires_at_ms IS NULL
+  AND d.state IN ('queued', 'leased')
   AND NOT EXISTS (
        SELECT 1
        FROM queued_message_withdrawals AS w
@@ -123,6 +120,17 @@ WHERE m.thread_id = ?
         AND w.original_request_id = d.correlation_id
         AND w.outcome = 'withdrawn'
   )
+  AND NOT EXISTS (
+      SELECT 1 FROM failed_message_recoveries AS fr WHERE fr.message_id = d.message_id
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM messages AS later
+      JOIN message_dispatches AS ld ON ld.message_id = later.message_id
+      WHERE later.thread_id = m.thread_id
+        AND later.accepted_at_ms > m.accepted_at_ms
+        AND ld.state IN ('running', 'completed')
+  )
 ";
 
 const FAILED_LIST_SQL: &str = r"
@@ -134,7 +142,10 @@ SELECT m.message_id,
        m.accepted_at_ms,
        d.updated_at_ms,
        r.accepted_at_ms,
-       d.last_error
+       d.last_error,
+       NOT EXISTS (
+           SELECT 1 FROM conversation_items AS i WHERE i.source_message_id = d.message_id
+       )
 FROM messages AS m
 JOIN message_dispatches AS d ON d.message_id = m.message_id
 JOIN command_receipts AS r ON r.request_id = d.correlation_id
@@ -152,22 +163,36 @@ WHERE m.thread_id = ?
         AND w.original_request_id = d.correlation_id
         AND w.outcome = 'withdrawn'
   )
+  AND NOT EXISTS (
+      SELECT 1 FROM failed_message_recoveries AS fr WHERE fr.message_id = d.message_id
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM messages AS later
+      JOIN message_dispatches AS ld ON ld.message_id = later.message_id
+      WHERE later.thread_id = m.thread_id
+        AND later.accepted_at_ms > m.accepted_at_ms
+        AND ld.state IN ('running', 'completed')
+  )
 ORDER BY d.updated_at_ms DESC, d.message_id DESC
 LIMIT ?
 ";
 
 impl Repository {
-    /// Reads one bounded page of still-queued, never-claimed general
-    /// messages for exactly one existing thread.
+    /// Reads one bounded page of accepted general messages that have not
+    /// reached the transcript yet, for exactly one existing thread.
     ///
     /// Rows are ordered by `(queued_at_ms, message_id)` in the requested
-    /// direction. Only `queue_message` receipts paired with a `queued`
-    /// dispatch are eligible; leased, running, completed, failed, and
-    /// withdrawn rows are excluded. A dispatcher requeue returns its claim
-    /// to `queued` with a future availability and a persisted `last_error`,
-    /// so retrying rows stay eligible here until they are claimed,
-    /// completed, failed, or withdrawn — the composer lip never loses a
-    /// message that the dispatcher still retries. The
+    /// direction. Only `queue_message` receipts paired with a `queued` or
+    /// `leased` dispatch are eligible, each reported with its Forge-owned
+    /// state ([`QueuedMessageState::Queued`] or
+    /// [`QueuedMessageState::Dispatching`]); running, completed, failed, and
+    /// withdrawn rows are excluded. Launch moves a dispatch to `running` in
+    /// the same transaction that projects its transcript item, so a message
+    /// is always in exactly one of this listing, the transcript, or the
+    /// failed listing. A dispatcher requeue returns its claim to `queued`
+    /// with a persisted `last_error`, which is the reason the Forge is
+    /// holding the row. The
     /// result contains authored text and byte-free image references, never
     /// image bytes. `total_count` and `has_more` are derived from the same
     /// eligibility predicate as the page query in one read transaction.
@@ -266,10 +291,12 @@ impl Repository {
     /// Reads one bounded page of terminally failed dispatches for exactly one
     /// existing thread, newest failures first.
     ///
-    /// Failed rows are terminal: the dispatcher will never claim them again,
-    /// so this listing is purely diagnostic and drives the explicit new-chat
-    /// recovery action. Withdrawn rows are excluded: a withdrawal is an
-    /// explicit user dismissal, not a failure to surface. Every returned row
+    /// The dispatcher never claims a failed row by itself; only an explicit
+    /// retry requeues it. Withdrawn and recovered rows are excluded, and so
+    /// is a failure superseded by a later message of the thread that reached
+    /// the transcript. `retryable` is true while the message never reached
+    /// the transcript, so its stored payload can be dispatched again. Every
+    /// returned row
     /// carries its persisted dispatcher reason verbatim, so the reader sees
     /// exactly why the send cannot proceed on this thread. The result
     /// contains authored text and byte-free image references, never image
@@ -454,6 +481,7 @@ async fn failed_summary_from_row(
             DispatchError::parse(reason)
                 .map_err(|error| corrupt_data("message_dispatches", "last_error", error))
         })?;
+    let retryable = row_value::<bool, _>(row, 9, "retryable", "conversation_items")?;
 
     let attachments = read_image_refs(database, &message_id, &thread_id).await?;
     if text.as_ref().is_none_or(AuthoredText::is_blank) && attachments.is_empty() {
@@ -473,6 +501,7 @@ async fn failed_summary_from_row(
         accepted_at: UnixMillis::from_millis(accepted_at_ms),
         failed_at: UnixMillis::from_millis(failed_at_ms),
         reason,
+        retryable,
     })
 }
 
@@ -537,6 +566,27 @@ async fn summary_from_row(
         .map(DispatchError::parse)
         .transpose()
         .map_err(|error| corrupt_data("message_dispatches", "last_error", error))?;
+    let state = match row_value::<String, _>(row, 9, "state", "message_dispatches")?.as_str() {
+        "queued" => QueuedMessageState::Queued,
+        "leased" => QueuedMessageState::Dispatching,
+        _ => {
+            return Err(corrupt_data(
+                "message_dispatches",
+                "state",
+                "queued listing returned a settled dispatch",
+            ));
+        }
+    };
+    let engine = read_receipt_settings_in(database, &original_request_id)
+        .await
+        .map_err(|_| {
+            corrupt_data(
+                "command_receipts",
+                "engine_run_config",
+                "queued message configuration snapshot is unreadable",
+            )
+        })?
+        .map(|settings| settings.config().selection().engine_id());
 
     let attachments = read_image_refs(database, &message_id, &thread_id).await?;
     if text.as_ref().is_none_or(AuthoredText::is_blank) && attachments.is_empty() {
@@ -555,6 +605,8 @@ async fn summary_from_row(
         attachments,
         accepted_at: UnixMillis::from_millis(accepted_at_ms),
         last_error,
+        state,
+        engine,
     })
 }
 

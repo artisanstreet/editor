@@ -567,6 +567,7 @@ name = "artisan-domain"
 version = "0.0.0"
 dependencies = [
  "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]

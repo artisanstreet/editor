@@ -52,33 +52,6 @@ impl NativeApplication {
         // Collect echo candidates before the snapshot moves into the host:
         // matching needs only watched source ids, so a small owned
         // (message, turn) list suffices and no transcript data is cloned.
-        // Every staged watch is checked: several sends can await echo.
-        let mut echo_matches = Vec::new();
-        if self.selected_thread.as_ref() == Some(snapshot.thread_id()) {
-            for item in snapshot.items() {
-                let (source_id, turn_id) = match item {
-                    ConversationItem::UserMessage(message) => {
-                        (message.source_message_id.as_ref(), message.turn_id.clone())
-                    }
-                    ConversationItem::MultimodalUserMessage(message) => {
-                        (message.source_message_id.as_ref(), message.turn_id.clone())
-                    }
-                    // Assistant messages are the only other item kind and
-                    // never echo a send.
-                    ConversationItem::AssistantMessage(_) => continue,
-                };
-                if let Some(source_id) = source_id
-                    && self
-                        .composer_queue
-                        .state
-                        .echo_watch_for(source_id)
-                        .is_some()
-                {
-                    echo_matches.push((source_id.clone(), turn_id));
-                }
-            }
-        }
-        let thread_id = snapshot.thread_id().clone();
         let dispatch = host.update(cx, |host, host_cx| {
             host.dispatch(
                 ConversationStateEvent::Delivery(ConversationDeliveryEvent::SnapshotReceived(
@@ -98,9 +71,6 @@ impl NativeApplication {
             // The canonical turn may have arrived after retained observations;
             // replay them now that the snapshot exists.
             self.replay_observation_activity(cx);
-            for (message_id, turn_id) in echo_matches {
-                self.retire_echo_matched(&thread_id, &message_id, turn_id, host, cx);
-            }
             cx.notify();
         }
     }
@@ -200,14 +170,6 @@ impl NativeApplication {
         let Some(thread_id) = self.pending_thread.take() else {
             return;
         };
-        // A mount that is not the armed recovery creation cancels the
-        // pending recovery: only the exact created thread may receive the
-        // recalled prompt.
-        if let Some(recovery) = self.pending_failed_recovery.as_ref()
-            && recovery.new_thread.as_ref() != Some(&thread_id)
-        {
-            self.pending_failed_recovery = None;
-        }
         let carry_draft = self
             .thread_switch_flight
             .as_ref()
@@ -285,7 +247,6 @@ impl NativeApplication {
         {
             self.dispatch_snapshot(&host, snapshot, cx);
         }
-        self.continue_failed_recovery(cx);
     }
 
     pub(super) fn discard_initial_snapshot_request(&mut self, thread_id: &ThreadId) {

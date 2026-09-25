@@ -25,6 +25,8 @@ mod m20260910_000012_message_steer_target;
 mod m20260910_000013_queue_message_config_snapshot;
 mod m20260913_000014_streaming_speed;
 mod m20260925_000015_composer_drafts;
+mod m20260926_000016_failed_message_recoveries;
+mod m20260927_000017_composer_draft_submissions;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::{DatabaseConnection, TransactionTrait};
@@ -52,6 +54,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260910_000013_queue_message_config_snapshot::Migration),
             Box::new(m20260913_000014_streaming_speed::Migration),
             Box::new(m20260925_000015_composer_drafts::Migration),
+            Box::new(m20260926_000016_failed_message_recoveries::Migration),
+            Box::new(m20260927_000017_composer_draft_submissions::Migration),
         ]
     }
 }

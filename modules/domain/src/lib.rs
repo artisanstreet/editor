@@ -23,7 +23,9 @@
 //!
 //! The domain is independent of Cap'n Proto, Quinn, `SeaORM`, GPUI, Tokio,
 //! filesystem APIs, and wall-clock acquisition; it depends only on
-//! `thiserror`. External values return typed errors instead of panicking.
+//! `thiserror`, plus `uuid` for [`RequestId::mint`], the single client
+//! request-id mint (a `UUIDv7` reads the clock and the OS random source).
+//! External values return typed errors instead of panicking.
 //! Filesystem paths are carried as opaque descriptions without
 //! canonicalization.
 
@@ -157,8 +159,13 @@ pub use queued_message::{
     DispatchError, DispatchErrorParseError, FAILED_MESSAGE_LIST_MAX, FailedMessageListError,
     FailedMessageListing, FailedMessageListingError, FailedMessageSummary, ListFailedMessages,
     ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListError, QueuedMessageListOrder,
-    QueuedMessageListing, QueuedMessageListingError, QueuedMessageSummary,
+    QueuedMessageListing, QueuedMessageListingError, QueuedMessageState, QueuedMessageSummary,
     QueuedMessageWithdrawalOutcome, WithdrawQueuedMessage, WithdrawQueuedMessageResult,
+};
+mod message_outbox;
+pub use message_outbox::{
+    FailedMessageRecovered, FailedMessageRetried, FailedMessageRetryOutcome, FailedMessageTarget,
+    MessageOutbox, MessageOutboxError, RecoverFailedMessage, RetryFailedMessage,
 };
 mod run_interaction;
 pub use run_interaction::{
@@ -187,9 +194,11 @@ pub use composer_state::{
 };
 
 pub mod composer_draft;
+mod draft_submission;
 pub use composer_draft::{
     ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult,
     ComposerAttachmentUploaded, ComposerDraft, ComposerDraftError, ComposerDraftResult,
     ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, QueueStoredMessage,
     ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft, UploadComposerAttachment,
 };
+pub use draft_submission::{ComposerDraftSubmitted, DraftSubmissionOutcome, SubmitComposerDraft};

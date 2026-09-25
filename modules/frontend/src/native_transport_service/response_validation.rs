@@ -12,22 +12,17 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) enum ExpectedResponse {
-    QueuedMessages {
-        thread_id: ThreadId,
-    },
-    FailedMessages {
-        thread_id: ThreadId,
-    },
     MessageWithdrawn {
         thread_id: ThreadId,
         message_id: artisan_domain::MessageId,
         original_request_id: RequestId,
         request_id: RequestId,
     },
-    RecalledMessage {
-        thread_id: ThreadId,
-        message_id: artisan_domain::MessageId,
-        original_request_id: RequestId,
+    FailedMessageRetried {
+        request_id: RequestId,
+    },
+    FailedMessageRecovered {
+        request_id: RequestId,
     },
     RunUsage {
         thread_id: ThreadId,
@@ -72,7 +67,7 @@ pub(super) enum ExpectedResponse {
         thread_id: ThreadId,
         request_id: RequestId,
     },
-    MessageQueued {
+    DraftSubmitted {
         thread_id: ThreadId,
         request_id: RequestId,
     },
@@ -129,14 +124,6 @@ pub(super) fn validate_response_family(
 ) -> Result<ResponsePayload, ServiceFailure> {
     match (expected, payload) {
         (
-            ExpectedResponse::QueuedMessages { thread_id },
-            ResponsePayload::QueuedMessages(value),
-        ) if value.thread_id() == &thread_id => Ok(ResponsePayload::QueuedMessages(value)),
-        (
-            ExpectedResponse::FailedMessages { thread_id },
-            ResponsePayload::FailedMessages(value),
-        ) if value.thread_id() == &thread_id => Ok(ResponsePayload::FailedMessages(value)),
-        (
             ExpectedResponse::MessageWithdrawn {
                 thread_id,
                 message_id,
@@ -152,18 +139,13 @@ pub(super) fn validate_response_family(
             Ok(ResponsePayload::MessageWithdrawn(value))
         }
         (
-            ExpectedResponse::RecalledMessage {
-                thread_id,
-                message_id,
-                original_request_id,
-            },
-            ResponsePayload::RecalledMessage(value),
-        ) if value.thread_id == thread_id
-            && value.message_id == message_id
-            && value.original_request_id == original_request_id =>
-        {
-            Ok(ResponsePayload::RecalledMessage(value))
-        }
+            ExpectedResponse::FailedMessageRetried { request_id },
+            ResponsePayload::FailedMessageRetried(value),
+        ) if value.request_id == request_id => Ok(ResponsePayload::FailedMessageRetried(value)),
+        (
+            ExpectedResponse::FailedMessageRecovered { request_id },
+            ResponsePayload::FailedMessageRecovered(value),
+        ) if value.request_id == request_id => Ok(ResponsePayload::FailedMessageRecovered(value)),
         (ExpectedResponse::RunUsage { thread_id, run_id }, ResponsePayload::RunUsage(value))
             if value.thread_id == thread_id && value.run_id == run_id =>
         {
@@ -318,13 +300,13 @@ pub(super) fn validate_response_family(
             Ok(ResponsePayload::FirstMessageQueued(receipt))
         }
         (
-            ExpectedResponse::MessageQueued {
+            ExpectedResponse::DraftSubmitted {
                 thread_id,
                 request_id,
             },
-            ResponsePayload::MessageQueued(receipt),
-        ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
-            Ok(ResponsePayload::MessageQueued(receipt))
+            ResponsePayload::ComposerDraftSubmitted(submitted),
+        ) if submitted.thread_id == thread_id && submitted.request_id == request_id => {
+            Ok(ResponsePayload::ComposerDraftSubmitted(submitted))
         }
         (
             ExpectedResponse::ApprovalAnswered {
@@ -384,6 +366,8 @@ pub enum UniDelivery {
     Batch(PatchBatch),
     /// Valid uni engine observation event.
     Observation(ServerEvent),
+    /// A thread's complete message outbox.
+    Outbox(artisan_domain::MessageOutbox),
 }
 
 /// Validates the delivery family of one uni-stream envelope.
@@ -408,6 +392,7 @@ pub fn validate_uni_envelope(
             artisan_domain::Event::EngineObservation(_) => {
                 Ok(UniDelivery::Observation(server_event.clone()))
             }
+            artisan_domain::Event::MessageOutbox(outbox) => Ok(UniDelivery::Outbox(outbox.clone())),
             artisan_domain::Event::ProjectAttached(_)
             | artisan_domain::Event::ThreadCreated(_)
             | artisan_domain::Event::FirstMessageQueued(_) => Err(ServiceFailure::new(

@@ -228,23 +228,9 @@ pub(crate) fn encode_request(
             )
             .map_err(|_| ProtocolEncodeError::ComposerState)?;
         }
-        ClientRequest::Command(Command::WithdrawQueuedMessage(command)) => {
-            crate::composer_state_codec::encode_withdraw_queued_message_request(
-                builder.reborrow().init_withdraw_queued_message(),
-                command,
-            );
-        }
-        ClientRequest::Query(Query::ReadRecalledMessage(query)) => {
-            crate::composer_state_codec::encode_read_recalled_message_request(
-                builder.reborrow().init_read_recalled_message(),
-                query,
-            );
-        }
-        ClientRequest::Query(Query::ReadRunUsage(query)) => {
-            crate::composer_state_codec::encode_read_run_usage_request(
-                builder.reborrow().init_read_run_usage(),
-                query,
-            );
+        ClientRequest::Command(Command::WithdrawQueuedMessage(_))
+        | ClientRequest::Query(Query::ReadRecalledMessage(_) | Query::ReadRunUsage(_)) => {
+            encode_queue_state_request(builder, value);
         }
         ClientRequest::Query(Query::ListFailedMessages(query)) => {
             crate::composer_state_codec::encode_list_failed_messages_request(
@@ -260,6 +246,13 @@ pub(crate) fn encode_request(
         )
         | ClientRequest::Query(Query::ReadComposerDraft(_) | Query::ReadComposerAttachment(_)) => {
             encode_composer_draft_request(builder, value)?;
+        }
+        ClientRequest::Command(
+            Command::RetryFailedMessage(_)
+            | Command::RecoverFailedMessage(_)
+            | Command::SubmitComposerDraft(_),
+        ) => {
+            encode_message_submission_request(builder, value)?;
         }
         ClientRequest::ResolveRichLink(request) => {
             builder
@@ -334,6 +327,11 @@ pub(crate) fn encode_response_payload(
         | ResponsePayload::ComposerAttachmentUploaded(_)
         | ResponsePayload::ComposerAttachment(_) => {
             encode_composer_draft_response(builder, payload, outer_request_id)?;
+        }
+        ResponsePayload::FailedMessageRetried(_)
+        | ResponsePayload::FailedMessageRecovered(_)
+        | ResponsePayload::ComposerDraftSubmitted(_) => {
+            encode_message_submission_response(builder, payload, outer_request_id)?;
         }
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
@@ -789,6 +787,11 @@ pub(crate) fn decode_request(
         | request::Which::UploadComposerAttachment(_)
         | request::Which::ReadComposerAttachment(_)
         | request::Which::QueueStoredMessage(_) => decode_composer_draft_request(value, request_id),
+        request::Which::RetryFailedMessage(_)
+        | request::Which::RecoverFailedMessage(_)
+        | request::Which::SubmitComposerDraft(_) => {
+            decode_message_submission_request(value, request_id)
+        }
     }
 }
 
@@ -932,6 +935,11 @@ pub(crate) fn decode_response(
         | response::Which::ComposerAttachmentUploaded(_)
         | response::Which::ComposerAttachment(_) => {
             decode_composer_draft_response(value, &request_id)?
+        }
+        response::Which::FailedMessageRetried(_)
+        | response::Which::FailedMessageRecovered(_)
+        | response::Which::ComposerDraftSubmitted(_) => {
+            decode_message_submission_response(value, &request_id)?
         }
         response::Which::ProjectRepository(result) => {
             decode_project_repository_query_result(result?)?

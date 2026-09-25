@@ -231,6 +231,7 @@ pub async fn delivery_task_loop(
                 Ok(UniDelivery::Observation(observation)) => {
                     PrivateDelivery::Observation(observation)
                 }
+                Ok(UniDelivery::Outbox(outbox)) => PrivateDelivery::Outbox(outbox),
                 Err(failure) => PrivateDelivery::Lost(failure),
             };
             let is_lost = matches!(result, PrivateDelivery::Lost(_));
@@ -290,6 +291,9 @@ pub(super) async fn command_loop_with_delivery(
                     }
                     NativeTransportCommand::CreateTask(project_id) => {
                         create_task_in_project(runtime, frames, events, project_id).await?;
+                    }
+                    NativeTransportCommand::RecoverFailedMessage { project_id, command } => {
+                        project_intake::recover_failed_message(runtime, frames, events, project_id, *command).await?;
                     }
                     NativeTransportCommand::ComposerState(command) => {
                         composer_state_operations::handle_composer_state_command(runtime, frames, events, command).await?;
@@ -357,8 +361,8 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::QueueFirstMessage(command) => {
                         queue_first_message(runtime, frames, events, *command).await?;
                     }
-                    NativeTransportCommand::QueueMessage(command) => {
-                        queue_message(runtime, frames, events, *command).await?;
+                    NativeTransportCommand::SubmitComposerDraft(command) => {
+                        submit_composer_draft(runtime, frames, events, *command).await?;
                     }
                     NativeTransportCommand::ResolveRichLink { url } => {
                         resolve_rich_link(runtime, frames, events, url).await?;
@@ -431,6 +435,11 @@ pub(super) async fn command_loop_with_delivery(
                         // The application owns cursor ordering and replay dedup;
                         // emit without advancing custody, like patch batches.
                         publish(events, NativeTransportEvent::EngineObservation(observation))?;
+                    }
+                    Some(PrivateDelivery::Outbox(outbox)) => {
+                        if runtime.custody.active_thread() == Some(outbox.thread_id()) {
+                            publish(events, NativeTransportEvent::MessageOutbox(outbox))?;
+                        }
                     }
                     Some(PrivateDelivery::Lost(failure)) =>
                         handle_delivery_lost_reconnect(runtime, frames, events, failure).await?,

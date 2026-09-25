@@ -444,15 +444,23 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
                 .await
                 .expect("delivery stream opens on launch")
                 .expect("delivery stream accepts");
-            let admission = tokio::time::timeout(
-                TEST_DEADLINE,
-                artisan_transport::receive_envelope(&mut delivery),
-            )
-            .await
-            .expect("admission frame settles")
-            .expect("admission frame decodes");
-            let WireEnvelopeBody::PatchBatch(batch) = admission.body else {
-                panic!("launch must deliver a patch batch");
+            let batch = loop {
+                let admission = tokio::time::timeout(
+                    TEST_DEADLINE,
+                    artisan_transport::receive_envelope(&mut delivery),
+                )
+                .await
+                .expect("admission frame settles")
+                .expect("admission frame decodes");
+                match admission.body {
+                    WireEnvelopeBody::PatchBatch(batch) => break batch,
+                    // The activation's message-outbox push precedes launch.
+                    WireEnvelopeBody::Event(artisan_protocol::ServerEvent {
+                        event: artisan_domain::Event::MessageOutbox(_),
+                        ..
+                    }) => {}
+                    _ => panic!("launch must deliver a patch batch"),
+                }
             };
             assert_eq!(batch.thread_id(), &thread_id);
             let mut saw_user = false;
@@ -466,16 +474,26 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             }
             assert!(saw_user, "launch must stream the user admission");
             // Nothing else can commit: no provider was ever admitted, so
-            // no terminal may follow the admission.
-            assert!(
-                tokio::time::timeout(
-                    Duration::from_millis(500),
-                    artisan_transport::receive_envelope(&mut delivery),
-                )
-                .await
-                .is_err(),
-                "unlaunched thread must stay silent after admission"
-            );
+            // no terminal may follow the admission. Only the message outbox
+            // (the launched message leaving it) may still arrive.
+            while let Ok(frame) = tokio::time::timeout(
+                Duration::from_millis(500),
+                artisan_transport::receive_envelope(&mut delivery),
+            )
+            .await
+            {
+                let frame = frame.expect("delivery frame decodes");
+                assert!(
+                    matches!(
+                        frame.body,
+                        WireEnvelopeBody::Event(artisan_protocol::ServerEvent {
+                            event: artisan_domain::Event::MessageOutbox(_),
+                            ..
+                        })
+                    ),
+                    "unlaunched thread must stay silent after admission"
+                );
+            }
             cancel.cancel();
         };
 
@@ -883,10 +901,11 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
                         frames.push(StreamFrame::PatchBatch(batch));
                     }
                     WireEnvelopeBody::Event(event) => {
-                        let artisan_domain::Event::EngineObservation(observation) =
-                            event.event
-                        else {
-                            panic!("expected an engine observation event");
+                        let observation = match event.event {
+                            artisan_domain::Event::EngineObservation(observation) => observation,
+                            // Message-outbox state pushes share the stream.
+                            artisan_domain::Event::MessageOutbox(_) => continue,
+                            _ => panic!("expected an engine observation event"),
                         };
                         assert_eq!(observation.thread_id, thread_id);
                         // Only the provider thinking trace counts here, not
@@ -958,10 +977,10 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
                         frames.push(StreamFrame::PatchBatch(batch));
                     }
                     WireEnvelopeBody::Event(event) => {
-                        let artisan_domain::Event::EngineObservation(observation) =
-                            event.event
-                        else {
-                            panic!("expected an engine observation event");
+                        let observation = match event.event {
+                            artisan_domain::Event::EngineObservation(observation) => observation,
+                            artisan_domain::Event::MessageOutbox(_) => continue,
+                            _ => panic!("expected an engine observation event"),
                         };
                         frames.push(StreamFrame::ObservationEvent(observation));
                     }

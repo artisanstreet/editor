@@ -317,7 +317,7 @@ impl RequestHandler {
     /// original receipt stands; on terminal refusal the dispatch row is
     /// failed with the mapped reason and the payload stays preserved
     /// for user recovery. Never a silent fresh run.
-    async fn deliver_accepted_steer(
+    pub(super) async fn deliver_accepted_steer(
         &self,
         request_id: &RequestId,
         queue: &QueueMessage,
@@ -353,7 +353,7 @@ impl RequestHandler {
     /// only an open row safely reroutes the same original
     /// request/message/target. Unnamed replays return the stored receipt
     /// untouched, exactly as before.
-    async fn settle_replayed_steer(
+    pub(super) async fn settle_replayed_steer(
         &self,
         request_id: &RequestId,
         queue: &QueueMessage,

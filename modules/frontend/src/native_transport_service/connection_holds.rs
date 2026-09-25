@@ -260,13 +260,14 @@ impl NativeTransportCommand {
     #[must_use]
     pub const fn hold_kind(&self) -> Option<HoldKind> {
         match self {
-            Self::QueueFirstMessage(_) | Self::QueueMessage(_) => Some(HoldKind::Message),
-            Self::ComposerState(ComposerStateCommand::WithdrawQueuedMessage { .. }) => {
-                Some(HoldKind::QueueChange)
-            }
+            Self::QueueFirstMessage(_) | Self::SubmitComposerDraft(_) => Some(HoldKind::Message),
+            Self::ComposerState(
+                ComposerStateCommand::WithdrawQueuedMessage { .. }
+                | ComposerStateCommand::RetryFailedMessage { .. },
+            ) => Some(HoldKind::QueueChange),
             Self::StopRun(_) => Some(HoldKind::StopRequest),
             Self::RespondApproval(_) | Self::RespondQuestion(_) => Some(HoldKind::Answer),
-            Self::CreateTask(_) => Some(HoldKind::NewTask),
+            Self::CreateTask(_) | Self::RecoverFailedMessage { .. } => Some(HoldKind::NewTask),
             Self::BeginProjectIntake | Self::BeginProjectIntakeAt(_) | Self::RetryProjectIntake => {
                 Some(HoldKind::ProjectIntake)
             }
@@ -277,9 +278,6 @@ impl NativeTransportCommand {
             ) => Some(HoldKind::Draft),
             Self::ComposerState(
                 ComposerStateCommand::ReadFooterUsage { .. }
-                | ComposerStateCommand::ListQueuedMessages { .. }
-                | ComposerStateCommand::ListFailedMessages { .. }
-                | ComposerStateCommand::ReadRecalledMessage { .. }
                 | ComposerStateCommand::ReadRunUsage { .. },
             )
             | Self::ComposerDraft(

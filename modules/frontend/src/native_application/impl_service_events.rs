@@ -260,8 +260,12 @@ impl NativeApplication {
             | NativeTransportEvent::QuestionFailed { .. } => self.handle_answer_event(event, cx),
             NativeTransportEvent::MessageQueued(receipt) => {
                 self.handle_message_receipt(receipt, cx);
-                self.schedule_composer_queue(true, cx);
             }
+            NativeTransportEvent::MessageStale {
+                thread_id,
+                request_id,
+                current_revision,
+            } => self.handle_message_stale(&thread_id, &request_id, current_revision, cx),
             NativeTransportEvent::MessageFailed {
                 thread_id,
                 request_id,
@@ -282,6 +286,9 @@ impl NativeApplication {
             NativeTransportEvent::PatchBatch(batch) => self.handle_patch_batch(&batch, cx),
             NativeTransportEvent::EngineObservation(observation) => {
                 self.handle_engine_observation(&observation, cx);
+            }
+            NativeTransportEvent::MessageOutbox(outbox) => {
+                self.apply_message_outbox(&outbox, cx);
             }
             NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
             NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
@@ -309,7 +316,6 @@ impl NativeApplication {
         if self.selected_project.as_ref() != Some(project_id) {
             return;
         }
-        self.clear_message_retry();
         self.pending_thread = None;
         self.pending_snapshot = None;
         let listing = empty_thread_listing();
@@ -744,7 +750,7 @@ impl NativeApplication {
                 let artisan_domain::ConversationPatch::ItemUpsert { item, .. } = patch else {
                     continue;
                 };
-                self.retire_echo_for_item(batch.thread_id(), item, &host, cx);
+                self.label_delivered_turn(item, &host, cx);
             }
             cx.notify();
         }
@@ -1050,19 +1056,6 @@ impl NativeApplication {
         carry_draft: bool,
         cx: &mut Context<Self>,
     ) {
-        // Only the exact newly created recovery thread may keep its recall.
-        if !carry_draft
-            || self
-                .pending_failed_recovery
-                .as_ref()
-                .is_some_and(|recovery| {
-                    recovery.new_thread.is_none()
-                        || recovery.new_thread != target_thread
-                        || recovery.old_thread != source_thread
-                })
-        {
-            self.pending_failed_recovery = None;
-        }
         if self
             .conversation_host
             .as_ref()
@@ -1464,7 +1457,7 @@ impl NativeApplication {
     ) {
         self.retain_message_flight(cx);
         self.clear_message_presentation();
-        self.pending_failed_recovery = None;
+        self.intake_opens_forge_draft = false;
         self.intake_stage = None;
         self.intake_failure_operation = Some(operation);
         self.intake_retry_available = retryable;
@@ -1500,7 +1493,9 @@ impl NativeApplication {
         if self.thread_switch_flight.is_some() {
             return;
         }
-        self.arm_failed_recovery(&thread_id);
+        // A recovered failure's thread opens on its Forge draft; any other
+        // new task carries the composer's draft into its thread.
+        let carry_draft = !std::mem::take(&mut self.intake_opens_forge_draft);
         if !ready_membership_is_valid(projects, &project_id, threads, &thread_id) {
             self.handle_intake_failed(
                 NativeProjectIntakeOperation::RefreshThreads,
@@ -1566,7 +1561,7 @@ impl NativeApplication {
         if let Some(source_thread) = source_thread {
             // Retire on the stop receipt even if the old, hidden surface has
             // scroll effects left to paint. The new thread receives the draft.
-            self.begin_thread_transition(Some(thread_id), source_thread, true, cx);
+            self.begin_thread_transition(Some(thread_id), source_thread, carry_draft, cx);
         } else {
             self.try_mount_pending_thread(cx);
         }

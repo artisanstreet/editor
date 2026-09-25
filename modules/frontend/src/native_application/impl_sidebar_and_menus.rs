@@ -295,7 +295,6 @@ impl NativeApplication {
         if self.selected_thread.is_none() || self.conversation_host.is_none() {
             self.selected_thread = None;
             self.pending_thread = Some(thread_id);
-            self.pending_failed_recovery = None;
             self.state = NativeViewState::Loading;
             self.try_mount_pending_thread(cx);
         } else {
