@@ -43,7 +43,8 @@ pub use manifest::{
 };
 pub use paths::{
     DEV_HOME_ENV, DEV_HOME_NAME, DEV_VERSION, DIST_DEV_LEAF, DevPaths, STRIPPED_DEV_HOME_ENV,
-    STRIPPED_DEV_READY_ENV, WORKSPACE_ENV, default_base_dir, exe_name, resolve_dev_dir,
+    STRIPPED_DEV_READY_ENV, WORKSPACE_ENV, default_base_dir, exe_name, is_network_share,
+    resolve_dev_dir,
 };
 pub use provision::{
     DEV_ADMISSION_CAPACITY, DEV_ADMISSION_TIMEOUT_MS, DEV_DRAIN_TIMEOUT_MS,

@@ -155,7 +155,24 @@ pub fn resolve_dev_dir(explicit: Option<&Path>) -> Result<PathBuf, DevError> {
     if !dev_dir.is_absolute() {
         return Err(DevError::NotAbsolute { path: dev_dir });
     }
+    if is_network_share(&dev_dir) {
+        return Err(DevError::NetworkShare { path: dev_dir });
+    }
     Ok(dev_dir)
+}
+
+/// Whether `path` lives on a Windows network share (`\\server\share\…`,
+/// including `\\wsl.localhost\…`). Byte-range locks and hardlinks are
+/// unreliable there, so the dev home must stay on local disk. Paths never
+/// carry a UNC prefix on other platforms.
+#[must_use]
+pub fn is_network_share(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+    )
 }
 
 /// Platform binary file name.

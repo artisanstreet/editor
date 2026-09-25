@@ -135,3 +135,20 @@ fn staging_and_lock_paths_stay_inside_the_dev_tree() {
         "staging must not resemble the installed home"
     );
 }
+
+#[test]
+fn only_local_dev_directories_are_accepted() {
+    assert!(!native_dev::is_network_share(&absolute_dev_dir("local")));
+    if cfg!(windows) {
+        for shared in [
+            r"\wsl.localhost\Ubuntu\home\ada\editor\.dist\dev",
+            r"\?\UNC\server\share\dev",
+        ] {
+            assert!(native_dev::is_network_share(Path::new(shared)), "{shared}");
+            assert!(matches!(
+                resolve_dev_dir(Some(Path::new(shared))),
+                Err(native_dev::DevError::NetworkShare { .. })
+            ));
+        }
+    }
+}

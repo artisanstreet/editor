@@ -30,6 +30,15 @@ pub enum DevError {
         /// Where the search looked.
         hint: String,
     },
+    /// The dev directory is on a network share, where the staging lock
+    /// cannot be taken reliably.
+    #[error(
+        "dev directory {path} is on a network share; stage on local disk instead (pass --dev-dir, or run scripts/dev.ps1 which picks a local directory)"
+    )]
+    NetworkShare {
+        /// The shared dev directory.
+        path: PathBuf,
+    },
     /// Another `dev` run holds the staging lock.
     #[error(
         "dev staging is locked by another run; wait for it or remove {lock} if no dev run is active"

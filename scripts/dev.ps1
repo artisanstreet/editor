@@ -6,6 +6,8 @@
     Builds the four product binaries plus the native dev runner in one
     `cargo build --locked --jobs=1` invocation, then runs the same
     Cargo native development runner, pointed at the repo .dist/dev installation.
+    A checkout on a network share (such as \\wsl.localhost) builds and stages
+    under %LOCALAPPDATA%\Artisan Street Dev\build\<checkout-id> instead.
 
 .EXAMPLE
     scripts/dev.ps1
@@ -23,9 +25,6 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
-if ([string]::IsNullOrWhiteSpace($DevDir)) {
-    $DevDir = Join-Path $repo ".dist/dev"
-}
 if ($Release -and $Performance) {
     throw "Choose either -Release or -Performance"
 }
@@ -33,6 +32,48 @@ $config = if ($Release) { "release" } elseif ($Performance) { "performance" } el
 
 function Write-DevStep($message) {
     Write-Host "dev.ps1: $message"
+}
+
+# A checkout reached over a network share (for example \\wsl.localhost\...)
+# cannot host Cargo's target directory (build-script hardlinks fail with
+# "Access is denied") or the dev staging lock (byte-range locks fail). Build
+# and stage on local disk instead, keyed per checkout so worktrees never share.
+function Get-LocalBuildRoot {
+    $key = $repo.ToLowerInvariant()
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))
+    $id = (-join ($digest | ForEach-Object { $_.ToString("x2") })).Substring(0, 12)
+    return Join-Path $env:LOCALAPPDATA "Artisan Street Dev\build\$id"
+}
+
+$onShare = $repo.StartsWith("\\")
+if ($onShare) {
+    $localRoot = Get-LocalBuildRoot
+    if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+        $env:CARGO_TARGET_DIR = Join-Path $localRoot "target"
+        Write-DevStep "checkout is on a network share; building in $env:CARGO_TARGET_DIR"
+    }
+    if ([string]::IsNullOrWhiteSpace($DevDir)) {
+        $DevDir = Join-Path $localRoot "dev"
+    }
+}
+if ([string]::IsNullOrWhiteSpace($DevDir)) {
+    $DevDir = Join-Path $repo ".dist/dev"
+}
+
+# Release installer builds refuse to compile without a trust anchor
+# (modules/installer/RELEASE_TRUST.md). Local release builds use the
+# checked-in pre-release anchor unless the caller exported a real one.
+function Import-ReleaseTrustAnchor {
+    $anchor = Join-Path $repo "modules/installer/release/trust_anchor.env"
+    foreach ($line in Get-Content $anchor) {
+        if ($line -match '^\s*(ARTISAN_RELEASE_(KEY_ID|PUBLIC_KEY_HEX))\s*=\s*(.+?)\s*$') {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Matches[1]))) {
+                [Environment]::SetEnvironmentVariable($Matches[1], $Matches[3].Trim('"'), "Process")
+            }
+        }
+    }
+    Write-DevStep "release trust anchor: $env:ARTISAN_RELEASE_KEY_ID"
 }
 
 function Ensure-VsEnvironment {
@@ -53,7 +94,9 @@ function Ensure-VsEnvironment {
         throw "vcvars64.bat not found at $vcvars"
     }
     Write-DevStep "importing environment from $vcvars"
-    $envDump = cmd /c "`"$vcvars`" >nul && set" 2>&1
+    # stderr (e.g. cmd's UNC working-directory warning) arrives as ErrorRecords;
+    # keep only the `set` output lines.
+    $envDump = cmd /c "`"$vcvars`" >nul && set" 2>&1 | Where-Object { $_ -is [string] }
     if ($LASTEXITCODE -ne 0) {
         throw "vcvars64.bat failed with exit $LASTEXITCODE"
     }
@@ -125,6 +168,9 @@ function Invoke-CargoBuild {
 }
 
 Ensure-VsEnvironment
+if ($Release) {
+    Import-ReleaseTrustAnchor
+}
 Invoke-CargoBuild
 
 $targetBin = Get-TargetBinDir
