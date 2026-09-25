@@ -391,6 +391,8 @@ pub enum HostStateEvent {
     Preferences(artisan_domain::UserPreferences),
     /// A subscribed thread's display title.
     ThreadRetitled(artisan_domain::ThreadRetitled),
+    /// A subscribed thread's live run usage.
+    RunUsage(artisan_domain::RunUsageResult),
 }
 
 /// Validates the delivery family of one uni-stream envelope.
@@ -424,6 +426,9 @@ pub fn validate_uni_envelope(
             )),
             artisan_domain::Event::ThreadRetitled(retitled) => Ok(UniDelivery::HostState(
                 HostStateEvent::ThreadRetitled(retitled.clone()),
+            )),
+            artisan_domain::Event::RunUsage(usage) => Ok(UniDelivery::HostState(
+                HostStateEvent::RunUsage(usage.clone()),
             )),
             artisan_domain::Event::ProjectAttached(_)
             | artisan_domain::Event::ThreadCreated(_)

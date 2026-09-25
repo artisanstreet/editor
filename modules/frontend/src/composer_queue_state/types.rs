@@ -7,10 +7,6 @@ use super::*;
 /// The largest page of queued or failed rows the native surface retains.
 pub(crate) const COMPOSER_QUEUE_PAGE_LIMIT: usize = artisan_domain::QUEUED_MESSAGE_LIST_MAX;
 
-/// The run-usage refresh cadence the parent uses while a run is live. The
-/// message outbox itself is pushed by the Forge and never polled.
-pub(crate) const COMPOSER_USAGE_REFRESH_INTERVAL_MS: u64 = 5000;
-
 /// Exact row identity used between the outbox projection and controls.
 ///
 /// `command_id` is the original queue request id, not the newer withdrawal

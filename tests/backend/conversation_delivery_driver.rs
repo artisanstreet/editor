@@ -1975,3 +1975,124 @@ async fn account_usage_is_pushed_from_the_first_request() -> Result<(), Box<dyn 
     app.shutdown().await?;
     Ok(())
 }
+
+/// The live run's usage reaches its thread's subscriber as it is recorded:
+/// on activation, and again when a newer report commits. Nothing is pushed
+/// for a report the subscriber already has.
+#[tokio::test]
+async fn live_run_usage_is_pushed_as_it_changes() -> Result<(), Box<dyn Error>> {
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    let thread_id = seeded.thread_id.clone();
+    let run_id = seeded.run.launched.run_id.clone();
+    let registry = artisan_backend::run_cancellation::RunCancellationRegistry::new(4)?;
+    let _lease = registry.register(thread_id.clone(), run_id.clone())?;
+    let usage = |sequence: u64, input: u64| {
+        artisan_domain::RunUsageReport::new(artisan_domain::RunUsageReportInput {
+            run_id: run_id.clone(),
+            thread_id: thread_id.clone(),
+            provider_session_id: "delivery-session".to_owned(),
+            source_sequence: sequence,
+            model_id: EngineModelId::parse("delivery-model").expect("model id"),
+            provider_route_id: EngineRouteId::parse("delivery-route").expect("route id"),
+            variant_id: None,
+            basis: artisan_domain::RunUsageBasis::Cumulative,
+            provider_turn_id: None,
+            input_tokens: Some(input),
+            cached_input_tokens: None,
+            output_tokens: None,
+            context_tokens: Some(input),
+            context_window_tokens: Some(200_000),
+            observed_at: UnixMillis::from_millis(900),
+        })
+        .expect("usage report")
+    };
+    let record = |report: artisan_domain::RunUsageReport| {
+        let repository = repository.clone();
+        async move {
+            repository
+                .record_run_usage(artisan_database::RecordRunUsage {
+                    run_id: report.run_id(),
+                    thread_id: report.thread_id(),
+                    report: &report,
+                })
+                .await
+                .map(|_| ())
+        }
+    };
+    record(usage(1, 100)).await?;
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler = RequestHandler::new(repository.clone())
+        .with_conversation_commit_notifier(notifier.clone())
+        .with_run_cancellation_registry(registry.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let pushed = |frame: WireEnvelope| -> Result<u64, Box<dyn Error>> {
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected a usage event".into());
+        };
+        let Event::RunUsage(result) = event.event else {
+            return Err("expected the live run usage".into());
+        };
+        let report = result.report.ok_or("usage report present")?;
+        Ok(report.input_tokens().unwrap_or_default())
+    };
+    let client = async {
+        let (connection, mut delivery_stream) =
+            subscribed_client(&endpoint, address, thread_id.clone()).await?;
+        assert_eq!(
+            pushed(receive_delivery_frame(&mut delivery_stream).await?)?,
+            100
+        );
+        record(usage(2, 250)).await?;
+        let _ = notifier.publish(&thread_id);
+        assert_eq!(
+            pushed(receive_delivery_frame(&mut delivery_stream).await?)?,
+            250
+        );
+        let _ = notifier.publish(&thread_id);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                artisan_transport::receive_envelope(&mut delivery_stream),
+            )
+            .await
+            .is_err(),
+            "unchanged usage is not pushed again"
+        );
+        cancel.cancel();
+        drop(delivery_stream);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery run usage test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}

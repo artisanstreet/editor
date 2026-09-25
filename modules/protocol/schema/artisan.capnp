@@ -1079,6 +1079,10 @@ struct Event {
     accountUsage @6 :EngineUsageSnapshot;
     userPreferences @7 :UserPreferences;
     threadRetitled @8 :ThreadRetitled;
+
+    # The live run's latest usage report on a subscribed thread, pushed
+    # whenever it changes (replaces the Editor's polling). Fresh member @9.
+    runUsage @9 :ComposerState.RunUsageResult;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first

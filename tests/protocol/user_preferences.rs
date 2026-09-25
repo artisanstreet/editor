@@ -190,6 +190,14 @@ fn pushed_host_state_events_round_trip() -> Result<(), Box<dyn Error>> {
             thread_id: ThreadId::parse("thread-a")?,
             title: ThreadTitle::parse("Refined title")?,
         }),
+        Event::RunUsage(
+            artisan_domain::RunUsageResult::new(
+                ThreadId::parse("thread-a")?,
+                artisan_domain::RunId::parse("run-a")?,
+                None,
+            )?
+            .with_compaction_at(Some(180_000)),
+        ),
     ];
     for (index, event) in events.into_iter().enumerate() {
         round_trip(

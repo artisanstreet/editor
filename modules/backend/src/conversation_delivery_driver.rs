@@ -19,8 +19,8 @@ use std::time::Duration;
 use artisan_database::{MessageOutboxFingerprint, QueuedMessageRepositoryError, Repository};
 use artisan_domain::{
     EngineUsageSnapshot, Event, FAILED_MESSAGE_LIST_MAX, ListFailedMessages, ListQueuedMessages,
-    MessageOutbox, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListOrder, ThreadId, ThreadRetitled,
-    ThreadTitle, UserPreferences,
+    MessageOutbox, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListOrder, RunUsageResult, ThreadId,
+    ThreadRetitled, ThreadTitle, UserPreferences,
 };
 use artisan_transport::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 
@@ -52,6 +52,8 @@ pub(crate) struct ConversationDeliveryDriver {
     outboxes: BTreeMap<ThreadId, DeliveredOutbox>,
     /// The display title last pushed for each active subscription.
     titles: BTreeMap<ThreadId, ThreadTitle>,
+    /// The live run's usage last pushed for each active subscription.
+    run_usage: BTreeMap<ThreadId, RunUsageResult>,
     /// The connection-scoped host state last pushed.
     host: DeliveredHostState,
 }
@@ -94,6 +96,7 @@ impl ConversationDeliveryDriver {
             active: BTreeMap::new(),
             outboxes: BTreeMap::new(),
             titles: BTreeMap::new(),
+            run_usage: BTreeMap::new(),
             host: DeliveredHostState::default(),
         }
     }
@@ -148,6 +151,8 @@ impl ConversationDeliveryDriver {
                 .await?;
             self.deliver_thread_title(&thread_id, false, stamp, limit, cancel)
                 .await?;
+            self.deliver_run_usage(&thread_id, stamp, limit, cancel)
+                .await?;
             self.active.insert(thread_id, subscription);
         }
         // Every request looks for a host-state change; the first one also
@@ -159,6 +164,7 @@ impl ConversationDeliveryDriver {
         self.active.remove(thread_id);
         self.outboxes.remove(thread_id);
         self.titles.remove(thread_id);
+        self.run_usage.remove(thread_id);
     }
 
     /// Re-reads every active subscription once after a coalesced process-wide
@@ -190,9 +196,55 @@ impl ConversationDeliveryDriver {
                 .await?;
             self.deliver_thread_title(&thread_id, true, stamp, limit, cancel)
                 .await?;
+            self.deliver_run_usage(&thread_id, stamp, limit, cancel)
+                .await?;
             self.active.insert(thread_id, subscription);
         }
         self.deliver_host_state(stamp, limit, cancel).await
+    }
+
+    /// Pushes the latest usage report of a subscribed thread's live run when
+    /// it changed (on activation when one exists), so an Editor shows a
+    /// running turn's context usage without polling. A thread without a
+    /// live run pushes nothing.
+    async fn deliver_run_usage<F>(
+        &mut self,
+        thread_id: &ThreadId,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let Some(run_id) = self.context.live_run(thread_id) else {
+            return Ok(());
+        };
+        let repository = self.context.repository().clone();
+        let report = run_with_deadline(
+            OperationKind::Receive,
+            limit,
+            cancel,
+            repository.read_latest_run_usage(&run_id, thread_id),
+        )
+        .await
+        .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+        let Some(report) = report else {
+            return Ok(());
+        };
+        let compaction_at = crate::context_compaction_policy::compaction_at_tokens(&report);
+        let Ok(usage) = RunUsageResult::new(thread_id.clone(), run_id, Some(report))
+            .map(|usage| usage.with_compaction_at(compaction_at))
+        else {
+            return Ok(());
+        };
+        if self.run_usage.get(thread_id) == Some(&usage) {
+            return Ok(());
+        }
+        self.send_state_event(Event::RunUsage(usage.clone()), stamp, limit, cancel)
+            .await?;
+        self.run_usage.insert(thread_id.clone(), usage);
+        Ok(())
     }
 
     /// Pushes a subscribed thread's display title when it changed, so a
@@ -480,6 +532,7 @@ impl ConversationDeliveryDriver {
         self.active.clear();
         self.outboxes.clear();
         self.titles.clear();
+        self.run_usage.clear();
         writer_result
     }
 

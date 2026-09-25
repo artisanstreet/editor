@@ -1,9 +1,10 @@
 //! Connection-scoped state the Forge pushes over the delivery stream.
 //!
 //! The Forge pushes each engine's usage with its readiness verdict, the
-//! user's preferences, and the subscribed thread's display title whenever
-//! one changes. The Editor schedules no usage reads of its own: it renders
-//! what arrives, and only an explicit refresh asks the Forge to re-read.
+//! user's preferences, and the subscribed thread's display title and live
+//! run usage whenever one changes. The Editor schedules no usage reads of
+//! its own: it renders what arrives, and only an explicit refresh asks the
+//! Forge to re-read.
 
 use artisan_domain::{ThreadListing, ThreadRetitled};
 
@@ -20,6 +21,7 @@ impl NativeApplication {
                 self.apply_forge_preferences(&preferences, cx);
             }
             HostStateEvent::ThreadRetitled(retitled) => self.apply_thread_title(&retitled, cx),
+            HostStateEvent::RunUsage(usage) => self.apply_pushed_run_usage(usage, cx),
         }
         cx.notify();
     }

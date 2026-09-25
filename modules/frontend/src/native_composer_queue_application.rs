@@ -20,7 +20,6 @@ pub(super) struct QueueApplicationState {
     pub(super) state: ComposerQueueState,
     generation: u64,
     usage: Option<UsageReadToken>,
-    poll: Option<Task<()>>,
 }
 impl QueueApplicationState {
     pub(super) fn new(_cx: &mut Context<NativeApplication>) -> Self {
@@ -28,13 +27,13 @@ impl QueueApplicationState {
             state: ComposerQueueState::new(),
             generation: 0,
             usage: None,
-            poll: None,
         }
     }
 }
 impl NativeApplication {
-    /// Keeps the outbox scope on the selected thread and refreshes run usage
-    /// while a run is live. The outbox itself arrives with the subscription.
+    /// Keeps the outbox and run-usage scope on the selected thread. The
+    /// outbox and the live run's usage arrive pushed with the subscription;
+    /// a new run's scope reads its usage once.
     pub(super) fn schedule_composer_queue(&mut self, cx: &mut Context<Self>) {
         let changed = self.composer_queue.state.current_thread() != self.selected_thread.as_ref();
         if changed {
@@ -46,36 +45,43 @@ impl NativeApplication {
                 .state
                 .set_scope(self.selected_thread.clone(), next);
             self.composer_queue.usage = None;
-            self.composer_queue.poll = None;
         }
         if !self.message_composer_visible(cx)
             || self.service.is_none()
             || self.service_stopped
             || self.shutdown_prepared
         {
-            self.composer_queue.poll = None;
             return;
         }
         if changed {
             self.sync_composer_controls(cx);
         }
         self.observe_composer_usage_scope(cx);
-        let run_active = self.composer_controls.read(cx).snapshot().run_active;
-        if self.composer_queue.poll.is_some() || !run_active {
-            return;
-        }
-        self.composer_queue.poll = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(
-                    crate::composer_queue_state::COMPOSER_USAGE_REFRESH_INTERVAL_MS,
-                ))
-                .await;
-            let _ = this.update(cx, |app, cx| {
-                app.composer_queue.poll = None;
-                app.request_composer_usage(cx);
-                app.schedule_composer_queue(cx);
+    }
+
+    /// Applies the live run usage the Forge pushed for a subscribed thread:
+    /// to the composer's usage scope when it names the same run, and to a
+    /// footer that asked for that run.
+    pub(super) fn apply_pushed_run_usage(
+        &mut self,
+        usage: artisan_domain::RunUsageResult,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(host) = self.conversation_host.clone() {
+            let query =
+                artisan_domain::ReadRunUsage::new(usage.thread_id.clone(), usage.run_id.clone());
+            let footer = usage.clone();
+            host.update(cx, |host, cx| {
+                host.accept_footer_usage(&query, Some(footer), cx);
             });
-        }));
+        }
+        let name = usage
+            .report
+            .as_ref()
+            .map(|report| report.model_id().as_str().to_owned())
+            .unwrap_or_default();
+        let _ = self.composer_queue.state.accept_pushed_usage(usage, name);
+        self.sync_composer_availability(cx);
     }
 
     fn observe_composer_usage_scope(&mut self, cx: &mut Context<Self>) {

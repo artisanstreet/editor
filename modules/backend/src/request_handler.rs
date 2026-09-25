@@ -192,9 +192,15 @@ pub(crate) struct ConversationConnectionContext {
     identity: Arc<SubscriptionRegistrarIdentity>,
     notifier: ConversationCommitNotifier,
     account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
+    run_cancellation: Option<RunCancellationRegistry>,
 }
 
 impl ConversationConnectionContext {
+    /// The live run registered for `thread`, if any.
+    pub(crate) fn live_run(&self, thread: &ThreadId) -> Option<artisan_domain::RunId> {
+        self.run_cancellation.as_ref()?.active_run(thread).ok()?
+    }
+
     pub(crate) fn repository(&self) -> &Repository {
         &self.repository
     }
@@ -664,6 +670,7 @@ impl RequestHandler {
             identity: Arc::new(0_u8),
             notifier: self.conversation_commit_notifier.clone()?,
             account_usage: self.account_usage.clone(),
+            run_cancellation: self.run_cancellation.clone(),
         };
         // A new Editor wants current usage: read what is due now.
         if let Some(usage) = &self.account_usage {

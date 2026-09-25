@@ -140,6 +140,11 @@ pub(crate) fn encode_event(
             encoded.set_thread_id(retitled.thread_id.as_str());
             encoded.set_title(retitled.title.as_str());
         }
+        Event::RunUsage(usage) => crate::composer_state_codec::encode_run_usage_result(
+            builder.reborrow().init_run_usage(),
+            usage,
+        )
+        .map_err(|_| ProtocolEncodeError::ComposerState)?,
     }
     Ok(())
 }
@@ -375,6 +380,9 @@ pub(crate) fn decode_event(
                 .map_err(|source| ProtocolDecodeError::ThreadTitle { source })?,
             })
         }
+        event::Which::RunUsage(usage) => Event::RunUsage(
+            crate::composer_state_codec::decode_run_usage_result(usage?)?,
+        ),
     };
     Ok(ServerEvent { cursor, event })
 }
