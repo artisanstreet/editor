@@ -19,6 +19,11 @@
 //! Clients that need exact per-engine freshness issue one narrowed query
 //! per engine.
 //!
+//! Every served report carries the Forge's readiness verdict for its engine
+//! (see [`crate::account_readiness`]), judged at serve time against the same
+//! freshness window, and [`AccountUsageService::readiness`] answers that
+//! verdict from what the service last observed without reading a provider.
+//!
 //! Engine coverage mirrors the TypeScript adapters: Codex reads
 //! `account/rateLimits/read`, Claude parses `claude -p /usage`, Cursor posts
 //! its dashboard endpoint, and Grok Build and `OpenCode` report
@@ -34,8 +39,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use artisan_domain::{
-    EngineUsageAuth, EngineUsageAuthentication, EngineUsageReport, EngineUsageSnapshot,
-    QuotaSurface, ReadAccountUsage, iso_millis,
+    EngineReadiness, EngineUsageAuth, EngineUsageAuthentication, EngineUsageReport,
+    EngineUsageSnapshot, QuotaSurface, ReadAccountUsage, iso_millis,
 };
 use artisan_native_engine::account_usage::{ProviderUsage, UsageReaderError};
 use tokio::task::JoinSet;
@@ -365,6 +370,8 @@ impl AccountUsageReader for UnsupportedAccountUsageReader {
 pub struct AccountUsageService {
     readers: Vec<Arc<dyn AccountUsageReader>>,
     cache: Mutex<HashMap<String, CachedUsage>>,
+    /// Latest refresh failure per engine, cleared by the next success.
+    failures: Mutex<HashMap<String, String>>,
     freshness: Duration,
     per_engine_timeout: Duration,
 }
@@ -425,6 +432,7 @@ impl AccountUsageService {
         Self {
             readers,
             cache: Mutex::new(HashMap::new()),
+            failures: Mutex::new(HashMap::new()),
             freshness,
             per_engine_timeout,
         }
@@ -460,8 +468,8 @@ impl AccountUsageService {
             },
             None => (0..self.readers.len()).collect(),
         };
-        // (report, observation time) pairs in selection order.
-        let mut served: Vec<Option<(EngineUsageReport, String)>> =
+        // (report, observation time, fresh) in selection order.
+        let mut served: Vec<Option<(EngineUsageReport, String, bool)>> =
             selected.iter().map(|_| None).collect();
         let mut missing: Vec<(usize, usize)> = Vec::new();
         if query.force() {
@@ -482,7 +490,8 @@ impl AccountUsageService {
                 let engine_id = self.readers[*reader_index].engine_id();
                 match cache.get(engine_id) {
                     Some(cached) if cached.observed.elapsed() < self.freshness => {
-                        served[slot] = Some((cached.report.clone(), cached.fetched_at.clone()));
+                        served[slot] =
+                            Some((cached.report.clone(), cached.fetched_at.clone(), true));
                     }
                     _ => missing.push((slot, *reader_index)),
                 }
@@ -537,7 +546,7 @@ impl AccountUsageService {
                                     report: report.clone(),
                                 },
                             ));
-                            served[slot] = Some((report, fetched_at));
+                            served[slot] = Some((report, fetched_at, true));
                         }
                         Err(failure) => {
                             served[slot] =
@@ -559,17 +568,28 @@ impl AccountUsageService {
                 .cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut failures = self
+                .failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for (engine_id, cached) in fresh {
+                failures.remove(&engine_id);
                 cache.insert(engine_id, cached);
             }
         }
         let mut reports = Vec::with_capacity(served.len());
         let mut fetched_at = String::new();
-        for (report, observed_at) in served.into_iter().flatten() {
+        for (report, observed_at, fresh) in served.into_iter().flatten() {
             if observed_at > fetched_at {
                 fetched_at.clone_from(&observed_at);
             }
-            reports.push(report);
+            let readiness = crate::account_readiness::engine_readiness(
+                report.display_name(),
+                Some(&report),
+                fresh,
+                None,
+            );
+            reports.push(report.with_readiness(readiness));
         }
         if fetched_at.is_empty() {
             // No report was served (empty roster): stamp the empty snapshot
@@ -591,7 +611,11 @@ impl AccountUsageService {
         reader: &Arc<dyn AccountUsageReader>,
         failure: &ReaderFailure,
         now_iso: String,
-    ) -> (EngineUsageReport, String) {
+    ) -> (EngineUsageReport, String, bool) {
+        self.failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(reader.engine_id().to_owned(), failure.failure.clone());
         let cache = self
             .cache
             .lock()
@@ -602,10 +626,43 @@ impl AccountUsageService {
                 .clone()
                 .with_failure(failure.failure.clone())
                 .unwrap_or_else(|_| failure_report(reader, failure));
-            return (marked, cached.fetched_at.clone());
+            let fresh = cached.observed.elapsed() < self.freshness;
+            return (marked, cached.fetched_at.clone(), fresh);
         }
         drop(cache);
-        (failure_report(reader, failure), now_iso)
+        (failure_report(reader, failure), now_iso, false)
+    }
+
+    /// Returns the Forge's readiness verdict for one rostered engine from
+    /// what the service last observed, without reading a provider.
+    ///
+    /// The last-good report is judged against the freshness window as it
+    /// stands now, so a verdict never outlives its window; with no report,
+    /// the latest refresh failure makes the engine not ready, and an engine
+    /// never read yet is still being checked. `None` for an unrostered id.
+    #[must_use]
+    pub fn readiness(&self, engine_id: &str) -> Option<EngineReadiness> {
+        let reader = self
+            .readers
+            .iter()
+            .find(|reader| reader.engine_id() == engine_id)?;
+        let failure = self
+            .failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(engine_id)
+            .cloned();
+        let cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cached = cache.get(engine_id);
+        Some(crate::account_readiness::engine_readiness(
+            reader.display_name(),
+            cached.map(|cached| &cached.report),
+            cached.is_some_and(|cached| cached.observed.elapsed() < self.freshness),
+            failure.as_deref(),
+        ))
     }
 
     fn unknown_engine_snapshot(engine_id: &str) -> EngineUsageSnapshot {

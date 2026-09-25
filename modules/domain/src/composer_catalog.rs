@@ -128,6 +128,11 @@ impl ReadComposerCatalog {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ReadModelFavorites;
 
+/// Reads the scope-free host catalog: live discovery with the Forge's
+/// account readiness applied, for surfaces without a thread.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ReadHostCatalog;
+
 /// Changes one durable model favorite after checking a caller's catalog
 /// revision.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

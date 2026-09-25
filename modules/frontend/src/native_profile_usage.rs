@@ -11,6 +11,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use crate::usage_reset_duration::{UsageResetWindow, usage_reset_duration};
+pub use artisan_domain::{EngineReadiness, EngineReadinessVerdict};
 
 /// Stable selector for the profile usage section.
 pub const PROFILE_USAGE_SELECTOR: &str = "artisan-native-profile-usage";
@@ -119,6 +120,8 @@ pub struct NativeUsageReport {
     pub windows: Vec<NativeUsageWindow>,
     /// Provider or transport failure text, already redacted by the adapter.
     pub failure: Option<String>,
+    /// The Forge's readiness verdict for this engine, judged when served.
+    pub readiness: EngineReadiness,
 }
 
 impl NativeUsageReport {
@@ -517,101 +520,44 @@ pub fn narrowed_report_position(engine_ids: &[&str], requested_engine_id: &str) 
     (engine_ids[0] == requested_engine_id).then_some(0)
 }
 
-/// Roster engines whose adapters expose a real account-usage surface.
+/// Returns the Forge's readiness verdict for one engine as its latest usage
+/// report carries it.
 ///
-/// These engines get a usage verdict for account state: `codex` reads
-/// `account/rateLimits/read`, `claude` parses `claude -p /usage`, and
-/// `cursor` posts its dashboard endpoint. This mirrors the backend roster
-/// contract in `modules/backend/src/account_usage_service.rs`: `grok`
-/// and `opencode2` expose no account-usage surface. Admission to
-/// run is narrower (see [`CLI_PROBED_ENGINES`]): the dashboard read proves
-/// a Cursor account, never a local CLI installation.
-pub const ACCOUNT_GATED_ENGINES: [&str; 3] = ["codex", "claude", "cursor"];
-
-/// Roster engines whose usage read proves a responding local CLI.
-///
-/// Only `codex` (`account/rateLimits/read`) and `claude` (`claude -p
-/// /usage`) probe an installed executable, so only their authenticated
-/// usage admits that engine's discovered models to run. `cursor` posts an HTTP dashboard
-/// endpoint: its account verdict stays visible, but dashboard auth never
-/// proves a local CLI installation, so Cursor runtime admission follows
-/// the backend catalog marking instead of the usage overlay.
-pub const CLI_PROBED_ENGINES: [&str; 2] = ["codex", "claude"];
-
-/// Backend-probed account readiness for one native engine.
-///
-/// Derived only from the provider-owned usage rows the backend probed with
-/// real non-billable reads. A fresh `Authenticated` report proves the
-/// installed executable and the shared ambient account at once, so the
-/// discovered models for that engine are admittable without any managed
-/// `OpenCode` profile or registry. Anything else stays unrunnable with an
-/// honest reason; readiness is never synthesized from a missing row, and a
-/// stale last-good report never counts as fresh readiness indefinitely.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum EngineReadiness {
-    /// The provider authenticated this account inside the freshness window;
-    /// its discovered models may run.
-    Ready,
-    /// The provider reports no signed-in account.
-    NeedsSignIn,
-    /// The provider is unreachable, failing, stale, or has no account data yet.
-    NotReady,
-    /// A usage read is in flight; the verdict is pending.
-    Checking,
-}
-
-/// Derives one engine's account readiness from its probed usage row.
-///
-/// `now_ms` bounds last-good optimism with the same 180-second freshness
-/// window both layers share ([`profile_usage_is_fresh`]): an authenticated
-/// report older than that is `NotReady` (or `Checking` while its refresh is
-/// admitted), never `Ready`, so a signed-out or uninstalled engine cannot
-/// ride a stale report indefinitely. A fresh authenticated report with a
-/// refresh failure alongside stays `Ready` — the backend deliberately serves
-/// last-good on transient refresh failures — while the failure itself stays
-/// visible through [`engine_refresh_failure`] for actionable Settings
-/// status. Unknown engine ids and rows without a usable report are never
-/// ready: a missing row settles to `Checking` only while its refresh is
-/// admitted, otherwise `NotReady`, so the composer cannot mistake an
-/// unprobed engine for a runnable one.
+/// The verdict is the Forge's decision and is rendered as delivered; this
+/// only covers the moments before one exists: a read in flight is
+/// `Checking`, and an engine without any report is `NotReady`.
 #[must_use]
 pub fn engine_readiness(
     state: &NativeProfileUsageState,
     engine_id: &str,
-    now_ms: i64,
-) -> EngineReadiness {
-    let refreshing = state
-        .refreshing_engine_ids
-        .iter()
-        .any(|current| current == engine_id);
-    match state.entry(engine_id) {
-        Some(entry) => match entry.report.as_ref().map(|report| report.authentication) {
-            Some(NativeUsageAuthentication::Authenticated) => {
-                if profile_usage_is_fresh(entry.fetched_at_ms, now_ms) {
-                    EngineReadiness::Ready
-                } else if refreshing {
-                    EngineReadiness::Checking
-                } else {
-                    EngineReadiness::NotReady
-                }
-            }
-            Some(NativeUsageAuthentication::Unauthenticated) => EngineReadiness::NeedsSignIn,
-            _ => {
-                if entry.failure.is_some() || !refreshing {
-                    EngineReadiness::NotReady
-                } else {
-                    EngineReadiness::Checking
-                }
-            }
-        },
-        None => {
-            if refreshing {
-                EngineReadiness::Checking
-            } else {
-                EngineReadiness::NotReady
-            }
+) -> EngineReadinessVerdict {
+    match state
+        .entry(engine_id)
+        .and_then(|entry| entry.report.as_ref())
+    {
+        Some(report) => report.readiness.verdict(),
+        None if state
+            .refreshing_engine_ids
+            .iter()
+            .any(|current| current == engine_id) =>
+        {
+            EngineReadinessVerdict::Checking
         }
+        None => EngineReadinessVerdict::NotReady,
     }
+}
+
+/// Returns the Forge's presentation-ready readiness reason for one engine,
+/// when its latest usage report carries one.
+#[must_use]
+pub fn engine_readiness_reason(state: &NativeProfileUsageState, engine_id: &str) -> Option<String> {
+    state
+        .entry(engine_id)?
+        .report
+        .as_ref()?
+        .readiness
+        .reason()
+        .map(str::to_owned)
 }
 
 /// Returns the actionable refresh failure for one engine, if any.
@@ -628,64 +574,6 @@ pub fn engine_refresh_failure(state: &NativeProfileUsageState, engine_id: &str) 
         .as_ref()
         .and_then(|report| report.failure.clone())
         .or_else(|| entry.failure.clone())
-}
-
-/// Returns whether one CLI-probed engine's discovered models may run.
-///
-/// Only a fresh backend-authenticated usage report admits them, and only
-/// for the CLI-probed subset ([`CLI_PROBED_ENGINES`]): a dashboard read
-/// (Cursor) never proves a local installation. Engines without an account
-/// surface (`grok`, `opencode2`) never qualify here either; the
-/// overlay preserves their snapshot marking instead.
-#[must_use]
-pub fn engine_models_admittable(
-    state: &NativeProfileUsageState,
-    engine_id: &str,
-    now_ms: i64,
-) -> bool {
-    CLI_PROBED_ENGINES.contains(&engine_id)
-        && matches!(
-            engine_readiness(state, engine_id, now_ms),
-            EngineReadiness::Ready
-        )
-}
-
-/// Overlays backend-probed readiness onto a catalog snapshot.
-///
-/// The CLI-probed native subset ([`CLI_PROBED_ENGINES`]) is recomputed from
-/// scratch on every overlay: a freshly authenticated engine joins
-/// `runnable_harness_ids` once, and an engine whose latest verdict is
-/// anything else leaves it — so a previously admitted engine never survives
-/// a later signed-out, failed, or stale report when overlaid on the current
-/// snapshot. Every other runnable id is preserved verbatim: genuine managed
-/// `OpenCode` readiness from backend discovery, harness support for
-/// surfaceless engines, and the backend catalog marking for the
-/// dashboard-read `cursor` engine (whose usage auth never proves a local
-/// CLI). The shared admission policy (`admit_policy`, `validate_policy`)
-/// then treats the probed engine's models as runnable without inventing
-/// routes, versions, or account facts.
-#[must_use]
-pub fn catalog_with_usage_readiness(
-    catalog: crate::native_model_catalog::NativeModelCatalog,
-    usage: &NativeProfileUsageState,
-    now_ms: i64,
-) -> crate::native_model_catalog::NativeModelCatalog {
-    let mut catalog = catalog;
-    let mut runnable: Vec<String> = catalog
-        .runnable_harness_ids
-        .iter()
-        .filter(|id| !CLI_PROBED_ENGINES.contains(&id.as_str()))
-        .cloned()
-        .collect();
-    for engine_id in CLI_PROBED_ENGINES {
-        if engine_models_admittable(usage, engine_id, now_ms)
-            && !runnable.iter().any(|ready| ready == engine_id)
-        {
-            runnable.push(engine_id.to_owned());
-        }
-    }
-    catalog.runnable_harness_ids = runnable;
-    catalog
 }
 
 /// One cadence group in Electron's display order.

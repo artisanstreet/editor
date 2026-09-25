@@ -325,9 +325,17 @@ impl RequestHandler {
             Query::ReadComposerCatalog(read) => {
                 crate::composer_catalog_handler::read_composer_catalog(
                     self.composer_catalog.as_ref(),
+                    self.account_usage.as_ref(),
                     &self.repository,
                     request_id,
                     read,
+                )
+                .await
+            }
+            Query::ReadHostCatalog(_) => {
+                crate::composer_catalog_handler::read_host_catalog(
+                    self.account_usage.as_ref(),
+                    request_id,
                 )
                 .await
             }

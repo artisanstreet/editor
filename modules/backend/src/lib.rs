@@ -272,3 +272,5 @@ mod composer_catalog_handler;
 mod citation_projection;
 
 mod context_compaction_policy;
+
+mod account_readiness;

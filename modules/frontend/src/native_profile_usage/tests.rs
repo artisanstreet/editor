@@ -71,6 +71,7 @@ fn report(
         quota_surface: NativeUsageQuotaSurface::Supported,
         windows,
         failure: None,
+        readiness: EngineReadiness::ready(),
     }
 }
 
@@ -396,6 +397,7 @@ fn one_failure_preserves_siblings_and_stale_cannot_clear_refresh() {
             quota_surface: NativeUsageQuotaSurface::Supported,
             windows: Vec::new(),
             failure: None,
+            readiness: EngineReadiness::ready(),
         }),
         failure: None,
         fetched_at_ms: Some(100),
@@ -442,6 +444,7 @@ fn refresh_failure_keeps_last_good_meters_and_stays_visible() {
             quota_surface: NativeUsageQuotaSurface::Supported,
             windows: vec![window("five_hour", NativeUsageCadence::Session, None, 42.0)],
             failure: None,
+            readiness: EngineReadiness::ready(),
         }),
         failure: None,
         fetched_at_ms: Some(77),
@@ -470,6 +473,7 @@ fn provider_failure_with_windows_keeps_both_visible() {
         quota_surface: NativeUsageQuotaSurface::Supported,
         windows: vec![window("seven_day", NativeUsageCadence::Weekly, None, 10.0)],
         failure: Some("partial read".to_owned()),
+        readiness: EngineReadiness::ready(),
     };
     assert_eq!(report.renderable_windows().len(), 1);
     assert_eq!(report.failure.as_deref(), Some("partial read"));
@@ -501,268 +505,97 @@ fn disconnect_clears_incompatible_cache_and_pending() {
     assert_eq!(state.pending_seq("claude"), None);
 }
 
-/// Fixed test clock: `readiness_entry` stamps rows 10 seconds old unless
-/// the caller moves the stamp, so freshness assertions stay exact.
-const READINESS_NOW_MS: i64 = 1_789_000_000_000;
-
 fn readiness_entry(
     engine_id: &str,
-    authentication: NativeUsageAuthentication,
+    readiness: EngineReadiness,
     failure: Option<&str>,
 ) -> NativeUsageEntry {
     let mut entry = NativeUsageEntry::pending(engine_id, engine_id);
     entry.report = Some(NativeUsageReport {
         engine_id: engine_id.to_owned(),
         display_name: profile_usage_display_name(engine_id).to_owned(),
-        authentication,
+        authentication: NativeUsageAuthentication::Authenticated,
         account_email: None,
         quota_surface: NativeUsageQuotaSurface::Supported,
         windows: Vec::new(),
         failure: failure.map(str::to_owned),
+        readiness,
     });
-    entry.fetched_at_ms = Some(READINESS_NOW_MS - 10_000);
+    // An old observation: the Editor never re-judges the Forge's verdict
+    // against its own clock.
+    entry.fetched_at_ms = Some(1);
     entry
 }
 
 #[test]
-fn readiness_follows_only_probed_authentication() {
+fn readiness_renders_the_forge_verdict_as_delivered() {
     let mut state = NativeProfileUsageState::default();
-    // No row and no admitted refresh is never ready and never checking:
-    // the composer must not mistake an unprobed engine for a runnable one.
+    // No report yet: nothing claims the engine can run.
     assert_eq!(
-        engine_readiness(&state, "codex", READINESS_NOW_MS),
-        EngineReadiness::NotReady
+        engine_readiness(&state, "codex"),
+        EngineReadinessVerdict::NotReady
     );
-    assert!(!engine_models_admittable(&state, "codex", READINESS_NOW_MS));
-
+    assert_eq!(engine_readiness_reason(&state, "codex"), None);
+    // A read in flight without a report is being checked.
     state.begin_refresh_seq("codex", 1);
     assert_eq!(
-        engine_readiness(&state, "codex", READINESS_NOW_MS),
-        EngineReadiness::Checking
+        engine_readiness(&state, "codex"),
+        EngineReadinessVerdict::Checking
     );
 
-    state.accept(readiness_entry(
-        "codex",
-        NativeUsageAuthentication::Authenticated,
-        None,
-    ));
+    state.accept(readiness_entry("codex", EngineReadiness::ready(), None));
     assert_eq!(
-        engine_readiness(&state, "codex", READINESS_NOW_MS),
-        EngineReadiness::Ready
+        engine_readiness(&state, "codex"),
+        EngineReadinessVerdict::Ready
     );
-    assert!(engine_models_admittable(&state, "codex", READINESS_NOW_MS));
 
-    // A later refresh failure keeps the last-good authenticated verdict:
-    // a stale reply without an observation time never replaces the
-    // newer reading, exactly like the production controller.
+    let sign_in = EngineReadiness::new(
+        EngineReadinessVerdict::NeedsSignIn,
+        Some("Claude account sign-in is required.".to_owned()),
+    )
+    .expect("verdict");
+    state.accept(readiness_entry("claude", sign_in, None));
+    assert_eq!(
+        engine_readiness(&state, "claude"),
+        EngineReadinessVerdict::NeedsSignIn
+    );
+    assert_eq!(
+        engine_readiness_reason(&state, "claude").as_deref(),
+        Some("Claude account sign-in is required.")
+    );
+
+    // A later report's verdict replaces the earlier one, including while
+    // its engine is being refreshed again.
     state.begin_refresh_seq("codex", 2);
-    let mut older_reading = readiness_entry(
-        "codex",
-        NativeUsageAuthentication::Unknown,
-        Some("provider usage read timed out"),
-    );
-    older_reading.fetched_at_ms = None;
-    state.accept(older_reading);
+    let not_ready = EngineReadiness::new(
+        EngineReadinessVerdict::NotReady,
+        Some("Codex account status is unavailable: read timed out.".to_owned()),
+    )
+    .expect("verdict");
+    state.accept(readiness_entry("codex", not_ready, Some("read timed out")));
     assert_eq!(
-        engine_readiness(&state, "codex", READINESS_NOW_MS),
-        EngineReadiness::Ready
-    );
-
-    state.accept(readiness_entry(
-        "claude",
-        NativeUsageAuthentication::Unauthenticated,
-        None,
-    ));
-    assert_eq!(
-        engine_readiness(&state, "claude", READINESS_NOW_MS),
-        EngineReadiness::NeedsSignIn
-    );
-    assert!(!engine_models_admittable(
-        &state,
-        "claude",
-        READINESS_NOW_MS
-    ));
-
-    // Unknown engine ids never qualify.
-    assert_eq!(
-        engine_readiness(&state, "unknown-engine", READINESS_NOW_MS),
-        EngineReadiness::NotReady
-    );
-    assert!(!engine_models_admittable(
-        &state,
-        "unknown-engine",
-        READINESS_NOW_MS
-    ));
-}
-
-#[test]
-fn stale_last_good_is_not_fresh_readiness() {
-    let mut state = NativeProfileUsageState::default();
-    let mut old = readiness_entry("codex", NativeUsageAuthentication::Authenticated, None);
-    // Just past the shared 180-second freshness window.
-    old.fetched_at_ms = Some(READINESS_NOW_MS - 181_000);
-    state.accept(old);
-    // Stale last-good never counts as fresh readiness indefinitely: the
-    // composer must re-probe instead of sending on an aged verdict.
-    assert_eq!(
-        engine_readiness(&state, "codex", READINESS_NOW_MS),
-        EngineReadiness::NotReady
-    );
-    assert!(!engine_models_admittable(&state, "codex", READINESS_NOW_MS));
-    // While the re-probe is admitted the verdict is honestly pending.
-    state.begin_refresh_seq("codex", 1);
-    assert_eq!(
-        engine_readiness(&state, "codex", READINESS_NOW_MS),
-        EngineReadiness::Checking
-    );
-    // A fresh re-probe restores readiness.
-    state.accept(readiness_entry(
-        "codex",
-        NativeUsageAuthentication::Authenticated,
-        None,
-    ));
-    assert_eq!(
-        engine_readiness(&state, "codex", READINESS_NOW_MS),
-        EngineReadiness::Ready
+        engine_readiness(&state, "codex"),
+        EngineReadinessVerdict::NotReady
     );
 }
 
 #[test]
-fn fresh_last_good_with_refresh_failure_stays_ready_but_visible() {
+fn refresh_failures_stay_visible_beside_the_forge_verdict() {
     let mut state = NativeProfileUsageState::default();
-    // A forced refresh that fails over fresh last-good meters keeps the
-    // backend's optimistic verdict, while the failure stays actionable.
+    // The Forge serves last-good meters with the refresh failure and keeps
+    // judging the account ready; the failure stays actionable.
     state.accept(readiness_entry(
         "codex",
-        NativeUsageAuthentication::Authenticated,
+        EngineReadiness::ready(),
         Some("provider usage read timed out"),
     ));
     assert_eq!(
-        engine_readiness(&state, "codex", READINESS_NOW_MS),
-        EngineReadiness::Ready
+        engine_readiness(&state, "codex"),
+        EngineReadinessVerdict::Ready
     );
     assert_eq!(
         engine_refresh_failure(&state, "codex").as_deref(),
         Some("provider usage read timed out")
     );
     assert_eq!(engine_refresh_failure(&state, "claude"), None);
-}
-
-#[test]
-fn readiness_overlay_recomputes_the_gated_subset() {
-    use crate::native_model_catalog::NativeModelCatalog;
-
-    let catalog = NativeModelCatalog::from_manifest_json(include_str!(
-        "../../../../tests/fixtures/model_catalog.json"
-    ))
-    .expect("fixture catalog");
-    assert!(catalog.runnable_harness_ids.is_empty());
-
-    let mut usage = NativeProfileUsageState::default();
-    usage.accept(readiness_entry(
-        "codex",
-        NativeUsageAuthentication::Authenticated,
-        None,
-    ));
-    usage.accept(readiness_entry(
-        "claude",
-        NativeUsageAuthentication::Unauthenticated,
-        None,
-    ));
-    let admitted = catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
-    assert_eq!(admitted.runnable_harness_ids, vec!["codex".to_owned()]);
-    assert!(admitted.selectability("codex-sol").is_available());
-    assert!(!admitted.selectability("claude-fable").is_available());
-
-    // Re-overlaying never duplicates the runnable entry.
-    let again = catalog_with_usage_readiness(admitted, &usage, READINESS_NOW_MS);
-    assert_eq!(again.runnable_harness_ids, vec!["codex".to_owned()]);
-}
-
-#[test]
-fn signed_out_report_removes_a_previously_admitted_engine() {
-    use crate::native_model_catalog::NativeModelCatalog;
-
-    // A snapshot carrying genuine managed `OpenCode` readiness plus a
-    // previously admitted Codex, as backend discovery plus an earlier
-    // overlay produce in production.
-    let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
-        "../../../../tests/fixtures/model_catalog.json"
-    ))
-    .expect("fixture catalog");
-    catalog.runnable_harness_ids = vec![
-        "opencode2".to_owned(),
-        "codex".to_owned(),
-        "grok".to_owned(),
-    ];
-    let mut usage = NativeProfileUsageState::default();
-    usage.accept(readiness_entry(
-        "codex",
-        NativeUsageAuthentication::Authenticated,
-        None,
-    ));
-    let admitted = catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
-    assert_eq!(
-        admitted.runnable_harness_ids,
-        vec![
-            "opencode2".to_owned(),
-            "grok".to_owned(),
-            "codex".to_owned()
-        ]
-    );
-
-    // The account signs out later: the recomputed overlay drops Codex
-    // while genuine managed `OpenCode` readiness and the surfaceless
-    // `grok` harness marking survive verbatim.
-    usage.accept(readiness_entry(
-        "codex",
-        NativeUsageAuthentication::Unauthenticated,
-        None,
-    ));
-    let recomputed = catalog_with_usage_readiness(admitted, &usage, READINESS_NOW_MS);
-    assert_eq!(
-        recomputed.runnable_harness_ids,
-        vec!["opencode2".to_owned(), "grok".to_owned()]
-    );
-    assert!(!recomputed.selectability("codex-sol").is_available());
-}
-
-#[test]
-fn dashboard_auth_never_admits_cursor_models_to_run() {
-    use crate::native_model_catalog::NativeModelCatalog;
-
-    let mut usage = NativeProfileUsageState::default();
-    usage.accept(readiness_entry(
-        "cursor",
-        NativeUsageAuthentication::Authenticated,
-        None,
-    ));
-    // Account state is kept: the dashboard verdict stays visible...
-    assert_eq!(
-        engine_readiness(&usage, "cursor", READINESS_NOW_MS),
-        EngineReadiness::Ready
-    );
-    // ...but dashboard auth never proves a local CLI installation.
-    assert!(!engine_models_admittable(
-        &usage,
-        "cursor",
-        READINESS_NOW_MS
-    ));
-
-    // The overlay preserves the backend catalog marking for cursor
-    // verbatim instead of admitting it from usage.
-    let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
-        "../../../../tests/fixtures/model_catalog.json"
-    ))
-    .expect("fixture catalog");
-    catalog.runnable_harness_ids = vec!["cursor".to_owned()];
-    let overlaid = catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
-    assert_eq!(overlaid.runnable_harness_ids, vec!["cursor".to_owned()]);
-
-    let bare = NativeModelCatalog::from_manifest_json(include_str!(
-        "../../../../tests/fixtures/model_catalog.json"
-    ))
-    .expect("fixture catalog");
-    let overlaid = catalog_with_usage_readiness(bare, &usage, READINESS_NOW_MS);
-    assert!(overlaid.runnable_harness_ids.is_empty());
 }

@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use crate::composer::{SubmissionBlocked, SubmissionToken};
-use crate::native_model_catalog::NativeModelCatalog;
 use crate::native_transport_service::{
     CommandSendError, NativeTransportCommand, ServiceFailure, ServiceFailureCategory,
     ServiceFailureStage,
@@ -108,33 +107,6 @@ pub(super) enum ThreadSwitchPhase {
     },
     /// The fresh target subscription was admitted and must start.
     AwaitingSubscriptionStart { request_id: Option<RequestId> },
-}
-
-/// Loads the Forge-published scope-free catalog snapshot, if present.
-///
-/// The Forge writes `<home>/readiness/model-catalog.json` (live discovery
-/// only) next to its readiness receipt. Surfaces without a thread-scoped
-/// runtime read (the home picker) use this snapshot when it is available and
-/// otherwise show no models. Snapshots from an older harness revision fail
-/// wire validation, so rows published before an update never resurface.
-#[cfg(test)]
-pub(super) fn scope_free_catalog_snapshot() -> Option<NativeModelCatalog> {
-    None
-}
-
-#[cfg(not(test))]
-pub(super) fn scope_free_catalog_snapshot() -> Option<NativeModelCatalog> {
-    let layout = artisan_editor_cli::paths::Layout::discover().ok()?;
-    let path = layout.root.join("readiness").join("model-catalog.json");
-    let metadata = std::fs::metadata(&path).ok()?;
-    if metadata.len() > 16 * 1024 * 1024 {
-        return None;
-    }
-    let bytes = std::fs::read(&path).ok()?;
-    artisan_protocol::CatalogSnapshotWire::new(bytes)
-        .ok()?
-        .decoded()
-        .ok()
 }
 
 /// Mints a random `UUIDv7` request id (see [`RequestId::mint`]); ids stay

@@ -1,4 +1,5 @@
-//! Account-usage readiness and refresh flights for [`NativeApplication`].
+//! Account-usage refresh flights for [`NativeApplication`]; each report
+//! carries the Forge's readiness verdict for its engine.
 //!
 //! Extracted verbatim from `native_application.rs` during the phase-4 module
 //! split; visibility was widened to `pub(super)` for parent-owned methods.
@@ -168,7 +169,19 @@ impl NativeApplication {
         {
             return;
         }
-        self.profile_usage.try_accept(entry, request_seq);
+        let previous = engine_readiness(&self.profile_usage, engine_id);
+        let accepted = self.profile_usage.try_accept(entry, request_seq);
+        // The Forge applies readiness to the catalogs it serves, so a new
+        // verdict is picked up by reading the catalog again.
+        if accepted
+            && self
+                .profile_usage
+                .entry(engine_id)
+                .is_some_and(|entry| entry.report.is_some())
+            && engine_readiness(&self.profile_usage, engine_id) != previous
+        {
+            self.refresh_model_catalog(cx);
+        }
         self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }

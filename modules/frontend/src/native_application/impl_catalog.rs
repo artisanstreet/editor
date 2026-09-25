@@ -7,12 +7,11 @@
 use super::*;
 
 impl NativeApplication {
-    /// Refreshes the active scope or the local home picker every five minutes.
-    pub(super) fn refresh_model_catalog(
-        &mut self,
-        catalog: Option<NativeModelCatalog>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Refreshes the active scope's catalog, or the scope-free host catalog
+    /// when no thread is selected. Runs every five minutes and whenever the
+    /// Forge's readiness verdict for an engine changes, since the Forge
+    /// applies readiness to the catalogs it serves.
+    pub(super) fn refresh_model_catalog(&mut self, cx: &mut Context<Self>) {
         if self.shutdown_prepared || self.service_stopped {
             return;
         }
@@ -24,17 +23,40 @@ impl NativeApplication {
                     self.discover_composer_catalog_for_settings(cx);
                 }
             }
-        } else if self.machine_home.is_none()
-            && let Some(catalog) = catalog
-            && self
-                .model_selector
-                .read(cx)
-                .state()
-                .snapshot()
-                .catalog_revision
-                != catalog.catalog_revision
-        {
-            self.host_model_catalog = Some(catalog);
+        } else {
+            self.request_host_catalog();
+        }
+    }
+
+    /// Asks for the host catalog once the connection lists its projects,
+    /// unless this connection already has one.
+    pub(super) fn ensure_host_catalog(&mut self) {
+        if self.host_model_catalog.is_none() {
+            self.request_host_catalog();
+        }
+    }
+
+    /// Asks the Forge for the scope-free host catalog.
+    pub(super) fn request_host_catalog(&mut self) {
+        let _ = self.submit_command(NativeTransportCommand::ForgeDecision(
+            crate::native_transport_service::ForgeDecisionCommand::ReadHostCatalog,
+        ));
+    }
+
+    /// Applies one Forge-decision event.
+    pub(super) fn receive_forge_decision(
+        &mut self,
+        event: crate::native_transport_service::ForgeDecisionEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let crate::native_transport_service::ForgeDecisionEvent::HostCatalog(result) = event;
+        // A failed read keeps the catalog already shown; the next refresh
+        // asks again.
+        let Ok(catalog) = result else {
+            return;
+        };
+        self.host_model_catalog = Some(*catalog);
+        if self.selected_thread.is_none() {
             self.reset_model_selector_offline(cx);
             self.sync_composer_model_policy(cx);
             cx.notify();
@@ -42,22 +64,13 @@ impl NativeApplication {
     }
 
     pub(super) fn reset_model_selector_offline(&mut self, cx: &mut Context<Self>) {
-        // The Forge publishes a scope-free catalog snapshot built only from
-        // live discovery for surfaces without a thread-scoped runtime read.
-        // Without one the picker shows no models until discovery answers.
-        let catalog = self
-            .host_model_catalog
-            .clone()
-            .or_else(|| {
-                self.machine_home
-                    .is_none()
-                    .then(scope_free_catalog_snapshot)
-                    .flatten()
-            })
-            .unwrap_or_else(|| {
-                NativeModelCatalog::harnesses_only()
-                    .expect("the shipped harness descriptors are validated at the native boundary")
-            });
+        // Surfaces without a thread-scoped runtime read show the Forge's
+        // scope-free host catalog; until it answers the picker shows no
+        // models.
+        let catalog = self.host_model_catalog.clone().unwrap_or_else(|| {
+            NativeModelCatalog::harnesses_only()
+                .expect("the shipped harness descriptors are validated at the native boundary")
+        });
         self.model_selector.update(cx, |selector, cx| {
             selector.set_snapshot(catalog, cx);
             selector.set_policy(None, cx);
@@ -65,55 +78,20 @@ impl NativeApplication {
         });
     }
 
-    /// Returns the selector snapshot overlaid with backend-probed account
-    /// readiness.
-    ///
-    /// Static native models whose engine carries a fresh authenticated usage
-    /// report are admittable without any managed `OpenCode` profile or
-    /// registry; the overlay recomputes that gated subset on every call so a
-    /// signed-out, failed, or stale engine never inherits a previous
-    /// admission from the stored snapshot.
-    pub(super) fn effective_catalog_snapshot(&self, cx: &App) -> NativeModelCatalog {
-        let snapshot = self.model_selector.read(cx).state().snapshot().clone();
-        catalog_with_usage_readiness(snapshot, &self.profile_usage, profile_usage_now_ms())
+    /// Returns the catalog as the Forge served it: its runnable harnesses
+    /// already reflect the Forge's account readiness.
+    pub(super) fn served_catalog(&self, cx: &App) -> NativeModelCatalog {
+        self.model_selector.read(cx).state().snapshot().clone()
     }
 
-    /// Returns the actionable reason a displayed policy's engine cannot run.
-    ///
-    /// The verdict comes from the backend-probed usage row, never from a
-    /// catch-all, and the wording is shared across engines: a signed-out
-    /// engine names sign-in, a pending read says a check is running, and any
-    /// other unavailable state reports the check status plus the actual
-    /// probed failure when one exists. Nothing here claims a missing
-    /// installation or broken binary without executable evidence â€” a stale,
-    /// failed, or never-probed check reads as a status problem with a
-    /// refresh recovery, since the installed authenticated account is the
-    /// established baseline. Every message preserves the draft and points
-    /// at the working recovery (the model retry that refreshes account
-    /// status, or Settings â†’ Engines). A `Ready` engine that the catalog
-    /// still rejects is a catalog-side unavailability, not an account
-    /// problem.
+    /// Returns why a displayed policy's engine cannot run: the Forge's
+    /// readiness reason from the engine's latest usage report, or, when the
+    /// Forge judged the account ready, the catalog's own unavailability.
     pub(super) fn readiness_block_reason(&self, engine_id: &str) -> String {
-        let label = profile_usage_display_name(engine_id);
-        match engine_readiness(&self.profile_usage, engine_id, profile_usage_now_ms()) {
-            EngineReadiness::Ready => "This model is unavailable in the runtime catalog right now. Your draft is preserved; retry or pick another model.".to_owned(),
-            EngineReadiness::NeedsSignIn => format!(
-                "{label} account sign-in is required. Your draft is preserved; open Settings â†’ Engines â†’ {label} to review it, or retry to refresh."
-            ),
-            EngineReadiness::Checking => format!(
-                "Checking the {label} account status. Your draft is preserved; retry in a moment."
-            ),
-            EngineReadiness::NotReady => {
-                match engine_refresh_failure(&self.profile_usage, engine_id) {
-                    Some(failure) => format!(
-                        "{label} account status is unavailable: {failure}. Your draft is preserved; retry to refresh, or open Settings â†’ Engines â†’ {label}."
-                    ),
-                    None => format!(
-                        "{label} account status is unavailable right now. Your draft is preserved; retry to refresh its status, or open Settings â†’ Engines â†’ {label}."
-                    ),
-                }
-            }
-        }
+        engine_readiness_reason(&self.profile_usage, engine_id).map_or_else(
+            || "This model is unavailable in the runtime catalog right now. Your draft is preserved; retry or pick another model.".to_owned(),
+            |reason| format!("{reason} Your draft is preserved; retry to refresh, or review the engine in Settings."),
+        )
     }
 
     pub(super) fn reset_composer_catalog(&mut self, cx: &mut Context<Self>) {

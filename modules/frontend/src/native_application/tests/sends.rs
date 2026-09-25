@@ -1605,7 +1605,7 @@ fn host_catalog_refresh_updates_the_send_choice_revision(cx: &mut TestAppContext
     let (view, cx) = cx.add_window_view(test_application);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
-            let catalog = application.effective_catalog_snapshot(cx);
+            let catalog = application.served_catalog(cx);
             let policy = catalog.selection_policy_for_model("codex-luna").unwrap();
             application.composer_model_choice = Some((None, policy));
             let mut refreshed = catalog;
@@ -1618,7 +1618,7 @@ fn host_catalog_refresh_updates_the_send_choice_revision(cx: &mut TestAppContext
             assert_eq!(choice.catalog_revision, "host-new-revision");
             assert_eq!(choice.model_id, "codex-luna");
             application
-                .effective_catalog_snapshot(cx)
+                .served_catalog(cx)
                 .validate_policy(choice)
                 .unwrap();
         })
@@ -1630,13 +1630,7 @@ fn unconnected_application_never_offers_bundled_models(cx: &mut TestAppContext) 
     let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
     cx.update(|_, app| {
         view.update(app, |application, cx| {
-            assert!(
-                application
-                    .effective_catalog_snapshot(cx)
-                    .manifest
-                    .models
-                    .is_empty()
-            );
+            assert!(application.served_catalog(cx).manifest.models.is_empty());
             assert!(
                 application
                     .model_selector

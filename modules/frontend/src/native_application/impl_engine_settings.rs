@@ -245,8 +245,7 @@ impl NativeApplication {
         engine_id: &str,
         cx: &App,
     ) -> SettingsEngineSnapshot {
-        let now_ms = profile_usage_now_ms();
-        let readiness = engine_readiness(&self.profile_usage, engine_id, now_ms);
+        let readiness = engine_readiness(&self.profile_usage, engine_id);
         let entry = self.profile_usage.entry(engine_id);
         let account_email = entry.as_ref().and_then(|entry| {
             entry
@@ -286,7 +285,7 @@ impl NativeApplication {
             .as_ref()
             .map(|thread| thread.as_str().to_owned());
         let authoritative = self.engine_settings.authoritative_config();
-        let effective = self.effective_catalog_snapshot(cx);
+        let effective = self.served_catalog(cx);
         let saved_policy = authoritative.and_then(|config| {
             if config.selection().engine_id().as_str() != engine_id {
                 return None;
@@ -439,7 +438,7 @@ impl NativeApplication {
         model_id: &str,
         cx: &mut Context<Self>,
     ) {
-        let catalog = self.effective_catalog_snapshot(cx);
+        let catalog = self.served_catalog(cx);
         let Ok(raw) = catalog.selection_policy_for_model(model_id) else {
             return;
         };
@@ -472,7 +471,7 @@ impl NativeApplication {
         let Some(policy) = self.displayed_policy_for_engine(engine_id, cx) else {
             return;
         };
-        let catalog = self.effective_catalog_snapshot(cx);
+        let catalog = self.served_catalog(cx);
         let Ok(config) = crate::composer_model_config::config_for_policy(
             &catalog,
             &policy,

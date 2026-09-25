@@ -1,7 +1,8 @@
 //! Request-handler adapters for the native composer catalog and favorites.
 //!
 //! Catalog discovery stays in [`super::composer_catalog_service`]. This leaf
-//! combines its typed result with the latest durable favorites, passes the
+//! combines its typed result with the latest durable favorites and the
+//! Forge's account readiness (see [`crate::account_readiness`]), passes the
 //! complete value through the shared catalog bridge/wire encoder, and maps
 //! bounded failures to the existing protocol vocabulary. No provider payload,
 //! path, executable, or catalog diagnostic is formatted here.
@@ -21,6 +22,7 @@ use artisan_protocol::{
     ServerResponse, SetModelFavoriteReceipt,
 };
 
+use crate::account_usage_service::AccountUsageService;
 use crate::composer_catalog_service::{ComposerCatalogService, ComposerCatalogServiceError};
 
 const CATALOG_UNAVAILABLE_DETAIL: &str = "composer catalog service is unavailable";
@@ -85,9 +87,11 @@ pub(crate) enum ComposerCatalogHandlerError {
     UnknownModel,
 }
 
-/// Answers one scoped composer-catalog query.
+/// Answers one scoped composer-catalog query with the Forge's account
+/// readiness applied to its runnable harnesses.
 pub(crate) async fn read_composer_catalog(
     service: Option<&ComposerCatalogService>,
+    usage: Option<&AccountUsageService>,
     repository: &Repository,
     request_id: &RequestId,
     query: &ReadComposerCatalog,
@@ -95,6 +99,7 @@ pub(crate) async fn read_composer_catalog(
     let catalog = current_catalog(service, repository, query.thread_id(), query.profile_id())
         .await
         .map_err(|error| protocol_failure(error, request_id))?;
+    let catalog = crate::account_readiness::catalog_with_account_readiness(catalog, usage);
     let result = catalog_response(
         query.thread_id().clone(),
         query.profile_id().clone(),
@@ -104,6 +109,37 @@ pub(crate) async fn read_composer_catalog(
     Ok(outcome(
         request_id,
         ResponsePayload::ComposerCatalog(result),
+    ))
+}
+
+/// Answers the scope-free host catalog query: live discovery only, with the
+/// Forge's account readiness applied, for surfaces without a thread.
+///
+/// A cold Forge probes its engines first (each probe is bounded); later
+/// reads answer from the discovery cache.
+pub(crate) async fn read_host_catalog(
+    usage: Option<&AccountUsageService>,
+    request_id: &RequestId,
+) -> Result<ServerResponse, ProtocolFailure> {
+    let catalog = host_catalog(usage)
+        .await
+        .map_err(|error| protocol_failure(error, request_id))?;
+    let bytes = artisan_catalog::wire::encode_catalog(&catalog)
+        .map_err(|_| protocol_failure(ComposerCatalogHandlerError::InvalidCatalog, request_id))?;
+    let snapshot = CatalogSnapshotWire::new(bytes)
+        .map_err(|_| protocol_failure(ComposerCatalogHandlerError::InvalidCatalog, request_id))?;
+    Ok(outcome(request_id, ResponsePayload::HostCatalog(snapshot)))
+}
+
+/// Builds the scope-free host catalog with the Forge's account readiness.
+pub(crate) async fn host_catalog(
+    usage: Option<&AccountUsageService>,
+) -> Result<artisan_catalog::NativeModelCatalog, ComposerCatalogHandlerError> {
+    let discovery = crate::model_discovery::discovery_bundle().await;
+    let catalog = crate::native_model_catalog::from_discovery(&discovery)
+        .map_err(|_| ComposerCatalogHandlerError::InvalidCatalog)?;
+    Ok(crate::account_readiness::catalog_with_account_readiness(
+        catalog, usage,
     ))
 }
 

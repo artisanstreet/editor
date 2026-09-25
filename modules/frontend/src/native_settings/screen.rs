@@ -59,7 +59,7 @@ pub struct SettingsEngineSnapshot {
     /// Engine id this snapshot was built for.
     pub engine_id: String,
     /// Backend-probed account verdict for the engine.
-    pub readiness: crate::native_profile_usage::EngineReadiness,
+    pub readiness: crate::native_profile_usage::EngineReadinessVerdict,
     /// Provider-disclosed account email, when one was reported.
     pub account_email: Option<String>,
     /// Actionable refresh failure, when the latest check failed.
@@ -106,15 +106,15 @@ impl SettingsEngineSnapshot {
     #[must_use]
     pub fn availability_badge(&self) -> &'static str {
         if self.engine_id == "cursor"
-            && self.readiness == crate::native_profile_usage::EngineReadiness::Ready
+            && self.readiness == crate::native_profile_usage::EngineReadinessVerdict::Ready
         {
             return "Signed in";
         }
         match self.readiness {
-            crate::native_profile_usage::EngineReadiness::Ready => "Available",
-            crate::native_profile_usage::EngineReadiness::NeedsSignIn => "Sign-in required",
-            crate::native_profile_usage::EngineReadiness::Checking => "Checking",
-            crate::native_profile_usage::EngineReadiness::NotReady => "Unavailable",
+            crate::native_profile_usage::EngineReadinessVerdict::Ready => "Available",
+            crate::native_profile_usage::EngineReadinessVerdict::NeedsSignIn => "Sign-in required",
+            crate::native_profile_usage::EngineReadinessVerdict::Checking => "Checking",
+            crate::native_profile_usage::EngineReadinessVerdict::NotReady => "Unavailable",
         }
     }
 
@@ -129,17 +129,19 @@ impl SettingsEngineSnapshot {
     pub fn installation_state(&self) -> String {
         if self.engine_id == "cursor" {
             match self.readiness {
-                crate::native_profile_usage::EngineReadiness::Ready => match &self.account_email {
-                    Some(email) => {
-                        return format!(
-                            "Signed in as {email}. Cursor CLI installation is unverified."
-                        );
+                crate::native_profile_usage::EngineReadinessVerdict::Ready => {
+                    match &self.account_email {
+                        Some(email) => {
+                            return format!(
+                                "Signed in as {email}. Cursor CLI installation is unverified."
+                            );
+                        }
+                        None => {
+                            return "Signed in. Cursor CLI installation is unverified.".to_owned();
+                        }
                     }
-                    None => {
-                        return "Signed in. Cursor CLI installation is unverified.".to_owned();
-                    }
-                },
-                crate::native_profile_usage::EngineReadiness::NeedsSignIn => {
+                }
+                crate::native_profile_usage::EngineReadinessVerdict::NeedsSignIn => {
                     return "Cursor CLI installation is unverified. Account sign-in is required."
                         .to_owned();
                 }
@@ -147,20 +149,23 @@ impl SettingsEngineSnapshot {
             }
         }
         match self.readiness {
-            crate::native_profile_usage::EngineReadiness::Ready => match &self.account_email {
+            crate::native_profile_usage::EngineReadinessVerdict::Ready => match &self.account_email
+            {
                 Some(email) => format!("Installed and responding as {email}."),
                 None => "Installed and responding.".to_owned(),
             },
-            crate::native_profile_usage::EngineReadiness::NeedsSignIn => {
+            crate::native_profile_usage::EngineReadinessVerdict::NeedsSignIn => {
                 "Installed. Account sign-in is required.".to_owned()
             }
-            crate::native_profile_usage::EngineReadiness::Checking => {
+            crate::native_profile_usage::EngineReadinessVerdict::Checking => {
                 "Checking installation and account status.".to_owned()
             }
-            crate::native_profile_usage::EngineReadiness::NotReady => match &self.refresh_failure {
-                Some(failure) => format!("Status check failed: {failure}."),
-                None => "Installation and account status have not been checked yet.".to_owned(),
-            },
+            crate::native_profile_usage::EngineReadinessVerdict::NotReady => {
+                match &self.refresh_failure {
+                    Some(failure) => format!("Status check failed: {failure}."),
+                    None => "Installation and account status have not been checked yet.".to_owned(),
+                }
+            }
         }
     }
 
@@ -168,20 +173,23 @@ impl SettingsEngineSnapshot {
     #[must_use]
     pub fn account_state(&self) -> String {
         match self.readiness {
-            crate::native_profile_usage::EngineReadiness::Ready => match &self.account_email {
+            crate::native_profile_usage::EngineReadinessVerdict::Ready => match &self.account_email
+            {
                 Some(email) => format!("Signed in as {email}."),
                 None => "Signed in.".to_owned(),
             },
-            crate::native_profile_usage::EngineReadiness::NeedsSignIn => {
+            crate::native_profile_usage::EngineReadinessVerdict::NeedsSignIn => {
                 "No account is signed in.".to_owned()
             }
-            crate::native_profile_usage::EngineReadiness::Checking => {
+            crate::native_profile_usage::EngineReadinessVerdict::Checking => {
                 "Reading account status.".to_owned()
             }
-            crate::native_profile_usage::EngineReadiness::NotReady => match &self.refresh_failure {
-                Some(failure) => format!("Account status unavailable: {failure}."),
-                None => "Sign-in status unknown.".to_owned(),
-            },
+            crate::native_profile_usage::EngineReadinessVerdict::NotReady => {
+                match &self.refresh_failure {
+                    Some(failure) => format!("Account status unavailable: {failure}."),
+                    None => "Sign-in status unknown.".to_owned(),
+                }
+            }
         }
     }
 }

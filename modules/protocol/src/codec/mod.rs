@@ -34,14 +34,14 @@ use artisan_domain::{
     DisplayName, DisplayNameError, ENGINE_USAGE_ENGINES_MAX, ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE,
     EngineAgentId, EngineConfigError, EngineConfigReason, EngineConfigRevision,
     EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
-    EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
-    EngineRuntimeControlsInput, EngineSelection, EngineUsageAuth, EngineUsageAuthentication,
-    EngineUsageError, EngineUsageReport, EngineUsageSnapshot, EngineUsageWindow,
-    EngineUsageWindowKind, EngineVariantId, Event, FilesystemAccess, FiniteMillis,
-    FirstMessageQueued, GrokPermissionMode, GrokReasoningEffort, GrokSelection, IdentifierError,
-    ImageAttachment, ImageAttachmentError, ImageAttachmentRef, ImageAttachmentRefError,
-    IncrementalText, IncrementalTextError, ItemId, ItemOrdinal, ListAttachedProjects,
-    ListDirectories, ListProjectThreads, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
+    EngineProfileId, EngineReadiness, EngineReadinessVerdict, EngineRouteId, EngineRunConfig,
+    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, EngineUsageAuth,
+    EngineUsageAuthentication, EngineUsageError, EngineUsageReport, EngineUsageSnapshot,
+    EngineUsageWindow, EngineUsageWindowKind, EngineVariantId, Event, FilesystemAccess,
+    FiniteMillis, FirstMessageQueued, GrokPermissionMode, GrokReasoningEffort, GrokSelection,
+    IdentifierError, ImageAttachment, ImageAttachmentError, ImageAttachmentRef,
+    ImageAttachmentRefError, IncrementalText, IncrementalTextError, ItemId, ItemOrdinal,
+    ListAttachedProjects, ListDirectories, ListProjectThreads, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
     MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, MessageBody, MessageBodyError, MessageId, ModelFavoriteId,
     ModelFavoriteIdError, ModelFavoritesRevision, ModelFavoritesRevisionError,
     ModelFavoritesSnapshotError, MultimodalUserMessageItem, NetworkAccess, OpenCode2Selection,
@@ -49,8 +49,8 @@ use artisan_domain::{
     PermissionId, PlaceKind, ProjectAttached, ProjectId, ProjectListing, ProjectListingError,
     ProjectSummary, Query, QueryTurnCount, QueryTurnCountError, QueueFirstMessage, QueueMessage,
     QueueMessagePayload, QueueMessagePayloadError, QueuedMessage, QuotaSurface, ReadAccountUsage,
-    ReadActiveRun, ReadComposerCatalog, ReadModelFavorites, ReceiptDisposition, RequestId,
-    RespondApproval, RespondQuestion, Revision, RootPath, RootPathError, RunId,
+    ReadActiveRun, ReadComposerCatalog, ReadHostCatalog, ReadModelFavorites, ReceiptDisposition,
+    RequestId, RespondApproval, RespondQuestion, Revision, RootPath, RootPathError, RunId,
     RunInteractionError, SetModelFavorite, SetThreadEngineConfig, SteerTarget, StopRun,
     THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing, ThreadListingError,
     ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
@@ -93,6 +93,7 @@ mod engine_config;
 mod engine_usage;
 mod envelope;
 mod error;
+mod forge_decisions;
 mod interaction;
 mod message_submission;
 mod observation;
@@ -104,6 +105,7 @@ pub(crate) use conversation::*;
 pub(crate) use engine_config::*;
 pub(crate) use engine_usage::*;
 pub(crate) use envelope::*;
+pub(crate) use forge_decisions::*;
 pub(crate) use interaction::*;
 pub(crate) use message_submission::*;
 pub(crate) use observation::*;

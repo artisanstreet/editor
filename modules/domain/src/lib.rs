@@ -177,14 +177,15 @@ pub use model_favorites::MODEL_FAVORITE_ID_MAX_BYTES;
 pub mod composer_catalog;
 pub use composer_catalog::{
     CATALOG_REVISION_MAX_BYTES, CatalogRevision, CatalogRevisionError, ReadComposerCatalog,
-    ReadModelFavorites, SetModelFavorite,
+    ReadHostCatalog, ReadModelFavorites, SetModelFavorite,
 };
 
 pub mod account_usage;
 pub use account_usage::{
-    EngineUsageAuth, EngineUsageAuthentication, EngineUsageError, EngineUsageReport,
-    EngineUsageSnapshot, EngineUsageWindow, EngineUsageWindowKind, QuotaSurface, ReadAccountUsage,
-    clamp_percent_used, iso_millis, utc_ymd, validate_iso_timestamp,
+    EngineReadiness, EngineReadinessVerdict, EngineUsageAuth, EngineUsageAuthentication,
+    EngineUsageError, EngineUsageReport, EngineUsageSnapshot, EngineUsageWindow,
+    EngineUsageWindowKind, QuotaSurface, ReadAccountUsage, clamp_percent_used, iso_millis, utc_ymd,
+    validate_iso_timestamp,
 };
 
 pub mod composer_state;

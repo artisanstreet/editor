@@ -183,7 +183,7 @@ impl NativeApplication {
         // unrunnable engine would only requeue after the save lands. The
         // reason names the probed account state instead of a catch-all.
         let policy = crate::composer_model_config::with_default_native_profile(&raw_policy);
-        let catalog = self.effective_catalog_snapshot(cx);
+        let catalog = self.served_catalog(cx);
         catalog
             .admit_policy(&policy)
             .map_err(|_| self.readiness_block_reason(&policy.engine_id))?;
@@ -318,7 +318,7 @@ impl NativeApplication {
             && thread == &self.selected_thread
         {
             self.composer_model_run_error = crate::composer_model_config::validate_run_choice(
-                &self.effective_catalog_snapshot(cx),
+                &self.served_catalog(cx),
                 policy,
                 self.engine_settings.authoritative_config(),
             )

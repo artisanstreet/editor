@@ -73,7 +73,7 @@ impl NativeApplication {
             return;
         }
         self.deferred_composer_policy = None;
-        let catalog = self.effective_catalog_snapshot(cx);
+        let catalog = self.served_catalog(cx);
         let outcome = crate::composer_model_config::config_for_policy(
             &catalog,
             &policy,
@@ -139,7 +139,7 @@ impl NativeApplication {
         if choice_thread != self.selected_thread {
             return false;
         }
-        let catalog = self.effective_catalog_snapshot(cx);
+        let catalog = self.served_catalog(cx);
         let Ok(config) = crate::composer_model_config::config_for_policy(
             &catalog,
             &choice,
@@ -354,7 +354,7 @@ impl NativeApplication {
         // Admission and matching observe the readiness-overlaid catalog, so a
         // probed ambient account reads as authoritative without a managed
         // registry while a signed-out engine never does.
-        let snapshot = self.effective_catalog_snapshot(cx);
+        let snapshot = self.served_catalog(cx);
         let policy = self
             .engine_settings
             .authoritative_config()

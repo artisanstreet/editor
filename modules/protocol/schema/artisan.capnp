@@ -858,6 +858,11 @@ struct Request {
     # Sends the thread's composer draft at one revision; idempotent on the
     # thread and revision. Fresh ordinal, existing ordinals frozen.
     submitComposerDraft @39 :ComposerState.SubmitComposerDraftRequest;
+
+    # The scope-free model catalog (live discovery with the Forge's
+    # readiness applied) for surfaces without a thread. Fresh ordinal,
+    # existing ordinals frozen.
+    readHostCatalog @40 :Void;
   }
 }
 
@@ -948,6 +953,9 @@ struct Response {
 
     # Answer to submitComposerDraft. Fresh ordinal, existing ordinals frozen.
     composerDraftSubmitted @38 :ComposerState.ComposerDraftSubmitted;
+
+    # Answer to readHostCatalog. Fresh ordinal, existing ordinals frozen.
+    hostCatalog @39 :HostCatalogResult;
   }
 }
 
@@ -2415,6 +2423,10 @@ struct EngineUsageReport {
 
   # Bounded quota windows. At most 64 entries by owned conversion.
   windows @8 :List(EngineUsageWindow);
+
+  # The Forge's verdict on whether this engine's account can run, judged
+  # when the report is served. A null pointer decodes as not ready.
+  readiness @9 :EngineReadiness;
 }
 
 # Provider-account usage snapshot for the requested engines. Owned conversion
@@ -2498,4 +2510,31 @@ struct RespondQuestionReceipt {
   answers @4 :List(Text);
   outcome @5 :RespondInteractionOutcome;
   disposition @6 :ReceiptDisposition;
+}
+
+# Stateless Editor step 6 (appended 2026-09-25): business decisions the
+# Forge makes and sends as data. Appended at the end of the file so every
+# pre-existing node identity stays stable.
+# ---------------------------------------------------------------------------
+
+# The Forge's verdict on one engine account. notReady is the zero enumerant
+# so an absent verdict is never ready.
+enum EngineReadinessVerdict {
+  notReady @0;
+  ready @1;
+  needsSignIn @2;
+  checking @3;
+}
+
+struct EngineReadiness {
+  verdict @0 :EngineReadinessVerdict;
+  # Presentation-ready sentence naming the engine. Empty means absent;
+  # otherwise at most 1024 UTF-8 bytes, nonblank.
+  reason @1 :Text;
+}
+
+# Exact shared catalog wire bytes of the scope-free host catalog, bounded
+# like ComposerCatalogResult.snapshotData.
+struct HostCatalogResult {
+  snapshotData @0 :Data;
 }

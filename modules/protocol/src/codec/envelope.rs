@@ -254,6 +254,9 @@ pub(crate) fn encode_request(
         ) => {
             encode_message_submission_request(builder, value)?;
         }
+        ClientRequest::Query(Query::ReadHostCatalog(_)) => {
+            encode_forge_decision_request(builder, value)?;
+        }
         ClientRequest::ResolveRichLink(request) => {
             builder
                 .reborrow()
@@ -333,6 +336,7 @@ pub(crate) fn encode_response_payload(
         | ResponsePayload::ComposerDraftSubmitted(_) => {
             encode_message_submission_response(builder, payload, outer_request_id)?;
         }
+        ResponsePayload::HostCatalog(_) => encode_forge_decision_response(builder, payload)?,
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
         }
@@ -792,6 +796,7 @@ pub(crate) fn decode_request(
         | request::Which::SubmitComposerDraft(_) => {
             decode_message_submission_request(value, request_id)
         }
+        request::Which::ReadHostCatalog(()) => decode_forge_decision_request(value),
     }
 }
 
@@ -941,6 +946,7 @@ pub(crate) fn decode_response(
         | response::Which::ComposerDraftSubmitted(_) => {
             decode_message_submission_response(value, &request_id)?
         }
+        response::Which::HostCatalog(_) => decode_forge_decision_response(value)?,
         response::Which::ProjectRepository(result) => {
             decode_project_repository_query_result(result?)?
         }

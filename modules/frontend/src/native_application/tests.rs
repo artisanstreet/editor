@@ -97,6 +97,7 @@ fn signed_in_test_application(
             Vec::new(),
         ));
     }
+    serve_catalog_with_runnable(&mut application, cx, &["codex", "claude"]);
     application
 }
 
@@ -225,29 +226,6 @@ fn reported_usage_entry(
         NativeUsageAuthentication::Authenticated,
         windows,
     )
-}
-
-fn reported_usage_entry_with_auth(
-    engine_id: &str,
-    display_name: &str,
-    authentication: NativeUsageAuthentication,
-    windows: Vec<NativeUsageWindow>,
-) -> NativeUsageEntry {
-    NativeUsageEntry {
-        engine_id: engine_id.to_owned(),
-        display_name: display_name.to_owned(),
-        report: Some(NativeUsageReport {
-            engine_id: engine_id.to_owned(),
-            display_name: display_name.to_owned(),
-            authentication,
-            account_email: None,
-            quota_surface: NativeUsageQuotaSurface::Supported,
-            windows,
-            failure: None,
-        }),
-        failure: None,
-        fetched_at_ms: Some(super::profile_usage_now_ms().saturating_sub(60_000)),
-    }
 }
 
 /// Tall real-data fixture: eight authenticated providers with three
@@ -427,6 +405,7 @@ fn admit_probed_codex_usage(
         reported_usage_entry("codex", "Codex", Vec::new()),
         cx,
     );
+    serve_catalog_with_runnable(application, cx, &["codex"]);
 }
 
 /// Returns the request identity of the currently tracked save.
@@ -1086,6 +1065,9 @@ fn seed_failed_entry(application: &mut NativeApplication, thread: &ThreadId, gen
 
 #[path = "tests/draft_send.rs"]
 mod draft_send;
+#[path = "tests/forge_catalog.rs"]
+mod forge_catalog;
+use forge_catalog::{reported_usage_entry_with_auth, serve_catalog_with_runnable};
 #[path = "tests/forge_drafts.rs"]
 mod forge_drafts;
 #[path = "tests/lifecycle.rs"]

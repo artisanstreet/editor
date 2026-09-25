@@ -79,11 +79,10 @@ use crate::native_model_selector::{
     engine_accent, engine_asset, render_picker_hover_pill,
 };
 use crate::native_profile_usage::{
-    EngineReadiness, NativeProfileUsageState, NativeUsageEntry, NativeUsageWindow,
-    ProfileUsageGeneration, account_usage_response_current, catalog_with_usage_readiness,
-    checked_label, engine_readiness, engine_refresh_failure, group_usage_windows,
-    plan_profile_usage_loads, profile_usage_display_name, reset_duration, tip_run_up_from,
-    usage_remaining_percent,
+    NativeProfileUsageState, NativeUsageEntry, NativeUsageWindow, ProfileUsageGeneration,
+    account_usage_response_current, checked_label, engine_readiness, engine_readiness_reason,
+    engine_refresh_failure, group_usage_windows, plan_profile_usage_loads,
+    profile_usage_display_name, reset_duration, tip_run_up_from, usage_remaining_percent,
 };
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::{
@@ -248,7 +247,7 @@ use state::{
     ThreadSwitchFlight, ThreadSwitchPhase, command_failure, create_message_request_id,
     create_save_request_id, empty_thread_listing, intake_command, invalid_service_failure,
     mint_request_id, picker_route, project_options_from_listing, ready_membership_is_valid,
-    scope_free_catalog_snapshot, submission_blocked_failure,
+    submission_blocked_failure,
 };
 
 #[cfg(test)]
