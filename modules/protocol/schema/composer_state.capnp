@@ -184,3 +184,98 @@ struct RunUsageResult {
   report @2 :RunUsageReport;
 }
 
+
+# ---------------------------------------------------------------------------
+# Forge-owned composer drafts and the content-addressed attachment store.
+# The parent Request union carries saveComposerDraft @32, readComposerDraft
+# @33, uploadComposerAttachment @34, readComposerAttachment @35 and
+# queueStoredMessage @36; the parent Response union carries
+# composerDraftSaved @32, composerDraft @33, composerAttachmentUploaded @34
+# and composerAttachment @35. A stored-message send is answered by the
+# existing queuedMessageReceipt arm.
+# ---------------------------------------------------------------------------
+
+# The composer a draft belongs to: an existing thread, or the new-task
+# composer of an attached project before its first message creates a thread.
+struct ComposerDraftScope {
+  union {
+    thread @0 :Text;
+    project @1 :Text;
+  }
+}
+
+# Byte-free reference to one stored attachment. `digest` is the SHA-256 of
+# the encoded bytes and the store key; mimeType and sizeBytes repeat the
+# stored metadata for verification; name is the authored display name.
+struct ComposerAttachmentRef {
+  digest @0 :Data;
+  mimeType @1 :Text;
+  name @2 :Text;
+  sizeBytes @3 :UInt32;
+}
+
+# Replaces the scope's draft. Every save applies (the last to arrive wins);
+# the Forge assigns the scope's next revision.
+struct SaveComposerDraftRequest {
+  scope @0 :ComposerDraftScope;
+  text @1 :Text;
+  attachments @2 :List(ComposerAttachmentRef);
+}
+
+# Acknowledges one save with the revision the Forge assigned to it.
+# requestId must equal the parent Response.requestId.
+struct ComposerDraftSaved {
+  requestId @0 :Text;
+  scope @1 :ComposerDraftScope;
+  revision @2 :UInt64;
+}
+
+struct ReadComposerDraftRequest {
+  scope @0 :ComposerDraftScope;
+}
+
+struct ComposerDraft {
+  revision @0 :UInt64;
+  text @1 :Text;
+  attachments @2 :List(ComposerAttachmentRef);
+  updatedAtMillis @3 :Int64;
+}
+
+struct ComposerDraftResult {
+  scope @0 :ComposerDraftScope;
+  # A null struct pointer means the scope never saved a draft.
+  draft @1 :ComposerDraft;
+}
+
+# Stores one image under the digest of its bytes.
+struct UploadComposerAttachmentRequest {
+  image @0 :ImageAttachment;
+}
+
+# requestId must equal the parent Response.requestId.
+struct ComposerAttachmentUploaded {
+  requestId @0 :Text;
+  reference @1 :ComposerAttachmentRef;
+}
+
+struct ReadComposerAttachmentRequest {
+  digest @0 :Data;
+}
+
+struct ComposerAttachmentResult {
+  digest @0 :Data;
+  mimeType @1 :Text;
+  bytes @2 :Data;
+}
+
+# Queues one message whose images are stored attachments; the Forge
+# resolves them and admits the message exactly like queueMessage. Text-only
+# messages use queueMessage.
+struct QueueStoredMessageRequest {
+  threadId @0 :Text;
+  # A null Text pointer means None; a present zero-length Text means Some("").
+  text @1 :Text;
+  attachments @2 :List(ComposerAttachmentRef);
+  # Empty means a fresh send; otherwise the observed live run to steer into.
+  steerRunId @3 :Text;
+}

@@ -14,8 +14,9 @@ use crate::message::QueueMessagePayload;
 use crate::run_interaction::{RespondApproval, RespondQuestion};
 use crate::text::{MessageBody, ThreadTitle};
 use crate::{
-    ListFailedMessages, ListQueuedMessages, ReadAccountUsage, ReadRecalledMessage, ReadRunUsage,
-    WithdrawQueuedMessageCommand,
+    ListFailedMessages, ListQueuedMessages, QueueStoredMessage, ReadAccountUsage,
+    ReadComposerAttachment, ReadComposerDraft, ReadRecalledMessage, ReadRunUsage,
+    SaveComposerDraft, UploadComposerAttachment, WithdrawQueuedMessageCommand,
 };
 
 pub use crate::composer_catalog::{ReadComposerCatalog, ReadModelFavorites, SetModelFavorite};
@@ -281,6 +282,12 @@ pub enum Command {
     RespondQuestion(RespondQuestion),
     /// See [`SetThreadEngineConfig`].
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
+    /// See [`SaveComposerDraft`].
+    SaveComposerDraft(SaveComposerDraft),
+    /// See [`UploadComposerAttachment`].
+    UploadComposerAttachment(UploadComposerAttachment),
+    /// See [`QueueStoredMessage`].
+    QueueStoredMessage(QueueStoredMessage),
 }
 
 impl Command {
@@ -298,6 +305,9 @@ impl Command {
             Self::RespondApproval(command) => command.request_id(),
             Self::RespondQuestion(command) => command.request_id(),
             Self::SetThreadEngineConfig(command) => command.request_id(),
+            Self::SaveComposerDraft(command) => command.request_id(),
+            Self::UploadComposerAttachment(command) => &command.request_id,
+            Self::QueueStoredMessage(command) => command.request_id(),
         }
     }
 }
@@ -447,4 +457,8 @@ pub enum Query {
     ReadRunUsage(ReadRunUsage),
     /// See [`ReadAccountUsage`].
     ReadAccountUsage(ReadAccountUsage),
+    /// See [`ReadComposerDraft`].
+    ReadComposerDraft(ReadComposerDraft),
+    /// See [`ReadComposerAttachment`].
+    ReadComposerAttachment(ReadComposerAttachment),
 }

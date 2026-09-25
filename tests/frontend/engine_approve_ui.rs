@@ -227,7 +227,10 @@ fn approval_command_for(
         | Command::StopRun(_)
         | Command::SetModelFavorite(_)
         | Command::WithdrawQueuedMessage(_)
-        | Command::SetThreadEngineConfig(_) => {
+        | Command::SetThreadEngineConfig(_)
+        | Command::SaveComposerDraft(_)
+        | Command::UploadComposerAttachment(_)
+        | Command::QueueStoredMessage(_) => {
             panic!("approval gesture must build an approval command")
         }
     }
@@ -254,7 +257,10 @@ fn question_command_for(
         | Command::StopRun(_)
         | Command::SetModelFavorite(_)
         | Command::WithdrawQueuedMessage(_)
-        | Command::SetThreadEngineConfig(_) => {
+        | Command::SetThreadEngineConfig(_)
+        | Command::SaveComposerDraft(_)
+        | Command::UploadComposerAttachment(_)
+        | Command::QueueStoredMessage(_) => {
             panic!("question gesture must build a question command")
         }
     }
