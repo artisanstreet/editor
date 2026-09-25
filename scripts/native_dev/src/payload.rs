@@ -158,6 +158,7 @@ pub fn install_tree(paths: &DevPaths, tree: &Path, signer: &LocalSigner) -> Resu
     let options = InstallOptions {
         source: ReleaseSource::Tree {
             path: tree.to_path_buf(),
+            manifest_directory: None,
         },
         platform,
         install_root: paths.home.clone(),

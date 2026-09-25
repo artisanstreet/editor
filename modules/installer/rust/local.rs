@@ -127,6 +127,22 @@ impl LocalSigner {
     /// Returns [`InstallerError`] when the tree layout is not a valid payload
     /// or the manifest cannot be written.
     pub fn write_tree_manifest(&self, tree: &Path, release: &LocalRelease) -> Result<()> {
+        self.write_tree_manifest_to(tree, tree, release)
+    }
+
+    /// Like [`Self::write_tree_manifest`], but writes the manifest and
+    /// signature into `destination`, leaving a read-only `tree` untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallerError`] when the tree layout is not a valid payload
+    /// or the manifest cannot be written.
+    pub fn write_tree_manifest_to(
+        &self,
+        tree: &Path,
+        destination: &Path,
+        release: &LocalRelease,
+    ) -> Result<()> {
         let manifest = TreeManifest {
             format_version: 1,
             product_version: release.product_version.clone(),
@@ -149,9 +165,10 @@ impl LocalSigner {
             "signature": STANDARD.encode(self.key.sign(&bytes).to_bytes()),
         }))
         .map_err(InstallerError::InvalidPayload)?;
-        let manifest_path = tree.join(TREE_MANIFEST_NAME);
+        std::fs::create_dir_all(destination).map_err(io(destination))?;
+        let manifest_path = destination.join(TREE_MANIFEST_NAME);
         std::fs::write(&manifest_path, bytes).map_err(io(&manifest_path))?;
-        let signature_path = tree.join(TREE_SIGNATURE_NAME);
+        let signature_path = destination.join(TREE_SIGNATURE_NAME);
         std::fs::write(&signature_path, signature).map_err(io(&signature_path))?;
         Ok(())
     }
