@@ -1,0 +1,125 @@
+{
+  "captured": "2026-09-25",
+  "cli": {
+    "version": "2.1.282 (Claude Code)",
+    "executable": "npm global @anthropic-ai/claude-code shim on the Windows host, invoked from WSL (Ubuntu)",
+    "flag": "--thinking-display (hidden; accepted by 2.1.282, absent from --help)"
+  },
+  "model": "claude-sonnet-5",
+  "effort": "high",
+  "provider": "firstParty (modelUsage.provider)",
+  "auth": "Claude subscription login (apiKeySource: none); no credentials recorded",
+  "argv": [
+    "claude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--input-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--forward-subagent-text",
+    "--permission-prompt-tool",
+    "stdio",
+    "--dangerously-skip-permissions",
+    "--effort",
+    "high",
+    "--thinking-display",
+    "summarized",
+    "--session-id|--resume",
+    "<session>",
+    "--model",
+    "claude-sonnet-5"
+  ],
+  "argv_notes": "default-start omits --thinking-display; stdin carries one stream-json user line identical to protocol.rs user_message_line",
+  "sanitization": "signatures, signature_delta and input_json_delta payloads emptied; session ids, uuids, msg_/toolu_/req_ ids replaced by stable placeholders; local paths rewritten; environment inventories and hook output emptied. Field presence and frame order retained.",
+  "transport_findings": [
+    "thinking_delta fragments carry public summary prose when summarized is requested, interleaved with system/thinking_tokens frames",
+    "without the flag the same blocks stream empty thinking text plus estimated_tokens",
+    "each content block is followed by one buffered assistant frame (same message id as message_start) carrying only that block, emitted immediately before its content_block_stop",
+    "the buffered thinking text equals the concatenated streamed fragments in every captured block",
+    "summary prose arrives in paragraph bursts: the first paragraph lands while the stretch is still running"
+  ],
+  "research_provenance": {
+    "desktop_app": "Claude desktop 1.40609.1 (MSIX Claude_2.9939.2.0_x64__pzs8sxrjxfjjc), embedded Claude Code 2.1.255",
+    "web_build": "claude.ai b1fcb81587",
+    "artifacts": {
+      "claude-app.asar": "sha256:983cfaed9051d3e7b3b8f7fcd609b79ed31ea843635c636581d9ad81434ea3b3",
+      "claude-cli-strings.txt": "sha256:623c8da8b01e99ad32e0b0eec6abaeceeba0dc1263c188b149ead86d745f23dd",
+      "shared-11-CETOUHfJ.js": "sha256:5fb35dbb4e300dbff4f0ff60b26f4275d9d8e0628c309d9195847ee8c8ec4292",
+      "shared-12-4P3rNZ7K.js": "sha256:9786391e34648cb337702c4295cd498a4eab51f56602a40a238a74f24a21b280",
+      "shared-19-Yi-rkk6b.js": "sha256:2858a9c37aa4b29a6ec0b030bfd7171e24838ecc4dca1d084ad36c52b3c94bb0",
+      "index.chunk-7Eg3g-H9.js": "sha256:5df7f4b88f2acd1e565faeffc6f4a798280f9802235354e5a0360a63763426a8"
+    }
+  },
+  "files": [
+    {
+      "file": "summarized-tools.jsonl",
+      "kind": "real",
+      "raw_capture": "summarized-tools.jsonl",
+      "session_id": "fixture-session-tools",
+      "frames": 99,
+      "description": "Tool cycle: Read, one thinking stretch beside a second Read, answer text.",
+      "thinking_block_start_ms": 3425,
+      "first_public_summary_ms": 5092
+    },
+    {
+      "file": "summarized-mixed.jsonl",
+      "kind": "real",
+      "raw_capture": "summarized-multi.jsonl",
+      "session_id": "fixture-session-mixed",
+      "frames": 132,
+      "description": "Two Reads, then one message with a two-paragraph thinking block and answer text.",
+      "thinking_block_start_ms": 5380,
+      "first_public_summary_ms": 7759
+    },
+    {
+      "file": "summarized-start.jsonl",
+      "kind": "real",
+      "raw_capture": "summarized-think-start.jsonl",
+      "session_id": "fixture-session-resume",
+      "frames": 24,
+      "description": "Fresh start in summarized mode; adaptive thinking chose not to think (no-thinking turn)."
+    },
+    {
+      "file": "summarized-resume.jsonl",
+      "kind": "real",
+      "raw_capture": "summarized-think-resume.jsonl",
+      "session_id": "fixture-session-resume",
+      "frames": 73,
+      "description": "Native --resume of the same session; one thinking block plus answer text.",
+      "thinking_block_start_ms": 2332,
+      "first_public_summary_ms": 4406
+    },
+    {
+      "file": "default-start.jsonl",
+      "kind": "real",
+      "raw_capture": "default-start.jsonl",
+      "session_id": "fixture-session-default",
+      "frames": 33,
+      "description": "No --thinking-display flag: thinking block with empty text and estimates only."
+    },
+    {
+      "file": "interrupted.jsonl",
+      "kind": "real",
+      "raw_capture": "summarized-interrupted.jsonl",
+      "session_id": "fixture-session-interrupted",
+      "frames": 7,
+      "description": "Process group killed after the first text delta: no result frame."
+    },
+    {
+      "file": "constructed-two-stretches.jsonl",
+      "kind": "constructed",
+      "session_id": "fixture-session-two",
+      "frames": 23,
+      "description": "Constructed from the real transport shape: two thinking stretches around a tool_use in one message (block indexes 0 and 2), markdown in the second summary."
+    },
+    {
+      "file": "constructed-interrupted-thinking.jsonl",
+      "kind": "constructed",
+      "session_id": "fixture-session-resume",
+      "frames": 12,
+      "description": "Real resume capture truncated after the third thinking delta: EOF mid-stretch."
+    }
+  ]
+}
