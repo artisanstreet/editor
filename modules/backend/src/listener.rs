@@ -41,13 +41,14 @@
 //! An idle [`OperationKind::Connect`] timeout is nonterminal and continues
 //! with the same endpoint without consuming admission capacity. A
 //! connection-local authentication failure after the accepted guard closes the
-//! peer is nonterminal. After a ready connection ends, only the exact native
-//! client idle application close observed while accepting the next request is
-//! nonterminal; every other pre-ready exhaustion, metadata, and non-timeout
-//! admission failure, plus every other request-stage failure, is terminal
-//! service failure. A terminal primary remains classified as a service
-//! failure even when the best-effort drain also fails; both typed causes are
-//! preserved.
+//! peer is nonterminal, as is a peer's failed QUIC/TLS establishment. After a
+//! ready connection ends, its request-stage failure is nonterminal: that
+//! connection alone is failed and closed. Only an unrepresentable request
+//! limit or a closed process-wide commit notifier is terminal there. Every
+//! other pre-ready exhaustion, metadata, endpoint-closed admission, and
+//! non-retryable authentication failure is terminal service failure. A
+//! terminal primary remains classified as a service failure even when the
+//! best-effort drain also fails; both typed causes are preserved.
 //!
 //! [`Drop`] remains the synchronous local-close proof; [`Self::drain`] is the
 //! awaited idle proof.
@@ -74,10 +75,11 @@ use thiserror::Error;
 
 use crate::command_admission::{CommandOrigin, CommandOriginClockError, CommandOriginEntropyError};
 use crate::connection::{
-    AuthenticationStageError, ConnectionLimits, ForgeConnection, RequestStageError,
-    ServerFrameStamp, WelcomeMetadata, is_orderly_peer_disconnect,
+    AuthenticationStageError, ConnectionLimits, DeliveryStageError, ForgeConnection,
+    RequestStageError, ServerFrameStamp, WelcomeMetadata, is_orderly_peer_disconnect,
 };
 use crate::credential_authority::{CredentialAuthenticationError, CredentialAuthority};
+use crate::error_chain::ErrorChain;
 use crate::lifecycle_control::LifecycleController;
 use crate::request_handler::RequestHandler;
 
@@ -280,7 +282,8 @@ pub enum ServiceCause {
     #[error(transparent)]
     Listener(#[from] ListenerError),
 
-    /// A non-cancellation request-stage failure that is terminal.
+    /// A process-wide request-stage failure (unrepresentable request limit or
+    /// closed commit notifier); connection-local ones never end the loop.
     #[error(transparent)]
     Request(#[from] DeadlineError<RequestStageError>),
 }
@@ -486,12 +489,14 @@ impl ForgeListener {
     /// authentication failure — `AwaitingRotation`, timeout, invalid limit,
     /// entropy, rotation, finish, and all other variants — is a terminal
     /// service failure because mutation may have occurred or recoverability is
-    /// unproven. Admission-capacity exhaustion, local metadata/origin failure,
-    /// non-timeout admission transport failure, and non-cancellation
-    /// request-stage failure other than the exact native idle disconnect are
-    /// terminal service failures; a terminal primary remains a service failure
-    /// even when the best-effort drain also fails. Cancellation with a drain
-    /// failure is the cleanup-only error.
+    /// unproven. A peer's failed QUIC/TLS establishment and every
+    /// non-cancellation request-stage failure of a ready connection fail that
+    /// connection only, except an unrepresentable request limit or a closed
+    /// process-wide commit notifier. Admission-capacity exhaustion, local
+    /// metadata/origin failure, a closed endpoint, and those two process-wide
+    /// request failures are terminal service failures; a terminal primary
+    /// remains a service failure even when the best-effort drain also fails.
+    /// Cancellation with a drain failure is the cleanup-only error.
     ///
     /// Preserves lifetime admission counting and per-connection request
     /// capacity exactly; idle timeouts neither consume nor refund an
@@ -529,20 +534,24 @@ impl ForgeListener {
                                 Err(drain) => Err(ServeUntilCancelError::drain(drain)),
                             };
                         }
-                        if is_orderly_peer_disconnect(&source) {
-                            // `serve_attempt` has already run the connection
-                            // failure cleanup before returning this report:
-                            // delivery subscriptions are cleared, unfinished
-                            // output is reset, and the owned connection drops.
-                            // The listener's lifetime admission remains
-                            // consumed; only endpoint custody continues.
-                            continue;
+                        if is_request_failure_process_wide(&source) {
+                            let cause = ServiceCause::Request(source);
+                            return match listener.drain().await {
+                                Ok(()) => Err(ServeUntilCancelError::service(cause, None)),
+                                Err(drain) => {
+                                    Err(ServeUntilCancelError::service(cause, Some(drain)))
+                                }
+                            };
                         }
-                        let cause = ServiceCause::Request(source);
-                        return match listener.drain().await {
-                            Ok(()) => Err(ServeUntilCancelError::service(cause, None)),
-                            Err(drain) => Err(ServeUntilCancelError::service(cause, Some(drain))),
-                        };
+                        // `serve_attempt` has already run the connection
+                        // failure cleanup before returning this report:
+                        // delivery subscriptions are cleared, unfinished
+                        // output is reset, and the owned connection drops.
+                        // The listener's lifetime admission remains
+                        // consumed; only endpoint custody continues.
+                        if !is_orderly_peer_disconnect(&source) {
+                            eprintln!("Forge connection failed: {}", ErrorChain(&source));
+                        }
                     }
                 },
                 Err(error) => {
@@ -579,6 +588,20 @@ impl ForgeListener {
                     if let ListenerError::Authentication { source } = &error
                         && is_authentication_retryable(source)
                     {
+                        continue;
+                    }
+
+                    // A peer that fails its own QUIC/TLS establishment never
+                    // consumed admission capacity or touched the authority.
+                    if let ListenerError::Admission {
+                        source:
+                            DeadlineError::Peer {
+                                error: AdmissionCause::Tls { .. },
+                                ..
+                            },
+                    } = &error
+                    {
+                        eprintln!("Forge connection failed: {}", ErrorChain(&error));
                         continue;
                     }
 
@@ -740,6 +763,24 @@ fn is_authentication_retryable(source: &DeadlineError<AuthenticationStageError>)
         },
         _ => false,
     }
+}
+
+/// Returns whether a non-cancellation request-stage failure makes further
+/// service impossible rather than belonging to its one connection.
+///
+/// Only an unrepresentable request limit (it would fail every request) and a
+/// closed process-wide commit notifier (every delivery would fail) qualify.
+/// Peer disconnects, idle timeouts, request deadlines, malformed requests,
+/// and per-connection delivery failures end that connection only.
+fn is_request_failure_process_wide(source: &DeadlineError<RequestStageError>) -> bool {
+    matches!(
+        source,
+        DeadlineError::InvalidLimit { .. }
+            | DeadlineError::Peer {
+                error: RequestStageError::Delivery(DeliveryStageError::NotifierClosed),
+                ..
+            }
+    )
 }
 
 /// Applies exactly the three approved pending-peer bounds to the supplied
