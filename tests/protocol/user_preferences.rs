@@ -164,3 +164,41 @@ fn preference_answers_round_trip() -> Result<(), Box<dyn Error>> {
         "legacy-imported",
     )
 }
+
+#[test]
+fn pushed_host_state_events_round_trip() -> Result<(), Box<dyn Error>> {
+    use artisan_domain::{
+        EngineUsageAuth, EngineUsageAuthentication, EngineUsageReport, EngineUsageSnapshot, Event,
+        QuotaSurface, ThreadRetitled, ThreadTitle,
+    };
+    use artisan_protocol::{EventCursor, ServerEvent};
+
+    let report = EngineUsageReport::new(
+        Some("theo@example.com".to_owned()),
+        EngineUsageAuth::new(EngineUsageAuthentication::Authenticated, None)?,
+        "Codex".to_owned(),
+        "codex".to_owned(),
+        None,
+        Some(QuotaSurface::Unknown),
+        Vec::new(),
+    )?;
+    let usage = EngineUsageSnapshot::new(vec![report], "2026-09-25T12:00:00Z".to_owned())?;
+    let events = [
+        Event::AccountUsage(usage),
+        Event::UserPreferences(preferences(true)?),
+        Event::ThreadRetitled(ThreadRetitled {
+            thread_id: ThreadId::parse("thread-a")?,
+            title: ThreadTitle::parse("Refined title")?,
+        }),
+    ];
+    for (index, event) in events.into_iter().enumerate() {
+        round_trip(
+            WireEnvelopeBody::Event(ServerEvent {
+                cursor: EventCursor::new(u64::try_from(index)? + 1)?,
+                event,
+            }),
+            "host-state",
+        )?;
+    }
+    Ok(())
+}

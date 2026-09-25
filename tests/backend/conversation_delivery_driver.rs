@@ -296,7 +296,7 @@ async fn seed_project_thread_and_message(
             request_id: RequestId::parse("delivery-thread-request")?,
             thread_id: thread_id.clone(),
             project_id: ProjectId::parse("delivery-project")?,
-            title: ThreadTitle::parse("Delivery thread")?,
+            title: ThreadTitle::parse("New thread")?,
             created_at: UnixMillis::from_millis(200),
             updated_at: UnixMillis::from_millis(200),
         })
@@ -1731,6 +1731,132 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
         &endpoint,
         quinn::VarInt::from_u32(0),
         b"delivery activity test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
+
+/// Host state reaches a connected Editor without a request: a changed
+/// navigation record is pushed as the user's preferences, and a subscribed
+/// thread's refined title is pushed as soon as it is recorded. Nothing is
+/// pushed when neither changed.
+#[tokio::test]
+async fn preferences_and_refined_titles_are_pushed_when_they_change() -> Result<(), Box<dyn Error>>
+{
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    let thread_id = seeded.thread_id.clone();
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler =
+        RequestHandler::new(repository.clone()).with_conversation_commit_notifier(notifier.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let client = async {
+        let (connection, mut delivery_stream) =
+            subscribed_client(&endpoint, address, thread_id.clone()).await?;
+        // Like an Editor, read the preferences once; the connection pushes
+        // only their later changes.
+        let (mut read_send, mut read_recv) = connection.open_bi().await?;
+        artisan_transport::send_envelope(
+            &mut read_send,
+            &WireEnvelope {
+                protocol_version: ProtocolVersion::V1,
+                frame_id: FrameId::parse("delivery-read-preferences")?,
+                sent_at: UnixMillis::from_millis(40),
+                body: WireEnvelopeBody::Request(ClientRequest::Query(
+                    artisan_domain::Query::ReadUserPreferences(artisan_domain::ReadUserPreferences),
+                )),
+            },
+        )
+        .await?;
+        drop(read_send);
+        let read = tokio::time::timeout(
+            TEST_DEADLINE,
+            artisan_transport::receive_envelope(&mut read_recv),
+        )
+        .await??;
+        assert!(matches!(
+            read.body,
+            WireEnvelopeBody::Response(ref response)
+                if matches!(response.payload, ResponsePayload::UserPreferences(_))
+        ));
+        repository
+            .record_navigation(
+                &ProjectId::parse("delivery-project")?,
+                Some(&thread_id),
+                UnixMillis::from_millis(900),
+            )
+            .await?;
+        notifier.publish_host_state();
+        let frame = receive_delivery_frame(&mut delivery_stream).await?;
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected the preferences event".into());
+        };
+        let Event::UserPreferences(preferences) = event.event else {
+            return Err("expected the user's preferences".into());
+        };
+        let route = preferences.navigation.route().ok_or("route recorded")?;
+        assert_eq!(route.thread_id.as_ref(), Some(&thread_id));
+
+        repository
+            .record_generated_thread_title(&thread_id, &ThreadTitle::parse("Delivery plan")?)
+            .await?;
+        let _ = notifier.publish(&thread_id);
+        let frame = receive_delivery_frame(&mut delivery_stream).await?;
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected the title event".into());
+        };
+        let Event::ThreadRetitled(retitled) = event.event else {
+            return Err("expected the refined title".into());
+        };
+        assert_eq!(retitled.thread_id, thread_id);
+        assert_eq!(retitled.title.as_str(), "Delivery plan");
+
+        notifier.publish_host_state();
+        let _ = notifier.publish(&thread_id);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                artisan_transport::receive_envelope(&mut delivery_stream),
+            )
+            .await
+            .is_err(),
+            "unchanged host state and titles are not pushed again"
+        );
+        cancel.cancel();
+        drop(delivery_stream);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery host state test complete",
         TEST_DEADLINE,
     )
     .await?;

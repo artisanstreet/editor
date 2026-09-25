@@ -232,6 +232,7 @@ pub async fn delivery_task_loop(
                     PrivateDelivery::Observation(observation)
                 }
                 Ok(UniDelivery::Outbox(outbox)) => PrivateDelivery::Outbox(outbox),
+                Ok(UniDelivery::HostState(state)) => PrivateDelivery::HostState(state),
                 Err(failure) => PrivateDelivery::Lost(failure),
             };
             let is_lost = matches!(result, PrivateDelivery::Lost(_));
@@ -443,6 +444,9 @@ pub(super) async fn command_loop_with_delivery(
                         if runtime.custody.active_thread() == Some(outbox.thread_id()) {
                             publish(events, NativeTransportEvent::MessageOutbox(outbox))?;
                         }
+                    }
+                    Some(PrivateDelivery::HostState(state)) => {
+                        publish(events, NativeTransportEvent::HostState(state))?;
                     }
                     Some(PrivateDelivery::Lost(failure)) =>
                         handle_delivery_lost_reconnect(runtime, frames, events, failure).await?,

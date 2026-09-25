@@ -325,7 +325,7 @@ impl RequestHandler {
             Query::ReadComposerCatalog(read) => {
                 crate::composer_catalog_handler::read_composer_catalog(
                     self.composer_catalog.as_ref(),
-                    self.account_usage.as_ref(),
+                    self.account_usage.as_deref(),
                     &self.repository,
                     request_id,
                     read,
@@ -338,7 +338,7 @@ impl RequestHandler {
             }
             Query::ReadHostCatalog(_) => {
                 crate::composer_catalog_handler::read_host_catalog(
-                    self.account_usage.as_ref(),
+                    self.account_usage.as_deref(),
                     request_id,
                 )
                 .await
@@ -350,7 +350,7 @@ impl RequestHandler {
             }
             Query::ReadAccountUsage(query) => {
                 crate::account_usage_handler::read_account_usage(
-                    self.account_usage.as_ref(),
+                    self.account_usage.as_deref(),
                     request_id,
                     query,
                 )

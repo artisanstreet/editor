@@ -658,6 +658,7 @@ async fn run_with_handler(
             .await;
         }
     };
+    let notifier = native_run.conversation_commit_notifier();
     let native_dispatcher = NativeRunDispatcher::start_with_registry(
         app.repository().clone(),
         database.clone(),
@@ -675,13 +676,22 @@ async fn run_with_handler(
             database,
         ),
     );
-    let handler = handler.with_account_usage_service(
+    // The Forge keeps usage fresh while an Editor is connected and pushes
+    // every change; Editors never schedule usage reads.
+    let usage = Arc::new(
         crate::account_usage_service::AccountUsageService::with_defaults(
             &artisan_native_engine::resolve_codex_cli(),
             &artisan_native_engine::resolve_claude_cli(),
             crate::account_usage_cursor::CursorUsageConfig::new(),
-        ),
+        )
+        .with_host_state_notifier(notifier.clone()),
     );
+    let usage_refresher = tokio::spawn(crate::account_usage_service::refresh_while_observed(
+        Arc::clone(&usage),
+        notifier,
+        Arc::clone(&cancel),
+    ));
+    let handler = handler.with_shared_account_usage_service(usage);
     let primary = match listener.serve_until_cancel(&handler, &cancel).await {
         Ok(()) => None,
         Err(error) if error.is_service_failure() => Some(ForgeRuntimeError::Service(error)),
@@ -691,6 +701,8 @@ async fn run_with_handler(
         // keep the conservative shutdown exit rather than flattening it.
         Err(error) => Some(ForgeRuntimeError::ListenerDrain(error)),
     };
+    // Serving ended; no Editor remains for the refresher to keep current.
+    usage_refresher.abort();
     // `serve_until_cancel` consumes the listener on every path. No listener
     // owner or endpoint custody remains to pass into the cleanup tail.
     finish(

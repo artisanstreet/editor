@@ -191,11 +191,18 @@ pub(crate) struct ConversationConnectionContext {
     registrar: ConversationSubscriptionRegistrar,
     identity: Arc<SubscriptionRegistrarIdentity>,
     notifier: ConversationCommitNotifier,
+    account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
 }
 
 impl ConversationConnectionContext {
     pub(crate) fn repository(&self) -> &Repository {
         &self.repository
+    }
+
+    pub(crate) fn account_usage(
+        &self,
+    ) -> Option<&crate::account_usage_service::AccountUsageService> {
+        self.account_usage.as_deref()
     }
 
     pub(crate) fn registrar(&self) -> &ConversationSubscriptionRegistrar {
@@ -340,7 +347,7 @@ pub struct RequestHandler {
     run_cancellation: Option<RunCancellationRegistry>,
     run_interaction: Option<RunInteractionRegistry>,
     composer_catalog: Option<crate::composer_catalog_service::ComposerCatalogService>,
-    account_usage: Option<crate::account_usage_service::AccountUsageService>,
+    account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
     rich_link_resolver: Option<crate::rich_link_service::RichLinkResolver>,
     project_repository: Option<crate::project_repository_service::ProjectRepositoryService>,
 }
@@ -572,13 +579,22 @@ impl RequestHandler {
     /// Attaches the one process-owned account-usage fan-out service.
     ///
     /// The service fans out per requested engine with freshness caching and
-    /// per-engine failure isolation; it owns no run, provider session, or
-    /// frontend publication state. Public so tests can inject scripted
-    /// readers while production wires the provider-backed roster.
+    /// per-engine failure isolation; connection delivery pushes what it
+    /// serves. Public so tests can inject scripted readers while production
+    /// shares the provider-backed roster with its refresher.
     #[must_use]
     pub fn with_account_usage_service(
-        mut self,
+        self,
         service: crate::account_usage_service::AccountUsageService,
+    ) -> Self {
+        self.with_shared_account_usage_service(Arc::new(service))
+    }
+
+    /// Attaches an account-usage service shared with its refresher.
+    #[must_use]
+    pub fn with_shared_account_usage_service(
+        mut self,
+        service: Arc<crate::account_usage_service::AccountUsageService>,
     ) -> Self {
         self.account_usage = Some(service);
         self
@@ -642,12 +658,18 @@ impl RequestHandler {
     pub(crate) fn new_conversation_connection_context(
         &self,
     ) -> Option<ConversationConnectionContext> {
-        Some(ConversationConnectionContext {
+        let context = ConversationConnectionContext {
             repository: self.repository.clone(),
             registrar: ConversationSubscriptionRegistrar::new(),
             identity: Arc::new(0_u8),
             notifier: self.conversation_commit_notifier.clone()?,
-        })
+            account_usage: self.account_usage.clone(),
+        };
+        // A new Editor wants current usage: read what is due now.
+        if let Some(usage) = &self.account_usage {
+            usage.request_refresh();
+        }
+        Some(context)
     }
 
     /// Creates a handler with the process-owned native directory picker and
@@ -1040,6 +1062,7 @@ impl RequestHandler {
         };
         if response.is_ok() {
             self.wake_message_outbox(command);
+            self.wake_preferences(command);
         }
         response
     }

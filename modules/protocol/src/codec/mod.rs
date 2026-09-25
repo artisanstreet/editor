@@ -53,8 +53,8 @@ use artisan_domain::{
     RequestId, RespondApproval, RespondQuestion, Revision, RootPath, RootPathError, RunId,
     RunInteractionError, SetModelFavorite, SetThreadEngineConfig, SteerTarget, StopRun,
     THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing, ThreadListingError,
-    ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
-    WebSearchAccess,
+    ThreadRetitled, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal, UnixMillis,
+    UserMessageItem, WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;

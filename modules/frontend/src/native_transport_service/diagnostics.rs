@@ -236,6 +236,8 @@ pub enum PrivateDelivery {
     Observation(ServerEvent),
     /// A thread's complete message outbox.
     Outbox(artisan_domain::MessageOutbox),
+    /// Connection-scoped state the Forge pushed.
+    HostState(super::HostStateEvent),
     /// Bounded delivery loss.
     Lost(ServiceFailure),
 }

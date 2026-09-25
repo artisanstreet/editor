@@ -319,7 +319,7 @@ impl RequestHandler {
         });
         let catalog = crate::composer_catalog_handler::served_catalog(
             self.composer_catalog.as_ref(),
-            self.account_usage.as_ref(),
+            self.account_usage.as_deref(),
             &self.repository,
             thread,
             &profile,

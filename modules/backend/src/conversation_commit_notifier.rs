@@ -20,14 +20,19 @@ use tokio::sync::watch;
 struct Registry {
     state: Mutex<RegistryState>,
     any_sender: watch::Sender<()>,
+    /// Revision of the connection-scoped host state (account usage and the
+    /// user's preferences); every change bumps it.
+    host_sender: watch::Sender<u64>,
 }
 
 impl Registry {
     fn new() -> Self {
         let (any_sender, _receiver) = watch::channel(());
+        let (host_sender, _receiver) = watch::channel(0);
         Self {
             state: Mutex::new(RegistryState::new()),
             any_sender,
+            host_sender,
         }
     }
 }
@@ -90,6 +95,7 @@ pub struct ConversationCommitSubscription {
 #[derive(Debug)]
 pub(crate) struct ConversationCommitAnySubscription {
     receiver: watch::Receiver<()>,
+    host: watch::Receiver<u64>,
 }
 
 /// The result of publishing one process-local wake hint.
@@ -224,7 +230,24 @@ impl ConversationCommitNotifier {
         let _ = self.registry.any_sender.send(());
     }
 
-    /// Registers one bounded wake for any published conversation commit.
+    /// Wakes every connection's delivery driver to push the host state (the
+    /// account usage and the user's preferences) again. Only a changed value
+    /// crosses the wire.
+    pub fn publish_host_state(&self) {
+        self.registry
+            .host_sender
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    /// Number of connections whose delivery driver currently listens, so
+    /// host-state producers can idle while no Editor is connected.
+    #[must_use]
+    pub fn delivery_connections(&self) -> usize {
+        self.registry.any_sender.receiver_count()
+    }
+
+    /// Registers one bounded wake for any published conversation commit or
+    /// host-state change.
     ///
     /// The receiver retains only the latest watch generation, so the caller
     /// can scan its bounded active set once after a burst of commits without
@@ -233,22 +256,29 @@ impl ConversationCommitNotifier {
     pub(crate) fn subscribe_any(&self) -> ConversationCommitAnySubscription {
         ConversationCommitAnySubscription {
             receiver: self.registry.any_sender.subscribe(),
+            host: self.registry.host_sender.subscribe(),
         }
     }
 }
 
 impl ConversationCommitAnySubscription {
-    /// Waits for the next coalesced process-wide commit wake.
+    /// Waits for the next coalesced process-wide commit or host-state wake.
     ///
-    /// Tokio watch change detection is cancellation safe, and the receiver
-    /// therefore remains usable when the bounded wait is cancelled by the
+    /// Tokio watch change detection is cancellation safe, and the receivers
+    /// therefore remain usable when the bounded wait is cancelled by the
     /// caller's outer operation.
     #[allow(dead_code)]
     pub(crate) async fn wait(&mut self) -> Result<(), ConversationCommitWaitError> {
-        self.receiver
-            .changed()
-            .await
-            .map_err(|_| ConversationCommitWaitError::Closed)
+        tokio::select! {
+            changed = self.receiver.changed() => changed,
+            changed = self.host.changed() => changed,
+        }
+        .map_err(|_| ConversationCommitWaitError::Closed)
+    }
+
+    /// The host-state revision, marking it seen.
+    pub(crate) fn host_revision(&mut self) -> u64 {
+        *self.host.borrow_and_update()
     }
 }
 

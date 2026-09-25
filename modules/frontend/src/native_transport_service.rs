@@ -591,6 +591,8 @@ pub enum NativeTransportEvent {
     /// The subscribed thread's complete message outbox, pushed by the Forge
     /// whenever its undelivered messages change.
     MessageOutbox(artisan_domain::MessageOutbox),
+    /// Connection-scoped state the Forge pushed whenever it changed.
+    HostState(HostStateEvent),
     /// Bounded path-free delivery loss.
     DeliveryLost(ServiceFailure),
     /// Terminal service state.
@@ -704,7 +706,8 @@ use response_validation::{
     thread_selection_decision, validate_response_family,
 };
 pub use response_validation::{
-    UniDelivery, validate_started_correlation, validate_stopped_correlation, validate_uni_envelope,
+    HostStateEvent, UniDelivery, validate_started_correlation, validate_stopped_correlation,
+    validate_uni_envelope,
 };
 
 mod remote;

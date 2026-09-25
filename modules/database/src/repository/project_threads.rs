@@ -389,6 +389,45 @@ impl Repository {
         }
         ThreadListing::new(summaries).map_err(|source| RepositoryError::ThreadListing { source })
     }
+
+    /// Reads one thread's display title exactly as [`Self::list_threads`]
+    /// projects it: the stored title, or the first message while the
+    /// placeholder stands. `None` for an unknown thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns corrupt persisted data or a preserved database failure.
+    pub async fn thread_display_title(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ThreadTitle>, RepositoryError> {
+        let Some(row) = thread_row_by_id(&self.database, thread_id).await? else {
+            return Ok(None);
+        };
+        let title = ThreadTitle::parse(row.title)
+            .map_err(|error| corrupt_data("threads", "title", error))?;
+        if !matches!(title.as_str(), "New thread" | "New task") {
+            return Ok(Some(title));
+        }
+        let initial = entities::message::Entity::find()
+            .select_only()
+            .column_as(
+                sea_orm::sea_query::Expr::cust("substr(body, 1, 320)"),
+                "initial_text",
+            )
+            .filter(entities::message::Column::ThreadId.eq(thread_id.as_str()))
+            .filter(entities::message::Column::Ordinal.eq(0))
+            .into_tuple::<String>()
+            .one(&self.database)
+            .await
+            .map_err(|source| database_error("read initial thread message", source))?;
+        Ok(Some(
+            initial
+                .as_deref()
+                .and_then(initial_message_title)
+                .unwrap_or(title),
+        ))
+    }
 }
 
 // Project a useful label without persisting it: a later harness title can still

@@ -7,10 +7,22 @@
 
 #![forbid(unsafe_code)]
 
-use artisan_domain::{AccountProfile, DisplayName};
+use artisan_database::StoredUserPreferences;
+use artisan_domain::{AccountProfile, DisplayName, UserPreferences};
 
 const FALLBACK_USER: &str = "Artisan";
 const FALLBACK_HOST: &str = "This host";
+
+/// The stored preferences with the account the Forge runs as.
+#[must_use]
+pub(crate) fn user_preferences(stored: StoredUserPreferences) -> UserPreferences {
+    UserPreferences {
+        revision: stored.revision,
+        default_engine_config: stored.default_engine_config,
+        navigation: stored.navigation,
+        account: host_account_profile(),
+    }
+}
 
 /// The account profile of the running Forge.
 #[must_use]

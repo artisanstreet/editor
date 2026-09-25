@@ -372,6 +372,21 @@ pub enum UniDelivery {
     Observation(ServerEvent),
     /// A thread's complete message outbox.
     Outbox(artisan_domain::MessageOutbox),
+    /// Connection-scoped state the Forge pushed.
+    HostState(HostStateEvent),
+}
+
+/// Connection-scoped state the Forge pushes whenever it changes: every
+/// engine's usage with its readiness verdict, the user's preferences, and a
+/// subscribed thread's display title.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HostStateEvent {
+    /// Every observed engine's usage report and readiness verdict.
+    AccountUsage(artisan_domain::EngineUsageSnapshot),
+    /// The user's preferences.
+    Preferences(artisan_domain::UserPreferences),
+    /// A subscribed thread's display title.
+    ThreadRetitled(artisan_domain::ThreadRetitled),
 }
 
 /// Validates the delivery family of one uni-stream envelope.
@@ -397,6 +412,15 @@ pub fn validate_uni_envelope(
                 Ok(UniDelivery::Observation(server_event.clone()))
             }
             artisan_domain::Event::MessageOutbox(outbox) => Ok(UniDelivery::Outbox(outbox.clone())),
+            artisan_domain::Event::AccountUsage(usage) => Ok(UniDelivery::HostState(
+                HostStateEvent::AccountUsage(usage.clone()),
+            )),
+            artisan_domain::Event::UserPreferences(preferences) => Ok(UniDelivery::HostState(
+                HostStateEvent::Preferences(preferences.clone()),
+            )),
+            artisan_domain::Event::ThreadRetitled(retitled) => Ok(UniDelivery::HostState(
+                HostStateEvent::ThreadRetitled(retitled.clone()),
+            )),
             artisan_domain::Event::ProjectAttached(_)
             | artisan_domain::Event::ThreadCreated(_)
             | artisan_domain::Event::FirstMessageQueued(_) => Err(ServiceFailure::new(

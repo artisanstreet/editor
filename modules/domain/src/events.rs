@@ -18,7 +18,9 @@
 use crate::model::{ProjectSummary, QueuedMessage, ThreadSummary};
 use crate::observation::Observation;
 use crate::time::UnixMillis;
-use crate::{MessageOutbox, RunId, ThreadId, TurnId};
+use crate::{
+    EngineUsageSnapshot, MessageOutbox, RunId, ThreadId, ThreadTitle, TurnId, UserPreferences,
+};
 
 /// One directory attach completed and its project identity was minted.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,6 +74,24 @@ pub enum Event {
     /// The thread's undelivered messages changed; the complete outbox is
     /// pushed to the thread's subscribers (see [`MessageOutbox`]).
     MessageOutbox(MessageOutbox),
+    /// Every engine's account usage with the Forge's readiness verdict,
+    /// pushed to each connection whenever it changes.
+    AccountUsage(EngineUsageSnapshot),
+    /// The user's preferences, pushed to each connection whenever they
+    /// change.
+    UserPreferences(UserPreferences),
+    /// A subscribed thread's display title changed.
+    ThreadRetitled(ThreadRetitled),
+}
+
+/// A subscribed thread's display title changed: the generated title was
+/// recorded, or the first message now stands in for the placeholder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadRetitled {
+    /// The thread.
+    pub thread_id: ThreadId,
+    /// Its display title.
+    pub title: ThreadTitle,
 }
 
 /// One committed engine observation routed to its thread subscribers.

@@ -289,6 +289,7 @@ impl NativeApplication {
             NativeTransportEvent::MessageOutbox(outbox) => {
                 self.apply_message_outbox(&outbox, cx);
             }
+            NativeTransportEvent::HostState(state) => self.apply_host_state(state, cx),
             NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
             NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
         }

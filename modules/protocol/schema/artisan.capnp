@@ -1071,6 +1071,14 @@ struct Event {
     # rows with their Forge-owned state), pushed to the thread's subscribers
     # whenever they change. Fresh union member at @5.
     messageOutbox @5 :ComposerState.MessageOutbox;
+
+    # Connection-scoped state the Forge pushes whenever it changes (stateless
+    # Editor step 7): every engine's usage with its readiness verdict, the
+    # user's preferences, and a subscribed thread's display title. Fresh
+    # union members at @6..@8.
+    accountUsage @6 :EngineUsageSnapshot;
+    userPreferences @7 :UserPreferences;
+    threadRetitled @8 :ThreadRetitled;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first
@@ -2631,4 +2639,11 @@ struct LegacyPreferencesImported {
   defaultModel @0 :LegacyImportOutcome;
   projectOrder @1 :LegacyImportOutcome;
   preferences @2 :UserPreferences;
+}
+
+# A subscribed thread's display title (the generated title once recorded,
+# otherwise its first message while the placeholder stands) changed.
+struct ThreadRetitled {
+  threadId @0 :Text;
+  title @1 :Text;
 }

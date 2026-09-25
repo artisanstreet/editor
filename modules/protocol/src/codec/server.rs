@@ -129,6 +129,17 @@ pub(crate) fn encode_event(
             )
             .map_err(|_| ProtocolEncodeError::ComposerState)?;
         }
+        Event::AccountUsage(snapshot) => {
+            encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
+        }
+        Event::UserPreferences(preferences) => {
+            encode_preferences(builder.reborrow().init_user_preferences(), preferences)?;
+        }
+        Event::ThreadRetitled(retitled) => {
+            let mut encoded = builder.reborrow().init_thread_retitled();
+            encoded.set_thread_id(retitled.thread_id.as_str());
+            encoded.set_title(retitled.title.as_str());
+        }
     }
     Ok(())
 }
@@ -345,6 +356,24 @@ pub(crate) fn decode_event(
         }
         event::Which::MessageOutbox(outbox) => {
             Event::MessageOutbox(crate::composer_state_codec::decode_message_outbox(outbox?)?)
+        }
+        event::Which::AccountUsage(snapshot) => {
+            Event::AccountUsage(decode_engine_usage_snapshot_value(snapshot?)?)
+        }
+        event::Which::UserPreferences(preferences) => {
+            Event::UserPreferences(decode_preferences(preferences?)?)
+        }
+        event::Which::ThreadRetitled(retitled) => {
+            let retitled = retitled?;
+            let field = "event.threadRetitled.threadId";
+            Event::ThreadRetitled(ThreadRetitled {
+                thread_id: parse_thread_id(read_text(retitled.get_thread_id(), field)?, field)?,
+                title: ThreadTitle::parse(read_text(
+                    retitled.get_title(),
+                    "event.threadRetitled.title",
+                )?)
+                .map_err(|source| ProtocolDecodeError::ThreadTitle { source })?,
+            })
         }
     };
     Ok(ServerEvent { cursor, event })

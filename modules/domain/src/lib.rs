@@ -90,7 +90,7 @@ pub use engine_socket::{
 };
 pub use events::{
     EngineObservationAttribution, EngineObservationEvent, Event, FirstMessageQueued,
-    ProjectAttached, ThreadCreated,
+    ProjectAttached, ThreadCreated, ThreadRetitled,
 };
 pub use identifiers::{
     DirectoryId, EngineAgentId, EngineModelId, EngineProfileId, EngineProfileIdError,

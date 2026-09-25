@@ -6,10 +6,9 @@
 //! fills what the Forge does not have yet. The account profile is the host
 //! account the Forge runs as.
 
-use artisan_database::StoredUserPreferences;
 use artisan_domain::{
-    EngineRunConfig, ImportLegacyPreferences, LegacyPreferencesImported, RecordNavigation,
-    RequestId, UserPreferences,
+    Command, EngineRunConfig, ImportLegacyPreferences, LegacyPreferencesImported, RecordNavigation,
+    RequestId,
 };
 use artisan_protocol::{ProtocolFailure, ResponsePayload, ServerResponse};
 
@@ -29,7 +28,7 @@ impl RequestHandler {
             .map_err(|error| repository_failure(&error, request_id))?;
         Ok(outcome(
             request_id,
-            ResponsePayload::UserPreferences(with_account(stored)),
+            ResponsePayload::UserPreferences(crate::account_profile::user_preferences(stored)),
         ))
     }
 
@@ -50,7 +49,7 @@ impl RequestHandler {
             .map_err(|error| repository_failure(&error, request_id))?;
         Ok(outcome(
             request_id,
-            ResponsePayload::UserPreferences(with_account(stored)),
+            ResponsePayload::UserPreferences(crate::account_profile::user_preferences(stored)),
         ))
     }
 
@@ -65,7 +64,7 @@ impl RequestHandler {
         let default = match &import.default_selection {
             None => None,
             Some(selection) => Some(
-                match crate::composer_catalog_handler::host_catalog(self.account_usage.as_ref())
+                match crate::composer_catalog_handler::host_catalog(self.account_usage.as_deref())
                     .await
                 {
                     Ok(catalog) => {
@@ -95,7 +94,7 @@ impl RequestHandler {
             ResponsePayload::LegacyPreferencesImported(LegacyPreferencesImported {
                 default_model: imported.default_model,
                 project_order: imported.project_order,
-                preferences: with_account(imported.preferences),
+                preferences: crate::account_profile::user_preferences(imported.preferences),
             }),
         ))
     }
@@ -104,17 +103,23 @@ impl RequestHandler {
     /// threads start from. Best effort: the thread's own save already
     /// succeeded, and a default that could not be stored leaves the previous
     /// one.
+    /// Wakes every connection to push preferences a command may have changed
+    /// (a navigation, an import, or a saved configuration); only a changed
+    /// value crosses the wire.
+    pub(super) fn wake_preferences(&self, command: &Command) {
+        if matches!(
+            command,
+            Command::RecordNavigation(_)
+                | Command::ImportLegacyPreferences(_)
+                | Command::SetThreadEngineConfig(_)
+                | Command::SubmitComposerDraft(_)
+        ) && let Some(notifier) = &self.conversation_commit_notifier
+        {
+            notifier.publish_host_state();
+        }
+    }
+
     pub(super) async fn remember_default_engine_config(&self, config: &EngineRunConfig) {
         let _ = self.repository.remember_default_engine_config(config).await;
-    }
-}
-
-/// The stored preferences with the account the Forge runs as.
-fn with_account(stored: StoredUserPreferences) -> UserPreferences {
-    UserPreferences {
-        revision: stored.revision,
-        default_engine_config: stored.default_engine_config,
-        navigation: stored.navigation,
-        account: crate::account_profile::host_account_profile(),
     }
 }
