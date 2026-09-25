@@ -60,6 +60,11 @@ pub use repository::{
 pub use repository::QueuedMessageRepositoryError;
 
 pub use repository::{
+    COMPOSER_ATTACHMENT_UNREFERENCED_GRACE_MS, ComposerDraftRepositoryError,
+    ComposerDraftSaveOutcome, SaveComposerDraftInput,
+};
+
+pub use repository::{
     PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint,
     SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup,
     SessionContinuationQuery, SessionContinuationSequence, SessionContinuationUnavailable,
