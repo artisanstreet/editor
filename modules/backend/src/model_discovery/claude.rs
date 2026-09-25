@@ -3,17 +3,17 @@
 //!
 //! The published document at `downloads.claude.ai/model-catalog/v1/` is the
 //! anonymous baseline and is explicitly published for third-party Claude Code
-//! clients. Org-scoped and confidential rows exist only in the served cache
-//! the CLI writes for the signed-in account
-//! (`~/.claude/cache/model-catalog/<org>-<scope>-cc.json`); those rows are
-//! merged over the baseline and never leave this process except through the
-//! catalogue itself.
+//! clients. The served cache the CLI writes for the signed-in account
+//! (`~/.claude/cache/model-catalog/<org>-<scope>-cc.json`) is the exact list
+//! and order the CLI's own picker shows, including org-scoped and
+//! confidential rows; it omits runtime limits, which come from the matching
+//! published row. Rows never leave this process except through the catalogue
+//! itself, and their order is always the provider's, never re-sorted here.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{
     DiscoveredModel, DiscoveredThinking, DiscoveredThinkingOption, artisan_level, effort_economics,
@@ -29,27 +29,59 @@ const SURFACE: &str = "cc";
 /// Probes Claude; `None` when neither the published document nor a served
 /// cache is readable.
 pub(super) async fn discover_claude() -> Option<Vec<DiscoveredModel>> {
-    let mut rows: BTreeMap<String, DiscoveredModel> = BTreeMap::new();
+    let published = fetch_published().await;
+    let served = read_served_cache().await;
+    let rows = merge_rows(published.as_ref(), served.as_ref());
+    (!rows.is_empty()).then_some(rows)
+}
 
-    if let Some(value) = fetch_published().await {
-        for model in surface_models(&value) {
-            if let Some(row) = map_model(model) {
-                rows.insert(row.native_model_id.clone(), row);
-            }
+/// Builds rows in the provider's order: the account's served list when the
+/// CLI has written one, otherwise the published list. Served fields win; the
+/// published row with the same id fills what the served row omits.
+fn merge_rows(published: Option<&Value>, served: Option<&Value>) -> Vec<DiscoveredModel> {
+    let published = published.map(published_models).unwrap_or_default();
+    let served = served.map(served_models).unwrap_or_default();
+    let ordered = if served.is_empty() {
+        published
+            .iter()
+            .map(|model| (*model).clone())
+            .collect::<Vec<_>>()
+    } else {
+        served
+            .iter()
+            .map(|model| {
+                let id = model.get("id").and_then(Value::as_str);
+                match published.iter().find(|candidate| {
+                    id.is_some() && candidate.get("id").and_then(Value::as_str) == id
+                }) {
+                    Some(base) => overlay(base, model),
+                    None => (*model).clone(),
+                }
+            })
+            .collect()
+    };
+    let mut rows: Vec<DiscoveredModel> = Vec::with_capacity(ordered.len());
+    for model in &ordered {
+        if let Some(row) = map_model(model)
+            && !rows
+                .iter()
+                .any(|existing| existing.native_model_id == row.native_model_id)
+        {
+            rows.push(row);
         }
     }
-    for value in read_served_cache().await {
-        for model in surface_models(&value) {
-            if let Some(row) = map_model(model) {
-                rows.insert(row.native_model_id.clone(), row);
-            }
+    rows
+}
+
+/// Shallow-merges `top` over `base`, keeping base keys `top` does not carry.
+fn overlay(base: &Value, top: &Value) -> Value {
+    let mut merged: Map<String, Value> = base.as_object().cloned().unwrap_or_default();
+    if let Some(top) = top.as_object() {
+        for (key, value) in top {
+            merged.insert(key.clone(), value.clone());
         }
     }
-
-    if rows.is_empty() {
-        return None;
-    }
-    Some(rows.into_values().collect())
+    Value::Object(merged)
 }
 
 async fn fetch_published() -> Option<Value> {
@@ -82,8 +114,25 @@ async fn fetch_published() -> Option<Value> {
     Some(value)
 }
 
-/// Returns the model rows of the `cc` surface, if present.
-fn surface_models(value: &Value) -> Vec<&Value> {
+/// Returns the served cache's model rows for the `cc` surface, in order.
+fn served_models(value: &Value) -> Vec<&Value> {
+    let Some(catalog) = value.get("catalog") else {
+        return Vec::new();
+    };
+    if catalog.get("surface").and_then(Value::as_str) != Some(SURFACE) {
+        return Vec::new();
+    }
+    catalog
+        .get("config")
+        .filter(|config| config.get("id").and_then(Value::as_str) == Some(SURFACE))
+        .and_then(|config| config.get("models"))
+        .and_then(Value::as_array)
+        .map(|models| models.iter().collect())
+        .unwrap_or_default()
+}
+
+/// Returns the published document's model rows of the `cc` surface, in order.
+fn published_models(value: &Value) -> Vec<&Value> {
     let configs = value
         .get("surfaces")
         .and_then(|surfaces| surfaces.get(SURFACE))
@@ -231,15 +280,12 @@ fn map_thinking(value: &Value, runtime: &Value) -> DiscoveredThinking {
     DiscoveredThinking::Supported { default, options }
 }
 
-/// Reads every served `*-cc.json` cache entry the CLI has written.
-async fn read_served_cache() -> Vec<Value> {
-    let Some(directory) = claude_cache_directory() else {
-        return Vec::new();
-    };
-    let Ok(mut entries) = tokio::fs::read_dir(&directory).await else {
-        return Vec::new();
-    };
-    let mut values = Vec::new();
+/// Reads the most recently fetched served `*-cc.json` cache the CLI wrote,
+/// which is the list its picker currently shows for the signed-in account.
+async fn read_served_cache() -> Option<Value> {
+    let directory = claude_cache_directory()?;
+    let mut entries = tokio::fs::read_dir(&directory).await.ok()?;
+    let mut newest: Option<(u64, Value)> = None;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -255,16 +301,18 @@ async fn read_served_cache() -> Vec<Value> {
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
             continue;
         };
-        if value
-            .get("catalog")
-            .and_then(|catalog| catalog.get("surface"))
-            .and_then(Value::as_str)
-            == Some(SURFACE)
+        if served_models(&value).is_empty() {
+            continue;
+        }
+        let fetched_at = value.get("fetchedAt").and_then(Value::as_u64).unwrap_or(0);
+        if newest
+            .as_ref()
+            .is_none_or(|(newest_at, _)| fetched_at > *newest_at)
         {
-            values.push(value);
+            newest = Some((fetched_at, value));
         }
     }
-    values
+    newest.map(|(_, value)| value)
 }
 
 fn claude_cache_directory() -> Option<PathBuf> {
@@ -329,7 +377,7 @@ mod tests {
                 "default_effort": "high"
             }
         }]));
-        let models = surface_models(&value);
+        let models = published_models(&value);
         assert_eq!(models.len(), 1);
         let row = map_model(models[0]).expect("row maps");
         assert_eq!(row.native_model_id, "claude-fable-5-1");
@@ -371,7 +419,7 @@ mod tests {
             "runtime": { "max_input_tokens": 200_000, "max_output_tokens": 32000 }
         }]));
         assert!(
-            surface_models(&value)
+            published_models(&value)
                 .iter()
                 .all(|model| map_model(model).is_none())
         );
@@ -386,8 +434,86 @@ mod tests {
             "thinking": { "type": "none" },
             "runtime": { "max_input_tokens": 200_000, "max_output_tokens": 64000 }
         }]));
-        let row = map_model(surface_models(&value)[0]).expect("row maps");
+        let row = map_model(published_models(&value)[0]).expect("row maps");
         assert_eq!(row.thinking, DiscoveredThinking::Unavailable);
         assert_eq!(row.context_window_tokens, Some(200_000));
+    }
+
+    fn ids(rows: &[DiscoveredModel]) -> Vec<&str> {
+        rows.iter()
+            .map(|row| row.native_model_id.as_str())
+            .collect()
+    }
+
+    fn published_row(id: &str, name: &str, context: u64) -> serde_json::Value {
+        json!({
+            "id": id,
+            "name": name,
+            "offered_on": ["first_party"],
+            "thinking": { "type": "none" },
+            "runtime": { "max_input_tokens": context, "max_output_tokens": 64000 }
+        })
+    }
+
+    #[test]
+    fn published_rows_keep_the_published_order() {
+        let published = surface_value(json!([
+            published_row("claude-opus-5-5", "Opus 5.5", 1_000_000),
+            published_row("claude-sonnet-5", "Sonnet 5", 1_000_000),
+            published_row("claude-fable-5-1", "Fable 5.1", 1_000_000),
+            published_row("claude-fable-5", "Fable 5", 1_000_000),
+        ]));
+        let rows = merge_rows(Some(&published), None);
+        assert_eq!(
+            ids(&rows),
+            [
+                "claude-opus-5-5",
+                "claude-sonnet-5",
+                "claude-fable-5-1",
+                "claude-fable-5"
+            ]
+        );
+    }
+
+    #[test]
+    fn served_cache_sets_order_and_membership_and_published_fills_limits() {
+        let published = surface_value(json!([
+            published_row("claude-opus-5-5", "Opus 5.5", 1_000_000),
+            published_row("claude-sonnet-5", "Sonnet 5", 1_000_000),
+            published_row("claude-fable-5-1", "Fable 5.1", 1_000_000),
+            published_row("claude-fable-5", "Fable 5", 1_000_000),
+            published_row("claude-opus-4-1", "Opus 4.1", 200_000),
+        ]));
+        let served = json!({
+            "version": 2,
+            "fetchedAt": 1,
+            "catalog": {
+                "surface": "cc",
+                "config": {
+                    "id": "cc",
+                    "models": [
+                        { "id": "claude-opus-5-5", "name": "Opus 5.5", "section": "main", "thinking": { "type": "none" } },
+                        { "id": "claude-fable-5-1", "name": "Fable 5.1", "section": "main", "thinking": { "type": "none" } },
+                        { "id": "claude-sonnet-5", "name": "Sonnet 5", "section": "main", "thinking": { "type": "none" } },
+                        { "id": "claude-fable-5", "name": "Fable 5", "section": "overflow", "thinking": { "type": "none" } },
+                        { "id": "claude-confidential", "name": "Confidential", "section": "main", "thinking": { "type": "none" } }
+                    ]
+                }
+            }
+        });
+        let rows = merge_rows(Some(&published), Some(&served));
+        assert_eq!(
+            ids(&rows),
+            [
+                "claude-opus-5-5",
+                "claude-fable-5-1",
+                "claude-sonnet-5",
+                "claude-fable-5",
+                "claude-confidential"
+            ],
+            "the account's served list decides order and membership"
+        );
+        assert_eq!(rows[1].context_window_tokens, Some(1_000_000));
+        assert_eq!(rows[4].context_window_tokens, None);
     }
 }
