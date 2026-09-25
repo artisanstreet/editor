@@ -66,7 +66,7 @@ struct ActivationArguments {
 }
 
 #[derive(Debug, Parser)]
-#[command(version, about)]
+#[command(version = artisan_build_info::version_line(), about)]
 struct Arguments {
     #[command(subcommand)]
     operation: Option<Operation>,

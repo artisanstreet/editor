@@ -27,7 +27,11 @@ use super::lifecycle::{status, stop};
 use super::open::{OpenFlow, handle_protocol, open};
 
 #[derive(Debug, Parser)]
-#[command(name = "ae", version, about = "Artisan Editor and Forge")]
+#[command(
+    name = "ae",
+    version = artisan_build_info::version_line(),
+    about = "Artisan Editor and Forge"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
