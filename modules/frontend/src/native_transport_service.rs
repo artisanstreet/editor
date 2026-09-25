@@ -108,6 +108,8 @@ pub enum NativeTransportCommand {
     ComposerDraft(ComposerDraftCommand),
     /// Business decisions the Forge sends as data.
     ForgeDecision(ForgeDecisionCommand),
+    /// The Forge user's preferences and navigation record.
+    Preferences(PreferencesCommand),
     /// Query exact live run ownership, fenced by the application's selection generation.
     ReadActiveRun {
         thread_id: ThreadId,
@@ -256,6 +258,7 @@ pub enum NativeTransportEvent {
     ComposerState(ComposerStateEvent),
     ComposerDraft(ComposerDraftEvent),
     ForgeDecision(ForgeDecisionEvent),
+    Preferences(PreferencesEvent),
     ActiveRun {
         thread_id: ThreadId,
         generation: u64,
@@ -657,6 +660,10 @@ pub(crate) use composer_draft_operations::{ComposerDraftCommand, ComposerDraftEv
 #[path = "native_forge_decisions_transport.rs"]
 mod forge_decision_operations;
 pub(crate) use forge_decision_operations::{ForgeDecisionCommand, ForgeDecisionEvent};
+
+#[path = "native_preferences_transport.rs"]
+mod preferences_operations;
+pub(crate) use preferences_operations::{PreferencesCommand, PreferencesEvent};
 
 #[path = "native_profile_usage_transport.rs"]
 mod profile_usage_operations;

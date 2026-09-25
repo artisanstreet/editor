@@ -13,8 +13,8 @@ const DIRECTORY_NAME: &str = "editor";
 const FILE_NAME: &str = "settings.json";
 /// Upper bound for the settings file; anything larger is treated as corrupt.
 const MAX_FILE_BYTES: u64 = 256 * 1024;
-/// Upper bound for one legacy preference file (matches `native_last_used`).
-const MAX_LEGACY_BYTES: u64 = 8 * 1024;
+/// Upper bound for one legacy preference file.
+const MAX_LEGACY_BYTES: u64 = super::legacy_forge::MAX_FILE_BYTES;
 const LEGACY_DIRECTORY_NAME: &str = "ui";
 const LEGACY_FRAME_RATE_LIMIT: &str = "frame-rate-limit";
 const LEGACY_FPS_OVERLAY: &str = "fps-overlay";
@@ -202,6 +202,30 @@ fn import_legacy(
         imported = true;
     }
     imported
+}
+
+/// Reads one legacy Forge-pool preference file; `None` when it is absent,
+/// unreadable, or oversized.
+pub(super) fn read_legacy_file(path: &Path) -> Option<Vec<u8>> {
+    read_bounded(path, super::legacy_forge::MAX_FILE_BYTES)
+        .ok()
+        .flatten()
+}
+
+/// Removes legacy Forge-pool preference files the Forge has answered for,
+/// returning a problem for each file that could not be removed.
+pub(super) fn remove_legacy_files(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .filter_map(|path| match std::fs::remove_file(path) {
+            Ok(()) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(format!(
+                "legacy preference {} could not be removed ({error})",
+                path.display()
+            )),
+        })
+        .collect()
 }
 
 fn remove_legacy(legacy: &Path, diagnostics: &mut Vec<String>) {

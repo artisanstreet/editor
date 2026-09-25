@@ -1,10 +1,21 @@
 //! Project order and navigation for the sidebar workspace selector.
+//!
+//! The order starts from the Forge's navigation record (most recently used
+//! first) and then follows the user's own navigation, which is reported
+//! back to the Forge (see `preferences.rs`).
 
 use super::*;
 use crate::home_project_picker::PROJECT_CONTROL_RADIUS_PX;
 
 pub(super) struct ProjectNavigation {
     loaded_order: bool,
+    /// The project order of the Forge's record read on connect; `None`
+    /// until it arrives (or when it could not be read).
+    pub(super) forge_order: Option<Vec<ProjectId>>,
+    /// The route that record resumes.
+    pub(super) route: Option<artisan_domain::NavigationRoute>,
+    /// The navigation last reported to the Forge.
+    pub(super) reported: Option<(ProjectId, Option<ThreadId>)>,
     pub(super) last_threads: HashMap<ProjectId, ThreadId>,
     pub(super) restore_draft: bool,
     pub(super) awaiting_threads: bool,
@@ -16,6 +27,9 @@ impl ProjectNavigation {
     pub(super) fn new(cx: &mut Context<NativeApplication>) -> Self {
         Self {
             loaded_order: false,
+            forge_order: None,
+            route: None,
+            reported: None,
             last_threads: HashMap::new(),
             restore_draft: false,
             awaiting_threads: false,
@@ -59,8 +73,10 @@ impl NativeApplication {
                 .map(|project| project.id.clone())
                 .collect()
         } else {
-            self.project_navigation.loaded_order = true;
-            crate::native_last_used::load_project_order(self.machine_home.as_deref())
+            self.project_navigation
+                .forge_order
+                .clone()
+                .unwrap_or_default()
         };
         self.project_navigation.loaded_order = true;
         let mut options = project_options_from_listing(listing);
@@ -87,16 +103,8 @@ impl NativeApplication {
         };
         let option = self.project_options.remove(index);
         self.project_options.insert(0, option);
-        // Tests exercise navigation without writing the user's preferences.
-        #[cfg(not(test))]
-        crate::native_last_used::save_project_order(
-            self.machine_home.as_deref(),
-            &self
-                .project_options
-                .iter()
-                .map(|option| option.id.clone())
-                .collect::<Vec<_>>(),
-        );
+        // The Forge applies the same most-recently-used rule to the report.
+        self.report_navigation(project.clone(), None);
     }
 
     pub(super) fn cycle_project(&mut self, forward: bool, cx: &mut Context<Self>) {

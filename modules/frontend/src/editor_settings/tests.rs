@@ -278,3 +278,32 @@ fn failed_writes_still_apply_for_the_session(cx: &mut gpui::TestAppContext) {
     });
     assert!(!root.settings().with_extension("json.pending").exists());
 }
+
+#[test]
+fn legacy_forge_preferences_are_found_then_removed_once_retired() {
+    let root = Root::new();
+    write(
+        &root.legacy("last-used-model"),
+        br#"{"version":1,"engine_id":"codex","model_id":"codex-luna","native_model_id":"n"}"#,
+    );
+    write(
+        &root.legacy("project-orders/local"),
+        br#"{"version":1,"projects":["p2","p1"]}"#,
+    );
+    // Editor-pool legacy files are not Forge preferences and stay.
+    write(&root.legacy("fps-overlay"), b"false");
+    let found = legacy_forge::find(&root.0, None, storage::read_legacy_file);
+    assert_eq!(
+        found
+            .selection
+            .as_ref()
+            .map(|selection| selection.model_id.as_str()),
+        Some("codex-luna")
+    );
+    assert_eq!(found.project_order.len(), 2);
+    found.retire();
+    assert!(!root.legacy("last-used-model").exists());
+    assert!(!root.legacy("project-orders/local").exists());
+    assert!(root.legacy("fps-overlay").exists());
+    assert!(legacy_forge::find(&root.0, None, storage::read_legacy_file).is_empty());
+}

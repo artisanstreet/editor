@@ -1,10 +1,13 @@
 //! Editor account presentation, separate from Forge host identity and engine credentials.
 //!
-//! A future Artisan Street sign-in owner can install this global after authentication
-//! and remove it on sign-out, then refresh the application. It grants no authority
-//! and contains no credentials. Without it, the editor uses its local identity.
+//! The connected Forge supplies the account it runs as (its user's
+//! preferences carry the account profile), and the Editor installs it here
+//! whenever those preferences arrive; a future Artisan Street sign-in owner
+//! can install it the same way. It grants no authority and contains no
+//! credentials. The Editor never derives it from its own machine's
+//! environment, which may not be the connected host's.
 
-/// Display identity supplied by the Artisan Street account session.
+/// Display identity supplied by the connected Forge's account.
 pub struct ArtisanAccountIdentity {
     /// Account display name, preserving the account's spelling and capitalization.
     pub display_name: String,

@@ -100,7 +100,6 @@ pub mod native_composer_visuals;
 pub mod native_context_usage;
 mod native_frame_rate;
 pub mod native_hover_rail_card;
-mod native_last_used;
 pub mod native_new_thread_surface;
 pub mod native_project_menu;
 pub mod native_route;

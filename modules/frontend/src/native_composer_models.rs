@@ -51,11 +51,8 @@ impl NativeApplication {
         policy: &crate::native_model_selector::SelectPolicy,
         cx: &mut Context<Self>,
     ) {
-        // Every committed choice refreshes the last-used preference, so new
-        // threads without saved config start from this model.
-        if let Some(stored) = crate::native_last_used::save_model_policy(policy) {
-            self.last_used_model = Some(stored);
-        }
+        // The Forge makes the configuration a choice saves the default new
+        // threads start from, and pushes it.
         self.composer_model_choice = Some((self.selected_thread.clone(), policy.clone()));
         self.composer_model_run_error = None;
         self.sync_composer_controls(cx);
@@ -303,17 +300,18 @@ impl NativeApplication {
         });
     }
 
-    /// Seeds the displayed policy from the last-used preference.
+    /// Shows the Forge's default configuration as the catalog row that
+    /// carries it.
     ///
     /// Only for threads with no per-thread choice and no saved
     /// configuration: saved threads never reach this fallback, and the
     /// result stays non-authoritative until the thread saves its own.
-    fn last_used_display_policy(
+    fn default_display_policy(
         &self,
         snapshot: &crate::native_model_catalog::NativeModelCatalog,
     ) -> Option<crate::native_model_catalog::NativeModelPolicy> {
-        let stored = self.last_used_model.as_ref()?;
-        crate::native_last_used::restore_policy(snapshot, stored)
+        let config = self.default_engine_config.as_ref()?;
+        crate::picker_selection::saved_config_policy(snapshot, config)
     }
 
     pub(super) fn sync_composer_model_policy(&mut self, cx: &mut Context<Self>) {
@@ -350,7 +348,7 @@ impl NativeApplication {
             .as_ref()
             .and_then(|(_, choice)| snapshot.rebase_policy(choice))
             .or_else(|| saved_policy.clone())
-            .or_else(|| self.last_used_display_policy(&snapshot));
+            .or_else(|| self.default_display_policy(&snapshot));
         // The displayed choice is authoritative exactly when it is the saved
         // configuration's own display.
         let authoritative = policy.is_some() && policy == saved_policy;

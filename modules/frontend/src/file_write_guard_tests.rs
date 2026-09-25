@@ -39,12 +39,8 @@ const WRITE_APIS: &[&str] = &[
 const ALLOWED_WRITERS: &[(&str, &str)] = &[
     (
         "frontend/src/editor_settings/storage.rs",
-        "the Editor pool: settings.json, its corrupt copy, and legacy-file migration",
-    ),
-    (
-        "frontend/src/native_last_used.rs",
-        "temporary: last-used model and project orders are Forge-pool state that step 7 of \
-         docs/plans/stateless-editor.md moves to the Forge, deleting this writer",
+        "the Editor pool: settings.json, its corrupt copy, and legacy-file migration (including \
+         removing the Forge-pool files an older Editor kept, once the Forge adopted them)",
     ),
     (
         "frontend/src/dev_startup_receipt.rs",
@@ -308,5 +304,23 @@ fn after() { std::fs::File::create(\"c\").ok(); }
     assert_eq!(
         files.get(&modules.join("frontend/src/native_application/tests/sends.rs")),
         Some(&true)
+    );
+}
+
+/// Editor code keeps no domain state in files: the Editor pool and the two
+/// opt-in development writers are the only writers.
+#[test]
+fn only_the_editor_pool_and_development_writers_may_write() {
+    let allowed = ALLOWED_WRITERS
+        .iter()
+        .map(|(path, _)| *path)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        allowed,
+        BTreeSet::from([
+            "frontend/src/dev_startup_receipt.rs",
+            "frontend/src/editor_settings/storage.rs",
+            "frontend/src/native_application/frame_capture.rs",
+        ])
     );
 }

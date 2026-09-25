@@ -119,13 +119,6 @@ impl NativeApplication {
         let command_menu_observation = cx.observe(&command_menu, |application, menu, cx| {
             application.route_command_action(&menu, cx);
         });
-        let profile_hostname = std::env::var("COMPUTERNAME")
-            .ok()
-            .filter(|name| !name.is_empty());
-        let profile_name = std::env::var("USERNAME")
-            .ok()
-            .filter(|name| !name.is_empty())
-            .or_else(|| profile_hostname.clone());
         let mut application = Self {
             machine_error: None,
             machine_home: None,
@@ -145,7 +138,10 @@ impl NativeApplication {
             model_selector,
             composer_model_choice: None,
             deferred_composer_policy: None,
-            last_used_model: crate::native_last_used::load_stored_model(),
+            default_engine_config: None,
+            legacy_import: None,
+            #[cfg(test)]
+            test_legacy_preferences: None,
             composer_model_run_error: None,
             pending_resolution: None,
             catalog_controller: NativeCatalogController::new(),
@@ -163,8 +159,9 @@ impl NativeApplication {
             ]),
             profile_focus: cx.focus_handle(),
             profile_origin: Rc::new(Cell::new(Bounds::default())),
-            profile_name,
-            profile_hostname,
+            // The account the connected Forge runs as, once it answered.
+            profile_name: None,
+            profile_hostname: None,
             profile_usage: NativeProfileUsageState::default(),
             profile_usage_generation: ProfileUsageGeneration::first(),
             profile_usage_next_seq: 0,

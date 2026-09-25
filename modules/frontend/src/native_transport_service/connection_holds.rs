@@ -16,6 +16,7 @@ use tokio::sync::watch;
 
 use super::{
     ComposerDraftCommand, ComposerStateCommand, ForgeDecisionCommand, NativeTransportCommand,
+    PreferencesCommand,
 };
 
 /// What an in-flight hold is keeping open, for progress copy only.
@@ -39,11 +40,13 @@ pub enum HoldKind {
     ModelFavorite,
     /// A composer draft save or attachment upload.
     Draft,
+    /// A navigation record or preference import.
+    Preferences,
 }
 
 impl HoldKind {
     /// Every kind in presentation order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Message,
         Self::QueueChange,
         Self::StopRequest,
@@ -53,6 +56,7 @@ impl HoldKind {
         Self::EngineSettings,
         Self::ModelFavorite,
         Self::Draft,
+        Self::Preferences,
     ];
 
     const fn index(self) -> usize {
@@ -72,6 +76,7 @@ impl HoldKind {
             Self::EngineSettings => ("model setting", "model settings"),
             Self::ModelFavorite => ("favorite", "favorites"),
             Self::Draft => ("draft", "drafts"),
+            Self::Preferences => ("preference", "preferences"),
         };
         if count == 1 { one } else { many }
     }
@@ -278,6 +283,9 @@ impl NativeTransportCommand {
             Self::ComposerDraft(
                 ComposerDraftCommand::Save { .. } | ComposerDraftCommand::Upload { .. },
             ) => Some(HoldKind::Draft),
+            Self::Preferences(
+                PreferencesCommand::RecordNavigation(_) | PreferencesCommand::ImportLegacy(_),
+            ) => Some(HoldKind::Preferences),
             Self::ComposerState(
                 ComposerStateCommand::ReadFooterUsage { .. }
                 | ComposerStateCommand::ReadRunUsage { .. },
@@ -289,6 +297,7 @@ impl NativeTransportCommand {
                 ForgeDecisionCommand::ReadHostCatalog
                 | ForgeDecisionCommand::ResolveModelSelection(_),
             )
+            | Self::Preferences(PreferencesCommand::Read)
             | Self::ReadActiveRun { .. }
             | Self::SelectProject(_)
             | Self::ReadSidebarThreads { .. }

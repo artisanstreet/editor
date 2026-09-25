@@ -331,8 +331,13 @@ pub struct NativeApplication {
         Option<ThreadId>,
         crate::native_model_catalog::NativeModelPolicy,
     )>,
-    /// Last-used model preference backing new threads without saved config.
-    last_used_model: Option<crate::native_last_used::StoredModelPolicy>,
+    /// The Forge's default engine configuration, shown on threads without
+    /// their own until they save one.
+    default_engine_config: Option<artisan_domain::EngineRunConfig>,
+    /// Legacy file preferences handed to the Forge, removed once it answers.
+    legacy_import: Option<crate::editor_settings::LegacyForgePreferences>,
+    #[cfg(test)]
+    test_legacy_preferences: Option<crate::editor_settings::LegacyForgePreferences>,
     composer_model_run_error: Option<String>,
     /// The selection whose Forge resolution is awaited; a later selection
     /// replaces it so only the latest answer is applied.
@@ -497,3 +502,4 @@ mod impl_sidebar_threads;
 mod draft_send;
 mod forge_outbox;
 mod host_state;
+mod preferences;

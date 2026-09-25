@@ -12,9 +12,10 @@ impl NativeApplication {
     /// Applies one pushed host-state value.
     pub(super) fn apply_host_state(&mut self, state: HostStateEvent, cx: &mut Context<Self>) {
         match state {
-            HostStateEvent::AccountUsage(_)
-            | HostStateEvent::Preferences(_)
-            | HostStateEvent::ThreadRetitled(_) => {}
+            HostStateEvent::Preferences(preferences) => {
+                self.apply_forge_preferences(&preferences, cx);
+            }
+            HostStateEvent::AccountUsage(_) | HostStateEvent::ThreadRetitled(_) => {}
         }
         cx.notify();
     }

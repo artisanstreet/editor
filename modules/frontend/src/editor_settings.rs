@@ -19,10 +19,25 @@ use std::{
     sync::{LazyLock, OnceLock},
 };
 
+mod legacy_forge;
 mod storage;
+pub(crate) use legacy_forge::LegacyForgePreferences;
 pub(crate) use storage::{Loaded, SettingsPersistError};
 #[cfg(test)]
 pub(crate) use storage::{load, settings_path};
+
+/// The Forge-pool preferences an older Editor kept in loose files for the
+/// host whose credential home is `home` (`None` for this computer). Empty
+/// without an install root, and in unit tests, which never touch it.
+pub(crate) fn legacy_forge_preferences(home: Option<&Path>) -> LegacyForgePreferences {
+    if cfg!(test) {
+        return LegacyForgePreferences::default();
+    }
+    artisan_editor_cli::paths::Layout::discover().map_or_else(
+        |_| LegacyForgePreferences::default(),
+        |layout| legacy_forge::find(&layout.root, home, storage::read_legacy_file),
+    )
+}
 
 /// The schema this build writes. Newer files keep their higher version.
 pub(crate) const SCHEMA_VERSION: u64 = 1;
