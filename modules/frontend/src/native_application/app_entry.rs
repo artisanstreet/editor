@@ -78,6 +78,12 @@ fn report_renderer(window: &mut Window) {
 #[cfg(not(target_os = "windows"))]
 fn report_renderer(_window: &mut Window) {}
 
+fn window_title() -> String {
+    super::selectors::window_title(&crate::native_hosts::label(
+        crate::native_hosts::selected_home().as_deref(),
+    ))
+}
+
 /// Launches the real native application window.
 #[must_use]
 pub fn run() -> ExitCode {
@@ -125,15 +131,7 @@ pub fn run() -> ExitCode {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some(
-                            format!(
-                                "{WINDOW_TITLE} — {}",
-                                crate::native_hosts::label(
-                                    crate::native_hosts::selected_home().as_deref()
-                                )
-                            )
-                            .into(),
-                        ),
+                        title: Some(window_title().into()),
                         // CE keeps native resizing; desktop_shell supplies caption hit areas.
                         appears_transparent: true,
                         ..Default::default()

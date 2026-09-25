@@ -4,6 +4,7 @@ members = [
     "scripts/screen_demo",
     "modules/assets",
     "modules/backend",
+    "modules/build_info",
     "modules/catalog",
     "modules/cli",
     "modules/database",
@@ -102,6 +103,19 @@ unsafe_code = "forbid"
 [profile.performance]
 inherits = "dev"
 opt-level = 2
+
+# Payload integrity hashes every staged binary (about 1.4 GB in a debug
+# build) several times per `cargo dev` run; unoptimized SHA-256 made that the
+# slowest part of the dev loop. Optimizing only the hash crates keeps debug
+# builds of everything else unchanged.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.block-buffer]
+opt-level = 3
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

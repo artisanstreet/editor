@@ -81,6 +81,8 @@ pub enum SettingsSection {
     Privacy,
     /// `/settings/threads`.
     Threads,
+    /// `/settings/about`.
+    About,
 }
 
 const MODELS_ANCHORS: [SettingsAnchor; 2] = [
@@ -114,6 +116,8 @@ const THREADS_ANCHORS: [SettingsAnchor; 3] = [
     SettingsAnchor::new("usage-recovery", "Usage recovery"),
     SettingsAnchor::new("agents", "Agents"),
 ];
+
+const ABOUT_ANCHORS: [SettingsAnchor; 1] = [SettingsAnchor::new("build", "Build")];
 
 const MODELS_PRIMITIVES: [SettingsPrimitive; 3] = [
     SettingsPrimitive::Tabs,
@@ -154,14 +158,17 @@ const THREADS_PRIMITIVES: [SettingsPrimitive; 3] = [
     SettingsPrimitive::Switch,
 ];
 
+const ABOUT_PRIMITIVES: [SettingsPrimitive; 1] = [SettingsPrimitive::Card];
+
 impl SettingsSection {
     /// Every section in legacy sticky-nav order (`nav.svelte`).
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Models,
         Self::Threads,
         Self::Appearance,
         Self::Notifications,
         Self::Privacy,
+        Self::About,
         Self::Engines,
     ];
 
@@ -175,6 +182,7 @@ impl SettingsSection {
             Self::Notifications => "/settings/notifications",
             Self::Privacy => "/settings/privacy",
             Self::Threads => "/settings/threads",
+            Self::About => "/settings/about",
         }
     }
 
@@ -188,6 +196,7 @@ impl SettingsSection {
             Self::Notifications => "Notifications",
             Self::Privacy => "Privacy",
             Self::Threads => "Threads",
+            Self::About => "About",
         }
     }
 
@@ -201,6 +210,7 @@ impl SettingsSection {
             Self::Notifications => "Notifications",
             Self::Privacy => "Privacy",
             Self::Threads => "Threads",
+            Self::About => "About",
         }
     }
 
@@ -218,6 +228,7 @@ impl SettingsSection {
                 "Two independent choices for anonymous product analytics and sanitized crash reports."
             }
             Self::Threads => "Lifecycle rules the Forge applies to every thread.",
+            Self::About => "Which build of Artisan is running and where it is installed.",
         }
     }
 
@@ -231,6 +242,7 @@ impl SettingsSection {
             Self::Notifications => &NOTIFICATIONS_ANCHORS,
             Self::Privacy => &PRIVACY_ANCHORS,
             Self::Threads => &THREADS_ANCHORS,
+            Self::About => &ABOUT_ANCHORS,
         }
     }
 
@@ -244,6 +256,7 @@ impl SettingsSection {
             Self::Notifications => &NOTIFICATIONS_PRIMITIVES,
             Self::Privacy => &PRIVACY_PRIMITIVES,
             Self::Threads => &THREADS_PRIMITIVES,
+            Self::About => &ABOUT_PRIMITIVES,
         }
     }
 }
@@ -263,6 +276,7 @@ pub fn section_for_href(href: &str) -> Option<SettingsSection> {
         "/settings/notifications" => Some(SettingsSection::Notifications),
         "/settings/privacy" => Some(SettingsSection::Privacy),
         "/settings/threads" => Some(SettingsSection::Threads),
+        "/settings/about" => Some(SettingsSection::About),
         path if path == "/settings/engines" || path.starts_with("/settings/engines/") => {
             Some(SettingsSection::Engines)
         }
@@ -345,6 +359,7 @@ impl SettingsShell {
                 )
                 | (SettingsSection::Privacy, SettingsSection::Privacy,)
                 | (SettingsSection::Threads, SettingsSection::Threads,)
+                | (SettingsSection::About, SettingsSection::About)
         )
     }
 
@@ -678,6 +693,7 @@ pub const fn settings_section_for_route(route: SettingsRoute) -> SettingsSection
         SettingsRoute::Notifications => SettingsSection::Notifications,
         SettingsRoute::Privacy => SettingsSection::Privacy,
         SettingsRoute::Threads => SettingsSection::Threads,
+        SettingsRoute::About => SettingsSection::About,
     }
 }
 
@@ -694,6 +710,7 @@ pub const fn section_route(section: SettingsSection) -> SettingsRoute {
         SettingsSection::Notifications => SettingsRoute::Notifications,
         SettingsSection::Privacy => SettingsRoute::Privacy,
         SettingsSection::Threads => SettingsRoute::Threads,
+        SettingsSection::About => SettingsRoute::About,
     }
 }
 

@@ -1,0 +1,22 @@
+[package]
+name = "artisan-build-info"
+description = "Build identity for installed Artisan payloads"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] } # workspace-absent
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.27.0" # workspace-absent
+
+[lints]
+workspace = true
+
+[[test]]
+name = "build_info"
+path = "../../tests/build_info/build_info.rs"

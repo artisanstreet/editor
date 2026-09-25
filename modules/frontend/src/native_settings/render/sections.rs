@@ -102,6 +102,7 @@ impl SettingsScreen {
             SettingsSection::Appearance,
             SettingsSection::Notifications,
             SettingsSection::Privacy,
+            SettingsSection::About,
         ] {
             let selector = format!("settings-nav-{}", section.label().to_lowercase());
             let target = section_route(section);
@@ -1644,6 +1645,7 @@ impl SettingsScreen {
             SettingsRoute::Notifications => self.render_notifications(theme),
             SettingsRoute::Privacy => self.render_privacy(theme),
             SettingsRoute::Threads => self.render_threads(theme),
+            SettingsRoute::About => Self::render_about(theme),
         };
         div().flex().flex_col().flex_1().min_w_0().child(section)
     }

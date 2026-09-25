@@ -1,8 +1,8 @@
 //! Launching the staged Editor with bounded startup confirmation.
 //!
-//! The launcher spawns the **staged** Editor (`<home>/versions/dev`), never
-//! a build-output binary, and refuses to stage while the readiness receipt
-//! identifies a Forge running the staged binary. After spawning, it waits
+//! The launcher spawns the **installed** Editor (`<root>/versions/<v>`),
+//! never a build-output binary. Superseded dev instances are retired by the
+//! installer before activation, so no live Forge runs the old binaries. After spawning, it waits
 //! for the opt-in startup receipt the Editor's own transport service
 //! writes once authenticated initial queries complete — the existing
 //! startup signal, not a separate probe, so no bootstrap credential is
@@ -18,7 +18,6 @@ use std::{
 };
 
 use artisan_editor_cli::process::{self, ForgeReadiness, ForgeReadinessStatus};
-use fs2::FileExt;
 
 use crate::{
     error::DevError,
@@ -53,7 +52,7 @@ pub const MAX_RECEIPT_TEXT: usize = 256;
 #[must_use]
 pub fn fresh_receipt_path(paths: &DevPaths) -> PathBuf {
     paths
-        .dev_dir
+        .runner_dir()
         .join(format!("startup-receipt-{}.json", std::process::id()))
 }
 
@@ -80,16 +79,17 @@ pub fn clear_stale_receipt(path: &Path) -> Result<(), DevError> {
     }
 }
 
-/// Staged Editor binary launched by every run.
+/// Installed Editor binary of one version root.
 #[must_use]
-pub fn staged_editor(paths: &DevPaths) -> PathBuf {
-    paths.version_bin.join(exe_name("editor"))
+pub fn staged_editor(version_root: &Path) -> PathBuf {
+    version_root.join("bin").join(exe_name("editor"))
 }
 
-/// Staged Forge binary the production startup launches.
+/// Installed Forge binary of one version root, which the Editor's owned
+/// startup launches.
 #[must_use]
-pub fn staged_forge(paths: &DevPaths) -> PathBuf {
-    paths.version_bin.join(exe_name("forge"))
+pub fn staged_forge(version_root: &Path) -> PathBuf {
+    version_root.join("bin").join(exe_name("forge"))
 }
 
 /// Outcome of waiting for the startup receipt.

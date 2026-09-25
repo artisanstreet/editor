@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Build and launch the isolated development installation."""
-import argparse
-from build_support import ROOT, build, executable, run
+"""Build, install, and launch the development installation.
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--profile', choices=['dev', 'performance', 'release'], default='dev')
-args, launcher_args = parser.parse_known_args()
-bin_dir = build(args.profile)
-run(str(executable(bin_dir, 'dev')), '--bin-dir', str(bin_dir),
-    '--dev-dir', str(ROOT / '.dist/dev'), *launcher_args)
+A thin wrapper over `cargo dev` (the Rust runner in scripts/native_dev);
+every argument is passed through, for example `python3 scripts/dev.py stage
+--profile performance`. See `cargo dev --help`.
+"""
+import sys
+
+from build_support import run
+
+run('cargo', 'dev', *sys.argv[1:])

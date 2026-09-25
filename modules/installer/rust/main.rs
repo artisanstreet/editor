@@ -1,24 +1,11 @@
-mod archive;
-mod background_process;
-mod error;
-mod install;
-mod integrations;
-mod manifest;
-mod payload;
-mod platform;
-mod processes;
-mod shortcuts;
-
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
-use error::{InstallerError, Result};
-use install::{
-    InstallIntegrationOptions, InstallOptions, diagnose, install, prepare_update, repair, uninstall,
+use artisan_install::{
+    InstallIntegrationOptions, InstallOptions, LOCAL_CHANNEL, Platform, ReleaseSource, Result,
+    RetirementPolicy, TrustKey, diagnose, install, local_trust, prepare_update, prune, repair,
+    schedule_self_cleanup, uninstall,
 };
-use manifest::TrustKey;
-use platform::Platform;
-use processes::RetirementPolicy;
+use clap::{Args, Parser, Subcommand};
 use url::Url;
 
 const DEFAULT_MANIFEST: &str = "https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release-manifest.json";
@@ -46,6 +33,11 @@ struct IntegrationArguments {
     /// install beside an existing installation.
     #[arg(long, global = true)]
     skip_protocol: bool,
+
+    /// Leave the user PATH alone. For a side-by-side install whose `ae` must
+    /// not shadow the primary installation's.
+    #[arg(long, global = true)]
+    skip_path: bool,
 }
 
 #[derive(Args, Debug)]
@@ -66,7 +58,7 @@ struct ActivationArguments {
 }
 
 #[derive(Debug, Parser)]
-#[command(version, about)]
+#[command(version = artisan_build_info::version_line(), about)]
 struct Arguments {
     #[command(subcommand)]
     operation: Option<Operation>,
@@ -78,6 +70,17 @@ struct Arguments {
     /// Detached signature URL. Defaults to the manifest URL with `.json` replaced by `.sig`.
     #[arg(long, global = true)]
     signature_url: Option<Url>,
+
+    /// Install from a manifest URL, a release directory (release-tool output),
+    /// or an unpacked payload with a signed tree manifest, instead of
+    /// --manifest-url.
+    #[arg(long, global = true, value_name = "URL_OR_DIRECTORY", conflicts_with_all = ["manifest_url", "signature_url"])]
+    from: Option<String>,
+
+    /// Channel the release must belong to. `dev` releases are verified with
+    /// the installation's own local signing key instead of the release key.
+    #[arg(long, global = true, value_parser = ["stable", "beta", "nightly", "dev"])]
+    channel: Option<String>,
 
     /// Ed25519 public key as 32-byte hexadecimal. Development builds only:
     /// release builds refuse this override and use their embedded release key.
@@ -110,6 +113,13 @@ enum Operation {
     Update,
     /// Restore bootstrap-owned launchers, PATH integration, and installation health.
     Repair,
+    /// Remove superseded versions, keeping the active one and the most recent
+    /// others for rollback. Versions a running Editor or Forge uses are kept.
+    Prune {
+        /// Inactive versions to keep.
+        #[arg(long, default_value_t = 2)]
+        keep: usize,
+    },
     /// Remove installed binaries and owned integrations.
     Uninstall {
         /// Also permanently remove Forge data, projects, and conversations.
@@ -131,13 +141,13 @@ async fn run() -> Result<()> {
     let platform = Platform::detect()?;
     let install_root_env = std::env::var_os("ARTISAN_INSTALL_ROOT").map(PathBuf::from);
     let artisan_home_env = std::env::var_os("ARTISAN_HOME").map(PathBuf::from);
-    let root = platform::resolve_install_root(
+    let root = artisan_install::resolve_install_root(
         arguments.install_root.as_deref(),
         install_root_env.as_deref(),
         artisan_home_env.as_deref(),
     )?;
     #[cfg(debug_assertions)]
-    platform::forbid_default_install_root(&root)?;
+    artisan_install::forbid_default_install_root(&root)?;
 
     if let Some(operation) = arguments.operation.as_ref() {
         match operation {
@@ -146,41 +156,29 @@ async fn run() -> Result<()> {
                 &root,
                 (!arguments.activation.skip_retire).then_some(RetirementPolicy {
                     force: arguments.activation.force,
+                    close_editors_first: false,
                 }),
             )?,
             Operation::Update => {
-                let trust = TrustKey::resolve(arguments.public_key.as_deref())?;
-                install(make_install_options(
-                    &arguments, platform, root, trust, false,
-                ))
-                .await?;
+                install(make_install_options(&arguments, platform, root, false)?).await?;
             }
             Operation::Repair => repair(&root)?,
+            Operation::Prune { keep } => {
+                let report = prune(&root, *keep)?;
+                for version in &report.removed {
+                    println!("removed {version}");
+                }
+                for version in &report.in_use {
+                    println!("kept {version} (in use)");
+                }
+            }
             Operation::Uninstall { remove_data } => uninstall(&root, *remove_data)?,
         }
         return Ok(());
     }
 
-    let trust = TrustKey::resolve(arguments.public_key.as_deref())?;
-    install(InstallOptions {
-        signature_url: arguments.signature_url.unwrap_or_else(|| {
-            Url::parse(&arguments.manifest_url.as_str().replace(".json", ".sig"))
-                .expect("derived signature URL")
-        }),
-        manifest_url: arguments.manifest_url,
-        platform,
-        install_root: root,
-        trust,
-        run_setup: !arguments.activation.skip_setup,
-        integrations: InstallIntegrationOptions {
-            register_protocol: !arguments.integrations.skip_protocol,
-            register_shortcuts: !arguments.integrations.skip_shortcuts,
-        },
-        retirement: (!arguments.activation.skip_retire).then_some(RetirementPolicy {
-            force: arguments.activation.force,
-        }),
-    })
-    .await?;
+    let run_setup = !arguments.activation.skip_setup;
+    install(make_install_options(&arguments, platform, root, run_setup)?).await?;
 
     if arguments.automation.self_cleanup {
         schedule_self_cleanup()?;
@@ -192,69 +190,43 @@ fn make_install_options(
     arguments: &Arguments,
     platform: Platform,
     install_root: PathBuf,
-    trust: TrustKey,
     run_setup: bool,
-) -> InstallOptions {
-    InstallOptions {
-        signature_url: arguments.signature_url.clone().unwrap_or_else(|| {
-            Url::parse(&arguments.manifest_url.as_str().replace(".json", ".sig"))
-                .expect("derived signature URL")
-        }),
-        manifest_url: arguments.manifest_url.clone(),
+) -> Result<InstallOptions> {
+    let source = match &arguments.from {
+        Some(location) => ReleaseSource::from_location(location)?,
+        None => match &arguments.signature_url {
+            Some(signature_url) => ReleaseSource::Remote {
+                manifest_url: arguments.manifest_url.clone(),
+                signature_url: signature_url.clone(),
+            },
+            None => ReleaseSource::remote(arguments.manifest_url.clone())?,
+        },
+    };
+    // The dev channel trusts only the installation's own local key; every
+    // other channel trusts this build's release anchor.
+    let trust = if arguments.channel.as_deref() == Some(LOCAL_CHANNEL) {
+        local_trust(&install_root)?
+    } else {
+        TrustKey::resolve(arguments.public_key.as_deref())?
+    };
+    Ok(InstallOptions {
+        source,
         platform,
         install_root,
         trust,
+        expected_channel: arguments.channel.clone(),
         run_setup,
+        restore_forge: true,
         integrations: InstallIntegrationOptions {
             register_protocol: !arguments.integrations.skip_protocol,
             register_shortcuts: !arguments.integrations.skip_shortcuts,
+            register_path: !arguments.integrations.skip_path,
         },
         retirement: (!arguments.activation.skip_retire).then_some(RetirementPolicy {
             force: arguments.activation.force,
+            close_editors_first: false,
         }),
-    }
-}
-
-fn schedule_self_cleanup() -> Result<()> {
-    let executable = std::env::current_exe().map_err(InstallerError::CurrentExecutable)?;
-    let temporary_root = std::env::temp_dir()
-        .canonicalize()
-        .map_err(InstallerError::TemporaryDirectory)?;
-    let executable = executable
-        .canonicalize()
-        .map_err(InstallerError::CurrentExecutable)?;
-    if !executable.starts_with(&temporary_root) {
-        return Err(InstallerError::UnsafeSelfCleanup(executable));
-    }
-
-    #[cfg(windows)]
-    {
-        background_process::detached_background_command("cmd.exe")
-            .args([
-                "/d",
-                "/s",
-                "/c",
-                "ping 127.0.0.1 -n 3 > nul & del /f /q \"%ARTISAN_BOOTSTRAP_DELETE%\"",
-            ])
-            .env("ARTISAN_BOOTSTRAP_DELETE", &executable)
-            .spawn()
-            .map_err(InstallerError::CleanupHelper)?;
-    }
-    #[cfg(unix)]
-    {
-        std::process::Command::new("sh")
-            .args([
-                "-c",
-                "sleep 1; rm -f -- \"$1\"",
-                "ae-installer-cleanup",
-                executable
-                    .to_str()
-                    .ok_or_else(|| InstallerError::NonUtf8Path(executable.clone()))?,
-            ])
-            .spawn()
-            .map_err(InstallerError::CleanupHelper)?;
-    }
-    Ok(())
+    })
 }
 
 #[cfg(test)]

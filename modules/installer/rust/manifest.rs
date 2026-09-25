@@ -14,9 +14,11 @@
 //! A release build compiled without an anchor is a compile-time error; see
 //! `modules/installer/RELEASE_TRUST.md` for the release procedure.
 
+use std::collections::BTreeMap;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::{InstallerError, Result};
@@ -83,14 +85,18 @@ const _: () = {
     }
 };
 
-/// Whether the verification key originates from the pinned release anchor or
-/// from an explicit development override.
+/// Whether the verification key originates from the pinned release anchor,
+/// from an explicit development override, or from an installation root's
+/// own local signing key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TrustIdentity {
     /// Development trust: the caller supplied the key; no key id is pinned.
     Unpinned,
     /// Release trust: the manifest must name exactly this key id.
     Pinned(String),
+    /// Local trust: the key an installation root generated for locally built
+    /// releases. Pinned to its key id and valid only for the `dev` channel.
+    Local(String),
 }
 
 #[derive(Clone)]
@@ -102,6 +108,12 @@ pub struct TrustKey {
 impl TrustKey {
     /// Resolves the trust key for this process. Release builds use only their
     /// embedded anchor; development builds require an explicit override.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallerError`] when a release build lacks its anchor or is
+    /// given an override, a development build lacks a key, or the key is
+    /// malformed.
     pub fn resolve(configured: Option<&str>) -> Result<Self> {
         Self::resolve_for(build_trust(), configured)
     }
@@ -156,7 +168,30 @@ impl TrustKey {
             .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))
     }
 
+    /// Trust in one installation root's local signing key.
+    pub(crate) const fn local(key: VerifyingKey, key_id: String) -> Self {
+        Self {
+            key,
+            identity: TrustIdentity::Local(key_id),
+        }
+    }
+
+    /// Whether this is an installation root's local signing key, which may
+    /// only ever verify `dev`-channel releases.
+    #[must_use]
+    pub const fn is_local(&self) -> bool {
+        matches!(self.identity, TrustIdentity::Local(_))
+    }
+
+    const fn pinned_key_id(&self) -> Option<&String> {
+        match &self.identity {
+            TrustIdentity::Unpinned => None,
+            TrustIdentity::Pinned(key_id) | TrustIdentity::Local(key_id) => Some(key_id),
+        }
+    }
+
     #[cfg(test)]
+    #[must_use]
     pub fn from_verifying_key(key: VerifyingKey) -> Self {
         Self {
             key,
@@ -185,7 +220,7 @@ pub struct ReleaseManifest {
     pub artifacts: Vec<Artifact>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SigningIdentity {
     pub key_id: String,
@@ -254,8 +289,45 @@ pub async fn fetch(
     decode(&bytes, &signature, trust)
 }
 
-fn decode(bytes: &[u8], signature_bytes: &[u8], trust: &TrustKey) -> Result<ReleaseManifest> {
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+pub(crate) fn decode(
+    bytes: &[u8],
+    signature_bytes: &[u8],
+    trust: &TrustKey,
+) -> Result<ReleaseManifest> {
+    let envelope = verify_signature(bytes, signature_bytes, trust)?;
+    let manifest: ReleaseManifest =
+        serde_json::from_slice(bytes).map_err(InstallerError::InvalidPayload)?;
+    if manifest.format_version != 1 || !manifest.signing_identity.matches(&envelope) {
+        return Err(InstallerError::InvalidSignature);
+    }
+    require_pinned_key_id(trust, envelope.key_id)?;
+    Ok(manifest)
+}
+
+/// Verifies a signed tree manifest exactly like a release manifest.
+pub(crate) fn decode_tree(
+    bytes: &[u8],
+    signature_bytes: &[u8],
+    trust: &TrustKey,
+) -> Result<TreeManifest> {
+    let envelope = verify_signature(bytes, signature_bytes, trust)?;
+    let manifest: TreeManifest =
+        serde_json::from_slice(bytes).map_err(InstallerError::InvalidPayload)?;
+    if manifest.format_version != 1 || !manifest.signing_identity.matches(&envelope) {
+        return Err(InstallerError::InvalidSignature);
+    }
+    require_pinned_key_id(trust, envelope.key_id)?;
+    Ok(manifest)
+}
+
+/// Checks the detached Ed25519 envelope over `bytes` against `trust`.
+fn verify_signature(
+    bytes: &[u8],
+    signature_bytes: &[u8],
+    trust: &TrustKey,
+) -> Result<ManifestSignature> {
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES || signature_bytes.len() as u64 > MAX_MANIFEST_BYTES
+    {
         return Err(InstallerError::ManifestTooLarge(MAX_MANIFEST_BYTES));
     }
     let envelope: ManifestSignature =
@@ -263,32 +335,102 @@ fn decode(bytes: &[u8], signature_bytes: &[u8], trust: &TrustKey) -> Result<Rele
     if envelope.algorithm != "ed25519" {
         return Err(InstallerError::InvalidSignature);
     }
-    let signature_bytes = STANDARD
-        .decode(envelope.signature)
+    let raw = STANDARD
+        .decode(&envelope.signature)
         .map_err(|_| InstallerError::InvalidSignature)?;
-    let signature =
-        Signature::from_slice(&signature_bytes).map_err(|_| InstallerError::InvalidSignature)?;
+    let signature = Signature::from_slice(&raw).map_err(|_| InstallerError::InvalidSignature)?;
     trust
         .key
         .verify(bytes, &signature)
         .map_err(|_| InstallerError::InvalidSignature)?;
-    let manifest: ReleaseManifest =
-        serde_json::from_slice(bytes).map_err(InstallerError::InvalidPayload)?;
-    if manifest.format_version != 1
-        || manifest.signing_identity.algorithm != envelope.algorithm
-        || manifest.signing_identity.key_id != envelope.key_id
-    {
-        return Err(InstallerError::InvalidSignature);
-    }
-    if let TrustIdentity::Pinned(expected) = &trust.identity
-        && envelope.key_id != *expected
-    {
-        return Err(InstallerError::UntrustedSigningKey {
+    Ok(envelope)
+}
+
+/// A verifying signature is not enough for pinned trust: the manifest must
+/// also name the pinned key id.
+fn require_pinned_key_id(trust: &TrustKey, actual: String) -> Result<()> {
+    match trust.pinned_key_id() {
+        Some(expected) if *expected != actual => Err(InstallerError::UntrustedSigningKey {
             expected: expected.clone(),
-            actual: envelope.key_id,
-        });
+            actual,
+        }),
+        _ => Ok(()),
     }
-    Ok(manifest)
+}
+
+impl SigningIdentity {
+    fn matches(&self, envelope: &ManifestSignature) -> bool {
+        self.algorithm == envelope.algorithm && self.key_id == envelope.key_id
+    }
+}
+
+/// Signed description of an unpacked payload directory (a [`TreeManifest`]
+/// file beside `bin/` and `resources/`), produced for locally built releases.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TreeManifest {
+    pub format_version: u8,
+    pub product_version: String,
+    pub editor_forge_compatibility_version: String,
+    pub channel: String,
+    pub signing_identity: SigningIdentity,
+    pub minimum_installer_version: String,
+    pub minimum_cli_version: String,
+    pub platform: String,
+    pub architecture: String,
+    /// Payload-relative path to lowercase hex SHA-256 for every payload file.
+    pub files: BTreeMap<String, String>,
+}
+
+/// File name of a tree manifest inside its payload directory.
+pub const TREE_MANIFEST_NAME: &str = "tree-manifest.json";
+
+/// File name of a tree manifest's detached signature.
+pub const TREE_SIGNATURE_NAME: &str = "tree-manifest.sig";
+
+/// What activation records about a verified release, whatever its source.
+#[derive(Clone, Debug)]
+pub(crate) struct ReleaseRecord {
+    pub product_version: String,
+    pub editor_forge_compatibility_version: String,
+    pub minimum_installer_version: String,
+    pub minimum_cli_version: String,
+    pub channel: String,
+    pub signing_key_id: String,
+    /// Artifact id, or `tree` for an unpacked payload.
+    pub artifact_id: String,
+    /// Archive digest, or the tree manifest digest for an unpacked payload.
+    pub artifact_sha256: String,
+}
+
+impl ReleaseManifest {
+    pub(crate) fn record(&self, artifact: &Artifact) -> ReleaseRecord {
+        ReleaseRecord {
+            product_version: self.product_version.clone(),
+            editor_forge_compatibility_version: self.editor_forge_compatibility_version.clone(),
+            minimum_installer_version: self.minimum_installer_version.clone(),
+            minimum_cli_version: self.minimum_cli_version.clone(),
+            channel: self.channel.clone(),
+            signing_key_id: self.signing_identity.key_id.clone(),
+            artifact_id: artifact.id.clone(),
+            artifact_sha256: artifact.sha256.clone(),
+        }
+    }
+}
+
+impl TreeManifest {
+    pub(crate) fn record(&self, manifest_sha256: String) -> ReleaseRecord {
+        ReleaseRecord {
+            product_version: self.product_version.clone(),
+            editor_forge_compatibility_version: self.editor_forge_compatibility_version.clone(),
+            minimum_installer_version: self.minimum_installer_version.clone(),
+            minimum_cli_version: self.minimum_cli_version.clone(),
+            channel: self.channel.clone(),
+            signing_key_id: self.signing_identity.key_id.clone(),
+            artifact_id: "tree".to_owned(),
+            artifact_sha256: manifest_sha256,
+        }
+    }
 }
 
 #[cfg(test)]

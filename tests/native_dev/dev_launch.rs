@@ -1,8 +1,8 @@
-//! Launch control: staged paths and bounded startup confirmation.
+//! Launch control: installed paths and bounded startup confirmation.
 //!
-//! Two guarantees are pinned here. First, the launcher spawns the staged
-//! Editor and checks the staged Forge — never build-output paths — so a
-//! test with different source and staged directories proves the wiring.
+//! Two guarantees are pinned here. First, the launcher spawns the installed
+//! Editor and checks the installed Forge — never build-output paths — so a
+//! test with different source and installed directories proves the wiring.
 //! Second, startup confirmation reads the Editor's own receipt: ready and
 //! failed receipts resolve immediately, while missing or corrupt receipts
 //! wait out the (short, test-controlled) deadline.
@@ -32,6 +32,13 @@ fn cleanup(path: &Path) {
     let _ = std::fs::remove_dir_all(path);
 }
 
+fn version_root(paths: &DevPaths) -> PathBuf {
+    paths
+        .home
+        .join("versions")
+        .join("0.0.0-dev.1+gabc.b0123456789")
+}
+
 #[test]
 fn receipt_env_and_schema_match_the_frontend_contract() {
     assert_eq!(
@@ -58,15 +65,16 @@ fn launch_uses_staged_paths_not_sources() {
         installer: source_path("installer"),
     };
     let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
-    assert_ne!(staged_editor(&paths), set.editor);
-    assert_ne!(staged_forge(&paths), set.forge);
+    let installed = version_root(&paths);
+    assert_ne!(staged_editor(&installed), set.editor);
+    assert_ne!(staged_forge(&installed), set.forge);
     assert_eq!(
-        staged_editor(&paths),
-        paths.version_bin.join(native_dev::exe_name("editor"))
+        staged_editor(&installed),
+        installed.join("bin").join(native_dev::exe_name("editor"))
     );
     assert_eq!(
-        staged_forge(&paths),
-        paths.version_bin.join(native_dev::exe_name("forge"))
+        staged_forge(&installed),
+        installed.join("bin").join(native_dev::exe_name("forge"))
     );
     cleanup(&dev_dir);
 }
@@ -260,7 +268,8 @@ fn readiness_home(case: &str) -> (PathBuf, DevPaths) {
 fn missing_readiness_reconciles_to_absent() {
     let (dev_dir, paths) = readiness_home("reconcile-missing");
     assert_eq!(
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("missing reconciles"),
+        reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+            .expect("missing reconciles"),
         ReadinessReconcile::Absent
     );
     cleanup(&dev_dir);
@@ -286,7 +295,8 @@ fn stale_valid_readiness_permits_a_second_launch() {
     std::fs::write(&sibling, b"operator notes").expect("sibling");
 
     assert_eq!(
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("stale reconciles"),
+        reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+            .expect("stale reconciles"),
         ReadinessReconcile::CleanedStale { pid: u32::MAX }
     );
     assert!(
@@ -302,8 +312,8 @@ fn stale_valid_readiness_permits_a_second_launch() {
 fn malformed_readiness_is_preserved_and_refused() {
     let (dev_dir, paths) = readiness_home("reconcile-malformed");
     std::fs::write(paths.readiness_path(), b"not a receipt").expect("malformed receipt");
-    let error =
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("malformed refused");
+    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+        .expect_err("malformed refused");
     assert!(
         error.to_string().contains("malformed"),
         "unexpected: {error}"
@@ -319,8 +329,8 @@ fn malformed_readiness_is_preserved_and_refused() {
 fn oversized_readiness_is_preserved_and_refused() {
     let (dev_dir, paths) = readiness_home("reconcile-oversized");
     std::fs::write(paths.readiness_path(), vec![b'x'; 5000]).expect("oversized receipt");
-    let error =
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("oversized refused");
+    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+        .expect_err("oversized refused");
     assert!(
         error.to_string().contains("size bound"),
         "unexpected: {error}"
@@ -336,8 +346,8 @@ fn oversized_readiness_is_preserved_and_refused() {
 fn non_file_readiness_is_preserved_and_refused() {
     let (dev_dir, paths) = readiness_home("reconcile-dir");
     std::fs::create_dir_all(paths.readiness_path()).expect("directory at receipt path");
-    let error =
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("directory refused");
+    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+        .expect_err("directory refused");
     assert!(
         error.to_string().contains("not a regular file"),
         "unexpected: {error}"
@@ -361,7 +371,8 @@ fn publish_temporaries_are_never_swept() {
     std::fs::write(&exact, b"orphan").expect("exact tmp");
     std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
     assert_eq!(
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("stale reconciles"),
+        reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+            .expect("stale reconciles"),
         ReadinessReconcile::CleanedStale { pid: u32::MAX }
     );
     assert!(!paths.readiness_path().exists(), "stale receipt removed");
@@ -384,8 +395,8 @@ fn held_custody_refuses_and_preserves_the_receipt() {
         .open(paths.custody_path())
         .expect("custody opens");
     fs2::FileExt::try_lock_exclusive(&held).expect("test holds custody");
-    let error =
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("custody refuses");
+    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+        .expect_err("custody refuses");
     assert!(
         matches!(error, native_dev::DevError::CustodyHeld { .. }),
         "unexpected: {error}"
@@ -398,7 +409,8 @@ fn held_custody_refuses_and_preserves_the_receipt() {
 
     // With custody released, the same stale receipt reconciles normally.
     assert_eq!(
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect("stale reconciles"),
+        reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+            .expect("stale reconciles"),
         ReadinessReconcile::CleanedStale { pid: u32::MAX }
     );
     assert!(!paths.readiness_path().exists());
@@ -414,8 +426,8 @@ fn missing_custody_shape_fails_closed() {
     // inventing custody to justify removal.
     std::fs::remove_dir_all(paths.custody_path().parent().expect("custody parent"))
         .expect("custody dir removed");
-    let error =
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("missing refused");
+    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+        .expect_err("missing refused");
     assert!(error.to_string().contains("custody"), "unexpected: {error}");
     assert!(
         paths.readiness_path().exists(),
@@ -433,16 +445,16 @@ fn symlinked_parent_refuses_and_preserves() {
     use std::os::unix::fs::symlink;
 
     let outer = scratch_dev_dir("reconcile-symlink");
-    let real = outer.join("real").join("dev").join("home");
+    let real = outer.join("real").join("Artisan Street Dev");
     std::fs::create_dir_all(real.join("readiness")).expect("real readiness");
     std::fs::create_dir_all(real.join("custody")).expect("real custody");
     let linked = outer.join("linked");
     symlink(outer.join("real"), &linked).expect("ancestor symlink");
     // Every owned path now resolves through the symlinked ancestor.
-    let paths = DevPaths::new(&linked.join("dev")).expect("absolute dev dir");
+    let paths = DevPaths::new(&linked.join("Artisan Street Dev")).expect("absolute root");
     std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
-    let error =
-        reconcile_stale_readiness(&paths, &staged_forge(&paths)).expect_err("symlink refused");
+    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
+        .expect_err("symlink refused");
     assert!(
         error.to_string().contains("symbolic link"),
         "unexpected: {error}"

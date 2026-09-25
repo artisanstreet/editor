@@ -1,41 +1,37 @@
-//! Installation workflow and lifecycle operations.
+//! Activation and lifecycle operations.
 //!
-//! `install` drives manifest fetch, artifact download and extraction, stage
-//! transfer, stable CLI installation, activation, and post-activation
-//! integration. The remaining public entry points maintain an existing
-//! installation: repair, diagnose, uninstall, and prepare-update.
+//! Activation takes a verified release tree through stable CLI installation,
+//! the activation pointer swap, and post-activation integration. The
+//! remaining public entry points maintain an existing installation: repair,
+//! diagnose, uninstall, and prepare-update. Acquiring a release lives in the
+//! sibling `release` module.
 
 use std::{
-    io::Write,
     path::{Path, PathBuf},
     process::Stdio,
 };
 
-use chrono::Utc;
-use serde::Serialize;
-use sha2::{Digest, Sha256};
-use url::Url;
-
 use crate::{
-    archive,
     background_process::{background_command, detached_background_command},
     error::{InstallerError, Result, io},
     integrations::{
         OwnedIntegration, apply_protocol, prepare_protocol, remove_protocol, verify_protocol,
     },
-    manifest::{Artifact, TrustKey, fetch},
+    manifest::{ReleaseRecord, TrustKey},
     platform::Platform,
     processes::{Retirement, RetirementPolicy, retire_superseded},
     shortcuts,
 };
+use chrono::Utc;
+use serde::Serialize;
 
+use super::source::ReleaseSource;
 use super::{
     authority::{
         EntryKind, FileIdentity, InstallerLock, PendingMarker, PendingMarkerKind, RootMode,
-        StageLease, complete_install_locked, copy_owned_file, create_owned_file,
-        ensure_owned_directory, hash_file, ordinary_directory_exists, ordinary_file_exists,
-        ordinary_metadata, ordinary_path_identity, owned_file_identity, remove_owned_file,
-        require_identity, sync_owned_file,
+        copy_owned_file, create_owned_file, ensure_owned_directory, hash_file,
+        ordinary_directory_exists, ordinary_file_exists, ordinary_metadata, ordinary_path_identity,
+        owned_file_identity, remove_owned_file, require_identity, sync_owned_file,
     },
     path_registry,
     state::{
@@ -44,9 +40,6 @@ use super::{
         schedule_installation_cleanup, validate_state_root,
     },
 };
-
-const ABSOLUTE_ARTIFACT_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
-const NATIVE_PAYLOAD_LABEL: &str = "native payload";
 
 /// First install configures and verifies Forge, but deliberately leaves launch
 /// to the editor's background handoff. That gives the window exact ownership
@@ -62,211 +55,40 @@ pub struct InstallIntegrationOptions {
     pub register_protocol: bool,
     /// Whether this install owns the desktop and Start Menu launchers.
     pub register_shortcuts: bool,
+    /// Whether this install puts its permanent `ae` on the user PATH. A
+    /// side-by-side install (such as the `dev` channel) must not shadow the
+    /// primary installation's `ae`.
+    pub register_path: bool,
 }
 
 pub struct InstallOptions {
-    pub manifest_url: Url,
-    pub signature_url: Url,
+    /// Where the release comes from.
+    pub source: ReleaseSource,
     pub platform: Platform,
     pub install_root: PathBuf,
     pub trust: TrustKey,
+    /// Channel the release must belong to; `None` accepts the release's own
+    /// channel (an existing installation still pins its channel).
+    pub expected_channel: Option<String>,
     pub run_setup: bool,
+    /// Whether a Forge stopped by retirement is started again from the new
+    /// release. A caller that relaunches the Editor itself leaves this off so
+    /// the Editor owns the Forge it starts.
+    pub restore_forge: bool,
     pub integrations: InstallIntegrationOptions,
     /// `None` leaves superseded editor and Forge processes running. A policy
     /// retires them and controls whether a stuck Forge may be ended.
     pub retirement: Option<RetirementPolicy>,
 }
 
-#[allow(clippy::too_many_lines)]
-pub async fn install(options: InstallOptions) -> Result<()> {
-    let root_lock = InstallerLock::acquire(&options.install_root, RootMode::Create)?;
-    root_lock.fence()?;
-    recover_activation_pointer_swap(&root_lock)?;
-    // Plain HTTP is permitted only from this machine's own loopback, which
-    // cannot be intercepted off-host. A locally built, locally signed release
-    // is installed by serving its output directory on 127.0.0.1; every remote
-    // manifest still requires TLS, and the signature check applies to both.
-    let loopback_manifest = options.manifest_url.host().is_some_and(|host| match host {
-        url::Host::Ipv4(address) => address.is_loopback(),
-        url::Host::Ipv6(address) => address.is_loopback(),
-        url::Host::Domain(domain) => domain == "localhost",
-    });
-    let client = reqwest::Client::builder()
-        .https_only(!loopback_manifest)
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .map_err(InstallerError::ManifestRequest)?;
-    let artifact_base_url = options
-        .manifest_url
-        .join("./")
-        .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))?;
-    let manifest = fetch(
-        &client,
-        options.manifest_url.clone(),
-        options.signature_url.clone(),
-        &options.trust,
-    )
-    .await?;
-    let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-        .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))?;
-    let minimum_version = semver::Version::parse(&manifest.minimum_installer_version)
-        .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))?;
-    if current_version < minimum_version {
-        return Err(InstallerError::InstallerTooOld {
-            current: current_version.to_string(),
-            minimum: minimum_version.to_string(),
-        });
-    }
-    let product_version = semver::Version::parse(&manifest.product_version)
-        .map_err(|error| InstallerError::InvalidRelease(error.to_string()))?;
-    let compatibility_version =
-        semver::Version::parse(&manifest.editor_forge_compatibility_version)
-            .map_err(|error| InstallerError::InvalidRelease(error.to_string()))?;
-    let minimum_cli_version = semver::Version::parse(&manifest.minimum_cli_version)
-        .map_err(|error| InstallerError::InvalidRelease(error.to_string()))?;
-    if product_version != compatibility_version || product_version < minimum_cli_version {
-        return Err(InstallerError::InvalidRelease(
-            "product, Editor/Forge compatibility, and minimum CLI versions disagree".to_owned(),
-        ));
-    }
-    let versions = options.install_root.join("versions");
-    ensure_owned_directory(&versions)?;
-    let existing_release = versions.join(&manifest.product_version);
-    let existing_release = match std::fs::symlink_metadata(&existing_release) {
-        Ok(metadata) if ordinary_metadata(&metadata, EntryKind::Directory) => {
-            ordinary_path_identity(&existing_release, EntryKind::Directory)
-                .map_err(|()| InstallerError::UnsafeOwnedPath)?;
-            Some(existing_release)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Ok(_) | Err(_) => return Err(InstallerError::UnsafeOwnedPath),
-    };
-    if let Some(existing_release) = existing_release {
-        return verify_and_activate_existing(
-            &root_lock,
-            &client,
-            &options,
-            &manifest,
-            &artifact_base_url,
-            existing_release,
-        )
-        .await;
-    }
-    let stage = options.install_root.join(format!(
-        ".stage-{}-{}",
-        manifest.product_version,
-        std::process::id()
-    ));
-    root_lock.fence()?;
-    let mut stage_lease = StageLease::acquire(stage.clone(), &manifest.product_version)?;
-
-    let result = async {
-        let artifact = native_artifact(&manifest, &options.platform)?;
-        let artifact_url = artifact_url(&artifact_base_url, artifact)?;
-        install_artifact(&client, artifact, artifact_url, &stage).await?;
-        // The tree is final: record per-file digests so `ae doctor` can
-        // detect payload drift after activation.
-        crate::payload::write_manifest(&stage)?;
-
-        root_lock.fence()?;
-        let release = versions.join(&manifest.product_version);
-        match std::fs::symlink_metadata(&release) {
-            Ok(_) => {
-                return Err(InstallerError::ExistingRelease(
-                    manifest.product_version.clone(),
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(InstallerError::UnsafeOwnedPath),
-        }
-        stage_lease.transfer_to(&release)?;
-        let retirement = activate_release(&root_lock, &options, &manifest, &release)?;
-        if options.run_setup {
-            root_lock.fence()?;
-            run_setup_sequence(&release)?;
-        } else {
-            root_lock.fence()?;
-            restore_retired_forge(&options, &release, retirement)?;
-        }
-        Ok(())
-    }
-    .await;
-    complete_install_locked(&root_lock, &mut stage_lease, result)
-}
-
-/// Adopts an existing `versions/<v>` tree only after the signed release
-/// artifact has been re-downloaded, its checksum verified, and its extracted
-/// tree compared byte for byte with the tree on disk. The tree has no signed
-/// provenance of its own, so re-deriving it is the only sound way to activate
-/// it; an unverifiable or dev-staged tree is refused instead.
-async fn verify_and_activate_existing(
-    root_lock: &InstallerLock,
-    client: &reqwest::Client,
-    options: &InstallOptions,
-    manifest: &crate::manifest::ReleaseManifest,
-    artifact_base_url: &Url,
-    existing_release: PathBuf,
-) -> Result<()> {
-    let stage = options.install_root.join(format!(
-        ".stage-verify-{}-{}",
-        manifest.product_version,
-        std::process::id()
-    ));
-    root_lock.fence()?;
-    let mut stage_lease = StageLease::acquire(stage.clone(), &manifest.product_version)?;
-    let result = async {
-        let artifact = native_artifact(manifest, &options.platform)?;
-        let artifact_url = artifact_url(artifact_base_url, artifact)?;
-        install_artifact(client, artifact, artifact_url, &stage).await?;
-        root_lock.fence()?;
-        crate::payload::verify_existing_against_stage(
-            &existing_release,
-            &stage,
-            artifact,
-            &manifest.product_version,
-        )?;
-        stage_lease.cleanup()?;
-        let retirement = activate_release(root_lock, options, manifest, &existing_release)?;
-        root_lock.fence()?;
-        restore_retired_forge(options, &existing_release, retirement)?;
-        root_lock.fence()?;
-        invoke_ae(&existing_release, &["--version"])
-    }
-    .await;
-    complete_install_locked(root_lock, &mut stage_lease, result)
-}
-
-fn native_artifact<'a>(
-    manifest: &'a crate::manifest::ReleaseManifest,
-    platform: &Platform,
-) -> Result<&'a Artifact> {
-    manifest
-        .artifacts
-        .iter()
-        .find(|artifact| {
-            artifact.platform == platform.os
-                && artifact.architecture == platform.arch
-                && (platform.os != "linux" || artifact.libc.as_deref() == Some(platform_libc()))
-        })
-        .ok_or_else(|| InstallerError::MissingArtifact {
-            component: NATIVE_PAYLOAD_LABEL.to_owned(),
-            target: platform.target(),
-        })
-}
-
-fn artifact_url(base: &Url, artifact: &Artifact) -> Result<Url> {
-    base.join(&artifact.file_name)
-        .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))
-}
-
 /// Performs the shared activation steps for a release tree that has already
 /// been verified: stable CLI installation, protocol and shortcut preparation,
 /// the activation pointer swap, and integration application. Returns the
 /// retirement result so the caller can restore Forge after the final step.
-fn activate_release(
+pub(super) fn activate_release(
     root_lock: &InstallerLock,
     options: &InstallOptions,
-    manifest: &crate::manifest::ReleaseManifest,
+    record: &ReleaseRecord,
     release: &Path,
 ) -> Result<Retirement> {
     let lifecycle_ae = release_cli(release)?;
@@ -277,7 +99,12 @@ fn activate_release(
     }
     root_lock.fence()?;
     let retirement = retire_for(options, release, &lifecycle_ae)?;
-    let stable_ae = install_stable_cli(root_lock, &options.install_root, release)?;
+    let stable_ae = install_stable_cli(
+        root_lock,
+        &options.install_root,
+        release,
+        options.integrations.register_path,
+    )?;
     let protocol = if options.integrations.register_protocol {
         prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
     } else {
@@ -290,7 +117,7 @@ fn activate_release(
         root_lock,
         &options.install_root,
         release,
-        manifest,
+        record,
         options,
         &ActivationIntegrations {
             stable_ae: &stable_ae,
@@ -305,81 +132,6 @@ fn activate_release(
     root_lock.fence()?;
     shortcuts::apply(&launchers)?;
     Ok(retirement)
-}
-
-async fn install_artifact(
-    client: &reqwest::Client,
-    artifact: &Artifact,
-    artifact_url: Url,
-    stage: &Path,
-) -> Result<()> {
-    if artifact.size == 0 || artifact.size > ABSOLUTE_ARTIFACT_LIMIT {
-        return Err(InstallerError::ArtifactTooLarge {
-            url: artifact_url.clone(),
-        });
-    }
-    let response = client
-        .get(artifact_url.clone())
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|source| InstallerError::ArtifactRequest {
-            url: artifact_url.clone(),
-            source,
-        })?;
-    if response
-        .content_length()
-        .is_some_and(|size| size > artifact.size)
-    {
-        return Err(InstallerError::ArtifactTooLarge {
-            url: artifact_url.clone(),
-        });
-    }
-    let download = stage.join(format!(".{}.download", artifact.id));
-    let mut file = create_owned_file(&download)?;
-    let mut response = response;
-    let mut downloaded = 0_u64;
-    let mut hasher = Sha256::new();
-    while let Some(chunk) =
-        response
-            .chunk()
-            .await
-            .map_err(|source| InstallerError::ArtifactRequest {
-                url: artifact_url.clone(),
-                source,
-            })?
-    {
-        downloaded = downloaded.saturating_add(chunk.len() as u64);
-        if downloaded > artifact.size {
-            return Err(InstallerError::ArtifactTooLarge {
-                url: artifact_url.clone(),
-            });
-        }
-        hasher.update(&chunk);
-        file.write_all(&chunk).map_err(io(&download))?;
-    }
-    if downloaded != artifact.size {
-        return Err(InstallerError::ArtifactSizeMismatch {
-            expected: artifact.size,
-            actual: downloaded,
-        });
-    }
-    file.sync_all().map_err(io(&download))?;
-    let digest = hex::encode(hasher.finalize());
-    if !digest.eq_ignore_ascii_case(&artifact.sha256) {
-        return Err(InstallerError::ChecksumMismatch(artifact_url));
-    }
-    archive::extract(&download, artifact.format, stage, &artifact.archive_entries)?;
-    remove_owned_file(&download)?;
-    Ok(())
-}
-
-pub(crate) fn platform_libc() -> &'static str {
-    if cfg!(target_env = "musl") {
-        "musl"
-    } else {
-        "glibc"
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -438,18 +190,18 @@ fn retire_for(options: &InstallOptions, release: &Path, stable_ae: &Path) -> Res
 /// activated version. Setup-driven installs deliberately skip this: their
 /// caller opens the editor, whose background handoff must own the Forge it
 /// starts so window close can stop that exact process.
-fn restore_retired_forge(
+pub(super) fn restore_retired_forge(
     options: &InstallOptions,
     release: &Path,
     retirement: Retirement,
 ) -> Result<()> {
-    if should_restore_retired_forge(options.run_setup, retirement) {
+    if options.restore_forge && should_restore_retired_forge(options.run_setup, retirement) {
         invoke_ae(release, &["start"])?;
     }
     Ok(())
 }
 
-fn run_setup_sequence(release: &Path) -> Result<()> {
+pub(super) fn run_setup_sequence(release: &Path) -> Result<()> {
     for arguments in FIRST_RUN_CONFIGURATION_COMMANDS {
         invoke_ae(release, arguments)?;
     }
@@ -470,7 +222,7 @@ fn activate(
     lock: &InstallerLock,
     root: &Path,
     release: &Path,
-    manifest: &crate::manifest::ReleaseManifest,
+    record: &ReleaseRecord,
     options: &InstallOptions,
     integrations: &ActivationIntegrations<'_>,
 ) -> Result<()> {
@@ -507,25 +259,19 @@ fn activate(
         "install_root": root,
         "platform": options.platform.os,
         "architecture": options.platform.arch,
-        "channel": manifest.channel.as_str(),
+        "channel": record.channel.as_str(),
         "components": installed_components(),
         "integrations": integration_records,
         "installed_at": now,
         "updated_at": now,
         "activation_state": "active",
         "finalization_state": "complete",
-        "active_version": manifest.product_version.as_str(),
+        "active_version": record.product_version.as_str(),
         "permanent_ae_path": integrations.stable_ae,
         "artifact": {
-            "artifact_id": manifest.artifacts.iter()
-                .find(|artifact| artifact.platform == options.platform.os
-                    && artifact.architecture == options.platform.arch)
-                .map_or("unknown", |artifact| artifact.id.as_str()),
-            "sha256": manifest.artifacts.iter()
-                .find(|artifact| artifact.platform == options.platform.os
-                    && artifact.architecture == options.platform.arch)
-                .map_or("", |artifact| artifact.sha256.as_str()),
-            "signing_key_id": manifest.signing_identity.key_id.as_str(),
+            "artifact_id": record.artifact_id.as_str(),
+            "sha256": record.artifact_sha256.as_str(),
+            "signing_key_id": record.signing_key_id.as_str(),
         },
         "transaction": { "state": "idle" }
     });
@@ -557,7 +303,12 @@ fn activate(
     Ok(())
 }
 
-fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Result<PathBuf> {
+fn install_stable_cli(
+    lock: &InstallerLock,
+    root: &Path,
+    release: &Path,
+    integrate_path: bool,
+) -> Result<PathBuf> {
     lock.fence()?;
     let source = release_cli(release)?;
     let bin = root.join("bin");
@@ -579,7 +330,9 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
                 require_identity(&temporary, EntryKind::File, temporary_identity)?;
                 remove_owned_file(&temporary)?;
                 lock.fence()?;
-                path_registry::integrate_path(&bin)?;
+                if integrate_path {
+                    path_registry::integrate_path(&bin)?;
+                }
                 return Ok(stable);
             }
             require_identity(&stable, EntryKind::File, stable_identity)?;
@@ -595,7 +348,9 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
                         stable_identity,
                     )?;
                     lock.fence()?;
-                    path_registry::integrate_path(&bin)?;
+                    if integrate_path {
+                        path_registry::integrate_path(&bin)?;
+                    }
                     return Ok(stable);
                 }
                 #[cfg(not(windows))]
@@ -613,7 +368,9 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
     }
     std::fs::rename(&temporary, &stable).map_err(io(&stable))?;
     lock.fence()?;
-    path_registry::integrate_path(&bin)?;
+    if integrate_path {
+        path_registry::integrate_path(&bin)?;
+    }
     Ok(stable)
 }
 
@@ -672,6 +429,13 @@ fn schedule_stable_cli_replacement(
     Ok(())
 }
 
+/// Restores the stable launcher, protocol handler, and shortcuts of the
+/// installation at `root`, then runs `ae doctor`.
+///
+/// # Errors
+///
+/// Returns [`InstallerError`] when the installation state is invalid, the
+/// active release is missing, or an integration cannot be restored.
 pub fn repair(root: &Path) -> Result<()> {
     let root_lock = InstallerLock::acquire(root, RootMode::Existing)?;
     root_lock.fence()?;
@@ -691,7 +455,7 @@ pub fn repair(root: &Path) -> Result<()> {
     if !ordinary_file_exists(&bootstrap)? {
         return Err(InstallerError::MissingInstaller(bootstrap));
     }
-    let stable = install_stable_cli(&root_lock, root, &release)?;
+    let stable = install_stable_cli(&root_lock, root, &release, !is_local_channel_root(root))?;
     if stable != state.permanent_ae_path {
         return Err(InstallerError::InvalidInstallation(
             "permanent ae path is outside the bootstrap-owned layout".to_owned(),
@@ -731,6 +495,13 @@ pub fn repair(root: &Path) -> Result<()> {
     invoke_ae_diagnostic(&release, &["doctor"])
 }
 
+/// Verifies the stable launcher and protocol handler of the installation at
+/// `root` without changing them.
+///
+/// # Errors
+///
+/// Returns [`InstallerError`] when the installation state or an integration
+/// is invalid.
 pub fn diagnose(root: &Path) -> Result<()> {
     let root_lock = InstallerLock::acquire(root, RootMode::Existing)?;
     root_lock.fence()?;
@@ -774,6 +545,13 @@ fn invoke_ae_diagnostic(release: &Path, arguments: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Removes the installation at `root` and its owned integrations, and its
+/// Forge data only when `remove_data` is set.
+///
+/// # Errors
+///
+/// Returns [`InstallerError`] when the installation state is invalid or an
+/// owned path cannot be removed safely.
 pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
     let root_lock = InstallerLock::acquire(root, RootMode::Existing)?;
     root_lock.fence()?;
@@ -834,6 +612,13 @@ pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
     schedule_installation_cleanup(&root_lock, root)
 }
 
+/// Closes the Editor and retires Forge of the installation at `root` ahead
+/// of a locally built release.
+///
+/// # Errors
+///
+/// Returns [`InstallerError`] when the root is busy or invalid, or a running
+/// instance cannot be retired under `retirement`.
 pub fn prepare_update(root: &Path, retirement: Option<RetirementPolicy>) -> Result<()> {
     let root_lock = InstallerLock::acquire(root, RootMode::Existing)?;
     root_lock.fence()?;
@@ -867,7 +652,7 @@ pub fn prepare_update(root: &Path, retirement: Option<RetirementPolicy>) -> Resu
     Ok(())
 }
 
-fn invoke_ae(release: &Path, arguments: &[&str]) -> Result<()> {
+pub(super) fn invoke_ae(release: &Path, arguments: &[&str]) -> Result<()> {
     let executable = release
         .join("bin")
         .join(if cfg!(windows) { "ae.exe" } else { "ae" });
@@ -885,4 +670,19 @@ fn invoke_ae(release: &Path, arguments: &[&str]) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Whether `root` holds a side-by-side local (`dev`) installation, whose
+/// permanent `ae` must never be put on the user PATH.
+fn is_local_channel_root(root: &Path) -> bool {
+    std::fs::read(root.join("installation.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|document| {
+            document
+                .get("channel")
+                .and_then(serde_json::Value::as_str)
+                .map(|channel| channel == crate::local::LOCAL_CHANNEL)
+        })
+        .unwrap_or(false)
 }

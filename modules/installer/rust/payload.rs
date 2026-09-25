@@ -88,6 +88,11 @@ struct PayloadManifestDocument {
     files: BTreeMap<String, String>,
 }
 
+/// The per-file digests an installed version recorded at activation.
+pub(crate) fn recorded_files(root: &Path) -> Result<BTreeMap<String, String>> {
+    read_manifest(root)
+}
+
 fn read_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
     let path = root.join(PAYLOAD_MANIFEST_NAME);
     let bytes = std::fs::read(&path).map_err(io(&path))?;
@@ -171,6 +176,68 @@ pub(crate) fn verify_existing_against_stage(
     Ok(())
 }
 
+/// Digests every payload file of an unpacked tree: exactly the files a tree
+/// manifest must declare. The tree manifest and its signature are metadata,
+/// not payload, and a tree must hold all four required binaries.
+pub(crate) fn tree_files(root: &Path) -> Result<BTreeMap<String, String>> {
+    let mut files = BTreeMap::new();
+    collect_skipping(
+        root,
+        &[
+            crate::manifest::TREE_MANIFEST_NAME,
+            crate::manifest::TREE_SIGNATURE_NAME,
+        ],
+        &mut files,
+    )?;
+    for required in REQUIRED_PAYLOAD_FILES {
+        if !files.contains_key(required) {
+            return Err(invalid_layout(required));
+        }
+    }
+    Ok(files)
+}
+
+/// Whether a tree manifest may declare `relative`: a safe relative path to
+/// a required binary or into an optional payload directory.
+pub(crate) fn is_declarable(relative: &str) -> bool {
+    is_safe_relative(relative)
+        && is_payload_member(relative)
+        && !is_forbidden_legacy_member(relative)
+}
+
+/// Proves an existing `versions/<v>` tree holds exactly the files a verified
+/// tree manifest declares, byte for byte, and nothing else.
+pub(crate) fn verify_existing_against_files(
+    existing: &Path,
+    declared: &BTreeMap<String, String>,
+    version: &str,
+) -> Result<()> {
+    let recorded =
+        read_manifest(existing).map_err(|error| unverified(version, error.to_string()))?;
+    if recorded.len() != declared.len()
+        || !recorded.iter().all(|(relative, digest)| {
+            declared
+                .get(relative)
+                .is_some_and(|expected| expected.eq_ignore_ascii_case(digest))
+        })
+    {
+        return Err(tampered(version));
+    }
+    for (relative, expected) in declared {
+        let actual = hash_file(&existing.join(relative)).map_err(|_| tampered(version))?;
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(tampered(version));
+        }
+    }
+    let expected: BTreeSet<&str> = declared.keys().map(String::as_str).collect();
+    if tree_has_unexpected_files(existing, &expected)
+        .map_err(|error| unverified(version, error.to_string()))?
+    {
+        return Err(tampered(version));
+    }
+    Ok(())
+}
+
 fn unverified(version: &str, reason: impl Into<String>) -> InstallerError {
     InstallerError::UnverifiedRelease {
         version: version.to_owned(),
@@ -232,6 +299,16 @@ fn tree_has_unexpected_files(existing: &Path, expected: &BTreeSet<&str>) -> Resu
 }
 
 fn collect(root: &Path, files: &mut BTreeMap<String, String>) -> Result<()> {
+    collect_skipping(root, &[PAYLOAD_MANIFEST_NAME], files)
+}
+
+/// Collects payload files like [`collect`], ignoring the named top-level
+/// metadata files.
+fn collect_skipping(
+    root: &Path,
+    metadata: &[&str],
+    files: &mut BTreeMap<String, String>,
+) -> Result<()> {
     for entry in std::fs::read_dir(root).map_err(io(root))? {
         let entry = entry.map_err(io(root))?;
         let path = entry.path();
@@ -240,7 +317,7 @@ fn collect(root: &Path, files: &mut BTreeMap<String, String>) -> Result<()> {
         })?;
         let file_type = entry.file_type().map_err(io(&path))?;
         match name.as_str() {
-            PAYLOAD_MANIFEST_NAME if file_type.is_file() => {}
+            name if metadata.contains(&name) && file_type.is_file() => {}
             "bin" if file_type.is_dir() => collect_bin(&path, files)?,
             directory
                 if OPTIONAL_PAYLOAD_DIRECTORIES.contains(&directory) && file_type.is_dir() =>

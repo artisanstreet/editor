@@ -1,49 +1,54 @@
 //! One-command native development installation.
 //!
-//! `python3 scripts/dev.py` builds with Cargo and stages an isolated
-//! installation under `<workspace>/.dist/dev`, provisions that home through
-//! the existing CLI custody APIs (installation manifest, payload integrity,
-//! Forge credentials, native instance configuration), and launches the
-//! **staged** Editor. The Editor then performs its unchanged shipping
-//! startup: it discovers the dev home through `ARTISAN_HOME`, verifies the
-//! staged payload, starts its newly owned Forge through
-//! [`artisan_editor_cli::process::start_owned`], connects over
-//! authenticated QUIC, and writes the opt-in startup receipt the launcher
-//! waits for. This crate invents no transport, handshake, or credential
-//! flow; it only stages files, spawns the Editor, and confirms startup.
+//! `cargo dev` builds the product binaries with Cargo, assembles them and
+//! their build identity into an unpacked payload, signs it with the
+//! development root's local key, and installs it as a `dev`-channel release
+//! into the per-user `Artisan Street Dev` installation through
+//! `artisan-install`, the same code that installs published releases. It then
+//! provisions that root as the dev Forge home through the existing CLI
+//! custody APIs and launches the **installed** Editor, which performs its
+//! unchanged shipping startup: it discovers the root through `ARTISAN_HOME`,
+//! verifies the installed payload, starts its owned Forge, connects over
+//! authenticated QUIC, and writes the opt-in startup receipt the runner
+//! waits for.
 //!
-//! The real installed application is never touched: every path lives under
-//! the dev directory, and repeat invocations preserve the dev database,
-//! credentials, and instance identity. Failed updates never touch the
-//! active version: binaries stage into a scratch directory, verify there,
-//! and swap in atomically.
+//! The real installation is never touched: the dev root is a separate
+//! installation whose channel pins it to locally signed releases, and
+//! repeat runs preserve its database, credentials, and instance identity.
+//! Running a new build over an open dev Editor retires it the way an update
+//! does, so every iteration exercises the real update path.
 
 #![forbid(unsafe_code)]
 
 pub mod args;
 pub mod binaries;
+pub mod cargo;
 pub mod error;
+pub mod identity;
 pub mod launch;
-pub mod manifest;
+pub mod lock;
 pub mod paths;
+pub mod payload;
 pub mod provision;
-pub mod stage;
 
-pub use args::{Action, DevArgs, usage};
+pub use args::{Action, Command, DEFAULT_KEEP, DevArgs, usage};
 pub use binaries::{BinarySet, locate_binaries, locate_in_dir};
+pub use cargo::{PAYLOAD_BINARIES, Workspace, is_cargo_run_variable, profile_directory_name};
 pub use error::DevError;
+pub use identity::{GitState, dev_version, profile_for_bin_dir, runner_target};
 pub use launch::{
     DEV_STARTUP_POLL_MS, DEV_STARTUP_TIMEOUT_MS, MAX_RECEIPT_TEXT, ReadinessReconcile,
     STARTUP_RECEIPT_ENV, STARTUP_RECEIPT_SCHEMA, StartupWait, clear_stale_receipt,
     fresh_receipt_path, read_receipt, reconcile_stale_readiness, refuse_live_forge, spawn_editor,
     staged_editor, staged_forge, stop_editor, wait_for_startup,
 };
-pub use manifest::{
-    installation_document, provision_manifest, verify_payload_dir, write_payload_manifest,
-};
+pub use lock::DevLock;
 pub use paths::{
-    DEV_HOME_ENV, DEV_HOME_NAME, DEV_VERSION, DIST_DEV_LEAF, DevPaths, STRIPPED_DEV_HOME_ENV,
-    STRIPPED_DEV_READY_ENV, WORKSPACE_ENV, default_base_dir, exe_name, resolve_dev_dir,
+    DEV_HOME_ENV, DEV_ROOT_ENV, DEV_ROOT_NAME, DevPaths, STRIPPED_DEV_HOME_ENV,
+    STRIPPED_DEV_READY_ENV, default_dev_root, exe_name, is_network_share, resolve_dev_root,
+};
+pub use payload::{
+    PAYLOAD_DIRECTORY, assemble, binaries_digest, hash_file, install_tree, payload_version,
 };
 pub use provision::{
     DEV_ADMISSION_CAPACITY, DEV_ADMISSION_TIMEOUT_MS, DEV_DRAIN_TIMEOUT_MS,
@@ -52,9 +57,6 @@ pub use provision::{
     DEV_RUN_PROMPT_DELIVERY, DEV_RUN_QUEUE_CAPACITY, DEV_RUN_RETRY_BACKOFF_MS,
     DEV_RUN_SHUTDOWN_BUDGET_MS, DEV_RUN_STREAM_AFTER, InstanceOutcome, dev_listener_config,
     dev_run_config, provision_forge_home,
-};
-pub use stage::{
-    DevLock, StageCounts, hash_file, stage_binaries, staged_relative_names, write_atomic,
 };
 
 /// Formats one completed stage line (plain text, no TTY codes).

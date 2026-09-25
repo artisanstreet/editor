@@ -207,7 +207,7 @@ impl NativeApplication {
     /// workspace header naming the open project and conversation lives in the
     /// titlebar's content section, anchored to the primary card's left edge.
     pub(super) fn desktop_brand(&self, cx: &Context<Self>) -> Div {
-        div()
+        let brand = div()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -231,7 +231,20 @@ impl NativeApplication {
                     .letter_spacing(px(-1.0))
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
-            )
+            );
+        match artisan_build_info::BuildIdentity::current().badge() {
+            Some(badge) => brand.child(
+                div()
+                    .debug_selector(|| "artisan-brand-build".to_owned())
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(px(11.0))
+                    .line_height(px(16.0))
+                    .text_color(self.theme.colors.muted_foreground.to_paint())
+                    .child(badge),
+            ),
+            None => brand,
+        }
     }
 
     /// The titlebar workspace header, when the route names a conversation.

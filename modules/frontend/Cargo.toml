@@ -19,6 +19,7 @@ required-features = ["visual-proof"]
 
 [dependencies]
 artisan-assets = { path = "../assets" }
+artisan-build-info = { path = "../build_info" }
 artisan-catalog = { path = "../catalog" }
 artisan-domain = { path = "../domain" }
 artisan-editor-cli = { path = "../cli" }

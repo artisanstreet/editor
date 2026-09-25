@@ -1,6 +1,6 @@
 [package]
 name = "artisan-native-dev"
-description = "One-command native development installation: stage product Editor and Forge binaries under .dist/dev and launch the staged Editor on its owned Forge with startup confirmation"
+description = "One-command native development loop: build the product binaries, install them as a signed dev-channel release into the per-user Artisan Street Dev installation, and launch the installed Editor on its owned Forge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,16 +16,22 @@ name = "dev"
 path = "src/main.rs"
 
 [dependencies]
+ae-installer = { path = "../../modules/installer" }
+artisan-build-info = { path = "../../modules/build_info" }
 artisan-editor-cli = { path = "../../modules/cli" }
 fs2.workspace = true
+hex = "=0.4.3" # workspace-absent
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+ae-installer = { path = "../../modules/installer" }
+artisan-build-info = { path = "../../modules/build_info" }
 artisan-editor-cli = { path = "../../modules/cli" }
 fs2.workspace = true
 serde_json.workspace = true
@@ -43,8 +49,8 @@ name = "dev_launch"
 path = "../../tests/native_dev/dev_launch.rs"
 
 [[test]]
-name = "dev_manifest"
-path = "../../tests/native_dev/dev_manifest.rs"
+name = "dev_payload"
+path = "../../tests/native_dev/dev_payload.rs"
 
 [[test]]
 name = "dev_instance"
@@ -57,6 +63,10 @@ path = "../../tests/native_dev/dev_binaries.rs"
 [[test]]
 name = "dev_stage"
 path = "../../tests/native_dev/dev_stage.rs"
+
+[[test]]
+name = "dev_identity"
+path = "../../tests/native_dev/dev_identity.rs"
 
 [[bin]]
 name = "forge-host"

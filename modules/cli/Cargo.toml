@@ -15,6 +15,7 @@ path = "rust/main.rs"
 path = "rust/lib.rs"
 
 [dependencies]
+artisan-build-info = { path = "../build_info" }
 artisan-domain = { path = "../domain" }
 artisan-native-engine = { path = "../native_engine" }
 artisan-protocol = { path = "../protocol" }

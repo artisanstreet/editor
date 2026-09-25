@@ -10,6 +10,16 @@ use std::time::Duration;
 /// The one shipping application title.
 pub(crate) const WINDOW_TITLE: &str = "Artisan Editor";
 
+/// OS window title: product, selected host, and, for every build that is
+/// not a stable release, the channel and commit, so the taskbar and window
+/// switcher can never show a dev or unstaged build as the real app.
+pub(crate) fn window_title(host: &str) -> String {
+    match artisan_build_info::BuildIdentity::current().title_marker() {
+        Some(marker) => format!("{WINDOW_TITLE} — {host} — {marker}"),
+        None => format!("{WINDOW_TITLE} — {host}"),
+    }
+}
+
 /// Stable selector for the real application root.
 pub(crate) const NATIVE_ROOT_SELECTOR: &str = "artisan-native-application";
 

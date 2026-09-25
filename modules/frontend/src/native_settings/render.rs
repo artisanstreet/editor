@@ -12,4 +12,10 @@ mod chrome;
 #[path = "render/sections.rs"]
 mod sections;
 
+#[path = "render/about.rs"]
+mod about;
+
 pub use self::chrome::{notification_gap_notice, telemetry_choice_caption};
+
+#[cfg(test)]
+pub(super) use self::about::about_rows;

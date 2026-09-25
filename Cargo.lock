@@ -111,11 +111,13 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "ae-installer"
 version = "0.0.0"
 dependencies = [
+ "artisan-build-info",
  "base64 0.22.1",
  "chrono",
  "clap",
  "ed25519-dalek",
  "fs2",
+ "getrandom 0.4.3",
  "hex",
  "reqwest",
  "semver",
@@ -518,6 +520,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "artisan-build-info"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "artisan-capnp-codegen"
 version = "0.0.0"
 dependencies = [
@@ -562,6 +573,7 @@ dependencies = [
 name = "artisan-editor-cli"
 version = "0.0.0"
 dependencies = [
+ "artisan-build-info",
  "artisan-domain",
  "artisan-native-engine",
  "artisan-protocol",
@@ -592,6 +604,7 @@ name = "artisan-frontend"
 version = "0.0.0"
 dependencies = [
  "artisan-assets",
+ "artisan-build-info",
  "artisan-catalog",
  "artisan-domain",
  "artisan-editor-cli",
@@ -628,11 +641,15 @@ dependencies = [
 name = "artisan-native-dev"
 version = "0.0.0"
 dependencies = [
+ "ae-installer",
+ "artisan-build-info",
  "artisan-editor-cli",
  "fs2",
+ "hex",
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
