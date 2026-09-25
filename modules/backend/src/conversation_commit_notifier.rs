@@ -239,13 +239,6 @@ impl ConversationCommitNotifier {
             .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
-    /// Number of connections whose delivery driver currently listens, so
-    /// host-state producers can idle while no Editor is connected.
-    #[must_use]
-    pub fn delivery_connections(&self) -> usize {
-        self.registry.any_sender.receiver_count()
-    }
-
     /// Registers one bounded wake for any published conversation commit or
     /// host-state change.
     ///

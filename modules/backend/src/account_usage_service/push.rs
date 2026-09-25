@@ -1,8 +1,9 @@
 //! What the account-usage service pushes to connected Editors, and the
 //! refresh cadence that keeps it current.
 //!
-//! The Forge owns when usage is read: while at least one Editor is
-//! connected, [`refresh_while_observed`] re-reads every engine shortly
+//! The Forge owns when usage is read: while at least one Editor connection
+//! observes it (it made a request; a lifecycle-only connection never does),
+//! [`refresh_while_observed`] re-reads every engine shortly
 //! before its report goes stale (and a failing engine at most once a
 //! minute), so readiness verdicts stay fresh without any Editor polling.
 //! Whenever what the service would serve changes (a new report, a failure,
@@ -33,6 +34,21 @@ pub(super) struct UsagePush {
     /// source for engines no read has cached (a failure, a missing sign-in).
     served: Mutex<HashMap<String, (EngineUsageReport, String)>>,
     refresh: tokio::sync::Notify,
+    observers: std::sync::atomic::AtomicUsize,
+}
+
+/// One Editor connection observing usage; the refresher keeps usage fresh
+/// while any is held, and releases the connection's share when dropped.
+#[derive(Debug)]
+pub(crate) struct UsageObserver(Arc<AccountUsageService>);
+
+impl Drop for UsageObserver {
+    fn drop(&mut self) {
+        self.0
+            .push
+            .observers
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl UsagePush {
@@ -58,10 +74,14 @@ impl AccountUsageService {
         self
     }
 
-    /// Asks the refresher to look for due engines now (a new Editor
-    /// connected).
-    pub fn request_refresh(&self) {
+    /// Registers one observing Editor connection and asks the refresher to
+    /// read what is due now.
+    pub(crate) fn observe(self: &Arc<Self>) -> UsageObserver {
+        self.push
+            .observers
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.push.refresh.notify_one();
+        UsageObserver(Arc::clone(self))
     }
 
     /// Every engine the service has observed, as it would serve it now, one
@@ -147,12 +167,11 @@ impl AccountUsageService {
     }
 }
 
-/// Keeps every engine's usage fresh while an Editor is connected, until
+/// Keeps every engine's usage fresh while an Editor observes it, until
 /// `cancel` fires. Reads run concurrently, each under the service's
 /// per-engine deadline.
 pub(crate) async fn refresh_while_observed(
     service: Arc<AccountUsageService>,
-    notifier: ConversationCommitNotifier,
     cancel: Arc<CancelHandle>,
 ) {
     loop {
@@ -161,7 +180,12 @@ pub(crate) async fn refresh_while_observed(
             () = service.push.refresh.notified() => {}
             () = tokio::time::sleep(REFRESH_TICK) => {}
         }
-        if notifier.delivery_connections() == 0 {
+        if service
+            .push
+            .observers
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
             continue;
         }
         let mut reads = JoinSet::new();

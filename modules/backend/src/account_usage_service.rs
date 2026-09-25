@@ -379,7 +379,7 @@ pub struct AccountUsageService {
 }
 
 mod push;
-pub(crate) use push::refresh_while_observed;
+pub(crate) use push::{UsageObserver, refresh_while_observed};
 
 /// One cached provider observation with its own fetch time.
 ///

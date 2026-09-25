@@ -344,9 +344,10 @@ Implemented (step 7), preferences and navigation, and the step 6 gaps:
   (one snapshot per engine) from the connection's first request, preferences when they change
   after the Editor read them, a thread's display title when a wake finds it changed, and a live
   run's usage (with its compaction threshold) when it differs from the last push. The Forge owns
-  the usage cadence: while a driver listens it re-reads each engine a minute before its 180 s
-  report goes stale. Removed from the Editor: every usage read that was not the user's (profile
-  menu, machine list, Settings, thread selection, catalog load, picker retry, refused sends) and
+  the usage cadence: while a connection that made a handler request is open (an Editor; a
+  lifecycle-only connection never counts, so it cannot hold a stopping Forge on a CLI read) it
+  re-reads each engine a minute before its 180 s report goes stale. Removed from the Editor:
+  every usage read that was not the user's (profile menu, machine list, Settings, thread selection, catalog load, picker retry, refused sends) and
   the five-second composer usage timer. The explicit refresh controls still force a read.
 - OpenCode settings editor: the manual settings document is `ManualEngineConfiguration` in the
   domain; the Forge builds and validates a configuration from it

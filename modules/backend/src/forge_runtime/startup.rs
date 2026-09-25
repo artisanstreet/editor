@@ -688,7 +688,6 @@ async fn run_with_handler(
     );
     let usage_refresher = tokio::spawn(crate::account_usage_service::refresh_while_observed(
         Arc::clone(&usage),
-        notifier,
         Arc::clone(&cancel),
     ));
     let handler = handler.with_shared_account_usage_service(usage);

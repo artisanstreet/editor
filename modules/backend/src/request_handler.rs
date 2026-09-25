@@ -193,9 +193,18 @@ pub(crate) struct ConversationConnectionContext {
     notifier: ConversationCommitNotifier,
     account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
     run_cancellation: Option<RunCancellationRegistry>,
+    /// Held from this connection's first handled request: an Editor
+    /// observing usage (lifecycle requests never reach the handler).
+    usage_observer: std::sync::OnceLock<crate::account_usage_service::UsageObserver>,
 }
 
 impl ConversationConnectionContext {
+    fn observe_usage(&self) {
+        if let Some(usage) = &self.account_usage {
+            self.usage_observer.get_or_init(|| usage.observe());
+        }
+    }
+
     /// The live run registered for `thread`, if any.
     pub(crate) fn live_run(&self, thread: &ThreadId) -> Option<artisan_domain::RunId> {
         self.run_cancellation.as_ref()?.active_run(thread).ok()?
@@ -671,11 +680,8 @@ impl RequestHandler {
             notifier: self.conversation_commit_notifier.clone()?,
             account_usage: self.account_usage.clone(),
             run_cancellation: self.run_cancellation.clone(),
+            usage_observer: std::sync::OnceLock::new(),
         };
-        // A new Editor wants current usage: read what is due now.
-        if let Some(usage) = &self.account_usage {
-            usage.request_refresh();
-        }
         Some(context)
     }
 
@@ -817,6 +823,7 @@ impl RequestHandler {
         request_id: &RequestId,
         request: &ClientRequest,
     ) -> RequestHandlerResponse {
+        context.observe_usage();
         match request {
             ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)) => {
                 self.subscribe_with_receipt_in_context(context, request_id, subscribe)
