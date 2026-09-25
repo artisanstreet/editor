@@ -181,7 +181,8 @@ Implemented (step 4), drafts and attachments:
   redo remain local view history. Recalling a queued message fills the composer, which saves the
   Forge draft through the same chain.
 - Sends: the transport sends a message by reference when every image is one this connection
-  uploaded or read back, otherwise with inline bytes (recovered or retried payloads).
+  uploaded or read back, otherwise with inline bytes (recovered or retried payloads). Superseded
+  in step 5: a message is sent by naming its stored draft revision.
 - Left for later steps: the per-engine image policy still runs in the Editor's image preparation
   (step 6); the queue recall `restore_candidate` (a withdrawn payload waiting for an empty composer)
   is a recovery handshake rather than draft storage and moves with step 5. Known limit: two Editors
@@ -221,9 +222,22 @@ Implemented (step 5), Forge-accepted submissions:
   outbox rows ("Queued", "Waiting: <reason>", "Starting…"); the send entrance animation is view
   state keyed by the first appearance of a row's message id. A delivered turn's engine label comes
   from the engine on its outbox row. The composer stays locked while an edit recall is pending.
-- A request the Forge never answered (transport failure) keeps its draft; pressing Send again is
-  a new request with a new id. Known limit: if the Forge accepted the lost request, the message
-  can be queued twice.
+- Sending is idempotent on the draft (addition after review). The Editor never sends a message
+  body: `SubmitComposerDraft { thread, draft_revision, steer }` names the revision the Forge gave
+  the composer's body, and the Forge, in one transaction, reads the draft at exactly that
+  revision, admits it through the queue-message admission (stored images resolved to bytes),
+  records the submission under (thread, draft revision) (migration
+  `m20260927_000017_composer_draft_submissions`) and empties the draft at the next revision. A
+  repeat of the revision under any request id answers the first message as a duplicate and
+  changes nothing, so re-pressing Send after a lost answer cannot queue twice; the request id is
+  only a correlation id. Another revision is refused as data (`Stale { current_revision }`); the
+  Editor keeps its text, saves it again and the user sends again. Send waits for the save that
+  stores the body being sent (it is saved ahead of anything typed after Send, which is held
+  until the send is on the wire), and the last revision the Forge reported per scope outlives a
+  dropped connection. Draft saves are idempotent by request id (`composer_draft_save_receipts`),
+  so a retransmitted save cannot write a sent draft back. The Editor no longer sends
+  `QueueMessage`/`QueueStoredMessage`; both stay on the wire (general admission, frozen capnp
+  ordinals). A send with images still uploading is refused with its reason.
 - Left for step 6: the readiness verdict in `first_send_config` (catalog admission) still refuses
   an unrunnable first send in the Editor; it no longer holds the send. Run usage is still polled
   while a run is live.
