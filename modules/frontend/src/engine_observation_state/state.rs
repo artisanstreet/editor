@@ -456,6 +456,7 @@ impl EngineObservationState {
             tag,
             summary: detail,
             attribution: None,
+            first_committed_at: None,
         });
         ApplyOutcome::Applied {
             tag: "unknown",
@@ -759,6 +760,7 @@ impl EngineObservationState {
                 cursor,
                 sequence,
                 attribution: attribution.cloned(),
+                first_committed_at: attribution.map(|attr| attr.committed_at),
             });
     }
 
@@ -792,6 +794,7 @@ impl EngineObservationState {
                 cursor,
                 sequence,
                 attribution: attribution.cloned(),
+                first_committed_at: attribution.map(|attr| attr.committed_at),
             });
     }
 
@@ -823,6 +826,7 @@ impl EngineObservationState {
                 cursor,
                 sequence,
                 attribution: attribution.cloned(),
+                first_committed_at: attribution.map(|attr| attr.committed_at),
             });
     }
 
@@ -867,6 +871,7 @@ impl EngineObservationState {
                 cursor,
                 sequence,
                 attribution: attribution.cloned(),
+                first_committed_at: attribution.map(|attr| attr.committed_at),
             });
     }
 
@@ -905,6 +910,7 @@ impl EngineObservationState {
                 cursor,
                 sequence,
                 attribution: attribution.cloned(),
+                first_committed_at: attribution.map(|attr| attr.committed_at),
             });
         settled_in_place
     }
@@ -964,6 +970,7 @@ impl EngineObservationState {
                 cursor,
                 sequence,
                 attribution: attribution.cloned(),
+                first_committed_at: attribution.map(|attr| attr.committed_at),
             });
         settled_in_place
     }
@@ -1022,6 +1029,7 @@ impl EngineObservationState {
             tag,
             summary,
             attribution: attribution.cloned(),
+            first_committed_at: attribution.map(|attr| attr.committed_at),
         });
     }
 }

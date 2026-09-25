@@ -58,6 +58,8 @@ pub struct SceneFact {
     /// It orders activity without fabricating time; elapsed evidence still
     /// derives from the canonical turn's own creation/update times.
     pub observed_at_ms: Option<i64>,
+    /// First persisted event time, used only to interleave work with messages.
+    pub first_observed_at_ms: Option<i64>,
     /// Whether this fact is derived from retained engine observations.
     ///
     /// Derived activity facts are rebased atomically when canonical delivery
@@ -104,6 +106,7 @@ impl SceneFact {
             run_id: None,
             activity_lifecycle: None,
             observed_at_ms: None,
+            first_observed_at_ms: None,
             derived: false,
         };
         fact.as_scene_item(None)?;

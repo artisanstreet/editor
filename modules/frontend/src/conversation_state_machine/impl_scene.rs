@@ -123,6 +123,77 @@ impl ConversationStateController {
             }
         }
 
+        // Durable messages and retained work observations have separate ordinal
+        // spaces. Merge them for rendering without changing either stored order
+        // or identity. Use first-event time so streamed updates do not move rows.
+        if self
+            .facts
+            .values()
+            .any(|fact| fact.derived && fact.first_observed_at_ms.is_some())
+            && let Some(snapshot) = self.delivery.snapshot()
+        {
+            let mut message_positions: std::collections::HashMap<TurnId, Vec<(i64, u64)>> =
+                std::collections::HashMap::new();
+            for message in snapshot.items() {
+                let time = match message {
+                    ConversationItem::UserMessage(message) => message.created_at,
+                    ConversationItem::MultimodalUserMessage(message) => message.created_at,
+                    ConversationItem::AssistantMessage(message) => message.created_at,
+                };
+                message_positions
+                    .entry(message.turn_id().clone())
+                    .or_default()
+                    .push((time.as_millis(), message.ordinal().get()));
+            }
+            for positions in message_positions.values_mut() {
+                positions.sort_unstable();
+                let mut ordinal = 0;
+                for (_, position) in positions {
+                    ordinal = ordinal.max(*position);
+                    *position = ordinal;
+                }
+            }
+            let mut positions = Vec::with_capacity(items.len() + turns.len());
+            for turn in &turns {
+                positions.push(((turn.ordinal, 0, 0, 0), None));
+            }
+            for (index, item) in items.iter().enumerate() {
+                let mut key = (item.ordinal, 0, 0, 0);
+                if let Some(fact) = self.facts.get(&item.id)
+                    && fact.derived
+                    && let Some(time) = fact.first_observed_at_ms
+                {
+                    let anchor = message_positions
+                        .get(&item.turn_id)
+                        .and_then(|positions| {
+                            let index = positions.partition_point(|(created, _)| *created <= time);
+                            index.checked_sub(1).map(|index| positions[index].1)
+                        })
+                        .or_else(|| {
+                            turns
+                                .iter()
+                                .find(|turn| turn.turn_id == item.turn_id)
+                                .map(|turn| turn.ordinal)
+                        })
+                        .unwrap_or(item.ordinal);
+                    key = (anchor, 1, time, item.ordinal);
+                }
+                positions.push((key, Some(index)));
+            }
+            positions.sort_by_key(|(key, _)| *key);
+            let mut turn_ordinals = std::collections::HashMap::new();
+            for (ordinal, (key, index)) in positions.into_iter().enumerate() {
+                if let Some(index) = index {
+                    items[index].ordinal = ordinal as u64;
+                } else {
+                    turn_ordinals.insert(key.0, ordinal as u64);
+                }
+            }
+            for turn in &mut turns {
+                turn.ordinal = turn_ordinals[&turn.ordinal];
+            }
+        }
+
         ConversationScene::build(turns, items, narrations, Vec::new())
             .map_err(ConversationStateError::Scene)
             .and_then(|mut scene| {

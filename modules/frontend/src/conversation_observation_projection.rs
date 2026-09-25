@@ -204,6 +204,7 @@ pub fn project_activities(
             turn: turn.clone(),
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
+            first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
             activity_lifecycle: None,
             kind: CandidateKind::Reasoning {
@@ -243,6 +244,7 @@ pub fn project_activities(
             turn: turn.clone(),
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
+            first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
             activity_lifecycle: Some(tool_activity_lifecycle(row.action())),
             kind: CandidateKind::Activity { body, kind, detail },
@@ -271,29 +273,20 @@ pub fn project_activities(
             continue;
         };
         let state = row.state();
-        let (kind, activity_lifecycle) = match state {
-            artisan_domain::TerminalActivityState::Failed => (
-                CandidateKind::Error {
-                    message: terminal_body(row),
-                },
-                None,
-            ),
-            _ => (
-                CandidateKind::Activity {
-                    body: terminal_body(row),
-                    kind: String::from("terminal_activity"),
-                    detail: row
-                        .command()
-                        .map(|command| truncate_bounded(command, MAX_ACTIVITY_BODY_BYTES)),
-                },
-                Some(terminal_activity_lifecycle(state)),
-            ),
+        let kind = CandidateKind::Activity {
+            body: terminal_body(row),
+            kind: String::from("terminal_activity"),
+            detail: row
+                .command()
+                .map(|command| truncate_bounded(command, MAX_ACTIVITY_BODY_BYTES)),
         };
+        let activity_lifecycle = Some(terminal_activity_lifecycle(state));
         candidates.push(Candidate {
             id,
             turn: turn.clone(),
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
+            first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
             activity_lifecycle,
             kind,
@@ -326,6 +319,7 @@ pub fn project_activities(
             turn: turn.clone(),
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
+            first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
             activity_lifecycle: None,
             kind: CandidateKind::Approval {
@@ -360,6 +354,7 @@ pub fn project_activities(
             turn: turn.clone(),
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
+            first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
             activity_lifecycle: None,
             kind: CandidateKind::Question {
@@ -397,6 +392,7 @@ pub fn project_activities(
             turn: turn.clone(),
             run: run.clone(),
             committed_at_ms: committed_at.as_millis(),
+            first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
             // Timeline rows carry no lifecycle report: unknown never means
             // live, so these facts never count as tool progress.
@@ -425,7 +421,6 @@ pub fn project_activities(
             },
             CandidateKind::Approval { prompt } => SceneFactKind::Approval { prompt },
             CandidateKind::Question { prompt } => SceneFactKind::Question { prompt },
-            CandidateKind::Error { message } => SceneFactKind::Error { message },
             CandidateKind::Compaction { summary } => SceneFactKind::Compaction { summary },
         };
         let Ok(fact) = SceneFact::new(candidate.id, candidate.turn, ordinal, kind) else {
@@ -439,6 +434,7 @@ pub fn project_activities(
         if let Some(lifecycle) = candidate.activity_lifecycle {
             fact = fact.with_activity_lifecycle(lifecycle);
         }
+        fact.first_observed_at_ms = Some(candidate.first_committed_at_ms);
         facts.push(fact);
     }
 
@@ -515,9 +511,9 @@ fn timeline_kind(row: &TimelineRow) -> Option<CandidateKind> {
         "compaction" => Some(CandidateKind::Compaction {
             summary: truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES),
         }),
-        "process_diagnostic" | "protocol_diagnostic" | "retry" => Some(CandidateKind::Error {
-            message: truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES),
-        }),
+        // Native diagnostics and retries explain work; only the run's actual
+        // terminal failure belongs in the conversation-level failure surface.
+        "process_diagnostic" | "protocol_diagnostic" | "retry" => Some(timeline_activity(row)),
         _ => None,
     }
 }
@@ -548,9 +544,6 @@ enum CandidateKind {
     Question {
         prompt: String,
     },
-    Error {
-        message: String,
-    },
     Compaction {
         summary: String,
     },
@@ -561,6 +554,7 @@ struct Candidate {
     turn: TurnId,
     run: RunId,
     committed_at_ms: i64,
+    first_committed_at_ms: i64,
     delivery_sequence: u64,
     activity_lifecycle: Option<ConversationLifecycle>,
     kind: CandidateKind,

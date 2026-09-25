@@ -16,6 +16,7 @@ pub struct ReasoningRow {
     pub(super) cursor: u64,
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
+    pub(super) first_committed_at: Option<UnixMillis>,
 }
 
 impl ReasoningRow {
@@ -64,7 +65,13 @@ impl ReasoningRow {
         self.attribution.as_ref().map(|attr| &attr.turn_id)
     }
 
-    /// Returns the durable commit time, when delivered.
+    /// Persisted time of the first event for this item; updates keep its position.
+    #[must_use]
+    pub fn first_committed_at(&self) -> Option<UnixMillis> {
+        self.first_committed_at
+    }
+
+    /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
         self.attribution.as_ref().map(|attr| attr.committed_at)
@@ -87,6 +94,7 @@ pub struct ToolRow {
     pub(super) cursor: u64,
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
+    pub(super) first_committed_at: Option<UnixMillis>,
 }
 
 impl ToolRow {
@@ -135,7 +143,13 @@ impl ToolRow {
         self.attribution.as_ref().map(|attr| &attr.turn_id)
     }
 
-    /// Returns the durable commit time, when delivered.
+    /// Persisted time of the first event for this item; updates keep its position.
+    #[must_use]
+    pub fn first_committed_at(&self) -> Option<UnixMillis> {
+        self.first_committed_at
+    }
+
+    /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
         self.attribution.as_ref().map(|attr| attr.committed_at)
@@ -160,6 +174,7 @@ pub struct TerminalRow {
     pub(super) cursor: u64,
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
+    pub(super) first_committed_at: Option<UnixMillis>,
 }
 
 impl TerminalRow {
@@ -220,7 +235,13 @@ impl TerminalRow {
         self.attribution.as_ref().map(|attr| &attr.turn_id)
     }
 
-    /// Returns the durable commit time, when delivered.
+    /// Persisted time of the first event for this item; updates keep its position.
+    #[must_use]
+    pub fn first_committed_at(&self) -> Option<UnixMillis> {
+        self.first_committed_at
+    }
+
+    /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
         self.attribution.as_ref().map(|attr| attr.committed_at)
@@ -246,6 +267,7 @@ pub struct ApprovalRow {
     pub(super) cursor: u64,
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
+    pub(super) first_committed_at: Option<UnixMillis>,
 }
 
 impl ApprovalRow {
@@ -300,7 +322,13 @@ impl ApprovalRow {
         self.attribution.as_ref().map(|attr| &attr.turn_id)
     }
 
-    /// Returns the durable commit time, when delivered.
+    /// Persisted time of the first event for this item; updates keep its position.
+    #[must_use]
+    pub fn first_committed_at(&self) -> Option<UnixMillis> {
+        self.first_committed_at
+    }
+
+    /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
         self.attribution.as_ref().map(|attr| attr.committed_at)
@@ -386,6 +414,7 @@ pub struct QuestionRow {
     pub(super) cursor: u64,
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
+    pub(super) first_committed_at: Option<UnixMillis>,
 }
 
 impl QuestionRow {
@@ -452,7 +481,13 @@ impl QuestionRow {
         self.attribution.as_ref().map(|attr| &attr.turn_id)
     }
 
-    /// Returns the durable commit time, when delivered.
+    /// Persisted time of the first event for this item; updates keep its position.
+    #[must_use]
+    pub fn first_committed_at(&self) -> Option<UnixMillis> {
+        self.first_committed_at
+    }
+
+    /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
         self.attribution.as_ref().map(|attr| attr.committed_at)
@@ -478,6 +513,7 @@ pub struct TimelineRow {
     pub(super) tag: &'static str,
     pub(super) summary: String,
     pub(super) attribution: Option<EngineObservationAttribution>,
+    pub(super) first_committed_at: Option<UnixMillis>,
 }
 
 impl TimelineRow {
@@ -526,7 +562,13 @@ impl TimelineRow {
         self.attribution.as_ref().map(|attr| &attr.turn_id)
     }
 
-    /// Returns the durable commit time, when delivered.
+    /// Persisted time of the first event for this item; updates keep its position.
+    #[must_use]
+    pub fn first_committed_at(&self) -> Option<UnixMillis> {
+        self.first_committed_at
+    }
+
+    /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
         self.attribution.as_ref().map(|attr| attr.committed_at)

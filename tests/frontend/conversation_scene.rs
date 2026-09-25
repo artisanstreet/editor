@@ -2197,3 +2197,63 @@ fn overlong_engine_label_is_rejected() {
     .expect_err("overlong engine label is refused");
     assert!(matches!(err, SceneBuildError::EngineLabelTooLong { .. }));
 }
+
+#[test]
+fn durable_mid_run_reply_is_a_boundary_without_a_steering_label() {
+    use conversation_scene::ConversationScene;
+
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("prompt", "turn_a", 1, "go"),
+            provenanced(
+                activity_item("tool", "turn_a", 2, "ran"),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            user_item("steer", "turn_a", 5, "actually, stop"),
+            provenanced(
+                assistant_item(
+                    "reply-after-steer",
+                    "turn_a",
+                    7,
+                    "Thanks, I will check Windows",
+                    AssistantPhase::Commentary,
+                ),
+                "run_a",
+                ConversationLifecycle::Streaming,
+            ),
+            provenanced(
+                activity_item("tool2", "turn_a", 8, "stopping"),
+                "run_a",
+                ConversationLifecycle::Active,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    let kinds: Vec<&str> = blocks
+        .iter()
+        .map(|block| match block {
+            TurnBlock::UserMessage(_) => "user",
+            TurnBlock::WorkGroup(group) if group.session.is_some() => "session",
+            TurnBlock::WorkGroup(_) => "work",
+            TurnBlock::SteeringLabel(_) => "steer-label",
+            TurnBlock::AssistantMessage(_) => "assistant",
+            TurnBlock::TurnStatus(_) => "status",
+            TurnBlock::TurnFooter(_) => "footer",
+            _ => "other",
+        })
+        .collect();
+    // No status row: the live tool chain newer than any model prose carries
+    // progress itself (waiting-for-activity suppression).
+    assert_eq!(
+        kinds,
+        vec!["user", "session", "user", "assistant", "work", "footer"]
+    );
+    let group = session_group(blocks);
+    assert!(group.superseded);
+    assert_eq!(group.session_details.len(), 1);
+}

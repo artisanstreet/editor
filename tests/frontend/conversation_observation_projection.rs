@@ -823,7 +823,7 @@ fn reasoning_completion_without_delta_still_settles_public_summary() {
 }
 
 #[test]
-fn failed_terminal_projects_error_card() {
+fn failed_terminal_stays_in_work_history() {
     let mut state = EngineObservationState::new(thread_id());
     state.apply(
         1,
@@ -857,8 +857,8 @@ fn failed_terminal_projects_error_card() {
     let projection = project_activities(&state, &snapshot);
     assert_eq!(projection.facts.len(), 1);
     assert!(
-        matches!(&projection.facts[0].kind, SceneFactKind::Error { message } if message.contains("cargo test") && !message.contains("terminal ")),
-        "failed terminals surface as error cards with meaningful detail"
+        matches!(&projection.facts[0].kind, SceneFactKind::Activity { body, .. } if body.contains("cargo test") && body.contains("exit 1")),
+        "failed commands remain activities with their exit status"
     );
 }
 
@@ -1269,5 +1269,72 @@ fn tool_lifecycle_reports_live_or_settled_from_typed_action() {
     assert_eq!(
         lifecycle_of("tool-run_a-tool-done"),
         Some(Some(ConversationLifecycle::Completed))
+    );
+}
+
+#[test]
+fn work_keeps_its_first_position_between_assistant_messages_after_completion_and_replay() {
+    use artisan_frontend::conversation_scene::SessionDetail;
+    let mut first = make_assistant("comment-before", TURN_A, 2, RUN_A);
+    let mut second = make_assistant("comment-after", TURN_A, 3, RUN_A);
+    for (item, time) in [(&mut first, 1_100), (&mut second, 2_100)] {
+        let ConversationItem::AssistantMessage(message) = item else {
+            unreachable!()
+        };
+        message.phase = AssistantMessagePhase::Commentary;
+        message.created_at = stamp(time);
+    }
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1), first, second],
+    );
+    let start = attributed_event(
+        tool_observation("tool-start", 1, "read-file", ToolAction::Started),
+        RUN_A,
+        TURN_A,
+        1_500,
+        10,
+    );
+    let finish = attributed_event(
+        tool_observation("tool-finish", 2, "read-file", ToolAction::Failed),
+        RUN_A,
+        TURN_A,
+        3_000,
+        11,
+    );
+    let mut state = EngineObservationState::new(thread_id());
+    let mut controller = controller_with_snapshot(snapshot.clone());
+    for (cursor, event) in [(1, &start), (2, &finish)] {
+        let _ = state.apply(cursor, event);
+        upsert_all(&mut controller, project_activities(&state, &snapshot).facts);
+        let scene = controller.scene().unwrap();
+        let turn = scene.turn_scene(&turn_id(TURN_A)).unwrap();
+        let details = turn
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::WorkGroup(group) => Some(&group.session_details),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(
+            &details[..],
+            [
+                SessionDetail::Assistant { .. },
+                SessionDetail::Activity { .. },
+                SessionDetail::Assistant { .. }
+            ]
+        ));
+    }
+    // A reopened thread must derive the same order from retained events.
+    let mut replay = EngineObservationState::new(thread_id());
+    let _ = replay.apply(1, &start);
+    let _ = replay.apply(2, &finish);
+    let projected = project_activities(&replay, &snapshot);
+    assert_eq!(projected.facts[0].first_observed_at_ms, Some(1_500));
+    assert_eq!(projected.facts[0].observed_at_ms, Some(3_000));
+    assert_eq!(
+        projected.facts[0].activity_lifecycle,
+        Some(ConversationLifecycle::Failed)
     );
 }

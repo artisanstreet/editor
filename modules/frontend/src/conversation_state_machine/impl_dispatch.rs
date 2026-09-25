@@ -864,6 +864,7 @@ impl ConversationStateController {
                 run_id: existing.run_id.clone(),
                 activity_lifecycle: fact.activity_lifecycle.or(existing.activity_lifecycle),
                 observed_at_ms: fact.observed_at_ms,
+                first_observed_at_ms: fact.first_observed_at_ms,
                 derived: fact.derived,
             };
             kept.as_scene_item(None)

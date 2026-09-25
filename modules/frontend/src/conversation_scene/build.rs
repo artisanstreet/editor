@@ -340,6 +340,7 @@ impl ConversationScene {
             // Steering anchors in this turn, by ordinal: items after an
             // anchor render top-level and never join session details.
             let mut steer_anchor_ordinals: Vec<u64> = Vec::new();
+            let mut saw_user_message = false;
             for item in &turn_items {
                 if !matches!(
                     &item.kind,
@@ -347,9 +348,12 @@ impl ConversationScene {
                 ) {
                     continue;
                 }
-                if steerings_by_anchor.contains_key(item.id.as_str()) {
+                // Durable mid-run sends are user messages in the existing
+                // turn. They are boundaries even without an optional label.
+                if saw_user_message || steerings_by_anchor.contains_key(item.id.as_str()) {
                     steer_anchor_ordinals.push(item.ordinal);
                 }
+                saw_user_message = true;
             }
             let min_steer_ordinal: Option<u64> = steer_anchor_ordinals.into_iter().min();
             let is_post_steer =
