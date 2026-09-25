@@ -422,3 +422,35 @@ async fn a_release_directory_installs_without_a_network() {
     .unwrap();
     assert_eq!(files.len(), 4);
 }
+
+#[tokio::test]
+async fn pruning_keeps_the_active_version_and_the_most_recent_others() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("root");
+    for (index, tag) in ["a", "b", "c", "d"].into_iter().enumerate() {
+        let tree = signed_tree(
+            &root,
+            directory.path(),
+            &format!("0.0.0-dev.{index}+g{tag}"),
+            tag,
+        );
+        install(options(
+            &root,
+            ReleaseSource::Tree { path: tree },
+            local_trust(&root).unwrap(),
+        ))
+        .await
+        .unwrap();
+        // Distinct install times on coarse-timestamp filesystems.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let report = artisan_install::prune(&root, 1).unwrap();
+    assert_eq!(report.kept, ["0.0.0-dev.2+gc"]);
+    assert_eq!(report.removed, ["0.0.0-dev.1+gb", "0.0.0-dev.0+ga"]);
+    assert!(
+        root.join("versions/0.0.0-dev.3+gd/bin").is_dir(),
+        "active stays"
+    );
+    assert!(!root.join("versions/0.0.0-dev.0+ga").exists());
+    assert_eq!(installation(&root)["active_version"], "0.0.0-dev.3+gd");
+}

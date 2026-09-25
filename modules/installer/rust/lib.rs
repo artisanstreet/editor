@@ -20,8 +20,9 @@ mod shortcuts;
 
 pub use error::{InstallerError, Result};
 pub use install::{
-    InstallIntegrationOptions, InstallOptions, RELEASE_MANIFEST_NAME, RELEASE_SIGNATURE_NAME,
-    ReleaseSource, diagnose, install, prepare_update, repair, uninstall,
+    InstallIntegrationOptions, InstallOptions, PruneReport, RELEASE_MANIFEST_NAME,
+    RELEASE_SIGNATURE_NAME, ReleaseSource, diagnose, install, prepare_update, prune, repair,
+    uninstall,
 };
 pub use local::{LOCAL_CHANNEL, LOCAL_TRUST_DIRECTORY, LocalRelease, LocalSigner, local_trust};
 pub use manifest::{TREE_MANIFEST_NAME, TREE_SIGNATURE_NAME, TrustKey};

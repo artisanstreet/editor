@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use artisan_install::{
     InstallIntegrationOptions, InstallOptions, LOCAL_CHANNEL, Platform, ReleaseSource, Result,
-    RetirementPolicy, TrustKey, diagnose, install, local_trust, prepare_update, repair,
+    RetirementPolicy, TrustKey, diagnose, install, local_trust, prepare_update, prune, repair,
     schedule_self_cleanup, uninstall,
 };
 use clap::{Args, Parser, Subcommand};
@@ -113,6 +113,13 @@ enum Operation {
     Update,
     /// Restore bootstrap-owned launchers, PATH integration, and installation health.
     Repair,
+    /// Remove superseded versions, keeping the active one and the most recent
+    /// others for rollback. Versions a running Editor or Forge uses are kept.
+    Prune {
+        /// Inactive versions to keep.
+        #[arg(long, default_value_t = 2)]
+        keep: usize,
+    },
     /// Remove installed binaries and owned integrations.
     Uninstall {
         /// Also permanently remove Forge data, projects, and conversations.
@@ -155,6 +162,15 @@ async fn run() -> Result<()> {
                 install(make_install_options(&arguments, platform, root, false)?).await?;
             }
             Operation::Repair => repair(&root)?,
+            Operation::Prune { keep } => {
+                let report = prune(&root, *keep)?;
+                for version in &report.removed {
+                    println!("removed {version}");
+                }
+                for version in &report.in_use {
+                    println!("kept {version} (in use)");
+                }
+            }
             Operation::Uninstall { remove_data } => uninstall(&root, *remove_data)?,
         }
         return Ok(());

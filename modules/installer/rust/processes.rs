@@ -107,6 +107,27 @@ fn native_role_for_leaf(leaf: &OsStr, windows: bool) -> Option<ProcessRole> {
     }
 }
 
+/// Versions under `versions_root` that a running Editor or Forge was launched
+/// from; their directories must not be removed.
+pub(crate) fn running_versions(versions_root: &Path) -> Result<std::collections::BTreeSet<String>> {
+    Ok(discover(versions_root)?
+        .iter()
+        .filter(|process| process.role(versions_root).is_some())
+        .filter_map(|process| {
+            match process
+                .executable
+                .strip_prefix(versions_root)
+                .ok()?
+                .components()
+                .next()?
+            {
+                Component::Normal(version) => version.to_str().map(str::to_owned),
+                _ => None,
+            }
+        })
+        .collect())
+}
+
 fn partition_by_role<'a>(
     processes: &'a [RunningProcess],
     versions_root: &Path,
