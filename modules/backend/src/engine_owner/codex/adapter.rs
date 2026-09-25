@@ -693,8 +693,28 @@ pub(crate) async fn apply_event(
             None
         }
         CodexEvent::ApprovalRequested(request) => {
-            tracker.note_approval(request);
-            None
+            let id = activity_observation_id(run_id, frame_sequence, "approval");
+            let sequence = artisan_domain::ObservationSequence::new(frame_sequence);
+            let target = artisan_domain::ObservationId::parse(request.approval_id().to_owned());
+            let domain = request.to_domain_request();
+            let description = request.description().to_owned();
+            let (Some(id), Ok(sequence), Ok(target), Ok(domain)) = (id, sequence, target, domain)
+            else {
+                return None;
+            };
+            let Ok(row) = artisan_domain::ApprovalObservation::requested(
+                id,
+                sequence,
+                target,
+                description,
+                domain,
+            ) else {
+                return None;
+            };
+            if !tracker.note_approval(request) {
+                return None;
+            }
+            emit_activity(observations, vec![DomainObservation::Approval(row)]).await
         }
         CodexEvent::QuestionRequested(request) => {
             tracker.note_questions(&request);

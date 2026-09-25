@@ -520,6 +520,27 @@ async fn deliver_applied_response(
         let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
         return;
     }
+    if state.engine == EngineId::Codex
+        && let OwnedInteractionCommand::RespondApproval {
+            approval_id,
+            approved,
+            ..
+        } = command
+    {
+        let pending = turn.answer_provider_approval(
+            applied.receipt.request_id.as_str(),
+            approval_id.as_str(),
+            *approved,
+        );
+        if !matches!(
+            super::steer::drive_steer_ack(context, state, turn, pending).await,
+            super::steer::SteerDriveOutcome::Acked(Ok(()))
+        ) {
+            mark_interrupted(state, turn, true);
+            let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
+            return;
+        }
+    }
     if !commit_resolution_observation(context, state, turn, &applied).await {
         mark_interrupted(state, turn, true);
     }

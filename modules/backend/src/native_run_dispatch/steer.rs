@@ -20,7 +20,7 @@ use super::dispatch_support::{mint_item_id, mint_patch_id};
 use super::turn::{TurnConsumptionContext, TurnConsumptionState, handle_observation};
 
 /// Outcome of driving one steered provider-ack future.
-enum SteerDriveOutcome<E> {
+pub(super) enum SteerDriveOutcome<E> {
     /// The provider ack resolved (success or typed rejection).
     Acked(Result<(), E>),
     /// A cancellation handle fired while waiting.
@@ -40,7 +40,7 @@ enum SteerDriveOutcome<E> {
 /// steer read, and without this drain the ack would never come. Pinned
 /// once outside the loop: polling by value across iterations would move
 /// it after the first poll.
-async fn drive_steer_ack<F, E>(
+pub(super) async fn drive_steer_ack<F, E>(
     context: &TurnConsumptionContext<'_>,
     state: &mut TurnConsumptionState<'_>,
     turn: &mut AcceptedTurn,

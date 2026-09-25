@@ -465,6 +465,7 @@ pub(crate) struct SteerDelivery {
     #[allow(dead_code)]
     pub(super) request_id: String,
     pub(super) text: String,
+    pub(super) approval_response: Option<(String, bool)>,
     pub(super) ack: oneshot::Sender<Result<(), SteerError>>,
 }
 
@@ -483,6 +484,7 @@ impl SteerDelivery {
         Self {
             request_id,
             text,
+            approval_response: None,
             ack,
         }
     }
@@ -616,6 +618,24 @@ impl AcceptedTurn {
         request_id: &str,
         text: &str,
     ) -> impl std::future::Future<Output = Result<(), SteerError>> + Send + use<> {
+        self.send_provider_delivery(request_id, text, None)
+    }
+
+    pub(crate) fn answer_provider_approval(
+        &self,
+        request_id: &str,
+        target: &str,
+        approved: bool,
+    ) -> impl std::future::Future<Output = Result<(), SteerError>> + Send + use<> {
+        self.send_provider_delivery(request_id, "", Some((target.to_owned(), approved)))
+    }
+
+    fn send_provider_delivery(
+        &self,
+        request_id: &str,
+        text: &str,
+        approval_response: Option<(String, bool)>,
+    ) -> impl std::future::Future<Output = Result<(), SteerError>> + Send + use<> {
         let sender = self.steer_tx.clone();
         let control = Arc::clone(&self.control);
         let request_id = request_id.to_owned();
@@ -628,6 +648,7 @@ impl AcceptedTurn {
             let delivery = SteerDelivery {
                 request_id,
                 text,
+                approval_response,
                 ack: ack_tx,
             };
             let sent = tokio::select! {

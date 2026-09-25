@@ -1481,6 +1481,16 @@ async fn codex_message_history_preserves_parts_phases_and_late_corrections() {
         )
         .await;
 
+        use sea_orm::{ColumnTrait, QueryFilter};
+        database_entities::thread::Entity::update_many()
+            .col_expr(
+                database_entities::thread::Column::Title,
+                sea_orm::sea_query::Expr::value("New thread"),
+            )
+            .filter(database_entities::thread::Column::ThreadId.eq(thread_id.as_str()))
+            .exec(&database)
+            .await
+            .unwrap();
         let launch = NativeCodexAuthority::new()
             .resolve_launch_with_executable(
                 &temp.db_path,
@@ -1550,6 +1560,12 @@ async fn codex_message_history_preserves_parts_phases_and_late_corrections() {
             })
             .collect();
         items.sort_by_key(|item| item.ordinal);
+        let named_thread = database_entities::thread::Entity::find_by_id(thread_id.as_str())
+            .one(&database)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(named_thread.title, "Inspect project files");
         assert_eq!(items.len(), 2, "each provider message owns a durable row");
         assert_eq!(items[0].body, "I checked.");
         assert_eq!(

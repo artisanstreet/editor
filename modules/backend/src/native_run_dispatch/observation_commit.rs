@@ -230,6 +230,30 @@ pub(crate) async fn commit_activity_observation(
     cursor: &mut SubagentCommitCursor<'_>,
     observation: Observation,
 ) -> bool {
+    // Register the decision target before publishing the approval card. The
+    // response route must be able to find it as soon as the UI can answer.
+    if let Observation::Approval(row) = &observation
+        && row.approved().is_none()
+    {
+        let Some(requested_at) = at_or_after(origin, cursor.scope.expected_updated_at) else {
+            return false;
+        };
+        if repository
+            .record_approval_request(artisan_database::RecordApprovalRequest {
+                thread_id: &cursor.scope.launched.thread_id,
+                run_id: &cursor.scope.launched.run_id,
+                approval_id: row.approval_id(),
+                description: row.description().to_owned(),
+                request: row.request(),
+                requested_at,
+                binding_version: cursor.scope.bound.binding_version,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
     let Ok(base) = repository
         .last_committed_observation_sequence(&cursor.scope.launched.run_id)
         .await
@@ -362,6 +386,26 @@ fn resequence_activity_observation(
     sequence: ObservationSequence,
 ) -> Option<Observation> {
     match observation {
+        Observation::Approval(row) => {
+            let rebuilt = match row.approved() {
+                None => artisan_domain::ApprovalObservation::requested(
+                    observation_id.clone(),
+                    sequence,
+                    row.approval_id().clone(),
+                    row.description().to_owned(),
+                    row.request().clone(),
+                ),
+                Some(approved) => artisan_domain::ApprovalObservation::resolved(
+                    observation_id.clone(),
+                    sequence,
+                    row.approval_id().clone(),
+                    row.description().to_owned(),
+                    row.request().clone(),
+                    approved,
+                ),
+            };
+            rebuilt.ok().map(Observation::Approval)
+        }
         Observation::ReasoningSummaryDelta(row) => ReasoningSummaryDeltaObservation::new(
             observation_id.clone(),
             sequence,
@@ -641,5 +685,47 @@ mod activity_resequence_tests {
             resequence_activity_observation(&message, &fresh_id, fresh_sequence).is_none(),
             "transcript text must never enter the activity vocabulary"
         );
+    }
+}
+
+#[cfg(test)]
+mod approval_resequence_tests {
+    use super::*;
+
+    #[test]
+    fn pending_approval_survives_dispatch_resequence_and_checkpoint_encoding() {
+        let provider_id = ObservationId::parse("approval-provider-42").unwrap();
+        let source = Observation::Approval(
+            artisan_domain::ApprovalObservation::requested(
+                ObservationId::parse("provider-event").unwrap(),
+                ObservationSequence::new(42).unwrap(),
+                provider_id.clone(),
+                "Inspect the Windows editor".to_owned(),
+                artisan_domain::ApprovalRequest::command(
+                    "powershell.exe Get-Process editor".to_owned(),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let id = ObservationId::parse("durable-event").unwrap();
+        let sequence = ObservationSequence::new(9).unwrap();
+        let resequenced = resequence_activity_observation(&source, &id, sequence)
+            .expect("approval must not interrupt the dispatcher");
+        let Observation::Approval(row) = &resequenced else {
+            panic!("approval lost")
+        };
+        assert_eq!(row.approval_id(), &provider_id);
+        assert_eq!(row.approved(), None);
+        assert_eq!(row.description(), "Inspect the Windows editor");
+        artisan_database::encode_observation_checkpoint(
+            artisan_domain::EngineId::Codex,
+            1,
+            Some(8),
+            &[resequenced],
+        )
+        .expect("approval must be persistable");
     }
 }

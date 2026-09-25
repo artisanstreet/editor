@@ -6,6 +6,7 @@ use artisan_domain::{
     QuestionInput, RootPath,
 };
 use artisan_native_engine::CODEX_OPT_OUT_NOTIFICATION_METHODS;
+use base64::Engine as _;
 use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -120,16 +121,19 @@ impl CodexSettings {
     /// fast tier. A missing `threadId` is rejected by the real server with
     /// `-32600 Invalid request: missing field threadId`, so omitting it
     /// stalls the turn until the lease expires instead of failing fast.
-    pub(crate) fn turn_start_params(&self, thread_id: &str, prompt_text: &str) -> Value {
+    #[cfg(test)]
+    pub(crate) fn turn_start_params(&self, thread_id: &str, text: &str) -> Value {
+        self.turn_start_params_with_images(thread_id, text, &[])
+    }
+
+    pub(crate) fn turn_start_params_with_images(
+        &self,
+        thread_id: &str,
+        text: &str,
+        images: &[artisan_domain::ImageAttachment],
+    ) -> Value {
         let mut params = serde_json::Map::new();
-        params.insert(
-            "input".to_owned(),
-            Value::Array(vec![serde_json::json!({
-                "text": prompt_text,
-                "text_elements": [],
-                "type": "text",
-            })]),
-        );
+        params.insert("input".to_owned(), prompt_input(text, images));
         params.insert("threadId".to_owned(), Value::String(thread_id.to_owned()));
         if self.service_tier.as_deref() == Some("fast") {
             params.insert("serviceTier".to_owned(), Value::String("fast".to_owned()));
@@ -202,6 +206,7 @@ fn native_id_of(envelope: &Value) -> Option<String> {
 /// One typed Codex approval request (permission request).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodexApprovalRequest {
+    rpc_id: Value,
     approval_id: String,
     description: String,
     command: Option<String>,
@@ -212,13 +217,11 @@ pub(crate) struct CodexApprovalRequest {
 
 impl CodexApprovalRequest {
     /// Returns the provider approval identity.
-    #[cfg(test)]
     pub(crate) fn approval_id(&self) -> &str {
         &self.approval_id
     }
 
     /// Returns the human description.
-    #[cfg(test)]
     pub(crate) fn description(&self) -> &str {
         &self.description
     }
@@ -641,6 +644,7 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
                 return CodexEvent::UnknownMethod;
             }
             CodexEvent::ApprovalRequested(CodexApprovalRequest {
+                rpc_id: envelope.get("id").cloned().unwrap_or(Value::Null),
                 approval_id,
                 description: reason.clone().unwrap_or_else(|| "Run a command".to_owned()),
                 command,
@@ -657,6 +661,7 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
                 return CodexEvent::UnknownMethod;
             }
             CodexEvent::ApprovalRequested(CodexApprovalRequest {
+                rpc_id: envelope.get("id").cloned().unwrap_or(Value::Null),
                 approval_id,
                 description: reason
                     .clone()
@@ -1131,6 +1136,13 @@ impl CodexPendingTracker {
         self.native_thread_id.as_deref()
     }
 
+    pub(crate) fn approval_reply(&self, id: &str, approved: bool) -> Option<Value> {
+        let request = self.approvals.get(id)?;
+        Some(
+            serde_json::json!({"id": request.rpc_id, "result": {"decision": if approved {"approved"} else {"denied"}}}),
+        )
+    }
+
     /// Notes one approval request; re-noting the same id is a no-op.
     ///
     /// The request is validated through the domain constructor first, so an
@@ -1183,8 +1195,6 @@ impl CodexPendingTracker {
 
     /// Resolves one approval; returns whether it was pending.
     ///
-    /// Test-only until dispatcher delivery wiring lands.
-    #[cfg(test)]
     pub(crate) fn resolve_approval(&mut self, approval_id: &str) -> bool {
         self.approvals.remove(approval_id).is_some()
     }
@@ -1198,7 +1208,6 @@ impl CodexPendingTracker {
     }
 
     /// Returns the number of pending approvals.
-    #[cfg(test)]
     pub(crate) fn pending_approvals(&self) -> usize {
         self.approvals.len()
     }
@@ -1357,4 +1366,18 @@ pub(crate) fn parse_thread_token_usage(params: &Value) -> Option<CodexTokenUsage
         return None;
     }
     Some(sample)
+}
+
+/// Encode each attachment as native image input, never as a filename in text.
+fn prompt_input(text: &str, images: &[artisan_domain::ImageAttachment]) -> Value {
+    let mut content = Vec::new();
+    if !text.is_empty() || images.is_empty() {
+        content.push(serde_json::json!({"type":"text", "text":text, "text_elements":[]}));
+    }
+    for image in images {
+        content.push(serde_json::json!({"type":"image", "url":format!(
+            "data:{};base64,{}", image.mime_type_str(),
+            base64::engine::general_purpose::STANDARD.encode(image.bytes()))}));
+    }
+    Value::Array(content)
 }

@@ -2218,6 +2218,9 @@ async fn drive_codex_wire_turn(mut turn: AcceptedTurn) -> WireTurnOutcome {
         match observation {
             EngineObservation::TextDelta(delta) => text.push_str(delta.delta()),
             EngineObservation::Usage(_) => {}
+            EngineObservation::SummaryTitle { title, .. } => {
+                assert_eq!(title.as_str(), "Inspect project files")
+            }
             EngineObservation::Terminal(terminal) => observed_terminal = Some(terminal.state()),
             _ => panic!("unexpected wire observation"),
         }
@@ -2315,16 +2318,32 @@ async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
             &tokio::runtime::Handle::current(),
         );
         super::socket::reset_socket_open_count_for_tests();
-        let turn = admit_codex_wire_turn(
-            &owner,
-            settings,
-            launch,
-            thread_id.clone(),
-            RunId::parse("wire-run-accept").expect("run id"),
-            &temp.root,
-            "hello wire",
-        )
-        .await;
+        let image_bytes = vec![0, 1, 127, 128, 255];
+        let image =
+            artisan_domain::ImageAttachment::new("image/png", image_bytes.clone(), "image.png")
+                .unwrap();
+        let turn = owner
+            .admit_codex_turn(
+                EngineCodexTurnInput {
+                    run_id: RunId::parse("wire-run-accept").unwrap(),
+                    thread_id: thread_id.clone(),
+                    project_root: temp.root.clone(),
+                    prompt_id: "prompt-wire-1".to_owned(),
+                    prompt: QueueMessagePayload::new(
+                        Some(artisan_domain::AuthoredText::parse("hello wire").unwrap()),
+                        vec![image],
+                    )
+                    .unwrap(),
+                    settings,
+                    launch,
+                    continuation: None,
+                    prompt_delivery: "immediate".to_owned(),
+                    stream_after: 0,
+                    control_capacity: 1,
+                },
+                Duration::from_secs(50),
+            )
+            .unwrap();
         let started = std::time::Instant::now();
         let wire = drive_codex_wire_turn(turn).await;
         assert!(
@@ -2348,6 +2367,20 @@ async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
         .expect("recorded params are valid json");
         assert_eq!(recorded["threadId"], "thread-fixture-1");
         assert_eq!(recorded["input"][0]["text"], "hello wire");
+        assert_eq!(recorded["input"].as_array().unwrap().len(), 2);
+        assert_eq!(recorded["input"][1]["type"], "image");
+        use base64::Engine as _;
+        let encoded = recorded["input"][1]["url"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("data:image/png;base64,")
+            .unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            image_bytes
+        );
         assert_eq!(recorded["serviceTier"], "fast");
         assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
     })
@@ -3510,9 +3543,8 @@ async fn plain_message_and_terminal_paths_stay_unchanged() {
     let mut tracker = CodexPendingTracker::new();
     let mut active = None;
 
-    // Agent-message item envelopes never enter the activity vocabulary: the
-    // plain delta path is the only reply-text channel, without any inferred
-    // classification.
+    // Agent-message envelopes use the text snapshot vocabulary, never activity.
+    // Snapshots from a thread not bound to this tracker must be ignored.
     for line in [
         r#"{"method":"item/started","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"msg-1","phase":"commentary","text":"","type":"agentMessage"}}}"#,
         r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"msg-1","phase":"final","text":"done","type":"agentMessage"}}}"#,
@@ -3521,7 +3553,10 @@ async fn plain_message_and_terminal_paths_stay_unchanged() {
     ] {
         let event = parse_frame(line, 70).expect("envelope parses");
         assert!(
-            matches!(event, CodexEvent::UnknownMethod),
+            matches!(
+                event,
+                CodexEvent::UnknownMethod | CodexEvent::AgentMessageSnapshot { .. }
+            ),
             "non-activity envelope stays observable: {line}"
         );
         let (sender, mut receiver) = mpsc::channel(8);
@@ -3818,4 +3853,14 @@ async fn file_line_counts_follow_split_segment_semantics() {
             "segment semantics for {kind}/{diff:?}"
         );
     }
+}
+
+#[test]
+fn codex_image_only_input_has_native_images_without_placeholder_text() {
+    let settings = CodexSettings::from_selection(&codex_selection()).unwrap();
+    let image =
+        artisan_domain::ImageAttachment::new("image/png", vec![1, 2, 3], "pasted.png").unwrap();
+    let params = settings.turn_start_params_with_images("thread-images", "", &[image]);
+    assert_eq!(params["input"].as_array().unwrap().len(), 1);
+    assert_eq!(params["input"][0]["type"], "image");
 }

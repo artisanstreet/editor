@@ -51,7 +51,9 @@ pub(crate) use self::claude::read_claude_line;
 #[allow(unused_imports)]
 pub(crate) use self::claude::service_claude_steer_delivery;
 #[allow(unused_imports)]
-pub(crate) use self::codex::{ack_codex_steer_response, service_codex_steer_delivery};
+pub(crate) use self::codex::{
+    ack_codex_steer_response, service_codex_delivery, service_codex_steer_delivery,
+};
 // Shared Codex wire helpers live in the codex leaf module; re-exported so the
 // `engine_owner::operation::*` paths keep resolving for the `#[path]`
 // engine-owner suites.

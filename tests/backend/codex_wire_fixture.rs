@@ -147,6 +147,49 @@ fn main() {
             .get("method")
             .and_then(|method| method.as_str())
             .unwrap_or("");
+        if method == "thread/read" {
+            emit(
+                &mut output,
+                &serde_json::json!({"id":id,"result":{"thread":{"id":value.pointer("/params/threadId"),"name":null,"preview":"Inspect project files"}}}),
+            );
+            continue;
+        }
+        if method == "thread/start"
+            && value
+                .pointer("/params/ephemeral")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            emit(
+                &mut output,
+                &serde_json::json!({"id":id,"result":{"thread":{"id":"title-metadata"}}}),
+            );
+            continue;
+        }
+        if method == "turn/start"
+            && value
+                .pointer("/params/threadId")
+                .and_then(serde_json::Value::as_str)
+                == Some("title-metadata")
+        {
+            emit(
+                &mut output,
+                &serde_json::json!({"id":id,"result":{"turn":{"id":"title-turn"}}}),
+            );
+            emit(
+                &mut output,
+                &serde_json::json!({"method":"item/completed","params":{"threadId":"title-metadata","item":{"type":"agentMessage","text":"{\"title\":\"Inspect project files\"}"}}}),
+            );
+            emit(
+                &mut output,
+                &serde_json::json!({"method":"turn/completed","params":{"threadId":"title-metadata","turn":{"id":"title-turn","status":"completed"}}}),
+            );
+            continue;
+        }
+        if method == "thread/name/set" {
+            emit(&mut output, &serde_json::json!({"id":id,"result":{}}));
+            continue;
+        }
         match method {
             "initialize" => emit(
                 &mut output,
