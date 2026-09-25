@@ -260,7 +260,7 @@ impl NativeTransportCommand {
     #[must_use]
     pub const fn hold_kind(&self) -> Option<HoldKind> {
         match self {
-            Self::QueueFirstMessage(_) | Self::QueueMessage(_) => Some(HoldKind::Message),
+            Self::QueueFirstMessage(_) | Self::SubmitComposerDraft(_) => Some(HoldKind::Message),
             Self::ComposerState(
                 ComposerStateCommand::WithdrawQueuedMessage { .. }
                 | ComposerStateCommand::RetryFailedMessage { .. },

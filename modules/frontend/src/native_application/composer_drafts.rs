@@ -20,7 +20,7 @@ use crate::native_transport_service::{ComposerDraftCommand, ComposerDraftEvent, 
 /// Per-connection draft bookkeeping owned by the host view.
 #[derive(Default)]
 pub(super) struct ComposerDrafts {
-    sync: DraftSync<Hold>,
+    pub(super) sync: DraftSync<Hold>,
     /// The composer change counter already handed to the sync.
     seen_change: u64,
     /// The scope whose Forge draft was last requested.
@@ -114,16 +114,34 @@ impl NativeApplication {
     ) {
         match event {
             ComposerDraftEvent::Saved {
-                scope, sequence, ..
+                scope,
+                sequence,
+                revision,
+            } => {
+                let next = self
+                    .composer_drafts
+                    .sync
+                    .acknowledged(&scope, sequence, revision);
+                self.submit_draft_save(next);
+                self.drive_draft_submission(cx);
             }
-            | ComposerDraftEvent::SaveFailed {
+            ComposerDraftEvent::Revision { scope, revision } => {
+                self.composer_drafts.sync.observe_revision(&scope, revision);
+            }
+            ComposerDraftEvent::SaveFailed {
                 scope, sequence, ..
             } => {
                 let next = self.composer_drafts.sync.settled(&scope, sequence);
                 self.submit_draft_save(next);
+                self.drive_draft_submission(cx);
             }
             ComposerDraftEvent::Read { scope, result } => {
                 let draft = result.ok().flatten();
+                if let Some(draft) = &draft {
+                    self.composer_drafts
+                        .sync
+                        .observe_revision(&scope, draft.revision());
+                }
                 let digests = draft.map_or_else(Vec::new, |draft| {
                     self.composer.update(cx, |composer, cx| {
                         composer.apply_forge_draft(&scope, &draft, cx)
@@ -220,7 +238,25 @@ impl NativeApplication {
         self.composer_drafts.opened = None;
     }
 
-    fn submit_draft_save(&mut self, save: Option<DraftSave>) {
+    /// Saves the composer's current body again, for a send the Forge
+    /// refused because its stored draft moved on.
+    pub(super) fn resave_composer_draft(
+        &mut self,
+        scope: &artisan_domain::ComposerDraftScope,
+        cx: &mut Context<Self>,
+    ) {
+        let composer = self.composer.read(cx);
+        if composer.draft_scope().as_ref() != Some(scope) {
+            return;
+        }
+        let body = composer.draft_body();
+        let holds = self.connection_holds();
+        let acquire = || holds.as_ref()?.try_hold(HoldKind::Draft);
+        let save = self.composer_drafts.sync.edit(scope, body, acquire);
+        self.submit_draft_save(save);
+    }
+
+    pub(super) fn submit_draft_save(&mut self, save: Option<DraftSave>) {
         let mut next = save;
         while let Some(save) = next.take() {
             let scope = save.scope.clone();
@@ -257,6 +293,50 @@ impl NativeApplication {
 
 #[cfg(test)]
 impl NativeApplication {
+    /// Answers every draft save sent so far as the Forge would, each with
+    /// the next revision.
+    pub(super) fn ack_draft_saves(&mut self, cx: &mut Context<Self>) {
+        static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.sync_composer_draft(cx);
+        loop {
+            let mut saves = Vec::new();
+            self.composer_drafts.sent.borrow_mut().retain(|command| {
+                if let ComposerDraftCommand::Save { sequence, command } = command {
+                    saves.push((command.scope().clone(), *sequence));
+                    return false;
+                }
+                true
+            });
+            if saves.is_empty() {
+                break;
+            }
+            for (scope, sequence) in saves {
+                let next = REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let revision = artisan_domain::ComposerDraftRevision::new(next).expect("revision");
+                let event = ComposerDraftEvent::Saved {
+                    scope,
+                    sequence,
+                    revision,
+                };
+                self.receive_draft_event(event, cx);
+            }
+        }
+        // A draft seeded without an authored change is what the Forge
+        // already stores.
+        let scope = self.composer.read(cx).draft_scope().or_else(|| {
+            self.selected_thread
+                .clone()
+                .map(artisan_domain::ComposerDraftScope::Thread)
+        });
+        if let Some(scope) = scope {
+            let next = REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let revision = artisan_domain::ComposerDraftRevision::new(next).expect("revision");
+            if !self.composer_drafts.sync.is_submitting(&scope) {
+                self.composer_drafts.sync.observe_revision(&scope, revision);
+            }
+        }
+    }
+
     /// Answers the composer's pending read as the Forge would, with `text`
     /// stored at revision one for its current scope.
     pub(super) fn reply_forge_draft(&mut self, text: &str, cx: &mut Context<Self>) {

@@ -261,6 +261,11 @@ impl NativeApplication {
             NativeTransportEvent::MessageQueued(receipt) => {
                 self.handle_message_receipt(receipt, cx);
             }
+            NativeTransportEvent::MessageStale {
+                thread_id,
+                request_id,
+                current_revision,
+            } => self.handle_message_stale(&thread_id, &request_id, current_revision, cx),
             NativeTransportEvent::MessageFailed {
                 thread_id,
                 request_id,

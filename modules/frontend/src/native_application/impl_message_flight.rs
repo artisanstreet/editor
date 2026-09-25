@@ -340,10 +340,27 @@ impl NativeApplication {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
+        // The Forge sends the stored draft, so every image must be stored.
+        if !self.composer.read(cx).unstored_attachments().is_empty() {
+            self.message_failure = Some(NativeMessageFailure::new(ServiceFailure {
+                stage: ServiceFailureStage::Request,
+                category: ServiceFailureCategory::InvalidConfiguration,
+            }));
+            self.message_failure_note = Some(
+                "Images are still uploading. Your draft is preserved; send again in a moment."
+                    .to_owned(),
+            );
+            self.sync_composer_controls(cx);
+            cx.notify();
+            return;
+        }
+        // The body being sent, captured before the composer clears it.
+        self.sync_composer_draft(cx);
+        let body = self.composer.read(cx).draft_body();
         let submission = self
             .composer
             .update(cx, |composer, _| composer.begin_payload_submission());
-        let (body, token) = match submission {
+        let (_, token) = match submission {
             Ok(submission) => submission,
             Err(blocked) => {
                 if let Some(failure) = submission_blocked_failure(blocked) {
@@ -364,20 +381,13 @@ impl NativeApplication {
                 return;
             }
         };
-        let mut queued =
-            artisan_domain::QueueMessage::new(request_id.clone(), thread_id.clone(), body);
-        if let Some(target) = self.observed_steer_target() {
-            queued = queued.with_steer_target(target);
-        }
         let flight = NativeMessageFlight {
-            thread_id,
+            thread_id: thread_id.clone(),
             request_id,
             token,
         };
-        match self.submit_command(NativeTransportCommand::QueueMessage(Box::new(queued))) {
-            Ok(()) => self.launch_message_flight(flight, cx),
-            Err(error) => self.reject_message_submission(flight.token, command_failure(error), cx),
-        }
+        self.launch_message_flight(flight, cx);
+        self.begin_draft_submission(&thread_id, body, cx);
         self.sync_composer_availability(cx);
         cx.notify();
     }
@@ -426,6 +436,8 @@ impl NativeApplication {
 
     pub(super) fn retain_message_flight(&mut self, cx: &mut Context<Self>) {
         if let Some(flight) = self.message_flight.take() {
+            let scope = artisan_domain::ComposerDraftScope::Thread(flight.thread_id.clone());
+            self.end_draft_submission(&scope);
             self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
         }
         self.sync_composer_availability(cx);

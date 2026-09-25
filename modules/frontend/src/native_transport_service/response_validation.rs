@@ -67,7 +67,7 @@ pub(super) enum ExpectedResponse {
         thread_id: ThreadId,
         request_id: RequestId,
     },
-    MessageQueued {
+    DraftSubmitted {
         thread_id: ThreadId,
         request_id: RequestId,
     },
@@ -300,13 +300,13 @@ pub(super) fn validate_response_family(
             Ok(ResponsePayload::FirstMessageQueued(receipt))
         }
         (
-            ExpectedResponse::MessageQueued {
+            ExpectedResponse::DraftSubmitted {
                 thread_id,
                 request_id,
             },
-            ResponsePayload::MessageQueued(receipt),
-        ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
-            Ok(ResponsePayload::MessageQueued(receipt))
+            ResponsePayload::ComposerDraftSubmitted(submitted),
+        ) if submitted.thread_id == thread_id && submitted.request_id == request_id => {
+            Ok(ResponsePayload::ComposerDraftSubmitted(submitted))
         }
         (
             ExpectedResponse::ApprovalAnswered {

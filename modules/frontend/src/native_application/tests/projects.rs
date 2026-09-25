@@ -337,7 +337,7 @@ fn switching_to_an_empty_project_keeps_an_inflight_payload_in_its_source_thread(
             assert!(!commands.borrow().iter().any(|command| matches!(
                 command,
                 NativeTransportCommand::CreateTask(_)
-                    | NativeTransportCommand::QueueMessage(_)
+                    | NativeTransportCommand::SubmitComposerDraft(_)
                     | NativeTransportCommand::StopRun(_)
             )));
         });

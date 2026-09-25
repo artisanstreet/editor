@@ -107,7 +107,12 @@ fn queued_messages(
 ) -> Vec<&super::NativeTransportCommand> {
     commands
         .iter()
-        .filter(|command| matches!(command, super::NativeTransportCommand::QueueMessage(_)))
+        .filter(|command| {
+            matches!(
+                command,
+                super::NativeTransportCommand::SubmitComposerDraft(_)
+            )
+        })
         .collect()
 }
 
@@ -328,6 +333,9 @@ fn install_ready_message_surface(
         composer_cx.notify();
     });
     application.sync_composer_availability(cx);
+    // The Forge has stored the draft, as the composer's save chain would
+    // have it by the time the user presses Send.
+    application.ack_draft_saves(cx);
 }
 
 /// Admits one harness run-terminal observation carrying `summary_title`
@@ -1087,6 +1095,8 @@ fn seed_failed_entry(application: &mut NativeApplication, thread: &ThreadId, gen
         .expect("failed outbox");
 }
 
+#[path = "tests/draft_send.rs"]
+mod draft_send;
 #[path = "tests/forge_drafts.rs"]
 mod forge_drafts;
 #[path = "tests/lifecycle.rs"]

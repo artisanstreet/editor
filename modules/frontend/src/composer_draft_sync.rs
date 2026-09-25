@@ -10,6 +10,14 @@
 //! its latest sent save arrives and nothing else is pending, so a host
 //! switch or quit drains every draft before the connection closes.
 //!
+//! A message is sent by naming the draft revision the Forge gave its body,
+//! so a send waits until the save carrying that body is acknowledged. While
+//! it waits, the body being sent is saved ahead of anything typed after
+//! Send, and later bodies are held until the send is on the wire; the
+//! revision is therefore exactly the sent body's. The latest revision the
+//! Forge reported per scope outlives the connection's save chains, so a send
+//! repeated after a lost answer names the same revision.
+//!
 //! The chain is generic over the hold so its bookkeeping is testable without
 //! a connection.
 
@@ -17,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use artisan_domain::{ComposerAttachmentRef, ComposerDraftScope};
+use artisan_domain::{ComposerAttachmentRef, ComposerDraftRevision, ComposerDraftScope};
 
 /// The saved content of one draft: text exactly as typed and the stored
 /// attachments in tray order.
@@ -40,11 +48,36 @@ pub(crate) struct DraftSave {
     pub(crate) body: DraftBody,
 }
 
+/// Whether a waiting send may name its draft revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SubmitReadiness {
+    /// The body being sent is not acknowledged yet.
+    Waiting,
+    /// The Forge stored the body being sent at this revision.
+    Ready(ComposerDraftRevision),
+    /// The body being sent could not be stored.
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubmitWait {
+    /// The body being sent is waiting behind an in-flight save.
+    Pinned,
+    /// The body being sent is the save with this sequence.
+    Sequence(u64),
+    /// The body being sent is stored.
+    Ready(ComposerDraftRevision),
+    Failed,
+}
+
 struct Slot<H> {
     /// Sequence of the latest save sent for this scope.
     sent: u64,
     in_flight: Option<u64>,
     pending: Option<DraftBody>,
+    /// The body a waiting send carries, saved ahead of `pending`.
+    pinned: Option<DraftBody>,
+    submit: Option<SubmitWait>,
     uploads: usize,
     hold: Option<H>,
 }
@@ -55,13 +88,18 @@ impl<H> Slot<H> {
             sent: 0,
             in_flight: None,
             pending: None,
+            pinned: None,
+            submit: None,
             uploads: 0,
             hold: None,
         }
     }
 
     const fn is_settled(&self) -> bool {
-        self.in_flight.is_none() && self.pending.is_none() && self.uploads == 0
+        self.in_flight.is_none()
+            && self.pending.is_none()
+            && self.pinned.is_none()
+            && self.uploads == 0
     }
 
     fn send(&mut self, scope: &ComposerDraftScope, body: DraftBody) -> DraftSave {
@@ -78,12 +116,15 @@ impl<H> Slot<H> {
 /// Per-scope save chains.
 pub(crate) struct DraftSync<H> {
     slots: HashMap<ComposerDraftScope, Slot<H>>,
+    /// Latest revision the Forge reported per scope.
+    revisions: HashMap<ComposerDraftScope, ComposerDraftRevision>,
 }
 
 impl<H> Default for DraftSync<H> {
     fn default() -> Self {
         Self {
             slots: HashMap::new(),
+            revisions: HashMap::new(),
         }
     }
 }
@@ -114,15 +155,111 @@ impl<H> DraftSync<H> {
         self.advance(scope)
     }
 
-    /// Settles the save with `sequence` (acknowledged or definitively
-    /// failed) and returns the next pending save, if any. A failed body is
-    /// not retried; the next change sends the complete current body.
-    pub(crate) fn settled(&mut self, scope: &ComposerDraftScope, sequence: u64) -> Option<DraftSave> {
+    /// Settles the save with `sequence` as definitively failed and returns
+    /// the next pending save, if any. A failed body is not retried; the next
+    /// change sends the complete current body.
+    pub(crate) fn settled(
+        &mut self,
+        scope: &ComposerDraftScope,
+        sequence: u64,
+    ) -> Option<DraftSave> {
+        self.settle(scope, sequence, None)
+    }
+
+    /// Settles the save with `sequence` as stored at `revision`.
+    pub(crate) fn acknowledged(
+        &mut self,
+        scope: &ComposerDraftScope,
+        sequence: u64,
+        revision: ComposerDraftRevision,
+    ) -> Option<DraftSave> {
+        self.settle(scope, sequence, Some(revision))
+    }
+
+    /// Records a revision the Forge reported for a scope (a read, or the
+    /// emptied draft after a send). Revisions only grow.
+    pub(crate) fn observe_revision(
+        &mut self,
+        scope: &ComposerDraftScope,
+        revision: ComposerDraftRevision,
+    ) {
+        let known = self.revisions.entry(scope.clone()).or_insert(revision);
+        *known = (*known).max(revision);
+    }
+
+    /// Starts a send of `body`, the scope's current content. The send
+    /// names the revision of the save that carries this body: the unsent
+    /// body, the in-flight save, or, when everything is stored, the latest
+    /// known revision. Returns a save the caller must send now.
+    pub(crate) fn begin_submit(
+        &mut self,
+        scope: &ComposerDraftScope,
+        body: DraftBody,
+    ) -> Option<DraftSave> {
+        let known = self.revisions.get(scope).copied();
+        let slot = self.slots.entry(scope.clone()).or_insert_with(Slot::new);
+        slot.pinned = slot.pending.take();
+        if slot.pinned.is_none() && slot.in_flight.is_none() && known.is_none() {
+            // Nothing the Forge acknowledged names this body yet.
+            slot.pinned = Some(body);
+        }
+        slot.submit = Some(match (&slot.pinned, slot.in_flight, known) {
+            (Some(_), _, _) => SubmitWait::Pinned,
+            (None, Some(sequence), _) => SubmitWait::Sequence(sequence),
+            (None, None, Some(revision)) => SubmitWait::Ready(revision),
+            (None, None, None) => SubmitWait::Failed,
+        });
+        self.advance(scope)
+    }
+
+    /// Whether a send of this scope is waiting for its draft.
+    pub(crate) fn is_submitting(&self, scope: &ComposerDraftScope) -> bool {
+        self.slots
+            .get(scope)
+            .is_some_and(|slot| slot.submit.is_some())
+    }
+
+    /// Whether the send started with [`Self::begin_submit`] may name its
+    /// revision.
+    pub(crate) fn submit_readiness(&self, scope: &ComposerDraftScope) -> SubmitReadiness {
+        match self.slots.get(scope).and_then(|slot| slot.submit) {
+            Some(SubmitWait::Ready(revision)) => SubmitReadiness::Ready(revision),
+            Some(SubmitWait::Pinned | SubmitWait::Sequence(_)) => SubmitReadiness::Waiting,
+            Some(SubmitWait::Failed) | None => SubmitReadiness::Failed,
+        }
+    }
+
+    /// Ends a send (it is on the wire, or it was abandoned) and returns the
+    /// next save held behind it. An abandoned send's body is still saved
+    /// unless something newer was typed.
+    pub(crate) fn end_submit(&mut self, scope: &ComposerDraftScope) -> Option<DraftSave> {
+        let slot = self.slots.get_mut(scope)?;
+        slot.submit = None;
+        if let Some(pinned) = slot.pinned.take()
+            && slot.pending.is_none()
+        {
+            slot.pending = Some(pinned);
+        }
+        self.advance(scope)
+    }
+
+    fn settle(
+        &mut self,
+        scope: &ComposerDraftScope,
+        sequence: u64,
+        revision: Option<ComposerDraftRevision>,
+    ) -> Option<DraftSave> {
+        if let Some(revision) = revision {
+            self.observe_revision(scope, revision);
+        }
         let slot = self.slots.get_mut(scope)?;
         if slot.in_flight != Some(sequence) {
             return None;
         }
         slot.in_flight = None;
+        if slot.submit == Some(SubmitWait::Sequence(sequence)) {
+            slot.submit = Some(revision.map_or(SubmitWait::Failed, SubmitWait::Ready));
+        }
         self.advance(scope)
     }
 
@@ -152,7 +289,9 @@ impl<H> DraftSync<H> {
         self.slots
             .iter_mut()
             .filter_map(|(scope, slot)| {
-                let body = slot.pending.take()?;
+                slot.submit = None;
+                let pinned = slot.pinned.take();
+                let body = slot.pending.take().or(pinned)?;
                 Some((slot.send(scope, body), slot.hold.as_ref()))
             })
             .collect()
@@ -176,7 +315,14 @@ impl<H> DraftSync<H> {
 
     fn advance(&mut self, scope: &ComposerDraftScope) -> Option<DraftSave> {
         let slot = self.slots.get_mut(scope)?;
-        let save = if slot.in_flight.is_none() {
+        let save = if slot.in_flight.is_some() {
+            None
+        } else if let Some(body) = slot.pinned.take() {
+            let save = slot.send(scope, body);
+            slot.submit = Some(SubmitWait::Sequence(save.sequence));
+            Some(save)
+        } else if slot.submit.is_none() {
+            // Bodies typed after Send wait until the send is on the wire.
             slot.pending.take().map(|body| slot.send(scope, body))
         } else {
             None

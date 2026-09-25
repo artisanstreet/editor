@@ -361,8 +361,8 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::QueueFirstMessage(command) => {
                         queue_first_message(runtime, frames, events, *command).await?;
                     }
-                    NativeTransportCommand::QueueMessage(command) => {
-                        queue_message(runtime, frames, events, *command).await?;
+                    NativeTransportCommand::SubmitComposerDraft(command) => {
+                        submit_composer_draft(runtime, frames, events, *command).await?;
                     }
                     NativeTransportCommand::ResolveRichLink { url } => {
                         resolve_rich_link(runtime, frames, events, url).await?;

@@ -174,10 +174,10 @@ fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
             // probes may be recorded on the shared boundary; the
             // meaningful assertion is that nothing queues.
             assert!(
-                commands
-                    .borrow()
-                    .iter()
-                    .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_))),
+                commands.borrow().iter().all(|command| !matches!(
+                    command,
+                    NativeTransportCommand::SubmitComposerDraft(_)
+                )),
                 "rejected offline send must never queue its message"
             );
             assert_eq!(application.composer.read(cx).draft(), "keep my draft");
@@ -223,10 +223,10 @@ fn unconfigured_first_send_without_an_account_verdict_is_refused_not_held(cx: &m
             // draft stays. Readiness probes may be recorded on the shared
             // boundary; the blocked send never queues.
             assert!(
-                commands
-                    .borrow()
-                    .iter()
-                    .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_))),
+                commands.borrow().iter().all(|command| !matches!(
+                    command,
+                    NativeTransportCommand::SubmitComposerDraft(_)
+                )),
                 "blocked first send must never queue its message"
             );
             assert!(application.message_flight.is_none());
@@ -336,16 +336,16 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
     let queued = commands
         .iter()
         .find_map(|command| match command {
-            NativeTransportCommand::QueueMessage(command) => Some(command),
+            NativeTransportCommand::SubmitComposerDraft(command) => Some(command),
             _ => None,
         })
         .expect("unheld explicit send must queue its message");
     assert_eq!(queued.thread_id, thread_id);
-    assert_eq!(
-        queued.payload.text().expect("text payload").as_str(),
-        "explicit pick draft"
+    assert!(
+        queued.draft_revision.get() > 0,
+        "the send names its stored draft"
     );
-    assert!(queued.steer_target().is_none());
+    assert!(queued.steer_target.is_none());
 }
 
 #[gpui::test]
@@ -455,14 +455,14 @@ fn save_ack_seats_config_without_touching_the_unheld_send(cx: &mut TestAppContex
     let queued = commands
         .iter()
         .find_map(|command| match command {
-            NativeTransportCommand::QueueMessage(command) => Some(command),
+            NativeTransportCommand::SubmitComposerDraft(command) => Some(command),
             _ => None,
         })
         .expect("unheld first send must queue its message");
     assert_eq!(queued.thread_id, thread_id);
-    assert_eq!(
-        queued.payload.text().expect("text payload").as_str(),
-        "keep my draft"
+    assert!(
+        queued.draft_revision.get() > 0,
+        "the send names its stored draft"
     );
 }
 
@@ -500,7 +500,7 @@ fn save_failure_does_not_hold_the_first_send(cx: &mut TestAppContext) {
         commands
             .borrow()
             .iter()
-            .any(|command| matches!(command, NativeTransportCommand::QueueMessage(_))),
+            .any(|command| matches!(command, NativeTransportCommand::SubmitComposerDraft(_))),
         "unheld first send must queue despite the save failure"
     );
 }
@@ -535,13 +535,14 @@ fn same_engine_live_run_names_the_send_as_a_steer(cx: &mut TestAppContext) {
         .borrow()
         .iter()
         .find_map(|command| match command {
-            NativeTransportCommand::QueueMessage(command) => Some(command.clone()),
+            NativeTransportCommand::SubmitComposerDraft(command) => Some(command.clone()),
             _ => None,
         })
         .expect("named send must queue");
     assert_eq!(
         queued
-            .steer_target()
+            .steer_target
+            .as_ref()
             .expect("wire command carries the named run")
             .run_id()
             .as_str(),
@@ -581,11 +582,11 @@ fn cross_engine_selection_sends_unnamed(cx: &mut TestAppContext) {
         .borrow()
         .iter()
         .find_map(|command| match command {
-            NativeTransportCommand::QueueMessage(command) => Some(command.clone()),
+            NativeTransportCommand::SubmitComposerDraft(command) => Some(command.clone()),
             _ => None,
         })
         .expect("unnamed send must queue");
-    assert!(queued.steer_target().is_none());
+    assert!(queued.steer_target.is_none());
 }
 
 #[gpui::test]
@@ -633,7 +634,7 @@ fn starting_run_refuses_the_send_with_its_reason(cx: &mut TestAppContext) {
         commands
             .borrow()
             .iter()
-            .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_))),
+            .all(|command| !matches!(command, NativeTransportCommand::SubmitComposerDraft(_))),
         "starting-guard refusal must never queue"
     );
 }
@@ -1491,7 +1492,7 @@ fn first_send_persists_displayed_one_million_window_before_queueing(cx: &mut Tes
         .expect("default choice must be saved");
     let queue = commands
         .iter()
-        .position(|command| matches!(command, NativeTransportCommand::QueueMessage(_)))
+        .position(|command| matches!(command, NativeTransportCommand::SubmitComposerDraft(_)))
         .unwrap();
     assert!(save < queue);
     let NativeTransportCommand::SetThreadEngineConfig(command) = &commands[save] else {

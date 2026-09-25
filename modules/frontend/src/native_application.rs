@@ -491,4 +491,5 @@ mod impl_projects;
 #[path = "native_application/impl_sidebar_threads.rs"]
 mod impl_sidebar_threads;
 
+mod draft_send;
 mod forge_outbox;

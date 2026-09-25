@@ -971,7 +971,7 @@ fn recovered_thread_opens_on_its_forge_draft_not_the_old_composer(cx: &mut TestA
         commands
             .borrow()
             .iter()
-            .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_))),
+            .all(|command| !matches!(command, NativeTransportCommand::SubmitComposerDraft(_))),
         "nothing is autosent during recovery"
     );
 }
@@ -1024,7 +1024,7 @@ fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(cx: &mu
             assert_eq!(application.composer.read(cx).draft(), "Alpha idea");
             assert!(!commands.borrow().iter().any(|command| matches!(
                 command,
-                NativeTransportCommand::QueueMessage(_) | NativeTransportCommand::StopRun(_)
+                NativeTransportCommand::SubmitComposerDraft(_) | NativeTransportCommand::StopRun(_)
             )));
         });
     });
