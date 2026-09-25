@@ -325,7 +325,7 @@ fn forbid_installed_root(root: &Path, installed: &Path) -> Result<()> {
     Err(InstallerError::DebugBuildGuard(format!(
         "this debug installer build refuses to operate on the installed Artisan root at {}; \
          pass --install-root (or set ARTISAN_INSTALL_ROOT) to a sandbox such as \
-         <repo>/.dist/dev/install-root, for example via `pnpm run dev:ae-installer`",
+         a directory under the system temporary directory",
         installed.display()
     )))
 }
@@ -629,7 +629,7 @@ mod tests {
         let expected_message = format!(
             "this debug installer build refuses to operate on the installed Artisan root at {}; \
              pass --install-root (or set ARTISAN_INSTALL_ROOT) to a sandbox such as \
-             <repo>/.dist/dev/install-root, for example via `pnpm run dev:ae-installer`",
+             a directory under the system temporary directory",
             installed.display()
         );
         assert!(matches!(
