@@ -2464,7 +2464,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3085,7 +3085,7 @@ dependencies = [
 [[package]]
 name = "gpui-ce"
 version = "0.2.2"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3159,7 +3159,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_apple"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "anyhow",
  "block",
@@ -3183,7 +3183,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_collections"
 version = "0.2.2"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "gpui_ce_util",
  "indexmap",
@@ -3193,7 +3193,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_derive_refineable"
 version = "0.2.2"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3203,7 +3203,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_linux"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3251,7 +3251,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_macos"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3297,7 +3297,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_macros"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3308,7 +3308,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_media"
 version = "0.2.2"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -3322,7 +3322,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_platform"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "console_error_panic_hook",
  "gpui-ce",
@@ -3335,7 +3335,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_refineable"
 version = "0.2.2"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "gpui_ce_derive_refineable",
 ]
@@ -3343,7 +3343,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_scheduler"
 version = "0.2.2"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "async-task",
  "backtrace",
@@ -3359,7 +3359,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "schemars",
  "serde",
@@ -3369,7 +3369,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_sum_tree"
 version = "0.2.2"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "heapless",
  "log",
@@ -3380,7 +3380,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_util"
 version = "0.2.6"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "anyhow",
  "log",
@@ -3390,7 +3390,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_web"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3414,7 +3414,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3440,7 +3440,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_windows"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/gpui-ce?rev=b86b2e616693ac6f64474de7dfe1b2fed80280b7#b86b2e616693ac6f64474de7dfe1b2fed80280b7"
+source = "git+https://github.com/artisanstreet/gpui-ce?rev=5015ad3f9e5571c84d0131731b44c1d4410d160a#5015ad3f9e5571c84d0131731b44c1d4410d160a"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -5876,7 +5876,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6436,7 +6436,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6449,7 +6449,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7673,7 +7673,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8888,7 +8888,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

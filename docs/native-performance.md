@@ -62,6 +62,29 @@ ticks. GPUI's existing inactive-window and thermal throttles also remain in
 effect. A failed save is shown in the settings section; the chosen limit
 still applies for the current session.
 
+## Resuming after idle
+
+The first input event that changes the UI now immediately enables GPUI's
+interactive presentation grace period. It previously required six such events
+within 100 ms, which excluded sparse clicks and the start of wheel interaction.
+The shared behavior applies across platforms: recently interacting with an
+unfocused window also bypasses the background animation cap. The user FPS limit
+and thermal throttling still apply.
+
+The grace period expires one second after the last input that changes the UI.
+It does not install a timer or request frames on its own; idle platforms can
+still park when frame demand ends. Platforms already delivering frame callbacks
+can continue presenting during that bounded period.
+
+The FPS overlay also ends its sample when the final animation callback finishes
+without a draw. This prevents an idle gap from depressing the next animation's
+FPS readout. Gaps while animation remains scheduled still count as stalls.
+
+Regression coverage exercises first-input response, expiry and resumption, the
+explicit FPS limit, return to idle, and the final callback without a draw. These
+are headless shared-rendering tests; physical Windows input-to-display latency
+still needs verification on the affected desktop.
+
 ## Model picker redraws
 
 The model picker retains its grouped catalog projection across animation frames.
