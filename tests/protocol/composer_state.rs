@@ -361,6 +361,17 @@ fn usage_round_trip_preserves_absent_vs_zero_and_optional_identity_fields() {
     assert_eq!(report.cached_input_tokens(), None);
     assert_eq!(report.provider_turn_id(), None);
     assert_eq!(report.source_sequence(), 0);
+    assert_eq!(received.compaction_at_tokens, None);
+}
+
+#[test]
+fn usage_round_trip_carries_the_forge_compaction_threshold() {
+    for threshold in [Some(0), Some(967_000), None] {
+        let original = usage_result().with_compaction_at(threshold);
+        let received = round_trip_usage(&original);
+        assert_eq!(received, original);
+        assert_eq!(received.compaction_at_tokens, threshold);
+    }
 }
 
 #[test]

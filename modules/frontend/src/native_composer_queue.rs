@@ -87,6 +87,7 @@ fn native_context_usage(usage: ReportingUsage) -> NativeContextUsage {
         usage.cached_input_tokens,
         usage.output_tokens,
     )
+    .with_compaction_at(usage.compaction_at_tokens)
 }
 
 fn pending_steering_row(row: QueueLipRow) -> PendingSteeringRow {

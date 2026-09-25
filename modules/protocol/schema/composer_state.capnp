@@ -195,6 +195,10 @@ struct RunUsageResult {
   runId @1 :Text;
   # A null struct pointer means no authoritative usage report exists.
   report @2 :RunUsageReport;
+  # Context size, in tokens, at which the reporting run's engine compacts;
+  # absent when no documented policy applies (the window is the limit).
+  # Decided by the Forge from the reporting run's engine and model.
+  compactionAtTokens @3 :OptionalUInt64;
 }
 
 

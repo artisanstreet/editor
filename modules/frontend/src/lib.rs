@@ -24,7 +24,6 @@ pub mod composer_action_failure;
 pub(crate) mod composer_draft_sync;
 pub mod composer_gesture;
 pub mod composer_send_readiness;
-pub mod context_auto_compaction;
 pub mod context_usage_description;
 pub mod context_usage_details_policy;
 pub mod context_usage_gauge_policy;

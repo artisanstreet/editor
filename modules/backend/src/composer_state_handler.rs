@@ -104,7 +104,11 @@ impl RequestHandler {
             .read_latest_run_usage(&query.run_id, &query.thread_id)
             .await
             .map_err(|error| usage_failure(&error, request_id))?;
+        let compaction_at = report
+            .as_ref()
+            .and_then(crate::context_compaction_policy::compaction_at_tokens);
         let result = RunUsageResult::new(query.thread_id.clone(), query.run_id.clone(), report)
+            .map(|result| result.with_compaction_at(compaction_at))
             .map_err(|_| {
                 typed_failure(
                     ErrorCode::Internal,

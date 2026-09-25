@@ -9,7 +9,8 @@
 //!
 //! [`NativeContextUsage`] is the data seam. [`NativeContextUsage::presentation`]
 //! is the pure validation/projection boundary and reuses the existing context
-//! percentage, tone, auto-compaction, details, description, and gauge policies.
+//! percentage, tone, details, description, and gauge policies; the
+//! compaction threshold arrives from the Forge with the usage report.
 //! The rendering helpers are intentionally focused: callers can put the ring
 //! beside a model picker and the details in a controlled [`Popover`].
 
@@ -27,10 +28,6 @@ use gpui::{
     div, point, px,
 };
 
-use crate::context_auto_compaction::{
-    ContextUsageAggregate as AutoCompactionUsage, ContextUsageOrigin as AutoCompactionOrigin,
-    context_usage_auto_compaction_percent,
-};
 use crate::context_usage_description::{
     ContextUsageAggregate as DescriptionUsage, context_usage_description,
 };
@@ -78,6 +75,9 @@ pub struct NativeContextUsage {
     pub cached_input_tokens: Option<u64>,
     /// Optional output-token breakdown from that observation.
     pub output_tokens: Option<u64>,
+    /// Context size, in tokens, at which the reporting engine compacts, as
+    /// the Forge reported it; absent means the window is the only limit.
+    pub compaction_at_tokens: Option<u64>,
 }
 
 impl NativeContextUsage {
@@ -101,6 +101,7 @@ impl NativeContextUsage {
             input_tokens: None,
             cached_input_tokens: None,
             output_tokens: None,
+            compaction_at_tokens: None,
         }
     }
 
@@ -115,6 +116,13 @@ impl NativeContextUsage {
         self.input_tokens = input_tokens;
         self.cached_input_tokens = cached_input_tokens;
         self.output_tokens = output_tokens;
+        self
+    }
+
+    /// Adds the Forge-reported compaction threshold.
+    #[must_use]
+    pub const fn with_compaction_at(mut self, compaction_at_tokens: Option<u64>) -> Self {
+        self.compaction_at_tokens = compaction_at_tokens;
         self
     }
 
@@ -134,7 +142,7 @@ impl NativeContextUsage {
     #[must_use]
     #[expect(
         clippy::cast_precision_loss,
-        reason = "token counters are converted to f64 for the shared percentage and auto-compaction policy; u64 counters stay far below 2^53 in practice"
+        reason = "token counters are converted to f64 for the shared percentage and the compaction marker; u64 counters stay far below 2^53 in practice"
     )]
     pub fn presentation(
         &self,
@@ -159,20 +167,11 @@ impl NativeContextUsage {
         let percent =
             context_usage_percent_opt(Some(context_tokens_f64), Some(context_window_tokens_f64))?;
 
-        let auto_compaction_usage = AutoCompactionUsage::new(
-            Some(AutoCompactionOrigin::new(
-                Some(&self.reporting_engine_id),
-                Some(&self.reporting_model_id),
-            )),
-            Some(context_tokens_f64),
-        );
-        let auto_compaction_percent = context_usage_auto_compaction_percent(
-            Some(&auto_compaction_usage),
-            context_window_tokens_f64,
-        );
-        if !auto_compaction_percent.is_finite() {
-            return None;
-        }
+        // The Forge decides where the reporting engine compacts; without a
+        // documented threshold the window itself is the boundary.
+        let auto_compaction_percent = self.compaction_at_tokens.map_or(100.0, |tokens| {
+            (tokens as f64 / context_window_tokens_f64 * 100.0).min(100.0)
+        });
 
         let description_usage = DescriptionUsage {
             context_tokens: Some(context_tokens),
@@ -260,7 +259,7 @@ pub struct NativeContextUsagePresentation {
     pub window_tokens: u64,
     /// Finite clamped context fullness percentage.
     pub percent: f64,
-    /// Documented auto-compaction boundary, when the policy supplies one.
+    /// Auto-compaction boundary from the Forge-reported threshold.
     pub compaction_percent: Option<f64>,
     /// Accessible trigger label from the shared gauge policy.
     pub aria_label: String,
@@ -463,6 +462,7 @@ mod tests {
             Some(200_000),
         )
         .with_breakdown(Some(60_000), Some(10_000), Some(20_000))
+        .with_compaction_at(Some(180_000))
     }
 
     #[test]
@@ -507,9 +507,14 @@ mod tests {
     }
 
     #[test]
-    fn compaction_marker_is_policy_derived_and_optional_in_the_view() {
+    fn compaction_marker_paints_the_forge_threshold_and_defaults_to_the_window() {
         let presentation = usage().presentation(Some("run-1")).expect("valid report");
         assert_eq!(presentation.compaction_percent, Some(90.0));
+        let unreported = usage()
+            .with_compaction_at(None)
+            .presentation(Some("run-1"))
+            .expect("valid report");
+        assert_eq!(unreported.compaction_percent, Some(100.0));
         assert_eq!(presentation.tone_mix().danger, 0);
         assert!(presentation.progress_fraction().value() > 0.0);
 
