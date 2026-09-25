@@ -1,11 +1,50 @@
 # Build, dev-loop, and release pipeline plan
 
-- Status: Phases 0 and 1 implemented (branch `build-pipeline`); Phases 2–5 open
+- Status: Phases 0 and 1 implemented, then revised to Nix-orchestrated stages (branch `build-pipeline`); Phases 2–5 open
 - Drafted: 2026-09-25
 - Scope: how every Artisan binary is built, identified, staged, run, released,
   and updated — from a local edit to a signed stable release
 - Primary platform: Windows x64 desktop, with the repository living in WSL
   (`\\wsl.localhost\Ubuntu\...`) and Forge hosts on WSL/Linux
+
+## Revision: Nix orchestrates, two stages (2026-09-25)
+
+Supersedes the Cargo-driven dev loop and the `preview`/`performance` profile
+design below wherever they conflict.
+
+- **Nix is the orchestrator; Cargo compiles Rust.** `nix run .#dev` builds a
+  payload with Nix (toolchain, cross toolchain, dependency cache, build
+  identity, layout) and hands it to the dev runner, which only signs,
+  installs, provisions, prunes, and launches (`dev run --payload <dir>`). The
+  runner no longer builds; `cargo dev`, `dev.py`, `dev.ps1`, `package.py`,
+  `release_manifest.py`, and `codegen.py` are gone. Payload archives come from
+  `payload-manifest-generator --archive`; release metadata from
+  `release-tool generate` called by Nix; bindings from `capnp` called by Nix.
+- **Two stages, one codegen.** Debug (`production-debug`) and Production
+  (`production`) both use opt-level 3, fat LTO, one codegen unit,
+  `panic = "abort"`, mimalloc, and an x86-64-v3 baseline. Debug adds full debug
+  info, debug assertions, overflow checks, and the GPUI inspector. GPUI
+  `test-support` is only enabled by tests and the `visual-proof` feature, so it
+  never ships. Outputs: `{linux,windows}-{debug,production}`.
+- **Windows is cross-built from Linux** with the nixpkgs MinGW-w64 toolchain
+  (`x86_64-pc-windows-gnu`), not MSVC and not LLVM-MinGW (`gnullvm`): the
+  nixpkgs LLVM-MinGW compiler-rt build is broken at the pinned revision, while
+  the GCC MinGW toolchain is cached. Executables link the CRT, the GCC runtime,
+  and mcfgthread statically and import only Windows system DLLs. The GPUI
+  renderer on Windows is wgpu, so no HLSL compiler is needed.
+- **Identity:** `version = <workspace>-<channel>.<revCount>+g<commit>[.dirty].n<outhash>`,
+  written by Nix into `resources/build-info.json`.
+- **Measured** (see `docs/native-performance.md`): Debug renders the
+  new-thread screen at 530 presentations per second sustained (was about
+  10 fps in Cargo's unoptimized `dev` profile), 0.57 ms CPU draw; Production
+  draws in 0.54 ms. Build cost on this 6-core WSL host: Windows Debug about
+  13 min cold (dependencies included), about 7 min after a source change;
+  Windows Production about 9 min cold. Linux Debug took about 35 min cold,
+  dominated by a roughly 20 min fat-LTO link with full debug info.
+- **Detached Editor:** the runner starts the Editor outside its job object
+  (`CREATE_BREAKAWAY_FROM_JOB`), with output in `.dev-runner/editor.log`;
+  WSL interop otherwise terminates Windows processes when the WSL session
+  that started them ends.
 
 ## Implementation checkpoint (2026-09-25)
 
