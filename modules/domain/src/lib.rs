@@ -185,3 +185,11 @@ pub use composer_state::{
     QueuedMessageWithdrawalResult, ReadRecalledMessage, ReadRunUsage, RecalledMessageResult,
     RunUsageResult, WithdrawQueuedMessageCommand,
 };
+
+pub mod composer_draft;
+pub use composer_draft::{
+    ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult,
+    ComposerAttachmentUploaded, ComposerDraft, ComposerDraftError, ComposerDraftResult,
+    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, QueueStoredMessage,
+    ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft, UploadComposerAttachment,
+};
