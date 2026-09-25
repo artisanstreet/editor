@@ -122,7 +122,7 @@ fn second_tick_does_not_resend_before_pairing(cx: &mut TestAppContext) {
 fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
     cx: &mut TestAppContext,
 ) {
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_out_test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -548,7 +548,7 @@ fn save_failure_does_not_hold_the_first_send(cx: &mut TestAppContext) {
 fn same_engine_live_run_names_the_send_as_a_steer(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("steer-task").expect("thread");
     let run_id = RunId::parse("run-live").expect("run");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -599,7 +599,7 @@ fn same_engine_live_run_names_the_send_as_a_steer(cx: &mut TestAppContext) {
 #[gpui::test]
 fn cross_engine_selection_sends_unnamed(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("cross-engine-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -690,7 +690,7 @@ fn starting_run_refuses_the_send_with_its_reason(cx: &mut TestAppContext) {
 fn retry_replays_the_original_steer_target(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("steer-retry-task").expect("thread");
     let run_id = RunId::parse("run-retry").expect("run");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, commands) = command_sink([Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -778,7 +778,7 @@ fn retry_replays_the_original_steer_target(cx: &mut TestAppContext) {
 #[gpui::test]
 fn send_captures_routed_label_not_picker_or_stale_run(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("label-capture-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -817,7 +817,7 @@ fn send_captures_routed_label_not_picker_or_stale_run(cx: &mut TestAppContext) {
 )]
 fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("echo-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -971,7 +971,7 @@ fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
 #[gpui::test]
 fn legacy_echo_without_source_id_takes_no_take_up(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("legacy-echo-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1017,7 +1017,7 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
     cx.update(|app| {
         app.set_reduce_motion(true);
     });
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     // Stage 1: submit + receipt. Pending before ACK, accepted with the
     // send-time routed label staged for its echo.
@@ -1451,7 +1451,7 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
 #[gpui::test]
 fn failed_send_preserves_label_across_retry(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("label-retry-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1535,7 +1535,7 @@ fn send_label_ignores_changed_picker(cx: &mut TestAppContext) {
 )]
 fn two_sends_retire_their_echoes_independently(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("two-send-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1656,7 +1656,7 @@ fn two_sends_retire_their_echoes_independently(cx: &mut TestAppContext) {
 #[gpui::test]
 fn echo_before_receipt_retires_from_canonical_scan(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("early-echo-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {

@@ -3,7 +3,7 @@ use super::*;
 #[gpui::test]
 fn correlated_failure_retains_exact_retry_identity_and_body(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-thread").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| signed_in_test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -61,7 +61,7 @@ fn correlated_failure_retains_exact_retry_identity_and_body(cx: &mut TestAppCont
     });
     cx.run_until_parked();
 
-    assert_eq!(commands.borrow().len(), 1);
+    assert_eq!(queued_messages(&commands.borrow()).len(), 1);
     cx.update(|_, app| {
         let application = view.read(app);
         assert!(
@@ -173,7 +173,7 @@ fn pointer_enter_and_space_retry_activation_each_queue_once_with_stable_identity
     let thread_id = ThreadId::parse("retry-activation-thread").expect("thread");
     let request_id = request("retry-stable-request");
     let body = "retry activation body";
-    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| signed_in_test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(()), Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -199,7 +199,7 @@ fn pointer_enter_and_space_retry_activation_each_queue_once_with_stable_identity
         });
     });
     cx.run_until_parked();
-    assert_eq!(commands.borrow().len(), 1);
+    assert_eq!(queued_messages(&commands.borrow()).len(), 1);
 
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -213,7 +213,7 @@ fn pointer_enter_and_space_retry_activation_each_queue_once_with_stable_identity
         });
     });
     cx.run_until_parked();
-    assert_eq!(commands.borrow().len(), 2);
+    assert_eq!(queued_messages(&commands.borrow()).len(), 2);
 
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -229,6 +229,7 @@ fn pointer_enter_and_space_retry_activation_each_queue_once_with_stable_identity
     cx.run_until_parked();
 
     let commands = commands.borrow();
+    let commands = queued_messages(&commands);
     assert_eq!(commands.len(), 3);
     for command in commands.iter() {
         let NativeTransportCommand::QueueMessage(command) = command else {
@@ -246,7 +247,7 @@ fn retry_receipts_settle_only_matching_flights_and_stale_results_are_inert(
 ) {
     let thread_id = ThreadId::parse("retry-receipt-thread").expect("thread");
     let stale_thread_id = ThreadId::parse("retry-stale-thread").expect("stale thread");
-    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| signed_in_test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -331,14 +332,14 @@ fn retry_receipts_settle_only_matching_flights_and_stale_results_are_inert(
         });
     });
     cx.run_until_parked();
-    assert_eq!(commands.borrow().len(), 2);
+    assert_eq!(queued_messages(&commands.borrow()).len(), 2);
 }
 
 #[gpui::test]
 fn edited_retry_is_suppressed_while_fresh_send_mints_a_new_request(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-edited-thread").expect("thread");
     let original_request = request("retry-edited-request");
-    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| signed_in_test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -371,7 +372,7 @@ fn edited_retry_is_suppressed_while_fresh_send_mints_a_new_request(cx: &mut Test
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
             application.activate_message_retry(application_cx);
-            assert_eq!(commands.borrow().len(), 0);
+            assert_eq!(queued_messages(&commands.borrow()).len(), 0);
             assert!(application.message_flight.is_none());
             assert!(application.message_retry.is_some());
             assert_eq!(
@@ -392,6 +393,7 @@ fn edited_retry_is_suppressed_while_fresh_send_mints_a_new_request(cx: &mut Test
     });
 
     let commands = commands.borrow();
+    let commands = queued_messages(&commands);
     assert_eq!(commands.len(), 1);
     let NativeTransportCommand::QueueMessage(command) = &commands[0] else {
         panic!("fresh send must queue a first message")
@@ -449,7 +451,7 @@ fn busy_retry_admission_retains_identity_and_draft_without_a_flight(cx: &mut Tes
             ));
         });
     });
-    assert_eq!(commands.borrow().len(), 1);
+    assert_eq!(queued_messages(&commands.borrow()).len(), 1);
 }
 
 #[gpui::test]
@@ -485,7 +487,7 @@ fn stopped_retry_admission_fails_closed_and_removes_the_affordance(cx: &mut Test
             assert!(!application.message_retry_focus_handle.tab_stop);
         });
     });
-    assert_eq!(commands.borrow().len(), 1);
+    assert_eq!(queued_messages(&commands.borrow()).len(), 1);
 }
 
 #[gpui::test]

@@ -85,6 +85,52 @@ fn test_application(
     application
 }
 
+// Sends to a CLI-probed engine wait for a fresh authenticated usage read.
+// Send-flow tests that are not about that gate start with one already
+// settled, as a signed-in desktop would after its first usage refresh.
+fn signed_in_test_application(
+    window: &mut gpui::Window,
+    cx: &mut Context<NativeApplication>,
+) -> NativeApplication {
+    let mut application = test_application(window, cx);
+    for (engine_id, display_name) in [("codex", "Codex"), ("claude", "Claude")] {
+        application
+            .profile_usage
+            .entries
+            .push(reported_usage_entry(engine_id, display_name, Vec::new()));
+    }
+    application
+}
+
+// Transport commands that queue a message; snapshot refreshes and usage
+// reads the application issues alongside are not part of a send's identity.
+fn queued_messages(
+    commands: &[super::NativeTransportCommand],
+) -> Vec<&super::NativeTransportCommand> {
+    commands
+        .iter()
+        .filter(|command| matches!(command, super::NativeTransportCommand::QueueMessage(_)))
+        .collect()
+}
+
+// A desktop whose CLI engines answered their usage read as signed out:
+// sends are settled by admission instead of waiting on a pending read.
+fn signed_out_test_application(
+    window: &mut gpui::Window,
+    cx: &mut Context<NativeApplication>,
+) -> NativeApplication {
+    let mut application = test_application(window, cx);
+    for (engine_id, display_name) in [("codex", "Codex"), ("claude", "Claude")] {
+        application.profile_usage.entries.push(reported_usage_entry_with_auth(
+            engine_id,
+            display_name,
+            NativeUsageAuthentication::Unauthenticated,
+            Vec::new(),
+        ));
+    }
+    application
+}
+
 fn project(id: &str, name: &str) -> ProjectSummary {
     ProjectSummary {
         project_id: ProjectId::parse(id).expect("project"),
