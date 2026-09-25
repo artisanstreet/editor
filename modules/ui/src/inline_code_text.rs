@@ -160,6 +160,74 @@ pub fn summary_line(text: &str) -> Option<String> {
     None
 }
 
+/// Maximum Unicode scalar values in one Claude thinking label, including the
+/// single trailing `…` a truncated label ends with.
+///
+/// An explicit Artisan limit matching the Claude app's 200-character label;
+/// it counts scalar values, not graphemes, and applies only to display.
+pub const CLAUDE_LABEL_MAX_CHARS: usize = 200;
+
+/// Reduces Claude public thinking prose to its one-line label.
+///
+/// Claude's summaries lead with a short title that often has no terminal
+/// punctuation, so the first meaningful line is the label: code fences,
+/// headings, quote and list markers, link syntax, and emphasis marks are
+/// stripped, whitespace collapses, and lines that reduce to bare formatting
+/// markers are skipped. Later paragraphs never replace the first line, so a
+/// streaming label only grows. Returns `None` when no line has content; the
+/// Codex [`summary_line`] policy stays separate and unchanged.
+#[must_use]
+pub fn claude_label_line(text: &str) -> Option<String> {
+    let label = text.split('\n').find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            return None;
+        }
+        let plain = flatten_fragments(&inline_fragments(&strip_link_syntax(trimmed)));
+        let collapsed = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        collapsed
+            .chars()
+            .any(|character| !is_markdown_marker(character))
+            .then_some(collapsed)
+    })?;
+    if label.chars().count() <= CLAUDE_LABEL_MAX_CHARS {
+        return Some(label);
+    }
+    let kept: String = label.chars().take(CLAUDE_LABEL_MAX_CHARS - 1).collect();
+    Some(format!("{}…", kept.trim_end()))
+}
+
+/// Characters that carry Markdown structure rather than label content.
+fn is_markdown_marker(character: char) -> bool {
+    character.is_whitespace() || "*_~`#>-+=|[]()!:.".contains(character)
+}
+
+/// Replaces `[text](target)` and `![alt](target)` with their visible text.
+fn strip_link_syntax(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        // Offsets within `after`: the label's closing bracket and the
+        // target's closing parenthesis.
+        let span = after.find(']').and_then(|label_end| {
+            let target = after[label_end + 1..].strip_prefix('(')?;
+            Some((label_end, label_end + 2 + target.find(')')?))
+        });
+        let prefix = &rest[..open];
+        if let Some((label_end, target_end)) = span {
+            out.push_str(prefix.strip_suffix('!').unwrap_or(prefix));
+            out.push_str(&after[..label_end]);
+            rest = &after[target_end + 1..];
+        } else {
+            out.push_str(&rest[..=open]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Builds the paint inputs for one fragment list: flattened text, one
 /// highlight list, and the code ranges.
 ///

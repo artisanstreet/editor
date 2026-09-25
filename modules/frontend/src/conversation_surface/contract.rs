@@ -2,6 +2,7 @@
 //! observations, block kinds, selectors, and pure copy helpers.
 
 use super::*;
+use artisan_ui::inline_code_text::claude_label_line;
 
 /// Stable debug selector for the conversation surface root.
 pub const CONVERSATION_SURFACE_SELECTOR: &str = "artisan-conversation-surface";
@@ -520,13 +521,56 @@ pub fn owning_group_index(turn: &TurnScene) -> Option<usize> {
     })
 }
 
-/// Reduces the raw scene summary to the one thinking line, if finished.
+/// Engine policy reducing one raw reasoning summary to its thinking line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SummaryLinePolicy {
+    /// Codex and every other engine: the newest headline or the newest
+    /// paragraph's first finished sentence ([`summary_line`]).
+    Sentence,
+    /// Claude public thinking summaries: the first meaningful line, accepted
+    /// without terminal punctuation ([`claude_label_line`]).
+    FirstLine,
+}
+
+impl SummaryLinePolicy {
+    /// Resolves the policy from the turn's validated engine label.
+    ///
+    /// The label is the roster display name every engine-label setter
+    /// derives from the run's engine id; an absent or unknown label keeps
+    /// the existing sentence policy.
+    #[must_use]
+    pub fn for_engine_label(engine_label: Option<&str>) -> Self {
+        if engine_label
+            == Some(crate::native_profile_usage::profile_usage_display_name(
+                "claude",
+            ))
+        {
+            Self::FirstLine
+        } else {
+            Self::Sentence
+        }
+    }
+
+    /// Reduces one raw summary under this policy.
+    #[must_use]
+    pub fn reduce(self, summary: &str) -> Option<String> {
+        match self {
+            Self::Sentence => summary_line(summary),
+            Self::FirstLine => claude_label_line(summary),
+        }
+    }
+}
+
+/// Reduces the raw scene summary to the one thinking line, if any.
 ///
-/// Unfinished phases yield `None` so the caller falls back to the narration,
-/// exactly like the reference.
+/// The turn's engine label selects the [`SummaryLinePolicy`]; a summary that
+/// reduces to nothing yields `None` so the caller falls back to the
+/// narration, exactly like the reference. Copy and visibility decisions both
+/// call this one function.
 #[must_use]
-pub fn status_summary_copy(summary: Option<&str>) -> Option<String> {
-    summary.and_then(summary_line)
+pub fn status_summary_copy(summary: Option<&str>, engine_label: Option<&str>) -> Option<String> {
+    let policy = SummaryLinePolicy::for_engine_label(engine_label);
+    summary.and_then(|summary| policy.reduce(summary))
 }
 
 /// Returns the exact pre-response provider wait label.
@@ -569,7 +613,7 @@ pub fn turn_status_copy_text(
     reasoning_summary: Option<&str>,
     engine_label: Option<&str>,
 ) -> Option<String> {
-    match status_summary_copy(reasoning_summary) {
+    match status_summary_copy(reasoning_summary, engine_label) {
         Some(summary) => Some(summary),
         None => match narration {
             TurnNarration::ProviderWait => Some(provider_wait_copy(engine_label)),

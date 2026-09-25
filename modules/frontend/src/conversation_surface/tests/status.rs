@@ -169,16 +169,56 @@ fn live_status_formats_the_authoritative_elapsed_basis() {
 #[test]
 fn multiline_reasoning_reduces_to_one_headline() {
     assert_eq!(
-        status_summary_copy(Some(
-            "**First thought**\n\nSome body.\n\n**Planning playful ambiguous response**"
-        )),
+        status_summary_copy(
+            Some("**First thought**\n\nSome body.\n\n**Planning playful ambiguous response**"),
+            Some("Codex"),
+        ),
         Some("Planning playful ambiguous response".to_owned())
     );
     assert_eq!(
-        status_summary_copy(Some("Unfinished thought without end")),
+        status_summary_copy(Some("Unfinished thought without end"), None),
         None
     );
-    assert_eq!(status_summary_copy(None), None);
+    assert_eq!(status_summary_copy(None, None), None);
+}
+
+#[test]
+fn claude_turns_take_the_first_line_without_punctuation() {
+    let prose = "Checking the pair sums\n\nThen **comparing** the margins.";
+    assert_eq!(
+        SummaryLinePolicy::for_engine_label(Some("Claude")),
+        SummaryLinePolicy::FirstLine
+    );
+    assert_eq!(
+        SummaryLinePolicy::for_engine_label(Some("Codex")),
+        SummaryLinePolicy::Sentence
+    );
+    assert_eq!(
+        SummaryLinePolicy::for_engine_label(None),
+        SummaryLinePolicy::Sentence
+    );
+    assert_eq!(
+        status_summary_copy(Some(prose), Some("Claude")),
+        Some("Checking the pair sums".to_owned())
+    );
+    // The Codex policy is unchanged for the same prose.
+    assert_eq!(
+        status_summary_copy(Some(prose), Some("Codex")),
+        Some("Then comparing the margins.".to_owned())
+    );
+    // Copy and the summary decision agree for a live Claude row.
+    assert_eq!(
+        turn_status_copy_text(
+            TurnNarration::Thinking,
+            Some(0),
+            Some(5_000),
+            Some("Recommending a modern tech stack"),
+            Some("Claude"),
+        ),
+        Some("Recommending a modern tech stack".to_owned())
+    );
+    // Formatting-only prose reduces to nothing and keeps the narration.
+    assert_eq!(status_summary_copy(Some("---\n**\n"), Some("Claude")), None);
 }
 
 #[test]

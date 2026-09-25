@@ -44,7 +44,7 @@
 1216 modules/frontend/src/conversation_state_machine/impl_dispatch.rs
 1072 modules/frontend/src/conversation_surface/interactions.rs
 1158 modules/frontend/src/conversation_surface/render_blocks.rs
-876 modules/frontend/src/conversation_surface/render_sections.rs
+812 modules/frontend/src/conversation_surface/render_sections.rs
 1172 modules/frontend/src/conversation_surface/tests/work_groups.rs
 1049 modules/frontend/src/conversation_turn_machine.rs
 886 modules/frontend/src/conversation_view_machine.rs

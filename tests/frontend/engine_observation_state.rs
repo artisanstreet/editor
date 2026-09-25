@@ -17,6 +17,7 @@ use artisan_domain::{
     TerminalActivityState, ThreadId, ToolAction, ToolObservation, TranscriptContent,
     TranscriptTool, TurnState, TurnStateObservation, UnixMillis,
 };
+use artisan_frontend::conversation_surface::SummaryLinePolicy;
 use artisan_frontend::engine_observation_state::{
     ApplyOutcome, EngineObservationState, TimelineRow,
 };
@@ -254,6 +255,74 @@ fn reasoning_deltas_accumulate_and_empty_completion_keeps_text() {
         .expect("reasoning row pairs");
     assert_eq!(row.text(), "summary ");
     assert!(row.settled());
+}
+
+fn claude_stretch() -> Vec<Observation> {
+    let delta = |id: &str, text: &str| {
+        Observation::ReasoningSummaryDelta(
+            ReasoningSummaryDeltaObservation::new(
+                observation_id(id),
+                sequence(5),
+                observation_id("thinking:msg-1:0"),
+                0,
+                String::from(text),
+                None,
+                observation_id("run-claude"),
+            )
+            .expect("fixture reasoning delta is valid"),
+        )
+    };
+    vec![
+        delta("obs-claude-1", "Checking the pair"),
+        delta("obs-claude-2", " sums\n\nIf interpreting"),
+        Observation::ReasoningSummaryCompleted(
+            ReasoningSummaryCompletedObservation::new(
+                observation_id("obs-claude-3"),
+                sequence(6),
+                observation_id("thinking:msg-1:0"),
+                Some(String::from(
+                    "Checking the pair sums\n\nIf interpreting the files",
+                )),
+                observation_id("run-claude"),
+            )
+            .expect("fixture settled reasoning is valid"),
+        ),
+    ]
+}
+
+#[test]
+fn claude_label_is_stable_while_streaming_and_after_replay() {
+    let policy = SummaryLinePolicy::for_engine_label(Some("Claude"));
+    let mut live = state();
+    let mut labels = Vec::new();
+    for (cursor, observation) in claude_stretch().into_iter().enumerate() {
+        live.apply(cursor as u64 + 1, &event(observation));
+        let row = live.reasoning("thinking:msg-1:0").expect("row pairs");
+        labels.push(policy.reduce(row.text()));
+    }
+    assert_eq!(
+        labels,
+        vec![
+            Some(String::from("Checking the pair")),
+            Some(String::from("Checking the pair sums")),
+            Some(String::from("Checking the pair sums")),
+        ]
+    );
+    // The authoritative completion replaces the streamed text instead of
+    // appending it a second time.
+    let row = live.reasoning("thinking:msg-1:0").expect("row pairs");
+    assert_eq!(
+        row.text(),
+        "Checking the pair sums\n\nIf interpreting the files"
+    );
+    // Replaying the durable observations reproduces the same line.
+    let mut replayed = state();
+    for (cursor, observation) in claude_stretch().into_iter().enumerate() {
+        replayed.apply(cursor as u64 + 1, &event(observation));
+    }
+    let replayed_row = replayed.reasoning("thinking:msg-1:0").expect("row pairs");
+    assert_eq!(replayed_row.text(), row.text());
+    assert_eq!(policy.reduce(replayed_row.text()), labels[2]);
 }
 
 #[test]
