@@ -139,12 +139,11 @@ impl ConversationStateController {
     ) -> Result<(), ConversationStateError> {
         self.dispatch(ConversationStateEvent::SetTurnEngineLabel {
             turn_id,
-            engine_label,
+            engine_label: engine_label.map(|label| TurnEngineLabel::new(None, label)),
         })
     }
 
-    /// Applies a send-time engine display label mutation.
-    ///
+    /// Applies a send-time engine metadata mutation.
     /// Storage is keyed by turns already present in [`Self::turns`], so the
     /// map stays bounded by [`MAX_TURN_CONTROLLERS`] without its own ceiling.
     /// Labels for turns that leave the authoritative snapshot are pruned by
@@ -160,7 +159,7 @@ impl ConversationStateController {
     pub fn set_turn_engine_label(
         &mut self,
         turn_id: TurnId,
-        engine_label: Option<String>,
+        engine_label: Option<TurnEngineLabel>,
     ) -> Result<(), ConversationStateError> {
         if self.delivery.is_closed() {
             return Err(ConversationStateError::OwnerClosed);

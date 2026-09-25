@@ -51,6 +51,7 @@ use gpui::{
 };
 
 use crate::composer::{DraftDisposition, SubmissionToken};
+use crate::conversation_scene::TurnEngineLabel;
 use crate::desktop_shell::{
     DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, DesktopShellStyle, desktop_nav_glyph,
     desktop_shell,

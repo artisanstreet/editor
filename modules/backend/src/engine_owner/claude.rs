@@ -25,9 +25,14 @@
 //! Stream text phases are preserved verbatim on the typed event
 //! (`unspecified` for streamed deltas, `commentary` for assistant text that
 //! accompanies tool uses, mirroring the TypeScript normalizer); both fold to
-//! `TextDelta` on the shared vocabulary. Encrypted-thinking estimates
-//! (`system/thinking_tokens`) and reasoning settlement without delta text are
-//! preserved in the tracker as plumbing for a later packet, never as root
+//! `TextDelta` on the shared vocabulary. Buffered assistant frames project
+//! their ordered content (text and thinking) plus at most one usage sample.
+//! When the launch requested `--thinking-display summarized`, thinking
+//! blocks carry public summary prose that the [`ClaudeThinkingTracker`]
+//! projects onto the shared reasoning-summary observations, one item per
+//! provider message and content-block index; signatures never become text
+//! and unknown display semantics project nothing. Encrypted-thinking
+//! estimates (`system/thinking_tokens`) stay tracker plumbing, never root
 //! text. Subagent lifecycle frames emit validated [`Observation::Subagent`]
 //! rows (state `Discovered`, root plus agent thread identities) and child
 //! transcript frames (`parent_tool_use_id`) project into validated
@@ -59,8 +64,18 @@
 #![forbid(unsafe_code)]
 
 mod adapter;
+mod content;
 mod launch;
 mod protocol;
+#[cfg(test)]
+mod quota;
+mod thinking;
+mod usage;
 pub(crate) use adapter::*;
+#[cfg(test)]
+pub(crate) use content::*;
 pub(crate) use launch::*;
 pub(crate) use protocol::*;
+#[cfg(test)]
+pub(crate) use quota::*;
+pub(crate) use usage::*;

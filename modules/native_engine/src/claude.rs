@@ -44,6 +44,44 @@ pub const CLAUDE_MINIMUM_CLI_VERSION: &str = "2.1.220";
 /// gate is enforced in this packet.
 pub const CLAUDE_NATIVE_CONTINUATION_VERSION: &str = "2.1.220";
 
+/// First Claude Code release whose `--thinking-display summarized` launch
+/// Artisan captured and verified (2026-09-25 capture).
+///
+/// This is a known-good floor, not the first release that accepted the
+/// hidden flag: older CLIs keep their existing arguments. It is independent
+/// of [`CLAUDE_MINIMUM_CLI_VERSION`] and never gates launch or continuation.
+pub const CLAUDE_THINKING_DISPLAY_VERSION: &str = "2.1.282";
+
+/// Verified `--thinking-display` support of one probed CLI.
+///
+/// Distinguishes support for the flag from eligibility for hosted
+/// `highlights`: no variant implies highlights eligibility, which is an
+/// observed property of an execution context rather than of a CLI version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaudeThinkingDisplaySupport {
+    /// Below the verified display floor or unparseable: omit the flag.
+    Unsupported,
+    /// `--thinking-display summarized` is verified for this release.
+    Summarized,
+}
+
+/// Resolves the verified thinking-display support for one CLI version.
+///
+/// Fails closed: an unparseable version is [`Unsupported`], so an unknown
+/// CLI keeps its existing arguments.
+///
+/// [`Unsupported`]: ClaudeThinkingDisplaySupport::Unsupported
+#[must_use]
+pub fn claude_thinking_display_support(version: &str) -> ClaudeThinkingDisplaySupport {
+    match (
+        parse_claude_version(version),
+        parse_claude_version(CLAUDE_THINKING_DISPLAY_VERSION),
+    ) {
+        (Ok(version), Ok(floor)) if version >= floor => ClaudeThinkingDisplaySupport::Summarized,
+        _ => ClaudeThinkingDisplaySupport::Unsupported,
+    }
+}
+
 /// Stream-JSON transport label shared with the TypeScript adapter.
 pub const CLAUDE_TRANSPORT: &str = "claude-cli-stream-json";
 
@@ -141,6 +179,12 @@ impl VerifiedClaudeLaunch {
     #[must_use]
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    /// Returns the verified `--thinking-display` support of this CLI.
+    #[must_use]
+    pub fn thinking_display(&self) -> ClaudeThinkingDisplaySupport {
+        claude_thinking_display_support(&self.version)
     }
 
     /// Rechecks that the verified executable is still the same regular file.
@@ -462,6 +506,27 @@ mod tests {
         assert_eq!(check_minimum_version(&current), Ok(()));
         let newer = parse_claude_version("claude 2.2.0").unwrap();
         assert_eq!(check_minimum_version(&newer), Ok(()));
+    }
+
+    #[test]
+    fn thinking_display_support_starts_at_the_captured_release() {
+        assert_eq!(CLAUDE_THINKING_DISPLAY_VERSION, "2.1.282");
+        for (version, support) in [
+            (
+                "2.1.282 (Claude Code)",
+                ClaudeThinkingDisplaySupport::Summarized,
+            ),
+            ("2.2.0", ClaudeThinkingDisplaySupport::Summarized),
+            ("2.1.281", ClaudeThinkingDisplaySupport::Unsupported),
+            ("2.1.220", ClaudeThinkingDisplaySupport::Unsupported),
+            ("no version", ClaudeThinkingDisplaySupport::Unsupported),
+        ] {
+            assert_eq!(
+                claude_thinking_display_support(version),
+                support,
+                "{version}"
+            );
+        }
     }
 
     #[test]

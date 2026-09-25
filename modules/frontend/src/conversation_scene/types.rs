@@ -182,6 +182,58 @@ pub struct TurnNarrationEntry {
     /// The build prefers this over transition-derived labels; it carries
     /// no work, session, or lifecycle meaning.
     pub engine_label: Option<String>,
+    /// Typed engine that produced the turn, when the same send-time
+    /// metadata named one. Presentation policy keys off this identity,
+    /// never off the display label.
+    pub engine: Option<EngineId>,
+}
+
+/// Send-time engine metadata for one turn: the typed engine identity, when
+/// known, plus its display label.
+///
+/// Dereferences to the display label so label-only readers stay textual;
+/// policy decisions read [`Self::engine`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnEngineLabel {
+    engine: Option<EngineId>,
+    label: String,
+}
+
+impl TurnEngineLabel {
+    /// Labels one engine with its provider-owned roster display name.
+    #[must_use]
+    pub fn for_engine(engine: EngineId) -> Self {
+        Self::new(
+            Some(engine),
+            crate::native_profile_usage::profile_usage_display_name(engine.as_str()).to_owned(),
+        )
+    }
+
+    /// Pairs an engine identity (or none) with an explicit display label.
+    #[must_use]
+    pub const fn new(engine: Option<EngineId>, label: String) -> Self {
+        Self { engine, label }
+    }
+
+    /// Returns the typed engine identity, when known.
+    #[must_use]
+    pub const fn engine(&self) -> Option<EngineId> {
+        self.engine
+    }
+
+    /// Returns the display label.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+impl std::ops::Deref for TurnEngineLabel {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.label
+    }
 }
 
 impl TurnNarrationEntry {
@@ -194,6 +246,18 @@ impl TurnNarrationEntry {
             active_started_at_ms: None,
             session_disclosure: None,
             engine_label: None,
+            engine: None,
+        }
+    }
+
+    /// Attaches aggregate-validated send-time engine metadata: the display
+    /// label plus the typed engine identity, when known.
+    #[must_use]
+    pub fn with_turn_engine(self, engine: &TurnEngineLabel) -> Self {
+        Self {
+            engine_label: Some(engine.label().to_owned()),
+            engine: engine.engine(),
+            ..self
         }
     }
 

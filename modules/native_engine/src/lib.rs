@@ -46,8 +46,9 @@ mod windows_private;
 
 pub use claude_authority::{
     CLAUDE_EXECUTABLE_ENV_VAR, CLAUDE_MINIMUM_CLI_VERSION, CLAUDE_NATIVE_CONTINUATION_VERSION,
-    CLAUDE_PROTOCOL_VERSION, CLAUDE_TRANSPORT, NativeClaudeAuthority, NativeClaudeLaunchError,
-    VerifiedClaudeLaunch, compare_claude_versions,
+    CLAUDE_PROTOCOL_VERSION, CLAUDE_THINKING_DISPLAY_VERSION, CLAUDE_TRANSPORT,
+    ClaudeThinkingDisplaySupport, NativeClaudeAuthority, NativeClaudeLaunchError,
+    VerifiedClaudeLaunch, claude_thinking_display_support, compare_claude_versions,
 };
 pub use codex_authority::{
     CODEX_APP_SERVER_ARGS, CODEX_MINIMUM_CLI_VERSION, CODEX_OPT_OUT_NOTIFICATION_METHODS,

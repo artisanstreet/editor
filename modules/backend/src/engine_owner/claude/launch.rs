@@ -4,7 +4,7 @@ use artisan_domain::{
     ApprovalMode, ClaudePermissionMode, ClaudeSelection, FilesystemAccess, NetworkAccess,
     OBSERVATION_TITLE_MAX_BYTES, RootPath,
 };
-use artisan_native_engine::CLAUDE_NATIVE_CONTINUATION_VERSION;
+use artisan_native_engine::{CLAUDE_NATIVE_CONTINUATION_VERSION, ClaudeThinkingDisplaySupport};
 use serde_json::Value;
 
 use super::protocol::{CLAUDE_MAX_ID_BYTES, ClaudeTurnError, user_message_line};
@@ -43,6 +43,39 @@ pub(crate) fn new_session_id() -> Option<String> {
     Some(id)
 }
 
+/// Thinking display Artisan requests for one managed launch.
+///
+/// Backend-local launch policy, never a persisted selection field: supported
+/// CLIs request public `summarized` prose, every other CLI keeps its
+/// existing arguments. The same value tells the pump whether thinking text is
+/// public summary prose; unrequested display semantics are unknown, so their
+/// thinking text is never projected.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ClaudeThinkingDisplay {
+    /// Flag omitted: the CLI keeps its own default.
+    #[default]
+    Unrequested,
+    /// `--thinking-display summarized`.
+    Summarized,
+}
+
+impl ClaudeThinkingDisplay {
+    /// Resolves the requested display from the verified launch capability.
+    pub(crate) const fn for_support(support: ClaudeThinkingDisplaySupport) -> Self {
+        match support {
+            ClaudeThinkingDisplaySupport::Summarized => Self::Summarized,
+            ClaudeThinkingDisplaySupport::Unsupported => Self::Unrequested,
+        }
+    }
+
+    const fn flag_value(self) -> Option<&'static str> {
+        match self {
+            Self::Unrequested => None,
+            Self::Summarized => Some("summarized"),
+        }
+    }
+}
+
 /// Typed Claude settings derived from the durable selection.
 ///
 /// Mirrors `ResolveRunOptions` in `modules/engines/src/claude/cli-engine.ts`
@@ -61,6 +94,7 @@ pub(crate) struct ClaudeSettings {
     disable_tools: bool,
     safe_mode: bool,
     effort: Option<String>,
+    thinking_display: ClaudeThinkingDisplay,
 }
 
 impl ClaudeSettings {
@@ -93,7 +127,20 @@ impl ClaudeSettings {
             disable_tools: selection.disable_tools(),
             safe_mode: selection.safe_mode(),
             effort: selection.effort().map(|effort| effort.as_str().to_owned()),
+            thinking_display: ClaudeThinkingDisplay::Unrequested,
         })
+    }
+
+    /// Applies the launch's resolved thinking display policy.
+    #[must_use]
+    pub(crate) const fn with_thinking_display(mut self, display: ClaudeThinkingDisplay) -> Self {
+        self.thinking_display = display;
+        self
+    }
+
+    /// Returns the thinking display this launch requests.
+    pub(crate) const fn thinking_display(&self) -> ClaudeThinkingDisplay {
+        self.thinking_display
     }
 
     /// Returns the managed profile identity.
@@ -104,9 +151,9 @@ impl ClaudeSettings {
     /// Builds the exact `claude` argv for one session.
     ///
     /// Base flags mirror the TypeScript spawn (`-p`, stream-JSON stdio,
-    /// `--permission-prompt-tool stdio`); `--thinking-display` is
-    /// deliberately absent because continuation gating on the verified
-    /// release is a later packet.
+    /// `--permission-prompt-tool stdio`). `--thinking-display` follows the
+    /// resolved display policy identically for fresh starts and native
+    /// resumes, so a supported CLI requests public summaries on every turn.
     pub(crate) fn spawn_args(&self, session: &ClaudeSession) -> Vec<String> {
         let mut args = vec![
             "-p".to_owned(),
@@ -137,6 +184,10 @@ impl ClaudeSettings {
             args.push("--effort".to_owned());
             args.push(effort.to_owned());
         }
+        if let Some(display) = self.thinking_display.flag_value() {
+            args.push("--thinking-display".to_owned());
+            args.push(display.to_owned());
+        }
         match session {
             ClaudeSession::Start(id) => {
                 args.push("--session-id".to_owned());
@@ -163,7 +214,7 @@ impl ClaudeSettings {
     ) -> String {
         super::protocol::user_message_with_images(
             session.session_id(),
-            prompt.text().map(|text| text.as_str()),
+            prompt.text().map(artisan_domain::AuthoredText::as_str),
             prompt.attachments(),
         )
     }

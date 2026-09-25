@@ -394,8 +394,8 @@ pub enum ConversationStateEvent {
     SetTurnEngineLabel {
         /// Turn the label belongs to.
         turn_id: TurnId,
-        /// Display label, or `None` to clear.
-        engine_label: Option<String>,
+        /// Typed engine plus display label, or `None` to clear.
+        engine_label: Option<TurnEngineLabel>,
     },
     /// Register one disclosure controller keyed by stable scene identity.
     RegisterDisclosure {

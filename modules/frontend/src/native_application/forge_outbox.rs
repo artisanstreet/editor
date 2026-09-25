@@ -110,7 +110,7 @@ impl NativeApplication {
             host.dispatch(
                 ConversationStateEvent::SetTurnEngineLabel {
                     turn_id: turn_id.clone(),
-                    engine_label: Some(profile_usage_display_name(engine.as_str()).to_owned()),
+                    engine_label: Some(TurnEngineLabel::for_engine(engine)),
                 },
                 host_cx,
             )

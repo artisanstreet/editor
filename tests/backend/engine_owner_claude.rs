@@ -28,12 +28,13 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::claude::{
-    CLAUDE_MAX_ANSWERS, CLAUDE_MAX_FRAME_BYTES, ClaudeApplyOutcome, ClaudeContinuationDecision,
-    ClaudeContinuationGateInput, ClaudeEvent, ClaudePendingTracker, ClaudeQuotaWindowKind,
-    ClaudeSession, ClaudeSettings, ClaudeUsageAttribution, ClaudeUsageContext, ClaudeUsageScope,
-    answer_approval, answer_questions, apply_event, approval_response_line,
-    check_claude_native_continuation, clamp_claude_percent_used, classify_claude_quota_window_kind,
-    classify_exit, claude_cli_meets_minimum, claude_cli_usage_args, claude_project_directory_name,
+    CLAUDE_MAX_ANSWERS, CLAUDE_MAX_FRAME_BYTES, ClaudeApplyOutcome, ClaudeAssistantContent,
+    ClaudeAssistantFrame, ClaudeContinuationDecision, ClaudeContinuationGateInput, ClaudeEvent,
+    ClaudePendingTracker, ClaudeQuotaWindowKind, ClaudeSession, ClaudeSettings,
+    ClaudeUsageAttribution, ClaudeUsageContext, ClaudeUsageScope, answer_approval,
+    answer_questions, apply_event, approval_response_line, check_claude_native_continuation,
+    clamp_claude_percent_used, classify_claude_quota_window_kind, classify_exit,
+    claude_cli_meets_minimum, claude_cli_usage_args, claude_project_directory_name,
     claude_requires_group_termination, claude_resume_session, claude_session_title_from_lines,
     claude_session_transcript_path, claude_usage_report, has_stalled, new_session_id,
     parse_claude_assistant_usage, parse_claude_cli_reset_at, parse_claude_cli_usage_windows,
@@ -133,7 +134,7 @@ fn claude_settings_map_selection_without_coercion() {
     );
     assert!(
         !args.contains(&"--thinking-display".to_owned()),
-        "continuation gating is a later packet"
+        "an unresolved display policy keeps the existing arguments"
     );
 }
 
@@ -295,11 +296,10 @@ fn init_delta_phases_and_message_start_decode() {
     )
     .expect("assistant decodes");
     match commentary {
-        ClaudeEvent::TextDelta { delta, phase, .. } => {
-            assert_eq!(delta, "working");
-            assert_eq!(phase, "commentary");
+        ClaudeEvent::Assistant(frame) => {
+            assert_eq!(frame.text(), Some(("working", "commentary")));
         }
-        _ => panic!("expected commentary delta"),
+        _ => panic!("expected commentary frame"),
     }
 
     let start = parse_frame(
@@ -326,7 +326,15 @@ fn init_delta_phases_and_message_start_decode() {
         6,
     )
     .expect("reasoning block decodes");
-    assert!(matches!(settled, ClaudeEvent::ReasoningSettled { .. }));
+    match settled {
+        ClaudeEvent::Assistant(frame) => assert_eq!(
+            frame.content,
+            vec![ClaudeAssistantContent::Thinking {
+                text: String::new()
+            }]
+        ),
+        _ => panic!("expected buffered thinking frame"),
+    }
 }
 
 #[test]
@@ -438,7 +446,10 @@ fn unknown_bookkeeping_and_malformed_frames_reject_safely() {
     )
     .expect("usage-only frame decodes");
     assert!(
-        matches!(usage_only, ClaudeEvent::Usage { .. }),
+        matches!(
+            &usage_only,
+            ClaudeEvent::Assistant(frame) if frame.content.is_empty() && frame.usage.is_some()
+        ),
         "usage without text must stay observable as usage"
     );
 
@@ -732,16 +743,19 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
-    assert!(tracker.reasoning_settled());
     assert!(receiver.try_recv().is_err(), "no root observation");
 
-    // A non-empty thinking delta counts without root text either.
+    // Without a requested display, thinking text has unknown semantics and
+    // projects nothing at all.
     let thinking = parse_frame(
-        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"plan"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}}"#,
         5,
     )
     .expect("thinking delta decodes");
-    assert!(matches!(thinking, ClaudeEvent::ReasoningDelta));
+    assert!(matches!(
+        thinking,
+        ClaudeEvent::ThinkingDelta { index: 0, .. }
+    ));
     let outcome = apply_event(
         thinking,
         &run,
@@ -754,7 +768,6 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
     )
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
-    assert_eq!(tracker.thinking_deltas(), 1);
     assert!(receiver.try_recv().is_err(), "no root observation");
 }
 
@@ -1094,8 +1107,14 @@ async fn run_fixture_turn(
                         if let ClaudeEvent::Init { session_id } = &event {
                             session_seen = Some(session_id.clone());
                         }
-                        if let ClaudeEvent::TextDelta { phase, .. } = &event {
-                            phases.push(*phase);
+                        match &event {
+                            ClaudeEvent::TextDelta { phase, .. } => phases.push(*phase),
+                            ClaudeEvent::Assistant(frame) => {
+                                if let Some((_, phase)) = frame.text() {
+                                    phases.push(phase);
+                                }
+                            }
+                            _ => {}
                         }
                         match apply_event(
                             event, &run, SESSION, &mut tracker, &mut active, &sender, sequence,
@@ -1177,7 +1196,6 @@ async fn fixture_start_deltas_phases_close() {
         "exact native session identity rules"
     );
     assert_eq!(outcome.tracker.thinking_tokens(), Some(9));
-    assert!(outcome.tracker.reasoning_settled());
     assert_eq!(outcome.tracker.subagent_count(), 1);
     let terminal = terminal_observation(&run_id(), 3, TerminalState::Completed);
     assert_eq!(terminal.state(), TerminalState::Completed);
@@ -1982,9 +2000,9 @@ fn assistant_and_result_usage_decode_with_honest_shapes() {
     )
     .expect("assistant with usage decodes");
     match event {
-        ClaudeEvent::TextDelta { delta, usage, .. } => {
-            assert_eq!(delta, "hi");
-            let sample = usage.expect("gauge travels with the delta");
+        ClaudeEvent::Assistant(frame) => {
+            assert_eq!(frame.text(), Some(("hi", "unspecified")));
+            let sample = frame.usage.expect("gauge travels with the text");
             assert_eq!(sample.input, Some(100));
             assert_eq!(sample.cached_input, Some(20));
             assert_eq!(sample.output, Some(5));
@@ -2001,7 +2019,10 @@ fn assistant_and_result_usage_decode_with_honest_shapes() {
     )
     .expect("usage-only frame decodes");
     match usage_only {
-        ClaudeEvent::Usage { sample } => {
+        ClaudeEvent::Assistant(ClaudeAssistantFrame {
+            usage: Some(sample),
+            ..
+        }) => {
             assert_eq!(sample.input, Some(40));
             assert_eq!(sample.context, Some(40));
         }

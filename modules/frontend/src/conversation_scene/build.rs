@@ -970,18 +970,16 @@ impl ConversationScene {
             // superseded state resolve here, once the whole turn was seen.
             // A superseded session never narrates: later content in the same
             // turn owns the live line.
+            let live_summary = (summary_scoped.or(summary_all))
+                .filter(|_| narration.is_active_work())
+                .map(|(_, body)| body);
             if let Some(group_index) = group_index {
                 let is_last_content = group_index == blocks.len().saturating_sub(1);
                 let TurnBlock::WorkGroup(group) = &mut blocks[group_index] else {
                     unreachable!("session index always addresses its group");
                 };
                 group.superseded = !is_last_content;
-                if narration.is_active_work() {
-                    group.reasoning_summary = summary_scoped
-                        .clone()
-                        .or(summary_all.clone())
-                        .map(|(_, body)| body);
-                }
+                group.reasoning_summary.clone_from(&live_summary);
             }
 
             // A duration narration is a terminal label, not a label on every
@@ -1036,19 +1034,11 @@ impl ConversationScene {
                 blocks.push(TurnBlock::TurnStatus(TurnStatusBlock {
                     narration,
                     active_started_at_ms,
-                    reasoning_summary: if session_mode && narration.is_active_work() {
-                        summary_scoped
-                            .clone()
-                            .or(summary_all.clone())
-                            .map(|(_, body)| body)
-                    } else {
-                        None
-                    },
-                    engine_label: explicit_engine_label.clone().or(if session_mode {
-                        engine_label
-                    } else {
-                        None
-                    }),
+                    reasoning_summary: live_summary.filter(|_| session_mode),
+                    engine_label: explicit_engine_label
+                        .clone()
+                        .or(engine_label.filter(|_| session_mode)),
+                    engine: entry.and_then(|entry| entry.engine),
                 }));
             }
             blocks.push(TurnBlock::TurnFooter(TurnFooterBlock {

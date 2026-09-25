@@ -1,6 +1,6 @@
 # Claude thinking highlights: reverse-engineering notes and integration plan
 
-- Status: research baseline retained; integration plan revised 2026-09-25; implementation not started
+- Status: research baseline retained; integration plan revised 2026-09-25; Packets A and B (public-summary release) implemented 2026-09-25 per [the decision](../decisions/CLAUDE_THINKING_DISPLAY.md); Packets C and D not started
 - Research frozen: 2026-09-25
 - Scope: how the Claude app produces its one-line thinking label, what the Claude Code CLI supports, and how to bring it to Artisan
 - Evidence baseline: Claude desktop app 1.40609.1 (MSIX `Claude_2.9939.2.0_x64__pzs8sxrjxfjjc`), embedded Claude Code 2.1.255, claude.ai web build `b1fcb81587`
