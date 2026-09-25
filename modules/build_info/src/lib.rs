@@ -256,10 +256,22 @@ impl BuildIdentity {
     /// In-app badge beside the wordmark: the title marker of installed
     /// non-stable builds. Unstaged binaries are marked only in the OS window
     /// title, so test and fixture renders keep the product's own chrome.
+    ///
+    /// The badge shares the narrow sidebar column with the wordmark, so it
+    /// carries a seven-character commit.
     #[must_use]
     pub fn badge(&self) -> Option<String> {
         match self {
-            Self::Installed(_) => self.title_marker(),
+            Self::Installed(info) if info.channel == Channel::Stable => None,
+            Self::Installed(info) => Some(match &info.commit {
+                Some(commit) => format!(
+                    "{} {}{}",
+                    info.channel.label(),
+                    commit.get(..7).unwrap_or(commit),
+                    if info.dirty { "+" } else { "" }
+                ),
+                None => info.channel.label().to_owned(),
+            }),
             Self::Unstaged(_) => None,
         }
     }

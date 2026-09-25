@@ -141,6 +141,7 @@ fn only_stable_builds_omit_the_title_marker() {
 
     let dev = BuildIdentity::Installed(info(Channel::Dev, Some("1a2b3c4d5e6f"), true));
     assert_eq!(dev.title_marker().as_deref(), Some("Dev 1a2b3c4d5e+"));
+    assert_eq!(dev.badge().as_deref(), Some("Dev 1a2b3c4+"));
 
     let nightly = BuildIdentity::Installed(info(Channel::Nightly, None, false));
     assert_eq!(nightly.title_marker().as_deref(), Some("Nightly"));
