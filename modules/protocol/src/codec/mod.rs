@@ -53,8 +53,8 @@ use artisan_domain::{
     RequestId, RespondApproval, RespondQuestion, Revision, RootPath, RootPathError, RunId,
     RunInteractionError, SetModelFavorite, SetThreadEngineConfig, SteerTarget, StopRun,
     THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing, ThreadListingError,
-    ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
-    WebSearchAccess,
+    ThreadRetitled, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal, UnixMillis,
+    UserMessageItem, WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -97,9 +97,11 @@ mod forge_decisions;
 mod interaction;
 mod message_submission;
 mod observation;
+mod queries;
 mod repository;
 mod rich_link;
 mod server;
+mod user_preferences;
 
 pub(crate) use composer_draft::*;
 pub(crate) use conversation::*;
@@ -110,9 +112,11 @@ pub(crate) use forge_decisions::*;
 pub(crate) use interaction::*;
 pub(crate) use message_submission::*;
 pub(crate) use observation::*;
+pub(crate) use queries::*;
 pub(crate) use repository::*;
 pub(crate) use rich_link::*;
 pub(crate) use server::*;
+pub(crate) use user_preferences::*;
 
 pub use error::{ProtocolDecodeError, ProtocolEncodeError};
 

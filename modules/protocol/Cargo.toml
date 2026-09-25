@@ -81,3 +81,7 @@ path = "../../tests/protocol/conversation_roundtrip.rs"
 [[test]]
 name = "protocol_conversation_activity"
 path = "../../tests/protocol/conversation_activity.rs"
+
+[[test]]
+name = "user_preferences"
+path = "../../tests/protocol/user_preferences.rs"

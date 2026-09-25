@@ -233,7 +233,9 @@ fn approval_command_for(
         | Command::QueueStoredMessage(_)
         | Command::RetryFailedMessage(_)
         | Command::RecoverFailedMessage(_)
-        | Command::SubmitComposerDraft(_) => {
+        | Command::SubmitComposerDraft(_)
+        | Command::RecordNavigation(_)
+        | Command::ImportLegacyPreferences(_) => {
             panic!("approval gesture must build an approval command")
         }
     }
@@ -266,7 +268,9 @@ fn question_command_for(
         | Command::QueueStoredMessage(_)
         | Command::RetryFailedMessage(_)
         | Command::RecoverFailedMessage(_)
-        | Command::SubmitComposerDraft(_) => {
+        | Command::SubmitComposerDraft(_)
+        | Command::RecordNavigation(_)
+        | Command::ImportLegacyPreferences(_) => {
             panic!("question gesture must build a question command")
         }
     }

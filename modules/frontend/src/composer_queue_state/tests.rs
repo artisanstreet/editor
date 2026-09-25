@@ -394,3 +394,39 @@ fn absent_usage_fields_remain_absent_and_scope_mismatch_is_rejected() {
         .expect_err("wrong thread must be fenced");
     assert_eq!(error.reason, UsageRejection::WrongThread);
 }
+
+#[test]
+fn pushed_usage_updates_the_live_run_without_a_read_and_keeps_every_fence() {
+    let thread_id = thread("thread-a");
+    let run_id = RunId::parse("run-a").expect("run id");
+    let mut state = ComposerQueueState::new();
+    state.set_scope(Some(thread_id.clone()), 2);
+    assert!(state.begin_usage_scope(
+        thread_id.clone(),
+        2,
+        run_id.clone(),
+        EngineModelId::parse("model-a").expect("model"),
+        EngineRouteId::parse("route-a").expect("route"),
+        None,
+    ));
+    let pushed = |sequence, run: &RunId| RunUsageResult {
+        thread_id: thread_id.clone(),
+        run_id: run.clone(),
+        report: Some(report(&thread_id, run, sequence, "model-a", "route-a")),
+        compaction_at_tokens: None,
+    };
+    assert_eq!(
+        state.accept_pushed_usage(pushed(2, &run_id), "Model A".to_owned()),
+        Ok(UsageResultDisposition::Updated)
+    );
+    let older = state
+        .accept_pushed_usage(pushed(1, &run_id), "Model A".to_owned())
+        .expect_err("an older push never replaces a newer report");
+    assert_eq!(older.reason, UsageRejection::StaleSequence);
+    let other = RunId::parse("run-b").expect("run id");
+    let foreign = state
+        .accept_pushed_usage(pushed(3, &other), "Model A".to_owned())
+        .expect_err("another run's usage is not this scope's");
+    assert_eq!(foreign.reason, UsageRejection::WrongRun);
+    assert!(state.reporting_usage_for(Some(run_id.as_str())).is_some());
+}

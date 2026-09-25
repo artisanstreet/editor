@@ -67,6 +67,9 @@ pub use repository::{
     SubmitComposerDraftInput,
 };
 
+pub use repository::ComposerAttachmentChunkOutcome;
+pub use repository::{LegacyImport, StoredUserPreferences};
+
 pub use repository::{
     PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint,
     SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup,

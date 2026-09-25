@@ -6,7 +6,10 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-use artisan_domain::{ModelSelectionResolution, ResolveModelSelection};
+use artisan_domain::{
+    EngineConfigurationResolution, ManualEngineConfiguration, ModelSelectionResolution,
+    ResolveEngineConfiguration, ResolveModelSelection,
+};
 
 use crate::composer_state_codec as leaf;
 
@@ -26,8 +29,23 @@ pub(crate) fn encode_forge_decision_request(
             leaf::encode_catalog_selection(encoded.init_selection(), &query.selection);
             Ok(())
         }
+        ClientRequest::Query(Query::ResolveEngineConfiguration(query)) => {
+            let mut encoded = builder.init_resolve_engine_configuration();
+            encoded.set_thread_id(query.thread_id.as_str());
+            encoded.set_document(query.configuration.to_document().as_str());
+            Ok(())
+        }
         _ => Err(ProtocolEncodeError::ComposerState),
     }
+}
+
+/// Decodes one manual configuration document.
+fn decode_manual_document(
+    value: capnp::Result<capnp::text::Reader<'_>>,
+    field: &'static str,
+) -> Result<ManualEngineConfiguration, ProtocolDecodeError> {
+    ManualEngineConfiguration::parse(&read_text(value, field)?)
+        .map_err(|error| engine_config_error(field, error.reason()))
 }
 
 /// Decodes one Forge-decision request arm.
@@ -47,6 +65,19 @@ pub(crate) fn decode_forge_decision_request(
                     selection: leaf::decode_catalog_selection(
                         query.get_selection()?,
                         "request.resolveModelSelection.selection",
+                    )?,
+                },
+            )))
+        }
+        request::Which::ResolveEngineConfiguration(query) => {
+            let query = query?;
+            let field = "request.resolveEngineConfiguration.threadId";
+            Ok(ClientRequest::Query(Query::ResolveEngineConfiguration(
+                ResolveEngineConfiguration {
+                    thread_id: parse_thread_id(read_text(query.get_thread_id(), field)?, field)?,
+                    configuration: decode_manual_document(
+                        query.get_document(),
+                        "request.resolveEngineConfiguration.document",
                     )?,
                 },
             )))
@@ -80,6 +111,16 @@ pub(crate) fn encode_forge_decision_response(
                 encoded.reborrow().init_selection(),
                 &resolution.selection,
             );
+            match &resolution.outcome {
+                Ok(config) => encode_engine_run_config(encoded.init_resolved(), config),
+                Err(refusal) => leaf::encode_submission_refusal(encoded.init_refused(), refusal),
+            }
+            Ok(())
+        }
+        ResponsePayload::EngineConfigurationResolved(resolution) => {
+            let mut encoded = builder.reborrow().init_engine_configuration_resolved();
+            encoded.set_thread_id(resolution.thread_id.as_str());
+            encoded.set_document(resolution.configuration.to_document().as_str());
             match &resolution.outcome {
                 Ok(config) => encode_engine_run_config(encoded.init_resolved(), config),
                 Err(refusal) => leaf::encode_submission_refusal(encoded.init_refused(), refusal),
@@ -121,6 +162,34 @@ pub(crate) fn decode_forge_decision_response(
                     selection: leaf::decode_catalog_selection(
                         resolution.get_selection()?,
                         "response.modelSelectionResolved.selection",
+                    )?,
+                    outcome,
+                },
+            ))
+        }
+        response::Which::EngineConfigurationResolved(resolution) => {
+            let resolution = resolution?;
+            let field = "response.engineConfigurationResolved.threadId";
+            let outcome = match resolution.which()? {
+                artisan_capnp::engine_configuration_resolution::Which::Resolved(config) => {
+                    Ok(decode_engine_run_config(config?)?)
+                }
+                artisan_capnp::engine_configuration_resolution::Which::Refused(refusal) => {
+                    Err(leaf::decode_submission_refusal(
+                        refusal?,
+                        "response.engineConfigurationResolved.refused",
+                    )?)
+                }
+            };
+            Ok(ResponsePayload::EngineConfigurationResolved(
+                EngineConfigurationResolution {
+                    thread_id: parse_thread_id(
+                        read_text(resolution.get_thread_id(), field)?,
+                        field,
+                    )?,
+                    configuration: decode_manual_document(
+                        resolution.get_document(),
+                        "response.engineConfigurationResolved.document",
                     )?,
                     outcome,
                 },

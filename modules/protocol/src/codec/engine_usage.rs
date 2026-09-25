@@ -233,6 +233,13 @@ fn decode_engine_readiness(
 pub(crate) fn decode_engine_usage_snapshot(
     value: engine_usage_snapshot::Reader<'_>,
 ) -> Result<ResponsePayload, ProtocolDecodeError> {
+    decode_engine_usage_snapshot_value(value).map(ResponsePayload::AccountUsage)
+}
+
+/// Decodes one usage snapshot (a read's answer or a pushed event).
+pub(crate) fn decode_engine_usage_snapshot_value(
+    value: engine_usage_snapshot::Reader<'_>,
+) -> Result<EngineUsageSnapshot, ProtocolDecodeError> {
     let fetched_at = read_text(value.get_fetched_at(), "response.accountUsage.fetchedAt")?;
     let encoded_engines = value.get_engines()?;
     let count = encoded_engines.len() as usize;
@@ -247,7 +254,5 @@ pub(crate) fn decode_engine_usage_snapshot(
     for encoded_engine in encoded_engines {
         engines.push(decode_engine_usage_report(encoded_engine)?);
     }
-    Ok(ResponsePayload::AccountUsage(EngineUsageSnapshot::new(
-        engines, fetched_at,
-    )?))
+    Ok(EngineUsageSnapshot::new(engines, fetched_at)?)
 }

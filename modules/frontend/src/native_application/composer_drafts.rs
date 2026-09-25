@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use artisan_domain::{AuthoredText, SaveComposerDraft, UploadComposerAttachment};
+use artisan_domain::{AuthoredText, ComposerUpload, SaveComposerDraft, UploadComposerAttachment};
 
 use super::*;
 use crate::composer_draft_sync::{DraftBody, DraftSave, DraftSync};
@@ -89,7 +89,10 @@ impl NativeApplication {
             let command = ComposerDraftCommand::Upload {
                 scope: scope.clone(),
                 attachment_id,
-                command: Box::new(UploadComposerAttachment { request_id, image }),
+                command: Box::new(UploadComposerAttachment {
+                    request_id,
+                    upload: ComposerUpload::Image(image),
+                }),
             };
             if self
                 .submit_draft(command, self.composer_drafts.sync.hold(&scope))

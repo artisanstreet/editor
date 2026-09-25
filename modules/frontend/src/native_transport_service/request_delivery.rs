@@ -232,6 +232,7 @@ pub async fn delivery_task_loop(
                     PrivateDelivery::Observation(observation)
                 }
                 Ok(UniDelivery::Outbox(outbox)) => PrivateDelivery::Outbox(outbox),
+                Ok(UniDelivery::HostState(state)) => PrivateDelivery::HostState(state),
                 Err(failure) => PrivateDelivery::Lost(failure),
             };
             let is_lost = matches!(result, PrivateDelivery::Lost(_));
@@ -300,6 +301,9 @@ pub(super) async fn command_loop_with_delivery(
                     }
                     NativeTransportCommand::ComposerDraft(command) => {
                         composer_draft_operations::handle_composer_draft_command(runtime, frames, events, command).await?;
+                    }
+                    NativeTransportCommand::Preferences(command) => {
+                        preferences_operations::handle_preferences_command(runtime, frames, events, command).await?;
                     }
                     NativeTransportCommand::ForgeDecision(command) => {
                         forge_decision_operations::handle_forge_decision_command(runtime, frames, events, command).await?;
@@ -443,6 +447,9 @@ pub(super) async fn command_loop_with_delivery(
                         if runtime.custody.active_thread() == Some(outbox.thread_id()) {
                             publish(events, NativeTransportEvent::MessageOutbox(outbox))?;
                         }
+                    }
+                    Some(PrivateDelivery::HostState(state)) => {
+                        publish(events, NativeTransportEvent::HostState(state))?;
                     }
                     Some(PrivateDelivery::Lost(failure)) =>
                         handle_delivery_lost_reconnect(runtime, frames, events, failure).await?,

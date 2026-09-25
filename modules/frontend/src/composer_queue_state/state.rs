@@ -607,6 +607,39 @@ impl ComposerQueueState {
             });
         }
         self.usage_read_in_flight = None;
+        self.apply_usage(result, model_name)
+    }
+
+    /// Accepts a usage report the Forge pushed for the live run. No read
+    /// needs to be in flight; the scope, policy, and sequence fences of a
+    /// read's answer all apply, so an older or foreign report is refused.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the rejection error intentionally carries the unconsumed usage result back to the caller"
+    )]
+    pub(crate) fn accept_pushed_usage(
+        &mut self,
+        result: RunUsageResult,
+        model_name: String,
+    ) -> Result<UsageResultDisposition, UsageResultError> {
+        self.apply_usage(result, model_name)
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "the rejection error intentionally carries the unconsumed usage result back to the caller"
+    )]
+    fn apply_usage(
+        &mut self,
+        result: RunUsageResult,
+        model_name: String,
+    ) -> Result<UsageResultDisposition, UsageResultError> {
+        let Some(scope) = self.usage_scope.as_ref() else {
+            return Err(UsageResultError {
+                result,
+                reason: UsageRejection::NoScope,
+            });
+        };
         if result.thread_id != scope.thread_id {
             return Err(UsageResultError {
                 result,

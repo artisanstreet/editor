@@ -191,11 +191,33 @@ pub(crate) struct ConversationConnectionContext {
     registrar: ConversationSubscriptionRegistrar,
     identity: Arc<SubscriptionRegistrarIdentity>,
     notifier: ConversationCommitNotifier,
+    account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
+    run_cancellation: Option<RunCancellationRegistry>,
+    /// Held from this connection's first handled request: an Editor
+    /// observing usage (lifecycle requests never reach the handler).
+    usage_observer: std::sync::OnceLock<crate::account_usage_service::UsageObserver>,
 }
 
 impl ConversationConnectionContext {
+    fn observe_usage(&self) {
+        if let Some(usage) = &self.account_usage {
+            self.usage_observer.get_or_init(|| usage.observe());
+        }
+    }
+
+    /// The live run registered for `thread`, if any.
+    pub(crate) fn live_run(&self, thread: &ThreadId) -> Option<artisan_domain::RunId> {
+        self.run_cancellation.as_ref()?.active_run(thread).ok()?
+    }
+
     pub(crate) fn repository(&self) -> &Repository {
         &self.repository
+    }
+
+    pub(crate) fn account_usage(
+        &self,
+    ) -> Option<&crate::account_usage_service::AccountUsageService> {
+        self.account_usage.as_deref()
     }
 
     pub(crate) fn registrar(&self) -> &ConversationSubscriptionRegistrar {
@@ -340,7 +362,7 @@ pub struct RequestHandler {
     run_cancellation: Option<RunCancellationRegistry>,
     run_interaction: Option<RunInteractionRegistry>,
     composer_catalog: Option<crate::composer_catalog_service::ComposerCatalogService>,
-    account_usage: Option<crate::account_usage_service::AccountUsageService>,
+    account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
     rich_link_resolver: Option<crate::rich_link_service::RichLinkResolver>,
     project_repository: Option<crate::project_repository_service::ProjectRepositoryService>,
 }
@@ -572,13 +594,22 @@ impl RequestHandler {
     /// Attaches the one process-owned account-usage fan-out service.
     ///
     /// The service fans out per requested engine with freshness caching and
-    /// per-engine failure isolation; it owns no run, provider session, or
-    /// frontend publication state. Public so tests can inject scripted
-    /// readers while production wires the provider-backed roster.
+    /// per-engine failure isolation; connection delivery pushes what it
+    /// serves. Public so tests can inject scripted readers while production
+    /// shares the provider-backed roster with its refresher.
     #[must_use]
     pub fn with_account_usage_service(
-        mut self,
+        self,
         service: crate::account_usage_service::AccountUsageService,
+    ) -> Self {
+        self.with_shared_account_usage_service(Arc::new(service))
+    }
+
+    /// Attaches an account-usage service shared with its refresher.
+    #[must_use]
+    pub fn with_shared_account_usage_service(
+        mut self,
+        service: Arc<crate::account_usage_service::AccountUsageService>,
     ) -> Self {
         self.account_usage = Some(service);
         self
@@ -642,12 +673,16 @@ impl RequestHandler {
     pub(crate) fn new_conversation_connection_context(
         &self,
     ) -> Option<ConversationConnectionContext> {
-        Some(ConversationConnectionContext {
+        let context = ConversationConnectionContext {
             repository: self.repository.clone(),
             registrar: ConversationSubscriptionRegistrar::new(),
             identity: Arc::new(0_u8),
             notifier: self.conversation_commit_notifier.clone()?,
-        })
+            account_usage: self.account_usage.clone(),
+            run_cancellation: self.run_cancellation.clone(),
+            usage_observer: std::sync::OnceLock::new(),
+        };
+        Some(context)
     }
 
     /// Creates a handler with the process-owned native directory picker and
@@ -788,6 +823,7 @@ impl RequestHandler {
         request_id: &RequestId,
         request: &ClientRequest,
     ) -> RequestHandlerResponse {
+        context.observe_usage();
         match request {
             ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)) => {
                 self.subscribe_with_receipt_in_context(context, request_id, subscribe)
@@ -998,8 +1034,14 @@ impl RequestHandler {
                 self.respond_question_outcome(request_id, respond).await
             }
             Command::SetThreadEngineConfig(config) => {
-                self.set_thread_engine_config_outcome(request_id, config.as_ref())
-                    .await
+                let response = self
+                    .set_thread_engine_config_outcome(request_id, config.as_ref())
+                    .await;
+                if response.is_ok() {
+                    // A configuration the user saves is the new default.
+                    self.remember_default_engine_config(config.config()).await;
+                }
+                response
             }
             Command::WithdrawQueuedMessage(command) => {
                 self.withdraw_composer_message(request_id, command).await
@@ -1024,9 +1066,17 @@ impl RequestHandler {
             Command::SubmitComposerDraft(submit) => {
                 self.submit_composer_draft_outcome(request_id, submit).await
             }
+            Command::RecordNavigation(record) => {
+                self.record_navigation_outcome(request_id, record).await
+            }
+            Command::ImportLegacyPreferences(import) => {
+                self.import_legacy_preferences_outcome(request_id, import)
+                    .await
+            }
         };
         if response.is_ok() {
             self.wake_message_outbox(command);
+            self.wake_preferences(command);
         }
         response
     }
@@ -1258,6 +1308,9 @@ mod engine_config;
 
 #[path = "request_handler/model_selection.rs"]
 mod model_selection;
+
+#[path = "request_handler/user_preferences.rs"]
+mod user_preferences;
 
 #[path = "request_handler/attach_project.rs"]
 mod attach_project;

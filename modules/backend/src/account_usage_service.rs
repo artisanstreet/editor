@@ -374,7 +374,12 @@ pub struct AccountUsageService {
     failures: Mutex<HashMap<String, String>>,
     freshness: Duration,
     per_engine_timeout: Duration,
+    /// What the service pushes to connected Editors (see [`push`]).
+    push: push::UsagePush,
 }
+
+mod push;
+pub(crate) use push::{UsageObserver, refresh_while_observed};
 
 /// One cached provider observation with its own fetch time.
 ///
@@ -435,6 +440,7 @@ impl AccountUsageService {
             failures: Mutex::new(HashMap::new()),
             freshness,
             per_engine_timeout,
+            push: push::UsagePush::default(),
         }
     }
 
@@ -580,6 +586,7 @@ impl AccountUsageService {
         let mut reports = Vec::with_capacity(served.len());
         let mut fetched_at = String::new();
         for (report, observed_at, fresh) in served.into_iter().flatten() {
+            self.push.record_served(&report, &observed_at);
             if observed_at > fetched_at {
                 fetched_at.clone_from(&observed_at);
             }
@@ -597,6 +604,7 @@ impl AccountUsageService {
             // carries its own observation time instead.
             fetched_at = iso_millis(system_millis());
         }
+        self.publish_if_changed();
         // Construction invariant: `selected` is bounded by the fixed reader
         // roster and `fetched_at` comes from `iso_millis`; `read` has no typed
         // error channel to report an unrepresentable snapshot.

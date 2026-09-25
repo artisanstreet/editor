@@ -211,6 +211,10 @@ pub(crate) fn presentation(home: Option<&Path>) -> HostPresentation {
 
 fn read_presentation(home: Option<&Path>) -> HostPresentation {
     let Some(home) = home else {
+        // This computer's own tile, shown whichever host is connected and
+        // before any connection exists: its avatar is seeded from the local
+        // machine's name, the one fact only this machine can present. It is
+        // tile presentation, never the account or a Forge fact.
         return HostPresentation {
             wsl_distribution: None,
             subtitle: local_host_subtitle(

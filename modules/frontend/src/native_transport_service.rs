@@ -108,6 +108,8 @@ pub enum NativeTransportCommand {
     ComposerDraft(ComposerDraftCommand),
     /// Business decisions the Forge sends as data.
     ForgeDecision(ForgeDecisionCommand),
+    /// The Forge user's preferences and navigation record.
+    Preferences(PreferencesCommand),
     /// Query exact live run ownership, fenced by the application's selection generation.
     ReadActiveRun {
         thread_id: ThreadId,
@@ -179,11 +181,11 @@ pub enum NativeTransportCommand {
     },
     /// Load the certified engine profile catalogue.
     ListRegisteredProfiles,
-    /// Read one engine's provider-account usage, fenced by the profile-menu
-    /// connection generation and a per-engine request sequence. The service
-    /// fans out per engine so each snapshot `fetched_at` represents that
-    /// provider; the application owns freshness, pending rows, and
-    /// stale-response pairing.
+    /// Read one engine's provider-account usage on the user's explicit
+    /// refresh, fenced by the profile-menu connection generation and a
+    /// per-engine request sequence. Every other change arrives pushed by
+    /// the Forge; the application owns pending rows and stale-response
+    /// pairing.
     ///
     /// Each read executes on the one serial service loop through the existing
     /// bounded `runtime.request` path (existing request deadline, admission
@@ -256,6 +258,7 @@ pub enum NativeTransportEvent {
     ComposerState(ComposerStateEvent),
     ComposerDraft(ComposerDraftEvent),
     ForgeDecision(ForgeDecisionEvent),
+    Preferences(PreferencesEvent),
     ActiveRun {
         thread_id: ThreadId,
         generation: u64,
@@ -591,6 +594,8 @@ pub enum NativeTransportEvent {
     /// The subscribed thread's complete message outbox, pushed by the Forge
     /// whenever its undelivered messages change.
     MessageOutbox(artisan_domain::MessageOutbox),
+    /// Connection-scoped state the Forge pushed whenever it changed.
+    HostState(HostStateEvent),
     /// Bounded path-free delivery loss.
     DeliveryLost(ServiceFailure),
     /// Terminal service state.
@@ -656,6 +661,10 @@ pub(crate) use composer_draft_operations::{ComposerDraftCommand, ComposerDraftEv
 mod forge_decision_operations;
 pub(crate) use forge_decision_operations::{ForgeDecisionCommand, ForgeDecisionEvent};
 
+#[path = "native_preferences_transport.rs"]
+mod preferences_operations;
+pub(crate) use preferences_operations::{PreferencesCommand, PreferencesEvent};
+
 #[path = "native_profile_usage_transport.rs"]
 mod profile_usage_operations;
 
@@ -704,7 +713,8 @@ use response_validation::{
     thread_selection_decision, validate_response_family,
 };
 pub use response_validation::{
-    UniDelivery, validate_started_correlation, validate_stopped_correlation, validate_uni_envelope,
+    HostStateEvent, UniDelivery, validate_started_correlation, validate_stopped_correlation,
+    validate_uni_envelope,
 };
 
 mod remote;

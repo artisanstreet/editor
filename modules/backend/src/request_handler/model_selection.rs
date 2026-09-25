@@ -15,10 +15,10 @@
 use artisan_catalog::{NativeModelCatalog, NativeModelPolicy};
 use artisan_database::SetThreadEngineConfigInput;
 use artisan_domain::{
-    CatalogSelection, EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId,
-    EngineProfileId, EngineReadiness, EngineRunConfig, ModelSelectionResolution, RequestId,
-    ResolveModelSelection, RunId, SubmissionRefusal, SubmissionRefusalKind, SubmitComposerDraft,
-    ThreadId,
+    CatalogSelection, EngineConfigRevision, EngineConfigUpdatePrecondition,
+    EngineConfigurationResolution, EngineId, EngineProfileId, EngineReadiness, EngineRunConfig,
+    ModelSelectionResolution, RequestId, ResolveEngineConfiguration, ResolveModelSelection, RunId,
+    SubmissionRefusal, SubmissionRefusalKind, SubmitComposerDraft, ThreadId,
 };
 use artisan_protocol::{ProtocolFailure, ResponsePayload, RunLiveStatus, ServerResponse};
 
@@ -39,6 +39,13 @@ pub(super) struct ResolvedSelection {
     catalog: NativeModelCatalog,
     policy: NativeModelPolicy,
     config: EngineRunConfig,
+}
+
+impl ResolvedSelection {
+    /// The configuration the selection resolved to.
+    pub(super) fn into_config(self) -> EngineRunConfig {
+        self.config
+    }
 }
 
 /// How a draft submission is admitted.
@@ -201,6 +208,41 @@ impl RequestHandler {
         ))
     }
 
+    /// Answers a manual configuration document: the configuration it
+    /// describes on one of the registered profiles, or the field that keeps
+    /// the Forge from building it. Nothing is saved.
+    pub(super) fn resolve_engine_configuration_outcome(
+        &self,
+        request_id: &RequestId,
+        query: &ResolveEngineConfiguration,
+    ) -> ServerResponse {
+        let registered = self
+            .registered_engine_profiles
+            .as_ref()
+            .and_then(|reader| reader.list_profiles().ok().flatten())
+            .unwrap_or_default();
+        let built =
+            crate::engine_selection::build_manual_config(&query.configuration, &registered)
+                .map_err(|error| {
+                    refusal(
+                        SubmissionRefusalKind::InvalidSelection,
+                        &format!(
+                            "The {} value is {}. Your settings are preserved; correct it and save again.",
+                            error.field(),
+                            error.reason()
+                        ),
+                    )
+                });
+        outcome(
+            request_id,
+            ResponsePayload::EngineConfigurationResolved(EngineConfigurationResolution {
+                thread_id: query.thread_id.clone(),
+                configuration: query.configuration.clone(),
+                outcome: built,
+            }),
+        )
+    }
+
     /// Admits one draft submission, saving the selection's configuration
     /// when it changes the thread's.
     ///
@@ -312,7 +354,7 @@ impl RequestHandler {
         });
         let catalog = crate::composer_catalog_handler::served_catalog(
             self.composer_catalog.as_ref(),
-            self.account_usage.as_ref(),
+            self.account_usage.as_deref(),
             &self.repository,
             thread,
             &profile,
@@ -348,7 +390,11 @@ impl RequestHandler {
             })
             .await
         {
-            Ok(_) => Ok(true),
+            Ok(_) => {
+                // The selection a send saved is the user's latest choice.
+                self.remember_default_engine_config(config).await;
+                Ok(true)
+            }
             Err(artisan_database::RepositoryError::EngineConfigRevisionConflict { .. }) => {
                 Ok(false)
             }

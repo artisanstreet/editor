@@ -181,6 +181,9 @@ impl NativeApplication {
             composer.switch_thread(thread_id.as_str(), carry_draft, cx);
         });
         self.selected_thread = Some(thread_id.clone());
+        if let Some(project) = self.selected_project.clone() {
+            self.report_navigation(project, Some(thread_id.clone()));
+        }
         if matches!(
             self.route(),
             NativeRoute::NewThread { .. } | NativeRoute::Thread { .. }

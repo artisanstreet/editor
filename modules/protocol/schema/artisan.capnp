@@ -868,6 +868,16 @@ struct Request {
     # would run for the thread, without saving it. Fresh ordinal, existing
     # ordinals frozen.
     resolveModelSelection @41 :ResolveModelSelectionRequest;
+
+    # The Forge user's preferences, navigation record, and account profile
+    # (stateless Editor step 7). Fresh ordinals, existing ordinals frozen.
+    readUserPreferences @42 :Void;
+    recordNavigation @43 :RecordNavigationRequest;
+    importLegacyPreferences @44 :ImportLegacyPreferencesRequest;
+
+    # Builds the configuration a manual settings document describes for a
+    # thread, without saving it. Fresh ordinal, existing ordinals frozen.
+    resolveEngineConfiguration @45 :ResolveEngineConfigurationRequest;
   }
 }
 
@@ -964,6 +974,14 @@ struct Response {
 
     # Answer to resolveModelSelection. Fresh ordinal, existing ordinals frozen.
     modelSelectionResolved @40 :ModelSelectionResolution;
+
+    # Answer to readUserPreferences and recordNavigation, and to
+    # importLegacyPreferences. Fresh ordinals, existing ordinals frozen.
+    userPreferences @41 :UserPreferences;
+    legacyPreferencesImported @42 :LegacyPreferencesImported;
+
+    # Answer to resolveEngineConfiguration. Fresh ordinal.
+    engineConfigurationResolved @43 :EngineConfigurationResolution;
   }
 }
 
@@ -1060,6 +1078,18 @@ struct Event {
     # rows with their Forge-owned state), pushed to the thread's subscribers
     # whenever they change. Fresh union member at @5.
     messageOutbox @5 :ComposerState.MessageOutbox;
+
+    # Connection-scoped state the Forge pushes whenever it changes (stateless
+    # Editor step 7): every engine's usage with its readiness verdict, the
+    # user's preferences, and a subscribed thread's display title. Fresh
+    # union members at @6..@8.
+    accountUsage @6 :EngineUsageSnapshot;
+    userPreferences @7 :UserPreferences;
+    threadRetitled @8 :ThreadRetitled;
+
+    # The live run's latest usage report on a subscribed thread, pushed
+    # whenever it changes (replaces the Editor's polling). Fresh member @9.
+    runUsage @9 :ComposerState.RunUsageResult;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first
@@ -2556,6 +2586,90 @@ struct ResolveModelSelectionRequest {
 struct ModelSelectionResolution {
   threadId @0 :Text;
   selection @1 :ComposerState.CatalogSelection;
+  union {
+    resolved @2 :EngineRunConfig;
+    refused @3 :ComposerState.SubmissionRefusal;
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Stateless Editor step 7: the Forge user's preferences and navigation.
+# Appended so existing node identities stay stable.
+# ---------------------------------------------------------------------------
+
+# One project of the navigation record; an empty lastThreadId means none.
+struct NavigationProject {
+  projectId @0 :Text;
+  lastThreadId @1 :Text;
+}
+
+# Where the user last was; an empty threadId means no open thread.
+struct NavigationRoute {
+  projectId @0 :Text;
+  threadId @1 :Text;
+}
+
+# The host account the Forge runs as, for presentation.
+struct AccountProfile {
+  displayName @0 :Text;
+  hostName @1 :Text;
+}
+
+struct UserPreferences {
+  revision @0 :UInt64;
+  # A null pointer means the user has not chosen a model yet.
+  defaultEngineConfig @1 :EngineRunConfig;
+  # Most recently used first, at most 256 projects.
+  projects @2 :List(NavigationProject);
+  # A null pointer means no route was recorded yet.
+  route @3 :NavigationRoute;
+  account @4 :AccountProfile;
+}
+
+# The user opened projectId, and threadId in it when not empty.
+struct RecordNavigationRequest {
+  projectId @0 :Text;
+  threadId @1 :Text;
+}
+
+# Preferences an older Editor kept in files, adopted by the Forge only where
+# it has none of its own. A null selection means no last-used model.
+struct ImportLegacyPreferencesRequest {
+  defaultSelection @0 :ComposerState.CatalogSelection;
+  projectOrder @1 :List(Text);
+}
+
+enum LegacyImportOutcome {
+  absent @0;
+  imported @1;
+  kept @2;
+  refused @3;
+}
+
+struct LegacyPreferencesImported {
+  defaultModel @0 :LegacyImportOutcome;
+  projectOrder @1 :LegacyImportOutcome;
+  preferences @2 :UserPreferences;
+}
+
+# A subscribed thread's display title (the generated title once recorded,
+# otherwise its first message while the placeholder stands) changed.
+struct ThreadRetitled {
+  threadId @0 :Text;
+  title @1 :Text;
+}
+
+# A manual settings document: one `key=value` line per field, at most
+# 16 KiB. The Forge builds and validates the configuration.
+struct ResolveEngineConfigurationRequest {
+  threadId @0 :Text;
+  document @1 :Text;
+}
+
+# The document echoes the request so a late answer can be matched.
+struct EngineConfigurationResolution {
+  threadId @0 :Text;
+  document @1 :Text;
   union {
     resolved @2 :EngineRunConfig;
     refused @3 :ComposerState.SubmissionRefusal;

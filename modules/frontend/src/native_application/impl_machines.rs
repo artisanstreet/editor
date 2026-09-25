@@ -89,7 +89,6 @@ impl NativeApplication {
         if !self.profile_menu.is_open() {
             self.profile_menu.set_open(true);
             self.begin_profile_menu_open(cx);
-            self.ensure_profile_usage(false, None, cx);
         }
         self.update_machine_entries();
         #[cfg(not(test))]

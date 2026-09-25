@@ -204,7 +204,6 @@ impl NativeWorkspace {
         self.host.view.update(cx, |view, cx| {
             view.profile_menu.set_open(true);
             view.begin_profile_menu_open(cx);
-            view.ensure_profile_usage(false, None, cx);
             view.profile_focus.focus(window, cx);
         });
     }

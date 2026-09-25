@@ -386,11 +386,8 @@ impl NativeApplication {
             .message_flight
             .take()
             .expect("flight was checked above");
+        // A recovered account arrives as a pushed verdict; nothing to ask.
         self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
-        if refusal.kind() == artisan_domain::SubmissionRefusalKind::EngineNotReady {
-            // Refresh the Forge's verdict so a recovered account is observed.
-            self.ensure_profile_usage(false, None, cx);
-        }
         self.message_receipt = None;
         self.message_failure = Some(NativeMessageFailure::new(ServiceFailure {
             stage: ServiceFailureStage::Request,

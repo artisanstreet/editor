@@ -17,6 +17,14 @@ pub(super) async fn load_initial_catalog(
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
 ) -> Result<(), ServiceFailure> {
+    // The user's preferences come first so the Editor orders the projects
+    // and resumes its last route from them; a failed read is reported and
+    // leaves the catalog's own order.
+    let preferences = preferences_operations::read_preferences(runtime, frames).await;
+    publish(
+        events,
+        NativeTransportEvent::Preferences(PreferencesEvent::Loaded(preferences)),
+    )?;
     let payload = runtime
         .request(frames, project_request(), ExpectedResponse::Projects)
         .await?;

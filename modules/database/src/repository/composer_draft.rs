@@ -84,6 +84,13 @@ pub enum ComposerDraftRepositoryError {
         /// Oversized digest.
         digest: ComposerAttachmentDigest,
     },
+    /// A chunk contradicts the upload it joins, or the assembled image
+    /// does not match its digest; the upload is discarded.
+    #[error("composer attachment upload {digest} was discarded")]
+    ChunkRejected {
+        /// Discarded upload digest.
+        digest: ComposerAttachmentDigest,
+    },
     /// Persisted data violates a domain or schema invariant.
     #[error("persisted composer draft data is corrupt in {table}.{field}: {reason}")]
     CorruptData {
@@ -287,11 +294,9 @@ async fn read_attachment(
     let bytes = row
         .try_get_by_index::<Vec<u8>>(1)
         .map_err(|source| corrupt_data("composer_attachments", "bytes", source))?;
-    Ok(Some(ComposerAttachmentResult {
-        digest: *digest,
-        mime_type,
-        bytes,
-    }))
+    Ok(Some(ComposerAttachmentResult::whole(
+        *digest, mime_type, bytes,
+    )))
 }
 
 /// Empties a draft inside `transaction` and gives it the revision after
@@ -618,7 +623,7 @@ fn parse_revision(value: i64) -> DraftResult<ComposerDraftRevision> {
         .ok_or_else(|| corrupt_data("composer_drafts", "revision", "revision out of range"))
 }
 
-fn parse_mime(value: &str) -> DraftResult<ImageMimeType> {
+pub(super) fn parse_mime(value: &str) -> DraftResult<ImageMimeType> {
     ImageMimeType::parse(value)
         .map_err(|source| corrupt_data("composer_attachments", "mime_type", source))
 }

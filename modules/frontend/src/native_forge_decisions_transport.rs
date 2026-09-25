@@ -11,8 +11,8 @@
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_domain::{
-    CatalogSelection, EngineConfigRevision, EngineRunConfig, ReadHostCatalog,
-    ResolveModelSelection, SubmissionRefusal,
+    CatalogSelection, EngineConfigRevision, EngineRunConfig, ManualEngineConfiguration,
+    ReadHostCatalog, ResolveEngineConfiguration, ResolveModelSelection, SubmissionRefusal,
 };
 
 use crate::native_model_catalog::NativeModelCatalog;
@@ -26,6 +26,8 @@ pub enum ForgeDecisionCommand {
     ReadHostCatalog,
     /// Resolve a selection into the configuration the Forge would run.
     ResolveModelSelection(ResolveModelSelection),
+    /// Build the configuration a manual settings draft describes.
+    ResolveEngineConfiguration(ResolveEngineConfiguration),
 }
 
 /// One Forge-decision result returned by the service child.
@@ -39,6 +41,16 @@ pub enum ForgeDecisionEvent {
         thread_id: ThreadId,
         /// The selection as asked.
         selection: CatalogSelection,
+        /// The configuration or the Forge's refusal; or the request failure.
+        result: Result<Result<Box<EngineRunConfig>, SubmissionRefusal>, ServiceFailure>,
+    },
+    /// The Forge built a manual settings draft into a configuration, or
+    /// refused it.
+    EngineConfigurationResolved {
+        /// Thread the draft is for.
+        thread_id: ThreadId,
+        /// The draft as asked.
+        configuration: ManualEngineConfiguration,
         /// The configuration or the Forge's refusal; or the request failure.
         result: Result<Result<Box<EngineRunConfig>, SubmissionRefusal>, ServiceFailure>,
     },
@@ -66,6 +78,7 @@ pub enum ForgeDecisionEvent {
 pub(super) enum ForgeDecisionExpectation {
     HostCatalog,
     Resolution(ResolveModelSelection),
+    Configuration(ResolveEngineConfiguration),
 }
 
 impl ForgeDecisionExpectation {
@@ -75,6 +88,13 @@ impl ForgeDecisionExpectation {
             (Self::HostCatalog, ResponsePayload::HostCatalog(_)) => true,
             (Self::Resolution(query), ResponsePayload::ModelSelectionResolved(resolution)) => {
                 resolution.thread_id == query.thread_id && resolution.selection == query.selection
+            }
+            (
+                Self::Configuration(query),
+                ResponsePayload::EngineConfigurationResolved(resolution),
+            ) => {
+                resolution.thread_id == query.thread_id
+                    && resolution.configuration == query.configuration
             }
             _ => false,
         }
@@ -133,6 +153,29 @@ pub(super) async fn handle_forge_decision_command(
             ForgeDecisionEvent::ModelSelectionResolved {
                 thread_id,
                 selection,
+                result,
+            }
+        }
+        ForgeDecisionCommand::ResolveEngineConfiguration(query) => {
+            let thread_id = query.thread_id.clone();
+            let configuration = query.configuration.clone();
+            let result = runtime
+                .request(
+                    frames,
+                    query_request(Query::ResolveEngineConfiguration(query.clone())),
+                    ExpectedResponse::ForgeDecision(ForgeDecisionExpectation::Configuration(query)),
+                )
+                .await
+                .map_err(ServiceFailure::from)
+                .and_then(|payload| match payload {
+                    ResponsePayload::EngineConfigurationResolved(resolution) => {
+                        Ok(resolution.outcome.map(Box::new))
+                    }
+                    _ => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+                });
+            ForgeDecisionEvent::EngineConfigurationResolved {
+                thread_id,
+                configuration,
                 result,
             }
         }

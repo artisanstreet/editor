@@ -5,6 +5,11 @@
 //! thread. It never spawns work or queues patch data: every wake performs a
 //! bounded authoritative re-read, and the writer advances the connection
 //! registry only after the corresponding batch has crossed the wire.
+//!
+//! Beside each subscription's patches, observations, outbox, and display
+//! title, the driver pushes connection-scoped host state (every engine's
+//! usage with its readiness, the user's preferences) whenever the
+//! notifier's host-state revision moves; only a changed value is sent.
 
 #![forbid(unsafe_code)]
 
@@ -13,8 +18,9 @@ use std::time::Duration;
 
 use artisan_database::{MessageOutboxFingerprint, QueuedMessageRepositoryError, Repository};
 use artisan_domain::{
-    Event, FAILED_MESSAGE_LIST_MAX, ListFailedMessages, ListQueuedMessages, MessageOutbox,
-    QUEUED_MESSAGE_LIST_MAX, QueuedMessageListOrder, ThreadId,
+    EngineUsageSnapshot, Event, FAILED_MESSAGE_LIST_MAX, ListFailedMessages, ListQueuedMessages,
+    MessageOutbox, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListOrder, RunUsageResult, ThreadId,
+    ThreadRetitled, ThreadTitle, UserPreferences,
 };
 use artisan_transport::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 
@@ -44,6 +50,22 @@ pub(crate) struct ConversationDeliveryDriver {
     active: BTreeMap<artisan_domain::ThreadId, ActivatedConversationSubscription>,
     /// The message outbox last pushed to each active subscription.
     outboxes: BTreeMap<ThreadId, DeliveredOutbox>,
+    /// The display title last pushed for each active subscription.
+    titles: BTreeMap<ThreadId, ThreadTitle>,
+    /// The live run's usage last pushed for each active subscription.
+    run_usage: BTreeMap<ThreadId, RunUsageResult>,
+    /// The connection-scoped host state last pushed.
+    host: DeliveredHostState,
+}
+
+/// The host state last pushed to this connection and the host-state
+/// revision it was read at.
+#[derive(Debug, Default)]
+struct DeliveredHostState {
+    revision: Option<u64>,
+    preferences: Option<UserPreferences>,
+    /// The usage snapshot last pushed per engine.
+    usage: BTreeMap<String, EngineUsageSnapshot>,
 }
 
 /// One subscription's last pushed outbox and the fingerprint it was read at.
@@ -73,6 +95,9 @@ impl ConversationDeliveryDriver {
             wake,
             active: BTreeMap::new(),
             outboxes: BTreeMap::new(),
+            titles: BTreeMap::new(),
+            run_usage: BTreeMap::new(),
+            host: DeliveredHostState::default(),
         }
     }
 
@@ -110,27 +135,36 @@ impl ConversationDeliveryDriver {
         F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
     {
         if let Some(thread_id) = outcome.stopped_thread {
-            self.active.remove(&thread_id);
-            self.outboxes.remove(&thread_id);
+            self.forget(&thread_id);
         }
 
-        let Some(subscription) = outcome.activation else {
-            return Ok(());
-        };
+        if let Some(subscription) = outcome.activation {
+            let thread_id = subscription.lease().thread_id().clone();
+            self.forget(&thread_id);
+            let subscription = self
+                .deliver_until_current(subscription, stamp, limit, cancel)
+                .await?;
+            let subscription = self
+                .deliver_observation_history(subscription, stamp, limit, cancel)
+                .await?;
+            self.deliver_message_outbox(&thread_id, stamp, limit, cancel)
+                .await?;
+            self.deliver_thread_title(&thread_id, false, stamp, limit, cancel)
+                .await?;
+            self.deliver_run_usage(&thread_id, stamp, limit, cancel)
+                .await?;
+            self.active.insert(thread_id, subscription);
+        }
+        // Every request looks for a host-state change; the first one also
+        // pushes the current usage.
+        self.deliver_host_state(stamp, limit, cancel).await
+    }
 
-        let thread_id = subscription.lease().thread_id().clone();
-        self.active.remove(&thread_id);
-        self.outboxes.remove(&thread_id);
-        let subscription = self
-            .deliver_until_current(subscription, stamp, limit, cancel)
-            .await?;
-        let subscription = self
-            .deliver_observation_history(subscription, stamp, limit, cancel)
-            .await?;
-        self.deliver_message_outbox(&thread_id, stamp, limit, cancel)
-            .await?;
-        self.active.insert(thread_id, subscription);
-        Ok(())
+    fn forget(&mut self, thread_id: &ThreadId) {
+        self.active.remove(thread_id);
+        self.outboxes.remove(thread_id);
+        self.titles.remove(thread_id);
+        self.run_usage.remove(thread_id);
     }
 
     /// Re-reads every active subscription once after a coalesced process-wide
@@ -160,8 +194,185 @@ impl ConversationDeliveryDriver {
                 .await?;
             self.deliver_message_outbox(&thread_id, stamp, limit, cancel)
                 .await?;
+            self.deliver_thread_title(&thread_id, true, stamp, limit, cancel)
+                .await?;
+            self.deliver_run_usage(&thread_id, stamp, limit, cancel)
+                .await?;
             self.active.insert(thread_id, subscription);
         }
+        self.deliver_host_state(stamp, limit, cancel).await
+    }
+
+    /// Pushes the latest usage report of a subscribed thread's live run when
+    /// it changed (on activation when one exists), so an Editor shows a
+    /// running turn's context usage without polling. A thread without a
+    /// live run pushes nothing.
+    async fn deliver_run_usage<F>(
+        &mut self,
+        thread_id: &ThreadId,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let Some(run_id) = self.context.live_run(thread_id) else {
+            return Ok(());
+        };
+        let repository = self.context.repository().clone();
+        let report = run_with_deadline(
+            OperationKind::Receive,
+            limit,
+            cancel,
+            repository.read_latest_run_usage(&run_id, thread_id),
+        )
+        .await
+        .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+        let Some(report) = report else {
+            return Ok(());
+        };
+        let compaction_at = crate::context_compaction_policy::compaction_at_tokens(&report);
+        let Ok(usage) = RunUsageResult::new(thread_id.clone(), run_id, Some(report))
+            .map(|usage| usage.with_compaction_at(compaction_at))
+        else {
+            return Ok(());
+        };
+        if self.run_usage.get(thread_id) == Some(&usage) {
+            return Ok(());
+        }
+        self.send_state_event(Event::RunUsage(usage.clone()), stamp, limit, cancel)
+            .await?;
+        self.run_usage.insert(thread_id.clone(), usage);
+        Ok(())
+    }
+
+    /// Pushes a subscribed thread's display title when it changed, so a
+    /// title the Forge refines appears without waiting for a listing read.
+    /// Activation records the title the Editor just listed without pushing
+    /// it (`announce` false).
+    async fn deliver_thread_title<F>(
+        &mut self,
+        thread_id: &ThreadId,
+        announce: bool,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let repository = self.context.repository().clone();
+        let title = run_with_deadline(
+            OperationKind::Receive,
+            limit,
+            cancel,
+            repository.thread_display_title(thread_id),
+        )
+        .await
+        .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+        let Some(title) = title else {
+            return Ok(());
+        };
+        if self.titles.get(thread_id) == Some(&title) {
+            return Ok(());
+        }
+        if announce {
+            let event = Event::ThreadRetitled(ThreadRetitled {
+                thread_id: thread_id.clone(),
+                title: title.clone(),
+            });
+            self.send_state_event(event, stamp, limit, cancel).await?;
+        }
+        self.titles.insert(thread_id.clone(), title);
+        Ok(())
+    }
+
+    /// Pushes the connection-scoped host state when its revision moved since
+    /// the last push; each value crosses the wire only when changed. Each
+    /// engine's usage with its readiness is pushed as its own narrowed
+    /// snapshot from the connection's first request on; the user's
+    /// preferences only when they change (an Editor reads them as it
+    /// connects).
+    async fn deliver_host_state<F>(
+        &mut self,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let revision = self.wake.host_revision();
+        if self.host.revision == Some(revision) {
+            return Ok(());
+        }
+        let repository = self.context.repository().clone();
+        let stored = run_with_deadline(
+            OperationKind::Receive,
+            limit,
+            cancel,
+            repository.read_user_preferences(),
+        )
+        .await
+        .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+        let preferences = crate::account_profile::user_preferences(stored);
+        // An Editor reads the preferences when it connects; this connection
+        // pushes only their later changes.
+        if self.host.revision.is_some() && self.host.preferences.as_ref() != Some(&preferences) {
+            let event = Event::UserPreferences(preferences.clone());
+            self.send_state_event(event, stamp, limit, cancel).await?;
+        }
+        self.host.preferences = Some(preferences);
+        let usage = self
+            .context
+            .account_usage()
+            .map(crate::account_usage_service::AccountUsageService::current_snapshots)
+            .unwrap_or_default();
+        for snapshot in usage {
+            let Some(engine) = snapshot.engines().first().map(|report| report.engine_id()) else {
+                continue;
+            };
+            if self.host.usage.get(engine) == Some(&snapshot) {
+                continue;
+            }
+            let engine = engine.to_owned();
+            let event = Event::AccountUsage(snapshot.clone());
+            self.send_state_event(event, stamp, limit, cancel).await?;
+            self.host.usage.insert(engine, snapshot);
+        }
+        self.host.revision = Some(revision);
+        Ok(())
+    }
+
+    /// Sends one state event on the shared delivery stream.
+    async fn send_state_event<F>(
+        &mut self,
+        event: Event,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let frame = stamp().map_err(|error| DeadlineError::Peer {
+            operation: OperationKind::Send,
+            error,
+        })?;
+        let writer = self
+            .writer
+            .take()
+            .ok_or_else(|| delivery_failure(OperationKind::Send, DeliveryStageError::Writer))?;
+        let writer = run_with_deadline(
+            OperationKind::Send,
+            limit,
+            cancel,
+            writer.deliver_state_event(frame, event),
+        )
+        .await
+        .map_err(map_writer_deadline)?;
+        self.writer = Some(writer);
         Ok(())
     }
 
@@ -211,23 +422,8 @@ impl ConversationDeliveryDriver {
             .get(thread_id)
             .is_some_and(|delivered| delivered.outbox == outbox);
         if !unchanged {
-            let frame = stamp().map_err(|error| DeadlineError::Peer {
-                operation: OperationKind::Send,
-                error,
-            })?;
-            let writer = self
-                .writer
-                .take()
-                .ok_or_else(|| delivery_failure(OperationKind::Send, DeliveryStageError::Writer))?;
-            let writer = run_with_deadline(
-                OperationKind::Send,
-                limit,
-                cancel,
-                writer.deliver_state_event(frame, Event::MessageOutbox(outbox.clone())),
-            )
-            .await
-            .map_err(map_writer_deadline)?;
-            self.writer = Some(writer);
+            self.send_state_event(Event::MessageOutbox(outbox.clone()), stamp, limit, cancel)
+                .await?;
         }
         self.outboxes.insert(
             thread_id.clone(),
@@ -335,6 +531,8 @@ impl ConversationDeliveryDriver {
         self.context.registrar().clear_all().await;
         self.active.clear();
         self.outboxes.clear();
+        self.titles.clear();
+        self.run_usage.clear();
         writer_result
     }
 

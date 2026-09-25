@@ -13,6 +13,10 @@
 use crate::usage_reset_duration::{UsageResetWindow, usage_reset_duration};
 pub use artisan_domain::{EngineReadiness, EngineReadinessVerdict};
 
+#[path = "native_profile_usage/entry.rs"]
+mod entry;
+pub use entry::usage_entry;
+
 /// Stable selector for the profile usage section.
 pub const PROFILE_USAGE_SELECTOR: &str = "artisan-native-profile-usage";
 

@@ -44,16 +44,16 @@ pub mod text;
 pub mod time;
 
 pub use bounds::{
-    COMPOSER_ATTACHMENT_MAX_BYTES, COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES,
-    CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
-    CONVERSATION_TEXT_FRAGMENT_MAX_BYTES, DIRECTORY_LISTING_MAX_ENTRIES,
-    DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES, ENGINE_CONFIG_MAX_ENCODED_BYTES,
-    ENGINE_PROFILE_ID_MAX_BYTES, ENGINE_RUNTIME_MAX_BODY_BYTES, ENGINE_RUNTIME_MAX_HEADER_COUNT,
-    ENGINE_RUNTIME_MAX_LINE_BYTES, ENGINE_RUNTIME_MAX_MILLIS, ENGINE_RUNTIME_MAX_OBSERVATIONS,
-    ENGINE_RUNTIME_MAX_SSE_EVENT_BYTES, ENGINE_RUNTIME_MAX_STDERR_BYTES,
-    ENGINE_USAGE_EMAIL_MAX_BYTES, ENGINE_USAGE_ENGINES_MAX, ENGINE_USAGE_REASON_MAX_BYTES,
-    ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE, IDENTIFIER_MAX_BYTES, MESSAGE_BODY_MAX_BYTES,
-    MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
+    COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES, COMPOSER_ATTACHMENT_MAX_BYTES,
+    COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES, CONVERSATION_PATCH_BATCH_MAX_PATCHES,
+    CONVERSATION_QUERY_MAX_TURNS, CONVERSATION_TEXT_FRAGMENT_MAX_BYTES,
+    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES,
+    ENGINE_CONFIG_MAX_ENCODED_BYTES, ENGINE_PROFILE_ID_MAX_BYTES, ENGINE_RUNTIME_MAX_BODY_BYTES,
+    ENGINE_RUNTIME_MAX_HEADER_COUNT, ENGINE_RUNTIME_MAX_LINE_BYTES, ENGINE_RUNTIME_MAX_MILLIS,
+    ENGINE_RUNTIME_MAX_OBSERVATIONS, ENGINE_RUNTIME_MAX_SSE_EVENT_BYTES,
+    ENGINE_RUNTIME_MAX_STDERR_BYTES, ENGINE_USAGE_EMAIL_MAX_BYTES, ENGINE_USAGE_ENGINES_MAX,
+    ENGINE_USAGE_REASON_MAX_BYTES, ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE, IDENTIFIER_MAX_BYTES,
+    MESSAGE_BODY_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
     MESSAGE_IMAGE_ATTACHMENT_MIME_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_NAME_MAX_BYTES,
     MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES, PROJECT_LISTING_MAX_PROJECTS, ROOT_PATH_MAX_BYTES,
     THREAD_LISTING_MAX_THREADS, THREAD_TITLE_MAX_BYTES,
@@ -90,7 +90,7 @@ pub use engine_socket::{
 };
 pub use events::{
     EngineObservationAttribution, EngineObservationEvent, Event, FirstMessageQueued,
-    ProjectAttached, ThreadCreated,
+    ProjectAttached, ThreadCreated, ThreadRetitled,
 };
 pub use identifiers::{
     DirectoryId, EngineAgentId, EngineModelId, EngineProfileId, EngineProfileIdError,
@@ -202,13 +202,30 @@ pub use composer_state::{
     RunUsageResult, WithdrawQueuedMessageCommand,
 };
 
+pub mod composer_attachment;
 pub mod composer_draft;
 mod draft_submission;
+pub use composer_attachment::{
+    ComposerAttachmentChunk, ComposerAttachmentResult, ComposerAttachmentUploaded, ComposerUpload,
+    ReadComposerAttachment, UploadComposerAttachment,
+};
 pub use composer_draft::{
-    ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult,
-    ComposerAttachmentUploaded, ComposerDraft, ComposerDraftError, ComposerDraftResult,
-    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, ComposerImage,
-    QueueStoredMessage, ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft,
-    UploadComposerAttachment,
+    ComposerAttachmentDigest, ComposerAttachmentRef, ComposerDraft, ComposerDraftError,
+    ComposerDraftResult, ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope,
+    ComposerImage, QueueStoredMessage, ReadComposerDraft, SaveComposerDraft,
 };
 pub use draft_submission::{ComposerDraftSubmitted, DraftSubmissionOutcome, SubmitComposerDraft};
+
+pub mod manual_engine_configuration;
+pub use manual_engine_configuration::{
+    EngineConfigurationResolution, MANUAL_CONFIGURATION_KEYS, MAX_MANUAL_CONFIGURATION_BYTES,
+    MAX_MANUAL_CONFIGURATION_LINES, ManualEngineConfiguration, ResolveEngineConfiguration,
+};
+
+pub mod user_preferences;
+pub use user_preferences::{
+    AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,
+    NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord, NavigationRecordError,
+    NavigationRoute, ReadUserPreferences, RecordNavigation, UserPreferences,
+    UserPreferencesRevision,
+};

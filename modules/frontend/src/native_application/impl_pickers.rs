@@ -16,10 +16,14 @@ impl NativeApplication {
             .first()
             .map(|project| project.project_id.clone());
         let options = self.ordered_project_options(listing);
+        // A fresh connection resumes the Forge's last route.
+        let listed = |id: &&ProjectId| options.iter().any(|project| &project.id == *id);
         let selected_project = self
             .selected_project
-            .clone()
-            .filter(|id| options.iter().any(|project| &project.id == id))
+            .as_ref()
+            .or_else(|| self.project_navigation.resumed_project())
+            .filter(listed)
+            .cloned()
             .or_else(|| options.first().map(|project| project.id.clone()));
         if self.selected_project != selected_project || selected_project.is_none() {
             self.retire_host(cx);

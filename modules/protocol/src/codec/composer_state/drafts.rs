@@ -3,11 +3,11 @@
 #![forbid(unsafe_code)]
 
 use artisan_domain::{
-    ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult,
-    ComposerAttachmentUploaded, ComposerDraft, ComposerDraftResult, ComposerDraftRevision,
-    ComposerDraftSaved, ComposerDraftScope, ImageMimeType, ProjectId, QueueStoredMessage,
-    ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft, SteerTarget,
-    UploadComposerAttachment,
+    ComposerAttachmentChunk, ComposerAttachmentDigest, ComposerAttachmentRef,
+    ComposerAttachmentResult, ComposerAttachmentUploaded, ComposerDraft, ComposerDraftResult,
+    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, ComposerUpload, ImageMimeType,
+    ProjectId, QueueStoredMessage, ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft,
+    SteerTarget, UploadComposerAttachment,
 };
 
 use super::helpers::*;
@@ -273,15 +273,28 @@ pub fn decode_composer_draft_result(
     Ok(ComposerDraftResult { scope, draft })
 }
 
-/// Encodes one attachment upload.
+/// Encodes one attachment upload: a whole image or one chunk.
 pub fn encode_upload_composer_attachment_request(
     builder: composer_state_capnp::upload_composer_attachment_request::Builder<'_>,
     value: &UploadComposerAttachment,
 ) {
-    let mut image = builder.init_image();
-    image.set_mime_type(value.image.mime_type_str());
-    image.set_name(value.image.name());
-    image.set_bytes(value.image.bytes());
+    match &value.upload {
+        ComposerUpload::Image(image) => {
+            let mut encoded = builder.init_image();
+            encoded.set_mime_type(image.mime_type_str());
+            encoded.set_name(image.name());
+            encoded.set_bytes(image.bytes());
+        }
+        ComposerUpload::Chunk(chunk) => {
+            let mut encoded = builder.init_chunk();
+            encoded.set_digest(chunk.digest().as_bytes());
+            encoded.set_mime_type(chunk.mime_type().as_str());
+            encoded.set_name(chunk.name());
+            encoded.set_total_bytes(chunk.total_bytes());
+            encoded.set_offset(chunk.offset());
+            encoded.set_bytes(chunk.bytes());
+        }
+    }
 }
 
 /// Decodes one attachment upload using the parent envelope request id.
@@ -289,6 +302,27 @@ pub fn decode_upload_composer_attachment_request(
     value: composer_state_capnp::upload_composer_attachment_request::Reader<'_>,
     request_id: RequestId,
 ) -> Result<UploadComposerAttachment, ComposerStateCodecError> {
+    if value.has_chunk() {
+        let field = "request.uploadComposerAttachment.chunk";
+        let chunk = value.get_chunk()?;
+        let bytes = chunk.get_bytes()?;
+        if bytes.len() > artisan_domain::COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES {
+            return Err(ComposerStateCodecError::Image { field });
+        }
+        let chunk = ComposerAttachmentChunk::new(
+            decode_digest(chunk.get_digest(), field)?,
+            decode_mime(chunk.get_mime_type(), field)?,
+            read_text(chunk.get_name(), field)?,
+            chunk.get_total_bytes(),
+            chunk.get_offset(),
+            bytes.to_vec(),
+        )
+        .map_err(|_| ComposerStateCodecError::Image { field })?;
+        return Ok(UploadComposerAttachment {
+            request_id,
+            upload: ComposerUpload::Chunk(chunk),
+        });
+    }
     let field = "request.uploadComposerAttachment.image";
     let image = value.get_image()?;
     let bytes = image.get_bytes()?;
@@ -301,7 +335,10 @@ pub fn decode_upload_composer_attachment_request(
         read_text(image.get_name(), field)?,
     )
     .map_err(|_| ComposerStateCodecError::Image { field })?;
-    Ok(UploadComposerAttachment { request_id, image })
+    Ok(UploadComposerAttachment {
+        request_id,
+        upload: ComposerUpload::Image(image),
+    })
 }
 
 /// Encodes one upload acknowledgement after checking its correlation.
@@ -317,6 +354,7 @@ pub fn encode_composer_attachment_uploaded(
     }
     builder.set_request_id(value.request_id.as_str());
     encode_reference(builder.reborrow().init_reference(), &value.reference);
+    builder.set_pending_bytes(value.pending_bytes);
     Ok(())
 }
 
@@ -336,6 +374,7 @@ pub fn decode_composer_attachment_uploaded(
             value.get_reference()?,
             "response.composerAttachmentUploaded.reference",
         )?,
+        pending_bytes: value.get_pending_bytes(),
     })
 }
 
@@ -345,6 +384,8 @@ pub fn encode_read_composer_attachment_request(
     value: &ReadComposerAttachment,
 ) {
     builder.set_digest(value.digest.as_bytes());
+    builder.set_offset(value.offset);
+    builder.set_max_bytes(value.max_bytes);
 }
 
 /// Decodes one stored-attachment read.
@@ -353,6 +394,8 @@ pub fn decode_read_composer_attachment_request(
 ) -> Result<ReadComposerAttachment, ComposerStateCodecError> {
     Ok(ReadComposerAttachment {
         digest: decode_digest(value.get_digest(), "request.readComposerAttachment.digest")?,
+        offset: value.get_offset(),
+        max_bytes: value.get_max_bytes(),
     })
 }
 
@@ -364,21 +407,35 @@ pub fn encode_composer_attachment_result(
     builder.set_digest(value.digest.as_bytes());
     builder.set_mime_type(value.mime_type.as_str());
     builder.set_bytes(&value.bytes);
+    builder.set_total_bytes(value.total_bytes);
+    builder.set_offset(value.offset);
 }
 
-/// Decodes one stored-attachment read result.
+/// Decodes one stored-attachment read result: a window inside its image.
 pub fn decode_composer_attachment_result(
     value: composer_state_capnp::composer_attachment_result::Reader<'_>,
 ) -> Result<ComposerAttachmentResult, ComposerStateCodecError> {
     let field = "response.composerAttachment";
     let bytes = value.get_bytes()?;
-    if bytes.is_empty() || bytes.len() > artisan_domain::COMPOSER_ATTACHMENT_MAX_BYTES {
+    let total_bytes = value.get_total_bytes();
+    let offset = value.get_offset();
+    let within = u64::from(offset)
+        .checked_add(bytes.len() as u64)
+        .is_some_and(|end| end <= u64::from(total_bytes));
+    if bytes.is_empty()
+        || usize::try_from(total_bytes).map_or(true, |total| {
+            total > artisan_domain::COMPOSER_ATTACHMENT_MAX_BYTES
+        })
+        || !within
+    {
         return Err(ComposerStateCodecError::Image { field });
     }
     Ok(ComposerAttachmentResult {
         digest: decode_digest(value.get_digest(), field)?,
         mime_type: decode_mime(value.get_mime_type(), field)?,
         bytes: bytes.to_vec(),
+        total_bytes,
+        offset,
     })
 }
 

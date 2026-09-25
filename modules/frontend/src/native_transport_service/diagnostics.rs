@@ -236,6 +236,8 @@ pub enum PrivateDelivery {
     Observation(ServerEvent),
     /// A thread's complete message outbox.
     Outbox(artisan_domain::MessageOutbox),
+    /// Connection-scoped state the Forge pushed.
+    HostState(super::HostStateEvent),
     /// Bounded delivery loss.
     Lost(ServiceFailure),
 }
@@ -590,6 +592,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::ComposerState(_) => "ComposerState",
             Self::ComposerDraft(_) => "ComposerDraft",
             Self::ForgeDecision(_) => "ForgeDecision",
+            Self::Preferences(_) => "Preferences",
             Self::ReadActiveRun { .. } => "ReadActiveRun",
             Self::StopRun(_) => "StopRun",
             Self::RespondApproval(_) => "RespondApproval",

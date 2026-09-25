@@ -1,6 +1,7 @@
 //! Domain-typed repositories for the native schema.
 
 mod common;
+mod composer_attachment_upload;
 mod composer_draft;
 mod conversation_patch_replay;
 mod conversation_projection;
@@ -34,6 +35,7 @@ pub(crate) use common::{
     RepositoryFailure, corrupt_data, database_error, negative_counter, row_value,
 };
 
+pub use composer_attachment_upload::ComposerAttachmentChunkOutcome;
 pub use composer_draft::{
     COMPOSER_ATTACHMENT_UNREFERENCED_GRACE_MS, ComposerDraftRepositoryError,
     ComposerDraftSaveOutcome, SaveComposerDraftInput,
@@ -283,6 +285,9 @@ mod queued_message;
 pub use queued_message::{
     FailedMessageRecovery, MessageOutboxFingerprint, QueuedMessageRepositoryError,
 };
+
+mod user_preferences;
+pub use user_preferences::{LegacyImport, StoredUserPreferences};
 
 mod session_continuation;
 pub use session_continuation::{

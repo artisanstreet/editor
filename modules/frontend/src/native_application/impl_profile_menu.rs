@@ -1159,7 +1159,6 @@ impl NativeApplication {
                 if !was_open && app.profile_menu.is_open() {
                     app.clear_profile_hover();
                     app.begin_profile_menu_open(cx);
-                    app.ensure_profile_usage(false, None, cx);
                 } else {
                     app.clear_profile_hover();
                     app.cancel_profile_usage_scroll();
@@ -1196,7 +1195,6 @@ impl NativeApplication {
                         if !was_open {
                             app.begin_profile_menu_open(cx);
                         }
-                        app.ensure_profile_usage(false, None, cx);
                     }
                     "up" => {
                         let was_open = app.profile_menu.is_open();
@@ -1206,7 +1204,6 @@ impl NativeApplication {
                         if !was_open {
                             app.begin_profile_menu_open(cx);
                         }
-                        app.ensure_profile_usage(false, None, cx);
                     }
                     "home" => {
                         let _ = app.profile_menu.move_first();
@@ -1225,7 +1222,6 @@ impl NativeApplication {
                             if app.profile_menu.is_open() {
                                 app.clear_profile_hover();
                                 app.begin_profile_menu_open(cx);
-                                app.ensure_profile_usage(false, None, cx);
                             }
                         }
                     }

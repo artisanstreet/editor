@@ -85,6 +85,9 @@ pub enum ResponsePayload {
     HostCatalog(CatalogSnapshotWire),
     /// A model selection resolved into a configuration, or refused.
     ModelSelectionResolved(artisan_domain::ModelSelectionResolution),
+    /// A manual configuration document built into a configuration, or
+    /// refused.
+    EngineConfigurationResolved(artisan_domain::EngineConfigurationResolution),
     /// Complete durable model-favorites projection.
     ModelFavorites(ModelFavoritesSnapshot),
     /// Correlated favorite mutation receipt with complete post-state.
@@ -115,6 +118,10 @@ pub enum ResponsePayload {
     FailedMessageRecovered(artisan_domain::FailedMessageRecovered),
     /// Correlated answer to a draft submission.
     ComposerDraftSubmitted(artisan_domain::ComposerDraftSubmitted),
+    /// The Forge user's preferences, after a read or a recorded navigation.
+    UserPreferences(artisan_domain::UserPreferences),
+    /// The Forge's answer to a one-time legacy preference import.
+    LegacyPreferencesImported(artisan_domain::LegacyPreferencesImported),
 }
 
 /// Successful response correlated to a client request frame.

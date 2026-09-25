@@ -2,6 +2,10 @@
 //!
 //! The cache is a presentation memo for the machine menu, replaced wholesale
 //! from the credential store on every refresh; it never outlives the store.
+//! It holds only what the store already says about each registered host
+//! (its name, home path, subtitle, avatar seed, and WSL distribution) and
+//! no domain state: nothing here is written back, and dropping it loses
+//! nothing the next refresh cannot rebuild.
 use super::*;
 use std::{
     collections::HashMap,

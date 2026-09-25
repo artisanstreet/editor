@@ -174,39 +174,11 @@ impl RequestHandler {
         let Some(draft) = draft.filter(|draft| draft.revision() == submit.draft_revision) else {
             return Ok(Ok(Vec::new()));
         };
-        let mut picked = Vec::with_capacity(draft.attachments().len());
-        for reference in draft.attachments() {
-            let stored = self
-                .repository
-                .read_composer_attachment(reference.digest())
-                .await
-                .map_err(|error| draft_failure(&error, request_id))?
-                .ok_or_else(|| {
-                    typed_failure(
-                        ErrorCode::InvalidInput,
-                        "a draft attachment is not stored",
-                        false,
-                        request_id,
-                    )
-                })?;
-            picked.push((stored, reference.name().to_owned()));
-        }
-        if picked.is_empty() {
+        if draft.attachments().is_empty() {
             return Ok(Ok(Vec::new()));
         }
-        // Decoding, rescaling and encoding are CPU work off the async runtime.
-        let fitted = tokio::task::spawn_blocking(move || {
-            crate::attachment_policy::fit_draft_images(engine.as_str(), &picked)
-        })
-        .await
-        .map_err(|_| {
-            typed_failure(
-                ErrorCode::Internal,
-                "fitting the draft's images failed",
-                true,
-                request_id,
-            )
-        })?;
+        let picked = self.read_picked(request_id, draft.attachments()).await?;
+        let fitted = self.fit_picked(request_id, engine, picked).await?;
         Ok(fitted.map_err(|reason| {
             SubmissionRefusal::new(
                 SubmissionRefusalKind::AttachmentRejected,

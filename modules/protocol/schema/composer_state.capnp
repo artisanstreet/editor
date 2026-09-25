@@ -264,25 +264,38 @@ struct ComposerDraftResult {
   draft @1 :ComposerDraft;
 }
 
-# Stores one image under the digest of its bytes.
+# Stores one image under the digest of its bytes: whole (`image`, one
+# frame) or one chunk at a time (`chunk`, for images larger than a frame).
 struct UploadComposerAttachmentRequest {
   image @0 :ImageAttachment;
+  # A null pointer uploads `image` whole.
+  chunk @1 :ComposerAttachmentChunk;
 }
 
 # requestId must equal the parent Response.requestId.
 struct ComposerAttachmentUploaded {
   requestId @0 :Text;
   reference @1 :ComposerAttachmentRef;
+  # Bytes of a chunked upload still missing; zero once stored.
+  pendingBytes @2 :UInt32;
 }
 
 struct ReadComposerAttachmentRequest {
   digest @0 :Data;
+  # A window of the stored bytes; maxBytes zero answers every byte from
+  # offset.
+  offset @1 :UInt32;
+  maxBytes @2 :UInt32;
 }
 
 struct ComposerAttachmentResult {
   digest @0 :Data;
   mimeType @1 :Text;
+  # The window of bytes starting at offset.
   bytes @2 :Data;
+  # Byte length of the whole image.
+  totalBytes @3 :UInt32;
+  offset @4 :UInt32;
 }
 
 # Queues one message whose images are stored attachments; the Forge
@@ -410,4 +423,20 @@ enum SubmissionRefusalKind {
 struct SubmissionRefusal {
   kind @0 :SubmissionRefusalKind;
   message @1 :Text;
+}
+
+# ---------------------------------------------------------------------------
+# Stateless Editor step 7: picked images up to 32 MiB cross the wire in
+# chunks of at most 4 MiB. Appended so existing node identities stay stable.
+# ---------------------------------------------------------------------------
+
+# One chunk of a picked image: digest is the SHA-256 of the whole image, and
+# the Forge stores it once every byte arrived and the digest matches.
+struct ComposerAttachmentChunk {
+  digest @0 :Data;
+  mimeType @1 :Text;
+  name @2 :Text;
+  totalBytes @3 :UInt32;
+  offset @4 :UInt32;
+  bytes @5 :Data;
 }

@@ -22,7 +22,10 @@ use artisan_domain::{
     WebSearchAccess,
 };
 
+mod manual;
 mod native;
+
+pub(crate) use manual::build_manual_config;
 
 /// Default profile identity persisted for native engine selections that
 /// carry no explicit profile.

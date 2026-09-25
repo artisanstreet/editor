@@ -5141,12 +5141,20 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
     let (_temporary, storage) = opened_storage("draft-attachment").await;
     seed_conversation(storage.repository(), "thread-attach", "attach").await;
     let handler = RequestHandler::new(storage.repository().clone());
-    let bytes = vec![0x89, 0x50, 0x4e, 0x47, 7];
+    // The thread runs an engine, so a sent image is fitted to it; a GIF
+    // passes through untouched.
+    let bytes = vec![
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+    ];
     let upload = ClientRequest::Command(Command::UploadComposerAttachment(
         artisan_domain::UploadComposerAttachment {
             request_id: request("request-upload"),
-            image: artisan_domain::ComposerImage::new("image/png", bytes.clone(), "chart.png")
-                .expect("valid image"),
+            upload: artisan_domain::ComposerUpload::Image(
+                artisan_domain::ComposerImage::new("image/gif", bytes.clone(), "chart.gif")
+                    .expect("valid image"),
+            ),
         },
     ));
     let response = handler
@@ -5157,8 +5165,8 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
         panic!("expected an upload acknowledgement");
     };
     let reference = uploaded.reference;
-    assert_eq!(reference.name(), "chart.png");
-    assert_eq!(reference.size_bytes(), 5);
+    assert_eq!(reference.name(), "chart.gif");
+    assert_eq!(reference.size_bytes(), 43);
 
     let save = save_draft_command(
         "request-draft-image",
@@ -5180,9 +5188,7 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
         .respond(
             &request("request-read-attachment"),
             &ClientRequest::Query(Query::ReadComposerAttachment(
-                artisan_domain::ReadComposerAttachment {
-                    digest: *reference.digest(),
-                },
+                artisan_domain::ReadComposerAttachment::whole(*reference.digest()),
             )),
         )
         .await
@@ -5226,7 +5232,7 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
         panic!("expected message image bytes");
     };
     assert_eq!(image.bytes, bytes);
-    assert_eq!(image.reference.name, "chart.png");
+    assert_eq!(image.reference.name, "chart.gif");
 
     // A retried stored send replays the original receipt.
     let replay = queued_message_of(
@@ -5261,4 +5267,111 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
             .await,
     );
     assert_eq!(failure.code, ErrorCode::InvalidInput);
+}
+
+#[tokio::test]
+async fn preferences_follow_navigation_and_the_configuration_the_user_saves() {
+    let (_temporary, storage) = opened_storage("preferences").await;
+    storage
+        .repository()
+        .attach_project(attach_input(
+            "preferences-attach",
+            "preferences-directory",
+            "preferences-project",
+        ))
+        .await
+        .expect("project should attach");
+    storage
+        .repository()
+        .create_thread(create_input(
+            "preferences-create",
+            "preferences-project",
+            "preferences-thread",
+        ))
+        .await
+        .expect("thread should create");
+    let origin = ScriptedOriginHandle::scripted(
+        Vec::new(),
+        vec![
+            Ok(UnixMillis::from_millis(400)),
+            Ok(UnixMillis::from_millis(401)),
+            Ok(UnixMillis::from_millis(402)),
+        ],
+    );
+    let handler = scripted_handler(&storage, &origin);
+    let preferences_of = |response: ServerResponse| match response.payload {
+        ResponsePayload::UserPreferences(preferences) => preferences,
+        other => panic!("expected preferences, got {other:?}"),
+    };
+
+    let fresh = preferences_of(
+        handler
+            .respond(
+                &request("preferences-read"),
+                &ClientRequest::Query(Query::ReadUserPreferences(
+                    artisan_domain::ReadUserPreferences,
+                )),
+            )
+            .await
+            .expect("preferences should read"),
+    );
+    assert_eq!(fresh.revision, 0);
+    assert_eq!(fresh.default_engine_config, None);
+    assert!(!fresh.account.display_name.as_str().is_empty());
+
+    handler
+        .respond(
+            &request("preferences-config"),
+            &engine_config_command(
+                "preferences-config",
+                "preferences-thread",
+                EngineConfigUpdatePrecondition::Unconfigured,
+                "preferred",
+            ),
+        )
+        .await
+        .expect("configuration should save");
+    let navigation = |request_id: &str, project: &str| {
+        ClientRequest::Command(Command::RecordNavigation(
+            artisan_domain::RecordNavigation {
+                request_id: request(request_id),
+                project_id: ProjectId::parse(project).expect("valid project id"),
+                thread_id: Some(ThreadId::parse("preferences-thread").expect("valid thread id")),
+            },
+        ))
+    };
+    let recorded = preferences_of(
+        handler
+            .respond(
+                &request("preferences-navigate"),
+                &navigation("preferences-navigate", "preferences-project"),
+            )
+            .await
+            .expect("navigation should record"),
+    );
+    assert_eq!(
+        recorded.default_engine_config,
+        Some(engine_config("preferred"))
+    );
+    let route = recorded.navigation.route().expect("route recorded");
+    assert_eq!(route.project_id.as_str(), "preferences-project");
+    assert_eq!(
+        route.thread_id.as_ref().map(ThreadId::as_str),
+        Some("preferences-thread")
+    );
+    assert_eq!(
+        recorded.navigation.projects()[0].project_id.as_str(),
+        "preferences-project"
+    );
+
+    let unknown = failure_of(
+        handler
+            .respond(
+                &request("preferences-unknown"),
+                &navigation("preferences-unknown", "missing-project"),
+            )
+            .await,
+    );
+    assert_eq!(unknown.code, ErrorCode::ProjectUnknown);
+    storage.close().await.expect("storage should close");
 }
