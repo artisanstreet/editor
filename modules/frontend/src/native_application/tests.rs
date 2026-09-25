@@ -736,13 +736,13 @@ fn prepare_thread_switch_fixture(
     application.active_subscription_request_id = Some(request("switch-start-a-1"));
     application.state = NativeViewState::Ready;
 
-    let (_, token) = application
+    let token = application
         .composer
         .update(application_cx, |composer, composer_cx| {
             composer.set_disabled(false, composer_cx);
             composer.switch_thread(source.as_str(), false, composer_cx);
             composer.set_draft("retained switch draft");
-            composer.begin_payload_submission()
+            composer.begin_draft_submission()
         })
         .expect("message flight");
     application.message_flight = Some(NativeMessageFlight {

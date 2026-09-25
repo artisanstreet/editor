@@ -43,8 +43,13 @@ pub(super) struct ResolvedSelection {
 
 /// How a draft submission is admitted.
 pub(super) enum SubmissionAdmission {
-    /// Queue it, steering into `steer_run_id` when named.
-    Admitted { steer_run_id: Option<RunId> },
+    /// Queue it on `engine`, steering into `steer_run_id` when named. A
+    /// revision already submitted is admitted without an engine: its replay
+    /// answers the first submission.
+    Admitted {
+        steer_run_id: Option<RunId>,
+        engine: Option<EngineId>,
+    },
     /// Refuse it; nothing is queued.
     Refused(SubmissionRefusal),
 }
@@ -58,7 +63,7 @@ pub(super) enum SubmissionPlan {
     /// configuration.
     Admit {
         /// Configuration to save before queueing, when the send changes it.
-        save: Option<EngineRunConfig>,
+        save: Option<Box<EngineRunConfig>>,
         /// Engine the message runs on.
         engine: EngineId,
     },
@@ -146,7 +151,7 @@ pub(super) fn plan_submission(
         });
     }
     SubmissionPlan::Admit {
-        save: Some(resolved.config),
+        save: Some(Box::new(resolved.config)),
         engine,
     }
 }
@@ -213,7 +218,10 @@ impl RequestHandler {
             .await
             .map_err(|error| repository_failure(&error, request_id))?
         {
-            return Ok(SubmissionAdmission::Admitted { steer_run_id: None });
+            return Ok(SubmissionAdmission::Admitted {
+                steer_run_id: None,
+                engine: None,
+            });
         }
         let live = self.live_run(thread).await;
         let saved = self
@@ -266,21 +274,30 @@ impl RequestHandler {
         };
         Ok(SubmissionAdmission::Admitted {
             steer_run_id: steer_target(live, engine),
+            engine: Some(engine),
         })
     }
 
-    /// The thread's configuration revision after an admitted submission.
+    /// The thread's configuration revision after an admitted submission;
+    /// admission leaves the thread configured, so it exists.
     pub(super) async fn engine_config_revision(
         &self,
         request_id: &RequestId,
         thread: &ThreadId,
-    ) -> Result<Option<EngineConfigRevision>, ProtocolFailure> {
-        Ok(self
-            .repository
+    ) -> Result<EngineConfigRevision, ProtocolFailure> {
+        self.repository
             .read_thread_engine_settings(thread)
             .await
             .map_err(|error| repository_failure(&error, request_id))?
-            .map(|saved| saved.revision()))
+            .map(|saved| saved.revision())
+            .ok_or_else(|| {
+                super::failures::typed_failure(
+                    artisan_protocol::ErrorCode::Internal,
+                    "an admitted submission's thread has no engine configuration",
+                    false,
+                    request_id,
+                )
+            })
     }
 
     async fn resolve_selection(

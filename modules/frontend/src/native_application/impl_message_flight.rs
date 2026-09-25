@@ -199,9 +199,9 @@ impl NativeApplication {
         let body = self.composer.read(cx).draft_body();
         let submission = self
             .composer
-            .update(cx, |composer, _| composer.begin_payload_submission());
-        let (_, token) = match submission {
-            Ok(submission) => submission,
+            .update(cx, |composer, _| composer.begin_draft_submission());
+        let token = match submission {
+            Ok(token) => token,
             Err(blocked) => {
                 if let Some(failure) = submission_blocked_failure(blocked) {
                     self.message_failure = Some(NativeMessageFailure::new(failure));

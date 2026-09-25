@@ -1,4 +1,5 @@
-//! Pure image intake policy used before an image is sent to an engine.
+//! Pure image policy the Forge applies before an image is sent to an engine
+//! (moved from the Editor's intake with the rest of the attachment policy).
 //!
 //! The policy deliberately does not encode, decode, or inspect image bytes.
 //! It only describes supported media types and computes a safe rescale target
@@ -40,17 +41,6 @@ pub enum ImageCompressionFormat {
 }
 
 impl ImageCompressionFormat {
-    /// Returns the MIME type represented by this compression format.
-    #[must_use]
-    pub const fn as_mime_type(self) -> &'static str {
-        match self {
-            Self::Png => "image/png",
-            Self::Jpeg => "image/jpeg",
-            Self::Webp => "image/webp",
-            Self::Avif => "image/avif",
-        }
-    }
-
     /// Converts a compression format to an intake media type when the format
     /// is one of the media types accepted by the frontend protocol.
     #[must_use]
@@ -161,3 +151,7 @@ pub fn image_rescale_target_with_long_edge(
 fn round_scaled_dimension(value: f64) -> f64 {
     value.round().max(1.0)
 }
+
+#[cfg(test)]
+#[path = "image_policy/tests.rs"]
+mod tests;

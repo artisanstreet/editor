@@ -48,8 +48,8 @@ impl PreviewWork {
 impl AttachmentWork {
     fn run(self) -> Vec<AttachmentPreparationOutcome> {
         match self {
-            Self::Clipboard { items } => prepare_clipboard_batch(items, None),
-            Self::Files { items } => prepare_file_batch(items, None),
+            Self::Clipboard { items } => prepare_clipboard_batch(items),
+            Self::Files { items } => prepare_file_batch(items),
             Self::Recalled { items } => prepare_recalled_batch(items),
         }
     }

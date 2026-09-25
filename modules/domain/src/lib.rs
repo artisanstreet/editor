@@ -44,6 +44,7 @@ pub mod text;
 pub mod time;
 
 pub use bounds::{
+    COMPOSER_ATTACHMENT_MAX_BYTES, COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES,
     CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
     CONVERSATION_TEXT_FRAGMENT_MAX_BYTES, DIRECTORY_LISTING_MAX_ENTRIES,
     DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES, ENGINE_CONFIG_MAX_ENCODED_BYTES,
@@ -206,7 +207,8 @@ mod draft_submission;
 pub use composer_draft::{
     ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult,
     ComposerAttachmentUploaded, ComposerDraft, ComposerDraftError, ComposerDraftResult,
-    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, QueueStoredMessage,
-    ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft, UploadComposerAttachment,
+    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, ComposerImage,
+    QueueStoredMessage, ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft,
+    UploadComposerAttachment,
 };
 pub use draft_submission::{ComposerDraftSubmitted, DraftSubmissionOutcome, SubmitComposerDraft};

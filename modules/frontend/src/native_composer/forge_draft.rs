@@ -9,7 +9,7 @@
 
 use artisan_domain::{
     ComposerAttachmentDigest, ComposerAttachmentRef, ComposerDraft, ComposerDraftScope,
-    ImageAttachment, ImageMimeType, ProjectId, ThreadId,
+    ComposerImage, ImageMimeType, ProjectId, ThreadId,
 };
 
 use sha2::{Digest as _, Sha256};
@@ -125,13 +125,13 @@ impl NativeComposer {
     }
 
     /// Ready attachments the Forge store does not hold yet, by composer id.
-    pub(crate) fn unstored_attachments(&self) -> Vec<(String, ImageAttachment)> {
+    pub(crate) fn unstored_attachments(&self) -> Vec<(String, ComposerImage)> {
         self.attachments
             .iter()
             .filter(|attachment| attachment.stored.is_none())
             .filter_map(|attachment| {
                 let bytes = attachment.bytes.as_ref()?;
-                let image = ImageAttachment::new(
+                let image = ComposerImage::new(
                     &attachment.mime_type,
                     bytes.as_ref().clone(),
                     &attachment.name,

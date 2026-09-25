@@ -516,12 +516,12 @@ fn terminal_switch_refusal_preserves_old_host_and_disables_picker(cx: &mut TestA
             application.selected_thread = Some(source.clone());
             application.conversation_host = Some(source_host.clone());
             application.state = NativeViewState::Ready;
-            let (_, token) = application
+            let token = application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.set_disabled(false, composer_cx);
                     composer.set_draft("refused switch draft");
-                    composer.begin_payload_submission()
+                    composer.begin_draft_submission()
                 })
                 .expect("message flight");
             application.message_flight = Some(NativeMessageFlight {

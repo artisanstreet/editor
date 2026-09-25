@@ -15,8 +15,8 @@ use thiserror::Error;
 
 use artisan_domain::{
     AuthoredText, ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult,
-    ComposerDraft, ComposerDraftRevision, ComposerDraftScope, ImageAttachment, ImageMimeType,
-    RequestId, UnixMillis,
+    ComposerDraft, ComposerDraftRevision, ComposerDraftScope, ComposerImage, ImageAttachment,
+    ImageMimeType, RequestId, UnixMillis,
 };
 
 use super::{Repository, RepositoryFailure, corrupt_data, database_error};
@@ -75,6 +75,13 @@ pub enum ComposerDraftRepositoryError {
     #[error("composer attachment {digest} does not match its stored metadata")]
     AttachmentMismatch {
         /// Mismatched digest.
+        digest: ComposerAttachmentDigest,
+    },
+    /// A stored image is larger than a message image; only a draft send,
+    /// which fits it to the thread's engine, can use it.
+    #[error("composer attachment {digest} is too large to send as it is")]
+    AttachmentNotSendable {
+        /// Oversized digest.
         digest: ComposerAttachmentDigest,
     },
     /// Persisted data violates a domain or schema invariant.
@@ -176,7 +183,7 @@ impl Repository {
     /// Returns a database error when `SQLite` fails.
     pub async fn store_composer_attachment(
         &self,
-        image: &ImageAttachment,
+        image: &ComposerImage,
         stored_at: UnixMillis,
     ) -> DraftResult<ComposerAttachmentRef> {
         let digest = ComposerAttachmentDigest::new(Sha256::digest(image.bytes()).into());
@@ -250,7 +257,9 @@ pub(super) async fn resolve_attachments(
         }
         images.push(
             ImageAttachment::new(stored.mime_type.as_str(), stored.bytes, reference.name())
-                .map_err(|source| corrupt_data("composer_attachments", "bytes", source))?,
+                .map_err(|_| ComposerDraftRepositoryError::AttachmentNotSendable {
+                    digest: *reference.digest(),
+                })?,
         );
     }
     Ok(images)

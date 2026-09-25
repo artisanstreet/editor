@@ -636,17 +636,13 @@ impl NativeComposer {
         Ok(submission)
     }
 
-    /// Builds the exact typed queue payload owned by the current draft.
+    /// Begins custody of the current draft for a send by revision.
     ///
-    /// The current draft text is parsed without trimming and each ready tray
-    /// item contributes one owned image in tray order. Image-only messages
-    /// preserve whether authored text was absent or explicitly empty; no
-    /// marker text is ever inserted. The payload is returned to the
-    /// application transport, while this entity retains a byte-identical
-    /// snapshot for accepted cleanup and retry matching.
-    pub(crate) fn begin_payload_submission(
-        &mut self,
-    ) -> Result<(artisan_domain::QueueMessagePayload, SubmissionToken), SubmissionBlocked> {
+    /// The draft text is checked without trimming and every tray item must be
+    /// ready; the draft needs text or an image. The images stay as the user
+    /// picked them: the Forge fits them to the thread's engine when it sends
+    /// the stored draft. This entity retains a snapshot for accepted cleanup.
+    pub(crate) fn begin_draft_submission(&mut self) -> Result<SubmissionToken, SubmissionBlocked> {
         if self.send_blocked
             || self.state.is_disabled()
             || self.marked_range.is_some()
@@ -660,42 +656,28 @@ impl NativeComposer {
             .snapshot_ordered_ready_attachments()
             .map_err(|_| SubmissionBlocked::Disabled)?;
         let active_snapshot = snapshot.clone();
-        let text = if self.authored_text_present {
-            Some(
-                artisan_domain::AuthoredText::parse(self.state.draft().to_owned()).map_err(
-                    |error| match error {
-                        artisan_domain::AuthoredTextError::TooLong { length, maximum } => {
-                            SubmissionBlocked::InvalidBody(
-                                artisan_domain::MessageBodyError::TooLong { length, maximum },
-                            )
-                        }
-                    },
-                )?,
-            )
-        } else {
-            None
-        };
-        let images = snapshot
-            .attachments
-            .into_iter()
-            .map(|attachment| {
-                artisan_domain::ImageAttachment::new(
-                    attachment.media_type,
-                    attachment.bytes,
-                    attachment.name,
-                )
-                .map_err(|_| SubmissionBlocked::Disabled)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let payload = artisan_domain::QueueMessagePayload::new(text, images)
-            .map_err(|_| SubmissionBlocked::Disabled)?;
-        let token = self.state.begin_payload_submission(&payload)?;
+        if self.authored_text_present {
+            artisan_domain::AuthoredText::parse(self.state.draft().to_owned()).map_err(
+                |error| match error {
+                    artisan_domain::AuthoredTextError::TooLong { length, maximum } => {
+                        SubmissionBlocked::InvalidBody(artisan_domain::MessageBodyError::TooLong {
+                            length,
+                            maximum,
+                        })
+                    }
+                },
+            )?;
+        }
+        if self.state.draft().is_empty() && snapshot.attachments.is_empty() {
+            return Err(SubmissionBlocked::Disabled);
+        }
+        let token = self.state.begin_draft_submission()?;
         self.state.present_submission_eagerly();
         self.layout = None;
         self.selection = 0..0;
         self.active_attachment_submission = Some(active_snapshot);
         self.active_submission_draft_revision = Some(self.draft_revision);
-        Ok((payload, token))
+        Ok(token)
     }
 
     /// Compares a typed payload with the current authored text and complete

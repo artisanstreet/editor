@@ -11,8 +11,9 @@
 
 use artisan_database::{DraftSubmission, DraftSubmissionError, SubmitComposerDraftInput};
 use artisan_domain::{
-    ComposerDraftSubmitted, DraftSubmissionOutcome, MessageId, QueueMessage, ReceiptDisposition,
-    RequestId, SubmitComposerDraft,
+    ComposerDraftScope, ComposerDraftSubmitted, DraftSubmissionOutcome, ImageAttachment, MessageId,
+    QueueMessage, ReceiptDisposition, RequestId, RunId, SubmissionRefusal, SubmissionRefusalKind,
+    SubmitComposerDraft,
 };
 use artisan_protocol::{
     ErrorCode, ProtocolFailure, QueueMessageReceipt, ResponsePayload, ServerResponse,
@@ -33,14 +34,11 @@ impl RequestHandler {
         request_id: &RequestId,
         submit: &SubmitComposerDraft,
     ) -> Result<ServerResponse, ProtocolFailure> {
-        let steer_run_id = match self.admit_submission(request_id, submit).await? {
-            SubmissionAdmission::Admitted { steer_run_id } => steer_run_id,
-            SubmissionAdmission::Refused(refusal) => {
-                return Ok(submitted(
-                    request_id,
-                    submit,
-                    DraftSubmissionOutcome::Refused(refusal),
-                ));
+        let (steer_run_id, images) = match self.prepare_submission(request_id, submit).await? {
+            Ok(prepared) => prepared,
+            Err(refusal) => {
+                let refused = DraftSubmissionOutcome::Refused(refusal);
+                return Ok(submitted(request_id, submit, refused));
             }
         };
         let identity = self
@@ -61,6 +59,7 @@ impl RequestHandler {
                 draft_revision: submit.draft_revision,
                 message_id,
                 steer_run_id,
+                images,
                 submitted_at,
             })
             .await
@@ -116,18 +115,9 @@ impl RequestHandler {
         if !matches!(settled.payload, ResponsePayload::MessageQueued(_)) {
             return Ok(settled);
         }
-        // Admission leaves the thread configured, so its revision exists.
-        let Some(engine_config_revision) = self
+        let engine_config_revision = self
             .engine_config_revision(request_id, &submit.thread_id)
-            .await?
-        else {
-            return Err(typed_failure(
-                ErrorCode::Internal,
-                "an admitted submission's thread has no engine configuration",
-                false,
-                request_id,
-            ));
-        };
+            .await?;
         Ok(submitted(
             request_id,
             submit,
@@ -138,6 +128,100 @@ impl RequestHandler {
                 engine_config_revision,
             },
         ))
+    }
+}
+
+impl RequestHandler {
+    /// Admits the send and fits its images to the admitted engine: the live
+    /// run it steers into and the fitted images, or the refusal.
+    async fn prepare_submission(
+        &self,
+        request_id: &RequestId,
+        submit: &SubmitComposerDraft,
+    ) -> Result<Result<(Option<RunId>, Vec<ImageAttachment>), SubmissionRefusal>, ProtocolFailure>
+    {
+        let (steer_run_id, engine) = match self.admit_submission(request_id, submit).await? {
+            SubmissionAdmission::Admitted {
+                steer_run_id,
+                engine,
+            } => (steer_run_id, engine),
+            SubmissionAdmission::Refused(refusal) => return Ok(Err(refusal)),
+        };
+        let Some(engine) = engine else {
+            return Ok(Ok((steer_run_id, Vec::new())));
+        };
+        Ok(self
+            .fitted_draft_images(request_id, submit, engine)
+            .await?
+            .map(|images| (steer_run_id, images)))
+    }
+
+    /// The submitted revision's picked images fitted to `engine`, in order,
+    /// or the refusal naming the image the engine cannot take. A draft at
+    /// another revision fits nothing: the repository answers it as stale.
+    async fn fitted_draft_images(
+        &self,
+        request_id: &RequestId,
+        submit: &SubmitComposerDraft,
+        engine: artisan_domain::EngineId,
+    ) -> Result<Result<Vec<ImageAttachment>, SubmissionRefusal>, ProtocolFailure> {
+        let scope = ComposerDraftScope::Thread(submit.thread_id.clone());
+        let draft = self
+            .repository
+            .read_composer_draft(&scope)
+            .await
+            .map_err(|error| draft_failure(&error, request_id))?;
+        let Some(draft) = draft.filter(|draft| draft.revision() == submit.draft_revision) else {
+            return Ok(Ok(Vec::new()));
+        };
+        let mut picked = Vec::with_capacity(draft.attachments().len());
+        for reference in draft.attachments() {
+            let stored = self
+                .repository
+                .read_composer_attachment(reference.digest())
+                .await
+                .map_err(|error| draft_failure(&error, request_id))?
+                .ok_or_else(|| {
+                    typed_failure(
+                        ErrorCode::InvalidInput,
+                        "a draft attachment is not stored",
+                        false,
+                        request_id,
+                    )
+                })?;
+            picked.push((stored, reference.name().to_owned()));
+        }
+        if picked.is_empty() {
+            return Ok(Ok(Vec::new()));
+        }
+        // Decoding, rescaling and encoding are CPU work off the async runtime.
+        let fitted = tokio::task::spawn_blocking(move || {
+            crate::attachment_policy::fit_draft_images(engine.as_str(), &picked)
+        })
+        .await
+        .map_err(|_| {
+            typed_failure(
+                ErrorCode::Internal,
+                "fitting the draft's images failed",
+                true,
+                request_id,
+            )
+        })?;
+        Ok(fitted.map_err(|reason| {
+            SubmissionRefusal::new(
+                SubmissionRefusalKind::AttachmentRejected,
+                format!(
+                    "{reason} Your draft is preserved; remove or replace the image and send again."
+                ),
+            )
+            .unwrap_or_else(|_| {
+                SubmissionRefusal::new(
+                    SubmissionRefusalKind::AttachmentRejected,
+                    "An attached image cannot be sent to this engine. Your draft is preserved.",
+                )
+                .expect("the fallback refusal message is valid")
+            })
+        }))
     }
 }
 

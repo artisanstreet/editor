@@ -35,14 +35,12 @@ fn resolved(runnable: &[&str], model_id: &str) -> ResolvedSelection {
         .unwrap_or_else(|refusal| panic!("{model_id} resolves: {}", refusal.message()))
 }
 
-fn signed_out(engine: &str) -> Option<EngineReadiness> {
-    Some(
-        EngineReadiness::new(
-            EngineReadinessVerdict::NeedsSignIn,
-            Some(format!("{engine} account sign-in is required.")),
-        )
-        .unwrap(),
+fn signed_out(engine: &str) -> EngineReadiness {
+    EngineReadiness::new(
+        EngineReadinessVerdict::NeedsSignIn,
+        Some(format!("{engine} account sign-in is required.")),
     )
+    .unwrap()
 }
 
 fn refused_kind(plan: &SubmissionPlan) -> Option<SubmissionRefusalKind> {
@@ -59,7 +57,7 @@ fn a_first_send_saves_the_resolved_configuration_when_its_engine_can_run() {
     assert_eq!(
         plan_submission(None, None, Some(Ok(resolved)), |_| None),
         SubmissionPlan::Admit {
-            save: Some(config),
+            save: Some(Box::new(config)),
             engine: EngineId::Codex,
         }
     );
@@ -68,7 +66,7 @@ fn a_first_send_saves_the_resolved_configuration_when_its_engine_can_run() {
 #[test]
 fn a_first_send_on_an_engine_that_cannot_run_is_refused_with_its_reason() {
     let plan = plan_submission(None, None, Some(Ok(resolved(&[], "codex-sol"))), |engine| {
-        signed_out(if engine == "codex" { "Codex" } else { engine })
+        Some(signed_out(if engine == "codex" { "Codex" } else { engine }))
     });
     let SubmissionPlan::Refuse(refusal) = plan else {
         panic!("an unrunnable first send is refused");
@@ -128,7 +126,7 @@ fn a_selection_that_changes_the_configuration_is_saved_first() {
             |_| None
         ),
         SubmissionPlan::Admit {
-            save: Some(config),
+            save: Some(Box::new(config)),
             engine: EngineId::Claude,
         }
     );

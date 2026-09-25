@@ -257,10 +257,6 @@ name = "hover_pill_group_policy"
 path = "../../tests/frontend/hover_pill_group_policy.rs"
 
 [[test]]
-name = "image_policy"
-path = "../../tests/frontend/image_policy.rs"
-
-[[test]]
 name = "latest_request_gate"
 path = "../../tests/frontend/latest_request_gate.rs"
 
