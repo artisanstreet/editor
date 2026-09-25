@@ -170,7 +170,12 @@ pub fn install_tree(paths: &DevPaths, tree: &Path, signer: &LocalSigner) -> Resu
             register_shortcuts: false,
             register_path: false,
         },
-        retirement: Some(RetirementPolicy { force: false }),
+        retirement: Some(RetirementPolicy {
+            force: false,
+            // The point of a dev run is to replace the running dev Editor;
+            // its owned Forge stops with it.
+            close_editors_first: true,
+        }),
     };
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

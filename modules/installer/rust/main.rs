@@ -156,6 +156,7 @@ async fn run() -> Result<()> {
                 &root,
                 (!arguments.activation.skip_retire).then_some(RetirementPolicy {
                     force: arguments.activation.force,
+                    close_editors_first: false,
                 }),
             )?,
             Operation::Update => {
@@ -223,6 +224,7 @@ fn make_install_options(
         },
         retirement: (!arguments.activation.skip_retire).then_some(RetirementPolicy {
             force: arguments.activation.force,
+            close_editors_first: false,
         }),
     })
 }
