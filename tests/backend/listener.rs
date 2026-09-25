@@ -2271,9 +2271,9 @@ async fn until_cancel_family_mismatch_is_retryable_then_valid_succeeds() {
 }
 
 #[tokio::test]
-async fn until_cancel_handshake_timeout_is_terminal_service_failure() {
-    // Handshake timeout is terminal: authority may have already been touched,
-    // so the loop must drain and report service failure, not retry.
+async fn until_cancel_handshake_timeout_before_hello_fails_only_that_connection() {
+    // A peer that connects but never sends Hello times out before the
+    // authority consumed anything, so only that connection fails.
     let limits = ListenerLimits {
         admission: Duration::from_secs(2),
         handshake: Duration::from_millis(120),
@@ -2281,51 +2281,96 @@ async fn until_cancel_handshake_timeout_is_terminal_service_failure() {
         drain: Duration::from_secs(2),
     };
     let (mut broker, pki) =
-        start_until_cancel_broker("until-hs-timeout", limits, capacity(4), capacity(4)).await;
+        start_until_cancel_broker("until-hs-timeout-before", limits, capacity(4), capacity(4))
+            .await;
     let client_ep = client_endpoint(&pki);
     let addr = broker.addr();
 
-    // Connect but delay opening the control stream past the handshake deadline.
     let connecting = client_ep
         .connect(addr, LOOPBACK_SERVER_NAME)
         .expect("connect");
-    let connection = tokio::time::timeout(WATCHDOG, connecting)
+    let silent = tokio::time::timeout(WATCHDOG, connecting)
         .await
         .expect("connect watchdog")
         .expect("established");
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    // Attempt to open after the server has timed out; the server's
-    // deadline decision is already terminal.
-    let _ = connection.open_bi().await;
+    // The server's handshake deadline closes the silent peer.
+    expect_application_close(&silent, CONNECTION_RELEASE_REASON).await;
 
+    // The initial credential is still expected. The silent attempt minted
+    // identities 0 and 1, so this Welcome is `forge-meta-3`.
+    let client = admit(&client_ep, addr, initial_credential()).await;
+    assert_eq!(client.welcome.frame_id.as_str(), "forge-meta-3");
+    exchange_response(
+        &client,
+        &list_projects_request("frame-after-silent-peer"),
+        "forge-meta-4",
+        UnixMillis::from_millis(1002),
+    )
+    .await;
+    broker.cancel();
     let outcome = broker.await_result().await;
-    assert!(outcome.is_err(), "handshake timeout must be terminal");
-    let error = outcome.unwrap_err();
+    assert!(
+        outcome.is_ok(),
+        "a pre-credential timeout must not end the loop"
+    );
+    expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
+    assert_connect_fails(&client_ep, addr).await;
+    broker
+        .complete("until-hs-timeout-before")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_handshake_timeout_after_credential_is_terminal_service_failure() {
+    // The credential is consumed and rotation staged while the sixteen-byte
+    // receive window blocks the Welcome write; the handshake deadline then
+    // leaves the authority fail-closed, which must stay terminal.
+    let limits = ListenerLimits {
+        admission: Duration::from_secs(2),
+        handshake: Duration::from_millis(300),
+        next_request: Duration::from_secs(2),
+        drain: Duration::from_secs(2),
+    };
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-hs-timeout-after", limits, capacity(4), capacity(4)).await;
+    let client_ep = constrained_client_endpoint(&pki);
+    let addr = broker.addr();
+
+    let (connection, control_send, mut control_recv) =
+        send_hello_only(&client_ep, addr, initial_credential()).await;
+    // Causal witness: actual Welcome bytes prove the credential was consumed.
+    let mut welcome_prefix = [0_u8; 8];
+    tokio::time::timeout(WATCHDOG, control_recv.read_exact(&mut welcome_prefix))
+        .await
+        .expect("prefix arrives under the watchdog")
+        .expect("prefix readable");
+
+    let error = broker
+        .await_result()
+        .await
+        .expect_err("a post-credential handshake timeout must be terminal");
     assert!(
         error.is_service_failure(),
         "timeout must be service failure, not drain-only"
     );
     assert!(error.drain_error().is_none(), "drain should succeed");
-    assert!(
-        error.as_listener_error().is_some(),
-        "primary must be listener authentication timeout"
-    );
-    if let Some(ListenerError::Authentication { source }) = error.as_listener_error() {
-        assert!(matches!(
-            source,
-            DeadlineError::Timeout {
+    assert!(matches!(
+        error.as_listener_error(),
+        Some(ListenerError::Authentication {
+            source: DeadlineError::Timeout {
                 operation: OperationKind::Handshake,
                 ..
-            }
-        ));
-    } else {
-        panic!("expected authentication timeout");
-    }
+            },
+        })
+    ));
     let rendered = format!("{error}{error:?}");
     assert!(!rendered.contains("b7b7"));
 
-    assert_connect_fails(&client_ep, addr).await;
+    drop(control_send);
+    drop(control_recv);
+    drop(connection);
+    assert_connect_fails(&client_endpoint(&pki), addr).await;
     broker
-        .complete("until-hs-timeout")
+        .complete("until-hs-timeout-after")
         .expect("bounded completion");
 }
