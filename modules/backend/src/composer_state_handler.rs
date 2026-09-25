@@ -5,8 +5,9 @@ use super::{
 };
 use artisan_database::{QueuedMessageRepositoryError, RunUsageRepositoryError};
 use artisan_domain::{
-    ListFailedMessages, ListQueuedMessages, ReadRecalledMessage, ReadRunUsage,
-    RecalledMessageResult, RunUsageResult, WithdrawQueuedMessage, WithdrawQueuedMessageCommand,
+    ListFailedMessages, ListQueuedMessages, QueuedMessageWithdrawalOutcome,
+    QueuedMessageWithdrawalResult, ReadRecalledMessage, ReadRunUsage, RecalledMessageResult,
+    RunUsageResult, WithdrawQueuedMessage, WithdrawQueuedMessageCommand,
 };
 
 impl RequestHandler {
@@ -134,6 +135,8 @@ impl RequestHandler {
             .await
             .map_err(|error| queue_failure(&error, request_id))?
         {
+            self.recall_withdrawn_to_draft(request_id, command, &receipt)
+                .await?;
             return Ok(outcome(
                 request_id,
                 ResponsePayload::MessageWithdrawn(receipt),
@@ -154,17 +157,51 @@ impl RequestHandler {
             })
             .await
             .map_err(|error| queue_failure(&error, request_id))?;
-        // `withdraw_queued_message` commits its fence before returning. The
-        // original payload is intentionally recovered only through the
-        // separate recalled-message query after this result is returned.
+        // `withdraw_queued_message` commits its fence before returning. An
+        // edit moves the withdrawn payload into the thread's Forge draft, so
+        // the Editor never holds a copy of it.
+        self.recall_withdrawn_to_draft(request_id, command, &receipt)
+            .await?;
         Ok(outcome(
             request_id,
             ResponsePayload::MessageWithdrawn(receipt),
         ))
     }
+
+    /// For an edit (`recall_to_draft`), stores a withdrawn payload as the
+    /// thread's composer draft. A replayed withdrawal stores it again: the
+    /// Editor only replays when it never saw the first answer.
+    async fn recall_withdrawn_to_draft(
+        &self,
+        request_id: &RequestId,
+        command: &WithdrawQueuedMessageCommand,
+        receipt: &QueuedMessageWithdrawalResult,
+    ) -> Result<(), ProtocolFailure> {
+        if !command.recall_to_draft || receipt.outcome != QueuedMessageWithdrawalOutcome::Withdrawn
+        {
+            return Ok(());
+        }
+        let Some(payload) = self
+            .repository
+            .read_withdrawn_message_payload(
+                &command.thread_id,
+                &command.message_id,
+                &command.original_request_id,
+            )
+            .await
+            .map_err(|error| queue_failure(&error, request_id))?
+        else {
+            return Ok(());
+        };
+        self.store_payload_as_draft(request_id, &command.thread_id, &payload)
+            .await
+    }
 }
 
-fn queue_failure(error: &QueuedMessageRepositoryError, request_id: &RequestId) -> ProtocolFailure {
+pub(super) fn queue_failure(
+    error: &QueuedMessageRepositoryError,
+    request_id: &RequestId,
+) -> ProtocolFailure {
     let (code, detail, retryable) = match error {
         QueuedMessageRepositoryError::IdempotencyConflict { .. } => (
             ErrorCode::IdempotencyConflict,

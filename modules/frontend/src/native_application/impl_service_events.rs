@@ -283,6 +283,7 @@ impl NativeApplication {
             NativeTransportEvent::EngineObservation(observation) => {
                 self.handle_engine_observation(&observation, cx);
             }
+            NativeTransportEvent::MessageOutbox(_) => {}
             NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
             NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
         }

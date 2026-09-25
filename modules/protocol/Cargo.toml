@@ -55,6 +55,10 @@ name = "composer_draft"
 path = "../../tests/protocol/composer_draft.rs"
 
 [[test]]
+name = "message_submission"
+path = "../../tests/protocol/message_submission.rs"
+
+[[test]]
 name = "engine_usage"
 path = "../../tests/protocol/engine_usage.rs"
 

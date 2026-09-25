@@ -11,7 +11,11 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use artisan_domain::ThreadId;
+use artisan_database::{MessageOutboxFingerprint, QueuedMessageRepositoryError, Repository};
+use artisan_domain::{
+    Event, FAILED_MESSAGE_LIST_MAX, ListFailedMessages, ListQueuedMessages, MessageOutbox,
+    QUEUED_MESSAGE_LIST_MAX, QueuedMessageListOrder, ThreadId,
+};
 use artisan_transport::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 
 use crate::activated_conversation_replay::{
@@ -38,6 +42,15 @@ pub(crate) struct ConversationDeliveryDriver {
     writer: Option<ConversationDeliveryWriter>,
     wake: ConversationCommitAnySubscription,
     active: BTreeMap<artisan_domain::ThreadId, ActivatedConversationSubscription>,
+    /// The message outbox last pushed to each active subscription.
+    outboxes: BTreeMap<ThreadId, DeliveredOutbox>,
+}
+
+/// One subscription's last pushed outbox and the fingerprint it was read at.
+#[derive(Debug)]
+struct DeliveredOutbox {
+    fingerprint: MessageOutboxFingerprint,
+    outbox: MessageOutbox,
 }
 
 impl ConversationDeliveryDriver {
@@ -59,6 +72,7 @@ impl ConversationDeliveryDriver {
             )),
             wake,
             active: BTreeMap::new(),
+            outboxes: BTreeMap::new(),
         }
     }
 
@@ -97,6 +111,7 @@ impl ConversationDeliveryDriver {
     {
         if let Some(thread_id) = outcome.stopped_thread {
             self.active.remove(&thread_id);
+            self.outboxes.remove(&thread_id);
         }
 
         let Some(subscription) = outcome.activation else {
@@ -105,11 +120,14 @@ impl ConversationDeliveryDriver {
 
         let thread_id = subscription.lease().thread_id().clone();
         self.active.remove(&thread_id);
+        self.outboxes.remove(&thread_id);
         let subscription = self
             .deliver_until_current(subscription, stamp, limit, cancel)
             .await?;
         let subscription = self
             .deliver_observation_history(subscription, stamp, limit, cancel)
+            .await?;
+        self.deliver_message_outbox(&thread_id, stamp, limit, cancel)
             .await?;
         self.active.insert(thread_id, subscription);
         Ok(())
@@ -140,8 +158,84 @@ impl ConversationDeliveryDriver {
             let subscription = self
                 .deliver_observation_history(subscription, stamp, limit, cancel)
                 .await?;
+            self.deliver_message_outbox(&thread_id, stamp, limit, cancel)
+                .await?;
             self.active.insert(thread_id, subscription);
         }
+        Ok(())
+    }
+
+    /// Pushes the thread's message outbox when it changed since the last
+    /// push to this subscription (always on activation).
+    ///
+    /// It runs after the thread's patches, so a message that reached the
+    /// transcript leaves the outbox in the same wake that delivered its
+    /// transcript item. A cheap fingerprint skips the listing reads when no
+    /// dispatch of the thread moved; an unchanged outbox is not resent.
+    async fn deliver_message_outbox<F>(
+        &mut self,
+        thread_id: &ThreadId,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let repository = self.context.repository().clone();
+        let fingerprint = run_with_deadline(
+            OperationKind::Receive,
+            limit,
+            cancel,
+            repository.message_outbox_fingerprint(thread_id),
+        )
+        .await
+        .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+        if self
+            .outboxes
+            .get(thread_id)
+            .is_some_and(|delivered| delivered.fingerprint == fingerprint)
+        {
+            return Ok(());
+        }
+        let outbox = run_with_deadline(
+            OperationKind::Receive,
+            limit,
+            cancel,
+            read_message_outbox(&repository, thread_id),
+        )
+        .await
+        .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+        let unchanged = self
+            .outboxes
+            .get(thread_id)
+            .is_some_and(|delivered| delivered.outbox == outbox);
+        if !unchanged {
+            let frame = stamp().map_err(|error| DeadlineError::Peer {
+                operation: OperationKind::Send,
+                error,
+            })?;
+            let writer = self
+                .writer
+                .take()
+                .ok_or_else(|| delivery_failure(OperationKind::Send, DeliveryStageError::Writer))?;
+            let writer = run_with_deadline(
+                OperationKind::Send,
+                limit,
+                cancel,
+                writer.deliver_state_event(frame, Event::MessageOutbox(outbox.clone())),
+            )
+            .await
+            .map_err(map_writer_deadline)?;
+            self.writer = Some(writer);
+        }
+        self.outboxes.insert(
+            thread_id.clone(),
+            DeliveredOutbox {
+                fingerprint,
+                outbox,
+            },
+        );
         Ok(())
     }
 
@@ -240,6 +334,7 @@ impl ConversationDeliveryDriver {
 
         self.context.registrar().clear_all().await;
         self.active.clear();
+        self.outboxes.clear();
         writer_result
     }
 
@@ -320,6 +415,33 @@ impl ConversationDeliveryDriver {
             | ConversationDeliveryError::ObservationRegistry(_) => DeliveryStageError::Writer,
         })
     }
+}
+
+/// Reads one thread's complete message outbox: every queued or dispatching
+/// message (oldest first) and the failures still offered to the user.
+async fn read_message_outbox(
+    repository: &Repository,
+    thread_id: &ThreadId,
+) -> Result<MessageOutbox, QueuedMessageRepositoryError> {
+    let queued = repository
+        .read_queued_messages(
+            ListQueuedMessages::new(
+                thread_id.clone(),
+                QueuedMessageListOrder::OldestFirst,
+                QUEUED_MESSAGE_LIST_MAX,
+            )
+            .map_err(QueuedMessageRepositoryError::InvalidListLimit)?,
+        )
+        .await?;
+    let failed = repository
+        .read_failed_messages(
+            ListFailedMessages::new(thread_id.clone(), FAILED_MESSAGE_LIST_MAX)
+                .map_err(QueuedMessageRepositoryError::InvalidFailedListLimit)?,
+        )
+        .await?;
+    MessageOutbox::new(queued, failed).map_err(|_| QueuedMessageRepositoryError::Invariant {
+        reason: "message outbox listings name different threads",
+    })
 }
 
 fn delivery_failure(

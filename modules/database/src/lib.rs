@@ -57,7 +57,9 @@ pub use repository::{
     RunUsageWriteReceipt,
 };
 
-pub use repository::QueuedMessageRepositoryError;
+pub use repository::{
+    FailedMessageRecovery, MessageOutboxFingerprint, QueuedMessageRepositoryError,
+};
 
 pub use repository::{
     COMPOSER_ATTACHMENT_UNREFERENCED_GRACE_MS, ComposerDraftRepositoryError,

@@ -1581,15 +1581,23 @@ async fn accept_fixture_delivery(connection: &Connection) -> quinn::RecvStream {
         .unwrap_or_else(|_| panic!("Forge delivery stream could not be accepted"))
 }
 
+/// Receives the next patch batch, skipping the message-outbox state pushes
+/// the Forge interleaves on the same delivery stream.
 async fn receive_fixture_patch_batch(stream: &mut quinn::RecvStream) -> PatchBatch {
-    let envelope = tokio::time::timeout(FORGE_REPLAY_PROOF_DEADLINE, receive_envelope(stream))
-        .await
-        .unwrap_or_else(|_| panic!("Forge delivery batch exceeded the test deadline"))
-        .unwrap_or_else(|_| panic!("Forge delivery batch could not be received"));
-    let WireEnvelopeBody::PatchBatch(batch) = envelope.body else {
-        panic!("Forge delivery stream should carry a patch batch");
-    };
-    batch
+    loop {
+        let envelope = tokio::time::timeout(FORGE_REPLAY_PROOF_DEADLINE, receive_envelope(stream))
+            .await
+            .unwrap_or_else(|_| panic!("Forge delivery batch exceeded the test deadline"))
+            .unwrap_or_else(|_| panic!("Forge delivery batch could not be received"));
+        match envelope.body {
+            WireEnvelopeBody::PatchBatch(batch) => return batch,
+            WireEnvelopeBody::Event(artisan_protocol::ServerEvent {
+                event: artisan_domain::Event::MessageOutbox(_),
+                ..
+            }) => {}
+            _ => panic!("Forge delivery stream should carry a patch batch"),
+        }
+    }
 }
 
 async fn shutdown_fixture_forge_client(client: FixtureForgeClient, reason: &'static [u8]) {

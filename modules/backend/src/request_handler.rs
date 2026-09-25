@@ -983,7 +983,7 @@ impl RequestHandler {
             ));
         }
 
-        match command {
+        let response = match command {
             Command::AttachProject(attach) => self.attach_project_outcome(request_id, attach).await,
             Command::CreateThread(create) => self.create_thread_outcome(request_id, create).await,
             Command::QueueFirstMessage(queue) => {
@@ -1014,7 +1014,18 @@ impl RequestHandler {
             Command::QueueStoredMessage(queue) => {
                 self.queue_stored_message_outcome(request_id, queue).await
             }
+            Command::RetryFailedMessage(retry) => {
+                self.retry_failed_message_outcome(request_id, retry).await
+            }
+            Command::RecoverFailedMessage(recover) => {
+                self.recover_failed_message_outcome(request_id, recover)
+                    .await
+            }
+        };
+        if response.is_ok() {
+            self.wake_message_outbox(command);
         }
+        response
     }
 
     fn stop_run_outcome(
@@ -1063,19 +1074,29 @@ impl RequestHandler {
         request_id: &RequestId,
         create: &CreateThread,
     ) -> Result<ServerResponse, ProtocolFailure> {
+        let result = self.create_thread_record(request_id, create).await?;
+        Ok(outcome(
+            request_id,
+            ResponsePayload::CreatedThread {
+                thread: result.thread,
+                disposition: result.receipt.disposition,
+            },
+        ))
+    }
+
+    /// Creates a thread, or replays the thread its request already created.
+    async fn create_thread_record(
+        &self,
+        request_id: &RequestId,
+        create: &CreateThread,
+    ) -> Result<artisan_database::CreateThreadResult, ProtocolFailure> {
         if let Some(replay) = self
             .repository
             .lookup_create_thread(&create.request_id, &create.project_id, &create.title)
             .await
             .map_err(|error| repository_failure(&error, request_id))?
         {
-            return Ok(outcome(
-                request_id,
-                ResponsePayload::CreatedThread {
-                    thread: replay.thread,
-                    disposition: replay.receipt.disposition,
-                },
-            ));
+            return Ok(replay);
         }
         let identity = self
             .origin
@@ -1087,8 +1108,7 @@ impl RequestHandler {
             .map_err(|error| origin_clock_failure(error, request_id))?;
         let thread_id =
             ThreadId::parse(identity).map_err(|_| forged_identity_failure("thread", request_id))?;
-        let result = self
-            .repository
+        self.repository
             .create_thread(CreateThreadInput {
                 request_id: create.request_id.clone(),
                 thread_id,
@@ -1098,14 +1118,7 @@ impl RequestHandler {
                 updated_at: accepted_at,
             })
             .await
-            .map_err(|error| repository_failure(&error, request_id))?;
-        Ok(outcome(
-            request_id,
-            ResponsePayload::CreatedThread {
-                thread: result.thread,
-                disposition: result.receipt.disposition,
-            },
-        ))
+            .map_err(|error| repository_failure(&error, request_id))
     }
 
     /// Answers one first-message mutation from its durable receipt or a
@@ -1231,6 +1244,9 @@ mod live_run;
 #[path = "request_handler/composer_drafts.rs"]
 mod composer_drafts;
 
+#[path = "request_handler/failed_messages.rs"]
+mod failed_messages;
+
 #[path = "request_handler/engine_config.rs"]
 mod engine_config;
 
@@ -1249,3 +1265,7 @@ mod composer_state_handler;
 #[cfg(test)]
 #[path = "../../../tests/backend/composer_state_handler.rs"]
 mod composer_state_handler_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/backend/failed_messages.rs"]
+mod failed_messages_tests;

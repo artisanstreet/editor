@@ -38,10 +38,14 @@ pub struct WithdrawQueuedMessageCommand {
     pub message_id: MessageId,
     /// Request identity that originally accepted the queued message.
     pub original_request_id: RequestId,
+    /// Whether a successful withdrawal moves the payload into the thread's
+    /// Forge composer draft (the edit flow) instead of discarding it.
+    pub recall_to_draft: bool,
 }
 
 impl WithdrawQueuedMessageCommand {
-    /// Constructs an exact withdrawal command without a client-supplied clock.
+    /// Constructs an exact discard withdrawal without a client-supplied
+    /// clock.
     #[must_use]
     pub const fn new(
         request_id: RequestId,
@@ -54,7 +58,16 @@ impl WithdrawQueuedMessageCommand {
             thread_id,
             message_id,
             original_request_id,
+            recall_to_draft: false,
         }
+    }
+
+    /// Makes this withdrawal move the payload into the thread's composer
+    /// draft once the Forge withdraws it.
+    #[must_use]
+    pub const fn recalling_to_draft(mut self) -> Self {
+        self.recall_to_draft = true;
+        self
     }
 
     /// Returns the withdrawal request identity.

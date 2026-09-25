@@ -585,6 +585,7 @@ async fn dispatch_workers(mut context: DispatchLoopContext) -> DispatchLoopExit 
             .repository
             .fail_orphaned_steered_dispatches(now)
             .await;
+        context.config.notifier.wake_any();
     }
     #[cfg(test)]
     if matches!(&context.launch_mode, DispatchLaunchMode::Fixture(_)) {
@@ -714,6 +715,8 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
         let claimed = match repository.claim_next_message_dispatch(claim).await {
             Ok(Some(claimed)) => {
                 claim_failures = 0;
+                // The claimed message is now dispatching in its outbox.
+                config.notifier.wake_any();
                 claimed
             }
             Ok(None) => {
@@ -848,18 +851,15 @@ struct ClaimExecution<'a> {
 
 impl ClaimExecution<'_> {
     async fn requeue(self, reason: &'static str) {
-        requeue_claim(
-            self.repository,
-            self.claimed,
-            self.config,
-            self.origin,
-            reason,
-        )
-        .await;
+        let config = self.config;
+        requeue_claim(self.repository, self.claimed, config, self.origin, reason).await;
+        config.notifier.wake_any();
     }
 
     async fn fail(self, reason: &'static str) {
+        let config = self.config;
         fail_claim(self.repository, self.claimed, self.origin, reason).await;
+        config.notifier.wake_any();
     }
 }
 

@@ -848,6 +848,12 @@ struct Request {
     uploadComposerAttachment @34 :ComposerState.UploadComposerAttachmentRequest;
     readComposerAttachment @35 :ComposerState.ReadComposerAttachmentRequest;
     queueStoredMessage @36 :ComposerState.QueueStoredMessageRequest;
+
+    # Forge-owned submissions: a failed message is retried or moved to a
+    # new thread by its identity. Appended after queueStoredMessage; fresh
+    # ordinals, existing ordinals frozen.
+    retryFailedMessage @37 :ComposerState.FailedMessageTarget;
+    recoverFailedMessage @38 :ComposerState.FailedMessageTarget;
   }
 }
 
@@ -930,6 +936,11 @@ struct Response {
     composerDraft @33 :ComposerState.ComposerDraftResult;
     composerAttachmentUploaded @34 :ComposerState.ComposerAttachmentUploaded;
     composerAttachment @35 :ComposerState.ComposerAttachmentResult;
+
+    # Forge-owned submission results. Appended after composerAttachment;
+    # fresh ordinals, existing ordinals frozen.
+    failedMessageRetried @36 :ComposerState.FailedMessageRetried;
+    failedMessageRecovered @37 :ComposerState.FailedMessageRecovered;
   }
 }
 
@@ -1021,6 +1032,11 @@ struct Event {
     # surface a typed decode failure; old writers never set it, so their
     # frames decode unchanged.
     engineObservation @4 :EngineObservationEvent;
+
+    # The thread's undelivered messages (queued, dispatching, and failed
+    # rows with their Forge-owned state), pushed to the thread's subscribers
+    # whenever they change. Fresh union member at @5.
+    messageOutbox @5 :ComposerState.MessageOutbox;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first

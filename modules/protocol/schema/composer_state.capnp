@@ -49,6 +49,8 @@ struct WithdrawQueuedMessageRequest {
   threadId @0 :Text;
   messageId @1 :Text;
   originalRequestId @2 :Text;
+  # The edit flow: a withdrawn payload becomes the thread's composer draft.
+  recallToDraft @3 :Bool;
 }
 
 struct ReadRecalledMessageRequest {
@@ -96,6 +98,15 @@ struct QueuedMessageSummary {
   # requeued this message at least once. A null Text pointer means no
   # diagnostic; a never-attempted row carries no error.
   lastError @6 :Text;
+  # Forge-owned delivery state of the row.
+  state @7 :QueuedMessageState;
+  # Engine of the accepted configuration snapshot; empty means none.
+  engineId @8 :Text;
+}
+
+enum QueuedMessageState {
+  queued @0;
+  dispatching @1;
 }
 
 struct QueuedMessageListing {
@@ -119,6 +130,8 @@ struct FailedMessageSummary {
   # Terminal dispatcher diagnostic persisted with the failure. Always present
   # on the wire: a terminally failed row carries its reason verbatim.
   reason @7 :Text;
+  # Whether retryFailedMessage can re-dispatch the stored payload.
+  retryable @8 :Bool;
 }
 
 struct FailedMessageListing {
@@ -278,4 +291,45 @@ struct QueueStoredMessageRequest {
   attachments @2 :List(ComposerAttachmentRef);
   # Empty means a fresh send; otherwise the observed live run to steer into.
   steerRunId @3 :Text;
+}
+
+# ---------------------------------------------------------------------------
+# Forge-owned submissions. The parent Request union carries
+# retryFailedMessage @37 and recoverFailedMessage @38; the parent Response
+# union carries failedMessageRetried @36 and failedMessageRecovered @37; the
+# parent Event union carries messageOutbox @5.
+# ---------------------------------------------------------------------------
+
+# Every undelivered message of one thread, pushed over its subscription.
+struct MessageOutbox {
+  queued @0 :QueuedMessageListing;
+  failed @1 :FailedMessageListing;
+}
+
+# One terminally failed message.
+struct FailedMessageTarget {
+  threadId @0 :Text;
+  messageId @1 :Text;
+  originalRequestId @2 :Text;
+}
+
+enum FailedMessageRetryOutcome {
+  requeued @0;
+  notRetryable @1;
+}
+
+# requestId must equal the parent Response.requestId.
+struct FailedMessageRetried {
+  requestId @0 :Text;
+  target @1 :FailedMessageTarget;
+  outcome @2 :FailedMessageRetryOutcome;
+}
+
+# requestId must equal the parent Response.requestId. An empty newThreadId
+# means the message was not a recoverable failure.
+struct FailedMessageRecovered {
+  requestId @0 :Text;
+  target @1 :FailedMessageTarget;
+  newThreadId @2 :Text;
+  disposition @3 :ReceiptDisposition;
 }

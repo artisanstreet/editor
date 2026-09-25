@@ -34,6 +34,7 @@ const STEER_TARGET_MIGRATION: &str = "m20260910_000012_message_steer_target";
 const QUEUE_SNAPSHOT_MIGRATION: &str = "m20260910_000013_queue_message_config_snapshot";
 const STREAMING_SPEED_MIGRATION: &str = "m20260913_000014_streaming_speed";
 const COMPOSER_DRAFTS_MIGRATION: &str = "m20260925_000015_composer_drafts";
+const FAILED_MESSAGE_RECOVERIES_MIGRATION: &str = "m20260926_000016_failed_message_recoveries";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -120,7 +121,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        15
+        16
     );
     first
         .execute_unprepared(
@@ -154,7 +155,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        15
+        16
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -223,7 +224,8 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             STEER_TARGET_MIGRATION.to_string(),
             QUEUE_SNAPSHOT_MIGRATION.to_string(),
             STREAMING_SPEED_MIGRATION.to_string(),
-            COMPOSER_DRAFTS_MIGRATION.to_string()
+            COMPOSER_DRAFTS_MIGRATION.to_string(),
+            FAILED_MESSAGE_RECOVERIES_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -928,7 +930,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
     migrate_to_current(&database).await?;
     assert_eq!(
         scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
-        15
+        16
     );
     for (table, expected) in [
         ("messages", 1),
@@ -1035,7 +1037,7 @@ async fn seed_legacy_queue_database(
     Ok(())
 }
 
-/// Verifies a migrated database carries the full schema: all fifteen
+/// Verifies a migrated database carries the full schema: all sixteen
 /// migration records, exactly one copy of each engine-config shape
 /// trigger, and the widened version guard live.
 async fn assert_migrated_schema(
@@ -1043,7 +1045,7 @@ async fn assert_migrated_schema(
 ) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         scalar_i64(database, "SELECT count(*) FROM seaql_migrations").await?,
-        15,
+        16,
         "migration must record every version exactly once"
     );
     assert_eq!(

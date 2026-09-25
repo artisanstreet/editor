@@ -123,6 +123,10 @@ name = "queued_message"
 path = "../../tests/database/queued_message.rs"
 
 [[test]]
+name = "message_outbox"
+path = "../../tests/database/message_outbox.rs"
+
+[[test]]
 name = "session_continuation"
 path = "../../tests/database/session_continuation.rs"
 

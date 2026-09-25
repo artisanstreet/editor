@@ -277,6 +277,11 @@ fn encode_queued_message_summary(
     if let Some(error) = value.last_error.as_ref() {
         builder.set_last_error(error.as_str());
     }
+    builder.set_state(match value.state {
+        QueuedMessageState::Queued => composer_state_capnp::QueuedMessageState::Queued,
+        QueuedMessageState::Dispatching => composer_state_capnp::QueuedMessageState::Dispatching,
+    });
+    builder.set_engine_id(value.engine.map_or("", EngineId::as_str));
     Ok(())
 }
 
@@ -363,7 +368,39 @@ fn decode_queued_message_summary(
         attachments,
         accepted_at: UnixMillis::from_millis(value.get_accepted_at_millis()),
         last_error,
+        state: decode_queued_state(value)?,
+        engine: decode_queued_engine(value)?,
     })
+}
+
+fn decode_queued_state(
+    value: composer_state_capnp::queued_message_summary::Reader<'_>,
+) -> Result<QueuedMessageState, ComposerStateCodecError> {
+    match value
+        .get_state()
+        .map_err(|source| ComposerStateCodecError::UnknownEnum {
+            field: "response.queuedMessages.messages.state",
+            value: source.0,
+        })? {
+        composer_state_capnp::QueuedMessageState::Queued => Ok(QueuedMessageState::Queued),
+        composer_state_capnp::QueuedMessageState::Dispatching => {
+            Ok(QueuedMessageState::Dispatching)
+        }
+    }
+}
+
+/// An empty engine id means the acceptance captured no configuration.
+fn decode_queued_engine(
+    value: composer_state_capnp::queued_message_summary::Reader<'_>,
+) -> Result<Option<EngineId>, ComposerStateCodecError> {
+    let field = "response.queuedMessages.messages.engineId";
+    let engine = read_text(value.get_engine_id(), field)?;
+    if engine.is_empty() {
+        return Ok(None);
+    }
+    EngineId::parse(&engine)
+        .map(Some)
+        .map_err(|_| ComposerStateCodecError::Listing { field })
 }
 
 fn encode_failed_message_summary(
@@ -393,6 +430,7 @@ fn encode_failed_message_summary(
     builder.set_accepted_at_millis(value.accepted_at.as_millis());
     builder.set_failed_at_millis(value.failed_at.as_millis());
     builder.set_reason(value.reason.as_str());
+    builder.set_retryable(value.retryable);
     Ok(())
 }
 
@@ -479,5 +517,6 @@ fn decode_failed_message_summary(
         accepted_at: UnixMillis::from_millis(value.get_accepted_at_millis()),
         failed_at: UnixMillis::from_millis(value.get_failed_at_millis()),
         reason,
+        retryable: value.get_retryable(),
     })
 }

@@ -230,15 +230,7 @@ impl Repository {
         &self,
         thread_id: &ThreadId,
     ) -> Result<RootPath, RepositoryError> {
-        let thread = entities::thread::Entity::find_by_id(thread_id.as_str())
-            .one(&self.database)
-            .await
-            .map_err(|source| database_error("read thread project", source))?
-            .ok_or_else(|| RepositoryError::ThreadNotFound {
-                thread_id: thread_id.clone(),
-            })?;
-        let project_id = ProjectId::parse(thread.project_id)
-            .map_err(|error| corrupt_data("threads", "project_id", error))?;
+        let project_id = self.read_thread_project(thread_id).await?;
         let project = entities::attached_project::Entity::find_by_id(project_id.as_str())
             .one(&self.database)
             .await
@@ -246,6 +238,27 @@ impl Repository {
             .ok_or(RepositoryError::ProjectNotFound { project_id })?;
         RootPath::parse(project.root_path)
             .map_err(|error| corrupt_data("attached_projects", "root_path", error))
+    }
+
+    /// Reads the attached project that owns a thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] if the thread is missing, its project id
+    /// is corrupt, or a database query fails.
+    pub async fn read_thread_project(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<ProjectId, RepositoryError> {
+        let thread = entities::thread::Entity::find_by_id(thread_id.as_str())
+            .one(&self.database)
+            .await
+            .map_err(|source| database_error("read thread project", source))?
+            .ok_or_else(|| RepositoryError::ThreadNotFound {
+                thread_id: thread_id.clone(),
+            })?;
+        ProjectId::parse(thread.project_id)
+            .map_err(|error| corrupt_data("threads", "project_id", error))
     }
 }
 
@@ -265,7 +278,9 @@ pub use run_usage::{
 };
 
 mod queued_message;
-pub use queued_message::QueuedMessageRepositoryError;
+pub use queued_message::{
+    FailedMessageRecovery, MessageOutboxFingerprint, QueuedMessageRepositoryError,
+};
 
 mod session_continuation;
 pub use session_continuation::{

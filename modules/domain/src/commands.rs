@@ -16,7 +16,8 @@ use crate::text::{MessageBody, ThreadTitle};
 use crate::{
     ListFailedMessages, ListQueuedMessages, QueueStoredMessage, ReadAccountUsage,
     ReadComposerAttachment, ReadComposerDraft, ReadRecalledMessage, ReadRunUsage,
-    SaveComposerDraft, UploadComposerAttachment, WithdrawQueuedMessageCommand,
+    RecoverFailedMessage, RetryFailedMessage, SaveComposerDraft, UploadComposerAttachment,
+    WithdrawQueuedMessageCommand,
 };
 
 pub use crate::composer_catalog::{ReadComposerCatalog, ReadModelFavorites, SetModelFavorite};
@@ -288,6 +289,10 @@ pub enum Command {
     UploadComposerAttachment(UploadComposerAttachment),
     /// See [`QueueStoredMessage`].
     QueueStoredMessage(QueueStoredMessage),
+    /// See [`RetryFailedMessage`].
+    RetryFailedMessage(RetryFailedMessage),
+    /// See [`RecoverFailedMessage`].
+    RecoverFailedMessage(RecoverFailedMessage),
 }
 
 impl Command {
@@ -308,6 +313,8 @@ impl Command {
             Self::SaveComposerDraft(command) => command.request_id(),
             Self::UploadComposerAttachment(command) => &command.request_id,
             Self::QueueStoredMessage(command) => command.request_id(),
+            Self::RetryFailedMessage(command) => &command.request_id,
+            Self::RecoverFailedMessage(command) => &command.request_id,
         }
     }
 }

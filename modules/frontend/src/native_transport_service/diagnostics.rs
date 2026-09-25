@@ -234,6 +234,8 @@ pub enum PrivateDelivery {
     Batch(PatchBatch),
     /// Valid uni engine observation event.
     Observation(ServerEvent),
+    /// A thread's complete message outbox.
+    Outbox(artisan_domain::MessageOutbox),
     /// Bounded delivery loss.
     Lost(ServiceFailure),
 }

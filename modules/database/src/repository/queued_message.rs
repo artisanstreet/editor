@@ -18,8 +18,11 @@
 
 mod payload;
 mod read;
+mod resubmit;
 mod rows;
 mod withdraw;
+
+pub use resubmit::{FailedMessageRecovery, MessageOutboxFingerprint};
 
 use sea_orm::DbErr;
 use thiserror::Error;

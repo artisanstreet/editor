@@ -18,7 +18,8 @@ use std::collections::HashSet;
 use thiserror::Error;
 
 use crate::{
-    AuthoredText, CommandReceipt, ImageAttachmentRef, MessageId, RequestId, ThreadId, UnixMillis,
+    AuthoredText, CommandReceipt, EngineId, ImageAttachmentRef, MessageId, RequestId, ThreadId,
+    UnixMillis,
 };
 
 /// Maximum number of queued-message summaries returned by one read.
@@ -106,8 +107,30 @@ pub struct QueuedMessageSummary {
     pub accepted_at: UnixMillis,
     /// Latest dispatcher diagnostic persisted with the dispatch, if the
     /// dispatcher has claimed and requeued this message at least once. A
-    /// never-attempted row carries no diagnostic.
+    /// never-attempted row carries no diagnostic. While the row is
+    /// [`QueuedMessageState::Queued`] this is the reason the Forge is
+    /// holding it (for example an engine that is not ready yet).
     pub last_error: Option<DispatchError>,
+    /// Forge-owned delivery state of the row.
+    pub state: QueuedMessageState,
+    /// Engine the accepted configuration snapshot routes this message to,
+    /// when the acceptance captured one.
+    pub engine: Option<EngineId>,
+}
+
+/// Forge-owned delivery state of one accepted message that has not reached
+/// the transcript yet.
+///
+/// A message leaves the queued listing in the same commit that projects it
+/// into the transcript, or when it fails terminally (then it is listed as a
+/// [`FailedMessageSummary`]) or is withdrawn.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum QueuedMessageState {
+    /// Accepted and waiting for the dispatcher, possibly held with the
+    /// reason in [`QueuedMessageSummary::last_error`].
+    Queued,
+    /// Claimed by the dispatcher; its run is starting.
+    Dispatching,
 }
 
 /// Bounded dispatcher diagnostic persisted with one queued dispatch.
@@ -514,6 +537,9 @@ pub struct FailedMessageSummary {
     pub failed_at: UnixMillis,
     /// Dispatcher diagnostic persisted with the terminal failure.
     pub reason: DispatchError,
+    /// Whether the Forge can re-dispatch the stored payload on request
+    /// (`RetryFailedMessage`): the message never reached the transcript.
+    pub retryable: bool,
 }
 
 /// A bounded, truthfully countable failed-dispatch page.

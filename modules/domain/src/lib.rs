@@ -159,8 +159,13 @@ pub use queued_message::{
     DispatchError, DispatchErrorParseError, FAILED_MESSAGE_LIST_MAX, FailedMessageListError,
     FailedMessageListing, FailedMessageListingError, FailedMessageSummary, ListFailedMessages,
     ListQueuedMessages, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListError, QueuedMessageListOrder,
-    QueuedMessageListing, QueuedMessageListingError, QueuedMessageSummary,
+    QueuedMessageListing, QueuedMessageListingError, QueuedMessageState, QueuedMessageSummary,
     QueuedMessageWithdrawalOutcome, WithdrawQueuedMessage, WithdrawQueuedMessageResult,
+};
+mod message_outbox;
+pub use message_outbox::{
+    FailedMessageRecovered, FailedMessageRetried, FailedMessageRetryOutcome, FailedMessageTarget,
+    MessageOutbox, MessageOutboxError, RecoverFailedMessage, RetryFailedMessage,
 };
 mod run_interaction;
 pub use run_interaction::{

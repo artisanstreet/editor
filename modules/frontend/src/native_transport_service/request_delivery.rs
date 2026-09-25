@@ -231,6 +231,7 @@ pub async fn delivery_task_loop(
                 Ok(UniDelivery::Observation(observation)) => {
                     PrivateDelivery::Observation(observation)
                 }
+                Ok(UniDelivery::Outbox(outbox)) => PrivateDelivery::Outbox(outbox),
                 Err(failure) => PrivateDelivery::Lost(failure),
             };
             let is_lost = matches!(result, PrivateDelivery::Lost(_));
@@ -431,6 +432,11 @@ pub(super) async fn command_loop_with_delivery(
                         // The application owns cursor ordering and replay dedup;
                         // emit without advancing custody, like patch batches.
                         publish(events, NativeTransportEvent::EngineObservation(observation))?;
+                    }
+                    Some(PrivateDelivery::Outbox(outbox)) => {
+                        if runtime.custody.active_thread() == Some(outbox.thread_id()) {
+                            publish(events, NativeTransportEvent::MessageOutbox(outbox))?;
+                        }
                     }
                     Some(PrivateDelivery::Lost(failure)) =>
                         handle_delivery_lost_reconnect(runtime, frames, events, failure).await?,

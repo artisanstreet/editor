@@ -604,6 +604,9 @@ pub enum NativeTransportEvent {
     /// The application pairs the observation into presentation state and owns
     /// reconnect replay ordering; the service never advances a cursor here.
     EngineObservation(ServerEvent),
+    /// The subscribed thread's complete message outbox, pushed by the Forge
+    /// whenever its undelivered messages change.
+    MessageOutbox(artisan_domain::MessageOutbox),
     /// Bounded path-free delivery loss.
     DeliveryLost(ServiceFailure),
     /// Terminal service state.

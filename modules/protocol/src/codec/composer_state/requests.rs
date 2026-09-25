@@ -45,6 +45,7 @@ pub fn encode_withdraw_queued_message_request(
     builder.set_thread_id(value.thread_id.as_str());
     builder.set_message_id(value.message_id.as_str());
     builder.set_original_request_id(value.original_request_id.as_str());
+    builder.set_recall_to_draft(value.recall_to_draft);
 }
 
 /// Decodes a withdrawal command using the parent envelope request id as its
@@ -53,7 +54,8 @@ pub fn decode_withdraw_queued_message_request(
     value: composer_state_capnp::withdraw_queued_message_request::Reader<'_>,
     request_id: RequestId,
 ) -> Result<WithdrawQueuedMessageCommand, ComposerStateCodecError> {
-    Ok(WithdrawQueuedMessageCommand::new(
+    let recall_to_draft = value.get_recall_to_draft();
+    let command = WithdrawQueuedMessageCommand::new(
         request_id,
         parse_thread_id(
             read_text(
@@ -76,7 +78,12 @@ pub fn decode_withdraw_queued_message_request(
             )?,
             "request.withdrawQueuedMessage.originalRequestId",
         )?,
-    ))
+    );
+    Ok(if recall_to_draft {
+        command.recalling_to_draft()
+    } else {
+        command
+    })
 }
 
 /// Encodes an exact recalled-message query.
