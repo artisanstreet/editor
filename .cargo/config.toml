@@ -1,2 +1,11 @@
-[alias]
-dev = "run --locked -p artisan-native-dev --bin dev --"
+# CPU baseline for every build of each shipped x86-64 target: x86-64-v3
+# (AVX2, FMA, BMI1/2, MOVBE), which every x86-64 CPU since Intel Haswell (2013)
+# and AMD Excavator (2015) provides. Low-end Atom-class chips without AVX2
+# cannot run these binaries.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# Windows binaries are cross-built with MinGW-w64 and link the C runtime and
+# GCC runtime statically, so every .exe runs without MinGW DLLs beside it.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+crt-static"]
