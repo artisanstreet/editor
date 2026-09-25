@@ -156,13 +156,34 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
         );
         return Ok(0);
     }
+    launch_installed(options, paths, lock, &version_root, total)
+}
+
+/// Stages 6 and 7: launch the installed Editor and confirm its startup.
+/// The install lock is released once the Editor is spawned.
+fn launch_installed(
+    options: &DevArgs,
+    paths: &DevPaths,
+    lock: DevLock,
+    version_root: &Path,
+    total: u32,
+) -> Result<u8, Outcome> {
+    let editor = staged_editor(version_root);
     let receipt_path = fresh_receipt_path(paths);
     clear_stale_receipt(&receipt_path).map_err(fail)?;
-    match reconcile_stale_readiness(paths, &staged_forge(&version_root)).map_err(fail)? {
-        ReadinessReconcile::Absent => {}
-        ReadinessReconcile::CleanedStale { pid } => {
+    // Installing retired every superseded version, so a live Forge of the
+    // active version means this exact build is already running: an
+    // unchanged tree builds the same payload.
+    match reconcile_stale_readiness(paths, &staged_forge(version_root)) {
+        Ok(ReadinessReconcile::Absent) => {}
+        Ok(ReadinessReconcile::CleanedStale { pid }) => {
             println!("dev: removed stale readiness of dead forge pid {pid}");
         }
+        Err(DevError::PreviousForgeRunning { pid }) => {
+            println!("dev: this build is already running (forge pid {pid}); nothing to relaunch");
+            return Ok(0);
+        }
+        Err(error) => return Err(fail(error)),
     }
     println!(
         "{}",
@@ -213,7 +234,7 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
         );
         return Ok(0);
     }
-    wait_for_exit(child, &version_root)
+    wait_for_exit(child, version_root)
 }
 
 /// Follows the dev Editor until it exits, including when a later run
