@@ -1,4 +1,4 @@
-//! `dev` binary (`cargo dev`): build, install, and launch the dev Editor.
+//! `dev` binary: install a Nix-built payload and launch the dev Editor.
 //!
 //! The binary is deliberately thin: every reusable step lives in the
 //! [`native_dev`] library so it stays covered by `tests/native_dev`. Here
@@ -12,10 +12,10 @@ use std::{path::Path, time::Duration};
 use artisan_build_info::{BuildIdentity, BuildInfo};
 use artisan_install::LocalSigner;
 use native_dev::{
-    Action, Command, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, GitState,
-    InstanceOutcome, PAYLOAD_DIRECTORY, ReadinessReconcile, StartupWait, Workspace, assemble,
-    clear_stale_receipt, fresh_receipt_path, install_tree, locate_binaries, profile_for_bin_dir,
-    provision_forge_home, reconcile_stale_readiness, resolve_dev_root, spawn_editor, stage_line,
+    Action, Command, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, EditorOutput,
+    InstanceOutcome, ReadinessReconcile, StartupWait, clear_stale_receipt, fresh_receipt_path,
+    install_payload, locate_binaries, payload_identity, provision_forge_home,
+    reconcile_stale_readiness, resolve_dev_root, sign_payload, spawn_editor, stage_line,
     staged_editor, staged_forge, stop_editor, usage, wait_for_startup,
 };
 
@@ -78,7 +78,7 @@ fn report_where(paths: &DevPaths) {
             println!("editor: {}", editor.display());
             println!("build: {}", BuildIdentity::for_executable(&editor));
         }
-        Err(_) => println!("build: nothing installed yet; run `cargo dev`"),
+        Err(_) => println!("build: nothing installed yet; run `nix run .#dev`"),
     }
 }
 
@@ -97,68 +97,41 @@ fn prune(paths: &DevPaths, keep: usize) {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear stage-by-stage runbook; each stage's error hint stays adjacent to its call"
-)]
+/// An attached run shares the runner's streams; otherwise the Editor
+/// outlives the runner and writes to a log in the runner directory.
+fn editor_output(options: &DevArgs, paths: &DevPaths) -> EditorOutput {
+    if options.attach {
+        EditorOutput::Inherit
+    } else {
+        EditorOutput::Detached(paths.runner_dir().join("editor.log"))
+    }
+}
+
 fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome> {
     let launch = options.command == Command::Run;
     let total = if launch { 7 } else { 5 };
-    // Prebuilt binaries (for example from Nix) need no Cargo workspace;
-    // building does.
-    let workspace = match (Workspace::locate(), &options.bin_dir) {
-        (Ok(workspace), _) => Some(workspace),
-        (Err(_), Some(_)) => None,
-        (Err(error), None) => return Err(fail(error)),
+    let Some(payload) = options.payload.as_deref() else {
+        return Err(fail(DevError::Usage {
+            reason: "no payload to install".to_owned(),
+        }));
     };
-    let (bin_dir, profile) = match (&options.bin_dir, &workspace) {
-        (Some(bin_dir), _) => (
-            bin_dir.clone(),
-            options
-                .profile
-                .clone()
-                .unwrap_or_else(|| profile_for_bin_dir(bin_dir)),
-        ),
-        (None, Some(workspace)) => {
-            let profile = options.profile.clone().unwrap_or_else(|| "dev".to_owned());
-            (workspace.build(&profile).map_err(fail)?, profile)
-        }
-        (None, None) => unreachable!("building requires a located workspace"),
-    };
-    let binaries = locate_binaries(Some(&bin_dir)).map_err(fail)?;
-    println!(
-        "{}",
-        stage_line(
-            1,
-            total,
-            "build",
-            &format!("{profile} in {}", bin_dir.display())
-        )
-    );
+    let identity = payload_identity(payload).map_err(fail)?;
+    locate_binaries(Some(&payload.join("bin"))).map_err(fail)?;
+    println!("{}", stage_line(1, total, "payload", &identity.version));
 
     let lock = DevLock::acquire(paths).map_err(fail)?;
     let signer =
         LocalSigner::load_or_create(&paths.home).map_err(|error| fail(DevError::Install(error)))?;
-    let (tree, checkout) = match &workspace {
-        Some(workspace) => (
-            workspace.target_directory.join(PAYLOAD_DIRECTORY),
-            workspace.root.clone(),
-        ),
-        None => (
-            paths.runner_dir().join("payload"),
-            std::env::current_dir().unwrap_or_default(),
-        ),
-    };
-    let git = GitState::read(&checkout);
-    let info = assemble(&binaries, &git, &profile, &tree, &signer).map_err(fail)?;
-    println!("{}", stage_line(2, total, "assemble", &info.version));
+    let manifests = paths.runner_dir().join("manifest");
+    sign_payload(payload, &manifests, &identity, &signer).map_err(fail)?;
+    println!("{}", stage_line(2, total, "sign", signer.key_id()));
 
-    install_tree(paths, &tree, &signer).map_err(|error| {
+    install_payload(paths, payload, &manifests, &signer).map_err(|error| {
         eprintln!("dev: error: {error}");
         eprintln!("dev: hint: the previously active version is untouched");
         Outcome::Failure
     })?;
-    println!("{}", stage_line(3, total, "install", &describe(&info)));
+    println!("{}", stage_line(3, total, "install", &describe(&identity)));
 
     let outcome = provision_forge_home(paths).map_err(fail)?;
     let detail = match outcome {
@@ -195,9 +168,10 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
         "{}",
         stage_line(6, total, "launch", &editor.display().to_string())
     );
-    let mut child = spawn_editor(&editor, &paths.home, &receipt_path).map_err(fail)?;
+    let output = editor_output(options, paths);
+    let mut child = spawn_editor(&editor, &paths.home, &receipt_path, &output).map_err(fail)?;
     // Installs and launches are serialized only up to here: the lock is
-    // never held for the Editor's lifetime, so the next `cargo dev` can
+    // never held for the Editor's lifetime, so the next `nix run .#dev` can
     // retire this Editor and relaunch its new build.
     drop(lock);
     let startup = wait_for_startup(
@@ -231,10 +205,11 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
             return Err(Outcome::Failure);
         }
     }
-    if !options.attach {
+    if let EditorOutput::Detached(log) = &output {
         println!(
-            "dev: editor running (pid {}); run `cargo dev` again to replace it with a new build",
-            child.id()
+            "dev: editor running (pid {}, output in {}); run `nix run .#dev` again to replace it with a new build",
+            child.id(),
+            log.display()
         );
         return Ok(0);
     }

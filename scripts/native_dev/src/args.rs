@@ -1,7 +1,7 @@
 //! Command-line parsing for the native dev runner.
 //!
 //! Unknown commands and flags fail closed with usage text, so a typo never
-//! builds or installs half a payload.
+//! installs half a payload.
 
 use std::{ffi::OsString, path::PathBuf};
 
@@ -13,9 +13,9 @@ pub const DEFAULT_KEEP: usize = 3;
 /// What the runner was asked to do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
-    /// Build, install, and launch (or relaunch) the dev Editor.
+    /// Install the payload and launch (or relaunch) the dev Editor.
     Run,
-    /// Build and install without launching.
+    /// Install the payload without launching.
     Stage,
     /// Print the dev root, active version, and build identity.
     Where,
@@ -39,16 +39,12 @@ pub struct DevArgs {
     pub command: Command,
     /// Explicit development root; defaults to the per-user `Artisan Street Dev`.
     pub root: Option<PathBuf>,
-    /// Cargo profile to build, or that prebuilt `--bin-dir` binaries were
-    /// built with; `None` means `dev` (or, for `--bin-dir`, the profile
-    /// named by the Cargo output directory).
-    pub profile: Option<String>,
-    /// Prebuilt binaries to install instead of building.
-    pub bin_dir: Option<PathBuf>,
+    /// Nix-built payload to install (`run` and `stage`).
+    pub payload: Option<PathBuf>,
     /// Inactive versions kept after an install or prune.
     pub keep: usize,
     /// Follow the launched Editor until it exits instead of returning once it
-    /// confirms startup. A detached runner is what lets the next run rebuild
+    /// confirms startup. A detached runner is what lets the next run replace
     /// the runner itself on Windows, where a running executable is locked.
     pub attach: bool,
 }
@@ -58,14 +54,13 @@ impl DevArgs {
     ///
     /// # Errors
     ///
-    /// Returns [`DevError::Usage`] for unknown commands, unknown flags, or
-    /// missing and malformed values.
+    /// Returns [`DevError::Usage`] for unknown commands, unknown flags,
+    /// missing and malformed values, or `run`/`stage` without a payload.
     pub fn parse(argv: &[OsString]) -> Result<Action, DevError> {
         let mut options = Self {
             command: Command::Run,
             root: None,
-            profile: None,
-            bin_dir: None,
+            payload: None,
             keep: DEFAULT_KEEP,
             attach: false,
         };
@@ -94,11 +89,7 @@ impl DevArgs {
             match flag.as_ref() {
                 "-h" | "--help" => return Ok(Action::Help),
                 "--root" => options.root = Some(PathBuf::from(value("--root")?)),
-                "--bin-dir" => options.bin_dir = Some(PathBuf::from(value("--bin-dir")?)),
-                "--profile" => {
-                    options.profile = Some(value("--profile")?.to_string_lossy().into_owned());
-                }
-                "--release" => options.profile = Some("release".to_owned()),
+                "--payload" => options.payload = Some(PathBuf::from(value("--payload")?)),
                 "--attach" => options.attach = true,
                 "--keep" => {
                     options.keep = value("--keep")?
@@ -109,13 +100,11 @@ impl DevArgs {
                 unknown => return Err(usage(format!("unknown flag `{unknown}`"))),
             }
         }
-        if let Some(profile) = &options.profile
-            && (profile.is_empty()
-                || !profile.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-                }))
-        {
-            return Err(usage(format!("invalid profile `{profile}`")));
+        if matches!(options.command, Command::Run | Command::Stage) && options.payload.is_none() {
+            return Err(usage(
+                "run and stage install a Nix-built payload: pass --payload (or use `nix run .#dev`)"
+                    .to_owned(),
+            ));
         }
         Ok(Action::Execute(options))
     }
@@ -124,25 +113,23 @@ impl DevArgs {
 /// Usage text for `--help`.
 #[must_use]
 pub fn usage() -> &'static str {
-    "usage: cargo dev [run|stage|where|prune] [--root PATH] [--profile NAME | --release]\n\
-     \x20                [--bin-dir PATH] [--keep N] [--attach]\n\
+    "usage: dev [run|stage] --payload PATH [--root PATH] [--keep N] [--attach]\n\
+     \x20      dev [where|prune] [--root PATH] [--keep N]\n\
      \n\
-     Builds the Artisan binaries, installs them as a signed dev-channel\n\
-     release into the per-user `Artisan Street Dev` installation through the\n\
-     same installer code releases use, and (for `run`) launches the dev\n\
-     Editor, closing any previous dev Editor first.\n\
+     Installs a Nix-built payload as a signed dev-channel release into the\n\
+     per-user `Artisan Street Dev` installation through the same installer code\n\
+     releases use, and (for `run`) launches the dev Editor, closing any previous\n\
+     dev Editor first. Normally driven by `nix run .#dev`, which builds the\n\
+     payload first.\n\
      \n\
-     run             build, install, and launch or relaunch (default)\n\
-     stage           build and install without launching\n\
+     run             install and launch or relaunch (default)\n\
+     stage           install without launching\n\
      where           print the dev root, active version, and build identity\n\
      prune           remove superseded dev versions\n\
      \n\
+     --payload PATH  Nix-built payload (bin/ and resources/build-info.json)\n\
      --root PATH     development installation root (default: per-user\n\
      \x20               `Artisan Street Dev`, or ARTISAN_DEV_ROOT)\n\
-     --profile NAME  Cargo profile to build (default: dev); with --bin-dir,\n\
-     \x20               the profile the binaries were built with\n\
-     --release       shorthand for --profile release\n\
-     --bin-dir PATH  install prebuilt ae/editor/forge/installer binaries\n\
      --keep N        inactive versions kept for rollback (default: 3)\n\
      --attach        follow the launched Editor until it exits"
 }

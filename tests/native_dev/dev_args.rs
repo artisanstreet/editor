@@ -17,12 +17,14 @@ fn execute(arguments: &[&str]) -> DevArgs {
 }
 
 #[test]
-fn no_arguments_runs_the_dev_profile_on_the_default_root() {
-    let options = execute(&[]);
+fn running_needs_only_a_payload() {
+    let options = execute(&["--payload", "/nix/store/abc-artisan-linux-debug"]);
     assert_eq!(options.command, Command::Run);
-    assert_eq!(options.profile, None);
+    assert_eq!(
+        options.payload,
+        Some(PathBuf::from("/nix/store/abc-artisan-linux-debug"))
+    );
     assert_eq!(options.root, None);
-    assert_eq!(options.bin_dir, None);
     assert_eq!(options.keep, DEFAULT_KEEP);
     assert!(
         !options.attach,
@@ -38,30 +40,29 @@ fn every_command_is_recognized() {
         ("where", Command::Where),
         ("prune", Command::Prune),
     ] {
-        assert_eq!(execute(&[word]).command, command, "{word}");
+        let options = execute(&[word, "--payload", "/payload"]);
+        assert_eq!(options.command, command, "{word}");
     }
+    assert_eq!(execute(&["where"]).command, Command::Where);
+    assert_eq!(execute(&["prune"]).command, Command::Prune);
 }
 
 #[test]
-fn flags_set_root_profile_binaries_and_retention() {
+fn flags_set_root_retention_and_attachment() {
     let options = execute(&[
         "stage",
+        "--payload",
+        "/payload",
         "--root",
         "/tmp/dev-root",
-        "--profile",
-        "performance",
-        "--bin-dir",
-        "/tmp/bins",
         "--keep",
         "5",
+        "--attach",
     ]);
     assert_eq!(options.command, Command::Stage);
     assert_eq!(options.root, Some(PathBuf::from("/tmp/dev-root")));
-    assert_eq!(options.profile.as_deref(), Some("performance"));
-    assert_eq!(options.bin_dir, Some(PathBuf::from("/tmp/bins")));
     assert_eq!(options.keep, 5);
-    assert!(execute(&["--attach"]).attach);
-    assert_eq!(execute(&["--release"]).profile.as_deref(), Some("release"));
+    assert!(options.attach);
 }
 
 #[test]
@@ -71,14 +72,15 @@ fn help_is_available_anywhere() {
 }
 
 #[test]
-fn unknown_or_incomplete_invocations_fail_closed() {
+fn unknown_incomplete_or_payloadless_invocations_fail_closed() {
     for invalid in [
         &["deploy"][..],
-        &["--stage-only"][..],
-        &["--root"][..],
-        &["--keep", "many"][..],
-        &["--profile", "../escape"][..],
-        &["--profile", ""][..],
+        &[][..],
+        &["stage"][..],
+        &["--profile", "production"][..],
+        &["--bin-dir", "/bins"][..],
+        &["--payload"][..],
+        &["where", "--keep", "many"][..],
     ] {
         assert!(
             matches!(parse(invalid), Err(DevError::Usage { .. })),
@@ -95,9 +97,10 @@ fn usage_names_every_command() {
         "stage",
         "where",
         "prune",
+        "--payload",
         "--root",
-        "--profile",
         "--keep",
+        "nix run .#dev",
     ] {
         assert!(usage.contains(word), "{word}");
     }

@@ -1,6 +1,6 @@
 [package]
 name = "artisan-native-dev"
-description = "One-command native development loop: build the product binaries, install them as a signed dev-channel release into the per-user Artisan Street Dev installation, and launch the installed Editor on its owned Forge"
+description = "Development installer: install a Nix-built payload as a signed dev-channel release into the per-user Artisan Street Dev installation and launch the installed Editor on its owned Forge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,9 +20,7 @@ ae-installer = { path = "../../modules/installer" }
 artisan-build-info = { path = "../../modules/build_info" }
 artisan-editor-cli = { path = "../../modules/cli" }
 fs2.workspace = true
-hex = "=0.4.3" # workspace-absent
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
@@ -63,10 +61,6 @@ path = "../../tests/native_dev/dev_binaries.rs"
 [[test]]
 name = "dev_stage"
 path = "../../tests/native_dev/dev_stage.rs"
-
-[[test]]
-name = "dev_identity"
-path = "../../tests/native_dev/dev_identity.rs"
 
 [[bin]]
 name = "forge-host"

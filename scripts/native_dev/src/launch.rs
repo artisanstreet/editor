@@ -568,35 +568,84 @@ fn reconcile_invalid_readiness(
     Ok(ReadinessReconcile::CleanedStale { pid: receipt.pid() })
 }
 
+/// Where a launched Editor's output goes, and whether it outlives the runner.
+#[derive(Clone, Debug)]
+pub enum EditorOutput {
+    /// Share the runner's streams; the runner follows the Editor (`--attach`).
+    Inherit,
+    /// Write to this log file, and detach the Editor from the runner so it
+    /// keeps running after the runner (and whatever started it) exits.
+    Detached(PathBuf),
+}
+
 /// Spawns the staged Editor on the dev home.
 ///
 /// The child inherits the environment with `ARTISAN_HOME` pointed at the
 /// dev home, the manual-forge escape hatches removed, and the startup
 /// receipt path set, so the Editor always exercises its owned Forge
-/// custody path. Standard streams are inherited so Editor output stays
-/// visible.
+/// custody path.
+///
+/// A detached Editor gets no console and, on Windows, breaks away from the
+/// runner's job object: a runner started through WSL interop runs in a job
+/// that terminates its processes when the WSL session ends.
 ///
 /// # Errors
 ///
-/// Returns [`DevError::Stage`] when the Editor cannot be spawned.
+/// Returns [`DevError::Stage`] when the log cannot be created or the Editor
+/// cannot be spawned.
 pub fn spawn_editor(
     editor_exe: &Path,
     home: &Path,
     receipt_path: &Path,
+    output: &EditorOutput,
 ) -> Result<Child, DevError> {
     let mut command = std::process::Command::new(editor_exe);
     command
         .env(DEV_HOME_ENV, home)
         .env(STARTUP_RECEIPT_ENV, receipt_path)
         .env_remove(STRIPPED_DEV_HOME_ENV)
-        .env_remove(STRIPPED_DEV_READY_ENV)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        .env_remove(STRIPPED_DEV_READY_ENV);
+    match output {
+        EditorOutput::Inherit => {
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
+        }
+        EditorOutput::Detached(log) => {
+            let file = std::fs::File::create(log).map_err(|_| DevError::Stage {
+                stage: "launch",
+                reason: format!("cannot create {}", log.display()),
+            })?;
+            let copy = file.try_clone().map_err(|_| DevError::Stage {
+                stage: "launch",
+                reason: format!("cannot share {}", log.display()),
+            })?;
+            command.stdin(Stdio::null()).stdout(file).stderr(copy);
+            detach(&mut command);
+        }
+    }
     command.spawn().map_err(|_| DevError::Stage {
         stage: "launch",
         reason: format!("cannot launch {}", editor_exe.display()),
     })
+}
+
+#[cfg(windows)]
+fn detach(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+}
+
+#[cfg(unix)]
+fn detach(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // Its own process group: Ctrl-C and hangups aimed at the terminal job
+    // that ran the runner do not reach the Editor.
+    command.process_group(0);
 }
 
 /// Reads one receipt file without blocking.
