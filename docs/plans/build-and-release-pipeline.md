@@ -1,11 +1,46 @@
 # Build, dev-loop, and release pipeline plan
 
-- Status: draft for review
+- Status: Phases 0 and 1 implemented (branch `build-pipeline`); Phases 2–5 open
 - Drafted: 2026-09-25
 - Scope: how every Artisan binary is built, identified, staged, run, released,
   and updated — from a local edit to a signed stable release
 - Primary platform: Windows x64 desktop, with the repository living in WSL
   (`\\wsl.localhost\Ubuntu\...`) and Forge hosts on WSL/Linux
+
+## Implementation checkpoint (2026-09-25)
+
+Delivered and verified on Linux (tests) and Windows (a `\\wsl.localhost`
+checkout through `scripts/dev.ps1`: install, launch, relaunch over a running
+dev Editor, pruning):
+
+- `artisan-build-info`: payload-carried identity (`resources/build-info.json`)
+  shown by `ae --version`, `installer --version`, the window title, a
+  wordmark badge for non-stable builds, and Settings → About.
+- `artisan_install` library (in `modules/installer`) with `ReleaseSource`
+  (`Remote`, `Directory`, `Tree`), `--from`/`--channel`/`--skip-path`, the
+  per-root local signing key, channel-pinned trust, `prune`, and an
+  editor-first retirement mode for callers that replace the Editor.
+- `cargo dev` (`run`, `stage`, `where`, `prune`) installs every local build as
+  a signed `dev`-channel release into `Artisan Street Dev`; `dev.py`,
+  `dev.ps1`, the Nix dev apps, `verify_visual.ps1`, and the desktop workflow
+  all go through it. A no-change run takes about 5 s; an edit-to-relaunch
+  cycle on Windows about 50 s.
+
+Not done in Phase 1, carried forward:
+
+- `cargo dev watch` (rebuild and relaunch on save).
+- `ae update --from` / `ae rollback` on the permanent launcher (the installer
+  binary supports `--from`; rollback is re-installing an existing version).
+- A distinct AppUserModelID and single-instance identity for Artisan Dev;
+  today it is distinguished by root, title, badge, and the absence of PATH,
+  protocol, and shortcut registration.
+- The Linux root rename to XDG-style `artisan-street` (Per-platform section).
+
+Found along the way: an Editor-owned Forge cannot be stopped through the
+permanent `ae` (reconnect capability custody is unavailable), so a release
+update with the Editor open still cancels before activation. The dev runner
+avoids it with editor-first retirement; the product fix belongs with the
+Phase 4 updater.
 
 ## Outcome
 
