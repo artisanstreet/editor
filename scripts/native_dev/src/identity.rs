@@ -8,8 +8,6 @@
 
 use std::{path::Path, process::Command};
 
-use artisan_build_info::{BuildInfo, Channel, FORMAT_VERSION};
-
 /// Source checkout state at staging time.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GitState {
@@ -89,20 +87,4 @@ pub fn dev_version(package_version: &str, git: &GitState) -> String {
         version.push_str(&metadata.join("."));
     }
     version
-}
-
-/// Identity document for a payload staged from `bin_dir` out of the
-/// checkout described by `git`.
-#[must_use]
-pub fn dev_build_info(git: &GitState, bin_dir: &Path) -> BuildInfo {
-    BuildInfo {
-        format_version: FORMAT_VERSION,
-        version: dev_version(env!("CARGO_PKG_VERSION"), git),
-        channel: Channel::Dev,
-        commit: git.commit.clone(),
-        dirty: git.dirty,
-        profile: profile_for_bin_dir(bin_dir),
-        target: runner_target().to_owned(),
-        built_at: None,
-    }
 }

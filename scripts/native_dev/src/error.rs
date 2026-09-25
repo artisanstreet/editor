@@ -30,19 +30,17 @@ pub enum DevError {
         /// Where the search looked.
         hint: String,
     },
-    /// The dev directory is on a network share, where the staging lock
-    /// cannot be taken reliably.
+    /// The dev root is on a network share, where locks and hardlinks are
+    /// unreliable.
     #[error(
-        "dev directory {path} is on a network share; stage on local disk instead (pass --dev-dir, or run scripts/dev.ps1 which picks a local directory)"
+        "dev root {path} is on a network share; install on local disk instead (pass --root or set ARTISAN_DEV_ROOT)"
     )]
     NetworkShare {
-        /// The shared dev directory.
+        /// The shared dev root.
         path: PathBuf,
     },
-    /// Another `dev` run holds the staging lock.
-    #[error(
-        "dev staging is locked by another run; wait for it or remove {lock} if no dev run is active"
-    )]
+    /// Another `dev` run holds the runner lock.
+    #[error("another dev run is installing on this root; wait for it to finish ({lock})")]
     StagingLocked {
         /// Lock file that is held.
         lock: PathBuf,
@@ -55,12 +53,9 @@ pub enum DevError {
         /// Bounded human-readable reason.
         reason: String,
     },
-    /// The payload gate rejected the staged version.
-    #[error("staged payload is not verified: {issues}")]
-    PayloadUnverified {
-        /// Integrity findings from the existing verifier.
-        issues: String,
-    },
+    /// The installer refused or failed to install the dev payload.
+    #[error("install failed: {0}")]
+    Install(#[source] artisan_install::InstallerError),
     /// A previous dev Forge still owns the dev home.
     #[error(
         "previous dev Forge still running with pid {pid}; close the previous dev session first"

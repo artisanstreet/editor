@@ -640,12 +640,15 @@ dependencies = [
 name = "artisan-native-dev"
 version = "0.0.0"
 dependencies = [
+ "ae-installer",
  "artisan-build-info",
  "artisan-editor-cli",
  "fs2",
+ "hex",
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

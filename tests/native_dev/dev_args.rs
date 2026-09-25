@@ -1,104 +1,99 @@
-//! Argument parsing for the native dev launcher.
-//!
-//! The launcher accepts exactly three flags; anything else fails closed
-//! with usage text so a typo never stages half a home.
+//! Command-line parsing: commands, flags, and fail-closed usage errors.
 
-use std::{
-    ffi::OsString,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{ffi::OsString, path::PathBuf};
 
-use native_dev::{Action, DevArgs, usage};
+use native_dev::{Action, Command, DEFAULT_KEEP, DevArgs, DevError};
 
-fn argv(flags: &[&str]) -> Vec<OsString> {
-    flags.iter().map(OsString::from).collect()
+fn parse(arguments: &[&str]) -> Result<Action, DevError> {
+    let argv: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+    DevArgs::parse(&argv)
+}
+
+fn execute(arguments: &[&str]) -> DevArgs {
+    match parse(arguments).expect("valid invocation") {
+        Action::Execute(options) => options,
+        Action::Help => panic!("unexpected help for {arguments:?}"),
+    }
 }
 
 #[test]
-fn empty_argv_runs_with_defaults() {
-    let action = DevArgs::parse(&argv(&[])).expect("empty argv parses");
-    assert_eq!(
-        action,
-        Action::Run(DevArgs {
-            dev_dir: None,
-            bin_dir: None,
-            stage_only: false,
-        })
-    );
+fn no_arguments_runs_the_dev_profile_on_the_default_root() {
+    let options = execute(&[]);
+    assert_eq!(options.command, Command::Run);
+    assert_eq!(options.profile, None);
+    assert_eq!(options.root, None);
+    assert_eq!(options.bin_dir, None);
+    assert_eq!(options.keep, DEFAULT_KEEP);
 }
 
 #[test]
-fn stage_only_is_accepted() {
-    let action = DevArgs::parse(&argv(&["--stage-only"])).expect("stage-only parses");
-    assert!(matches!(
-        action,
-        Action::Run(DevArgs {
-            stage_only: true,
-            ..
-        })
-    ));
+fn every_command_is_recognized() {
+    for (word, command) in [
+        ("run", Command::Run),
+        ("stage", Command::Stage),
+        ("where", Command::Where),
+        ("prune", Command::Prune),
+    ] {
+        assert_eq!(execute(&[word]).command, command, "{word}");
+    }
 }
 
 #[test]
-fn explicit_directories_are_kept_verbatim() {
-    let action = DevArgs::parse(&argv(&[
-        "--dev-dir",
-        "/tmp/artisan-dev",
+fn flags_set_root_profile_binaries_and_retention() {
+    let options = execute(&[
+        "stage",
+        "--root",
+        "/tmp/dev-root",
+        "--profile",
+        "performance",
         "--bin-dir",
-        "/tmp/artisan-bins",
-    ]))
-    .expect("explicit directories parse");
-    let Action::Run(args) = action else {
-        panic!("expected a run action");
-    };
-    assert_eq!(
-        args.dev_dir,
-        Some(std::path::PathBuf::from("/tmp/artisan-dev"))
-    );
-    assert_eq!(
-        args.bin_dir,
-        Some(std::path::PathBuf::from("/tmp/artisan-bins"))
-    );
-    assert!(!args.stage_only);
+        "/tmp/bins",
+        "--keep",
+        "5",
+    ]);
+    assert_eq!(options.command, Command::Stage);
+    assert_eq!(options.root, Some(PathBuf::from("/tmp/dev-root")));
+    assert_eq!(options.profile.as_deref(), Some("performance"));
+    assert_eq!(options.bin_dir, Some(PathBuf::from("/tmp/bins")));
+    assert_eq!(options.keep, 5);
+    assert_eq!(execute(&["--release"]).profile.as_deref(), Some("release"));
 }
 
 #[test]
-fn help_flags_select_help() {
-    for flag in ["--help", "-h"] {
-        let action = DevArgs::parse(&argv(&[flag])).expect("help parses");
-        assert_eq!(action, Action::Help, "flag {flag}");
+fn help_is_available_anywhere() {
+    assert_eq!(parse(&["--help"]).expect("help"), Action::Help);
+    assert_eq!(parse(&["run", "-h"]).expect("help"), Action::Help);
+}
+
+#[test]
+fn unknown_or_incomplete_invocations_fail_closed() {
+    for invalid in [
+        &["deploy"][..],
+        &["--stage-only"][..],
+        &["--root"][..],
+        &["--keep", "many"][..],
+        &["--profile", "../escape"][..],
+        &["--profile", ""][..],
+    ] {
+        assert!(
+            matches!(parse(invalid), Err(DevError::Usage { .. })),
+            "{invalid:?} must be refused"
+        );
     }
 }
 
 #[test]
-fn unknown_flags_fail_closed() {
-    let error = DevArgs::parse(&argv(&["--watch"])).expect_err("unknown flag is rejected");
-    assert!(error.to_string().contains("--watch"), "unexpected: {error}");
-}
-
-#[test]
-fn missing_flag_values_fail_closed() {
-    for flag in ["--dev-dir", "--bin-dir"] {
-        let error = DevArgs::parse(&argv(&[flag])).expect_err("missing value is rejected");
-        assert!(error.to_string().contains(flag), "unexpected: {error}");
+fn usage_names_every_command() {
+    let usage = native_dev::usage();
+    for word in [
+        "run",
+        "stage",
+        "where",
+        "prune",
+        "--root",
+        "--profile",
+        "--keep",
+    ] {
+        assert!(usage.contains(word), "{word}");
     }
-}
-
-#[test]
-fn usage_names_every_flag() {
-    let text = usage();
-    for flag in ["--dev-dir", "--bin-dir", "--stage-only"] {
-        assert!(text.contains(flag), "usage is missing {flag}");
-    }
-    assert!(text.contains(".dist/dev"), "usage names the default home");
-}
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[test]
-fn argument_parsing_has_no_process_side_effects() {
-    let before = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let action = DevArgs::parse(&argv(&["--stage-only"])).expect("parses");
-    assert!(matches!(action, Action::Run(_)));
-    assert_eq!(COUNTER.load(Ordering::Relaxed), before + 1);
 }

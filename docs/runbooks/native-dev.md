@@ -11,15 +11,37 @@ Install Nix with flakes enabled on Linux/WSL, then:
 
 ```sh
 nix develop
-python3 scripts/dev.py
+cargo dev
 ```
 
-This is the incremental Cargo workflow. It stages the four product binaries under
-`.dist/dev/home`, preserving the database and credentials. Use `--stage-only` to
-stage without launching, `--profile performance` for optimized rendering, or
-`--dev-dir /absolute/path` for an isolated installation. The Editor starts its
-owned Forge through the product APIs. `CARGO_TARGET_DIR` is respected; do not
-share target directories across worktrees.
+This is the incremental Cargo workflow (`python3 scripts/dev.py` and, on
+Windows, `scripts/dev.ps1` wrap the same command). `cargo dev` builds the four
+product binaries, installs them as a signed `dev`-channel release into the
+per-user **Artisan Street Dev** installation through the shipping installer
+code, and launches the installed Editor, which starts its owned Forge through
+the product APIs. The dev installation sits beside the real one
+(`$XDG_DATA_HOME/Artisan Street Dev`, `%LOCALAPPDATA%\Artisan Street Dev`),
+never inside it, and keeps its database, credentials, and instance identity
+across runs.
+
+Running `cargo dev` again while the dev Editor is open retires it the way an
+update does and launches the new build, so every iteration exercises the real
+update path. Every build is a distinct version such as
+`0.0.0-dev.1284+g1a2b3c4d5e.dirty.b0123456789` and shows its channel and commit in
+the window title and under Settings → About.
+
+```sh
+cargo dev                        # build, install, launch or relaunch
+cargo dev stage                  # build and install without launching
+cargo dev --profile performance  # optimized rendering (or --release)
+cargo dev where                  # dev root, active version, build identity
+cargo dev prune --keep 1         # drop superseded dev versions
+cargo dev --root /abs/path       # a separate dev installation (or ARTISAN_DEV_ROOT)
+```
+
+Previous versions stay installed for rollback (three by default, `--keep N`).
+`CARGO_TARGET_DIR` is respected; do not share target directories across
+worktrees.
 
 For automatic activation, install direnv, add its hook to your shell, and run
 `direnv allow` in this checkout. `.envrc` enters the flake shell; it does not build
@@ -32,15 +54,14 @@ Nix builder concurrency is separate: on this WSL machine use `--max-jobs 1 --cor
 
 ```sh
 nix build .#development --max-jobs 1 --cores 2
-nix run .#dev -- --stage-only
 nix run .#dev
 nix build .#release --max-jobs 1 --cores 2
 nix run .#editor
 ```
 
-The `dev` and `editor` apps use the existing staging launcher and keep state under
-`${XDG_STATE_HOME:-$HOME/.local/state}/artisan/{dev,release}`. Set `ARTISAN_DEV_DIR`
-to an absolute path to override it. Store outputs remain immutable. Individual
+The `dev`, `performance`, and `editor` apps install their prebuilt binaries into
+the same Artisan Street Dev installation as `cargo dev` (the root honors
+`ARTISAN_DEV_ROOT`) and launch it. Store outputs remain immutable. Individual
 raw `editor`, `forge`, `ae`, and `installer` packages are also available;
 use the layout-aware app to launch the Editor. Helpers (`dev-launcher`,
 `payload-manifest-generator`, `release-tool`, `capnp-codegen`) build independently.
@@ -163,7 +184,11 @@ restrictions may limit perf. See [native performance](../native-performance.md).
 ## Windows, CI, caches and deployment
 
 Native Windows uses Rust 1.98, Visual Studio C++ tools, Python 3.11+ and
-`scripts/dev.ps1`. Nix manages WSL/Linux dependencies; the Windows SDK and Win32
+`scripts/dev.ps1`, which imports the Visual Studio environment and runs
+`cargo dev` (`-StageOnly`, `-Performance`, `-Release`; other arguments pass
+through). A checkout reached over `\\wsl.localhost` builds under
+`%LOCALAPPDATA%\Artisan Street Dev\build\<checkout-id>` because Cargo cannot
+use a target directory on a network share. Nix manages WSL/Linux dependencies; the Windows SDK and Win32
 capture remain native. CI runs a Windows Cargo lane and independent Linux flake
 checks. Artifact jobs depend on both passing. Manual desktop workflows require
 self-hosted runners labelled `artisan-desktop`, logged into a real desktop;

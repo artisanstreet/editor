@@ -1,31 +1,52 @@
-//! Command-line parsing for the native dev launcher.
+//! Command-line parsing for the native dev runner.
 //!
-//! The launcher accepts exactly three flags; anything else fails closed
-//! with usage text so a typo never stages half a home.
+//! Unknown commands and flags fail closed with usage text, so a typo never
+//! builds or installs half a payload.
 
 use std::{ffi::OsString, path::PathBuf};
 
 use crate::error::DevError;
+
+/// Default number of inactive dev versions kept for rollback.
+pub const DEFAULT_KEEP: usize = 3;
+
+/// What the runner was asked to do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Command {
+    /// Build, install, and launch (or relaunch) the dev Editor.
+    Run,
+    /// Build and install without launching.
+    Stage,
+    /// Print the dev root, active version, and build identity.
+    Where,
+    /// Remove superseded dev versions.
+    Prune,
+}
 
 /// What the argument parser decided.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
     /// Print usage text.
     Help,
-    /// Run the dev stages.
-    Run(DevArgs),
+    /// Execute one command.
+    Execute(DevArgs),
 }
 
 /// Parsed `dev` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DevArgs {
-    /// Explicit dev directory; defaults to `<workspace>/.dist/dev`.
-    pub dev_dir: Option<PathBuf>,
-    /// Explicit directory holding prebuilt `ae`/`editor`/`forge`/`installer`
-    /// binaries; defaults to the directory containing the launcher.
+    /// Requested command.
+    pub command: Command,
+    /// Explicit development root; defaults to the per-user `Artisan Street Dev`.
+    pub root: Option<PathBuf>,
+    /// Cargo profile to build, or that prebuilt `--bin-dir` binaries were
+    /// built with; `None` means `dev` (or, for `--bin-dir`, the profile
+    /// named by the Cargo output directory).
+    pub profile: Option<String>,
+    /// Prebuilt binaries to install instead of building.
     pub bin_dir: Option<PathBuf>,
-    /// Stage and provision only; do not launch the Editor.
-    pub stage_only: bool,
+    /// Inactive versions kept after an install or prune.
+    pub keep: usize,
 }
 
 impl DevArgs {
@@ -33,52 +54,88 @@ impl DevArgs {
     ///
     /// # Errors
     ///
-    /// Returns [`DevError::Usage`] for unknown flags or missing values.
+    /// Returns [`DevError::Usage`] for unknown commands, unknown flags, or
+    /// missing and malformed values.
     pub fn parse(argv: &[OsString]) -> Result<Action, DevError> {
         let mut options = Self {
-            dev_dir: None,
+            command: Command::Run,
+            root: None,
+            profile: None,
             bin_dir: None,
-            stage_only: false,
+            keep: DEFAULT_KEEP,
         };
-        let mut rest = argv.iter();
+        let usage = |reason: String| DevError::Usage { reason };
+        let mut rest = argv.iter().peekable();
+        if let Some(first) = rest
+            .peek()
+            .map(|value| value.to_string_lossy().into_owned())
+            && !first.starts_with('-')
+        {
+            options.command = match first.as_str() {
+                "run" => Command::Run,
+                "stage" => Command::Stage,
+                "where" => Command::Where,
+                "prune" => Command::Prune,
+                other => return Err(usage(format!("unknown command `{other}`"))),
+            };
+            rest.next();
+        }
         while let Some(flag) = rest.next() {
             let flag = flag.to_string_lossy();
+            let mut value = |name: &str| {
+                rest.next()
+                    .ok_or_else(|| usage(format!("{name} requires a value")))
+            };
             match flag.as_ref() {
                 "-h" | "--help" => return Ok(Action::Help),
-                "--stage-only" => options.stage_only = true,
-                "--dev-dir" => {
-                    let value = rest.next().ok_or_else(|| DevError::Usage {
-                        reason: "--dev-dir requires a path value".to_owned(),
-                    })?;
-                    options.dev_dir = Some(PathBuf::from(value));
+                "--root" => options.root = Some(PathBuf::from(value("--root")?)),
+                "--bin-dir" => options.bin_dir = Some(PathBuf::from(value("--bin-dir")?)),
+                "--profile" => {
+                    options.profile = Some(value("--profile")?.to_string_lossy().into_owned());
                 }
-                "--bin-dir" => {
-                    let value = rest.next().ok_or_else(|| DevError::Usage {
-                        reason: "--bin-dir requires a path value".to_owned(),
-                    })?;
-                    options.bin_dir = Some(PathBuf::from(value));
+                "--release" => options.profile = Some("release".to_owned()),
+                "--keep" => {
+                    options.keep = value("--keep")?
+                        .to_string_lossy()
+                        .parse()
+                        .map_err(|_| usage("--keep requires a number".to_owned()))?;
                 }
-                unknown => {
-                    return Err(DevError::Usage {
-                        reason: format!("unknown flag `{unknown}`"),
-                    });
-                }
+                unknown => return Err(usage(format!("unknown flag `{unknown}`"))),
             }
         }
-        Ok(Action::Run(options))
+        if let Some(profile) = &options.profile
+            && (profile.is_empty()
+                || !profile.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                }))
+        {
+            return Err(usage(format!("invalid profile `{profile}`")));
+        }
+        Ok(Action::Execute(options))
     }
 }
 
-/// Short usage text for `--help`.
+/// Usage text for `--help`.
 #[must_use]
 pub fn usage() -> &'static str {
-    "usage: dev [--dev-dir PATH] [--bin-dir PATH] [--stage-only]\n\
+    "usage: cargo dev [run|stage|where|prune] [--root PATH] [--profile NAME | --release]\n\
+     \x20                [--bin-dir PATH] [--keep N]\n\
      \n\
-     Stage product binaries into <workspace>/.dist/dev, provision the\n\
-     isolated dev home through the existing CLI custody APIs, and launch\n\
-     the staged Editor on its newly owned Forge with startup confirmation.\n\
+     Builds the Artisan binaries, installs them as a signed dev-channel\n\
+     release into the per-user `Artisan Street Dev` installation through the\n\
+     same installer code releases use, and (for `run`) launches the dev\n\
+     Editor, closing any previous dev Editor first.\n\
      \n\
-     --dev-dir PATH  isolated installation root (default: <workspace>/.dist/dev)\n\
-     --bin-dir PATH  directory with prebuilt ae/editor/forge/installer binaries\n\
-     --stage-only    stage and provision without launching the Editor"
+     run             build, install, and launch or relaunch (default)\n\
+     stage           build and install without launching\n\
+     where           print the dev root, active version, and build identity\n\
+     prune           remove superseded dev versions\n\
+     \n\
+     --root PATH     development installation root (default: per-user\n\
+     \x20               `Artisan Street Dev`, or ARTISAN_DEV_ROOT)\n\
+     --profile NAME  Cargo profile to build (default: dev); with --bin-dir,\n\
+     \x20               the profile the binaries were built with\n\
+     --release       shorthand for --profile release\n\
+     --bin-dir PATH  install prebuilt ae/editor/forge/installer binaries\n\
+     --keep N        inactive versions kept for rollback (default: 3)"
 }

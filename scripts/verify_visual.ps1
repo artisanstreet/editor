@@ -1,5 +1,6 @@
 # verify_visual.ps1 - the only acceptance gate that matters.
-# Builds the editor, launches it, waits for the window, captures it to PNG.
+# Installs an identified build (cargo dev stage) or launches -ExePath, waits
+# for the window, and captures it to PNG.
 # Output: evidence\<name>-<timestamp>.png  - attach this path to your report.
 # A task without a capture from THIS script is rejected. Agent claims are not evidence.
 param(
@@ -60,8 +61,17 @@ if ($ExePath) {
   if ($arguments.Count -gt 0) { $launch.ArgumentList = $arguments }
   $proc = Start-Process @launch
 } else {
-  # build + run in one shot; cargo streams build output to stderr, window appears when ready
-  $proc = Start-Process -FilePath 'cargo' -ArgumentList 'run','--locked','--profile','performance','-p','artisan-frontend','--bin','editor' -WorkingDirectory $repo -PassThru
+  # Capture an identified build, never a raw cargo output: install the
+  # optimized build into the dev installation through the shipping
+  # installer, then launch the installed Editor on that root.
+  & (Join-Path $PSScriptRoot 'dev.ps1') -Performance -StageOnly
+  if ($LASTEXITCODE -ne 0) { throw "cargo dev stage failed with exit $LASTEXITCODE" }
+  $where = & (Join-Path $PSScriptRoot 'dev.ps1') where
+  $devRoot = ($where | Select-String -Pattern '^root: (.+)$').Matches[0].Groups[1].Value
+  $installedEditor = ($where | Select-String -Pattern '^editor: (.+)$').Matches[0].Groups[1].Value
+  if (-not $installedEditor) { throw 'cargo dev where reported no installed editor' }
+  $env:ARTISAN_HOME = $devRoot
+  $proc = Start-Process -FilePath $installedEditor -PassThru
 }
 
 # wait for the window (up to 8 min for cold builds)

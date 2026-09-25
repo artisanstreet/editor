@@ -245,8 +245,8 @@ let
     shellApp "artisan-${profile}" [ pkgs.git pkgs.getent ] (
       graphicalEnvironment
       + ''
-        state="''${ARTISAN_DEV_DIR:-''${XDG_STATE_HOME:-$HOME/.local/state}/artisan/${profile}}"
-        exec ${launcher}/bin/dev --bin-dir ${binaries}/bin --dev-dir "$state" "$@"
+        root="''${ARTISAN_DEV_ROOT:-''${XDG_DATA_HOME:-$HOME/.local/share}/Artisan Street Dev}"
+        exec ${launcher}/bin/dev run --bin-dir ${binaries}/bin --profile ${profile} --root "$root" "$@"
       ''
     );
   closure = pkgs.closureInfo {

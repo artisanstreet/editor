@@ -1,47 +1,23 @@
-//! `dev` binary: stage the native development installation and launch it.
+//! `dev` binary (`cargo dev`): build, install, and launch the dev Editor.
 //!
 //! The binary is deliberately thin: every reusable step lives in the
 //! [`native_dev`] library so it stays covered by `tests/native_dev`. Here
-//! only stage printing, Editor process control, and exit code propagation
-//! remain.
+//! only command dispatch, stage printing, Editor process control, and exit
+//! code propagation remain.
 
 #![forbid(unsafe_code)]
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
-use std::path::PathBuf;
-
+use artisan_build_info::{BuildIdentity, BuildInfo};
+use artisan_install::LocalSigner;
 use native_dev::{
-    Action, BinarySet, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, GitState,
-    InstanceOutcome, ReadinessReconcile, StartupWait, WORKSPACE_ENV, clear_stale_receipt,
-    dev_build_info, fresh_receipt_path, locate_binaries, provision_forge_home, provision_manifest,
-    reconcile_stale_readiness, refuse_live_forge, resolve_dev_dir, spawn_editor, stage_line,
-    stage_payload, staged_editor, staged_forge, stop_editor, usage, wait_for_startup,
+    Action, Command, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, GitState,
+    InstanceOutcome, PAYLOAD_DIRECTORY, ReadinessReconcile, StartupWait, Workspace, assemble,
+    clear_stale_receipt, fresh_receipt_path, install_tree, locate_binaries, profile_for_bin_dir,
+    provision_forge_home, reconcile_stale_readiness, resolve_dev_root, spawn_editor, stage_line,
+    staged_editor, staged_forge, stop_editor, usage, wait_for_startup,
 };
-
-/// Checkout the staged binaries were built from: the explicit workspace,
-/// else the working directory (both scripts run from the checkout).
-fn source_checkout() -> PathBuf {
-    std::env::var_os(WORKSPACE_ENV)
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default()
-}
-
-/// Cargo output directory holding the located binaries.
-fn binaries_dir(binaries: &BinarySet) -> PathBuf {
-    binaries
-        .editor
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default()
-}
-
-/// Number of stages in a full stage-and-launch run.
-const FULL_STAGES: u32 = 7;
-
-/// Number of stages in a `--stage-only` run.
-const STAGE_ONLY_STAGES: u32 = 6;
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -60,129 +36,187 @@ enum Outcome {
 }
 
 #[expect(
-    clippy::too_many_lines,
-    reason = "linear stage-by-stage runbook; each stage's error hint stays adjacent to its call"
+    clippy::needless_pass_by_value,
+    reason = "a `map_err` adapter receives the error by value"
 )]
+fn fail(error: DevError) -> Outcome {
+    eprintln!("dev: error: {error}");
+    Outcome::Failure
+}
+
 fn run() -> Result<u8, Outcome> {
     let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let action = DevArgs::parse(&argv).map_err(|error| {
         eprintln!("dev: error: {error}");
-        eprintln!("{}", usage());
         Outcome::Usage
     })?;
-    let Action::Run(options) = action else {
+    let Action::Execute(options) = action else {
         println!("{}", usage());
         return Ok(0);
     };
-    let total = if options.stage_only {
-        STAGE_ONLY_STAGES
-    } else {
-        FULL_STAGES
-    };
-    let fail = |error: DevError| {
-        eprintln!("dev: error: {error}");
-        Outcome::Failure
-    };
+    let root = resolve_dev_root(options.root.as_deref()).map_err(fail)?;
+    let paths = DevPaths::new(&root).map_err(fail)?;
+    match options.command {
+        Command::Where => {
+            report_where(&paths);
+            Ok(0)
+        }
+        Command::Prune => {
+            prune(&paths, options.keep);
+            Ok(0)
+        }
+        Command::Stage | Command::Run => install_and_launch(&options, &paths),
+    }
+}
 
-    let dev_dir = resolve_dev_dir(options.dev_dir.as_deref()).map_err(fail)?;
-    let paths = DevPaths::new(&dev_dir).map_err(fail)?;
+/// Prints where the dev installation lives and what it runs.
+fn report_where(paths: &DevPaths) {
+    println!("root: {}", paths.home.display());
+    match paths.active_version_root() {
+        Ok(version_root) => {
+            let editor = staged_editor(&version_root);
+            println!("editor: {}", editor.display());
+            println!("build: {}", BuildIdentity::for_executable(&editor));
+        }
+        Err(_) => println!("build: nothing installed yet; run `cargo dev`"),
+    }
+}
+
+/// Removes superseded versions, reporting what was kept in use.
+fn prune(paths: &DevPaths, keep: usize) {
+    match artisan_install::prune(&paths.home, keep) {
+        Ok(report) => {
+            for version in &report.removed {
+                println!("dev: pruned {version}");
+            }
+            for version in &report.in_use {
+                println!("dev: kept {version} (in use)");
+            }
+        }
+        Err(error) => eprintln!("dev: warning: prune skipped: {error}"),
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear stage-by-stage runbook; each stage's error hint stays adjacent to its call"
+)]
+fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome> {
+    let launch = options.command == Command::Run;
+    let total = if launch { 7 } else { 5 };
+    // Prebuilt binaries (for example from Nix) need no Cargo workspace;
+    // building does.
+    let workspace = match (Workspace::locate(), &options.bin_dir) {
+        (Ok(workspace), _) => Some(workspace),
+        (Err(_), Some(_)) => None,
+        (Err(error), None) => return Err(fail(error)),
+    };
+    let (bin_dir, profile) = match (&options.bin_dir, &workspace) {
+        (Some(bin_dir), _) => (
+            bin_dir.clone(),
+            options
+                .profile
+                .clone()
+                .unwrap_or_else(|| profile_for_bin_dir(bin_dir)),
+        ),
+        (None, Some(workspace)) => {
+            let profile = options.profile.clone().unwrap_or_else(|| "dev".to_owned());
+            (workspace.build(&profile).map_err(fail)?, profile)
+        }
+        (None, None) => unreachable!("building requires a located workspace"),
+    };
+    let binaries = locate_binaries(Some(&bin_dir)).map_err(fail)?;
     println!(
         "{}",
         stage_line(
             1,
             total,
-            "resolve",
-            &format!("dev home {}", paths.home.display())
+            "build",
+            &format!("{profile} in {}", bin_dir.display())
         )
     );
 
-    let binaries = locate_binaries(options.bin_dir.as_deref()).map_err(fail)?;
-    println!(
-        "{}",
-        stage_line(2, total, "binaries", &binaries.forge.display().to_string())
-    );
+    let lock = DevLock::acquire(paths).map_err(fail)?;
+    let signer =
+        LocalSigner::load_or_create(&paths.home).map_err(|error| fail(DevError::Install(error)))?;
+    let (tree, checkout) = match &workspace {
+        Some(workspace) => (
+            workspace.target_directory.join(PAYLOAD_DIRECTORY),
+            workspace.root.clone(),
+        ),
+        None => (
+            paths.runner_dir().join("payload"),
+            std::env::current_dir().unwrap_or_default(),
+        ),
+    };
+    let git = GitState::read(&checkout);
+    let info = assemble(&binaries, &git, &profile, &tree, &signer).map_err(fail)?;
+    println!("{}", stage_line(2, total, "assemble", &info.version));
 
-    let _lock = DevLock::acquire(&paths).map_err(fail)?;
-    refuse_live_forge(&paths, &staged_forge(&paths)).map_err(fail)?;
-    println!("{}", stage_line(3, total, "lock", "staging lock held"));
-    let outcome = provision_forge_home(&paths).map_err(fail)?;
+    install_tree(paths, &tree, &signer).map_err(|error| {
+        eprintln!("dev: error: {error}");
+        eprintln!("dev: hint: the previously active version is untouched");
+        Outcome::Failure
+    })?;
+    println!("{}", stage_line(3, total, "install", &describe(&info)));
+
+    let outcome = provision_forge_home(paths).map_err(fail)?;
     let detail = match outcome {
         InstanceOutcome::Created => "fresh identity minted",
         InstanceOutcome::Preserved => "identity and data preserved",
     };
     println!("{}", stage_line(4, total, "provision", detail));
-
-    let identity = dev_build_info(
-        &GitState::read(&source_checkout()),
-        &binaries_dir(&binaries),
-    );
-    let counts = stage_payload(&binaries, Some(&identity), &paths).map_err(|error| {
-        eprintln!("dev: error: {error}");
-        eprintln!("dev: hint: the active version is untouched; fix the cause and retry");
-        Outcome::Failure
-    })?;
+    prune(paths, options.keep);
     println!(
         "{}",
-        stage_line(
-            5,
-            total,
-            "stage",
-            &format!(
-                "{} rewritten, {} reused; {}",
-                counts.rewritten, counts.reused, identity.version
-            ),
-        )
+        stage_line(5, total, "prune", &format!("keep {}", options.keep))
     );
 
-    provision_manifest(&paths).map_err(fail)?;
-    println!(
-        "{}",
-        stage_line(6, total, "manifest", "verified by shipping loader")
-    );
-
-    if options.stage_only {
+    let version_root = paths.active_version_root().map_err(fail)?;
+    let editor = staged_editor(&version_root);
+    if !launch {
         println!(
-            "dev: staged without launch; run with ARTISAN_HOME={} {}",
+            "dev: installed without launch; run with {}={} {}",
+            native_dev::DEV_HOME_ENV,
             paths.home.display(),
-            staged_editor(&paths).display()
+            editor.display()
         );
         return Ok(0);
     }
-
-    // `_lock` stays held for the whole owned Editor lifetime: another
-    // runner must not stage or start on this home before the Forge receipt
-    // exists. It releases when this process exits; the Editor child never
-    // acquires it.
-    let receipt_path = fresh_receipt_path(&paths);
+    let receipt_path = fresh_receipt_path(paths);
     clear_stale_receipt(&receipt_path).map_err(fail)?;
-    let editor = staged_editor(&paths);
-    let forge = staged_forge(&paths);
-    match reconcile_stale_readiness(&paths, &forge).map_err(fail)? {
+    match reconcile_stale_readiness(paths, &staged_forge(&version_root)).map_err(fail)? {
         ReadinessReconcile::Absent => {}
         ReadinessReconcile::CleanedStale { pid } => {
             println!("dev: removed stale readiness of dead forge pid {pid}");
         }
     }
     println!(
-        "dev: launching staged editor {} on its owned forge (close the window to stop)",
-        editor.display()
+        "{}",
+        stage_line(6, total, "launch", &editor.display().to_string())
     );
     let mut child = spawn_editor(&editor, &paths.home, &receipt_path).map_err(fail)?;
-    match wait_for_startup(
+    // Installs and launches are serialized only up to here: the lock is
+    // never held for the Editor's lifetime, so the next `cargo dev` can
+    // retire this Editor and relaunch its new build.
+    drop(lock);
+    let startup = wait_for_startup(
         &mut child,
         &receipt_path,
         Duration::from_millis(DEV_STARTUP_TIMEOUT_MS),
-    ) {
+    );
+    let _ = std::fs::remove_file(&receipt_path);
+    match startup {
         StartupWait::Ready { stage } => {
             println!("{}", stage_line(7, total, "startup", &stage));
         }
         StartupWait::Failed { stage, reason } => {
-            stop_editor(child);
+            let _ = stop_editor(child);
             eprintln!("dev: stage 7/{total} startup ... failed ({stage}: {reason})");
             return Err(Outcome::Failure);
         }
         StartupWait::Timeout => {
-            stop_editor(child);
+            let _ = stop_editor(child);
             eprintln!(
                 "dev: stage 7/{total} startup ... failed (no receipt within {}s)",
                 DEV_STARTUP_TIMEOUT_MS / 1_000
@@ -197,22 +231,43 @@ fn run() -> Result<u8, Outcome> {
             return Err(Outcome::Failure);
         }
     }
+    wait_for_exit(child, &version_root)
+}
+
+/// Follows the dev Editor until it exits, including when a later run
+/// retires it for a newer build.
+fn wait_for_exit(mut child: std::process::Child, version_root: &Path) -> Result<u8, Outcome> {
     let status = child.wait().map_err(|_| {
-        eprintln!("dev: error: cannot wait for the staged editor");
+        eprintln!("dev: error: cannot wait for the dev editor");
         Outcome::Failure
     })?;
     match status.code() {
         Some(0) => {
-            println!("{}", stage_line(7, total, "editor", "exit 0"));
+            println!("dev: editor from {} exited", version_root.display());
             Ok(0)
         }
         Some(code) => {
-            eprintln!("dev: stage 7/{total} editor ... failed (exit {code})");
+            eprintln!("dev: editor exited with {code}");
             Ok(u8::try_from(code).unwrap_or(1))
         }
         None => {
-            eprintln!("dev: stage 7/{total} editor ... failed (terminated by signal)");
+            eprintln!("dev: editor terminated by signal");
             Err(Outcome::Failure)
         }
+    }
+}
+
+fn describe(info: &BuildInfo) -> String {
+    match info.short_commit() {
+        Some(commit) => format!(
+            "{} channel, commit {commit}{}",
+            info.channel.as_str(),
+            if info.dirty {
+                " with local changes"
+            } else {
+                ""
+            }
+        ),
+        None => format!("{} channel", info.channel.as_str()),
     }
 }

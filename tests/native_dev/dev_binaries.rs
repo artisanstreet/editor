@@ -53,3 +53,31 @@ fn explicit_directory_reports_every_missing_binary() {
     assert!(message.contains("--bin-dir"), "unexpected: {message}");
     cleanup(&directory);
 }
+
+#[test]
+fn only_cargo_run_package_variables_are_stripped_from_inner_builds() {
+    for injected in [
+        "OUT_DIR",
+        "CARGO_MANIFEST_DIR",
+        "CARGO_MANIFEST_PATH",
+        "CARGO_PKG_VERSION",
+        "CARGO_PKG_NAME",
+        "CARGO_PRIMARY_PACKAGE",
+        "CARGO_BIN_NAME",
+    ] {
+        assert!(native_dev::is_cargo_run_variable(injected), "{injected}");
+    }
+    for configuration in [
+        "CARGO",
+        "CARGO_HOME",
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_JOBS",
+        "CARGO_PROFILE_DEV_DEBUG",
+        "CARGO_INCREMENTAL",
+    ] {
+        assert!(
+            !native_dev::is_cargo_run_variable(configuration),
+            "{configuration}"
+        );
+    }
+}
