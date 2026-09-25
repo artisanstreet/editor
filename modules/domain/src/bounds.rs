@@ -109,8 +109,13 @@ pub const MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES: usize = 12 * 1024 * 1024;
 /// Maximum size of one image as the user picked it, uploaded to the Forge's
 /// composer attachment store. The Forge rescales and re-encodes it for the
 /// thread's engine when the message is sent, where the message bounds above
-/// apply; this bound keeps one upload inside one transport frame.
-pub const COMPOSER_ATTACHMENT_MAX_BYTES: usize = 12 * 1024 * 1024;
+/// apply. It crosses the wire in chunks of at most
+/// [`COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES`], so it is not bound to one frame.
+pub const COMPOSER_ATTACHMENT_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// Maximum size of one chunk of an uploaded or read-back composer
+/// attachment; comfortably inside one transport frame.
+pub const COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Maximum aggregate size of the images one composer draft references.
 pub const COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES: usize =

@@ -5141,12 +5141,20 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
     let (_temporary, storage) = opened_storage("draft-attachment").await;
     seed_conversation(storage.repository(), "thread-attach", "attach").await;
     let handler = RequestHandler::new(storage.repository().clone());
-    let bytes = vec![0x89, 0x50, 0x4e, 0x47, 7];
+    // The thread runs an engine, so a sent image is fitted to it; a GIF
+    // passes through untouched.
+    let bytes = vec![
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+    ];
     let upload = ClientRequest::Command(Command::UploadComposerAttachment(
         artisan_domain::UploadComposerAttachment {
             request_id: request("request-upload"),
-            image: artisan_domain::ComposerImage::new("image/png", bytes.clone(), "chart.png")
-                .expect("valid image"),
+            upload: artisan_domain::ComposerUpload::Image(
+                artisan_domain::ComposerImage::new("image/gif", bytes.clone(), "chart.gif")
+                    .expect("valid image"),
+            ),
         },
     ));
     let response = handler
@@ -5157,8 +5165,8 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
         panic!("expected an upload acknowledgement");
     };
     let reference = uploaded.reference;
-    assert_eq!(reference.name(), "chart.png");
-    assert_eq!(reference.size_bytes(), 5);
+    assert_eq!(reference.name(), "chart.gif");
+    assert_eq!(reference.size_bytes(), 43);
 
     let save = save_draft_command(
         "request-draft-image",
@@ -5180,9 +5188,7 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
         .respond(
             &request("request-read-attachment"),
             &ClientRequest::Query(Query::ReadComposerAttachment(
-                artisan_domain::ReadComposerAttachment {
-                    digest: *reference.digest(),
-                },
+                artisan_domain::ReadComposerAttachment::whole(*reference.digest()),
             )),
         )
         .await
@@ -5226,7 +5232,7 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
         panic!("expected message image bytes");
     };
     assert_eq!(image.bytes, bytes);
-    assert_eq!(image.reference.name, "chart.png");
+    assert_eq!(image.reference.name, "chart.gif");
 
     // A retried stored send replays the original receipt.
     let replay = queued_message_of(

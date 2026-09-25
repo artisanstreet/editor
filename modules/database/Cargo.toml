@@ -119,6 +119,10 @@ name = "user_preferences"
 path = "../../tests/database/user_preferences.rs"
 
 [[test]]
+name = "composer_attachment_upload"
+path = "../../tests/database/composer_attachment_upload.rs"
+
+[[test]]
 name = "run_usage"
 path = "../../tests/database/run_usage.rs"
 

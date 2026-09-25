@@ -6,8 +6,8 @@ use super::*;
 use crate::native_transport_service::{ComposerDraftCommand, ComposerDraftEvent};
 use artisan_domain::{
     AuthoredText, ComposerAttachmentDigest, ComposerAttachmentRef, ComposerDraft,
-    ComposerDraftRevision, ComposerDraftScope, ImageAttachment, ImageMimeType, QueueMessagePayload,
-    SaveComposerDraft, UnixMillis,
+    ComposerDraftRevision, ComposerDraftScope, ComposerUpload, ImageAttachment, ImageMimeType,
+    QueueMessagePayload, SaveComposerDraft, UnixMillis,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -159,7 +159,10 @@ fn recall_image(cx: &mut TestAppContext, view: &View) -> (String, Vec<ComposerDr
                 command,
                 ..
             } => {
-                assert_eq!(command.image.bytes(), ONE_PIXEL_PNG);
+                let ComposerUpload::Image(image) = &command.upload else {
+                    panic!("a small image uploads whole");
+                };
+                assert_eq!(image.bytes(), ONE_PIXEL_PNG);
                 Some(attachment_id.clone())
             }
             _ => None,

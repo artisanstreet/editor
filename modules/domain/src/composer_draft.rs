@@ -17,10 +17,11 @@ use std::fmt;
 
 use thiserror::Error;
 
+#[cfg(test)]
+use crate::bounds::MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES;
 use crate::bounds::{
     COMPOSER_ATTACHMENT_MAX_BYTES, COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES,
-    MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
-    MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
+    MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
 };
 use crate::commands::SteerTarget;
 use crate::identifiers::{ProjectId, RequestId, ThreadId};
@@ -486,58 +487,13 @@ impl ComposerImage {
     }
 }
 
-/// Stores one image in the Forge composer attachment store.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UploadComposerAttachment {
-    /// Client request identity.
-    pub request_id: RequestId,
-    /// The image as picked, with its authored display name.
-    pub image: ComposerImage,
-}
-
-/// Acknowledgement of one stored attachment.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ComposerAttachmentUploaded {
-    /// Client request identity echoed by the enclosing response.
-    pub request_id: RequestId,
-    /// Reference naming the stored bytes under the uploaded display name.
-    pub reference: ComposerAttachmentRef,
-}
-
-/// Reads the bytes of one stored attachment.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ReadComposerAttachment {
-    /// Store key.
-    pub digest: ComposerAttachmentDigest,
-}
-
-/// Bytes of one stored attachment.
-#[derive(Clone, Eq, PartialEq)]
-pub struct ComposerAttachmentResult {
-    /// Store key.
-    pub digest: ComposerAttachmentDigest,
-    /// Stored MIME type.
-    pub mime_type: ImageMimeType,
-    /// Encoded image bytes.
-    pub bytes: Vec<u8>,
-}
-
-impl fmt::Debug for ComposerAttachmentResult {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ComposerAttachmentResult")
-            .field("digest", &self.digest)
-            .field("mime_type", &self.mime_type)
-            .field("bytes_len", &self.bytes.len())
-            .finish()
-    }
-}
-
 /// Queues one message whose images are stored composer attachments.
 ///
-/// The Forge resolves every reference to its stored bytes and then admits
-/// the resulting message exactly like [`crate::QueueMessage`], so replay,
+/// The Forge resolves every reference to its stored bytes, fits the images
+/// to the thread's engine exactly as a draft send does, and then admits the
+/// resulting message exactly like [`crate::QueueMessage`], so replay,
 /// idempotency, and dispatch are unchanged; only the bytes stay off the wire.
+/// References may therefore name any image the store holds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueueStoredMessage {
     request_id: RequestId,
@@ -564,11 +520,7 @@ impl QueueStoredMessage {
         if attachments.is_empty() {
             return Err(ComposerDraftError::NoStoredAttachments);
         }
-        validate_references(
-            &attachments,
-            MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
-            MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
-        )?;
+        validate_draft_references(&attachments)?;
         Ok(Self {
             request_id,
             thread_id,
@@ -635,9 +587,9 @@ pub enum ComposerDraftError {
         /// Supplied count.
         count: usize,
     },
-    /// The aggregate attachment size exceeded the message bound.
+    /// The aggregate attachment size exceeded the composer store bound.
     #[error(
-        "composer draft attachments total {total} bytes; the maximum is {MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES}"
+        "composer draft attachments total {total} bytes; the maximum is {COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES}"
     )]
     AttachmentsTooLarge {
         /// Supplied total.
@@ -698,6 +650,8 @@ mod tests {
             ),
             Err(ComposerDraftError::TooManyAttachments { .. })
         ));
+        // A message sent by reference may name any stored image: the Forge
+        // fits it to the engine.
         let large = u32::try_from(MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES).unwrap();
         assert!(matches!(
             QueueStoredMessage::new(
@@ -711,7 +665,7 @@ mod tests {
                 ],
                 None,
             ),
-            Err(ComposerDraftError::AttachmentsTooLarge { .. })
+            Ok(_)
         ));
         assert_eq!(
             format!("{}", ComposerAttachmentDigest::new([0xab; 32])).len(),

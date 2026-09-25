@@ -2,11 +2,12 @@
 //! stored-attachment messages.
 
 use artisan_domain::{
-    AuthoredText, Command, ComposerAttachmentDigest, ComposerAttachmentRef,
-    ComposerAttachmentResult, ComposerAttachmentUploaded, ComposerDraft, ComposerDraftResult,
-    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, ComposerImage, ImageMimeType,
-    ProjectId, Query, QueueStoredMessage, ReadComposerAttachment, ReadComposerDraft, RequestId,
-    RunId, SaveComposerDraft, SteerTarget, ThreadId, UnixMillis, UploadComposerAttachment,
+    AuthoredText, Command, ComposerAttachmentChunk, ComposerAttachmentDigest,
+    ComposerAttachmentRef, ComposerAttachmentResult, ComposerAttachmentUploaded, ComposerDraft,
+    ComposerDraftResult, ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope,
+    ComposerImage, ComposerUpload, ImageMimeType, ProjectId, Query, QueueStoredMessage,
+    ReadComposerAttachment, ReadComposerDraft, RequestId, RunId, SaveComposerDraft, SteerTarget,
+    ThreadId, UnixMillis, UploadComposerAttachment,
 };
 use artisan_protocol::{
     ClientRequest, FrameId, ProtocolVersion, ResponsePayload, ServerResponse, WireEnvelope,
@@ -78,21 +79,33 @@ fn draft_requests_round_trip_both_scopes_text_and_ordered_references() {
     round_trip(WireEnvelopeBody::Request(ClientRequest::Query(
         Query::ReadComposerAttachment(ReadComposerAttachment {
             digest: ComposerAttachmentDigest::new([5; 32]),
+            offset: 4096,
+            max_bytes: 1024,
         }),
     )));
     round_trip(WireEnvelopeBody::Request(ClientRequest::Command(
         Command::UploadComposerAttachment(UploadComposerAttachment {
             request_id: request_id(),
-            image: ComposerImage::new("image/png", vec![1, 2, 3], "paste.png").unwrap(),
+            upload: ComposerUpload::Image(
+                ComposerImage::new("image/png", vec![1, 2, 3], "paste.png").unwrap(),
+            ),
         }),
     )));
-    // A picked image larger than a message image still uploads: the Forge
-    // fits it to the thread's engine when the draft is sent.
-    let large = vec![7; artisan_domain::MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES + 1];
+    // A picked image larger than one frame uploads chunk by chunk: the
+    // Forge assembles it and fits it to the thread's engine when it is sent.
+    let chunk = ComposerAttachmentChunk::new(
+        ComposerAttachmentDigest::new([8; 32]),
+        ImageMimeType::Png,
+        "screenshot.png",
+        u32::try_from(artisan_domain::COMPOSER_ATTACHMENT_MAX_BYTES).unwrap(),
+        u32::try_from(artisan_domain::COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES).unwrap(),
+        vec![7; artisan_domain::COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES],
+    )
+    .unwrap();
     round_trip(WireEnvelopeBody::Request(ClientRequest::Command(
         Command::UploadComposerAttachment(UploadComposerAttachment {
             request_id: request_id(),
-            image: ComposerImage::new("image/png", large, "screenshot.png").unwrap(),
+            upload: ComposerUpload::Chunk(chunk),
         }),
     )));
     assert!(
@@ -162,6 +175,7 @@ fn draft_responses_round_trip_and_absent_drafts_stay_absent() {
         ComposerAttachmentUploaded {
             request_id: request_id(),
             reference: reference(6, "uploaded.webp"),
+            pending_bytes: 4096,
         },
     )));
     round_trip(response(ResponsePayload::ComposerAttachment(
@@ -169,6 +183,8 @@ fn draft_responses_round_trip_and_absent_drafts_stay_absent() {
             digest: ComposerAttachmentDigest::new([6; 32]),
             mime_type: ImageMimeType::Webp,
             bytes: vec![9; 12],
+            total_bytes: 40,
+            offset: 28,
         },
     )));
 }
@@ -185,6 +201,7 @@ fn receipts_must_echo_the_enclosing_request() {
         ResponsePayload::ComposerAttachmentUploaded(ComposerAttachmentUploaded {
             request_id: other.clone(),
             reference: reference(1, "a.webp"),
+            pending_bytes: 0,
         }),
     ] {
         assert!(encode_envelope(&envelope(response(payload))).is_err());

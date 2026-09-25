@@ -3,11 +3,7 @@ use artisan_domain::ComposerAttachmentDigest;
 use super::*;
 
 fn picked(mime_type: ImageMimeType, bytes: Vec<u8>) -> ComposerAttachmentResult {
-    ComposerAttachmentResult {
-        digest: ComposerAttachmentDigest::new([1; 32]),
-        mime_type,
-        bytes,
-    }
+    ComposerAttachmentResult::whole(ComposerAttachmentDigest::new([1; 32]), mime_type, bytes)
 }
 
 fn png(width: u32, height: u32) -> Vec<u8> {

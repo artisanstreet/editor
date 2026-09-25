@@ -37,7 +37,7 @@ impl MigrationTrait for Migration {
     }
 }
 
-async fn rebuild(
+pub(super) async fn rebuild(
     connection: &SchemaManagerConnection<'_>,
     max_bytes: i64,
     keep_at_most: Option<i64>,

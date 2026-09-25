@@ -599,7 +599,9 @@ async fn draft_with_picked_image(
 ) -> ComposerDraftRevision {
     let upload = artisan_domain::UploadComposerAttachment {
         request_id: request("upload-picked"),
-        image: artisan_domain::ComposerImage::new(mime_type, bytes, name).unwrap(),
+        upload: artisan_domain::ComposerUpload::Image(
+            artisan_domain::ComposerImage::new(mime_type, bytes, name).unwrap(),
+        ),
     };
     let ResponsePayload::ComposerAttachmentUploaded(uploaded) = handler
         .upload_composer_attachment(&upload.request_id, &upload)
@@ -720,4 +722,79 @@ async fn an_image_the_engine_cannot_take_refuses_the_send_and_keeps_the_draft() 
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn a_large_picked_image_uploads_in_chunks_and_a_stored_message_fits_it() {
+    let (_temporary, storage) = storage("stored-fitted").await;
+    seed(storage.repository()).await;
+    let handler = handler(&storage);
+    // Noise does not compress: the picked PNG is larger than one chunk and
+    // than a message image, and wider than the long-edge cap.
+    let noise = image::RgbaImage::from_fn(4000, 500, |x, y| {
+        let value = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)).to_le_bytes();
+        image::Rgba([value[0], value[1], value[2], 255])
+    });
+    let mut picked = Vec::new();
+    image::DynamicImage::ImageRgba8(noise)
+        .write_to(
+            &mut std::io::Cursor::new(&mut picked),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    assert!(picked.len() > artisan_domain::COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES);
+    let image = artisan_domain::ComposerImage::new("image/png", picked, "noise.png").unwrap();
+    let digest = artisan_domain::ComposerAttachmentDigest::new(
+        <sha2::Sha256 as sha2::Digest>::digest(image.bytes()).into(),
+    );
+    let mut reference = None;
+    for (index, chunk) in artisan_domain::ComposerAttachmentChunk::split(&image, digest)
+        .into_iter()
+        .enumerate()
+    {
+        let upload = artisan_domain::UploadComposerAttachment {
+            request_id: request(&format!("upload-chunk-{index}")),
+            upload: artisan_domain::ComposerUpload::Chunk(chunk),
+        };
+        let ResponsePayload::ComposerAttachmentUploaded(uploaded) = handler
+            .upload_composer_attachment(&upload.request_id, &upload)
+            .await
+            .unwrap()
+            .payload
+        else {
+            panic!("expected an upload answer");
+        };
+        reference = Some(uploaded);
+    }
+    let uploaded = reference.expect("chunks were sent");
+    assert_eq!(uploaded.pending_bytes, 0);
+    let queue = artisan_domain::QueueStoredMessage::new(
+        request("send-stored"),
+        thread(),
+        None,
+        vec![uploaded.reference],
+        None,
+    )
+    .unwrap();
+    let response = handler
+        .queue_stored_message_outcome(queue.request_id(), &queue)
+        .await
+        .expect("the fitted image is sent");
+    assert!(matches!(
+        response.payload,
+        ResponsePayload::MessageQueued(_)
+    ));
+    let queued = storage
+        .repository()
+        .read_queued_messages(
+            ListQueuedMessages::new(thread(), QueuedMessageListOrder::OldestFirst, 32).unwrap(),
+        )
+        .await
+        .unwrap();
+    let sent = queued
+        .messages()
+        .last()
+        .expect("the stored message is queued");
+    let size = usize::try_from(sent.attachments[0].size_bytes).unwrap();
+    assert!(size <= artisan_domain::MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES);
 }

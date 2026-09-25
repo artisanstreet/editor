@@ -44,7 +44,7 @@ pub(super) const ATTACHMENT_TOTAL_LIMIT_MESSAGE: &str =
     "Attached images together are too large to keep in one draft.";
 pub(super) const ATTACHMENT_UNSUPPORTED_FORMAT_MESSAGE: &str =
     "That file is not a JPEG, PNG, WebP, or GIF image.";
-pub(super) const ATTACHMENT_TOO_LARGE_MESSAGE: &str = "That image exceeds the 12 MiB upload limit.";
+pub(super) const ATTACHMENT_TOO_LARGE_MESSAGE: &str = "That image exceeds the 32 MiB upload limit.";
 
 /// The exact typed image upload seam needed by the native transport follow-up.
 ///

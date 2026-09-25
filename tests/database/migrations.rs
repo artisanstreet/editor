@@ -38,6 +38,7 @@ const FAILED_MESSAGE_RECOVERIES_MIGRATION: &str = "m20260926_000016_failed_messa
 const DRAFT_SUBMISSIONS_MIGRATION: &str = "m20260927_000017_composer_draft_submissions";
 const ATTACHMENT_SOURCES_MIGRATION: &str = "m20260928_000018_composer_attachment_sources";
 const USER_PREFERENCES_MIGRATION: &str = "m20260929_000019_user_preferences";
+const CHUNKED_ATTACHMENTS_MIGRATION: &str = "m20260930_000020_chunked_composer_attachments";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -124,7 +125,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        19
+        20
     );
     first
         .execute_unprepared(
@@ -158,7 +159,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        19
+        20
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -231,7 +232,8 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             FAILED_MESSAGE_RECOVERIES_MIGRATION.to_string(),
             DRAFT_SUBMISSIONS_MIGRATION.to_string(),
             ATTACHMENT_SOURCES_MIGRATION.to_string(),
-            USER_PREFERENCES_MIGRATION.to_string()
+            USER_PREFERENCES_MIGRATION.to_string(),
+            CHUNKED_ATTACHMENTS_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -254,7 +256,7 @@ async fn attachment_store_keeps_picked_images_and_their_draft_references()
         )
         .await?;
     // A picked image larger than a message image (5 MiB) is stored as it is;
-    // one over the upload bound (12 MiB) is not.
+    // one over the upload bound (32 MiB) is not.
     let insert = |size: i64, digest: u8| {
         format!(
             "INSERT INTO composer_attachments (digest, mime_type, size_bytes, bytes, stored_at_ms) VALUES (x'{}', 'image/png', {size}, zeroblob({size}), 1)",
@@ -262,11 +264,11 @@ async fn attachment_store_keeps_picked_images_and_their_draft_references()
         )
     };
     database
-        .execute_unprepared(&insert(6 * 1024 * 1024, 1))
+        .execute_unprepared(&insert(20 * 1024 * 1024, 1))
         .await?;
     assert!(
         database
-            .execute_unprepared(&insert(12 * 1024 * 1024 + 1, 2))
+            .execute_unprepared(&insert(32 * 1024 * 1024 + 1, 2))
             .await
             .is_err()
     );
@@ -994,7 +996,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
     migrate_to_current(&database).await?;
     assert_eq!(
         scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
-        19
+        20
     );
     for (table, expected) in [
         ("messages", 1),
@@ -1109,7 +1111,7 @@ async fn assert_migrated_schema(
 ) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         scalar_i64(database, "SELECT count(*) FROM seaql_migrations").await?,
-        19,
+        20,
         "migration must record every version exactly once"
     );
     assert_eq!(

@@ -10,8 +10,9 @@
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_domain::{
-    ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult, ComposerDraft,
-    ComposerDraftRevision, ComposerDraftScope, ReadComposerAttachment, ReadComposerDraft,
+    COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES, ComposerAttachmentChunk, ComposerAttachmentDigest,
+    ComposerAttachmentRef, ComposerAttachmentResult, ComposerDraft, ComposerDraftRevision,
+    ComposerDraftScope, ComposerUpload, ReadComposerAttachment, ReadComposerDraft,
     SaveComposerDraft, UploadComposerAttachment,
 };
 
@@ -112,7 +113,11 @@ pub(super) enum ComposerDraftExpectation {
     },
     Draft(ComposerDraftScope),
     Uploaded(RequestId),
-    Attachment(ComposerAttachmentDigest),
+    /// One window of a stored attachment, starting at the offset asked.
+    Attachment {
+        digest: ComposerAttachmentDigest,
+        offset: u32,
+    },
 }
 
 impl ComposerDraftExpectation {
@@ -126,9 +131,8 @@ impl ComposerDraftExpectation {
             (Self::Uploaded(request_id), ResponsePayload::ComposerAttachmentUploaded(uploaded)) => {
                 &uploaded.request_id == request_id
             }
-            (Self::Attachment(digest), ResponsePayload::ComposerAttachment(result)) => {
-                &result.digest == digest
-                    && Sha256::digest(&result.bytes).as_slice() == digest.as_bytes()
+            (Self::Attachment { digest, offset }, ResponsePayload::ComposerAttachment(result)) => {
+                &result.digest == digest && result.offset == *offset
             }
             _ => false,
         }
@@ -168,20 +172,7 @@ pub(super) async fn handle_composer_draft_command(
             attachment_id,
             command,
         } => {
-            let request_id = command.request_id.clone();
-            let expected = ComposerDraftExpectation::Uploaded(request_id.clone());
-            let result = mutate(
-                runtime,
-                frames,
-                &request_id,
-                Command::UploadComposerAttachment(*command),
-                expected,
-            )
-            .await
-            .and_then(|payload| match payload {
-                ResponsePayload::ComposerAttachmentUploaded(uploaded) => Ok(uploaded.reference),
-                _ => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
-            });
+            let result = upload(runtime, frames, *command).await;
             ComposerDraftEvent::Uploaded {
                 scope,
                 attachment_id,
@@ -189,20 +180,7 @@ pub(super) async fn handle_composer_draft_command(
             }
         }
         ComposerDraftCommand::ReadAttachment { scope, digest } => {
-            let result = runtime
-                .request(
-                    frames,
-                    query_request(Query::ReadComposerAttachment(ReadComposerAttachment {
-                        digest,
-                    })),
-                    ExpectedResponse::ComposerDraft(ComposerDraftExpectation::Attachment(digest)),
-                )
-                .await
-                .map_err(ServiceFailure::from)
-                .and_then(|payload| match payload {
-                    ResponsePayload::ComposerAttachment(result) => Ok(Box::new(result)),
-                    _ => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
-                });
+            let result = read_attachment(runtime, frames, digest).await.map(Box::new);
             ComposerDraftEvent::AttachmentRead {
                 scope,
                 digest,
@@ -279,3 +257,168 @@ async fn mutate(
     .await
     .map_err(ServiceFailure::from)
 }
+
+/// Stores one picked image and answers its reference once every byte is
+/// stored.
+async fn upload(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    command: UploadComposerAttachment,
+) -> Result<ComposerAttachmentRef, ServiceFailure> {
+    let mut stored = None;
+    for request in upload_requests(command)? {
+        stored = Some(upload_one(runtime, frames, request).await?);
+    }
+    match stored {
+        Some((reference, 0)) => Ok(reference),
+        _ => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+    }
+}
+
+/// The requests that store one picked image: the image itself when it fits
+/// one chunk, otherwise its chunks in order under request identities
+/// derived from the stable one, so a retransmitted upload repeats exactly
+/// the same chunks.
+pub(super) fn upload_requests(
+    command: UploadComposerAttachment,
+) -> Result<Vec<UploadComposerAttachment>, ServiceFailure> {
+    let image = match &command.upload {
+        ComposerUpload::Image(image) if image.byte_len() > COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES => {
+            image
+        }
+        _ => return Ok(vec![command]),
+    };
+    let digest = ComposerAttachmentDigest::new(Sha256::digest(image.bytes()).into());
+    ComposerAttachmentChunk::split(image, digest)
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let request_id = RequestId::parse(format!("{}-chunk-{index}", command.request_id))
+                .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+            Ok(UploadComposerAttachment {
+                request_id,
+                upload: ComposerUpload::Chunk(chunk),
+            })
+        })
+        .collect()
+}
+
+/// Sends one upload request: the reference and the bytes still missing.
+async fn upload_one(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    command: UploadComposerAttachment,
+) -> Result<(ComposerAttachmentRef, u32), ServiceFailure> {
+    let request_id = command.request_id.clone();
+    let expected = ComposerDraftExpectation::Uploaded(request_id.clone());
+    match mutate(
+        runtime,
+        frames,
+        &request_id,
+        Command::UploadComposerAttachment(command),
+        expected,
+    )
+    .await?
+    {
+        ResponsePayload::ComposerAttachmentUploaded(uploaded) => {
+            Ok((uploaded.reference, uploaded.pending_bytes))
+        }
+        _ => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+    }
+}
+
+/// Reads one stored attachment window by window.
+async fn read_attachment(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    digest: ComposerAttachmentDigest,
+) -> Result<ComposerAttachmentResult, ServiceFailure> {
+    let mut readback = AttachmentReadback::new(digest);
+    loop {
+        let read = readback.next_read()?;
+        let expected = ComposerDraftExpectation::Attachment {
+            digest,
+            offset: read.offset,
+        };
+        let window = match runtime
+            .request(
+                frames,
+                query_request(Query::ReadComposerAttachment(read)),
+                ExpectedResponse::ComposerDraft(expected),
+            )
+            .await
+            .map_err(ServiceFailure::from)?
+        {
+            ResponsePayload::ComposerAttachment(window) => window,
+            _ => return Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+        };
+        if let Some(image) = readback.accept(window)? {
+            return Ok(image);
+        }
+    }
+}
+
+/// Joins the windows of one stored attachment and verifies the whole image
+/// against its digest.
+pub(super) struct AttachmentReadback {
+    digest: ComposerAttachmentDigest,
+    bytes: Vec<u8>,
+    mime_type: Option<artisan_domain::ImageMimeType>,
+}
+
+impl AttachmentReadback {
+    pub(super) fn new(digest: ComposerAttachmentDigest) -> Self {
+        Self {
+            digest,
+            bytes: Vec::new(),
+            mime_type: None,
+        }
+    }
+
+    /// The next window to ask for.
+    pub(super) fn next_read(&self) -> Result<ReadComposerAttachment, ServiceFailure> {
+        let invalid = || ServiceFailure::invalid(ServiceFailureStage::Request);
+        Ok(ReadComposerAttachment {
+            digest: self.digest,
+            offset: u32::try_from(self.bytes.len()).map_err(|_| invalid())?,
+            max_bytes: u32::try_from(COMPOSER_ATTACHMENT_CHUNK_MAX_BYTES).map_err(|_| invalid())?,
+        })
+    }
+
+    /// Takes the answered window: the verified image once complete.
+    pub(super) fn accept(
+        &mut self,
+        window: ComposerAttachmentResult,
+    ) -> Result<Option<ComposerAttachmentResult>, ServiceFailure> {
+        let invalid = || ServiceFailure::invalid(ServiceFailureStage::Request);
+        let offset = usize::try_from(window.offset).map_err(|_| invalid())?;
+        if window.digest != self.digest
+            || offset != self.bytes.len()
+            || self
+                .mime_type
+                .is_some_and(|known| known != window.mime_type)
+        {
+            return Err(invalid());
+        }
+        self.mime_type = Some(window.mime_type);
+        self.bytes.extend_from_slice(&window.bytes);
+        let total = usize::try_from(window.total_bytes).map_err(|_| invalid())?;
+        if self.bytes.len() < total {
+            return Ok(None);
+        }
+        if self.bytes.len() != total
+            || Sha256::digest(&self.bytes).as_slice() != self.digest.as_bytes()
+        {
+            return Err(invalid());
+        }
+        Ok(Some(ComposerAttachmentResult::whole(
+            self.digest,
+            window.mime_type,
+            std::mem::take(&mut self.bytes),
+        )))
+    }
+}
+
+#[cfg(test)]
+#[path = "native_composer_draft_transport_tests.rs"]
+mod tests;
