@@ -37,7 +37,7 @@ impl NativeModelSelector {
                 self.theme,
                 engine_asset(&engine),
                 IconSize::Default,
-                IconTint::Muted,
+                IconTint::Inherit,
             ))
             .size(px(16.0))
             .flex_shrink_0(),
@@ -46,7 +46,6 @@ impl NativeModelSelector {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .flex_1()
             .min_w(px(0.0))
             .overflow_hidden();
         let muted = self.theme.colors.muted_foreground.to_paint();
@@ -329,7 +328,10 @@ impl Render for NativeModelSelector {
                 if moved {
                     let scroll = scroll.clone();
                     window.defer(cx, move |window, _| {
-                        scroll.scroll_to_item(0);
+                        scroll.scroll_to(gpui::ListOffset {
+                            item_ix: 0,
+                            offset_in_item: px(0.0),
+                        });
                         window.refresh();
                     });
                 }

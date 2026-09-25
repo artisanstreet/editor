@@ -48,9 +48,10 @@ pub(crate) fn validate_run_choice(
     policy: &NativeModelPolicy,
     saved: Option<&EngineRunConfig>,
 ) -> Result<(), &'static str> {
-    catalog.admit_policy(policy).map_err(
-        |_| "This model is unavailable in the runtime catalog right now. Your draft is preserved; open Settings → Engines to review it, or retry.",
-    )?;
+    catalog.admit_policy(policy).map_err(|error| match error {
+        artisan_catalog::NativePolicyValidationError::StaleCatalog { .. } => "The host model catalog changed. Your draft is preserved; refresh the model selection and retry.",
+        _ => "This model is unavailable in the host catalog. Your draft is preserved; refresh models or choose another model.",
+    })?;
     let expected = config_for_policy(catalog, policy, saved)?;
     if saved != Some(&expected) {
         return Err(
@@ -1058,7 +1059,10 @@ mod tests {
     /// marked runnable, mirroring the catalog test helpers: static
     /// direct models need no route, so runnable harnesses admit them.
     fn runnable_catalog() -> NativeModelCatalog {
-        let mut catalog = NativeModelCatalog::offline().unwrap();
+        let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .unwrap();
         for engine_id in ["codex", "claude", "grok", "cursor"] {
             catalog.runnable_harness_ids.push(engine_id.to_owned());
         }
@@ -1074,7 +1078,10 @@ mod tests {
 
     #[test]
     fn offline_choice_cannot_fall_back_to_another_run_configuration() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+        let catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .unwrap();
         let policy = catalog.selection_policy_for_model("codex-sol").unwrap();
         assert!(validate_run_choice(&catalog, &policy, None).is_err());
         assert!(catalog.validate_selection_policy(&policy).is_ok());
@@ -1082,7 +1089,10 @@ mod tests {
 
     #[test]
     fn offline_catalog_admits_nothing_runnable() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+        let catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .unwrap();
         assert!(catalog.runnable_harness_ids.is_empty());
         let policy = profiled_policy(&catalog, "codex-sol");
         assert!(catalog.admit_policy(&policy).is_err());
@@ -1112,7 +1122,10 @@ mod tests {
 
     #[test]
     fn saved_base_window_does_not_inherit_an_extended_catalog_default() {
-        let mut catalog = NativeModelCatalog::offline().unwrap();
+        let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .unwrap();
         let mut policy = profiled_policy(&catalog, "codex-sol");
         policy.context_window = None;
         let saved = config_for_policy(&catalog, &policy, None).unwrap();
@@ -1137,7 +1150,10 @@ mod tests {
 
     #[test]
     fn codex_extended_window_selects_a_window_override() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+        let catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .unwrap();
         let mut policy = profiled_policy(&catalog, "codex-sol");
         policy.context_window = Some(NativeContextSelection {
             id: "extended".to_owned(),
@@ -1183,7 +1199,10 @@ mod tests {
 
     #[test]
     fn claude_restricted_selects_plan_mode_at_the_write_floor() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+        let catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .unwrap();
         let mut policy = profiled_policy(&catalog, "claude-fable");
         policy.permission = Some(NativeOptionValue {
             id: "restricted".to_owned(),
@@ -1206,7 +1225,10 @@ mod tests {
 
     #[test]
     fn claude_unrepresentable_speed_is_an_honest_error() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+        let catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .unwrap();
         let mut policy = profiled_policy(&catalog, "claude-opus");
         policy.speed = Some(NativeOptionValue {
             id: "fast".to_owned(),
@@ -1256,7 +1278,10 @@ mod tests {
 
     #[test]
     fn cursor_fast_speed_selects_fast_delivery() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+        let catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .unwrap();
         let mut policy = profiled_policy(&catalog, "cursor-composer-2-5");
         policy.speed = Some(NativeOptionValue {
             id: "fast".to_owned(),
@@ -1271,7 +1296,10 @@ mod tests {
 
     #[test]
     fn unknown_registry_engine_stays_unavailable() {
-        let mut catalog = NativeModelCatalog::offline().unwrap();
+        let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .unwrap();
         let mut harness = catalog.manifest.harness("codex").cloned().unwrap();
         harness.id = "custom".to_owned();
         catalog.manifest.harnesses.push(harness);

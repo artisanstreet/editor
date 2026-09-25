@@ -85,8 +85,8 @@ pub fn model_display_label(
 ///
 /// The policy's exact option id wins; a missing or stale id falls back to the
 /// capability default and then the first option. The catalog's display label
-/// is authoritative (`272K`, `1M`, `200K`), with the token formatter as a
-/// defensive fallback for a label the manifest left empty.
+/// is used below one million tokens. Larger windows use the token count so
+/// a catalog label such as `1000K` reads `1M`.
 fn context_window_label(
     model: &NativeModelDefinition,
     policy: &NativeModelPolicy,
@@ -111,11 +111,13 @@ fn context_window_label(
                 .find(|option| option.id == capability.default)
         })
         .or_else(|| capability.options.first())?;
-    Some(if selected.label.trim().is_empty() {
-        format_context_tokens(selected.tokens)
-    } else {
-        selected.label.clone()
-    })
+    Some(
+        if selected.tokens >= 1_000_000 || selected.label.trim().is_empty() {
+            format_context_tokens(selected.tokens)
+        } else {
+            selected.label.clone()
+        },
+    )
 }
 
 /// Resolves the reasoning-effort label using the shared thinking vocabulary.
@@ -856,7 +858,9 @@ pub(super) fn rebase_selection_policy(
     }
     if policy.context_window.is_some() {
         let mut candidate = rebased.clone();
-        candidate.context_window.clone_from(&policy.context_window);
+        candidate.context_window = snapshot
+            .rebase_policy(policy)
+            .and_then(|policy| policy.context_window);
         if snapshot.validate_selection_policy(&candidate).is_ok() {
             rebased.context_window = candidate.context_window;
         }
@@ -879,10 +883,16 @@ pub(super) fn rebase_selection_policy(
 }
 
 fn format_context_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 && tokens.is_multiple_of(1_000_000) {
-        format!("{}M", tokens / 1_000_000)
-    } else if tokens >= 1_000 && tokens.is_multiple_of(1_000) {
-        format!("{}K", tokens / 1_000)
+    if tokens >= 1_000_000 {
+        let millions = tokens / 1_000_000 + u64::from(tokens % 1_000_000 >= 500_000);
+        format!("{millions}M")
+    } else if tokens >= 1_000 {
+        let thousands = tokens / 1_000 + u64::from(tokens % 1_000 >= 500);
+        if thousands == 1_000 {
+            "1M".to_owned()
+        } else {
+            format!("{thousands}K")
+        }
     } else {
         tokens.to_string()
     }

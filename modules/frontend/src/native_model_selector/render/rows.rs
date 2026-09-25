@@ -64,7 +64,33 @@ impl NativeModelSelector {
             ))
             .gap(px(3.0));
         if groups.is_empty() {
-            return list;
+            let status = self.state.status();
+            let message = status.error.clone().unwrap_or_else(|| {
+                if status.saving {
+                    "Loading models…".to_owned()
+                } else if !status.authoritative {
+                    "Models have not loaded for this conversation.".to_owned()
+                } else {
+                    "No models reported by this engine.".to_owned()
+                }
+            });
+            return list.child(
+                div()
+                    .p(px(12.0))
+                    .text_color(self.theme.colors.muted_foreground.to_paint())
+                    .child(message)
+                    .child(
+                        div()
+                            .id("retry-engine-models")
+                            .cursor_pointer()
+                            .text_color(self.theme.colors.foreground.to_paint())
+                            .mt(px(8.0))
+                            .child("Retry discovery")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(NativeModelSelectorEvent::RefreshCatalog);
+                            })),
+                    ),
+            );
         }
         let show_group_headers =
             groups.len() > 1 || groups.first().is_some_and(|group| group.id != "default");
@@ -77,69 +103,99 @@ impl NativeModelSelector {
                 entries.extend((0..group.models.len()).map(|index| (group_index, Some(index))));
             }
         }
+        let first_layout = self.menu_scroll.item_count() == 0;
+        let entries_changed = *self.model_list_entries.borrow() != entries;
+        if entries_changed {
+            self.menu_scroll.reset(entries.len());
+            self.model_list_entries.replace(entries.clone());
+        }
         let entity = cx.entity();
-        let virtual_list =
-            gpui::uniform_list("model-virtual-list", entries.len(), move |range, _, app| {
-                entity.update(app, |view, cx| {
-                    range
-                        .map(|index| {
-                            let (group_index, model_index) = entries[index];
-                            let group = &groups[group_index];
-                            let row = if let Some(model_index) = model_index {
-                                view.render_model_row(&group.models[model_index], cx)
-                                    .into_any_element()
-                            } else {
-                                let id = group.id.clone();
-                                div()
-                                    .id(format!("model-group-{}", group.id))
-                                    .debug_selector({
-                                        let id = format!("model-group-{}", group.id);
-                                        move || id.clone()
-                                    })
-                                    .h(px(MODEL_ROW_HEIGHT_PX))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .px(px(10.0))
-                                    .cursor_pointer()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(view.theme.colors.muted_foreground.to_paint())
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.state.toggle_group(&id);
-                                        view.model_hover.borrow_mut().clear_if_missing(&[]);
-                                        view.menu_scroll.set_offset(point(px(0.0), px(0.0)));
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        icon(IconStyle::resolve(
-                                            view.theme,
-                                            if view.state.group_collapsed(&group.id) {
-                                                AssetId::TABLER_CHEVRON_RIGHT
-                                            } else {
-                                                AssetId::TABLER_CHEVRON_DOWN
-                                            },
-                                            IconSize::Compact,
-                                            IconTint::Muted,
-                                        ))
-                                        .size(px(14.0)),
-                                    )
-                                    .child(group.label.clone())
-                                    .into_any_element()
-                            };
-                            div()
-                                .h(px(MODEL_ROW_HEIGHT_PX + 3.0))
-                                .w_full()
-                                .on_scroll_wheel(cx.listener(Self::handle_model_scroll_wheel))
-                                .child(row)
+        let virtual_list = gpui::list(self.menu_scroll.clone(), move |index, _, app| {
+            entity.update(app, |view, cx| {
+                let (group_index, model_index) = entries[index];
+                let group = &groups[group_index];
+                let row = if let Some(model_index) = model_index {
+                    view.render_model_row(&group.models[model_index], cx)
+                        .into_any_element()
+                } else {
+                    let id = group.id.clone();
+                    div()
+                        .id(format!("model-group-{}", group.id))
+                        .debug_selector({
+                            let id = format!("model-group-{}", group.id);
+                            move || id.clone()
                         })
-                        .collect::<Vec<_>>()
-                })
+                        .h(px(MODEL_GROUP_HEIGHT_PX))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(10.0))
+                        .cursor_pointer()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(view.theme.colors.muted_foreground.to_paint())
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.state.toggle_group(&id);
+                            view.model_scroll.cancel_to(0.0, 0.0);
+                            view.model_hover.borrow_mut().clear_if_missing(&[]);
+                            view.menu_scroll.scroll_to(gpui::ListOffset {
+                                item_ix: 0,
+                                offset_in_item: px(0.0),
+                            });
+                            cx.notify();
+                        }))
+                        .child(group.label.clone())
+                        .child(
+                            icon(IconStyle::resolve(
+                                view.theme,
+                                if view.state.group_collapsed(&group.id) {
+                                    AssetId::TABLER_CHEVRON_RIGHT
+                                } else {
+                                    AssetId::TABLER_CHEVRON_DOWN
+                                },
+                                IconSize::Compact,
+                                IconTint::Muted,
+                            ))
+                            .size(px(14.0))
+                            .flex_shrink_0(),
+                        )
+                        .into_any_element()
+                };
+                div()
+                    .h(px(if model_index.is_some() {
+                        MODEL_ROW_HEIGHT_PX
+                    } else {
+                        MODEL_GROUP_HEIGHT_PX
+                    } + 3.0))
+                    .w_full()
+                    .on_scroll_wheel(cx.listener(Self::handle_model_scroll_wheel))
+                    .child(row)
+                    .into_any_element()
             })
-            .track_scroll(&self.virtual_model_scroll)
-            .h(px(MODEL_PANEL_HEIGHT_PX))
-            .w_full();
+        })
+        .h(px(MODEL_PANEL_HEIGHT_PX))
+        .w_full();
         list = list.child(virtual_list);
+        if entries_changed && first_layout {
+            let entity = cx.entity();
+            list = list.child(
+                canvas(
+                    |_, _, _| {},
+                    move |_, (), window, cx| {
+                        let entity = entity.clone();
+                        window.defer(cx, move |_, cx| {
+                            entity.update(cx, |view, cx| {
+                                view.reveal_highlight();
+                                cx.notify();
+                            });
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
+        }
         let scroll = self.menu_scroll.clone();
         let top = self
             .theme
@@ -154,8 +210,8 @@ impl NativeModelSelector {
         let fade = canvas(
             |_, _, _| {},
             move |bounds, (), window, _| {
-                let offset = f32::from(scroll.offset().y);
-                let maximum = f32::from(scroll.max_offset().y);
+                let offset = f32::from(scroll.scroll_px_offset_for_scrollbar().y);
+                let maximum = f32::from(scroll.max_offset_for_scrollbar().y);
                 let above = (-offset).clamp(0.0, 24.0);
                 let below = (maximum + offset).clamp(0.0, 24.0);
                 if above > 0.0 {
@@ -238,8 +294,7 @@ impl NativeModelSelector {
             .gap(px(8.0))
             .h(px(MODEL_ROW_HEIGHT_PX))
             .px(px(10.0))
-            .rounded(px(14.0))
-            .when(definition_disabled, |row| row.opacity(0.58));
+            .rounded(px(14.0));
         row = row.on_hover(cx.listener(move |view: &mut Self, hovered: &bool, _, cx| {
             if *hovered && view.menu_is_interactive() {
                 view.state.preview_model(&hover_model_id);
@@ -265,6 +320,7 @@ impl NativeModelSelector {
                 IconTint::Inherit,
             ))
             .size(px(20.0))
+            .text_color(self.theme.colors.foreground.to_paint())
             .flex_shrink_0(),
         );
         let mut text = div()
@@ -279,6 +335,9 @@ impl NativeModelSelector {
                     .text_size(px(14.0))
                     .line_height(px(20.0))
                     .font_weight(FontWeight::SEMIBOLD)
+                    .when(definition_disabled, |label| {
+                        label.text_color(self.theme.colors.muted_foreground.to_paint())
+                    })
                     .child(model.name.clone()),
             )
             .child(
@@ -862,7 +921,7 @@ impl NativeModelSelector {
                     label: candidate
                         .variant_label
                         .as_deref()
-                        .map_or_else(|| candidate.name.clone(), humanize_variant),
+                        .map_or_else(|| "Default".to_owned(), humanize_variant),
                     description: None,
                     advisory: self.state.model_definition_disabled_reason(&candidate.id),
                     group: None,

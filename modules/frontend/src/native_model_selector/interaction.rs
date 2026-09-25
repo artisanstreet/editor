@@ -22,15 +22,16 @@ impl NativeModelSelector {
         mode: ThemeMode,
         cx: &mut Context<Self>,
     ) -> Self {
-        let virtual_model_scroll = gpui::UniformListScrollHandle::new();
-        let menu_scroll = virtual_model_scroll.0.borrow().base_handle.clone();
+        let menu_scroll =
+            gpui::ListState::new(0, gpui::ListAlignment::Top, px(MODEL_ROW_HEIGHT_PX))
+                .measure_all();
         Self {
             state: NativeModelSelectorState::new(snapshot, policy),
             theme: ArtisanTheme::for_mode(mode),
             trigger_focus: cx.focus_handle().tab_index(1).tab_stop(true),
             menu_focus: cx.focus_handle(),
             menu_scroll,
-            virtual_model_scroll,
+            model_list_entries: RefCell::new(Vec::new()),
             axis_menu_scroll: ScrollHandle::new(),
             trigger_origin: Rc::new(RefCell::new(None)),
             menu_bounds: Rc::new(RefCell::new(None)),
@@ -322,8 +323,8 @@ impl NativeModelSelector {
         self.model_hover.borrow_mut().clear();
         self.axis_hover.borrow_mut().clear();
         self.model_scroll.cancel_to(
-            f32::from(self.menu_scroll.offset().y),
-            f32::from(self.menu_scroll.max_offset().y),
+            f32::from(self.menu_scroll.scroll_px_offset_for_scrollbar().y),
+            f32::from(self.menu_scroll.max_offset_for_scrollbar().y),
         );
         self.axis_scroll.cancel_to(
             f32::from(self.axis_menu_scroll.offset().y),
@@ -384,23 +385,28 @@ impl NativeModelSelector {
             self.clear_option_tooltip();
         }
 
-        let handle = if model_list {
-            self.menu_scroll.clone()
+        let (offset, maximum) = if model_list {
+            (
+                self.menu_scroll.scroll_px_offset_for_scrollbar(),
+                self.menu_scroll.max_offset_for_scrollbar(),
+            )
         } else {
-            // Keep policy-menu scrolling independent so a future long option
-            // list cannot fight model-list inertia.
-            self.axis_menu_scroll.clone()
+            (
+                self.axis_menu_scroll.offset(),
+                self.axis_menu_scroll.max_offset(),
+            )
         };
-        let offset = handle.offset();
         let current = f32::from(offset.y);
-        let maximum = f32::from(handle.max_offset().y).max(0.0);
+        let maximum = f32::from(maximum.y).max(0.0);
 
         if event.delta.precise() || cx.reduce_motion() {
             let next = (current + delta).clamp(-maximum, 0.0);
-            handle.set_offset(point(offset.x, px(next)));
             if model_list {
+                self.menu_scroll
+                    .set_offset_from_scrollbar(point(offset.x, px(next)));
                 self.model_scroll.cancel_to(next, maximum);
             } else {
+                self.axis_menu_scroll.set_offset(point(offset.x, px(next)));
                 self.axis_scroll.cancel_to(next, maximum);
             }
             cx.notify();
@@ -438,10 +444,11 @@ impl NativeModelSelector {
 
     fn advance_model_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model_scroll_frame_scheduled = false;
-        let offset = self.menu_scroll.offset();
-        let maximum = f32::from(self.menu_scroll.max_offset().y).max(0.0);
+        let offset = self.menu_scroll.scroll_px_offset_for_scrollbar();
+        let maximum = f32::from(self.menu_scroll.max_offset_for_scrollbar().y).max(0.0);
         if let Some(next) = self.model_scroll.step(f32::from(offset.y), maximum) {
-            self.menu_scroll.set_offset(point(offset.x, px(next)));
+            self.menu_scroll
+                .set_offset_from_scrollbar(point(offset.x, px(next)));
             cx.notify();
         }
         self.schedule_model_scroll_frame(window, cx);
@@ -691,7 +698,10 @@ impl NativeModelSelector {
             self.begin_axis_menu_close(axis, cx);
         }
         self.model_hover.borrow_mut().clear();
-        self.menu_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.menu_scroll.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.0),
+        });
         self.model_scroll.cancel_to(0.0, 0.0);
         cx.notify();
     }
@@ -705,7 +715,7 @@ impl NativeModelSelector {
         }
     }
 
-    fn reveal_highlight(&mut self) {
+    pub(super) fn reveal_highlight(&mut self) {
         let groups = self.state.model_groups();
         let headers = groups.len() > 1 || groups.first().is_some_and(|group| group.id != "default");
         let mut index = 0;
@@ -716,8 +726,7 @@ impl NativeModelSelector {
             }
             for model in &group.models {
                 if Some(model.id.as_str()) == self.state.highlighted_model_id() {
-                    self.virtual_model_scroll
-                        .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+                    self.menu_scroll.scroll_to_reveal_item(index);
                     return;
                 }
                 index += 1;

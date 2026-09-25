@@ -664,7 +664,10 @@ fn fresh_last_good_with_refresh_failure_stays_ready_but_visible() {
 fn readiness_overlay_recomputes_the_gated_subset() {
     use crate::native_model_catalog::NativeModelCatalog;
 
-    let catalog = NativeModelCatalog::offline().expect("bundled catalog");
+    let catalog = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("bundled catalog");
     assert!(catalog.runnable_harness_ids.is_empty());
 
     let mut usage = NativeProfileUsageState::default();
@@ -695,7 +698,10 @@ fn signed_out_report_removes_a_previously_admitted_engine() {
     // A snapshot carrying genuine managed `OpenCode` readiness plus a
     // previously admitted Codex, as backend discovery plus an earlier
     // overlay produce in production.
-    let mut catalog = NativeModelCatalog::offline().expect("bundled catalog");
+    let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("bundled catalog");
     catalog.runnable_harness_ids = vec![
         "opencode2".to_owned(),
         "codex".to_owned(),
@@ -757,12 +763,18 @@ fn dashboard_auth_never_admits_cursor_models_to_run() {
 
     // The overlay preserves the backend catalog marking for cursor
     // verbatim instead of admitting it from usage.
-    let mut catalog = NativeModelCatalog::offline().expect("bundled catalog");
+    let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("bundled catalog");
     catalog.runnable_harness_ids = vec!["cursor".to_owned()];
     let overlaid = catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
     assert_eq!(overlaid.runnable_harness_ids, vec!["cursor".to_owned()]);
 
-    let bare = NativeModelCatalog::offline().expect("bundled catalog");
+    let bare = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("bundled catalog");
     let overlaid = catalog_with_usage_readiness(bare, &usage, READINESS_NOW_MS);
     assert!(overlaid.runnable_harness_ids.is_empty());
 }

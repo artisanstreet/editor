@@ -14,7 +14,10 @@ use super::*;
 fn clicks_in_engine_tabs_and_preview_do_not_dismiss_the_menu(cx: &mut gpui::TestAppContext) {
     let (view, cx) = cx.add_window_view(|_, cx| {
         NativeModelSelector::new(
-            NativeModelCatalog::offline().unwrap(),
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .unwrap(),
             None,
             ThemeMode::Dark,
             cx,
@@ -75,7 +78,10 @@ fn wheel_events_accumulate_once_and_precise_pixels_cancel_inertia(cx: &mut gpui:
     cx.update(|app| app.set_reduce_motion(true));
     let (view, cx) = cx.add_window_view(|_, cx| {
         NativeModelSelector::new(
-            NativeModelCatalog::offline().unwrap(),
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .unwrap(),
             None,
             ThemeMode::Dark,
             cx,
@@ -94,7 +100,7 @@ fn wheel_events_accumulate_once_and_precise_pixels_cancel_inertia(cx: &mut gpui:
     let expected = cx.update(|window, app| {
         app.set_reduce_motion(false);
         let picker = view.read(app);
-        let maximum = f32::from(picker.menu_scroll.max_offset().y);
+        let maximum = f32::from(picker.menu_scroll.max_offset_for_scrollbar().y);
         assert!(maximum > 0.0, "the fixture must scroll");
         (-3.0 * f32::from(window.line_height())).clamp(-maximum, 0.0)
     });
@@ -107,8 +113,8 @@ fn wheel_events_accumulate_once_and_precise_pixels_cancel_inertia(cx: &mut gpui:
     cx.update(|_, app| assert_eq!(view.read(app).model_scroll.target(), expected));
     let expected_pixel = cx.update(|_, app| {
         let picker = view.read(app);
-        (f32::from(picker.menu_scroll.offset().y) - 7.0)
-            .clamp(-f32::from(picker.menu_scroll.max_offset().y), 0.0)
+        (f32::from(picker.menu_scroll.scroll_px_offset_for_scrollbar().y) - 7.0)
+            .clamp(-f32::from(picker.menu_scroll.max_offset_for_scrollbar().y), 0.0)
     });
     cx.simulate_event(ScrollWheelEvent {
         position: row.center(),
@@ -118,7 +124,7 @@ fn wheel_events_accumulate_once_and_precise_pixels_cancel_inertia(cx: &mut gpui:
     });
     cx.update(|_, app| {
         let picker = view.read(app);
-        assert_eq!(f32::from(picker.menu_scroll.offset().y), expected_pixel);
+        assert_eq!(f32::from(picker.menu_scroll.scroll_px_offset_for_scrollbar().y), expected_pixel);
         assert!(!picker.model_scroll.active());
     });
 }
@@ -127,7 +133,10 @@ fn option_hover_slides_across_rows_and_clears_on_surface_departure(cx: &mut gpui
     cx.update(|app| app.set_reduce_motion(true));
     let (view, cx) = cx.add_window_view(|_, cx| {
         NativeModelSelector::new(
-            NativeModelCatalog::offline().unwrap(),
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .unwrap(),
             None,
             ThemeMode::Dark,
             cx,
@@ -169,14 +178,20 @@ fn option_hover_slides_across_rows_and_clears_on_surface_departure(cx: &mut gpui
 }
 fn state_with_offline_catalog() -> NativeModelSelectorState {
     NativeModelSelectorState::new(
-        NativeModelCatalog::offline().expect("the real bundled catalog must decode"),
+        NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../../tests/fixtures/model_catalog.json"
+        ))
+        .expect("the real bundled catalog must decode"),
         None,
     )
 }
 
 #[test]
 fn hidden_harnesses_are_skipped_by_the_picker() {
-    let snapshot = NativeModelCatalog::offline().expect("bundled catalog");
+    let snapshot = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("bundled catalog");
     assert!(
         snapshot.manifest.harness("hermes").is_none(),
         "hermes is not part of the bundled manifest"
@@ -285,7 +300,10 @@ fn xhigh_thinking_value_uses_source_label() {
 
 #[test]
 fn full_trigger_label_includes_variable_context_and_keeps_no_separators() {
-    let snapshot = NativeModelCatalog::offline().expect("real catalog");
+    let snapshot = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("real catalog");
     let mut policy = snapshot
         .selection_policy_for_model("codex-sol")
         .expect("codex policy");
@@ -324,8 +342,30 @@ fn full_trigger_label_includes_variable_context_and_keeps_no_separators() {
 }
 
 #[test]
+fn million_token_context_uses_millions_even_when_catalog_says_1000k() {
+    let catalog_json = include_str!("../../../../tests/fixtures/model_catalog.json")
+        .replace("\"label\": \"1M\"", "\"label\": \"1000K\"");
+    let snapshot = NativeModelCatalog::from_manifest_json(&catalog_json).expect("real catalog");
+    let mut policy = snapshot
+        .selection_policy_for_model("codex-sol")
+        .expect("codex policy");
+    policy.context_window = Some(crate::native_model_catalog::NativeContextSelection {
+        id: "extended".to_owned(),
+        native_suffix: "1m".to_owned(),
+        native_config: None,
+    });
+
+    let label = model_display_label(&snapshot, &policy);
+    assert!(label.plain_text().contains(" 1M"));
+    assert!(!label.plain_text().contains("1000K"));
+}
+
+#[test]
 fn full_trigger_label_omits_missing_context_and_default_speed() {
-    let snapshot = NativeModelCatalog::offline().expect("real catalog");
+    let snapshot = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("real catalog");
     let mut policy = snapshot
         .selection_policy_for_model("codex-gpt-5-5")
         .expect("gpt-5.5 policy");
@@ -348,7 +388,10 @@ fn full_trigger_label_omits_missing_context_and_default_speed() {
 
 #[test]
 fn superfast_speed_token_uses_the_neon_gradient() {
-    let mut snapshot = NativeModelCatalog::offline().expect("real catalog");
+    let mut snapshot = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("real catalog");
     let model = snapshot
         .manifest
         .models
@@ -419,7 +462,10 @@ fn gradient_highlights_cover_every_character_left_to_right() {
 
 #[gpui::test]
 fn trigger_mounts_the_full_label_with_a_gradient_speed_token(cx: &mut gpui::TestAppContext) {
-    let snapshot = NativeModelCatalog::offline().expect("real catalog");
+    let snapshot = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("real catalog");
     let mut policy = snapshot
         .selection_policy_for_model("codex-sol")
         .expect("codex policy");
@@ -458,7 +504,10 @@ fn trigger_mounts_the_full_label_with_a_gradient_speed_token(cx: &mut gpui::Test
 
 #[test]
 fn rebase_keeps_explicit_native_profile_for_saved_policies() {
-    let snapshot = NativeModelCatalog::offline().expect("real catalog");
+    let snapshot = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("real catalog");
     let mut policy = snapshot
         .selection_policy_for_model("codex-sol")
         .expect("codex policy");
@@ -496,7 +545,10 @@ fn pointer_click_selects_offline_model_without_runtime_configuration(
 ) {
     let (view, cx) = cx.add_window_view(|_, cx| {
         NativeModelSelector::new(
-            NativeModelCatalog::offline().expect("real catalog"),
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .expect("real catalog"),
             None,
             ThemeMode::Dark,
             cx,
@@ -525,7 +577,10 @@ fn policy_popup_floats_and_accepts_clicks_outside_parent_bounds(cx: &mut gpui::T
     cx.update(|app| app.set_reduce_motion(true));
     let (view, cx) = cx.add_window_view(|_, cx| {
         NativeModelSelector::new(
-            NativeModelCatalog::offline().unwrap(),
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .unwrap(),
             None,
             ThemeMode::Dark,
             cx,
@@ -603,7 +658,10 @@ fn policy_option_tooltip_is_a_full_side_overlay(cx: &mut gpui::TestAppContext) {
     cx.update(|app| app.set_reduce_motion(true));
     let (view, cx) = cx.add_window_view(|_, cx| {
         NativeModelSelector::new(
-            NativeModelCatalog::offline().expect("real catalog"),
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .expect("real catalog"),
             None,
             ThemeMode::Dark,
             cx,
@@ -660,7 +718,10 @@ fn settings_exit_can_be_reopened_and_switched_before_completion(cx: &mut gpui::T
     cx.update(|app| app.set_reduce_motion(true));
     let (view, cx) = cx.add_window_view(|_, cx| {
         NativeModelSelector::new(
-            NativeModelCatalog::offline().unwrap(),
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .unwrap(),
             None,
             ThemeMode::Dark,
             cx,
@@ -763,7 +824,10 @@ fn settings_scroll_only_when_the_real_options_exceed_the_viewport(cx: &mut gpui:
     cx.update(|app| app.set_reduce_motion(true));
     let (view, cx) = cx.add_window_view(|_, cx| {
         NativeModelSelector::new(
-            NativeModelCatalog::offline().unwrap(),
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .unwrap(),
             None,
             ThemeMode::Dark,
             cx,
@@ -860,7 +924,10 @@ fn model_projections_refresh_for_selection_and_authoritative_catalog_changes() {
 fn harness_switch_animation_settles_without_rebuilding_catalog(cx: &mut gpui::TestAppContext) {
     let (view, cx) = cx.add_window_view(|_, cx| {
         NativeModelSelector::new(
-            NativeModelCatalog::offline().unwrap(),
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .unwrap(),
             None,
             ThemeMode::Dark,
             cx,
@@ -896,7 +963,7 @@ fn harness_switch_animation_settles_without_rebuilding_catalog(cx: &mut gpui::Te
             assert_eq!(
                 window.simulate_next_frame(app),
                 0,
-                "settled tabs must stop requesting frames"
+                "settled tabs must stop requesting frames: {selector}"
             );
         });
     }
@@ -905,7 +972,10 @@ fn harness_switch_animation_settles_without_rebuilding_catalog(cx: &mut gpui::Te
 #[gpui::test]
 fn large_catalog_groups_variants_virtualizes_rows_and_collapses(cx: &mut gpui::TestAppContext) {
     cx.update(|app| app.set_reduce_motion(true));
-    let mut catalog = NativeModelCatalog::offline().unwrap();
+    let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .unwrap();
     let template = catalog.manifest.models[0].clone();
     catalog.manifest.models = vec![template.clone()];
     for index in 0..300 {
@@ -952,7 +1022,7 @@ fn large_catalog_groups_variants_virtualizes_rows_and_collapses(cx: &mut gpui::T
     let engine_tab = cx
         .debug_bounds("artisan-native-model-selector-engine-codex")
         .unwrap();
-    let before_scroll = cx.update(|_, app| view.read(app).menu_scroll.offset());
+    let before_scroll = cx.update(|_, app| view.read(app).menu_scroll.scroll_px_offset_for_scrollbar());
     cx.simulate_event(ScrollWheelEvent {
         position: engine_tab.center(),
         delta: gpui::ScrollDelta::Pixels(point(px(-120.0), px(-120.0))),
@@ -965,8 +1035,11 @@ fn large_catalog_groups_variants_virtualizes_rows_and_collapses(cx: &mut gpui::T
             .unwrap(),
         engine_tab
     );
-    cx.update(|_, app| assert_eq!(view.read(app).menu_scroll.offset(), before_scroll));
+    cx.update(|_, app| assert_eq!(view.read(app).menu_scroll.scroll_px_offset_for_scrollbar(), before_scroll));
     let header = cx.debug_bounds("model-group-go").unwrap();
+    let first_model = cx.debug_bounds("artisan-native-model-selector-row-fixture-0-default").unwrap();
+    assert_eq!(f32::from(header.size.height), 28.0);
+    assert_eq!(f32::from(first_model.top() - header.bottom()), 3.0);
     cx.simulate_click(header.center(), gpui::Modifiers::none());
     cx.run_until_parked();
     cx.update(|_, app| assert!(view.read(app).state.group_collapsed("go")));

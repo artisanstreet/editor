@@ -89,6 +89,7 @@ const DROPDOWN_MIN_WIDTH_PX: f32 = 144.0;
 const MODEL_PANEL_HEIGHT_PX: f32 = 192.0;
 const MODEL_PREVIEW_WIDTH_PX: f32 = 224.0;
 const MODEL_ROW_HEIGHT_PX: f32 = 48.0;
+const MODEL_GROUP_HEIGHT_PX: f32 = 28.0;
 const COMPACT_CONTROL_HEIGHT_PX: f32 = 32.0;
 const POLICY_CONTROL_HEIGHT_PX: f32 = 24.0;
 pub(crate) const PICKER_MENU_MOTION_DURATION_MS: u64 = 100;
@@ -262,8 +263,8 @@ pub struct NativeModelSelector {
     theme: ArtisanTheme,
     trigger_focus: FocusHandle,
     menu_focus: FocusHandle,
-    menu_scroll: ScrollHandle,
-    virtual_model_scroll: gpui::UniformListScrollHandle,
+    menu_scroll: gpui::ListState,
+    model_list_entries: RefCell<Vec<(usize, Option<usize>)>>,
     axis_menu_scroll: ScrollHandle,
     trigger_origin: Rc<RefCell<Option<Point<Pixels>>>>,
     menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
