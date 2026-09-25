@@ -1,6 +1,6 @@
 # Stateless Editor, single host connection, and connection holds
 
-- Status: approved 2026-09-25; implementation in progress
+- Status: approved 2026-09-25; implementation in progress (steps 0, 2 and 3 implemented)
 - Scope: where Editor state may live, how the Editor connects to exactly one Forge, and how
   in-flight work keeps that connection open until it resolves
 
@@ -71,6 +71,23 @@ impl ConnectionHolds {
   thread; newer text replaces the unsent body (latest wins). The thread's hold drops only when the
   acknowledged revision equals the latest sent revision.
 
+Implemented (step 2): `native_transport_service/connection_holds.rs`. The service loop is serial and
+awaits each Forge reply inside its handler, so the in-flight record is the queued command itself:
+`submit` takes the hold on admission, the hold travels with the command through the bounded queue,
+and it drops when the handler returns or fails (a refused or never-processed command drops it
+too). `NativeTransportCommand::hold_kind` classifies every command exhaustively; the holding set
+is the list above except `SaveComposerDraft`, which arrives with step 4 (its `HoldKind` is added
+then), and among `ComposerState` commands only `WithdrawQueuedMessage` mutates. A sealed refusal
+surfaces as `CommandSendError::Busy`, so callers keep their retryable state for a cancelled switch.
+`HoldState` also counts holds per kind for progress copy.
+
+Application-level holds: a message flight holds from admission until its correlated receipt or
+failure arrives, the flight ends, or the service stops. The first send's `SetThreadEngineConfig`
+and `QueueMessage` are admitted in the same UI turn, so their transport holds already cover the
+pair. A send waiting for account readiness has not been admitted: sealing cancels it and the draft
+stays in the composer. `BeginProjectIntake` holds while its native directory picker is open, which
+is bounded by the user rather than a request timeout.
+
 ## 3. Single host connection
 
 The Editor owns exactly one connection. `NativeWorkspace` with one `NativeApplication` per host is
@@ -86,6 +103,29 @@ Switch sequence:
 
 Re-selecting the current host while sealing unseals and cancels the switch. Quitting the Editor
 uses the same seal and drain.
+
+Implemented (step 3), with one deviation: instead of extracting a `HostState` value from
+`NativeApplication`, the `NativeApplication` entity itself is the host-scoped state and is rebuilt
+for each connection. Nearly every one of its well over a hundred fields is host-scoped (routes, projects,
+threads, subscriptions, flights, caches, the composer and its drafts), so an extraction would move
+almost the whole struct while every `impl_*` module rewrote its field paths; dropping the entity
+drops everything it owns with no hand reset and no field that can be forgotten. `NativeWorkspace`
+owns only what is not about a host: the window, the connected home, the switch transaction and
+the connector seam. The sidebar and profile-menu disclosure carry over; settings globals live
+outside the entity.
+
+- Switch: `workspace.rs` seals through `NativeApplication::begin_host_switch` (composer
+  read-only, progress such as "Saving 1 message to Ubuntu…" in the profile header and a window
+  notice, repainted from `subscribe()`), awaits `idle()` on a background task, calls
+  `prepare_shutdown`, requests shutdown and waits (bounded) for the service thread, then replaces
+  the view entity and records the reopen-host hint. A selection during the drain retargets; the
+  current host during `Draining` cancels; once `Disconnecting` the switch is committed.
+- Quit: the workspace seals and returns its one service; `close_connection` waits up to 10 s for
+  holds to drain while pumping the event bridge, then shuts down.
+- Selecting the connected host still retries a failed or stopped connection in place.
+- The host catalog is a presentation memo replaced wholesale on each credential-store refresh; no
+  older invitation incarnation is retained.
+- Until step 4, drafts are Editor state and are discarded with the old host's view on a switch.
 
 ## 4. State that moves to the Forge
 
