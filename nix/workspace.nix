@@ -1,4 +1,9 @@
-{ pkgs, crane }:
+{
+  self,
+  pkgs,
+  windowsPkgs,
+  crane,
+}:
 let
   inherit (pkgs) lib;
   version = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version;
@@ -99,129 +104,119 @@ let
     ARTISAN_INSTALLER_RELEASE = "1";
     inherit (publicTrust) ARTISAN_RELEASE_KEY_ID ARTISAN_RELEASE_PUBLIC_KEY_HEX;
   };
+
+  # The product: Debug and Production payloads per platform (nix/stages.nix).
+  stageBuilds = import ./stages.nix {
+    inherit
+      self
+      lib
+      pkgs
+      windowsPkgs
+      crane
+      src
+      version
+      libraries
+      nativeTools
+      releaseTrust
+      ;
+  };
+  production = stageBuilds.packages.linux-production;
+
+  # Tests, fixtures, and tools build in Cargo's dev profile against one shared
+  # dependency cache; they are never shipped.
   allTargets = "--locked --offline --workspace --all-targets --features artisan-frontend/visual-proof";
-  deps =
-    profile:
-    craneLib.buildDepsOnly (
-      base
-      // lib.optionalAttrs (profile == "release") releaseTrust
-      // lib.optionalAttrs (profile == "performance") {
-        CARGO_PROFILE_PERFORMANCE_DEBUG = "1";
-        dontStrip = true;
-      }
-      // {
-        pname = "artisan-dependencies-${profile}";
-        CARGO_PROFILE = profile;
-        cargoExtraArgs = allTargets;
-        doCheck = false;
-      }
-    );
-  devDeps = deps "dev";
-  releaseDeps = deps "release";
-  performanceDeps = deps "performance";
-  # One compatible dependency cache per profile; helper outputs only build their
-  # selected package and can be requested independently of product binaries.
-  binary =
-    profile: package: name:
-    craneLib.buildPackage (
-      base
-      // lib.optionalAttrs (profile == "release") releaseTrust
-      // lib.optionalAttrs (profile == "performance") {
-        CARGO_PROFILE_PERFORMANCE_DEBUG = "1";
-        dontStrip = true;
-      }
-      // {
-        pname = "artisan-${name}-${profile}";
-        CARGO_PROFILE = profile;
-        cargoArtifacts =
-          if profile == "release" then
-            releaseDeps
-          else if profile == "performance" then
-            performanceDeps
-          else
-            devDeps;
-        cargoExtraArgs = "--locked --offline -p ${package} --bin ${name}";
-        doCheck = false;
-        meta.mainProgram = name;
-      }
-    );
-  product =
-    profile:
-    pkgs.symlinkJoin {
-      name = "artisan-editor-${profile}";
-      paths = [
-        (binary profile "artisan-frontend" "editor")
-        (binary profile "artisan-backend" "forge")
-        (binary profile "artisan-editor-cli" "ae")
-        (binary profile "ae-installer" "installer")
-      ];
-    };
-  helper =
+  devDeps = craneLib.buildDepsOnly (
+    base
+    // {
+      pname = "artisan-dependencies-dev";
+      CARGO_PROFILE = "dev";
+      cargoExtraArgs = allTargets;
+      doCheck = false;
+    }
+  );
+  # Each tool compiles only its own dependency graph, so a small tool never
+  # waits on the workspace-wide cache.
+  tool =
     package: name:
-    craneLib.buildPackage (
-      base
-      // {
+    let
+      attrs = base // {
         pname = "artisan-${name}";
         CARGO_PROFILE = "dev";
-        cargoArtifacts = craneLib.buildDepsOnly (
-          base
-          // {
-            pname = "artisan-${name}-dependencies";
-            CARGO_PROFILE = "dev";
-            cargoExtraArgs = "--locked --offline -p ${package} --bin ${name}";
-            doCheck = false;
-          }
-        );
         cargoExtraArgs = "--locked --offline -p ${package} --bin ${name}";
         doCheck = false;
+      };
+    in
+    craneLib.buildPackage (
+      attrs
+      // {
+        cargoArtifacts = craneLib.buildDepsOnly (attrs // { pname = "artisan-${name}-dependencies"; });
         meta.mainProgram = name;
       }
     );
-  generator = helper "artisan-packaging" "payload-manifest-generator";
-  releaseTool = helper "artisan-packaging" "release-tool";
-  plugin = helper "artisan-capnp-codegen" "artisan-capnp-codegen";
-  launcher = helper "artisan-native-dev" "dev";
-  hostLauncher = helper "artisan-native-dev" "forge-host";
-  release = product "release";
-  development = product "dev";
-  performance = product "performance";
-  bindings =
-    pkgs.runCommand "artisan-generated-bindings"
-      {
-        nativeBuildInputs = [
-          pkgs.python3
-          pkgs.capnproto
-        ];
-      }
-      ''
-        python ${src}/scripts/codegen.py --plugin ${plugin}/bin/artisan-capnp-codegen --output "$out"
-      '';
-  archive = pkgs.runCommand "artisan-nix-payload.zip" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-    python ${src}/scripts/package.py --bin-dir ${release}/bin \
-      --generator ${generator}/bin/payload-manifest-generator --output "$out"
-  '';
-  architecture = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x64";
-  metadata = pkgs.writeText "release-metadata.json" (
-    builtins.toJSON (
-      (builtins.fromJSON (builtins.readFile ../packaging/release/development.json))
-      // {
-        "product-version" = version;
-        "editor-forge-compatibility-version" = version;
-        "platform" = "linux";
-        "architecture" = architecture;
-        "libc" = "glibc";
-        "artifact-id" = "linux-${architecture}-nix";
-        "file-name" = "artisan-nix-payload.zip";
-        "signing-key-id" = releaseTrust.ARTISAN_RELEASE_KEY_ID;
-      }
-    )
+  generator = tool "artisan-packaging" "payload-manifest-generator";
+  releaseTool = tool "artisan-packaging" "release-tool";
+  plugin = tool "artisan-capnp-codegen" "artisan-capnp-codegen";
+  hostLauncher = tool "artisan-native-dev" "forge-host";
+  screenDemo = tool "artisan-screen-demo" "screen-demo";
+  # Remote-host fixtures run the product binaries; test builds do not need
+  # the Production codegen.
+  testProduct = craneLib.buildPackage (
+    base
+    // {
+      pname = "artisan-test-product";
+      CARGO_PROFILE = "dev";
+      cargoArtifacts = devDeps;
+      cargoExtraArgs = "--locked --offline ${
+        lib.concatMapStringsSep " " (
+          binary: "-p ${binary.package} --bin ${binary.name}"
+        ) stageBuilds.binaries
+      }";
+      doCheck = false;
+    }
   );
-  unsignedManifest =
-    pkgs.runCommand "artisan-unsigned-release.json" { nativeBuildInputs = [ pkgs.python3 ]; }
+
+  # Cap'n Proto bindings: the Nix-pinned compiler with the Cargo-pinned plugin.
+  generateBindings = output: ''
+    mkdir -p "${output}"
+    capnp compile --no-standard-import --src-prefix=schema \
+      -o${plugin}/bin/artisan-capnp-codegen:"${output}" \
+      schema/phase1_proof.capnp schema/artisan.capnp schema/composer_state.capnp
+  '';
+  bindings =
+    pkgs.runCommand "artisan-generated-bindings" { nativeBuildInputs = [ pkgs.capnproto ]; }
       ''
-        python ${src}/scripts/release_manifest.py --tool ${releaseTool}/bin/release-tool \
-          --archive ${archive} --metadata ${metadata} --output "$out"
+        cd ${src}/modules/protocol
+        ${generateBindings "$out"}
       '';
+
+  # Portable payload archive of a payload's binaries: stored ZIP plus
+  # payload-manifest.json, byte-reproducible (payload-manifest-generator).
+  payloadArchive =
+    payload:
+    pkgs.runCommand "artisan-payload.zip" { } ''
+      ${generator}/bin/payload-manifest-generator \
+        --layout ${../packaging/portable/versioned_layout.txt} --archive "$out" \
+        ${lib.concatMapStringsSep " " (
+          binary: "--file bin/${binary.name} ${payload}/bin/${binary.name}"
+        ) stageBuilds.binaries}
+    '';
+  archive = payloadArchive production;
+  architecture = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x64";
+  releaseMetadata = (builtins.fromJSON (builtins.readFile ../packaging/release/development.json)) // {
+    "product-version" = version;
+    "editor-forge-compatibility-version" = version;
+    "platform" = "linux";
+    "architecture" = architecture;
+    "libc" = "glibc";
+    "artifact-id" = "linux-${architecture}-nix";
+    "file-name" = "artisan-nix-payload.zip";
+    "signing-key-id" = releaseTrust.ARTISAN_RELEASE_KEY_ID;
+  };
+  unsignedManifest = pkgs.runCommand "artisan-unsigned-release.json" { } ''
+    ${releaseTool}/bin/release-tool generate --archive ${archive} --output "$out" \
+      ${lib.cli.toGNUCommandLineShell { } releaseMetadata}
+  '';
+
   graphicalEnvironment = ''
     export LD_LIBRARY_PATH="${
       lib.makeLibraryPath (libraries ++ [ pkgs.mesa ])
@@ -240,24 +235,11 @@ let
     type = "app";
     program = "${derivation}/bin/${name}";
   };
-  launch =
-    profile: binaries:
-    shellApp "artisan-${profile}" [ pkgs.git pkgs.getent ] (
-      graphicalEnvironment
-      + ''
-        root="''${ARTISAN_DEV_ROOT:-''${XDG_DATA_HOME:-$HOME/.local/share}/Artisan Street Dev}"
-        exec ${launcher}/bin/dev run --bin-dir ${binaries}/bin --profile ${profile} --root "$root" "$@"
-      ''
-    );
-  closure = pkgs.closureInfo {
-    rootPaths = [
-      release
-      editorApp
-    ];
+  closure = pkgs.closureInfo { rootPaths = [ production ]; };
+  devLoop = import ./dev.nix {
+    inherit lib pkgs graphicalEnvironment;
+    linuxRunner = stageBuilds.runner "linux";
   };
-  devApp = launch "dev" development;
-  editorApp = launch "release" release;
-  performanceApp = launch "performance" performance;
   parity = craneLib.buildPackage (
     base
     // {
@@ -281,9 +263,10 @@ let
       exec timeout --signal=TERM --kill-after=5s 45s ${parity}/bin/parity-visual-proof "$@"
     ''
   );
-  codegenApp = shellApp "artisan-codegen" [ pkgs.python3 pkgs.capnproto ] ''
-    exec python "$PWD/scripts/codegen.py" --plugin ${plugin}/bin/artisan-capnp-codegen \
-      --output "$PWD/modules/protocol/src" "$@"
+  # Rewrites the checked-in bindings in the working tree.
+  codegenApp = shellApp "artisan-codegen" [ pkgs.capnproto pkgs.git ] ''
+    cd "$(git rev-parse --show-toplevel)/modules/protocol"
+    ${generateBindings "src"}
   '';
   pinApp = shellApp "artisan-verify-gpui-pin" [ pkgs.python3 pkgs.gh ] ''
     exec python "$PWD/scripts/verify_gpui_pin.py" "$@"
@@ -300,6 +283,31 @@ let
       ${command}
       touch "$out"
     '';
+  # Test fixtures for a Cargo test run over target/debug: the example
+  # fixture programs, and two independently produced payload archives of
+  # small stand-in binaries (debug UI binaries exceed a gigabyte and obscure
+  # the archive structure and tampering proofs).
+  testFixtures = ''
+    export ARTISAN_ENGINE_OWNER_FIXTURE="$PWD/target/debug/examples/engine-owner-fixture"
+    export ARTISAN_CODEX_WIRE_FIXTURE="$PWD/target/debug/examples/codex-wire-fixture"
+    export ARTISAN_DIRECTORY_CONTROLLER_FIXTURE="$PWD/target/debug/examples/directory-controller-fixture"
+    fixtures="$(mktemp -d)"
+    files=()
+    for name in ae editor forge installer; do
+      printf 'archive fixture: %s' "$name" > "$fixtures/$name"
+      files+=(--file "bin/$name" "$fixtures/$name")
+      export "ARTISAN_VERSIONED_PAYLOAD_''${name^^}_BINARY=$fixtures/$name"
+    done
+    for archive in payload repeat; do
+      target/debug/payload-manifest-generator --layout packaging/portable/versioned_layout.txt \
+        --archive "$fixtures/$archive.zip" "''${files[@]}"
+    done
+    export ARTISAN_VERSIONED_PAYLOAD_ARCHIVE="$fixtures/payload.zip"
+    export ARTISAN_VERSIONED_PAYLOAD_ARCHIVE_REPRODUCIBILITY="$fixtures/repeat.zip"
+  '';
+  nextest =
+    scope: features:
+    "cargo nextest run --locked --offline --no-fail-fast ${scope} --all-targets ${features} --test-threads=1";
   shell =
     extra:
     craneLib.devShell {
@@ -327,7 +335,7 @@ let
       pname = "artisan-rustfmt";
       inherit version;
     };
-    # Cargo.toml owns lint policy; match scripts/check.py on every platform.
+    # Cargo.toml owns lint policy.
     clippy = craneLib.cargoClippy (checkBase // { cargoClippyExtraArgs = ""; });
     registration = craneLib.mkCargoDerivation (
       checkBase
@@ -342,7 +350,7 @@ let
       pkgs.python3
     ] "python scripts/file_size_ratchet.py";
     remote-hosts = simpleCheck "artisan-remote-hosts" [ pkgs.python3 pkgs.git pkgs.getent ] ''
-      python ${src}/scripts/test_remote_host.py --bin-dir ${development}/bin --helper ${hostLauncher}/bin/forge-host
+      python ${src}/scripts/test_remote_host.py --bin-dir ${testProduct}/bin --helper ${hostLauncher}/bin/forge-host
     '';
     python = simpleCheck "artisan-python-tests" [
       pkgs.python3
@@ -361,7 +369,8 @@ let
         nativeBuildInputs = nativeTools ++ [ pkgs.cargo-nextest ];
         buildPhaseCargoCommand = ''
           cargo build --locked --offline --workspace --bins --examples --features artisan-frontend/visual-proof
-          python scripts/check.py --tests-only --runner nextest --bin-dir target/debug
+          ${testFixtures}
+          ${nextest "--workspace" "--features artisan-frontend/visual-proof"}
         '';
         doInstallCargoArtifacts = false;
         installPhaseCommand = ''touch "$out"'';
@@ -375,7 +384,8 @@ let
         NEXTEST_SHOW_PROGRESS = "counter";
         buildPhaseCargoCommand = ''
           cargo build --locked --offline -p artisan-packaging --bins
-          python scripts/check.py --tests-only --runner nextest --package artisan-packaging --bin-dir target/debug
+          ${testFixtures}
+          ${nextest "-p artisan-packaging" ""}
         '';
         doInstallCargoArtifacts = false;
         installPhaseCommand = ''touch "$out"'';
@@ -399,7 +409,7 @@ let
           touch "$out"
         '';
     nixfmt = pkgs.runCommand "artisan-nix-format" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
-      nixfmt --check ${../flake.nix} ${./workspace.nix} ${./forge-service.nix}
+      nixfmt --check ${../flake.nix} ${./workspace.nix} ${./stages.nix} ${./dev.nix} ${./forge-service.nix}
       touch "$out"
     '';
   };
@@ -424,23 +434,15 @@ in
       pkgs.mesa-demos
     ];
   };
-  packages = {
-    default = release;
-    inherit release development performance;
+  packages = stageBuilds.packages // {
+    default = production;
     dev-dependencies = devDeps;
-    release-dependencies = releaseDeps;
-    performance-dependencies = performanceDeps;
-    editor = binary "release" "artisan-frontend" "editor";
-    forge = binary "release" "artisan-backend" "forge";
-    ae = binary "release" "artisan-editor-cli" "ae";
-    installer = binary "release" "ae-installer" "installer";
     payload-manifest-generator = generator;
     release-tool = releaseTool;
     capnp-codegen = plugin;
     generated-bindings = bindings;
-    dev-launcher = launcher;
     forge-host = hostLauncher;
-    screen-demo = binary "dev" "artisan-screen-demo" "screen-demo";
+    screen-demo = screenDemo;
     parity-visual-proof = parity;
     nix-payload = archive;
     unsigned-release = unsignedManifest;
@@ -450,14 +452,13 @@ in
       name = "artisan-forge";
       tag = version;
       contents = [
-        (binary "release" "artisan-backend" "forge")
         pkgs.git
         pkgs.getent
         pkgs.coreutils
         pkgs.cacert
       ];
       config = {
-        Entrypoint = [ "${binary "release" "artisan-backend" "forge"}/bin/forge" ];
+        Entrypoint = [ "${production}/bin/forge" ];
         WorkingDir = "/data";
         User = "65532:65532";
         Env = [
@@ -475,10 +476,8 @@ in
     };
   };
   apps = {
-    default = app editorApp "artisan-release";
-    editor = app editorApp "artisan-release";
-    dev = app devApp "artisan-dev";
-    performance = app performanceApp "artisan-performance";
+    default = app devLoop "artisan-dev";
+    dev = app devLoop "artisan-dev";
     codegen = app codegenApp "artisan-codegen";
     verify-gpui-pin = app pinApp "artisan-verify-gpui-pin";
     visual-proof = app visualApp "artisan-visual-proof";
@@ -492,7 +491,7 @@ in
         graphicalEnvironment
         + ''
           exec python ${src}/scripts/capture_window.py \
-            --program ${binary "dev" "artisan-screen-demo" "screen-demo"}/bin/screen-demo \
+            --program ${screenDemo}/bin/screen-demo \
             --software-icd ${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json "$@"
         ''
       )
@@ -500,7 +499,7 @@ in
     screen-demo = app (shellApp "artisan-screen-demo" [ ] (
       graphicalEnvironment
       + ''
-        exec ${binary "dev" "artisan-screen-demo" "screen-demo"}/bin/screen-demo "$@"
+        exec ${screenDemo}/bin/screen-demo "$@"
       ''
     )) "artisan-screen-demo";
     release-tool = app releaseTool "release-tool";
