@@ -13,10 +13,25 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Forge host: {error}");
+            eprintln!("Forge host: {}", error_chain(error.as_ref()));
             ExitCode::FAILURE
         }
     }
+}
+
+/// Renders `error` and every source beneath it as `top: cause: cause`.
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut rendered = error.to_string();
+    let mut current = error.source();
+    while let Some(source) = current {
+        let message = source.to_string();
+        if !rendered.ends_with(&message) {
+            rendered.push_str(": ");
+            rendered.push_str(&message);
+        }
+        current = source.source();
+    }
+    rendered
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -92,8 +107,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "Forge ready at {advertise}; private invitation: {}",
             home.join("host.json").display()
         );
-        if !child.wait()?.success() {
-            return Err("Forge exited unsuccessfully".into());
+        let status = child.wait()?;
+        if !status.success() {
+            // The Forge prints its own complete error chain to the shared
+            // stderr; the status keeps the exit-code classification visible.
+            return Err(format!("Forge exited unsuccessfully ({status})").into());
         }
         Ok(())
     })();
@@ -227,6 +245,24 @@ fn remove_stale_readiness(
 #[cfg(test)]
 mod restart_tests {
     use super::*;
+
+    #[test]
+    fn fatal_errors_render_their_complete_source_chain() {
+        #[derive(Debug)]
+        struct Wrapped(std::io::Error);
+        impl std::fmt::Display for Wrapped {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("readiness failed")
+            }
+        }
+        impl std::error::Error for Wrapped {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let error = Wrapped(std::io::Error::other("disk full"));
+        assert_eq!(error_chain(&error), "readiness failed: disk full");
+    }
 
     #[test]
     fn stale_receipt_is_removed_only_without_a_live_owner() {

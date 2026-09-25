@@ -19,6 +19,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use artisan_backend::error_chain::ErrorChain;
 use artisan_backend::listener::ServeUntilCancelError;
 use artisan_backend::{
     AuthenticationStageError, CommandOrigin, CommandOriginClockError, CommandOriginEntropyError,
@@ -1635,9 +1636,27 @@ async fn start_until_cancel_broker(
     admission_capacity: NonZeroU32,
     requests_per_connection: NonZeroU32,
 ) -> (UntilCancelBroker, TestPki) {
+    start_until_cancel_broker_with(
+        label,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+        |_| {},
+    )
+    .await
+}
+
+async fn start_until_cancel_broker_with(
+    label: &str,
+    limits: ListenerLimits,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+    configure: impl FnOnce(&mut quinn::ServerConfig),
+) -> (UntilCancelBroker, TestPki) {
     let temporary = TemporaryDatabase::new(label);
     let pki = test_pki();
-    let config = test_server_config(&pki);
+    let mut config = test_server_config(&pki);
+    configure(&mut config);
     let database_path = temporary.path().to_path_buf();
     let cancel = Arc::new(CancelHandle::new());
     let cancel_for_thread = cancel.clone();
@@ -1954,37 +1973,188 @@ async fn until_cancel_cancellation_while_waiting_drains() {
         .expect("bounded completion");
 }
 
+/// Reconnects with the rotated credential after one failed connection and
+/// proves the same listener endpoint still serves: the failed connection's
+/// pre-minted request stamp is `forge-meta-2`, so the new Welcome is
+/// `forge-meta-4` and its first reply `forge-meta-5`.
+async fn assert_serves_after_failed_connection(
+    broker: &mut UntilCancelBroker,
+    client_ep: &Endpoint,
+    rotated: ReconnectCapability,
+    context: &str,
+) {
+    let addr = broker.addr();
+    let second = admit(client_ep, addr, HelloCredential::Reconnect(rotated)).await;
+    assert_eq!(second.welcome.frame_id.as_str(), "forge-meta-4");
+    exchange_response(
+        &second,
+        &list_projects_request("frame-after-failed-connection"),
+        "forge-meta-5",
+        UnixMillis::from_millis(1003),
+    )
+    .await;
+    broker.cancel();
+    let outcome = broker.await_result().await;
+    assert!(
+        outcome.is_ok(),
+        "{context}: one failed connection must not end the serve loop"
+    );
+    expect_application_close(&second.connection, CONNECTION_RELEASE_REASON).await;
+    assert_connect_fails(client_ep, addr).await;
+}
+
+// A request-stage failure belongs to its connection. The loop used to treat
+// every request-stage failure other than the two exact native idle closes as
+// terminal for the whole Forge, so one peer that disconnected any other way
+// (an arbitrary close, a vanished process, a stalled request) ended service
+// for every client. The contract is now: fail and close that connection only.
 #[tokio::test]
-async fn until_cancel_request_failure_is_terminal_with_primary() {
+async fn until_cancel_request_failure_fails_only_that_connection() {
     let limits = default_limits(Duration::from_secs(2));
     let (mut broker, pki) =
-        start_until_cancel_broker("until-request-terminal", limits, capacity(4), capacity(8)).await;
+        start_until_cancel_broker("until-request-local", limits, capacity(4), capacity(8)).await;
     let client_ep = client_endpoint(&pki);
-    let addr = broker.addr();
-    let client = admit(&client_ep, addr, initial_credential()).await;
-    // Cause a non-cancellation request failure: this uses the shutdown code
-    // with an arbitrary reason, so the server's next accept fails with Peer
-    // and must remain terminal. Code alone is not enough for recovery.
-    client
-        .connection
-        .close(VarInt::from_u32(0x02), b"peer done");
-    let outcome = broker.await_result().await;
-    assert!(outcome.is_err(), "request failure must be terminal");
-    let error = outcome.unwrap_err();
-    assert!(
-        error.is_service_failure(),
-        "must be classified as service failure"
-    );
-    assert!(error.drain_error().is_none(), "drain should succeed");
-    assert!(
-        error.as_request_error().is_some(),
-        "primary must preserve request error"
-    );
-    let rendered = format!("{error}{error:?}");
-    assert!(!rendered.contains("b7b7"), "must not leak bootstrap");
-    assert_connect_fails(&client_ep, addr).await;
+    let first = admit(&client_ep, broker.addr(), initial_credential()).await;
+    let rotated = first.welcome.welcome.reconnect_capability;
+    // The shutdown code with an arbitrary reason is not a native idle close;
+    // the server's next accept fails with a typed Peer request-stage error.
+    first.connection.close(VarInt::from_u32(0x02), b"peer done");
+    assert_serves_after_failed_connection(&mut broker, &client_ep, rotated, "arbitrary close")
+        .await;
     broker
-        .complete("until-request-terminal")
+        .complete("until-request-local")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_request_deadline_fails_only_that_connection() {
+    let limits = ListenerLimits {
+        admission: Duration::from_secs(2),
+        handshake: Duration::from_secs(2),
+        next_request: Duration::from_millis(250),
+        drain: Duration::from_secs(2),
+    };
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-request-deadline", limits, capacity(4), capacity(8)).await;
+    let client_ep = client_endpoint(&pki);
+    let first = admit(&client_ep, broker.addr(), initial_credential()).await;
+    let rotated = first.welcome.welcome.reconnect_capability;
+    // Start a request and stall inside its frame: the server's bounded
+    // request stage expires with a typed Receive timeout.
+    let (mut stalled_send, _stalled_recv) = first
+        .connection
+        .open_bi()
+        .await
+        .expect("request stream opens");
+    stalled_send
+        .write_all(&[0, 0])
+        .await
+        .expect("partial frame prefix crosses the wire");
+    expect_application_close(&first.connection, CONNECTION_RELEASE_REASON).await;
+    assert_serves_after_failed_connection(&mut broker, &client_ep, rotated, "request deadline")
+        .await;
+    broker
+        .complete("until-request-deadline")
+        .expect("bounded completion");
+}
+
+/// Authenticates on a private client runtime, then makes the peer vanish
+/// without any close frame: the endpoint and connection handles are leaked
+/// and their driver runtime is dropped, exactly like an Editor process that
+/// exits (or is killed) before Quinn flushes its close. Returns the rotated
+/// reconnect credential the vanished client was issued.
+fn authenticate_then_vanish(
+    certificate: CertificateDer<'static>,
+    addr: SocketAddr,
+) -> ReconnectCapability {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("vanishing client runtime");
+        let (endpoint, client) = runtime.block_on(async {
+            let pinned = PinnedIdentity::from_certificate(&certificate);
+            let config = client_config(certificate.clone(), pinned).expect("client configuration");
+            let endpoint = bind_loopback_client(config).expect("client bind");
+            let client = admit(&endpoint, addr, initial_credential()).await;
+            (endpoint, client)
+        });
+        let rotated = client.welcome.welcome.reconnect_capability;
+        std::mem::forget(client.connection);
+        std::mem::forget(endpoint);
+        drop(runtime);
+        rotated
+    })
+    .join()
+    .expect("vanishing client thread")
+}
+
+// Reproduction of the observed Forge exits: a client that disappears without
+// a close frame is only noticed through the QUIC idle timeout, which reaches
+// the request stage as `ConnectionError::TimedOut`. The idle timeout is
+// shortened on the server so the test does not wait the production 30 s.
+#[tokio::test]
+async fn until_cancel_vanished_peer_fails_only_that_connection() {
+    let limits = default_limits(Duration::from_secs(2));
+    let (mut broker, pki) = start_until_cancel_broker_with(
+        "until-vanished-peer",
+        limits,
+        capacity(4),
+        capacity(8),
+        |config| {
+            let mut transport = TransportConfig::default();
+            transport.max_idle_timeout(Some(
+                quinn::IdleTimeout::try_from(Duration::from_millis(300)).expect("idle bound"),
+            ));
+            config.transport_config(Arc::new(transport));
+        },
+    )
+    .await;
+    let rotated = authenticate_then_vanish(pki.certificate.clone(), broker.addr());
+    let client_ep = client_endpoint(&pki);
+    assert_serves_after_failed_connection(&mut broker, &client_ep, rotated, "vanished peer").await;
+    broker
+        .complete("until-vanished-peer")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_failed_tls_establishment_does_not_terminate() {
+    let limits = default_limits(Duration::from_secs(2));
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-tls-failure", limits, capacity(4), capacity(4)).await;
+    let addr = broker.addr();
+    // A client pinned to another certificate aborts the QUIC/TLS handshake.
+    {
+        let stranger = client_endpoint(&test_pki());
+        let connecting = stranger
+            .connect(addr, LOOPBACK_SERVER_NAME)
+            .expect("connect accepted");
+        let refused = tokio::time::timeout(WATCHDOG, connecting)
+            .await
+            .expect("establishment settles under the watchdog");
+        assert!(refused.is_err(), "a mismatched pin must not establish");
+    }
+    // No metadata was minted for the failed establishment.
+    let client_ep = client_endpoint(&pki);
+    let client = admit(&client_ep, addr, initial_credential()).await;
+    assert_eq!(client.welcome.frame_id.as_str(), "forge-meta-1");
+    exchange_response(
+        &client,
+        &list_projects_request("frame-after-tls-failure"),
+        "forge-meta-2",
+        UnixMillis::from_millis(1001),
+    )
+    .await;
+    broker.cancel();
+    let outcome = broker.await_result().await;
+    assert!(
+        outcome.is_ok(),
+        "a failed establishment must not end the loop"
+    );
+    expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
+    broker
+        .complete("until-tls-failure")
         .expect("bounded completion");
 }
 
@@ -2043,15 +2213,26 @@ async fn serve_one_retains_consuming_error_contract() {
 #[tokio::test]
 async fn until_cancel_error_hides_secrets_in_debug_display() {
     let limits = default_limits(Duration::from_secs(2));
+    // One lifetime admission: after the failed connection the loop reaches
+    // the terminal exhaustion failure, whose full chain is rendered below.
     let (mut broker, pki) =
-        start_until_cancel_broker("until-secret", limits, capacity(4), capacity(8)).await;
+        start_until_cancel_broker("until-secret", limits, capacity(1), capacity(8)).await;
     let client_ep = client_endpoint(&pki);
     let client = admit(&client_ep, broker.addr(), initial_credential()).await;
     client
         .connection
         .close(VarInt::from_u32(0x02), b"peer done");
     let error = broker.await_result().await.expect_err("terminal");
-    let rendered = format!("{error}{error:?}");
+    assert!(matches!(
+        error.as_listener_error(),
+        Some(ListenerError::AdmissionCapacityExhausted)
+    ));
+    let chain = ErrorChain(&*error).to_string();
+    assert_eq!(
+        chain,
+        "forge listener service failure: admission capacity was exhausted"
+    );
+    let rendered = format!("{error}{error:?}{chain}");
     assert!(!rendered.contains("b7b7"));
     assert!(!rendered.contains("5c5c"));
     broker.complete("until-secret").expect("bounded completion");
@@ -2090,9 +2271,9 @@ async fn until_cancel_family_mismatch_is_retryable_then_valid_succeeds() {
 }
 
 #[tokio::test]
-async fn until_cancel_handshake_timeout_is_terminal_service_failure() {
-    // Handshake timeout is terminal: authority may have already been touched,
-    // so the loop must drain and report service failure, not retry.
+async fn until_cancel_handshake_timeout_before_hello_fails_only_that_connection() {
+    // A peer that connects but never sends Hello times out before the
+    // authority consumed anything, so only that connection fails.
     let limits = ListenerLimits {
         admission: Duration::from_secs(2),
         handshake: Duration::from_millis(120),
@@ -2100,51 +2281,96 @@ async fn until_cancel_handshake_timeout_is_terminal_service_failure() {
         drain: Duration::from_secs(2),
     };
     let (mut broker, pki) =
-        start_until_cancel_broker("until-hs-timeout", limits, capacity(4), capacity(4)).await;
+        start_until_cancel_broker("until-hs-timeout-before", limits, capacity(4), capacity(4))
+            .await;
     let client_ep = client_endpoint(&pki);
     let addr = broker.addr();
 
-    // Connect but delay opening the control stream past the handshake deadline.
     let connecting = client_ep
         .connect(addr, LOOPBACK_SERVER_NAME)
         .expect("connect");
-    let connection = tokio::time::timeout(WATCHDOG, connecting)
+    let silent = tokio::time::timeout(WATCHDOG, connecting)
         .await
         .expect("connect watchdog")
         .expect("established");
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    // Attempt to open after the server has timed out; the server's
-    // deadline decision is already terminal.
-    let _ = connection.open_bi().await;
+    // The server's handshake deadline closes the silent peer.
+    expect_application_close(&silent, CONNECTION_RELEASE_REASON).await;
 
+    // The initial credential is still expected. The silent attempt minted
+    // identities 0 and 1, so this Welcome is `forge-meta-3`.
+    let client = admit(&client_ep, addr, initial_credential()).await;
+    assert_eq!(client.welcome.frame_id.as_str(), "forge-meta-3");
+    exchange_response(
+        &client,
+        &list_projects_request("frame-after-silent-peer"),
+        "forge-meta-4",
+        UnixMillis::from_millis(1002),
+    )
+    .await;
+    broker.cancel();
     let outcome = broker.await_result().await;
-    assert!(outcome.is_err(), "handshake timeout must be terminal");
-    let error = outcome.unwrap_err();
+    assert!(
+        outcome.is_ok(),
+        "a pre-credential timeout must not end the loop"
+    );
+    expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
+    assert_connect_fails(&client_ep, addr).await;
+    broker
+        .complete("until-hs-timeout-before")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_handshake_timeout_after_credential_is_terminal_service_failure() {
+    // The credential is consumed and rotation staged while the sixteen-byte
+    // receive window blocks the Welcome write; the handshake deadline then
+    // leaves the authority fail-closed, which must stay terminal.
+    let limits = ListenerLimits {
+        admission: Duration::from_secs(2),
+        handshake: Duration::from_millis(300),
+        next_request: Duration::from_secs(2),
+        drain: Duration::from_secs(2),
+    };
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-hs-timeout-after", limits, capacity(4), capacity(4)).await;
+    let client_ep = constrained_client_endpoint(&pki);
+    let addr = broker.addr();
+
+    let (connection, control_send, mut control_recv) =
+        send_hello_only(&client_ep, addr, initial_credential()).await;
+    // Causal witness: actual Welcome bytes prove the credential was consumed.
+    let mut welcome_prefix = [0_u8; 8];
+    tokio::time::timeout(WATCHDOG, control_recv.read_exact(&mut welcome_prefix))
+        .await
+        .expect("prefix arrives under the watchdog")
+        .expect("prefix readable");
+
+    let error = broker
+        .await_result()
+        .await
+        .expect_err("a post-credential handshake timeout must be terminal");
     assert!(
         error.is_service_failure(),
         "timeout must be service failure, not drain-only"
     );
     assert!(error.drain_error().is_none(), "drain should succeed");
-    assert!(
-        error.as_listener_error().is_some(),
-        "primary must be listener authentication timeout"
-    );
-    if let Some(ListenerError::Authentication { source }) = error.as_listener_error() {
-        assert!(matches!(
-            source,
-            DeadlineError::Timeout {
+    assert!(matches!(
+        error.as_listener_error(),
+        Some(ListenerError::Authentication {
+            source: DeadlineError::Timeout {
                 operation: OperationKind::Handshake,
                 ..
-            }
-        ));
-    } else {
-        panic!("expected authentication timeout");
-    }
+            },
+        })
+    ));
     let rendered = format!("{error}{error:?}");
     assert!(!rendered.contains("b7b7"));
 
-    assert_connect_fails(&client_ep, addr).await;
+    drop(control_send);
+    drop(control_recv);
+    drop(connection);
+    assert_connect_fails(&client_endpoint(&pki), addr).await;
     broker
-        .complete("until-hs-timeout")
+        .complete("until-hs-timeout-after")
         .expect("bounded completion");
 }
