@@ -37,6 +37,7 @@ cargo dev --profile performance  # optimized rendering (or --release)
 cargo dev where                  # dev root, active version, build identity
 cargo dev prune --keep 1         # drop superseded dev versions
 cargo dev --root /abs/path       # a separate dev installation (or ARTISAN_DEV_ROOT)
+cargo dev --attach               # stay attached until the Editor exits
 ```
 
 Previous versions stay installed for rollback (three by default, `--keep N`).

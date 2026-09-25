@@ -24,6 +24,10 @@ fn no_arguments_runs_the_dev_profile_on_the_default_root() {
     assert_eq!(options.root, None);
     assert_eq!(options.bin_dir, None);
     assert_eq!(options.keep, DEFAULT_KEEP);
+    assert!(
+        !options.attach,
+        "runs return once the Editor confirms startup"
+    );
 }
 
 #[test]
@@ -56,6 +60,7 @@ fn flags_set_root_profile_binaries_and_retention() {
     assert_eq!(options.profile.as_deref(), Some("performance"));
     assert_eq!(options.bin_dir, Some(PathBuf::from("/tmp/bins")));
     assert_eq!(options.keep, 5);
+    assert!(execute(&["--attach"]).attach);
     assert_eq!(execute(&["--release"]).profile.as_deref(), Some("release"));
 }
 

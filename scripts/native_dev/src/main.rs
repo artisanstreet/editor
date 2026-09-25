@@ -231,6 +231,13 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
             return Err(Outcome::Failure);
         }
     }
+    if !options.attach {
+        println!(
+            "dev: editor running (pid {}); run `cargo dev` again to replace it with a new build",
+            child.id()
+        );
+        return Ok(0);
+    }
     wait_for_exit(child, &version_root)
 }
 

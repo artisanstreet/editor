@@ -18,7 +18,6 @@ use std::{
 };
 
 use artisan_editor_cli::process::{self, ForgeReadiness, ForgeReadinessStatus};
-use fs2::FileExt;
 
 use crate::{
     error::DevError,

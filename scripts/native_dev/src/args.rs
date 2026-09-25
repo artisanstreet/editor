@@ -47,6 +47,10 @@ pub struct DevArgs {
     pub bin_dir: Option<PathBuf>,
     /// Inactive versions kept after an install or prune.
     pub keep: usize,
+    /// Follow the launched Editor until it exits instead of returning once it
+    /// confirms startup. A detached runner is what lets the next run rebuild
+    /// the runner itself on Windows, where a running executable is locked.
+    pub attach: bool,
 }
 
 impl DevArgs {
@@ -63,6 +67,7 @@ impl DevArgs {
             profile: None,
             bin_dir: None,
             keep: DEFAULT_KEEP,
+            attach: false,
         };
         let usage = |reason: String| DevError::Usage { reason };
         let mut rest = argv.iter().peekable();
@@ -94,6 +99,7 @@ impl DevArgs {
                     options.profile = Some(value("--profile")?.to_string_lossy().into_owned());
                 }
                 "--release" => options.profile = Some("release".to_owned()),
+                "--attach" => options.attach = true,
                 "--keep" => {
                     options.keep = value("--keep")?
                         .to_string_lossy()
@@ -119,7 +125,7 @@ impl DevArgs {
 #[must_use]
 pub fn usage() -> &'static str {
     "usage: cargo dev [run|stage|where|prune] [--root PATH] [--profile NAME | --release]\n\
-     \x20                [--bin-dir PATH] [--keep N]\n\
+     \x20                [--bin-dir PATH] [--keep N] [--attach]\n\
      \n\
      Builds the Artisan binaries, installs them as a signed dev-channel\n\
      release into the per-user `Artisan Street Dev` installation through the\n\
@@ -137,5 +143,6 @@ pub fn usage() -> &'static str {
      \x20               the profile the binaries were built with\n\
      --release       shorthand for --profile release\n\
      --bin-dir PATH  install prebuilt ae/editor/forge/installer binaries\n\
-     --keep N        inactive versions kept for rollback (default: 3)"
+     --keep N        inactive versions kept for rollback (default: 3)\n\
+     --attach        follow the launched Editor until it exits"
 }
