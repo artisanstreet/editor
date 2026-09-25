@@ -25,7 +25,7 @@ impl NativeComposer {
             self.selection_dragging = false;
             self.advance_selection_revision();
             self.layout = None;
-            self.persist_current_draft();
+            self.note_draft_change();
             cx.notify();
         }
     }
@@ -46,7 +46,7 @@ impl NativeComposer {
             self.selection_dragging = false;
             self.advance_selection_revision();
             self.layout = None;
-            self.persist_current_draft();
+            self.note_draft_change();
             cx.notify();
         }
     }
@@ -128,7 +128,7 @@ impl NativeComposer {
             self.marked_range = None;
         }
         if changed {
-            self.persist_current_draft();
+            self.note_draft_change();
         }
         cx.notify();
     }

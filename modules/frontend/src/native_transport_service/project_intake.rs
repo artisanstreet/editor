@@ -11,6 +11,45 @@
 
 use super::*;
 
+/// One private retry plan for a project intake. Stable mutations retain their
+/// complete command identity; reads and the picker are intentionally retried
+/// with fresh frames.
+pub(super) enum IntakeRetry {
+    Validate(String),
+    Pick,
+    Attach(StableMutation),
+    RefreshProjects {
+        attached: ProjectSummary,
+    },
+    Create(StableMutation),
+    RefreshThreads {
+        project_id: ProjectId,
+        created: ThreadSummary,
+    },
+}
+
+pub(super) struct IntakeState {
+    pub(super) selected_directory: Option<DirectoryId>,
+    pub(super) projects: Option<ProjectListing>,
+    pub(super) retry: Option<IntakeRetry>,
+}
+
+impl IntakeState {
+    pub(super) const fn new() -> Self {
+        Self {
+            selected_directory: None,
+            projects: None,
+            retry: None,
+        }
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.selected_directory = None;
+        self.projects = None;
+        self.retry = None;
+    }
+}
+
 pub(super) async fn begin_project_intake(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,

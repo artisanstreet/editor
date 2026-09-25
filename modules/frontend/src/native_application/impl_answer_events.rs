@@ -16,6 +16,29 @@ use artisan_domain::{RespondApproval, RespondQuestion};
 use artisan_protocol::{RespondApprovalReceipt, RespondQuestionReceipt};
 
 impl NativeApplication {
+    /// Drains one queued answer batch into live transport, once per tick.
+    ///
+    /// Runs at the head of the controller tick beside the sibling drains, so
+    /// a slow or failing transport cannot stall unrelated per-tick work.
+    /// Admission follows the established submit path: without it the outbox
+    /// is left untouched. Each taken dispatch submits once with its
+    /// already-minted request id; `Busy`/`Stopped` keep rows pending with the
+    /// existing retry/diagnostic texts, and single-flight holds until
+    /// receipts pair through the existing settle-in-place pairing. Draining
+    /// first also keeps a same-tick host retirement from dropping gestures.
+    pub(super) fn drain_answer_dispatches(&mut self, cx: &mut Context<Self>) {
+        if !self.command_submission_is_available() {
+            return;
+        }
+        let Some(host) = self.conversation_host.clone() else {
+            return;
+        };
+        let surface = host.read(cx).surface().clone();
+        let this = &*self;
+        surface.update(cx, |surface, _| {
+            surface.drain_pending_answer_dispatches(&mut |command| this.submit_command(command));
+        });
+    }
     /// Settles the answer gates for one transport answer outcome.
     ///
     /// Only the four answer variants act; the caller's dispatch arm routes

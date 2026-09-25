@@ -30,32 +30,23 @@
 //! after the response has been written; the authenticated delivery path
 //! supplies a fresh connection-owned registrar context for that work.
 
-use std::{
-    fmt,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
-use artisan_database::{
-    AttachProjectInput, CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError,
-    SetThreadEngineConfigInput,
-};
+use artisan_database::{CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError};
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
-    ConversationUnsubscribe, CreateThread, EngineProfileId, MessageId, PatchBatch, ProjectId,
-    QueueFirstMessage, RequestId, SetModelFavorite, SetThreadEngineConfig, ThreadId, UnixMillis,
+    ConversationUnsubscribe, CreateThread, EngineProfileId, MessageId, PatchBatch,
+    QueueFirstMessage, RequestId, SetModelFavorite, ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, ErrorCode, FirstMessageReceipt, ProtocolFailure, ResponsePayload,
-    ServerResponse, SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
+    ServerResponse, StopRunDisposition, StopRunReceipt,
 };
 use tokio::sync::Mutex;
 
 use self::failures::{
     forged_identity_failure, origin_clock_failure, origin_entropy_failure, outcome,
     preparation_failure, repository_failure, run_cancellation_failure, typed_failure,
-    unknown_directory_failure,
 };
 use crate::command_admission::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, SystemCommandOrigin,
@@ -993,72 +984,7 @@ impl RequestHandler {
         }
 
         match command {
-            Command::AttachProject(attach) => {
-                if let Some(replay) = self
-                    .repository
-                    .lookup_attach_project(&attach.request_id, &attach.directory_id)
-                    .await
-                    .map_err(|error| repository_failure(&error, request_id))?
-                {
-                    return Ok(outcome(
-                        request_id,
-                        ResponsePayload::AttachedProject {
-                            project: replay.project,
-                            disposition: replay.receipt.disposition,
-                        },
-                    ));
-                }
-                let Some(picker) = self.directory_picker.as_ref() else {
-                    return Err(unknown_directory_failure(request_id, &attach.directory_id));
-                };
-                let mut authority = picker.authority.lock().await;
-                if let Some(replay) = self
-                    .repository
-                    .lookup_attach_project(&attach.request_id, &attach.directory_id)
-                    .await
-                    .map_err(|error| repository_failure(&error, request_id))?
-                {
-                    return Ok(outcome(
-                        request_id,
-                        ResponsePayload::AttachedProject {
-                            project: replay.project,
-                            disposition: replay.receipt.disposition,
-                        },
-                    ));
-                }
-                let Some(selected) = authority.consume(&attach.directory_id, Instant::now()) else {
-                    return Err(unknown_directory_failure(request_id, &attach.directory_id));
-                };
-                let identity = self
-                    .origin
-                    .mint_identity()
-                    .map_err(|error| origin_entropy_failure(&error, request_id))?;
-                let project_id = ProjectId::parse(identity)
-                    .map_err(|_| forged_identity_failure("project", request_id))?;
-                let attached_at = self
-                    .origin
-                    .acceptance_instant()
-                    .map_err(|error| origin_clock_failure(error, request_id))?;
-                let result = self
-                    .repository
-                    .attach_project(AttachProjectInput {
-                        request_id: attach.request_id.clone(),
-                        directory_id: selected.directory_id,
-                        project_id,
-                        root_path: selected.root_path,
-                        display_name: selected.display_name,
-                        attached_at,
-                    })
-                    .await
-                    .map_err(|error| repository_failure(&error, request_id))?;
-                Ok(outcome(
-                    request_id,
-                    ResponsePayload::AttachedProject {
-                        project: result.project,
-                        disposition: result.receipt.disposition,
-                    },
-                ))
-            }
+            Command::AttachProject(attach) => self.attach_project_outcome(request_id, attach).await,
             Command::CreateThread(create) => self.create_thread_outcome(request_id, create).await,
             Command::QueueFirstMessage(queue) => {
                 self.queue_first_message_outcome(request_id, queue).await
@@ -1080,6 +1006,13 @@ impl RequestHandler {
             }
             Command::SetModelFavorite(favorite) => {
                 self.set_model_favorite_outcome(request_id, favorite).await
+            }
+            Command::SaveComposerDraft(save) => self.save_composer_draft(request_id, save).await,
+            Command::UploadComposerAttachment(upload) => {
+                self.upload_composer_attachment(request_id, upload).await
+            }
+            Command::QueueStoredMessage(queue) => {
+                self.queue_stored_message_outcome(request_id, queue).await
             }
         }
     }
@@ -1237,45 +1170,6 @@ impl RequestHandler {
         ))
     }
 
-    /// Answers a durable thread engine-configuration mutation. Receipt
-    /// lookup is deliberately before the acceptance clock so exact replays
-    /// never consult fresh admission state.
-    async fn set_thread_engine_config_outcome(
-        &self,
-        request_id: &RequestId,
-        config: &SetThreadEngineConfig,
-    ) -> Result<ServerResponse, ProtocolFailure> {
-        if let Some(replay) = self
-            .repository
-            .lookup_set_thread_engine_config(
-                config.request_id(),
-                config.thread_id(),
-                config.precondition(),
-                config.config(),
-            )
-            .await
-            .map_err(|error| repository_failure(&error, request_id))?
-        {
-            return Ok(set_thread_engine_config_response(request_id, &replay));
-        }
-        let accepted_at = self
-            .origin
-            .acceptance_instant()
-            .map_err(|error| origin_clock_failure(error, request_id))?;
-        let result = self
-            .repository
-            .set_thread_engine_config(SetThreadEngineConfigInput {
-                request_id: config.request_id().clone(),
-                thread_id: config.thread_id().clone(),
-                precondition: config.precondition(),
-                config: config.config().clone(),
-                accepted_at,
-            })
-            .await
-            .map_err(|error| repository_failure(&error, request_id))?;
-        Ok(set_thread_engine_config_response(request_id, &result))
-    }
-
     /// Answers one catalog-backed favorite mutation.
     ///
     /// Durable receipt lookup runs before catalog discovery and before the
@@ -1331,23 +1225,17 @@ impl RequestHandler {
     }
 }
 
-fn set_thread_engine_config_response(
-    request_id: &RequestId,
-    result: &artisan_database::SetThreadEngineConfigResult,
-) -> ServerResponse {
-    outcome(
-        request_id,
-        ResponsePayload::ThreadEngineConfigSet(SetThreadEngineConfigResult {
-            request_id: result.receipt().request_id.clone(),
-            thread_id: result.thread_id().clone(),
-            revision: result.revision(),
-            disposition: result.receipt().disposition,
-        }),
-    )
-}
-
 #[path = "request_handler/live_run.rs"]
 mod live_run;
+
+#[path = "request_handler/composer_drafts.rs"]
+mod composer_drafts;
+
+#[path = "request_handler/engine_config.rs"]
+mod engine_config;
+
+#[path = "request_handler/attach_project.rs"]
+mod attach_project;
 
 #[path = "request_handler/queries.rs"]
 mod queries;

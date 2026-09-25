@@ -105,6 +105,15 @@ impl CredentialAuthority {
         }
     }
 
+    /// Returns whether a credential is still expected: nothing has been
+    /// consumed since construction or the last committed rotation. `false`
+    /// means a credential was consumed and its rotation never committed, so
+    /// the authority stays fail-closed.
+    #[must_use]
+    pub const fn expects_credential(&self) -> bool {
+        matches!(self.state, CredentialState::Expected(_))
+    }
+
     /// Authenticates and consumes one presented credential.
     ///
     /// Wrong-family and wrong-value attempts leave the expected credential

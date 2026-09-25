@@ -39,8 +39,8 @@ impl NativeApplication {
         let composer = cx.new(NativeComposer::new);
         let composer_controls =
             cx.new(|cx| NativeComposerControls::new(NativeComposerControlsSnapshot::idle(), cx));
-        let catalog =
-            NativeModelCatalog::harnesses_only().expect("the shipped harness descriptors are validated");
+        let catalog = NativeModelCatalog::harnesses_only()
+            .expect("the shipped harness descriptors are validated");
         let model_selector =
             cx.new(|cx| NativeModelSelector::new(catalog, None, ThemeMode::Dark, cx));
         let composer_controls_subscription = cx.subscribe(&composer_controls, |application, _, event, cx| {
@@ -142,6 +142,7 @@ impl NativeApplication {
             machine_home: None,
             machine_label: "This computer".into(),
             machine_menu: impl_machines::MachineMenu::new(cx),
+            host_switch: None,
             theme: ArtisanTheme::for_mode(ThemeMode::Dark),
             desktop_theme: DesktopTheme::neutral_dark(),
             focus_handle,
@@ -202,6 +203,8 @@ impl NativeApplication {
             sidebar_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             sidebar_hover_surface_bounds: Rc::new(RefCell::new(None)),
             message_flight: None,
+            message_flight_hold: None,
+            composer_drafts: super::composer_drafts::ComposerDrafts::default(),
             optimistic_messages: Vec::new(),
             message_retry: None,
             message_receipt: None,

@@ -66,6 +66,7 @@ impl Render for NativeApplication {
                         cx.notify();
                     }))
             }))
+            .children(self.host_switch_banner())
             .child(self.message_images.clone())
             .child(self.machine_dropdown(window, cx))
     }

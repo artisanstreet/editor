@@ -14,9 +14,6 @@ pub(super) enum AttachmentWork {
     Files {
         items: Vec<(String, std::path::PathBuf)>,
     },
-    Restored {
-        items: Vec<RestoredAttachmentInput>,
-    },
     Recalled {
         items: Vec<RecalledAttachmentInput>,
     },
@@ -53,7 +50,6 @@ impl AttachmentWork {
         match self {
             Self::Clipboard { items } => prepare_clipboard_batch(items, None),
             Self::Files { items } => prepare_file_batch(items, None),
-            Self::Restored { items } => prepare_restored_batch(items, None),
             Self::Recalled { items } => prepare_recalled_batch(items),
         }
     }
@@ -201,7 +197,7 @@ impl NativeComposer {
 
         if !work.is_empty() {
             self.spawn_attachment_work(AttachmentWork::Clipboard { items: work }, cx);
-            self.persist_current_draft();
+            self.note_draft_change();
             cx.notify();
         }
     }
@@ -231,7 +227,7 @@ impl NativeComposer {
             work.push((id, path));
         }
         self.spawn_attachment_work(AttachmentWork::Files { items: work }, cx);
-        self.persist_current_draft();
+        self.note_draft_change();
         cx.notify();
     }
 
@@ -267,6 +263,7 @@ impl NativeComposer {
         }
 
         let mut changed = false;
+        let mut authored = false;
         for outcome in outcomes {
             let Some(index) = self
                 .attachments
@@ -276,6 +273,8 @@ impl NativeComposer {
                 continue;
             };
             changed = true;
+            let stored = self.attachments[index].stored.take();
+            authored |= stored.is_none();
             match outcome.result {
                 Ok(prepared) => {
                     if self.attachment_is_duplicate(index, &prepared) {
@@ -302,7 +301,9 @@ impl NativeComposer {
                         );
                         continue;
                     }
-                    self.attachments[index] = ComposerAttachment::from_prepared(prepared);
+                    let mut ready = ComposerAttachment::from_prepared(prepared);
+                    ready.stored = stored;
+                    self.attachments[index] = ready;
                 }
                 Err(error) => {
                     self.attachments.remove(index);
@@ -316,7 +317,10 @@ impl NativeComposer {
                     .iter()
                     .any(|attachment| &attachment.id == id)
             });
-            self.persist_current_draft();
+            // Bytes restored from the Forge draft change nothing it stores.
+            if authored {
+                self.note_draft_change();
+            }
             cx.notify();
         }
         self.prune_attachment_tasks();
@@ -352,7 +356,7 @@ impl NativeComposer {
             self.clear_attachment_preview();
         }
         self.attachment_error = None;
-        self.persist_current_draft();
+        self.note_draft_change();
         cx.notify();
     }
 
@@ -442,7 +446,7 @@ impl NativeComposer {
         }
         self.attachments
             .retain(|attachment| !ids.contains(attachment.id.as_str()));
-        self.persist_current_draft();
+        self.note_draft_change();
         true
     }
 

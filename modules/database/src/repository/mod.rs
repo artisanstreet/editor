@@ -1,6 +1,7 @@
 //! Domain-typed repositories for the native schema.
 
 mod common;
+mod composer_draft;
 mod conversation_patch_replay;
 mod conversation_projection;
 mod dispatch_payload;
@@ -32,6 +33,10 @@ pub(crate) use common::{
     RepositoryFailure, corrupt_data, database_error, negative_counter, row_value,
 };
 
+pub use composer_draft::{
+    COMPOSER_ATTACHMENT_UNREFERENCED_GRACE_MS, ComposerDraftRepositoryError,
+    ComposerDraftSaveOutcome, SaveComposerDraftInput,
+};
 pub use conversation_patch_replay::ConversationPatchReplay;
 pub use dispatch_payload::{MessageDispatchPayload, QueueMessageDispatchPayload};
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};

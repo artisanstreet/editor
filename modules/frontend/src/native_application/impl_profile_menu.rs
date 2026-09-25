@@ -1421,7 +1421,11 @@ impl NativeApplication {
                                                     .text_size(px(12.0))
                                                     .line_height(px(16.0))
                                                     .text_color(theme.secondary)
-                                                    .child(self.machine_label.clone()),
+                                                    .child(
+                                                        self.host_switch_status().unwrap_or_else(
+                                                            || self.machine_label.clone(),
+                                                        ),
+                                                    ),
                                             ),
                                     )
                                     .into_any_element(),

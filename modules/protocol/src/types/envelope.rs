@@ -96,6 +96,14 @@ pub enum ResponsePayload {
     RichLink(RichLinkPageMetadata),
     /// Repository identity per requested project.
     ProjectRepository(ProjectRepositoryQueryResult),
+    /// Correlated draft-save acknowledgement with the stored revision.
+    ComposerDraftSaved(artisan_domain::ComposerDraftSaved),
+    /// Stored draft of one composer scope.
+    ComposerDraft(artisan_domain::ComposerDraftResult),
+    /// Correlated stored-attachment reference.
+    ComposerAttachmentUploaded(artisan_domain::ComposerAttachmentUploaded),
+    /// Bytes of one stored attachment.
+    ComposerAttachment(artisan_domain::ComposerAttachmentResult),
 }
 
 /// Successful response correlated to a client request frame.
@@ -346,6 +354,18 @@ impl WireEnvelope {
                 request_id,
                 payload: ResponsePayload::ModelFavoriteSet(receipt),
             }) if request_id != &receipt.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::ComposerDraftSaved(saved),
+            }) if request_id != &saved.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::ComposerAttachmentUploaded(uploaded),
+            }) if request_id != &uploaded.request_id => {
                 Err(ProtocolValueError::ResponseCorrelationMismatch)
             }
             _ => Ok(()),

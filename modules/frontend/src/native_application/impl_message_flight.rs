@@ -3,14 +3,8 @@
 //! Extracted verbatim from `native_application.rs` during the phase-2 module
 //! split; visibility was widened to `pub(super)` for parent-owned methods.
 
+use super::impl_profile_usage::PendingAccountSend;
 use super::*;
-
-pub(super) struct PendingAccountSend {
-    thread: Option<ThreadId>,
-    connection: ProfileUsageGeneration,
-    draft: (u64, u64),
-    policy: crate::native_model_selector::SelectPolicy,
-}
 
 impl NativeApplication {
     pub(super) fn message_submission_is_admissible(&self, cx: &App) -> bool {
@@ -18,6 +12,7 @@ impl NativeApplication {
             if self.selected_project.as_ref() == Some(project)
                 && self.selected_thread.as_ref() == Some(thread))
             && self.message_composer_visible(cx)
+            && !self.host_switch_pending()
     }
 
     pub(super) fn project_picker_action_is_admissible(&self) -> bool {
@@ -57,6 +52,7 @@ impl NativeApplication {
     }
 
     pub(super) fn sync_composer_controls(&mut self, cx: &mut Context<Self>) {
+        self.settle_message_flight_hold(None);
         if self.pending_account_send.as_ref().is_some_and(|send| {
             send.thread != self.selected_thread
                 || send.connection != self.profile_usage_generation
@@ -339,47 +335,6 @@ impl NativeApplication {
         Some(profile_usage_display_name(config.selection().engine_id().as_str()).to_owned())
     }
 
-    fn displayed_send_policy(
-        &self,
-        cx: &App,
-    ) -> Option<crate::native_model_selector::SelectPolicy> {
-        match &self.composer_model_choice {
-            Some((thread, policy)) if thread == &self.selected_thread => Some(policy.clone()),
-            _ => self.model_selector.read(cx).state().policy().cloned(),
-        }
-    }
-
-    pub(super) fn resume_account_send(&mut self, engine: &str, cx: &mut Context<Self>) {
-        if !self
-            .pending_account_send
-            .as_ref()
-            .is_some_and(|send| send.policy.engine_id == engine)
-        {
-            return;
-        }
-        let send = self
-            .pending_account_send
-            .take()
-            .expect("matched pending send");
-        if send.thread != self.selected_thread
-            || send.connection != self.profile_usage_generation
-            || send.draft != self.composer.read(cx).send_draft_identity()
-            || self.displayed_send_policy(cx).as_ref() != Some(&send.policy)
-        {
-            self.sync_composer_controls(cx);
-            return;
-        }
-        if engine_readiness(&self.profile_usage, engine, profile_usage_now_ms())
-            == EngineReadiness::Ready
-        {
-            self.begin_message_submission(cx);
-        } else {
-            self.composer_model_run_error = Some(self.readiness_block_reason(engine));
-            self.sync_composer_controls(cx);
-            cx.notify();
-        }
-    }
-
     pub(super) fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
         if !self.message_submission_is_admissible(cx) || self.message_flight.is_some() {
             return;
@@ -487,22 +442,17 @@ impl NativeApplication {
         if let Some(target) = steer_target.clone() {
             queued = queued.with_steer_target(target);
         }
-        let command = NativeTransportCommand::QueueMessage(Box::new(queued));
-        match self.submit_command(command) {
-            Ok(()) => {
-                self.message_flight = Some(NativeMessageFlight {
-                    thread_id,
-                    request_id,
-                    payload: body,
-                    steer_target,
-                    engine_label,
-                    token,
-                });
-                self.stage_local_send(cx);
-            }
-            Err(error) => {
-                self.reject_message_submission(token, command_failure(error), cx);
-            }
+        let flight = NativeMessageFlight {
+            thread_id,
+            request_id,
+            payload: body,
+            steer_target,
+            engine_label,
+            token,
+        };
+        match self.submit_command(NativeTransportCommand::QueueMessage(Box::new(queued))) {
+            Ok(()) => self.launch_message_flight(flight, cx),
+            Err(error) => self.reject_message_submission(flight.token, command_failure(error), cx),
         }
         self.sync_composer_availability(cx);
         cx.notify();
@@ -533,6 +483,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         self.sync_composer_controls(cx);
+        self.sync_composer_draft(cx);
         let Some(retry) = self.message_retry.as_mut() else {
             return;
         };
@@ -613,15 +564,17 @@ impl NativeApplication {
         match self.submit_command(command) {
             Ok(()) => {
                 self.clear_message_retry();
-                self.message_flight = Some(NativeMessageFlight {
-                    thread_id,
-                    request_id,
-                    payload: retry_body,
-                    steer_target: retry_target,
-                    engine_label: retry_label,
-                    token,
-                });
-                self.stage_local_send(cx);
+                self.launch_message_flight(
+                    NativeMessageFlight {
+                        thread_id,
+                        request_id,
+                        payload: retry_body,
+                        steer_target: retry_target,
+                        engine_label: retry_label,
+                        token,
+                    },
+                    cx,
+                );
             }
             Err(CommandSendError::Busy) => {
                 self.finish_composer_submission(token, DraftDisposition::Retained, cx);
@@ -667,6 +620,18 @@ impl NativeApplication {
         cx.notify();
     }
 
+    /// Starts an admitted message flight: it holds the connection until its
+    /// reply arrives and shows the optimistic local row.
+    pub(super) fn launch_message_flight(
+        &mut self,
+        flight: NativeMessageFlight,
+        cx: &mut Context<Self>,
+    ) {
+        self.message_flight = Some(flight);
+        self.message_flight_hold = self.connection_hold(HoldKind::Message);
+        self.stage_local_send(cx);
+    }
+
     pub(super) fn retain_message_flight(&mut self, cx: &mut Context<Self>) {
         if let Some(flight) = self.message_flight.take() {
             self.optimistic_messages
@@ -694,6 +659,7 @@ impl NativeApplication {
     pub(super) fn clear_transient_service_state(&mut self) {
         self.drop_transient_service_reads();
         self.run_controls.clear_transient_observation();
+        self.release_composer_drafts();
     }
 
     pub(super) fn handle_message_receipt(
@@ -701,6 +667,7 @@ impl NativeApplication {
         receipt: QueueMessageReceipt,
         cx: &mut Context<Self>,
     ) {
+        self.settle_message_flight_hold(Some(&receipt.request_id));
         let Some(flight) = self.message_flight.as_ref() else {
             return;
         };
@@ -778,6 +745,7 @@ impl NativeApplication {
         failure: ServiceFailure,
         cx: &mut Context<Self>,
     ) {
+        self.settle_message_flight_hold(Some(request_id));
         let matches_active = self.message_flight.as_ref().is_some_and(|flight| {
             &flight.thread_id == thread_id
                 && &flight.request_id == request_id
@@ -810,47 +778,5 @@ impl NativeApplication {
         self.message_failure_note = None;
         self.sync_composer_availability(cx);
         cx.notify();
-    }
-
-    /// Retains any admitted message before the application starts service
-    /// shutdown. This runs on the GPUI application thread.
-    pub(super) fn prepare_shutdown(&mut self, cx: &mut Context<Self>) {
-        self.shutdown_prepared = true;
-        self.thread_switch_flight = None;
-        self.ordinary_unsubscribe_thread = None;
-        self.pending_thread = None;
-        self.pending_failed_recovery = None;
-        self.set_picker_disabled(true, cx);
-        self.set_thread_picker_disabled(true, cx);
-        self.retain_message_flight(cx);
-        self.clear_message_presentation();
-        self.composer.update(cx, |composer, composer_cx| {
-            composer.set_disabled(true, composer_cx);
-        });
-        cx.notify();
-    }
-
-    /// Drains one queued answer batch into live transport, once per tick.
-    ///
-    /// Runs at the head of the controller tick beside the sibling drains, so
-    /// a slow or failing transport cannot stall unrelated per-tick work.
-    /// Admission follows the established submit path: without it the outbox
-    /// is left untouched. Each taken dispatch submits once with its
-    /// already-minted request id; `Busy`/`Stopped` keep rows pending with the
-    /// existing retry/diagnostic texts, and single-flight holds until
-    /// receipts pair through the existing settle-in-place pairing. Draining
-    /// first also keeps a same-tick host retirement from dropping gestures.
-    pub(super) fn drain_answer_dispatches(&mut self, cx: &mut Context<Self>) {
-        if !self.command_submission_is_available() {
-            return;
-        }
-        let Some(host) = self.conversation_host.clone() else {
-            return;
-        };
-        let surface = host.read(cx).surface().clone();
-        let this = &*self;
-        surface.update(cx, |surface, _| {
-            surface.drain_pending_answer_dispatches(&mut |command| this.submit_command(command));
-        });
     }
 }

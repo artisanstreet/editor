@@ -16,7 +16,7 @@ impl NativeTransportService {
     #[cfg(test)]
     pub(crate) fn pending_for_test() -> (
         Self,
-        tokio::sync::mpsc::Receiver<NativeTransportCommand>,
+        tokio::sync::mpsc::Receiver<QueuedCommand>,
         Arc<AtomicBool>,
     ) {
         let (commands, receiver) = tokio::sync::mpsc::channel(8);
@@ -28,6 +28,7 @@ impl NativeTransportService {
                 events: Arc::new(Mutex::new(events)),
                 finished: finished.clone(),
                 shutdown_requested: Arc::new(AtomicBool::new(false)),
+                holds: ConnectionHolds::new(),
                 join: Arc::new(Mutex::new(None)),
             },
             receiver,
@@ -96,16 +97,27 @@ impl NativeTransportService {
             events: Arc::new(Mutex::new(event_rx)),
             finished,
             shutdown_requested: Arc::new(AtomicBool::new(false)),
+            holds: ConnectionHolds::new(),
             join: Arc::new(Mutex::new(Some(join))),
         })
     }
 
+    /// The holds that keep this connection open while mutations are in flight.
+    #[must_use]
+    pub const fn holds(&self) -> &Arc<ConnectionHolds> {
+        &self.holds
+    }
+
     /// Tries to admit one command without waiting for capacity.
+    ///
+    /// A mutating command takes a connection hold on admission; the hold
+    /// travels with it and releases once its handler has returned.
     ///
     /// # Errors
     ///
     /// Returns [`CommandSendError::Busy`] when the bounded command queue is
-    /// full, or [`CommandSendError::Stopped`] after the service has stopped.
+    /// full or the connection is sealed for a host switch or quit, or
+    /// [`CommandSendError::Stopped`] after the service has stopped.
     pub fn submit(&self, command: NativeTransportCommand) -> Result<(), CommandSendError> {
         match command {
             NativeTransportCommand::Shutdown => self.request_shutdown(),
@@ -113,9 +125,35 @@ impl NativeTransportService {
                 if self.shutdown_requested.load(Ordering::Acquire) {
                     return Err(CommandSendError::Stopped);
                 }
-                try_send_command(&self.commands, command)
+                let hold = match command.hold_kind() {
+                    Some(kind) => Some(self.holds.try_hold(kind).ok_or(CommandSendError::Busy)?),
+                    None => None,
+                };
+                try_send_command(&self.commands, QueuedCommand { command, hold })
             }
         }
+    }
+
+    /// Admits one mutating command under a live application-level hold.
+    ///
+    /// The command takes an extension of `parent` instead of a fresh hold,
+    /// so work that began before the connection was sealed (a draft's next
+    /// coalesced save) is still admitted while the connection drains.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommandSendError::Busy`] when the bounded command queue is
+    /// full, or [`CommandSendError::Stopped`] after the service has stopped.
+    pub fn submit_under(
+        &self,
+        command: NativeTransportCommand,
+        parent: &Hold,
+    ) -> Result<(), CommandSendError> {
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Err(CommandSendError::Stopped);
+        }
+        let hold = command.hold_kind().map(|_| parent.extend());
+        try_send_command(&self.commands, QueuedCommand { command, hold })
     }
 
     /// Requests shutdown once, retaining nonblocking admission semantics.
@@ -181,17 +219,18 @@ impl NativeTransportService {
     }
 }
 
-/// Tries to admit one command to the bounded Tokio queue.
+/// Tries to admit one command to the bounded Tokio queue. A refused command
+/// is dropped here, releasing any hold it carried.
 ///
 /// # Errors
 ///
 /// Returns [`CommandSendError::Busy`] when the queue is full, or
 /// [`CommandSendError::Stopped`] when its receiver is closed.
 pub fn try_send_command(
-    sender: &tokio::sync::mpsc::Sender<NativeTransportCommand>,
-    command: NativeTransportCommand,
+    sender: &tokio::sync::mpsc::Sender<QueuedCommand>,
+    command: impl Into<QueuedCommand>,
 ) -> Result<(), CommandSendError> {
-    match sender.try_send(command) {
+    match sender.try_send(command.into()) {
         Ok(()) => Ok(()),
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(CommandSendError::Busy),
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(CommandSendError::Stopped),
@@ -265,6 +304,7 @@ impl ServiceRuntime {
             cancel: CancelHandle::new(),
             shutdown_grace: Duration::ZERO,
             known_threads: HashSet::new(),
+            stored_attachments: HashSet::new(),
             intake: IntakeState::new(),
             custody: SubscriptionCustody::new(),
             delivery_cancel: None,
@@ -393,6 +433,7 @@ async fn attach_to_owned_forge(
             cancel,
             shutdown_grace,
             known_threads: HashSet::new(),
+            stored_attachments: HashSet::new(),
             intake: IntakeState::new(),
             custody: SubscriptionCustody::new(),
             delivery_cancel: None,
@@ -509,6 +550,7 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
             cancel,
             shutdown_grace,
             known_threads: HashSet::new(),
+            stored_attachments: HashSet::new(),
             intake: IntakeState::new(),
             custody: SubscriptionCustody::new(),
             delivery_cancel: None,
@@ -642,7 +684,7 @@ async fn establish_session(
 }
 
 async fn service_main(
-    mut commands: tokio::sync::mpsc::Receiver<NativeTransportCommand>,
+    mut commands: tokio::sync::mpsc::Receiver<QueuedCommand>,
     events: SyncSender<NativeTransportEvent>,
     home: Option<std::path::PathBuf>,
 ) {

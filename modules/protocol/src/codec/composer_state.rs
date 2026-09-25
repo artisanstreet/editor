@@ -4,7 +4,8 @@
 //! owns only the imported request/response structs, so the parent arms remain
 //! small and the bounded payload cannot fall back to opaque JSON.
 //!
-//! Request codecs live in [`requests`], listings in [`listings`], payloads in
+//! Request codecs live in [`requests`], listings in [`listings`], drafts and
+//! stored attachments in [`drafts`], payloads in
 //! [`payload`], run-usage values in [`usage`], summary attachments in
 //! [`attachments`], and shared helpers in [`helpers`].
 
@@ -17,6 +18,8 @@
 
 #[path = "composer_state/attachments.rs"]
 mod attachments;
+#[path = "composer_state/drafts.rs"]
+mod drafts;
 #[path = "composer_state/helpers.rs"]
 mod helpers;
 #[path = "composer_state/listings.rs"]
@@ -28,6 +31,7 @@ mod requests;
 #[path = "composer_state/usage.rs"]
 mod usage;
 
+pub use self::drafts::*;
 pub use self::helpers::validate_withdrawal_response_correlation;
 pub use self::listings::*;
 pub use self::payload::*;

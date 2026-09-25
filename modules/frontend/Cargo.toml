@@ -88,10 +88,6 @@ name = "composer_action_failure"
 path = "../../tests/frontend/composer_action_failure.rs"
 
 [[test]]
-name = "composer_draft_session_policy"
-path = "../../tests/frontend/composer_draft_session_policy.rs"
-
-[[test]]
 name = "composer_gesture"
 path = "../../tests/frontend/composer_gesture.rs"
 

@@ -90,6 +90,7 @@ pub(super) enum ExpectedResponse {
     ConversationSubscriptionStopped {
         thread_id: ThreadId,
     },
+    ComposerDraft(super::composer_draft_operations::ComposerDraftExpectation),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,6 +170,9 @@ pub(super) fn validate_response_family(
             Ok(ResponsePayload::RunUsage(value))
         }
 
+        (ExpectedResponse::ComposerDraft(expected), payload) if expected.accepts(&payload) => {
+            Ok(payload)
+        }
         (ExpectedResponse::Directory, ResponsePayload::DirectoryPicked(outcome)) => {
             Ok(ResponsePayload::DirectoryPicked(outcome))
         }
