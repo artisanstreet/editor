@@ -15,7 +15,8 @@ pub(crate) fn selected_home() -> Option<PathBuf> {
     }
     // An explicit CLI host always wins; otherwise reopen the last-used host
     // when its credentials still decode, else fall back to local.
-    match crate::native_last_used::load_host() {
+    // A newer incarnation of the same host may have superseded the recorded home.
+    match crate::native_last_used::load_host().map(|home| hosts::current_home(&home)) {
         None => None,
         Some(home) => hosts::read_private(&home, "host.json")
             .and_then(|bytes| hosts::HostInvitation::decode(&bytes))
@@ -83,10 +84,10 @@ pub(crate) fn headless() -> Option<std::process::ExitCode> {
     if args.first().is_some_and(|arg| arg == "--import-host") {
         let result = args
             .get(1)
-            .ok_or("invitation path required")
+            .ok_or_else(|| "invitation path required".to_owned())
             .and_then(|path| {
-                import(Path::new(path))
-                    .map_err(|_| "invalid host invitation or private storage unavailable")
+                // Credential errors name paths and stages only, never secrets.
+                import(Path::new(path)).map_err(|error| format!("host import failed: {error}"))
             });
         return Some(match result {
             Ok(home) => {
@@ -154,15 +155,19 @@ fn probe() -> Result<(), &'static str> {
 }
 
 /// Refreshes endpoint/incarnation from the original invitation, retaining the imported certificate pin.
+///
+/// Importing a newer incarnation retires superseded registrations, so a home
+/// held by the caller may have been replaced by its successor.
 pub(crate) fn resolve_home(home: &Path) -> Result<PathBuf, ForgeCredentialError> {
-    let original = hosts::HostInvitation::decode(&hosts::read_private(home, "host.json")?)?;
+    let home = hosts::current_home(home);
+    let original = hosts::HostInvitation::decode(&hosts::read_private(&home, "host.json")?)?;
     if !home.join("credentials/source.json").exists() {
-        return Ok(home.to_path_buf());
+        return Ok(home);
     }
-    let source: PathBuf = serde_json::from_slice(&hosts::read_private(home, "source.json")?)
+    let source: PathBuf = serde_json::from_slice(&hosts::read_private(&home, "source.json")?)
         .map_err(|_| ForgeCredentialError::ManifestMalformed)?;
     if !source.exists() {
-        return Ok(home.to_path_buf());
+        return Ok(home);
     }
     let mut bytes = Vec::new();
     std::fs::File::open(&source)
