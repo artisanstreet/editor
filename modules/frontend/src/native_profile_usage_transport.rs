@@ -155,6 +155,7 @@ fn snapshot_to_entry(engine_id: &str, snapshot: &EngineUsageSnapshot) -> Option<
                 })
                 .collect(),
             failure: report.failure().map(str::to_owned),
+            readiness: report.readiness().clone(),
         }),
         failure: None,
         fetched_at_ms: Some(fetched_at_ms),

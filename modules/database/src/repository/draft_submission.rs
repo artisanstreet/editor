@@ -11,11 +11,11 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, Stat
 use thiserror::Error;
 
 use artisan_domain::{
-    CommandReceipt, ComposerDraftRevision, ComposerDraftScope, MessageId, QueueMessagePayload,
-    ReceiptDisposition, RequestId, RunId, ThreadId, UnixMillis,
+    CommandReceipt, ComposerDraftRevision, ComposerDraftScope, ImageAttachment, MessageId,
+    QueueMessagePayload, ReceiptDisposition, RequestId, RunId, ThreadId, UnixMillis,
 };
 
-use super::composer_draft::{clear_draft, ensure_scope_exists, read_draft, resolve_attachments};
+use super::composer_draft::{clear_draft, ensure_scope_exists, read_draft};
 use super::queue_message::{
     Admission, admit_queue_message, queue_result, read_queue_message_payload,
 };
@@ -36,8 +36,11 @@ pub struct SubmitComposerDraftInput {
     /// Identity for the message, used only when this is the first
     /// submission of the revision.
     pub message_id: MessageId,
-    /// Observed live run the message must steer into, if named.
+    /// Live run the Forge decided the message steers into, if any.
     pub steer_run_id: Option<RunId>,
+    /// The draft's images as the Forge fitted them to the thread's engine,
+    /// in authored order; unused when the revision was already submitted.
+    pub images: Vec<ImageAttachment>,
     /// Authoritative acceptance time.
     pub submitted_at: UnixMillis,
 }
@@ -76,6 +79,22 @@ pub enum DraftSubmissionError {
 }
 
 impl Repository {
+    /// Whether this revision of the thread's draft was already submitted, so
+    /// a repeat answers the first submission instead of being admitted anew.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or corrupt-data error.
+    pub async fn composer_draft_submitted(
+        &self,
+        thread_id: &ThreadId,
+        draft_revision: ComposerDraftRevision,
+    ) -> Result<bool, RepositoryError> {
+        Ok(submission(&self.database, thread_id, draft_revision)
+            .await?
+            .is_some())
+    }
+
     /// Sends a thread's composer draft at exactly `input.draft_revision`.
     ///
     /// # Errors
@@ -128,7 +147,15 @@ async fn submit(
     let Some(draft) = draft.filter(|draft| draft.revision() == input.draft_revision) else {
         return Ok(DraftSubmission::Stale { current_revision });
     };
-    let images = resolve_attachments(transaction, draft.attachments()).await?;
+    // The revision names the draft's content, so the images the Forge fitted
+    // from this revision are its attachments, in order.
+    if input.images.len() != draft.attachments().len() {
+        return Err(RepositoryError::Invariant {
+            reason: "fitted images do not match the submitted draft's attachments",
+        }
+        .into());
+    }
+    let images = input.images.clone();
     let text = (!draft.text().as_str().is_empty()).then(|| draft.text().clone());
     let Ok(payload) = QueueMessagePayload::new(text, images) else {
         return Ok(DraftSubmission::Empty);

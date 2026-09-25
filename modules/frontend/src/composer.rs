@@ -278,6 +278,18 @@ impl ComposerState {
         Ok((body, token))
     }
 
+    /// Begins custody of the current draft text for a send by revision; the
+    /// caller has validated its text and images.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubmissionBlocked`] when another submission is in flight,
+    /// the surface is disabled, or no flight identity is left.
+    pub fn begin_draft_submission(&mut self) -> Result<SubmissionToken, SubmissionBlocked> {
+        let text = self.draft.clone();
+        self.begin_validated_text(&text)
+    }
+
     /// Begins custody for an already validated text/image payload. Empty text
     /// is admitted only through the domain payload's image-only validation;
     /// no placeholder is inserted into the authored draft.

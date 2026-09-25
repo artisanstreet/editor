@@ -329,12 +329,12 @@ fn busy_and_stopped_admission_retains_the_draft_without_an_application_flight(
                     "stopped admission body".to_owned(),
                 ),
             ] {
-                let (_, token) = application
+                let token = application
                     .composer
                     .update(application_cx, |composer, composer_cx| {
                         composer.set_disabled(false, composer_cx);
                         composer.set_draft(draft.clone());
-                        composer.begin_payload_submission()
+                        composer.begin_draft_submission()
                     })
                     .expect("begin");
                 application.reject_message_submission(
@@ -358,12 +358,12 @@ fn accepted_and_duplicate_receipts_clear_only_the_matching_flight(cx: &mut TestA
         view.update(app, |application, application_cx| {
             application.selected_thread = Some(thread_id.clone());
             application.state = NativeViewState::Ready;
-            let (_, token) = application
+            let token = application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.set_disabled(false, composer_cx);
                     composer.set_draft("first exact body");
-                    composer.begin_payload_submission()
+                    composer.begin_draft_submission()
                 })
                 .expect("first begin");
             application.message_flight = Some(NativeMessageFlight {
@@ -390,12 +390,12 @@ fn accepted_and_duplicate_receipts_clear_only_the_matching_flight(cx: &mut TestA
                 Some(ReceiptDisposition::Accepted)
             );
 
-            let (_, token) = application
+            let token = application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.set_disabled(false, composer_cx);
                     composer.set_draft("second exact body");
-                    composer.begin_payload_submission()
+                    composer.begin_draft_submission()
                 })
                 .expect("second begin");
             application.message_flight = Some(NativeMessageFlight {
@@ -439,12 +439,12 @@ fn stale_queue_results_do_not_clear_a_newer_draft(cx: &mut TestAppContext) {
         view.update(app, |application, application_cx| {
             application.selected_thread = Some(thread_id.clone());
             application.state = NativeViewState::Ready;
-            let (_, token) = application
+            let token = application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.set_disabled(false, composer_cx);
                     composer.set_draft("newer draft");
-                    composer.begin_payload_submission()
+                    composer.begin_draft_submission()
                 })
                 .expect("begin");
             application.message_flight = Some(NativeMessageFlight {
@@ -475,12 +475,12 @@ fn queue_failure_and_service_stop_retain_the_draft(cx: &mut TestAppContext) {
         view.update(app, |application, application_cx| {
             application.selected_thread = Some(thread_id.clone());
             application.state = NativeViewState::Ready;
-            let (_, token) = application
+            let token = application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.set_disabled(false, composer_cx);
                     composer.set_draft("retained queue body");
-                    composer.begin_payload_submission()
+                    composer.begin_draft_submission()
                 })
                 .expect("begin");
             application.message_flight = Some(NativeMessageFlight {
@@ -507,12 +507,12 @@ fn queue_failure_and_service_stop_retain_the_draft(cx: &mut TestAppContext) {
             );
             assert!(application.message_failure.is_some());
 
-            let (_, token) = application
+            let token = application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.set_disabled(false, composer_cx);
                     composer.set_draft("retained on stop");
-                    composer.begin_payload_submission()
+                    composer.begin_draft_submission()
                 })
                 .expect("second begin");
             application.message_flight = Some(NativeMessageFlight {
@@ -541,12 +541,12 @@ fn real_thread_transition_and_shutdown_retain_and_clear_old_presentation(cx: &mu
         view.update(app, |application, application_cx| {
             application.selected_thread = Some(old_thread.clone());
             application.state = NativeViewState::Ready;
-            let (_, token) = application
+            let token = application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.set_disabled(false, composer_cx);
                     composer.set_draft("transition body");
-                    composer.begin_payload_submission()
+                    composer.begin_draft_submission()
                 })
                 .expect("begin");
             application.message_flight = Some(NativeMessageFlight {
@@ -577,12 +577,12 @@ fn real_thread_transition_and_shutdown_retain_and_clear_old_presentation(cx: &mu
 
             application.selected_thread = Some(old_thread.clone());
             application.state = NativeViewState::Ready;
-            let (_, token) = application
+            let token = application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.set_disabled(false, composer_cx);
                     composer.set_draft("shutdown body");
-                    composer.begin_payload_submission()
+                    composer.begin_draft_submission()
                 })
                 .expect("shutdown begin");
             application.message_flight = Some(NativeMessageFlight {

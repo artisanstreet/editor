@@ -20,7 +20,10 @@ use crate::{
     UploadComposerAttachment, WithdrawQueuedMessageCommand,
 };
 
-pub use crate::composer_catalog::{ReadComposerCatalog, ReadModelFavorites, SetModelFavorite};
+pub use crate::catalog_selection::ResolveModelSelection;
+pub use crate::composer_catalog::{
+    ReadComposerCatalog, ReadHostCatalog, ReadModelFavorites, SetModelFavorite,
+};
 
 /// Attaches one Forge-visible directory, minting its project identity.
 ///
@@ -460,6 +463,10 @@ pub enum Query {
     ReadComposerCatalog(ReadComposerCatalog),
     /// See [`ReadModelFavorites`].
     ReadModelFavorites(ReadModelFavorites),
+    /// See [`ReadHostCatalog`].
+    ReadHostCatalog(ReadHostCatalog),
+    /// See [`ResolveModelSelection`].
+    ResolveModelSelection(ResolveModelSelection),
     ListQueuedMessages(ListQueuedMessages),
     /// Terminally failed dispatches for one thread, newest first.
     ListFailedMessages(ListFailedMessages),

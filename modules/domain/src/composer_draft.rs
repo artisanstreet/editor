@@ -9,19 +9,22 @@
 //! Attachment bytes live once in a content-addressed Forge store keyed by the
 //! SHA-256 digest of the encoded image. Drafts, and messages sent from them,
 //! name stored attachments by [`ComposerAttachmentRef`] instead of carrying
-//! bytes.
+//! bytes. The store holds each image exactly as the user picked it
+//! ([`ComposerImage`], up to [`COMPOSER_ATTACHMENT_MAX_BYTES`]); the Forge
+//! applies its engine's image policy when a draft is sent.
 
 use std::fmt;
 
 use thiserror::Error;
 
 use crate::bounds::{
+    COMPOSER_ATTACHMENT_MAX_BYTES, COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES,
     MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
     MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
 };
 use crate::commands::SteerTarget;
 use crate::identifiers::{ProjectId, RequestId, ThreadId};
-use crate::message::{AuthoredText, ImageAttachment, ImageMimeType, validate_attachment_name};
+use crate::message::{AuthoredText, ImageMimeType, validate_attachment_name};
 use crate::time::UnixMillis;
 
 /// The composer a draft belongs to.
@@ -169,8 +172,8 @@ impl ComposerAttachmentRef {
     ///
     /// # Errors
     ///
-    /// Returns [`ComposerDraftError::InvalidAttachment`] for an empty or
-    /// oversized image or an invalid display name.
+    /// Returns [`ComposerDraftError::InvalidAttachment`] for an empty image,
+    /// one over [`COMPOSER_ATTACHMENT_MAX_BYTES`], or an invalid display name.
     pub fn new(
         digest: ComposerAttachmentDigest,
         mime_type: ImageMimeType,
@@ -179,7 +182,7 @@ impl ComposerAttachmentRef {
     ) -> Result<Self, ComposerDraftError> {
         let name = name.into();
         let size_fits = usize::try_from(size_bytes)
-            .is_ok_and(|size| size > 0 && size <= MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES);
+            .is_ok_and(|size| size > 0 && size <= COMPOSER_ATTACHMENT_MAX_BYTES);
         if !size_fits || validate_attachment_name(&name).is_err() {
             return Err(ComposerDraftError::InvalidAttachment);
         }
@@ -216,23 +219,43 @@ impl ComposerAttachmentRef {
     }
 }
 
-/// Checks the message image bounds over an ordered reference list.
-fn validate_references(attachments: &[ComposerAttachmentRef]) -> Result<(), ComposerDraftError> {
+/// Checks an ordered reference list against a per-image and total bound:
+/// the composer store's for drafts, the message's for a message sent by
+/// reference.
+fn validate_references(
+    attachments: &[ComposerAttachmentRef],
+    image_max: usize,
+    total_max: usize,
+) -> Result<(), ComposerDraftError> {
     if attachments.len() > MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT {
         return Err(ComposerDraftError::TooManyAttachments {
             count: attachments.len(),
         });
     }
+    if attachments.iter().any(|attachment| {
+        usize::try_from(attachment.size_bytes).map_or(true, |size| size > image_max)
+    }) {
+        return Err(ComposerDraftError::InvalidAttachment);
+    }
     let total = attachments
         .iter()
         .map(|attachment| u64::from(attachment.size_bytes))
         .sum::<u64>();
-    if usize::try_from(total).map_or(true, |total| {
-        total > MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES
-    }) {
+    if usize::try_from(total).map_or(true, |total| total > total_max) {
         return Err(ComposerDraftError::AttachmentsTooLarge { total });
     }
     Ok(())
+}
+
+/// Checks a draft's references against the composer store bounds.
+fn validate_draft_references(
+    attachments: &[ComposerAttachmentRef],
+) -> Result<(), ComposerDraftError> {
+    validate_references(
+        attachments,
+        COMPOSER_ATTACHMENT_MAX_BYTES,
+        COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES,
+    )
 }
 
 /// One stored composer draft.
@@ -257,7 +280,7 @@ impl ComposerDraft {
         attachments: Vec<ComposerAttachmentRef>,
         updated_at: UnixMillis,
     ) -> Result<Self, ComposerDraftError> {
-        validate_references(&attachments)?;
+        validate_draft_references(&attachments)?;
         Ok(Self {
             revision,
             text,
@@ -318,7 +341,7 @@ impl SaveComposerDraft {
         text: AuthoredText,
         attachments: Vec<ComposerAttachmentRef>,
     ) -> Result<Self, ComposerDraftError> {
-        validate_references(&attachments)?;
+        validate_draft_references(&attachments)?;
         Ok(Self {
             request_id,
             scope,
@@ -379,13 +402,97 @@ pub struct ComposerDraftResult {
     pub draft: Option<ComposerDraft>,
 }
 
+/// One image exactly as the user picked it, with its display name.
+///
+/// Unlike a message image it is not yet fitted to any engine: it may be
+/// larger than a message allows (up to [`COMPOSER_ATTACHMENT_MAX_BYTES`]),
+/// and the Forge rescales and re-encodes it for the thread's engine when the
+/// draft is sent.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct ComposerImage {
+    mime_type: ImageMimeType,
+    bytes: Vec<u8>,
+    name: String,
+}
+
+impl fmt::Debug for ComposerImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ComposerImage")
+            .field("mime_type", &self.mime_type)
+            .field("bytes_len", &self.bytes.len())
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+impl ComposerImage {
+    /// Validates one picked image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComposerDraftError::InvalidAttachment`] for an unsupported
+    /// MIME spelling, empty bytes, bytes over
+    /// [`COMPOSER_ATTACHMENT_MAX_BYTES`], or an invalid display name.
+    pub fn new(
+        mime_type: impl AsRef<str>,
+        bytes: Vec<u8>,
+        name: impl Into<String>,
+    ) -> Result<Self, ComposerDraftError> {
+        let mime_type = ImageMimeType::parse(mime_type.as_ref())
+            .map_err(|_| ComposerDraftError::InvalidAttachment)?;
+        let name = name.into();
+        if bytes.is_empty()
+            || bytes.len() > COMPOSER_ATTACHMENT_MAX_BYTES
+            || validate_attachment_name(&name).is_err()
+        {
+            return Err(ComposerDraftError::InvalidAttachment);
+        }
+        Ok(Self {
+            mime_type,
+            bytes,
+            name,
+        })
+    }
+
+    /// Validated MIME type.
+    #[must_use]
+    pub const fn mime_type(&self) -> ImageMimeType {
+        self.mime_type
+    }
+
+    /// Validated MIME spelling.
+    #[must_use]
+    pub const fn mime_type_str(&self) -> &'static str {
+        self.mime_type.as_str()
+    }
+
+    /// Encoded bytes as picked.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Encoded byte length.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Display name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// Stores one image in the Forge composer attachment store.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UploadComposerAttachment {
     /// Client request identity.
     pub request_id: RequestId,
-    /// The encoded image and its authored display name.
-    pub image: ImageAttachment,
+    /// The image as picked, with its authored display name.
+    pub image: ComposerImage,
 }
 
 /// Acknowledgement of one stored attachment.
@@ -457,7 +564,11 @@ impl QueueStoredMessage {
         if attachments.is_empty() {
             return Err(ComposerDraftError::NoStoredAttachments);
         }
-        validate_references(&attachments)?;
+        validate_references(
+            &attachments,
+            MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
+            MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
+        )?;
         Ok(Self {
             request_id,
             thread_id,

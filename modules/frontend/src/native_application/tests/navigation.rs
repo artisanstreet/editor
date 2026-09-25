@@ -762,7 +762,7 @@ fn wordmark_returns_to_start(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn conversation_header_paints_summary_then_stored_title(cx: &mut TestAppContext) {
+fn conversation_header_paints_the_forge_resolved_title(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _commands) = command_sink([]);
     cx.update(|_, app| {
@@ -774,7 +774,7 @@ fn conversation_header_paints_summary_then_stored_title(cx: &mut TestAppContext)
     assert!(
         cx.debug_bounds("artisan-desktop-route-title:New thread")
             .is_some(),
-        "the titlebar header paints the stored title before a summary exists"
+        "the titlebar header paints the listed title"
     );
     assert!(
         cx.debug_bounds("artisan-thread-screen-title:New thread")
@@ -785,11 +785,11 @@ fn conversation_header_paints_summary_then_stored_title(cx: &mut TestAppContext)
     cx.update(|_, app| {
         view.update(app, |application, cx| {
             let thread_id = ThreadId::parse("title-task").expect("thread");
-            install_summary_title(application, cx, &thread_id, "Ship the port");
+            install_listed_title(application, cx, &thread_id, "Ship the port");
             assert_eq!(
-                application.desktop_route_title(cx),
+                application.desktop_route_title(),
                 "Ship the port",
-                "summary mode selects the harness title for the route"
+                "the route shows the title the Forge listing resolved"
             );
         });
     });
@@ -797,12 +797,12 @@ fn conversation_header_paints_summary_then_stored_title(cx: &mut TestAppContext)
     assert!(
         cx.debug_bounds("artisan-desktop-route-title:Ship the port")
             .is_some(),
-        "the harness summary replaces the stored title in the titlebar header"
+        "the Forge-resolved title replaces the placeholder in the titlebar header"
     );
 }
 
 #[gpui::test]
-fn conversation_header_refines_the_creation_placeholder(cx: &mut TestAppContext) {
+fn conversation_header_waits_for_the_forge_to_resolve_the_placeholder(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _commands) = command_sink([]);
     cx.update(|_, app| {
@@ -826,35 +826,25 @@ fn conversation_header_refines_the_creation_placeholder(cx: &mut TestAppContext)
                 cx,
             );
             assert_eq!(
-                application.desktop_route_title(cx),
-                "Fix the header title",
-                "the stored title is the latest user message until the harness names the thread"
+                application.desktop_route_title(),
+                super::UNNAMED_THREAD_TITLE,
+                "the Editor never derives a title from transcript evidence"
             );
+            // The Forge resolves the placeholder to the first message.
+            install_listed_title(application, cx, &thread_id, "Fix the header title");
         });
     });
     cx.run_until_parked();
     assert!(
         cx.debug_bounds("artisan-desktop-route-title:Fix the header title")
             .is_some(),
-        "the refined fallback paints in the titlebar header"
+        "the Forge-resolved title paints in the titlebar header"
     );
     assert!(
         cx.debug_bounds("artisan-thread-screen-title:Fix the header title")
             .is_none(),
         "the conversation screen carries no duplicate title header"
     );
-
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            let thread_id = ThreadId::parse("title-task").expect("thread");
-            install_summary_title(application, cx, &thread_id, "Ship the port");
-            assert_eq!(
-                application.desktop_route_title(cx),
-                "Ship the port",
-                "the harness summary wins over the refined stored title"
-            );
-        });
-    });
 }
 
 #[gpui::test]
@@ -872,11 +862,11 @@ fn new_thread_route_names_the_thread_being_created(cx: &mut TestAppContext) {
                 cx,
             );
             // The new-thread route names the thread being created, not
-            // the generic draft label, once the harness has named it.
-            install_summary_title(application, cx, &thread_id, "Ship the port");
-            assert_eq!(application.desktop_route_title(cx), "Ship the port");
+            // the generic draft label, once the Forge listing names it.
+            install_listed_title(application, cx, &thread_id, "Ship the port");
+            assert_eq!(application.desktop_route_title(), "Ship the port");
             assert_eq!(
-                application.desktop_header_title(cx).as_deref(),
+                application.desktop_header_title().as_deref(),
                 Some("Ship the port")
             );
         });
@@ -891,13 +881,13 @@ fn new_thread_route_names_the_thread_being_created(cx: &mut TestAppContext) {
     // Without a thread the route keeps the unnamed draft label and the
     // header stays on the bare wordmark.
     cx.update(|_, app| {
-        view.update(app, |application, cx| {
+        view.update(app, |application, _| {
             application.pending_thread = None;
             assert_eq!(
-                application.desktop_route_title(cx),
+                application.desktop_route_title(),
                 super::UNNAMED_THREAD_TITLE
             );
-            assert_eq!(application.desktop_header_title(cx), None);
+            assert_eq!(application.desktop_header_title(), None);
         });
     });
 }
@@ -992,7 +982,7 @@ fn titlebar_workspace_header_starts_inset_from_the_sidebar_edge_and_truncates_th
     );
     cx.update(|_, app| {
         view.update(app, |application, cx| {
-            install_summary_title(application, cx, &thread_id, &long_title);
+            install_listed_title(application, cx, &thread_id, &long_title);
         });
     });
     cx.run_until_parked();

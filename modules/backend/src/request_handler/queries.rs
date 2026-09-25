@@ -325,9 +325,21 @@ impl RequestHandler {
             Query::ReadComposerCatalog(read) => {
                 crate::composer_catalog_handler::read_composer_catalog(
                     self.composer_catalog.as_ref(),
+                    self.account_usage.as_ref(),
                     &self.repository,
                     request_id,
                     read,
+                )
+                .await
+            }
+            Query::ResolveModelSelection(query) => {
+                self.resolve_model_selection_outcome(request_id, query)
+                    .await
+            }
+            Query::ReadHostCatalog(_) => {
+                crate::composer_catalog_handler::read_host_catalog(
+                    self.account_usage.as_ref(),
+                    request_id,
                 )
                 .await
             }
@@ -420,7 +432,7 @@ impl RequestHandler {
 /// Maps a durable run lifecycle to the live status the composer
 /// starting-guard reads. Settled lifecycles map to `None`: they are not
 /// live, however any registry entry reads.
-fn run_live_status(
+pub(super) fn run_live_status(
     lifecycle: &artisan_database::entities::AssistantRunLifecycle,
 ) -> Option<RunLiveStatus> {
     use artisan_database::entities::AssistantRunLifecycle as Lifecycle;

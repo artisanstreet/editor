@@ -217,6 +217,10 @@ pub struct RunUsageResult {
     pub run_id: RunId,
     /// Durable usage report, absent when no authoritative usage exists.
     pub report: Option<RunUsageReport>,
+    /// Context size, in tokens, at which the reporting run's engine
+    /// compacts, as the Forge decides it; `None` when no documented policy
+    /// applies and the window is the only limit.
+    pub compaction_at_tokens: Option<u64>,
 }
 
 /// Existing durable withdrawal result under the state-wire vocabulary.
@@ -250,7 +254,15 @@ impl RunUsageResult {
             thread_id,
             run_id,
             report,
+            compaction_at_tokens: None,
         })
+    }
+
+    /// Returns this result carrying the Forge's compaction threshold.
+    #[must_use]
+    pub const fn with_compaction_at(mut self, compaction_at_tokens: Option<u64>) -> Self {
+        self.compaction_at_tokens = compaction_at_tokens;
+        self
     }
 }
 

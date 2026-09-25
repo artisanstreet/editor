@@ -100,10 +100,6 @@ name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 
 [[test]]
-name = "context_auto_compaction"
-path = "../../tests/frontend/context_auto_compaction.rs"
-
-[[test]]
 name = "context_usage_description"
 path = "../../tests/frontend/context_usage_description.rs"
 
@@ -259,10 +255,6 @@ path = "../../tests/frontend/hover_pill_geometry_policy.rs"
 [[test]]
 name = "hover_pill_group_policy"
 path = "../../tests/frontend/hover_pill_group_policy.rs"
-
-[[test]]
-name = "image_policy"
-path = "../../tests/frontend/image_policy.rs"
 
 [[test]]
 name = "latest_request_gate"
@@ -508,10 +500,6 @@ path = "../../tests/frontend/thread_retention_settings_policy.rs"
 [[test]]
 name = "thread_route_gate_policy"
 path = "../../tests/frontend/thread_route_gate_policy.rs"
-
-[[test]]
-name = "thread_title_policy"
-path = "../../tests/frontend/thread_title_policy.rs"
 
 [[test]]
 name = "thread_title_settings_policy"

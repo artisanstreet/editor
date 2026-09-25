@@ -4,7 +4,7 @@
 use artisan_domain::{
     AuthoredText, Command, ComposerAttachmentDigest, ComposerAttachmentRef,
     ComposerAttachmentResult, ComposerAttachmentUploaded, ComposerDraft, ComposerDraftResult,
-    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, ImageAttachment, ImageMimeType,
+    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, ComposerImage, ImageMimeType,
     ProjectId, Query, QueueStoredMessage, ReadComposerAttachment, ReadComposerDraft, RequestId,
     RunId, SaveComposerDraft, SteerTarget, ThreadId, UnixMillis, UploadComposerAttachment,
 };
@@ -83,9 +83,26 @@ fn draft_requests_round_trip_both_scopes_text_and_ordered_references() {
     round_trip(WireEnvelopeBody::Request(ClientRequest::Command(
         Command::UploadComposerAttachment(UploadComposerAttachment {
             request_id: request_id(),
-            image: ImageAttachment::new("image/png", vec![1, 2, 3], "paste.png").unwrap(),
+            image: ComposerImage::new("image/png", vec![1, 2, 3], "paste.png").unwrap(),
         }),
     )));
+    // A picked image larger than a message image still uploads: the Forge
+    // fits it to the thread's engine when the draft is sent.
+    let large = vec![7; artisan_domain::MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES + 1];
+    round_trip(WireEnvelopeBody::Request(ClientRequest::Command(
+        Command::UploadComposerAttachment(UploadComposerAttachment {
+            request_id: request_id(),
+            image: ComposerImage::new("image/png", large, "screenshot.png").unwrap(),
+        }),
+    )));
+    assert!(
+        ComposerImage::new(
+            "image/png",
+            vec![7; artisan_domain::COMPOSER_ATTACHMENT_MAX_BYTES + 1],
+            "too-big.png"
+        )
+        .is_err()
+    );
 }
 
 #[test]

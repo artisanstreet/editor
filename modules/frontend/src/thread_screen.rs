@@ -10,11 +10,11 @@
 //!   loading mark reuses the shared [`FadeArc`] element, which is the same
 //!   component the legacy gate renders (`size-6 text-muted-foreground`).
 //! - `routes/components/thread-route.svelte` is controller plumbing around
-//!   one headline visual fact: the document title renders
-//!   `thread_display_title`. That policy now feeds the desktop titlebar's
-//!   centred header subject only; this screen carries no title row of its own
-//!   (the reference desktop shell renders the workspace header once, in the
-//!   window chrome).
+//!   one headline visual fact: the document title renders the thread's
+//!   display title, which the Forge resolves and the listing carries. It
+//!   feeds the desktop titlebar's centred header subject only; this screen
+//!   carries no title row of its own (the reference desktop shell renders
+//!   the workspace header once, in the window chrome).
 //! - `routes/components/thread-workspace.svelte` is the screen frame this
 //!   view follows in order: `main.relative.h-full.min-h-0.overflow-hidden`
 //!   holding the transcript column

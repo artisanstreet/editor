@@ -270,3 +270,13 @@ mod model_discovery;
 mod composer_catalog_handler;
 
 mod citation_projection;
+
+mod context_compaction_policy;
+
+mod account_readiness;
+
+mod engine_selection;
+
+mod image_policy;
+
+mod attachment_policy;

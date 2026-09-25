@@ -97,6 +97,7 @@ fn signed_in_test_application(
             Vec::new(),
         ));
     }
+    serve_catalog_with_runnable(&mut application, cx, &["codex", "claude"]);
     application
 }
 
@@ -227,29 +228,6 @@ fn reported_usage_entry(
     )
 }
 
-fn reported_usage_entry_with_auth(
-    engine_id: &str,
-    display_name: &str,
-    authentication: NativeUsageAuthentication,
-    windows: Vec<NativeUsageWindow>,
-) -> NativeUsageEntry {
-    NativeUsageEntry {
-        engine_id: engine_id.to_owned(),
-        display_name: display_name.to_owned(),
-        report: Some(NativeUsageReport {
-            engine_id: engine_id.to_owned(),
-            display_name: display_name.to_owned(),
-            authentication,
-            account_email: None,
-            quota_surface: NativeUsageQuotaSurface::Supported,
-            windows,
-            failure: None,
-        }),
-        failure: None,
-        fetched_at_ms: Some(super::profile_usage_now_ms().saturating_sub(60_000)),
-    }
-}
-
 /// Tall real-data fixture: eight authenticated providers with three
 /// cadence windows each (one at exactly zero, which stays visible),
 /// replacing the old pending placeholders without weakening scroll
@@ -338,61 +316,39 @@ fn install_ready_message_surface(
     application.ack_draft_saves(cx);
 }
 
-/// Admits one harness run-terminal observation carrying `summary_title`
-/// through the real engine-observation handler.
-fn install_summary_title(
+/// Delivers a Forge sidebar listing in which `thread_id` carries the
+/// Forge-resolved `title`, through the real sidebar-read handler.
+fn install_listed_title(
     application: &mut NativeApplication,
     cx: &mut Context<NativeApplication>,
     thread_id: &ThreadId,
-    summary_title: &str,
+    title: &str,
 ) {
-    let terminal = artisan_domain::RunTerminalObservation::new(
-        artisan_domain::ObservationId::parse("obs-summary").expect("observation"),
-        artisan_domain::ObservationSequence::new(0).expect("sequence"),
-        artisan_domain::RunTerminalState::Completed,
-        None,
-        Some(summary_title.to_owned()),
-    )
-    .expect("terminal observation");
-    application.handle_service_event(
-        NativeTransportEvent::EngineObservation(artisan_protocol::ServerEvent {
-            cursor: artisan_protocol::EventCursor::new(1).expect("cursor"),
-            event: artisan_domain::Event::EngineObservation(
-                artisan_domain::EngineObservationEvent {
-                    thread_id: thread_id.clone(),
-                    observation: artisan_domain::Observation::RunTerminal(terminal),
-                    attribution: None,
-                },
-            ),
-        }),
-        cx,
-    );
+    let project_id = application
+        .selected_project
+        .clone()
+        .expect("a selected project");
+    let generation = application.sidebar_threads.generation + 1;
+    application.sidebar_threads.generation = generation;
+    application.sidebar_threads.pending = Some((project_id.clone(), generation));
+    let listing = ThreadListing::new(vec![thread(thread_id.as_str(), project_id.as_str(), title)])
+        .expect("listing");
+    application.receive_sidebar_threads(&project_id, generation, Ok(listing), cx);
 }
 
 /// Drives the engine-settings controller to a persisted configuration
-/// built from the offline `codex-sol` policy, so send-admission tests
-/// exercise the configured first-send flow instead of the unconfigured
-/// block. Uses only controller-local transitions; no transport.
+/// the Forge resolved for the offline `codex-sol` policy, so send tests
+/// exercise a configured thread. Uses only controller-local transitions; no
+/// transport.
 fn install_configured_engine_settings(
     application: &mut NativeApplication,
-    cx: &mut Context<NativeApplication>,
+    _cx: &mut Context<NativeApplication>,
 ) {
     let thread_id = application
         .selected_thread
         .clone()
         .expect("selected settings thread");
-    let catalog = application
-        .model_selector
-        .read(cx)
-        .state()
-        .snapshot()
-        .clone();
-    let mut policy = catalog
-        .selection_policy_for_model("codex-sol")
-        .expect("default selection policy");
-    policy.profile_id = Some("default".to_owned());
-    let config = crate::composer_model_config::config_for_policy(&catalog, &policy, None)
-        .expect("default policy builds a run configuration");
+    let config = forge_codex_config(None);
     application.engine_settings.select_thread(Some(&thread_id));
     let generation = application
         .engine_settings
@@ -438,6 +394,7 @@ fn admit_probed_codex_usage(
         reported_usage_entry("codex", "Codex", Vec::new()),
         cx,
     );
+    serve_catalog_with_runnable(application, cx, &["codex"]);
 }
 
 /// Returns the request identity of the currently tracked save.
@@ -476,8 +433,9 @@ fn install_admitted_first_send(
         &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(policy),
         cx,
     );
-    // The selection auto-saves through the shared direct typed-save
-    // path; the sink records the exact command production would send.
+    // The Forge resolves the selection; its configuration saves through the
+    // shared direct typed-save path the sink records.
+    answer_resolution(application, cx, forge_codex_config(None));
     let (pending_thread, retained) = application
         .engine_settings
         .pending_save()
@@ -778,13 +736,13 @@ fn prepare_thread_switch_fixture(
     application.active_subscription_request_id = Some(request("switch-start-a-1"));
     application.state = NativeViewState::Ready;
 
-    let (_, token) = application
+    let token = application
         .composer
         .update(application_cx, |composer, composer_cx| {
             composer.set_disabled(false, composer_cx);
             composer.switch_thread(source.as_str(), false, composer_cx);
             composer.set_draft("retained switch draft");
-            composer.begin_payload_submission()
+            composer.begin_draft_submission()
         })
         .expect("message flight");
     application.message_flight = Some(NativeMessageFlight {
@@ -1097,6 +1055,12 @@ fn seed_failed_entry(application: &mut NativeApplication, thread: &ThreadId, gen
 
 #[path = "tests/draft_send.rs"]
 mod draft_send;
+#[path = "tests/forge_catalog.rs"]
+mod forge_catalog;
+use forge_catalog::{
+    answer_resolution, forge_codex_config, refuse_send, reported_usage_entry_with_auth,
+    serve_catalog_with_runnable,
+};
 #[path = "tests/forge_drafts.rs"]
 mod forge_drafts;
 #[path = "tests/lifecycle.rs"]

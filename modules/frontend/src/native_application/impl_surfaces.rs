@@ -254,8 +254,8 @@ impl NativeApplication {
     /// exist, the project folder otherwise, then the darker `/` separator and
     /// the conversation title. A route that names no conversation returns
     /// `None`, leaving the bare wordmark.
-    pub(super) fn desktop_header_cluster(&self, cx: &App) -> Option<AnyElement> {
-        let thread_title = self.desktop_header_title(cx)?;
+    pub(super) fn desktop_header_cluster(&self) -> Option<AnyElement> {
+        let thread_title = self.desktop_header_title()?;
         let project_display_name = self.selected_project_name();
         let presentation = present_titlebar_header(TitlebarHeaderInput::new(
             project_display_name.as_deref(),
@@ -568,21 +568,18 @@ impl NativeApplication {
 
     /// The title the desktop header shows for the current route.
     ///
-    /// Thread routes select through the shared display policy: the harness's
-    /// generated summary wins for an unlocked title, and the stored listing
-    /// title (refined to the latest user message while it is still the
-    /// creation placeholder) is the fallback. The new-thread route names the
-    /// thread being created once one exists; before then it is the unnamed
-    /// draft label.
-    pub(super) fn desktop_route_title(&self, cx: &App) -> String {
+    /// Thread routes show the Forge's resolved display title from the
+    /// listing. The new-thread route names the thread being created once one
+    /// exists; before then it is the unnamed draft label.
+    pub(super) fn desktop_route_title(&self) -> String {
         match self.route() {
             NativeRoute::NewThread { .. } => self
                 .pending_thread
                 .as_ref()
-                .and_then(|thread| self.listed_thread_display_title(thread, cx))
+                .and_then(|thread| self.listed_thread_display_title(thread))
                 .unwrap_or_else(|| UNNAMED_THREAD_TITLE.to_owned()),
             NativeRoute::Thread { thread, .. } => self
-                .listed_thread_display_title(thread, cx)
+                .listed_thread_display_title(thread)
                 .unwrap_or_else(|| String::from("Thread")),
             NativeRoute::Editor { .. } => String::from("Files"),
             NativeRoute::Settings { section, .. } => format!("Settings / {}", section.as_str()),
@@ -597,84 +594,30 @@ impl NativeApplication {
     /// once a thread is open â€” or a new-thread route already owns the thread
     /// being created â€” the subject joins the titlebar like the reference's
     /// workspace header.
-    pub(super) fn desktop_header_title(&self, cx: &App) -> Option<String> {
+    pub(super) fn desktop_header_title(&self) -> Option<String> {
         match self.route() {
-            NativeRoute::Thread { .. } => Some(self.desktop_route_title(cx)),
+            NativeRoute::Thread { .. } => Some(self.desktop_route_title()),
             NativeRoute::NewThread { .. } if self.pending_thread.is_some() => {
-                Some(self.desktop_route_title(cx))
+                Some(self.desktop_route_title())
             }
             _ => None,
         }
     }
 
-    /// Returns the retained harness summary title for `thread`, when one has
-    /// arrived on the live engine observation stream.
-    pub(super) fn retained_summary_title(&self, thread: &ThreadId) -> Option<String> {
-        self.engine_observations
-            .as_ref()
-            .filter(|state| state.thread_id() == thread)
-            .and_then(EngineObservationState::summary_title)
-            .map(str::to_owned)
-    }
-
-    /// Returns the latest user text from the open conversation for `thread`.
+    /// Returns the display title of one listed thread.
     ///
-    /// This is the evidence the reference's live refiner derives its stored
-    /// title from. It is only consulted for the exact mounted, selected
-    /// thread; any other thread leaves the caller with the stored title.
-    pub(super) fn open_thread_latest_user_text(
-        &self,
-        thread: &ThreadId,
-        cx: &App,
-    ) -> Option<String> {
-        if self.selected_thread.as_ref() != Some(thread) {
-            return None;
-        }
-        let host = self.conversation_host.as_ref()?;
-        if &host.read(cx).controller_view().delivery.thread_id != thread {
-            return None;
-        }
-        let snapshot = host.read(cx).canonical_snapshot()?;
-        snapshot.items().iter().rev().find_map(|item| match item {
-            ConversationItem::UserMessage(message) => Some(message.body.as_str().to_owned()),
-            ConversationItem::MultimodalUserMessage(message) => message
-                .text
-                .as_ref()
-                .map(|text| text.as_str().to_owned())
-                .filter(|text| !text.trim().is_empty()),
-            ConversationItem::AssistantMessage(_) => None,
-        })
-    }
-
-    /// Selects the display title for one listed thread through the shared
-    /// policy.
-    ///
-    /// The summary comes from the live harness observation for the mounted
-    /// thread, the stored title from the authoritative listing, and `false`
-    /// for the lock because native rename locking does not exist yet. `None`
-    /// means the thread is not listed, so the route supplies its own fallback
-    /// label instead.
-    pub(super) fn listed_thread_display_title(
-        &self,
-        thread: &ThreadId,
-        cx: &App,
-    ) -> Option<String> {
-        let item = self
-            .thread_listing
+    /// The Forge resolves it (the harness-generated title once recorded,
+    /// otherwise the first message while the thread still carries its
+    /// creation placeholder) and the listing carries the result. `None`
+    /// means the thread is not listed, so the route supplies its own
+    /// fallback label instead.
+    pub(super) fn listed_thread_display_title(&self, thread: &ThreadId) -> Option<String> {
+        self.thread_listing
             .as_ref()?
             .threads()
             .iter()
-            .find(|item| &item.thread_id == thread)?;
-        let summary_title = self.retained_summary_title(thread);
-        let latest_user_text = self.open_thread_latest_user_text(thread, cx);
-        let stored_title = refined_thread_title(item.title.as_str(), latest_user_text.as_deref());
-        Some(
-            thread_display_title(
-                ThreadTitleInput::new(summary_title.as_deref(), stored_title, false),
-                ThreadTitleMode::Summary,
-            )
-            .to_owned(),
-        )
+            .find(|item| &item.thread_id == thread)
+            .map(|item| item.title.as_str().to_owned())
     }
 
     pub(super) fn desktop_route_body(

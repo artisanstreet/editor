@@ -24,7 +24,6 @@ pub mod composer_action_failure;
 pub(crate) mod composer_draft_sync;
 pub mod composer_gesture;
 pub mod composer_send_readiness;
-pub mod context_auto_compaction;
 pub mod context_usage_description;
 pub mod context_usage_details_policy;
 pub mod context_usage_gauge_policy;
@@ -76,7 +75,6 @@ pub mod host_identity_controller;
 pub mod host_resume_recovery_policy;
 pub mod hover_pill_geometry_policy;
 pub mod hover_pill_group_policy;
-pub mod image_policy;
 pub mod latest_request_gate;
 pub mod machine_switch;
 pub mod markdown_fence_policy;
@@ -162,7 +160,6 @@ pub mod thread_read_tracker;
 pub mod thread_retention_settings_policy;
 pub mod thread_route_gate_policy;
 pub mod thread_screen;
-pub mod thread_title_policy;
 pub mod thread_title_settings_policy;
 pub mod titlebar_header_presentation;
 pub mod transcript;
@@ -186,7 +183,7 @@ pub mod native_model_catalog;
 pub mod native_model_selector;
 pub mod native_profile_usage;
 
-mod composer_model_config;
+mod picker_selection;
 
 pub mod native_transport;
 

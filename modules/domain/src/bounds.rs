@@ -106,6 +106,16 @@ pub const MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES: usize = 5 * 1024 * 1024;
 /// Maximum aggregate encoded image size accepted for one message.
 pub const MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES: usize = 12 * 1024 * 1024;
 
+/// Maximum size of one image as the user picked it, uploaded to the Forge's
+/// composer attachment store. The Forge rescales and re-encodes it for the
+/// thread's engine when the message is sent, where the message bounds above
+/// apply; this bound keeps one upload inside one transport frame.
+pub const COMPOSER_ATTACHMENT_MAX_BYTES: usize = 12 * 1024 * 1024;
+
+/// Maximum aggregate size of the images one composer draft references.
+pub const COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES: usize =
+    MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT * COMPOSER_ATTACHMENT_MAX_BYTES;
+
 /// Maximum UTF-8 byte length of an image's display name.
 pub const MESSAGE_IMAGE_ATTACHMENT_NAME_MAX_BYTES: usize = 256;
 

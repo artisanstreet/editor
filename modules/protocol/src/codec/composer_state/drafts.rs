@@ -292,10 +292,10 @@ pub fn decode_upload_composer_attachment_request(
     let field = "request.uploadComposerAttachment.image";
     let image = value.get_image()?;
     let bytes = image.get_bytes()?;
-    if bytes.is_empty() || bytes.len() > COMPOSER_STATE_IMAGE_MAX_BYTES {
+    if bytes.is_empty() || bytes.len() > artisan_domain::COMPOSER_ATTACHMENT_MAX_BYTES {
         return Err(ComposerStateCodecError::Image { field });
     }
-    let image = ImageAttachment::new(
+    let image = artisan_domain::ComposerImage::new(
         read_text(image.get_mime_type(), field)?,
         bytes.to_vec(),
         read_text(image.get_name(), field)?,
@@ -372,7 +372,7 @@ pub fn decode_composer_attachment_result(
 ) -> Result<ComposerAttachmentResult, ComposerStateCodecError> {
     let field = "response.composerAttachment";
     let bytes = value.get_bytes()?;
-    if bytes.is_empty() || bytes.len() > COMPOSER_STATE_IMAGE_MAX_BYTES {
+    if bytes.is_empty() || bytes.len() > artisan_domain::COMPOSER_ATTACHMENT_MAX_BYTES {
         return Err(ComposerStateCodecError::Image { field });
     }
     Ok(ComposerAttachmentResult {

@@ -389,6 +389,8 @@ pub(crate) struct ReportingUsage {
     pub(crate) cached_input_tokens: Option<u64>,
     /// Optional provider output breakdown.
     pub(crate) output_tokens: Option<u64>,
+    /// Forge-decided context size at which the reporting engine compacts.
+    pub(crate) compaction_at_tokens: Option<u64>,
 }
 
 /// Why an immutable usage result cannot be installed.

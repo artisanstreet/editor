@@ -109,6 +109,8 @@ fn settings_model_choice_saves_acknowledges_and_reloads(cx: &mut TestAppContext)
     cx.run_until_parked();
     cx.update(|_, app| {
         view.update(app, |application, cx| {
+            // The Forge resolves the choice; its configuration is saved.
+            answer_resolution(application, cx, forge_codex_config(None));
             let save_request = admitted_save_request(application);
             let retained = application
                 .engine_settings
@@ -211,87 +213,6 @@ fn settings_model_choice_saves_acknowledges_and_reloads(cx: &mut TestAppContext)
             .any(|command| matches!(command, NativeTransportCommand::ReadComposerCatalog { .. })),
         "native threads must read their host's runtime catalog"
     );
-}
-
-#[gpui::test]
-fn signed_out_refresh_removes_admission_and_updates_settings(cx: &mut TestAppContext) {
-    let thread_id = ThreadId::parse("settings-signout-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
-    let (sink, commands) = command_sink([Ok(())]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            install_ready_message_surface(application, cx, thread_id.clone(), "draft", sink);
-            admit_probed_codex_usage(application, cx);
-            assert!(
-                application
-                    .effective_catalog_snapshot(cx)
-                    .selectability("codex-sol")
-                    .is_available()
-            );
-            mount_settings_engine(application, cx, "codex");
-        });
-    });
-    cx.run_until_parked();
-    // The mounted Settings refresh button forces a probed re-read
-    // through the real transport command; the reply is fed after the
-    // click delivery flushes.
-    let refresh = cx
-        .debug_bounds("settings-installation-refresh")
-        .expect("settings refresh mounted");
-    cx.simulate_click(refresh.center(), gpui::Modifiers::default());
-    cx.run_until_parked();
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            let forced = commands.borrow();
-            assert!(
-                forced.iter().any(|command| matches!(
-                    command,
-                    NativeTransportCommand::ReadAccountUsage { force: true, .. }
-                )),
-                "refresh action must force an account re-read"
-            );
-            drop(forced);
-            // The signed-out reply removes the admission and updates the
-            // mounted page through the real response handler.
-            let generation = application.profile_usage_generation;
-            let request_seq = application
-                .profile_usage
-                .pending_seq("codex")
-                .expect("forced codex re-read admitted");
-            application.handle_account_usage(
-                "codex",
-                generation,
-                request_seq,
-                reported_usage_entry_with_auth(
-                    "codex",
-                    "Codex",
-                    NativeUsageAuthentication::Unauthenticated,
-                    Vec::new(),
-                ),
-                cx,
-            );
-            assert!(
-                !application
-                    .effective_catalog_snapshot(cx)
-                    .selectability("codex-sol")
-                    .is_available()
-            );
-            let screen = application
-                .settings_screen
-                .clone()
-                .expect("settings screen mounted");
-            let snapshot = screen
-                .read(cx)
-                .engine_snapshot()
-                .cloned()
-                .expect("engine snapshot");
-            assert_eq!(
-                snapshot.readiness,
-                crate::native_profile_usage::EngineReadiness::NeedsSignIn
-            );
-            assert_ne!(snapshot.saved_model.as_deref(), Some("codex-sol"));
-        });
-    });
 }
 
 #[gpui::test]
@@ -795,6 +716,7 @@ fn profile_usage_hides_providers_without_data(cx: &mut TestAppContext) {
                         40.0,
                     )],
                     failure: None,
+                    readiness: crate::native_profile_usage::EngineReadiness::ready(),
                 }),
                 failure: None,
                 fetched_at_ms: Some(1_000_000),
@@ -1429,58 +1351,6 @@ fn command_activation_routes_settings_through_the_application(cx: &mut TestAppCo
     });
 }
 #[gpui::test]
-fn periodic_catalog_refresh_replaces_home_cache(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            let mut catalog = application.host_model_catalog.clone().unwrap();
-            catalog.catalog_revision = "refreshed-models".to_owned();
-            catalog.manifest.models[0].name = "Newly discovered model".to_owned();
-            application.refresh_model_catalog(Some(catalog), cx);
-            application.reset_model_selector_offline(cx);
-            let snapshot = application.model_selector.read(cx).state().snapshot();
-            assert_eq!(snapshot.catalog_revision, "refreshed-models");
-            assert_eq!(snapshot.manifest.models[0].name, "Newly discovered model");
-            application.refresh_model_catalog(None, cx);
-            assert_eq!(
-                application
-                    .model_selector
-                    .read(cx)
-                    .state()
-                    .snapshot()
-                    .catalog_revision,
-                "refreshed-models"
-            );
-        });
-    });
-}
-
-#[gpui::test]
-fn periodic_catalog_refresh_requests_active_scope_once(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
-    let (sink, commands) = command_sink([Ok(()), Ok(())]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            let thread = ThreadId::parse("catalog-refresh-thread").unwrap();
-            install_ready_message_surface(application, cx, thread.clone(), "draft", sink);
-            let selection = application.catalog_controller.select_scope(
-                thread.clone(),
-                artisan_domain::EngineProfileId::parse("default").unwrap(),
-            ).unwrap();
-            let scope = selection.scope().clone();
-            assert!(application.catalog_controller.mark_catalog_admitted(&scope));
-            assert!(application.catalog_controller.on_catalog_loaded(&scope));
-            application.refresh_model_catalog(None, cx);
-            application.refresh_model_catalog(None, cx);
-            assert_eq!(commands.borrow().iter().filter(|command| matches!(
-                command,
-                NativeTransportCommand::ReadComposerCatalog { thread_id, .. } if *thread_id == thread
-            )).count(), 1);
-        });
-    });
-}
-
-#[gpui::test]
 fn conversation_reload_retains_opencode_models_without_scoped_admission(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     cx.update(|_, app| {
@@ -1562,25 +1432,6 @@ fn conversation_reload_retains_opencode_models_without_scoped_admission(cx: &mut
             ));
             assert!(cached.default_model_id.is_none());
             assert!(cached.model_defaults.is_empty());
-        });
-    });
-}
-
-#[gpui::test]
-fn periodic_catalog_refresh_recovers_missing_conversation_scope(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
-    let (sink, commands) = command_sink([Ok(()), Ok(()), Ok(())]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            let thread = ThreadId::parse("catalog-recovery-thread").unwrap();
-            install_ready_message_surface(application, cx, thread.clone(), "draft", sink);
-            application.reset_composer_catalog(cx);
-            assert!(application.catalog_controller.scope().is_none());
-            application.refresh_model_catalog(None, cx);
-            application.refresh_model_catalog(None, cx);
-            assert_eq!(commands.borrow().iter().filter(|command| matches!(command,
-                NativeTransportCommand::ReadComposerCatalog { thread_id, .. } if *thread_id == thread
-            )).count(), 1);
         });
     });
 }

@@ -5145,7 +5145,7 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
     let upload = ClientRequest::Command(Command::UploadComposerAttachment(
         artisan_domain::UploadComposerAttachment {
             request_id: request("request-upload"),
-            image: ImageAttachment::new("image/png", bytes.clone(), "chart.png")
+            image: artisan_domain::ComposerImage::new("image/png", bytes.clone(), "chart.png")
                 .expect("valid image"),
         },
     ));

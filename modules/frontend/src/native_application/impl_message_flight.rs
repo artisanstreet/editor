@@ -82,7 +82,7 @@ impl NativeApplication {
         snapshot.new_thread_ready =
             snapshot.run_active && snapshot.send_ready && self.add_project_action_is_admissible();
         // A refusal names the attempt that produced it (reference
-        // `action-failure.svelte`): the starting-run guard carries its exact
+        // `action-failure.svelte`): the Forge's refusal carries its exact
         // copy. A failed request keeps the draft in the composer, so the
         // banner offers Dismiss only and Send submits the draft again.
         let failure_note = self.message_failure_note.clone();
@@ -135,8 +135,7 @@ impl NativeApplication {
             self.engine_settings
                 .authoritative_config()
                 .and_then(|config| {
-                    crate::composer_model_config::policy_for_selection(catalog, config)
-                        .ok()
+                    crate::picker_selection::saved_config_policy(catalog, config)
                         .map(|policy| {
                             crate::native_model_selector::model_display_label(catalog, &policy)
                                 .plain_text()
@@ -159,184 +158,25 @@ impl NativeApplication {
         self.schedule_composer_queue(cx);
     }
 
-    /// Resolves the displayed model policy to its durable engine
-    /// configuration for a first send: either the explicit choice for this
-    /// thread or the selector's current policy.
-    ///
-    /// Native choices without an explicit profile persist under the supported
-    /// default profile, and admission runs against the readiness-overlaid
-    /// catalog so a probed ambient account needs no managed registry.
-    /// Returns the static blocking message when no policy is displayed or
-    /// the displayed policy cannot become a run configuration.
-    pub(super) fn first_send_config(
-        &self,
-        cx: &App,
-    ) -> Result<artisan_domain::EngineRunConfig, String> {
+    /// The model the composer shows for the selected thread: the explicit
+    /// choice, or the selector's policy. A send carries it as catalog
+    /// identities for the Forge to resolve, save, and admit.
+    pub(super) fn displayed_selection(&self, cx: &App) -> Option<artisan_domain::CatalogSelection> {
         let displayed = match &self.composer_model_choice {
             Some((thread, policy)) if thread == &self.selected_thread => Some(policy.clone()),
             _ => self.model_selector.read(cx).state().policy().cloned(),
-        };
-        let Some(raw_policy) = displayed else {
-            return Err("Select a model before sending. Your draft is preserved.".to_owned());
-        };
-        // The harness must be runnable before anything is persisted: an
-        // unrunnable engine would only requeue after the save lands. The
-        // reason names the probed account state instead of a catch-all.
-        let policy = crate::composer_model_config::with_default_native_profile(&raw_policy);
-        let catalog = self.effective_catalog_snapshot(cx);
-        catalog
-            .admit_policy(&policy)
-            .map_err(|_| self.readiness_block_reason(&policy.engine_id))?;
-        crate::composer_model_config::config_for_policy(
-            &catalog,
-            &policy,
-            self.engine_settings.authoritative_config(),
-        )
-        .map_err(std::borrow::ToOwned::to_owned)
-    }
-
-    /// Admits a first send on a thread without a persisted engine
-    /// configuration. Selection-time saves are reused; an inherited default
-    /// is saved here before submitting the message.
-    /// this gate never holds a send visibly for a save. The backend accept
-    /// transaction snapshots durable settings and refuses unconfigured
-    /// sends typed â€” never a silent queue â€” so the send proceeds whenever
-    /// a runnable configuration can be computed, and is refused with its
-    /// reason (draft preserved) only when none can be.
-    pub(super) fn admit_first_send(&mut self, cx: &mut Context<Self>) -> FirstSendAdmission {
-        if self.engine_settings.authoritative_config().is_some() {
-            self.composer_model_run_error = None;
-            return FirstSendAdmission::Proceed;
-        }
-        // Admission rests on the backend-probed account verdict: request a
-        // fresh read for the displayed engine before evaluating it, so the
-        // first send at startup, on selection, and from Settings observes
-        // true readiness instead of an empty row.
-        let displayed_engine = match &self.composer_model_choice {
-            Some((thread, policy)) if thread == &self.selected_thread => {
-                Some(policy.engine_id.clone())
-            }
-            _ => self
-                .model_selector
-                .read(cx)
-                .state()
-                .policy()
-                .map(|policy| policy.engine_id.clone()),
-        };
-        if let Some(engine_id) = displayed_engine.as_deref() {
-            self.ensure_profile_usage(false, Some(engine_id), cx);
-        }
-        let config = match self.first_send_config(cx) {
-            Ok(config) => config,
-            Err(message) => {
-                self.composer_model_run_error = Some(message);
-                self.sync_composer_controls(cx);
-                cx.notify();
-                return FirstSendAdmission::Held;
-            }
-        };
-        if self
-            .engine_settings
-            .pending_save()
-            .is_some_and(|(_, pending)| pending != &config)
-        {
-            self.composer_model_run_error = Some(
-                "The selected model settings are still saving. Your draft is preserved; try again once saving finishes.".to_owned(),
-            );
-            self.sync_composer_controls(cx);
-            cx.notify();
-            return FirstSendAdmission::Held;
-        }
-        // A default/inherited picker choice emits no selection event. Save
-        // it on the same ordered command stream before the first message.
-        if self.engine_settings.pending_save_request_id().is_none()
-            && let Some(thread) = self.selected_thread.clone()
-            && !self.submit_direct_save(thread, config)
-        {
-            self.composer_model_run_error = Some(
-                "Could not save the selected model settings. Your draft is preserved; try again."
-                    .to_owned(),
-            );
-            self.sync_composer_controls(cx);
-            cx.notify();
-            return FirstSendAdmission::Held;
-        }
-        self.composer_model_run_error = None;
-        FirstSendAdmission::Proceed
-    }
-
-    /// Names the observed live run for this send when the selected engine
-    /// matches the running engine, generation-fenced on the selected
-    /// thread. A cross-engine selection, an idle thread, or a still-starting
-    /// (`Queued`) run stays unnamed so the backend takes the fresh-send
-    /// path. The frontend names only; it never validates liveness.
-    pub(super) fn observed_steer_target(&self) -> Option<artisan_domain::SteerTarget> {
-        let (run_id, engine) = self
-            .run_controls
-            .steer_candidate(self.selected_thread.as_ref())?;
-        let selected = self
-            .engine_settings
-            .authoritative_config()
-            .map(|config| config.selection().engine_id())?;
-        if engine != selected {
-            return None;
-        }
-        Some(artisan_domain::SteerTarget::new(run_id))
+        }?;
+        crate::picker_selection::selection_for_policy(&displayed)
     }
 
     pub(super) fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
         if !self.message_submission_is_admissible(cx) || self.message_flight.is_some() {
             return;
         }
-        // Reference (`commands.ts:158-165`): a send never enters a starting
-        // run's queue from this UI. The refusal keeps the draft and names
-        // the attempt; the user presses Send again once the run is live.
-        if self
-            .run_controls
-            .starting_guard_active(self.selected_thread.as_ref())
-        {
-            self.message_failure = Some(NativeMessageFailure::new(ServiceFailure {
-                stage: ServiceFailureStage::Request,
-                category: ServiceFailureCategory::InvalidConfiguration,
-            }));
-            self.message_failure_note = Some(
-                "The current run is still starting. Wait before sending another message."
-                    .to_owned(),
-            );
-            self.sync_composer_availability(cx);
-            cx.notify();
-            return;
-        }
-        // The Forge holds an accepted message until its engine can run it and
-        // reports the waiting reason on the outbox row, so a send is never
-        // held here for an account check. The choice-versus-saved check is only meaningful once a thread
-        // carries a persisted configuration. On an unconfigured thread it
-        // would always fail and strand explicit selections; admission below
-        // owns unconfigured sends.
-        if self.engine_settings.authoritative_config().is_some()
-            && let Some((thread, policy)) = &self.composer_model_choice
-            && thread == &self.selected_thread
-        {
-            self.composer_model_run_error = crate::composer_model_config::validate_run_choice(
-                &self.effective_catalog_snapshot(cx),
-                policy,
-                self.engine_settings.authoritative_config(),
-            )
-            .err()
-            .map(std::borrow::ToOwned::to_owned);
-            if self.composer_model_run_error.is_some() {
-                self.sync_composer_controls(cx);
-                cx.notify();
-                return;
-            }
-        }
-        // First-send admission never holds for a save: the selection-time
-        // proactive save owns persistence, and the backend accept
-        // transaction snapshots durable settings (refusing unconfigured
-        // sends typed). Only an uncomputable configuration refuses here.
-        if !matches!(self.admit_first_send(cx), FirstSendAdmission::Proceed) {
-            return;
-        }
+        // The Forge admits the send: it refuses a still-starting run, resolves
+        // and saves the model the send carries, and decides whether it steers
+        // the live run. Its refusal arrives as data (`handle_message_refused`).
+        self.composer_model_run_error = None;
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
@@ -359,9 +199,9 @@ impl NativeApplication {
         let body = self.composer.read(cx).draft_body();
         let submission = self
             .composer
-            .update(cx, |composer, _| composer.begin_payload_submission());
-        let (_, token) = match submission {
-            Ok(submission) => submission,
+            .update(cx, |composer, _| composer.begin_draft_submission());
+        let token = match submission {
+            Ok(token) => token,
             Err(blocked) => {
                 if let Some(failure) = submission_blocked_failure(blocked) {
                     self.message_failure = Some(NativeMessageFailure::new(failure));
@@ -521,6 +361,42 @@ impl NativeApplication {
         self.message_receipt = None;
         self.message_failure = Some(NativeMessageFailure::new(failure));
         self.message_failure_note = None;
+        self.sync_composer_availability(cx);
+        cx.notify();
+    }
+
+    /// The Forge refused the send with a typed reason: nothing was queued,
+    /// the draft stays in the composer, and the Forge's message is shown as
+    /// it is worded.
+    pub(super) fn handle_message_refused(
+        &mut self,
+        thread_id: &ThreadId,
+        request_id: &RequestId,
+        refusal: &artisan_domain::SubmissionRefusal,
+        cx: &mut Context<Self>,
+    ) {
+        self.settle_message_flight_hold(Some(request_id));
+        let matches_active = self.message_flight.as_ref().is_some_and(|flight| {
+            &flight.thread_id == thread_id && &flight.request_id == request_id
+        });
+        if !matches_active {
+            return;
+        }
+        let flight = self
+            .message_flight
+            .take()
+            .expect("flight was checked above");
+        self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
+        if refusal.kind() == artisan_domain::SubmissionRefusalKind::EngineNotReady {
+            // Refresh the Forge's verdict so a recovered account is observed.
+            self.ensure_profile_usage(false, None, cx);
+        }
+        self.message_receipt = None;
+        self.message_failure = Some(NativeMessageFailure::new(ServiceFailure {
+            stage: ServiceFailureStage::Request,
+            category: ServiceFailureCategory::InvalidConfiguration,
+        }));
+        self.message_failure_note = Some(refusal.message().to_owned());
         self.sync_composer_availability(cx);
         cx.notify();
     }

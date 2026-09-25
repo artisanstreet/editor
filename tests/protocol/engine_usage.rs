@@ -6,9 +6,10 @@
 //! contacted.
 
 use artisan_domain::{
-    ENGINE_USAGE_ENGINES_MAX, ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE, EngineUsageAuth,
-    EngineUsageAuthentication, EngineUsageReport, EngineUsageSnapshot, EngineUsageWindow,
-    EngineUsageWindowKind, Query, QuotaSurface, ReadAccountUsage, RequestId, UnixMillis,
+    ENGINE_USAGE_ENGINES_MAX, ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE, EngineReadiness,
+    EngineReadinessVerdict, EngineUsageAuth, EngineUsageAuthentication, EngineUsageReport,
+    EngineUsageSnapshot, EngineUsageWindow, EngineUsageWindowKind, Query, QuotaSurface,
+    ReadAccountUsage, RequestId, UnixMillis,
 };
 use artisan_protocol::artisan_capnp::{envelope, response};
 use artisan_protocol::{
@@ -167,6 +168,75 @@ fn account_usage_snapshot_round_trips_field_for_field() {
         }
         _ => panic!("expected response body"),
     }
+}
+
+#[test]
+fn forge_readiness_verdicts_round_trip_with_their_reasons() {
+    let base = snapshot_fixture();
+    let verdicts = [
+        EngineReadiness::ready(),
+        EngineReadiness::new(
+            EngineReadinessVerdict::NeedsSignIn,
+            Some("Codex account sign-in is required.".to_owned()),
+        )
+        .expect("verdict"),
+        EngineReadiness::new(
+            EngineReadinessVerdict::Checking,
+            Some("Checking the Codex account status.".to_owned()),
+        )
+        .expect("verdict"),
+        EngineReadiness::new(EngineReadinessVerdict::NotReady, None).expect("verdict"),
+    ];
+    for readiness in verdicts {
+        let engines = base
+            .engines()
+            .iter()
+            .cloned()
+            .map(|report| report.with_readiness(readiness.clone()))
+            .collect();
+        let snapshot = EngineUsageSnapshot::new(engines, base.fetched_at()).expect("snapshot");
+        let frame = response_envelope(
+            "server-usage-readiness",
+            "usage-readiness",
+            ResponsePayload::AccountUsage(snapshot.clone()),
+        );
+        let decoded = decode_envelope(&encode_envelope(&frame).expect("snapshot encodes"))
+            .expect("snapshot decodes");
+        assert!(decoded == frame);
+        let WireEnvelopeBody::Response(ServerResponse {
+            payload: ResponsePayload::AccountUsage(decoded),
+            ..
+        }) = decoded.body
+        else {
+            panic!("expected accountUsage payload");
+        };
+        assert_eq!(decoded.engines()[0].readiness(), &readiness);
+    }
+}
+
+#[test]
+fn a_report_without_a_verdict_decodes_as_not_ready() {
+    assert_eq!(
+        snapshot_fixture().engines()[0].readiness().verdict(),
+        EngineReadinessVerdict::NotReady
+    );
+    let bytes = raw_account_usage_frame("usage-no-verdict", |response| {
+        let mut snapshot = response.init_account_usage();
+        snapshot.set_fetched_at("2026-09-09T12:00:00Z");
+        let mut report = snapshot.init_engines(1).get(0);
+        report.set_engine_id("codex");
+        report.set_display_name("Codex");
+        report.reborrow().init_quota_surface().set_absent(());
+    });
+    let decoded = decode_envelope(&bytes).expect("a legacy report decodes");
+    let WireEnvelopeBody::Response(ServerResponse {
+        payload: ResponsePayload::AccountUsage(snapshot),
+        ..
+    }) = decoded.body
+    else {
+        panic!("expected accountUsage payload");
+    };
+    assert!(!snapshot.engines()[0].readiness().is_ready());
 }
 
 #[test]

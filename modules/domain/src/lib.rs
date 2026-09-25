@@ -44,6 +44,7 @@ pub mod text;
 pub mod time;
 
 pub use bounds::{
+    COMPOSER_ATTACHMENT_MAX_BYTES, COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES,
     CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
     CONVERSATION_TEXT_FRAGMENT_MAX_BYTES, DIRECTORY_LISTING_MAX_ENTRIES,
     DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES, ENGINE_CONFIG_MAX_ENCODED_BYTES,
@@ -174,17 +175,25 @@ pub use run_interaction::{
 
 pub use model_favorites::MODEL_FAVORITE_ID_MAX_BYTES;
 
+pub mod catalog_selection;
+pub use catalog_selection::{
+    CATALOG_OPTION_ID_MAX_BYTES, CatalogOptionId, CatalogSelection, CatalogSelectionError,
+    ModelSelectionResolution, ResolveModelSelection, SUBMISSION_REFUSAL_MESSAGE_MAX_BYTES,
+    SubmissionRefusal, SubmissionRefusalKind,
+};
+
 pub mod composer_catalog;
 pub use composer_catalog::{
     CATALOG_REVISION_MAX_BYTES, CatalogRevision, CatalogRevisionError, ReadComposerCatalog,
-    ReadModelFavorites, SetModelFavorite,
+    ReadHostCatalog, ReadModelFavorites, SetModelFavorite,
 };
 
 pub mod account_usage;
 pub use account_usage::{
-    EngineUsageAuth, EngineUsageAuthentication, EngineUsageError, EngineUsageReport,
-    EngineUsageSnapshot, EngineUsageWindow, EngineUsageWindowKind, QuotaSurface, ReadAccountUsage,
-    clamp_percent_used, iso_millis, utc_ymd, validate_iso_timestamp,
+    EngineReadiness, EngineReadinessVerdict, EngineUsageAuth, EngineUsageAuthentication,
+    EngineUsageError, EngineUsageReport, EngineUsageSnapshot, EngineUsageWindow,
+    EngineUsageWindowKind, QuotaSurface, ReadAccountUsage, clamp_percent_used, iso_millis, utc_ymd,
+    validate_iso_timestamp,
 };
 
 pub mod composer_state;
@@ -198,7 +207,8 @@ mod draft_submission;
 pub use composer_draft::{
     ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult,
     ComposerAttachmentUploaded, ComposerDraft, ComposerDraftError, ComposerDraftResult,
-    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, QueueStoredMessage,
-    ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft, UploadComposerAttachment,
+    ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, ComposerImage,
+    QueueStoredMessage, ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft,
+    UploadComposerAttachment,
 };
 pub use draft_submission::{ComposerDraftSubmitted, DraftSubmissionOutcome, SubmitComposerDraft};

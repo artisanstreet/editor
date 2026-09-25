@@ -64,6 +64,7 @@ impl NativeApplication {
                 self.handle_composer_state_event(event, cx);
             }
             NativeTransportEvent::ComposerDraft(event) => self.receive_draft_event(event, cx),
+            NativeTransportEvent::ForgeDecision(event) => self.receive_forge_decision(event, cx),
             NativeTransportEvent::ActiveRun {
                 thread_id,
                 generation,
@@ -95,8 +96,7 @@ impl NativeApplication {
             NativeTransportEvent::Starting => {
                 self.state = NativeViewState::Loading;
                 self.reset_profile_usage_for_connection();
-                // Re-inspect repository facts for the new connection so a
-                // retained decoration cannot outlive its session.
+                // Repository facts belong to the session: inspect them again.
                 self.titlebar_repository_project = None;
                 self.sync_composer_availability(cx);
                 cx.notify();
@@ -248,8 +248,7 @@ impl NativeApplication {
             } => {
                 self.handle_engine_settings_failed(thread_id, generation, failure, cx);
             }
-            // The shipping composer uses QueueMessage. Legacy first-message
-            // results cannot settle a flight from the newer command family.
+            // Legacy first-message results never settle a draft submission.
             NativeTransportEvent::FirstMessageQueued(_)
             | NativeTransportEvent::FirstMessageFailed { .. } => {}
             // Answer receipts and failures settle their row gates through the
@@ -296,6 +295,7 @@ impl NativeApplication {
     }
 
     pub(super) fn handle_empty_projects(&mut self, cx: &mut Context<Self>) {
+        self.ensure_host_catalog();
         self.pending_thread = None;
         self.pending_snapshot = None;
         self.thread_listing = None;

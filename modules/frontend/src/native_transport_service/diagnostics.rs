@@ -584,6 +584,46 @@ pub(super) fn local_session_request_loss_is_retryable(error: &ClientRequestError
     }
 }
 
+impl std::fmt::Debug for NativeTransportCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Self::ComposerState(_) => "ComposerState",
+            Self::ComposerDraft(_) => "ComposerDraft",
+            Self::ForgeDecision(_) => "ForgeDecision",
+            Self::ReadActiveRun { .. } => "ReadActiveRun",
+            Self::StopRun(_) => "StopRun",
+            Self::RespondApproval(_) => "RespondApproval",
+            Self::RespondQuestion(_) => "RespondQuestion",
+            Self::BeginProjectIntake => "BeginProjectIntake",
+            Self::BeginProjectIntakeAt(_) => "BeginProjectIntakeAt",
+            Self::RetryProjectIntake => "RetryProjectIntake",
+            Self::SelectProject(_) => "SelectProject",
+            Self::ReadSidebarThreads { .. } => "ReadSidebarThreads",
+            Self::CreateTask(_) => "CreateTask",
+            Self::RecoverFailedMessage { .. } => "RecoverFailedMessage",
+            Self::RequestSnapshot(_) => "RequestSnapshot",
+            Self::ReadMessageImage(_) => "ReadMessageImage",
+            Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
+            Self::ReadComposerCatalog { .. } => "ReadComposerCatalog",
+            Self::ReadModelFavorites { .. } => "ReadModelFavorites",
+            Self::ListRegisteredProfiles => "ListRegisteredProfiles",
+            Self::ReadAccountUsage { .. } => "ReadAccountUsage",
+            Self::SetThreadEngineConfig(_) => "SetThreadEngineConfig",
+            Self::SetModelFavorite(_) => "SetModelFavorite",
+            Self::QueueFirstMessage(_) => "QueueFirstMessage",
+            Self::SubmitComposerDraft(_) => "SubmitComposerDraft",
+            Self::ResolveRichLink { .. } => "ResolveRichLink",
+            Self::QueryProjectRepository { .. } => "QueryProjectRepository",
+            Self::Subscribe { .. } => "Subscribe",
+            Self::Unsubscribe { .. } => "Unsubscribe",
+            Self::AcknowledgePatch { .. } => "AcknowledgePatch",
+            Self::Shutdown => "Shutdown",
+        };
+        formatter.write_str("NativeTransportCommand::")?;
+        formatter.write_str(variant)
+    }
+}
+
 #[cfg(test)]
 mod answer_failure_tests {
     use super::*;

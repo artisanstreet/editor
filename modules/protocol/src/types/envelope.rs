@@ -13,8 +13,9 @@ use crate::repository::ProjectRepositoryQueryResult;
 
 use super::ProtocolValueError;
 use super::catalog::{
-    ComposerCatalogResult, ModelFavoritesSnapshot, RegisteredEngineProfilesResult,
-    RichLinkPageMetadata, SetModelFavoriteReceipt, ThreadEngineSettingsResult,
+    CatalogSnapshotWire, ComposerCatalogResult, ModelFavoritesSnapshot,
+    RegisteredEngineProfilesResult, RichLinkPageMetadata, SetModelFavoriteReceipt,
+    ThreadEngineSettingsResult,
 };
 use super::dispatch::{
     ActiveRunResult, ClientRequest, ConversationSubscriptionStarted,
@@ -80,6 +81,10 @@ pub enum ResponsePayload {
     RegisteredEngineProfiles(RegisteredEngineProfilesResult),
     /// Runtime model catalog for one authenticated thread/profile scope.
     ComposerCatalog(ComposerCatalogResult),
+    /// Scope-free host catalog with the Forge's readiness applied.
+    HostCatalog(CatalogSnapshotWire),
+    /// A model selection resolved into a configuration, or refused.
+    ModelSelectionResolved(artisan_domain::ModelSelectionResolution),
     /// Complete durable model-favorites projection.
     ModelFavorites(ModelFavoritesSnapshot),
     /// Correlated favorite mutation receipt with complete post-state.

@@ -42,6 +42,7 @@ struct UsageScope {
 struct UsageSnapshot {
     report: RunUsageReport,
     model_name: String,
+    compaction_at_tokens: Option<u64>,
 }
 
 /// Complete outbox/usage projection owned by the native application.
@@ -618,6 +619,7 @@ impl ComposerQueueState {
                 reason: UsageRejection::WrongRun,
             });
         }
+        let compaction_at_tokens = result.compaction_at_tokens;
         let Some(report) = result.report else {
             return Ok(UsageResultDisposition::NoReport);
         };
@@ -632,6 +634,7 @@ impl ComposerQueueState {
                     thread_id: scope.thread_id.clone(),
                     run_id: scope.run_id.clone(),
                     report: Some(report),
+                    compaction_at_tokens,
                 },
                 reason: UsageRejection::PolicyMismatch,
             });
@@ -645,12 +648,17 @@ impl ComposerQueueState {
                     thread_id: scope.thread_id.clone(),
                     run_id: scope.run_id.clone(),
                     report: Some(report),
+                    compaction_at_tokens,
                 },
                 reason: UsageRejection::StaleSequence,
             });
         }
         self.usage_sequence = Some(report.source_sequence());
-        self.usage = Some(UsageSnapshot { report, model_name });
+        self.usage = Some(UsageSnapshot {
+            report,
+            model_name,
+            compaction_at_tokens,
+        });
         Ok(UsageResultDisposition::Updated)
     }
 
@@ -680,6 +688,7 @@ impl ComposerQueueState {
             input_tokens: report.input_tokens(),
             cached_input_tokens: report.cached_input_tokens(),
             output_tokens: report.output_tokens(),
+            compaction_at_tokens: usage.compaction_at_tokens,
         })
     }
 }

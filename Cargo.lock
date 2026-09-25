@@ -505,6 +505,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "image",
  "native-dialog",
  "quinn",
  "rcgen",

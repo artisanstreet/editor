@@ -1,6 +1,6 @@
 # Stateless Editor, single host connection, and connection holds
 
-- Status: approved 2026-09-25; implementation in progress (steps 0, 2, 3, 4 and 5 implemented)
+- Status: approved 2026-09-25; implementation in progress (steps 0, 2, 3, 4, 5 and 6 implemented)
 - Scope: where Editor state may live, how the Editor connects to exactly one Forge, and how
   in-flight work keeps that connection open until it resolves
 
@@ -239,12 +239,73 @@ Implemented (step 5), Forge-accepted submissions:
   `QueueMessage`/`QueueStoredMessage`; both stay on the wire (general admission, frozen capnp
   ordinals). A send with images still uploading is refused with its reason.
 - Left for step 6: the readiness verdict in `first_send_config` (catalog admission) still refuses
-  an unrunnable first send in the Editor; it no longer holds the send. Run usage is still polled
-  while a run is live.
+  an unrunnable first send in the Editor; it no longer holds the send (done in step 6). Run usage
+  is still polled while a run is live.
 
 Decisions that move to the Forge and arrive as data: send admission (typed refusals from one
 `SubmitMessage`), account readiness, catalog readiness overlay, engine-config validation, context
 compaction thresholds, thread title refinement, attachment image policy, failure-row pruning.
+
+Implemented (step 6), business decisions to the Forge:
+
+- Account readiness: the Forge judges each engine account when it serves a usage report
+  (`account_readiness.rs`) against its own 180 s freshness window: authenticated and fresh is
+  ready (also with a transient refresh failure served beside last-good), unauthenticated needs
+  sign-in, anything else is not ready, and an engine never observed is still being checked. Each
+  verdict carries a presentation-ready reason. `EngineUsageReport.readiness` carries it (a missing
+  verdict decodes as not ready); `AccountUsageService::readiness` answers the current verdict
+  from what the Forge last observed. The Editor renders the verdict; a read in flight without any
+  report still shows Checking. Deviation: the verdict is served with each report rather than
+  pushed; the Editor still schedules its usage re-reads by each report's age (refresh cadence,
+  not the verdict).
+- Catalog readiness overlay: the Forge applies readiness to every catalog it serves (Codex and
+  Claude, whose usage read proves a local CLI, are runnable exactly when ready; other harnesses
+  keep the catalog's marking). `catalog_with_usage_readiness`/`effective_catalog_snapshot` are
+  gone; the Editor reads the catalog again when a report changes an engine's verdict.
+- Model catalog side channel: `ReadHostCatalog` (answered by `hostCatalog`, live discovery with
+  readiness applied) replaces `<root>/readiness/model-catalog.json`. The Editor asks once the
+  connection lists its projects and every five minutes. The Forge's file publisher is removed:
+  nothing else read the file, and a file beside the local readiness receipt could only ever
+  describe the local host, not the connected one.
+- Engine configuration: the Editor names the model it shows by catalog identities
+  (`CatalogSelection`: model id, profile, reasoning/speed/context/permission option ids). The
+  Forge resolves it against its catalog and the thread's saved configuration
+  (`engine_selection.rs`, the former Editor `config_for_policy`, `with_default_native_profile`
+  and run-choice validation) or refuses with a reason. Deviation: a selection-time save is a
+  resolution query (`ResolveModelSelection` → `modelSelectionResolved`) followed by the existing
+  `SetThreadEngineConfig`, so receipts, compare-and-swap and conflict handling stay one path. The
+  picker's pure presentation stays in the Editor (`picker_selection.rs`): naming a displayed
+  policy by identities, and finding the catalog row that displays a saved configuration by
+  matching its values (it never builds one).
+- Send admission: `SubmitComposerDraft` carries the displayed selection instead of a steer target
+  (the retired `steerRunId` must be empty). The Forge refuses as data (`refused`, a
+  `SubmissionRefusal` kind and message) a send while the run is still starting, an unconfigured
+  thread without a model, a selection its catalog cannot build, and a selection that changes the
+  configuration to an engine that cannot run (with its readiness reason); a selection equal to
+  the saved configuration is admitted and held as before. A changing selection is saved before
+  the message is queued, and the answer reports the configuration revision so the Editor re-reads
+  its settings. The send steers the live run exactly when it runs or waits on the same engine. A
+  repeated revision skips admission. `first_send_config`, `admit_first_send`, the starting-run
+  guard and `observed_steer_target` are removed from the Editor.
+- Compaction thresholds: `RunUsageResult.compactionAtTokens` (Forge `context_compaction_policy.rs`,
+  same rules including the exact `claude-sonnet-5` case); the Editor paints the marker and
+  defaults to the window. `context_auto_compaction.rs` is removed.
+- Thread title: the listing title already is the Forge's resolved display title (the generated
+  title once recorded, otherwise the first message while the placeholder stands). The Editor's
+  `refined_thread_title`/`thread_display_title` re-derivation is removed. Deviation: no new wire
+  field; the Editor shows the listing it re-reads every 1.5 s.
+- Attachment image policy: the Editor keeps and uploads each image exactly as picked (it still
+  decodes one for its thumbnail). The composer store holds picked images up to 12 MiB, one upload
+  frame (`ComposerImage`, migration `m20260928_000018_composer_attachment_sources` rebuilds both
+  attachment tables with the larger bound). When a draft is sent the Forge fits its images to the
+  admitted engine (`attachment_policy.rs` with the moved `image_policy.rs`: 2576 px long edge, the
+  engine's best encoding when rescaled or smaller, GIFs untouched, then the message bounds) and
+  refuses what cannot fit (`AttachmentRejected`); the fitted images are what the submission
+  queues. Deviations: the Editor's raw intake ceiling drops from 32 MiB to the 12 MiB upload
+  bound, so an image between the two that the Editor used to shrink is now refused at intake;
+  `QueueStoredMessage` (unused by the Editor) cannot send a stored image over the message bound.
+- Left for step 7: run usage is still polled while a run is live, and the OpenCode settings
+  editor still saves a configuration it assembles from the managed registry.
 
 ## 5. Forge resilience prerequisites
 

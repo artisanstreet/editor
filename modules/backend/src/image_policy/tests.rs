@@ -1,7 +1,4 @@
-#[path = "../../modules/frontend/src/image_policy.rs"]
-mod image_policy;
-
-use image_policy::{
+use super::{
     IMAGE_COMPRESSION_LADDER, ImageCompressionFormat, ImageDimensions, ImageMediaType,
     MAXIMUM_IMAGE_LONG_EDGE_PIXELS, best_image_format, image_rescale_target,
     image_rescale_target_with_long_edge,
@@ -23,8 +20,13 @@ fn compression_ladder_is_ordered_worst_to_best() {
         ]
     );
     assert_eq!(
-        IMAGE_COMPRESSION_LADDER.map(ImageCompressionFormat::as_mime_type),
-        ["image/png", "image/jpeg", "image/webp", "image/avif"]
+        IMAGE_COMPRESSION_LADDER.map(ImageCompressionFormat::as_image_media_type),
+        [
+            Some(ImageMediaType::Png),
+            Some(ImageMediaType::Jpeg),
+            Some(ImageMediaType::Webp),
+            None
+        ]
     );
 }
 

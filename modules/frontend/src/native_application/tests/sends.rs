@@ -119,9 +119,7 @@ fn second_tick_does_not_resend_before_pairing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
-    cx: &mut TestAppContext,
-) {
+fn a_choice_the_forge_refuses_keeps_the_draft_and_shows_its_reason(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| signed_out_test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
@@ -133,15 +131,13 @@ fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
                 "keep my draft",
                 sink,
             );
-            let policy = crate::composer_model_config::with_default_native_profile(
-                &application
-                    .model_selector
-                    .read(cx)
-                    .state()
-                    .snapshot()
-                    .selection_policy_for_model("codex-sol")
-                    .unwrap(),
-            );
+            let policy = application
+                .model_selector
+                .read(cx)
+                .state()
+                .snapshot()
+                .selection_policy_for_model("codex-sol")
+                .unwrap();
             application.handle_composer_model_event(
                 &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(
                     policy.clone(),
@@ -149,8 +145,8 @@ fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
                 cx,
             );
             application.sync_composer_model_policy(cx);
-            // A pending offline save may leave the picker showing its own
-            // default policy; the durable choice is what has to survive.
+            // The durable choice survives the sync, and the Editor asks the
+            // Forge to resolve it instead of judging it.
             assert_eq!(
                 application
                     .composer_model_choice
@@ -158,41 +154,61 @@ fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
                     .map(|(_, choice)| choice),
                 Some(&policy)
             );
-            assert!(
-                application
-                    .model_selector
-                    .read(cx)
-                    .state()
-                    .status()
-                    .error
-                    .is_none()
-            );
+            assert!(commands.borrow().iter().any(|command| matches!(
+                command,
+                NativeTransportCommand::ForgeDecision(
+                    crate::native_transport_service::ForgeDecisionCommand::ResolveModelSelection(_)
+                )
+            )));
             assert!(application.composer_model_run_error.is_none());
+            // The send carries the choice; the Editor never refuses it.
             application.begin_message_submission(cx);
-            // The offline choice never reaches the transport: no save
-            // command can be built and no message may queue. Readiness
-            // probes may be recorded on the shared boundary; the
-            // meaningful assertion is that nothing queues.
-            assert!(
-                commands.borrow().iter().all(|command| !matches!(
-                    command,
-                    NativeTransportCommand::SubmitComposerDraft(_)
-                )),
-                "rejected offline send must never queue its message"
+            assert!(application.message_flight.is_some());
+            let reason = "Codex account sign-in is required. Your draft is preserved; send again once it is ready, or review the engine in Settings.";
+            refuse_send(
+                application,
+                cx,
+                artisan_domain::SubmissionRefusalKind::EngineNotReady,
+                reason,
             );
+            assert!(application.message_flight.is_none());
             assert_eq!(application.composer.read(cx).draft(), "keep my draft");
             assert!(!application.composer.read(cx).is_submitting());
-            assert!(application.composer_model_run_error.is_some());
+            assert_eq!(application.message_failure_note.as_deref(), Some(reason));
+            let snapshot = application.composer_controls.read(cx).snapshot().clone();
+            assert_eq!(
+                snapshot.failure.expect("refusal banner").failure.description,
+                reason
+            );
             application.selected_thread = None;
             application.sync_composer_model_policy(cx);
             assert!(application.composer_model_choice.is_none());
-            assert!(application.composer_model_run_error.is_none());
         });
     });
+    let commands = commands.borrow();
+    let sent = commands
+        .iter()
+        .find_map(|command| match command {
+            NativeTransportCommand::SubmitComposerDraft(command) => Some(command),
+            _ => None,
+        })
+        .expect("the send reaches the Forge");
+    assert_eq!(
+        sent.selection
+            .as_ref()
+            .map(|selection| selection.model_id.as_str()),
+        Some("codex-sol")
+    );
+    // A readiness refusal asks for a fresh verdict.
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, NativeTransportCommand::ReadAccountUsage { .. }))
+    );
 }
 
 #[gpui::test]
-fn unconfigured_first_send_without_an_account_verdict_is_refused_not_held(cx: &mut TestAppContext) {
+fn an_unconfigured_first_send_carries_the_displayed_model(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
@@ -205,39 +221,32 @@ fn unconfigured_first_send_without_an_account_verdict_is_refused_not_held(cx: &m
                 sink,
             );
             assert!(application.engine_settings.authoritative_config().is_none());
-            // The picker always displays its default policy, exactly the
-            // production first-send shape: a visible model with no
-            // persisted thread configuration and no explicit choice.
+            // The picker displays its default policy with no persisted
+            // configuration and no explicit choice: the production first
+            // send. The Forge resolves, saves, and admits what it carries.
             assert!(application.composer_model_choice.is_none());
-            assert!(
-                application
-                    .model_selector
-                    .read(cx)
-                    .state()
-                    .policy()
-                    .is_some()
-            );
+            let displayed = application
+                .model_selector
+                .read(cx)
+                .state()
+                .policy()
+                .cloned()
+                .expect("a displayed model");
             application.begin_message_submission(cx);
-            // The Editor never holds a send for an account check: without a
-            // runnable verdict the send is refused with its reason and the
-            // draft stays. Readiness probes may be recorded on the shared
-            // boundary; the blocked send never queues.
-            assert!(
-                commands.borrow().iter().all(|command| !matches!(
-                    command,
-                    NativeTransportCommand::SubmitComposerDraft(_)
-                )),
-                "blocked first send must never queue its message"
-            );
-            assert!(application.message_flight.is_none());
-            assert!(!application.composer.read(cx).is_submitting());
-            assert_eq!(application.composer.read(cx).draft(), "keep my draft");
-            assert!(application.composer_model_run_error.is_some());
-            admit_probed_codex_usage(application, cx);
-            application.begin_message_submission(cx);
-            assert!(
-                application.message_flight.is_some(),
-                "the next Send is admitted once the verdict is runnable"
+            assert!(application.message_flight.is_some());
+            let sent = commands
+                .borrow()
+                .iter()
+                .find_map(|command| match command {
+                    NativeTransportCommand::SubmitComposerDraft(command) => Some(command.clone()),
+                    _ => None,
+                })
+                .expect("the first send reaches the Forge");
+            assert_eq!(
+                sent.selection
+                    .as_ref()
+                    .map(|selection| selection.model_id.as_str().to_owned()),
+                Some(displayed.model_id)
             );
         });
     });
@@ -277,9 +286,10 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
                 cx,
             );
             assert!(application.engine_settings.authoritative_config().is_none());
-            // The selection auto-saved through the shared direct typed
-            // save; the send queues immediately without holding for its
-            // acknowledgment (unnamed: no authoritative engine yet).
+            // The Forge resolves the selection; its configuration saves
+            // through the shared direct typed save, and the send queues
+            // immediately without holding for the acknowledgment.
+            answer_resolution(application, cx, forge_codex_config(None));
             let save_request = admitted_save_request(application);
             let retained = application
                 .engine_settings
@@ -345,7 +355,13 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
         queued.draft_revision.get() > 0,
         "the send names its stored draft"
     );
-    assert!(queued.steer_target.is_none());
+    assert_eq!(
+        queued
+            .selection
+            .as_ref()
+            .map(|selection| selection.model_id.as_str()),
+        Some("codex-sol")
+    );
 }
 
 #[gpui::test]
@@ -506,9 +522,8 @@ fn save_failure_does_not_hold_the_first_send(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn same_engine_live_run_names_the_send_as_a_steer(cx: &mut TestAppContext) {
+fn a_send_during_a_live_run_leaves_the_steer_to_the_forge(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("steer-task").expect("thread");
-    let run_id = RunId::parse("run-live").expect("run");
     let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
@@ -523,14 +538,16 @@ fn same_engine_live_run_names_the_send_as_a_steer(cx: &mut TestAppContext) {
             install_configured_engine_settings(application, cx);
             application.seed_active_run_for_tests(
                 thread_id.clone(),
-                run_id.clone(),
+                RunId::parse("run-live").expect("run"),
                 artisan_protocol::RunLiveStatus::Running,
                 artisan_domain::EngineId::Codex,
             );
             application.begin_message_submission(cx);
-            assert!(application.message_flight.is_some(), "named flight");
+            assert!(application.message_flight.is_some());
         });
     });
+    // The send names only its draft revision and model; whether it steers
+    // the live run is the Forge's decision (the wire has no steer target).
     let queued = commands
         .borrow()
         .iter()
@@ -538,62 +555,16 @@ fn same_engine_live_run_names_the_send_as_a_steer(cx: &mut TestAppContext) {
             NativeTransportCommand::SubmitComposerDraft(command) => Some(command.clone()),
             _ => None,
         })
-        .expect("named send must queue");
-    assert_eq!(
-        queued
-            .steer_target
-            .as_ref()
-            .expect("wire command carries the named run")
-            .run_id()
-            .as_str(),
-        "run-live"
-    );
+        .expect("the send reaches the Forge");
+    assert_eq!(queued.thread_id, thread_id);
+    assert!(queued.selection.is_some());
 }
 
 #[gpui::test]
-fn cross_engine_selection_sends_unnamed(cx: &mut TestAppContext) {
-    let thread_id = ThreadId::parse("cross-engine-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
-    let (sink, commands) = command_sink([Ok(())]);
-    cx.update(|_, app| {
-        view.update(app, |application, cx| {
-            install_ready_message_surface(
-                application,
-                cx,
-                thread_id.clone(),
-                "next engine turn",
-                sink,
-            );
-            install_configured_engine_settings(application, cx);
-            // The live run belongs to another engine: naming it would
-            // pin the command back to its engine, so the send stays
-            // unnamed and the backend takes the fresh-run path.
-            application.seed_active_run_for_tests(
-                thread_id.clone(),
-                RunId::parse("run-other-engine").expect("run"),
-                artisan_protocol::RunLiveStatus::Running,
-                artisan_domain::EngineId::Claude,
-            );
-            application.begin_message_submission(cx);
-            assert!(application.message_flight.is_some(), "unnamed flight");
-        });
-    });
-    let queued = commands
-        .borrow()
-        .iter()
-        .find_map(|command| match command {
-            NativeTransportCommand::SubmitComposerDraft(command) => Some(command.clone()),
-            _ => None,
-        })
-        .expect("unnamed send must queue");
-    assert!(queued.steer_target.is_none());
-}
-
-#[gpui::test]
-fn starting_run_refuses_the_send_with_its_reason(cx: &mut TestAppContext) {
+fn a_starting_run_refusal_from_the_forge_keeps_the_draft(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("starting-task").expect("thread");
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
-    let (sink, commands) = command_sink([Ok(())]);
+    let (sink, _commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
             install_ready_message_surface(
@@ -604,39 +575,26 @@ fn starting_run_refuses_the_send_with_its_reason(cx: &mut TestAppContext) {
                 sink,
             );
             install_configured_engine_settings(application, cx);
-            application.seed_active_run_for_tests(
-                thread_id.clone(),
-                RunId::parse("run-starting").expect("run"),
-                artisan_protocol::RunLiveStatus::Queued,
-                artisan_domain::EngineId::Codex,
-            );
             application.begin_message_submission(cx);
-            // Refused, never queued: no flight, draft preserved, and
-            // the banner names the attempt with Dismiss only.
+            let reason = "The current run is still starting. Wait before sending another message.";
+            refuse_send(
+                application,
+                cx,
+                artisan_domain::SubmissionRefusalKind::RunStarting,
+                reason,
+            );
+            // Refused, never queued: no flight, draft preserved, and the
+            // banner names the attempt with Dismiss only.
             assert!(application.message_flight.is_none());
             assert!(!application.composer.read(cx).is_submitting());
             assert_eq!(application.composer.read(cx).draft(), "too early draft");
-            let note = application
-                .message_failure_note
-                .clone()
-                .expect("starting refusal names its reason");
-            assert!(
-                note.contains("still starting"),
-                "unexpected refusal: {note}"
-            );
+            assert_eq!(application.message_failure_note.as_deref(), Some(reason));
             let snapshot = application.composer_controls.read(cx).snapshot().clone();
             let failure = snapshot.failure.expect("refusal banner");
-            assert!(failure.failure.description.contains("still starting"));
+            assert_eq!(failure.failure.description, reason);
             assert!(!failure.retryable);
         });
     });
-    assert!(
-        commands
-            .borrow()
-            .iter()
-            .all(|command| !matches!(command, NativeTransportCommand::SubmitComposerDraft(_))),
-        "starting-guard refusal must never queue"
-    );
 }
 
 #[gpui::test]
@@ -1457,14 +1415,13 @@ fn each_new_message_submission_mints_a_fresh_request_id() {
 }
 
 #[gpui::test]
-fn first_send_persists_displayed_one_million_window_before_queueing(cx: &mut TestAppContext) {
+fn first_send_carries_the_displayed_one_million_window_for_the_forge(cx: &mut TestAppContext) {
     let thread = ThreadId::parse("default-extended-window").unwrap();
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
             install_ready_message_surface(application, cx, thread.clone(), "Hello", sink);
-            admit_probed_codex_usage(application, cx);
             let mut policy = application
                 .model_selector
                 .read(cx)
@@ -1485,23 +1442,15 @@ fn first_send_persists_displayed_one_million_window_before_queueing(cx: &mut Tes
             assert!(application.engine_settings.authoritative_config().is_none());
         })
     });
-    let commands = commands.borrow();
-    let save = commands
-        .iter()
-        .position(|command| matches!(command, NativeTransportCommand::SetThreadEngineConfig(_)))
-        .expect("default choice must be saved");
-    let queue = commands
-        .iter()
-        .position(|command| matches!(command, NativeTransportCommand::SubmitComposerDraft(_)))
-        .unwrap();
-    assert!(save < queue);
-    let NativeTransportCommand::SetThreadEngineConfig(command) = &commands[save] else {
-        unreachable!()
-    };
-    let artisan_domain::EngineSelection::Codex(selection) = command.config().selection() else {
-        unreachable!()
-    };
-    assert_eq!(selection.model_context_window().unwrap().get(), 1_050_000);
+    // The Forge resolves and saves the window the send carries; the Editor
+    // builds no configuration of its own.
+    assert!(
+        !commands
+            .borrow()
+            .iter()
+            .any(|command| matches!(command, NativeTransportCommand::SetThreadEngineConfig(_)))
+    );
+    assert_eq!(sent_context_window(&commands).as_deref(), Some("extended"));
 }
 
 #[gpui::test]
@@ -1512,7 +1461,6 @@ fn context_change_during_save_is_persisted_after_ack(cx: &mut TestAppContext) {
     cx.update(|_, app| {
         view.update(app, |application, cx| {
             install_ready_message_surface(application, cx, thread.clone(), "Hello", sink);
-            admit_probed_codex_usage(application, cx);
             let base = application
                 .model_selector
                 .read(cx)
@@ -1524,6 +1472,7 @@ fn context_change_during_save_is_persisted_after_ack(cx: &mut TestAppContext) {
                 &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(base.clone()),
                 cx,
             );
+            answer_resolution(application, cx, forge_codex_config(None));
             let first_request = admitted_save_request(application);
             let first_config = application
                 .engine_settings
@@ -1543,12 +1492,10 @@ fn context_change_during_save_is_persisted_after_ack(cx: &mut TestAppContext) {
                 &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(extended),
                 cx,
             );
+            // The send carries the latest choice; the Forge saves it before
+            // admitting the message, so the superseded base never runs it.
             application.begin_message_submission(cx);
-            assert!(
-                application.message_flight.is_none(),
-                "must not run the superseded base configuration"
-            );
-            assert_eq!(application.composer.read(cx).draft(), "Hello");
+            assert!(application.message_flight.is_some());
             application.handle_engine_config_set(
                 &artisan_protocol::SetThreadEngineConfigResult {
                     request_id: first_request,
@@ -1559,6 +1506,8 @@ fn context_change_during_save_is_persisted_after_ack(cx: &mut TestAppContext) {
                 first_config,
                 cx,
             );
+            // The acknowledgement resolves the deferred choice again.
+            answer_resolution(application, cx, forge_codex_config(Some(1_050_000)));
             let next_request = admitted_save_request(application);
             let next_config = application
                 .engine_settings
@@ -1598,6 +1547,7 @@ fn context_change_during_save_is_persisted_after_ack(cx: &mut TestAppContext) {
             .count(),
         2
     );
+    assert_eq!(sent_context_window(&commands).as_deref(), Some("extended"));
 }
 
 #[gpui::test]
@@ -1605,7 +1555,7 @@ fn host_catalog_refresh_updates_the_send_choice_revision(cx: &mut TestAppContext
     let (view, cx) = cx.add_window_view(test_application);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
-            let catalog = application.effective_catalog_snapshot(cx);
+            let catalog = application.served_catalog(cx);
             let policy = catalog.selection_policy_for_model("codex-luna").unwrap();
             application.composer_model_choice = Some((None, policy));
             let mut refreshed = catalog;
@@ -1618,7 +1568,7 @@ fn host_catalog_refresh_updates_the_send_choice_revision(cx: &mut TestAppContext
             assert_eq!(choice.catalog_revision, "host-new-revision");
             assert_eq!(choice.model_id, "codex-luna");
             application
-                .effective_catalog_snapshot(cx)
+                .served_catalog(cx)
                 .validate_policy(choice)
                 .unwrap();
         })
@@ -1630,13 +1580,7 @@ fn unconnected_application_never_offers_bundled_models(cx: &mut TestAppContext) 
     let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
     cx.update(|_, app| {
         view.update(app, |application, cx| {
-            assert!(
-                application
-                    .effective_catalog_snapshot(cx)
-                    .manifest
-                    .models
-                    .is_empty()
-            );
+            assert!(application.served_catalog(cx).manifest.models.is_empty());
             assert!(
                 application
                     .model_selector
@@ -1686,4 +1630,16 @@ fn local_send_leaves_detached_viewport_before_receipt(cx: &mut TestAppContext) {
             assert!(!host.read(cx).controller_view().viewport_state.is_detached());
         })
     });
+}
+
+/// The context-window option the recorded send's selection carried.
+fn sent_context_window(commands: &Rc<RefCell<Vec<NativeTransportCommand>>>) -> Option<String> {
+    commands.borrow().iter().find_map(|command| match command {
+        NativeTransportCommand::SubmitComposerDraft(command) => command
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.context_window.as_ref())
+            .map(|option| option.as_str().to_owned()),
+        _ => None,
+    })
 }

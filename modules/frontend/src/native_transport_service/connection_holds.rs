@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::{ComposerDraftCommand, ComposerStateCommand, NativeTransportCommand};
+use super::{
+    ComposerDraftCommand, ComposerStateCommand, ForgeDecisionCommand, NativeTransportCommand,
+};
 
 /// What an in-flight hold is keeping open, for progress copy only.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -282,6 +284,10 @@ impl NativeTransportCommand {
             )
             | Self::ComposerDraft(
                 ComposerDraftCommand::Read(_) | ComposerDraftCommand::ReadAttachment { .. },
+            )
+            | Self::ForgeDecision(
+                ForgeDecisionCommand::ReadHostCatalog
+                | ForgeDecisionCommand::ResolveModelSelection(_),
             )
             | Self::ReadActiveRun { .. }
             | Self::SelectProject(_)

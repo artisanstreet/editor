@@ -36,6 +36,7 @@ const STREAMING_SPEED_MIGRATION: &str = "m20260913_000014_streaming_speed";
 const COMPOSER_DRAFTS_MIGRATION: &str = "m20260925_000015_composer_drafts";
 const FAILED_MESSAGE_RECOVERIES_MIGRATION: &str = "m20260926_000016_failed_message_recoveries";
 const DRAFT_SUBMISSIONS_MIGRATION: &str = "m20260927_000017_composer_draft_submissions";
+const ATTACHMENT_SOURCES_MIGRATION: &str = "m20260928_000018_composer_attachment_sources";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -122,7 +123,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        17
+        18
     );
     first
         .execute_unprepared(
@@ -156,7 +157,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        17
+        18
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -227,8 +228,67 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             STREAMING_SPEED_MIGRATION.to_string(),
             COMPOSER_DRAFTS_MIGRATION.to_string(),
             FAILED_MESSAGE_RECOVERIES_MIGRATION.to_string(),
-            DRAFT_SUBMISSIONS_MIGRATION.to_string()
+            DRAFT_SUBMISSIONS_MIGRATION.to_string(),
+            ATTACHMENT_SOURCES_MIGRATION.to_string()
         ]
+    );
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn attachment_store_keeps_picked_images_and_their_draft_references()
+-> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    migrate_to_current(&database).await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/work/p1', 'Project', 1)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'Thread', 2, 3)",
+        )
+        .await?;
+    // A picked image larger than a message image (5 MiB) is stored as it is;
+    // one over the upload bound (12 MiB) is not.
+    let insert = |size: i64, digest: u8| {
+        format!(
+            "INSERT INTO composer_attachments (digest, mime_type, size_bytes, bytes, stored_at_ms) VALUES (x'{}', 'image/png', {size}, zeroblob({size}), 1)",
+            format!("{digest:02x}").repeat(32)
+        )
+    };
+    database
+        .execute_unprepared(&insert(6 * 1024 * 1024, 1))
+        .await?;
+    assert!(
+        database
+            .execute_unprepared(&insert(12 * 1024 * 1024 + 1, 2))
+            .await
+            .is_err()
+    );
+    database
+        .execute_unprepared(
+            "INSERT INTO composer_drafts (scope_kind, scope_id, revision, body, updated_at_ms) VALUES ('thread', 't1', 1, '', 4)",
+        )
+        .await?;
+    database
+        .execute_unprepared(&format!(
+            "INSERT INTO composer_draft_attachments (scope_kind, scope_id, position, digest, name) VALUES ('thread', 't1', 0, x'{}', 'screenshot.png')",
+            "01".repeat(32)
+        ))
+        .await?;
+    // The rebuilt reference still restricts deleting the stored image.
+    assert!(
+        database
+            .execute_unprepared("DELETE FROM composer_attachments")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        scalar_i64(&database, "SELECT count(*) FROM composer_draft_attachments").await?,
+        1
     );
     database.close().await?;
     Ok(())
@@ -932,7 +992,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
     migrate_to_current(&database).await?;
     assert_eq!(
         scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
-        17
+        18
     );
     for (table, expected) in [
         ("messages", 1),
@@ -1039,7 +1099,7 @@ async fn seed_legacy_queue_database(
     Ok(())
 }
 
-/// Verifies a migrated database carries the full schema: all seventeen
+/// Verifies a migrated database carries the full schema: all eighteen
 /// migration records, exactly one copy of each engine-config shape
 /// trigger, and the widened version guard live.
 async fn assert_migrated_schema(
@@ -1047,7 +1107,7 @@ async fn assert_migrated_schema(
 ) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         scalar_i64(database, "SELECT count(*) FROM seaql_migrations").await?,
-        17,
+        18,
         "migration must record every version exactly once"
     );
     assert_eq!(

@@ -10,6 +10,7 @@ impl NativeApplication {
         if self.thread_switch_flight.is_some() {
             return;
         }
+        self.ensure_host_catalog();
         let initial_project = listing
             .projects()
             .first()

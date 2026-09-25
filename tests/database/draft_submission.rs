@@ -8,7 +8,7 @@ use artisan_database::{
 };
 use artisan_domain::{
     ApprovalMode, AuthoredText, ByteLimit, ComposerAttachmentRef, ComposerDraftRevision,
-    ComposerDraftScope, CountLimit, DirectoryId, DisplayName, EngineAgentId,
+    ComposerDraftScope, ComposerImage, CountLimit, DirectoryId, DisplayName, EngineAgentId,
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
     EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, FilesystemAccess, FiniteMillis, ImageAttachment, MessageId, NetworkAccess,
@@ -146,6 +146,24 @@ async fn submit(
     draft_revision: u64,
     message_id: &str,
 ) -> DraftSubmission {
+    submit_with_images(
+        repository,
+        request_id,
+        draft_revision,
+        message_id,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Submits with the images the Forge fitted to the thread's engine.
+async fn submit_with_images(
+    repository: &Repository,
+    request_id: &str,
+    draft_revision: u64,
+    message_id: &str,
+    images: Vec<ImageAttachment>,
+) -> DraftSubmission {
     repository
         .submit_composer_draft(SubmitComposerDraftInput {
             request_id: request(request_id),
@@ -153,6 +171,7 @@ async fn submit(
             draft_revision: revision(draft_revision),
             message_id: MessageId::parse(message_id).unwrap(),
             steer_run_id: None,
+            images,
             submitted_at: UnixMillis::from_millis(400),
         })
         .await
@@ -287,20 +306,65 @@ async fn a_late_save_cannot_bring_back_a_sent_draft() {
 }
 
 #[tokio::test]
-async fn stored_images_are_sent_with_their_bytes_and_leave_the_draft() {
+async fn a_draft_is_sent_with_the_images_the_forge_fitted_and_leaves_the_draft() {
     let (_database, repository) = repository().await;
-    let image = ImageAttachment::new("image/png", vec![7; 5], "shot.png").unwrap();
+    // The store keeps the picked image, larger than a message allows.
+    let picked = ComposerImage::new(
+        "image/png",
+        vec![7; artisan_domain::MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES + 1],
+        "shot.png",
+    )
+    .unwrap();
     let reference = repository
-        .store_composer_attachment(&image, UnixMillis::from_millis(300))
+        .store_composer_attachment(&picked, UnixMillis::from_millis(300))
         .await
         .unwrap();
     save(&repository, "save-image", "", vec![reference]).await;
-    let DraftSubmission::Queued { result, .. } =
-        submit(&repository, "send-image", 1, "message-image").await
+    // Fitted images that do not match the draft's attachments are refused.
+    assert!(
+        repository
+            .submit_composer_draft(SubmitComposerDraftInput {
+                request_id: request("send-mismatch"),
+                thread_id: thread(),
+                draft_revision: revision(1),
+                message_id: MessageId::parse("message-mismatch").unwrap(),
+                steer_run_id: None,
+                images: Vec::new(),
+                submitted_at: UnixMillis::from_millis(400),
+            })
+            .await
+            .is_err()
+    );
+    let fitted = ImageAttachment::new("image/webp", vec![9; 5], "shot.webp").unwrap();
+    let DraftSubmission::Queued { result, .. } = submit_with_images(
+        &repository,
+        "send-image",
+        1,
+        "message-image",
+        vec![fitted.clone()],
+    )
+    .await
     else {
         panic!("an image-only draft is queued");
     };
     assert_eq!(result.payload.text(), None);
-    assert_eq!(result.payload.attachments(), [image]);
+    assert_eq!(result.payload.attachments(), [fitted]);
     assert_eq!(stored_draft(&repository).await, (2, String::new(), 0));
+    // A message sent by reference cannot use the picked image as it is.
+    assert!(matches!(
+        repository
+            .resolve_composer_attachments(&[artisan_domain::ComposerAttachmentRef::new(
+                *repository
+                    .store_composer_attachment(&picked, UnixMillis::from_millis(500))
+                    .await
+                    .unwrap()
+                    .digest(),
+                artisan_domain::ImageMimeType::Png,
+                "shot.png",
+                u32::try_from(picked.byte_len()).unwrap(),
+            )
+            .unwrap()])
+            .await,
+        Err(artisan_database::ComposerDraftRepositoryError::AttachmentNotSendable { .. })
+    ));
 }

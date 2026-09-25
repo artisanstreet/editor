@@ -22,6 +22,10 @@ pub fn encode_run_usage_result(
     if let Some(report) = &value.report {
         encode_run_usage_report(builder.reborrow().init_report(), report);
     }
+    encode_optional_u64(
+        builder.reborrow().init_compaction_at_tokens(),
+        value.compaction_at_tokens,
+    );
     Ok(())
 }
 
@@ -47,11 +51,19 @@ pub fn decode_run_usage_result(
     } else {
         None
     };
-    RunUsageResult::new(thread_id, run_id, report).map_err(|_| {
-        ComposerStateCodecError::StateValue {
+    let compaction_at_tokens = if value.has_compaction_at_tokens() {
+        decode_optional_u64(
+            value.get_compaction_at_tokens()?,
+            "response.runUsage.compactionAtTokens",
+        )?
+    } else {
+        None
+    };
+    RunUsageResult::new(thread_id, run_id, report)
+        .map(|result| result.with_compaction_at(compaction_at_tokens))
+        .map_err(|_| ComposerStateCodecError::StateValue {
             field: "response.runUsage.report",
-        }
-    })
+        })
 }
 
 /// Validates a usage result against the exact authenticated read scope.

@@ -301,6 +301,9 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::ComposerDraft(command) => {
                         composer_draft_operations::handle_composer_draft_command(runtime, frames, events, command).await?;
                     }
+                    NativeTransportCommand::ForgeDecision(command) => {
+                        forge_decision_operations::handle_forge_decision_command(runtime, frames, events, command).await?;
+                    }
                     NativeTransportCommand::ReadActiveRun { thread_id, generation } => {
                         composer_operations::read_active_run(runtime, frames, events, thread_id, generation).await?;
                     }

@@ -6,7 +6,7 @@ use artisan_database::{
 };
 use artisan_domain::{
     AuthoredText, ComposerAttachmentDigest, ComposerAttachmentRef, ComposerDraftScope,
-    ImageAttachment, ImageMimeType, ProjectId, RequestId, ThreadId, UnixMillis,
+    ComposerImage, ImageAttachment, ImageMimeType, ProjectId, RequestId, ThreadId, UnixMillis,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::ConnectionTrait;
@@ -56,8 +56,8 @@ fn save(
     }
 }
 
-fn image(byte: u8) -> ImageAttachment {
-    ImageAttachment::new("image/png", vec![byte; 3], "shot.png").unwrap()
+fn image(byte: u8) -> ComposerImage {
+    ComposerImage::new("image/png", vec![byte; 3], "shot.png").unwrap()
 }
 
 #[tokio::test]
@@ -212,7 +212,13 @@ async fn drafts_reference_stored_attachments_in_authored_order() {
         .resolve_composer_attachments(&[first.clone(), second])
         .await
         .unwrap();
-    assert_eq!(resolved, vec![image(1), image(2)]);
+    assert_eq!(
+        resolved,
+        vec![
+            ImageAttachment::new("image/png", vec![1; 3], "shot.png").unwrap(),
+            ImageAttachment::new("image/png", vec![2; 3], "shot.png").unwrap(),
+        ]
+    );
 
     let unknown = ComposerAttachmentRef::new(
         ComposerAttachmentDigest::new([9; 32]),

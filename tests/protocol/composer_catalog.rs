@@ -12,8 +12,8 @@ use artisan_catalog::wire::encode_catalog;
 use artisan_domain::{
     CATALOG_REVISION_MAX_BYTES, CatalogRevision, CatalogRevisionError, Command, EngineProfileId,
     ModelFavoriteId, ModelFavoritesRevision, ModelFavoritesSnapshotError, Query,
-    ReadComposerCatalog, ReadModelFavorites, ReceiptDisposition, RequestId, SetModelFavorite,
-    ThreadId, UnixMillis,
+    ReadComposerCatalog, ReadHostCatalog, ReadModelFavorites, ReceiptDisposition, RequestId,
+    SetModelFavorite, ThreadId, UnixMillis,
 };
 use artisan_protocol::artisan_capnp::{ReceiptDisposition as WireDisposition, envelope};
 use artisan_protocol::{
@@ -332,4 +332,40 @@ fn favorite_decoder_checks_list_length_before_allocating_ids() {
             }
         }) if actual == count
     ));
+}
+
+#[test]
+fn host_catalog_request_and_snapshot_round_trip() -> Result<(), Box<dyn Error>> {
+    let request = envelope_for(
+        "host-catalog-request",
+        WireEnvelopeBody::Request(ClientRequest::Query(Query::ReadHostCatalog(
+            ReadHostCatalog,
+        ))),
+    );
+    assert!(decode_envelope(&encode_envelope(&request)?)? == request);
+
+    // The scope-free catalog carries no thread scope.
+    let mut catalog =
+        NativeModelCatalog::from_manifest_json(include_str!("../fixtures/model_catalog.json"))?;
+    catalog.runnable_harness_ids = vec!["codex".to_owned()];
+    let snapshot = CatalogSnapshotWire::new(encode_catalog(&catalog)?)?;
+    let response = response_for(
+        "host-catalog",
+        ResponsePayload::HostCatalog(snapshot.clone()),
+    );
+    let decoded = decode_envelope(&encode_envelope(&response)?)?;
+    assert!(decoded == response);
+    let WireEnvelopeBody::Response(ServerResponse {
+        payload: ResponsePayload::HostCatalog(decoded),
+        ..
+    }) = decoded.body
+    else {
+        panic!("expected hostCatalog payload");
+    };
+    assert_eq!(decoded, snapshot);
+    assert_eq!(
+        decoded.decoded()?.runnable_harness_ids,
+        vec!["codex".to_owned()]
+    );
+    Ok(())
 }

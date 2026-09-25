@@ -330,6 +330,7 @@ fn stale_usage_is_rejected_without_reinterpreting_the_reporting_model() {
         thread_id: thread_id.clone(),
         run_id: run_id.clone(),
         report: Some(report(&thread_id, &run_id, 2, "model-a", "route-a")),
+        compaction_at_tokens: None,
     };
     assert_eq!(
         state.accept_usage_result(fresh, &usage_read, "Model A".to_owned()),
@@ -340,6 +341,7 @@ fn stale_usage_is_rejected_without_reinterpreting_the_reporting_model() {
         thread_id: thread_id.clone(),
         run_id: run_id.clone(),
         report: Some(report(&thread_id, &run_id, 1, "model-a", "route-a")),
+        compaction_at_tokens: None,
     };
     let error = state
         .accept_usage_result(older, &next_usage_read, "newly selected model".to_owned())
@@ -372,6 +374,7 @@ fn absent_usage_fields_remain_absent_and_scope_mismatch_is_rejected() {
         thread_id: thread_id.clone(),
         run_id: run_id.clone(),
         report: None,
+        compaction_at_tokens: None,
     };
     let (usage_read, _) = state.begin_usage_read().expect("usage read");
     assert_eq!(
@@ -383,6 +386,7 @@ fn absent_usage_fields_remain_absent_and_scope_mismatch_is_rejected() {
         thread_id: thread("thread-b"),
         run_id,
         report: None,
+        compaction_at_tokens: None,
     };
     let (next_usage_read, _) = state.begin_usage_read().expect("next usage read");
     let error = state

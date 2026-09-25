@@ -13,7 +13,7 @@ impl Render for NativeApplication {
         let body = self.desktop_route_body(window, cx);
         let brand = self.desktop_brand(cx).into_any_element();
         let header = self
-            .desktop_header_cluster(cx)
+            .desktop_header_cluster()
             .unwrap_or_else(|| div().into_any_element());
         // The modal belongs to the full window, not the clipped titlebar.
         let search = div().into_any_element();

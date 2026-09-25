@@ -30,6 +30,8 @@ mod listings;
 mod payload;
 #[path = "composer_state/requests.rs"]
 mod requests;
+#[path = "composer_state/selection.rs"]
+mod selection;
 #[path = "composer_state/submissions.rs"]
 mod submissions;
 #[path = "composer_state/usage.rs"]
@@ -41,6 +43,7 @@ pub use self::helpers::validate_withdrawal_response_correlation;
 pub use self::listings::*;
 pub use self::payload::*;
 pub use self::requests::*;
+pub use self::selection::*;
 pub use self::submissions::*;
 pub use self::usage::*;
 use artisan_domain::composer_state::{

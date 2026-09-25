@@ -447,7 +447,7 @@ async fn a_draft_resubmitted_after_a_lost_answer_is_queued_once() {
         request_id: request(request_id),
         thread_id: thread(),
         draft_revision,
-        steer_target: None,
+        selection: None,
     };
     let mut answers = Vec::new();
     // The first answer is lost; the Editor sends the same revision again
@@ -469,6 +469,7 @@ async fn a_draft_resubmitted_after_a_lost_answer_is_queued_once() {
             message_id: first,
             disposition: ReceiptDisposition::Accepted,
             cleared_revision,
+            ..
         },
         DraftSubmissionOutcome::Queued {
             message_id: second,
@@ -506,5 +507,217 @@ async fn a_draft_resubmitted_after_a_lost_answer_is_queued_once() {
         DraftSubmissionOutcome::Stale {
             current_revision: Some(*cleared_revision)
         }
+    );
+}
+
+#[tokio::test]
+async fn a_send_without_a_model_on_an_unconfigured_thread_is_refused_as_data() {
+    let (_temporary, storage) = storage("refused").await;
+    let repository = storage.repository();
+    seed(repository).await;
+    let unconfigured = ThreadId::parse("thread-unconfigured").unwrap();
+    repository
+        .create_thread(CreateThreadInput {
+            request_id: request("create-unconfigured"),
+            thread_id: unconfigured.clone(),
+            project_id: ProjectId::parse("project-failed").unwrap(),
+            title: ThreadTitle::parse("New thread").unwrap(),
+            created_at: UnixMillis::from_millis(600),
+            updated_at: UnixMillis::from_millis(600),
+        })
+        .await
+        .unwrap();
+    let handler = handler(&storage);
+    let save = SaveComposerDraft::new(
+        request("save-unconfigured"),
+        ComposerDraftScope::Thread(unconfigured.clone()),
+        AuthoredText::parse("which model?").unwrap(),
+        Vec::new(),
+    )
+    .unwrap();
+    let ResponsePayload::ComposerDraftSaved(saved) = handler
+        .save_composer_draft(save.request_id(), &save)
+        .await
+        .unwrap()
+        .payload
+    else {
+        panic!("expected a save answer");
+    };
+    let submit = SubmitComposerDraft {
+        request_id: request("submit-unconfigured"),
+        thread_id: unconfigured.clone(),
+        draft_revision: saved.revision,
+        selection: None,
+    };
+    let ResponsePayload::ComposerDraftSubmitted(answer) = handler
+        .submit_composer_draft_outcome(&submit.request_id, &submit)
+        .await
+        .unwrap()
+        .payload
+    else {
+        panic!("expected a submission answer");
+    };
+    let DraftSubmissionOutcome::Refused(refusal) = answer.outcome else {
+        panic!("the send is refused as data, got {:?}", answer.outcome);
+    };
+    assert_eq!(
+        refusal.kind(),
+        artisan_domain::SubmissionRefusalKind::NoSelection
+    );
+    assert_eq!(
+        refusal.message(),
+        "Select a model before sending. Your draft is preserved."
+    );
+    // Nothing was queued and the draft is untouched, so the same revision
+    // can be sent again once a model is chosen.
+    let queued = repository
+        .read_queued_messages(
+            ListQueuedMessages::new(
+                unconfigured.clone(),
+                QueuedMessageListOrder::OldestFirst,
+                32,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(queued.messages().is_empty());
+    assert!(
+        !repository
+            .composer_draft_submitted(&unconfigured, saved.revision)
+            .await
+            .unwrap()
+    );
+}
+
+/// Uploads one picked image and saves it as the seeded thread's draft.
+async fn draft_with_picked_image(
+    handler: &RequestHandler,
+    mime_type: &str,
+    bytes: Vec<u8>,
+    name: &str,
+) -> ComposerDraftRevision {
+    let upload = artisan_domain::UploadComposerAttachment {
+        request_id: request("upload-picked"),
+        image: artisan_domain::ComposerImage::new(mime_type, bytes, name).unwrap(),
+    };
+    let ResponsePayload::ComposerAttachmentUploaded(uploaded) = handler
+        .upload_composer_attachment(&upload.request_id, &upload)
+        .await
+        .unwrap()
+        .payload
+    else {
+        panic!("expected an upload answer");
+    };
+    let save = SaveComposerDraft::new(
+        request("save-picked"),
+        ComposerDraftScope::Thread(thread()),
+        AuthoredText::empty(),
+        vec![uploaded.reference],
+    )
+    .unwrap();
+    let ResponsePayload::ComposerDraftSaved(saved) = handler
+        .save_composer_draft(save.request_id(), &save)
+        .await
+        .unwrap()
+        .payload
+    else {
+        panic!("expected a save answer");
+    };
+    saved.revision
+}
+
+async fn submit_draft(
+    handler: &RequestHandler,
+    revision: ComposerDraftRevision,
+) -> DraftSubmissionOutcome {
+    let submit = SubmitComposerDraft {
+        request_id: request("submit-picked"),
+        thread_id: thread(),
+        draft_revision: revision,
+        selection: None,
+    };
+    let ResponsePayload::ComposerDraftSubmitted(answer) = handler
+        .submit_composer_draft_outcome(&submit.request_id, &submit)
+        .await
+        .unwrap()
+        .payload
+    else {
+        panic!("expected a submission answer");
+    };
+    answer.outcome
+}
+
+#[tokio::test]
+async fn a_picked_image_is_fitted_to_the_threads_engine_when_the_draft_is_sent() {
+    let (_temporary, storage) = storage("fitted").await;
+    let repository = storage.repository();
+    seed(repository).await;
+    let handler = handler(&storage);
+    // Wider than the long-edge cap: the Forge rescales it for the engine.
+    let mut picked = Vec::new();
+    image::DynamicImage::new_rgba8(3000, 10)
+        .write_to(
+            &mut std::io::Cursor::new(&mut picked),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    let revision = draft_with_picked_image(&handler, "image/png", picked.clone(), "wide.png").await;
+    let DraftSubmissionOutcome::Queued { message_id, .. } = submit_draft(&handler, revision).await
+    else {
+        panic!("the draft is queued");
+    };
+    let queued = repository
+        .read_queued_messages(
+            ListQueuedMessages::new(thread(), QueuedMessageListOrder::OldestFirst, 32).unwrap(),
+        )
+        .await
+        .unwrap();
+    let sent = queued
+        .messages()
+        .iter()
+        .find(|message| message.message_id == message_id)
+        .expect("the sent message is queued");
+    // The seeded thread runs `OpenCode`, which takes PNG: the rescaled image
+    // stays PNG but is not the picked bytes.
+    assert_eq!(sent.attachments.len(), 1);
+    assert_eq!(sent.attachments[0].mime_type.as_str(), "image/png");
+    assert_ne!(
+        usize::try_from(sent.attachments[0].size_bytes).unwrap(),
+        picked.len()
+    );
+}
+
+#[tokio::test]
+async fn an_image_the_engine_cannot_take_refuses_the_send_and_keeps_the_draft() {
+    let (_temporary, storage) = storage("unfittable").await;
+    let repository = storage.repository();
+    seed(repository).await;
+    let handler = handler(&storage);
+    // A GIF passes through untouched, so one over the message bound cannot
+    // be sent even though the store keeps it.
+    let revision = draft_with_picked_image(
+        &handler,
+        "image/gif",
+        vec![0; artisan_domain::MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES + 1],
+        "huge.gif",
+    )
+    .await;
+    let DraftSubmissionOutcome::Refused(refusal) = submit_draft(&handler, revision).await else {
+        panic!("the send is refused");
+    };
+    assert_eq!(
+        refusal.kind(),
+        artisan_domain::SubmissionRefusalKind::AttachmentRejected
+    );
+    assert_eq!(
+        refusal.message(),
+        "huge.gif: That image exceeds the 5 MiB limit. Your draft is preserved; remove or replace the image and send again."
+    );
+    assert!(
+        !repository
+            .composer_draft_submitted(&thread(), revision)
+            .await
+            .unwrap()
     );
 }

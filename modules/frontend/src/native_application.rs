@@ -79,11 +79,10 @@ use crate::native_model_selector::{
     engine_accent, engine_asset, render_picker_hover_pill,
 };
 use crate::native_profile_usage::{
-    EngineReadiness, NativeProfileUsageState, NativeUsageEntry, NativeUsageWindow,
-    ProfileUsageGeneration, account_usage_response_current, catalog_with_usage_readiness,
-    checked_label, engine_readiness, engine_refresh_failure, group_usage_windows,
-    plan_profile_usage_loads, profile_usage_display_name, reset_duration, tip_run_up_from,
-    usage_remaining_percent,
+    NativeProfileUsageState, NativeUsageEntry, NativeUsageWindow, ProfileUsageGeneration,
+    account_usage_response_current, checked_label, engine_readiness, engine_readiness_reason,
+    engine_refresh_failure, group_usage_windows, plan_profile_usage_loads,
+    profile_usage_display_name, reset_duration, tip_run_up_from, usage_remaining_percent,
 };
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::{
@@ -125,11 +124,12 @@ use crate::{
     },
     native_thread_picker::{NativeThreadPicker, ThreadPickerAction},
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
-    thread_title_policy::{
-        ThreadTitleInput, ThreadTitleMode, UNNAMED_THREAD_TITLE, refined_thread_title,
-        thread_display_title,
-    },
 };
+
+/// The label of a new-thread route before its thread exists; native task
+/// creation also writes it as the placeholder title the Forge later
+/// resolves.
+pub(crate) const UNNAMED_THREAD_TITLE: &str = "New thread";
 
 // Phase-1 split submodules (see native_application/).
 
@@ -243,11 +243,10 @@ use profile_motion::{
 #[cfg(test)]
 use state::NativeTestCommandSink;
 use state::{
-    FirstSendAdmission, NativeMessageFailure, NativeMessageFlight, NativeViewState, PickerRoute,
-    ThreadSwitchFlight, ThreadSwitchPhase, command_failure, create_message_request_id,
-    create_save_request_id, empty_thread_listing, intake_command, invalid_service_failure,
-    mint_request_id, picker_route, project_options_from_listing, ready_membership_is_valid,
-    scope_free_catalog_snapshot, submission_blocked_failure,
+    NativeMessageFailure, NativeMessageFlight, NativeViewState, PickerRoute, ThreadSwitchFlight,
+    ThreadSwitchPhase, command_failure, create_message_request_id, create_save_request_id,
+    empty_thread_listing, intake_command, invalid_service_failure, mint_request_id, picker_route,
+    project_options_from_listing, ready_membership_is_valid, submission_blocked_failure,
 };
 
 #[cfg(test)]
@@ -335,6 +334,9 @@ pub struct NativeApplication {
     /// Last-used model preference backing new threads without saved config.
     last_used_model: Option<crate::native_last_used::StoredModelPolicy>,
     composer_model_run_error: Option<String>,
+    /// The selection whose Forge resolution is awaited; a later selection
+    /// replaces it so only the latest answer is applied.
+    pending_resolution: Option<(ThreadId, artisan_domain::CatalogSelection)>,
     catalog_controller: NativeCatalogController,
     host_model_catalog: Option<NativeModelCatalog>,
     connection_retry_pending: bool,

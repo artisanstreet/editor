@@ -298,7 +298,7 @@ mod settings_screen_tests {
     }
 
     fn live_snapshot(
-        readiness: crate::native_profile_usage::EngineReadiness,
+        readiness: crate::native_profile_usage::EngineReadinessVerdict,
     ) -> SettingsEngineSnapshot {
         SettingsEngineSnapshot {
             engine_id: "codex".to_owned(),
@@ -324,34 +324,34 @@ mod settings_screen_tests {
 
     #[test]
     fn live_engine_states_name_the_probed_verdict() {
-        use crate::native_profile_usage::EngineReadiness;
+        use crate::native_profile_usage::EngineReadinessVerdict;
 
         let ready = SettingsEngineSnapshot {
             account_email: Some("owner@example.test".to_owned()),
-            ..live_snapshot(EngineReadiness::Ready)
+            ..live_snapshot(EngineReadinessVerdict::Ready)
         };
         assert_eq!(ready.availability_badge(), "Available");
         assert!(ready.installation_state().contains("owner@example.test"));
         assert!(ready.account_state().contains("owner@example.test"));
 
-        let signin = live_snapshot(EngineReadiness::NeedsSignIn);
+        let signin = live_snapshot(EngineReadinessVerdict::NeedsSignIn);
         assert_eq!(signin.availability_badge(), "Sign-in required");
         // A responding executable proves installation even without sign-in.
         assert!(signin.installation_state().contains("Installed"));
         assert!(signin.account_state().contains("No account"));
 
-        let checking = live_snapshot(EngineReadiness::Checking);
+        let checking = live_snapshot(EngineReadinessVerdict::Checking);
         assert_eq!(checking.availability_badge(), "Checking");
 
         // An unchecked engine never claims a missing installation.
-        let unknown = live_snapshot(EngineReadiness::NotReady);
+        let unknown = live_snapshot(EngineReadinessVerdict::NotReady);
         assert_eq!(unknown.availability_badge(), "Unavailable");
         assert!(!unknown.installation_state().contains("install"));
         assert!(!unknown.installation_state().contains("repair"));
 
         let failed = SettingsEngineSnapshot {
             refresh_failure: Some("provider usage read timed out".to_owned()),
-            ..live_snapshot(EngineReadiness::NotReady)
+            ..live_snapshot(EngineReadinessVerdict::NotReady)
         };
         assert!(
             failed
@@ -367,13 +367,13 @@ mod settings_screen_tests {
 
     #[test]
     fn dashboard_cursor_states_never_claim_a_local_installation() {
-        use crate::native_profile_usage::EngineReadiness;
+        use crate::native_profile_usage::EngineReadinessVerdict;
 
         // Dashboard auth proves the account, never a runnable local CLI.
         let ready = SettingsEngineSnapshot {
             engine_id: "cursor".to_owned(),
             account_email: Some("owner@example.test".to_owned()),
-            ..live_snapshot(EngineReadiness::Ready)
+            ..live_snapshot(EngineReadinessVerdict::Ready)
         };
         assert_eq!(ready.availability_badge(), "Signed in");
         assert!(ready.installation_state().contains("unverified"));
@@ -383,7 +383,7 @@ mod settings_screen_tests {
 
         let signin = SettingsEngineSnapshot {
             engine_id: "cursor".to_owned(),
-            ..live_snapshot(EngineReadiness::NeedsSignIn)
+            ..live_snapshot(EngineReadinessVerdict::NeedsSignIn)
         };
         assert_eq!(signin.availability_badge(), "Sign-in required");
         assert!(signin.installation_state().contains("unverified"));

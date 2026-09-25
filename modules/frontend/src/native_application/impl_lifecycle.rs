@@ -147,6 +147,7 @@ impl NativeApplication {
             deferred_composer_policy: None,
             last_used_model: crate::native_last_used::load_stored_model(),
             composer_model_run_error: None,
+            pending_resolution: None,
             catalog_controller: NativeCatalogController::new(),
             host_model_catalog: None,
             connection_retry_pending: false,
@@ -254,51 +255,16 @@ impl NativeApplication {
         });
         application.sync_command_menu_groups(cx);
         application.sync_composer_availability(cx);
-        // The Forge publishes its scope-free catalog snapshot shortly after it
-        // starts (discovery warms in the background); its first discovery is
-        // cold, so an older snapshot may already exist on disk. Watch through
-        // that window and re-apply whenever the revision changes.
-        #[cfg(not(test))]
-        cx.spawn(async move |view, cx| {
-            let mut applied: Option<String> = None;
-            for _ in 0..90 {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                let revision = cx
-                    .background_executor()
-                    .spawn(async {
-                        scope_free_catalog_snapshot().map(|catalog| catalog.catalog_revision)
-                    })
-                    .await;
-                let Some(revision) = revision else {
-                    continue;
-                };
-                if applied.as_deref() == Some(revision.as_str()) {
-                    continue;
-                }
-                applied = Some(revision);
-                let _ = view.update(cx, |app, cx| {
-                    if app.machine_home.is_none() && app.selected_thread.is_none() {
-                        app.reset_model_selector_offline(cx);
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
+        // The Forge's discovery warms in the background, so the catalogs it
+        // serves grow after it starts: ask again every five minutes.
         #[cfg(not(test))]
         cx.spawn(async move |view, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(300))
                     .await;
-                let catalog = cx
-                    .background_executor()
-                    .spawn(async { scope_free_catalog_snapshot() })
-                    .await;
                 if view
-                    .update(cx, |app, cx| app.refresh_model_catalog(catalog, cx))
+                    .update(cx, NativeApplication::refresh_model_catalog)
                     .is_err()
                 {
                     break;

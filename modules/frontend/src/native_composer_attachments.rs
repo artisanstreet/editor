@@ -1,8 +1,11 @@
 //! Native image intake and custody for the GPUI composer.
 //!
-//! File reads, decoding, resizing, encoding, and image-policy inspection all
-//! happen in the background executor. The composer receives only bounded
-//! presentation data and never retains a source path.
+//! The composer keeps every image exactly as the user picked it and uploads
+//! those bytes; the Forge owns the engine image policy (rescaling and
+//! re-encoding for the thread's engine when a draft is sent). File reads and
+//! the bounded decode for a thumbnail happen in the background executor. The
+//! composer receives only bounded presentation data and never retains a
+//! source path.
 
 #![forbid(unsafe_code)]
 
@@ -15,44 +18,33 @@ use std::{
 };
 
 use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, RenderImage, SvgRenderer};
-use image::{
-    DynamicImage, ImageDecoder, ImageFormat as EncodedImageFormat, ImageReader, Limits,
-    imageops::FilterType,
-};
+use image::{DynamicImage, ImageDecoder, ImageFormat as EncodedImageFormat, ImageReader, Limits};
 use sha2::{Digest, Sha256};
 
 use artisan_domain::ComposerAttachmentRef;
 
-use crate::image_policy::{
-    ImageDimensions, ImageMediaType, best_image_format, image_rescale_target,
-};
-
 /// The maximum number of images accepted by one composer draft.
-pub(super) const MAXIMUM_ATTACHMENT_COUNT: usize = 10;
-/// The maximum number of encoded bytes retained for one image.
-pub(super) const MAXIMUM_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
-/// The maximum encoded-byte total retained by one composer draft.
-pub(super) const MAXIMUM_ATTACHMENT_TOTAL_BYTES: usize = 12 * 1024 * 1024;
-/// The maximum source bytes read for one intake operation.
-///
-/// Electron's five-megabyte limit applies to the encoded attachment sent to
-/// the engine. A separate bounded source ceiling permits a compressible image
-/// to be resized or re-encoded without ever allowing an unbounded file read.
-pub(super) const MAXIMUM_RAW_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
-/// The maximum source bytes admitted from one clipboard batch. Files are read
-/// one at a time, so their per-file source ceiling is the relevant bound.
-pub(super) const MAXIMUM_RAW_ATTACHMENT_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAXIMUM_ATTACHMENT_COUNT: usize =
+    artisan_domain::MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT;
+/// The maximum bytes of one picked image, the Forge store's upload bound.
+pub(super) const MAXIMUM_ATTACHMENT_BYTES: usize = artisan_domain::COMPOSER_ATTACHMENT_MAX_BYTES;
+/// The maximum picked-image total one composer draft may reference.
+pub(super) const MAXIMUM_ATTACHMENT_TOTAL_BYTES: usize =
+    artisan_domain::COMPOSER_ATTACHMENTS_MAX_TOTAL_BYTES;
+/// The maximum source bytes read for one intake operation: exactly what can
+/// be uploaded, since the picked bytes are kept as they are.
+pub(super) const MAXIMUM_RAW_ATTACHMENT_BYTES: usize = MAXIMUM_ATTACHMENT_BYTES;
+/// The maximum source bytes admitted from one clipboard batch.
+pub(super) const MAXIMUM_RAW_ATTACHMENT_TOTAL_BYTES: usize = MAXIMUM_ATTACHMENT_TOTAL_BYTES;
 /// The maximum decoded RGBA pixel count allowed before a preview is retained.
 pub(super) const MAXIMUM_DECODED_IMAGE_PIXELS: usize = 16 * 1024 * 1024;
 
 pub(super) const ATTACHMENT_COUNT_LIMIT_MESSAGE: &str = "Attach up to 10 images at a time.";
 pub(super) const ATTACHMENT_TOTAL_LIMIT_MESSAGE: &str =
-    "Attached images together cannot exceed 12 MiB.";
+    "Attached images together are too large to keep in one draft.";
 pub(super) const ATTACHMENT_UNSUPPORTED_FORMAT_MESSAGE: &str =
     "That file is not a JPEG, PNG, WebP, or GIF image.";
-pub(super) const ATTACHMENT_TOO_LARGE_MESSAGE: &str = "That image exceeds the 5 MiB limit.";
-const ATTACHMENT_SOURCE_TOO_LARGE_MESSAGE: &str =
-    "That source image is too large to process safely.";
+pub(super) const ATTACHMENT_TOO_LARGE_MESSAGE: &str = "That image exceeds the 12 MiB upload limit.";
 
 /// The exact typed image upload seam needed by the native transport follow-up.
 ///
@@ -81,6 +73,14 @@ pub(crate) struct NativeComposerAttachmentSnapshot {
     pub draft_generation: u64,
     /// Ready image payloads in attachment order.
     pub attachments: Vec<NativeComposerAttachmentPayload>,
+}
+
+/// Width and height of a decoded image in pixels.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ImageDimensions {
+    pub(super) width: f64,
+    pub(super) height: f64,
 }
 
 /// Why the future typed upload seam cannot produce an image payload yet.
@@ -181,12 +181,6 @@ impl fmt::Display for AttachmentPreparationError {
             Self::TooLarge { maximum, .. } if *maximum == MAXIMUM_ATTACHMENT_TOTAL_BYTES => {
                 formatter.write_str(ATTACHMENT_TOTAL_LIMIT_MESSAGE)
             }
-            Self::TooLarge { maximum, .. }
-                if *maximum == MAXIMUM_RAW_ATTACHMENT_BYTES
-                    || *maximum == MAXIMUM_RAW_ATTACHMENT_TOTAL_BYTES =>
-            {
-                formatter.write_str(ATTACHMENT_SOURCE_TOO_LARGE_MESSAGE)
-            }
             Self::TooLarge { .. } => formatter.write_str(ATTACHMENT_TOO_LARGE_MESSAGE),
             Self::UnsupportedFormat => formatter.write_str(ATTACHMENT_UNSUPPORTED_FORMAT_MESSAGE),
             Self::NotAFile | Self::ReadFailed => {
@@ -210,7 +204,7 @@ pub(super) struct AttachmentPreparationOutcome {
     pub(super) result: Result<PreparedComposerAttachment, AttachmentPreparationError>,
 }
 
-/// A decoded, policy-processed image ready for GPUI presentation.
+/// A picked image with its decoded thumbnail, ready for GPUI presentation.
 #[derive(Clone, Debug)]
 pub(super) struct PreparedComposerAttachment {
     pub(super) id: String,
@@ -221,10 +215,6 @@ pub(super) struct PreparedComposerAttachment {
     pub(super) thumbnail: Arc<RenderImage>,
     #[cfg(test)]
     pub(super) dimensions: ImageDimensions,
-    #[cfg(test)]
-    pub(super) recommended_media_type: ImageMediaType,
-    #[cfg(test)]
-    pub(super) rescale_target: Option<ImageDimensions>,
     pub(super) source_digest: String,
     pub(super) encoded_digest: String,
     pub(super) source_size_bytes: usize,
@@ -335,7 +325,6 @@ pub(super) struct RecalledAttachmentInput {
 /// Prepares a batch of clipboard images sequentially on a background worker.
 pub(super) fn prepare_clipboard_batch(
     items: Vec<(String, ClipboardImageCandidate)>,
-    engine_id: Option<&str>,
 ) -> Vec<AttachmentPreparationOutcome> {
     let mut input_total: usize = 0;
     let mut output_total = 0;
@@ -358,7 +347,6 @@ pub(super) fn prepare_clipboard_batch(
                             &candidate.name,
                             candidate.format,
                             &candidate.bytes,
-                            engine_id,
                         ),
                         &mut output_total,
                     )
@@ -371,17 +359,14 @@ pub(super) fn prepare_clipboard_batch(
 /// Reads and prepares dropped files sequentially on a background worker.
 pub(super) fn prepare_file_batch(
     items: Vec<(String, PathBuf)>,
-    engine_id: Option<&str>,
 ) -> Vec<AttachmentPreparationOutcome> {
     let mut output_total = 0;
     items
         .into_iter()
         .map(|(id, path)| {
             let name = display_file_name(&path);
-            let result = limit_batch_output(
-                read_and_prepare_file(id.clone(), &path, engine_id),
-                &mut output_total,
-            );
+            let result =
+                limit_batch_output(read_and_prepare_file(id.clone(), &path), &mut output_total);
             AttachmentPreparationOutcome { id, name, result }
         })
         .collect()
@@ -434,121 +419,40 @@ fn limit_batch_output(
     Ok(prepared)
 }
 
-/// Reads, validates, decodes, resizes, encodes, and policy-checks one image.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "rescale targets are finite, positive, whole-pixel dimensions already bounded by the attachment limits"
-)]
+/// Validates one picked image and decodes it for its thumbnail. The bytes
+/// are kept exactly as picked: the Forge fits them to the engine.
 pub(super) fn prepare_image_bytes(
     id: String,
     name: &str,
     format: ImageFormat,
     bytes: &[u8],
-    engine_id: Option<&str>,
 ) -> Result<PreparedComposerAttachment, AttachmentPreparationError> {
     validate_format(format)?;
     validate_raw_size(bytes.len())?;
-
-    let source_digest = sha256_hex(bytes);
-    let (decoded, source_dimensions) = decode_bounded(bytes, format)?;
-    let source_dimensions = ImageDimensions {
-        width: f64::from(source_dimensions.0),
-        height: f64::from(source_dimensions.1),
-    };
-
-    // Electron intentionally keeps GIF bytes/animation untouched. The native
-    // preview uses its first safely-decoded frame, while the future payload
-    // receives the original animated bytes.
-    let is_gif = format == ImageFormat::Gif;
-    let rescale_target = (!is_gif)
-        .then(|| image_rescale_target(source_dimensions))
-        .flatten();
-    let display_image = if let Some(target) = rescale_target {
-        decoded.resize_exact(
-            target.width as u32,
-            target.height as u32,
-            FilterType::Lanczos3,
-        )
-    } else {
-        decoded
-    };
-
-    let recommended_media_type = if is_gif {
-        ImageMediaType::Gif
-    } else {
-        best_image_format(engine_id)
-    };
-    let recommended_format = encoded_format_for_media_type(recommended_media_type);
-    let (output_bytes, output_format, output_name) = if is_gif {
-        (bytes.to_vec(), format, name.to_owned())
-    } else {
-        let encoded = encode_image(&display_image, recommended_format);
-        let use_encoded = rescale_target.is_some()
-            || encoded
-                .as_ref()
-                .is_ok_and(|encoded| encoded.len() < bytes.len());
-        if use_encoded {
-            let encoded = encoded.map_err(|_| AttachmentPreparationError::InvalidImage)?;
-            validate_encoded_size(encoded.len())?;
-            let encoded_format = to_gpui_format(recommended_format)
-                .ok_or(AttachmentPreparationError::UnsupportedFormat)?;
-            (
-                encoded,
-                encoded_format,
-                encoded_name(name, recommended_format),
-            )
-        } else {
-            (bytes.to_vec(), format, name.to_owned())
-        }
-    };
-    validate_encoded_size(output_bytes.len())?;
-
-    #[cfg(test)]
-    let output_dimensions = ImageDimensions {
-        width: f64::from(display_image.width()),
-        height: f64::from(display_image.height()),
-    };
-    let thumbnail_bytes = encode_image(&display_image.thumbnail(256, 256), EncodedImageFormat::Png)
-        .map_err(|_| AttachmentPreparationError::InvalidImage)?;
-    let thumbnail = render_preview(ImageFormat::Png, thumbnail_bytes)?;
-
-    Ok(PreparedComposerAttachment {
+    prepare_preserved_encoded(
         id,
-        name: output_name,
-        format: output_format,
-        mime_type: output_format.mime_type().to_owned(),
-        bytes: Arc::new(output_bytes.clone()),
-        thumbnail,
-        #[cfg(test)]
-        dimensions: output_dimensions,
-        #[cfg(test)]
-        recommended_media_type,
-        #[cfg(test)]
-        rescale_target,
-        source_digest,
-        encoded_digest: sha256_hex(&output_bytes),
-        source_size_bytes: bytes.len(),
-        size_bytes: output_bytes.len(),
-    })
+        name.to_owned(),
+        format,
+        bytes.to_vec(),
+        String::new(),
+        0,
+    )
 }
 
 fn read_and_prepare_file(
     id: String,
     path: &Path,
-    engine_id: Option<&str>,
 ) -> Result<PreparedComposerAttachment, AttachmentPreparationError> {
     let name = display_file_name(path);
     let bytes = read_bounded_file(path)?;
     let format = detect_image_format(&bytes)?;
-    prepare_image_bytes(id, &name, format, &bytes, engine_id)
+    prepare_image_bytes(id, &name, format, &bytes)
 }
 
 /// Decodes an encoded image only for metadata and preview generation.
 ///
-/// The byte vector is the already accepted queue/draft representation. It is
-/// retained byte-for-byte, so a recall or restart cannot silently introduce a
-/// second resize or a lossy quality change.
+/// The byte vector is retained byte-for-byte (a picked image, or a stored or
+/// recalled one), so the Editor never resizes or re-encodes an image.
 fn prepare_preserved_encoded(
     id: String,
     name: String,
@@ -557,17 +461,7 @@ fn prepare_preserved_encoded(
     source_digest: String,
     source_size_bytes: usize,
 ) -> Result<PreparedComposerAttachment, AttachmentPreparationError> {
-    let recommended_media_type = match format {
-        ImageFormat::Gif => ImageMediaType::Gif,
-        ImageFormat::Jpeg => ImageMediaType::Jpeg,
-        ImageFormat::Png => ImageMediaType::Png,
-        ImageFormat::Webp => ImageMediaType::Webp,
-        ImageFormat::Svg
-        | ImageFormat::Bmp
-        | ImageFormat::Tiff
-        | ImageFormat::Ico
-        | ImageFormat::Pnm => return Err(AttachmentPreparationError::UnsupportedFormat),
-    };
+    validate_format(format)?;
     let encoded_size = bytes.len();
     validate_encoded_size(encoded_size)?;
     let bytes = Arc::new(bytes);
@@ -587,7 +481,7 @@ fn prepare_preserved_encoded(
         source_size_bytes
     };
     #[cfg(not(test))]
-    let _ = (recommended_media_type, source_dimensions);
+    let _ = source_dimensions;
 
     Ok(PreparedComposerAttachment {
         id,
@@ -601,10 +495,6 @@ fn prepare_preserved_encoded(
             width: f64::from(source_dimensions.0),
             height: f64::from(source_dimensions.1),
         },
-        #[cfg(test)]
-        recommended_media_type,
-        #[cfg(test)]
-        rescale_target: None,
         source_digest,
         encoded_digest,
         source_size_bytes,
@@ -779,15 +669,6 @@ fn to_encoded_format(format: ImageFormat) -> EncodedImageFormat {
     }
 }
 
-fn encoded_format_for_media_type(media_type: ImageMediaType) -> EncodedImageFormat {
-    match media_type {
-        ImageMediaType::Gif => EncodedImageFormat::Gif,
-        ImageMediaType::Jpeg => EncodedImageFormat::Jpeg,
-        ImageMediaType::Png => EncodedImageFormat::Png,
-        ImageMediaType::Webp => EncodedImageFormat::WebP,
-    }
-}
-
 fn to_gpui_format(format: EncodedImageFormat) -> Option<ImageFormat> {
     match format {
         EncodedImageFormat::Gif => Some(ImageFormat::Gif),
@@ -796,21 +677,6 @@ fn to_gpui_format(format: EncodedImageFormat) -> Option<ImageFormat> {
         EncodedImageFormat::WebP => Some(ImageFormat::Webp),
         _ => None,
     }
-}
-
-fn encoded_name(name: &str, format: EncodedImageFormat) -> String {
-    let stem = Path::new(name)
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| "Pasted image".to_owned());
-    let extension = match format {
-        EncodedImageFormat::Gif => "gif",
-        EncodedImageFormat::Jpeg => "jpg",
-        EncodedImageFormat::WebP => "webp",
-        _ => "png",
-    };
-    format!("{stem}.{extension}")
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -866,26 +732,22 @@ mod tests {
     }
 
     #[test]
-    fn intake_resizes_encodes_and_retains_source_digest() {
+    fn intake_keeps_the_picked_bytes_and_decodes_a_thumbnail() {
         let prepared = prepare_image_bytes(
             "attachment:0".into(),
             "pixel.png",
             ImageFormat::Png,
             ONE_BY_ONE_PNG,
-            Some("claude"),
         )
         .expect("fixture decodes");
         assert_eq!(prepared.dimensions.width, 1.0);
         assert_eq!(prepared.dimensions.height, 1.0);
-        assert_eq!(prepared.recommended_media_type, ImageMediaType::Webp);
-        assert!(prepared.rescale_target.is_none());
+        assert_eq!(prepared.bytes.as_ref(), ONE_BY_ONE_PNG);
+        assert_eq!(prepared.name, "pixel.png");
         assert_eq!(prepared.source_size_bytes, ONE_BY_ONE_PNG.len());
         assert_eq!(prepared.size_bytes, prepared.bytes.len());
-        assert_eq!(prepared.source_digest.len(), 64);
-        assert_eq!(prepared.encoded_digest.len(), 64);
         assert_eq!(prepared.source_digest, sha256_hex(ONE_BY_ONE_PNG));
-        assert_eq!(prepared.encoded_digest, sha256_hex(prepared.bytes.as_ref()));
-        assert!(prepared.size_bytes <= MAXIMUM_ATTACHMENT_BYTES);
+        assert_eq!(prepared.encoded_digest, sha256_hex(ONE_BY_ONE_PNG));
     }
 
     #[test]
@@ -906,33 +768,21 @@ mod tests {
         assert_eq!(prepared.bytes.as_ref(), ONE_BY_ONE_PNG);
         assert_eq!(prepared.encoded_digest, sha256_hex(ONE_BY_ONE_PNG));
         assert_eq!(prepared.source_digest, sha256_hex(ONE_BY_ONE_PNG));
-        assert!(prepared.rescale_target.is_none());
     }
 
     #[test]
-    fn resize_uses_the_policy_long_edge_without_enlarging_or_distorting() {
+    fn a_large_picture_is_kept_as_picked_for_the_forge_to_fit() {
+        // The Forge rescales for the engine when the draft is sent; the
+        // Editor never resizes or re-encodes.
         let source = DynamicImage::new_rgba8(2577, 3);
         let bytes = encode_image(&source, EncodedImageFormat::Png).expect("PNG source");
-        let prepared = prepare_image_bytes(
-            "attachment:0".into(),
-            "wide.png",
-            ImageFormat::Png,
-            &bytes,
-            None,
-        )
-        .expect("wide fixture decodes");
-
-        assert_eq!(
-            prepared.rescale_target,
-            Some(ImageDimensions {
-                width: 2576.0,
-                height: 3.0,
-            })
-        );
-        assert_eq!(prepared.dimensions.width, 2576.0);
-        assert_eq!(prepared.dimensions.height, 3.0);
+        let prepared =
+            prepare_image_bytes("attachment:0".into(), "wide.png", ImageFormat::Png, &bytes)
+                .expect("wide fixture decodes");
+        assert_eq!(prepared.dimensions.width, 2577.0);
+        assert_eq!(prepared.bytes.as_ref(), &bytes);
         assert_eq!(prepared.format, ImageFormat::Png);
-        assert_ne!(prepared.source_digest, prepared.encoded_digest);
+        assert_eq!(prepared.source_digest, prepared.encoded_digest);
     }
 
     #[test]
@@ -942,7 +792,6 @@ mod tests {
             "vector.svg",
             ImageFormat::Svg,
             b"<svg/>",
-            None,
         );
         assert!(matches!(
             result,
@@ -951,22 +800,15 @@ mod tests {
     }
 
     #[test]
-    fn encoded_output_keeps_the_five_mib_limit_separate_from_raw_intake() {
-        let result = validate_encoded_size(MAXIMUM_ATTACHMENT_BYTES + 1);
+    fn a_picked_image_may_be_as_large_as_one_upload() {
+        assert!(validate_raw_size(artisan_domain::MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES + 1).is_ok());
+        assert!(validate_raw_size(MAXIMUM_ATTACHMENT_BYTES).is_ok());
         assert!(matches!(
-            result,
+            validate_raw_size(MAXIMUM_ATTACHMENT_BYTES + 1),
             Err(AttachmentPreparationError::TooLarge {
                 size,
                 maximum: MAXIMUM_ATTACHMENT_BYTES,
             }) if size == MAXIMUM_ATTACHMENT_BYTES + 1
-        ));
-        assert!(validate_raw_size(MAXIMUM_ATTACHMENT_BYTES + 1).is_ok());
-        assert!(matches!(
-            validate_raw_size(MAXIMUM_RAW_ATTACHMENT_BYTES + 1),
-            Err(AttachmentPreparationError::TooLarge {
-                size,
-                maximum: MAXIMUM_RAW_ATTACHMENT_BYTES,
-            }) if size == MAXIMUM_RAW_ATTACHMENT_BYTES + 1
         ));
     }
 
@@ -997,13 +839,7 @@ mod tests {
         png[16..20].copy_from_slice(&4097_u32.to_be_bytes());
         png[20..24].copy_from_slice(&4096_u32.to_be_bytes());
         png[29..33].copy_from_slice(&0x1d61_4f29_u32.to_be_bytes());
-        let result = prepare_image_bytes(
-            "attachment:0".into(),
-            "wide.png",
-            ImageFormat::Png,
-            &png,
-            None,
-        );
+        let result = prepare_image_bytes("attachment:0".into(), "wide.png", ImageFormat::Png, &png);
         assert!(matches!(
             result,
             Err(AttachmentPreparationError::DecodedImageTooLarge { .. })

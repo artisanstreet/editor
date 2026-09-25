@@ -106,6 +106,8 @@ pub enum NativeTransportCommand {
     ComposerState(ComposerStateCommand),
     /// Forge-owned composer draft and stored-attachment work.
     ComposerDraft(ComposerDraftCommand),
+    /// Business decisions the Forge sends as data.
+    ForgeDecision(ForgeDecisionCommand),
     /// Query exact live run ownership, fenced by the application's selection generation.
     ReadActiveRun {
         thread_id: ThreadId,
@@ -245,45 +247,6 @@ pub enum NativeTransportCommand {
     Shutdown,
 }
 
-impl std::fmt::Debug for NativeTransportCommand {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let variant = match self {
-            Self::ComposerState(_) => "ComposerState",
-            Self::ComposerDraft(_) => "ComposerDraft",
-            Self::ReadActiveRun { .. } => "ReadActiveRun",
-            Self::StopRun(_) => "StopRun",
-            Self::RespondApproval(_) => "RespondApproval",
-            Self::RespondQuestion(_) => "RespondQuestion",
-            Self::BeginProjectIntake => "BeginProjectIntake",
-            Self::BeginProjectIntakeAt(_) => "BeginProjectIntakeAt",
-            Self::RetryProjectIntake => "RetryProjectIntake",
-            Self::SelectProject(_) => "SelectProject",
-            Self::ReadSidebarThreads { .. } => "ReadSidebarThreads",
-            Self::CreateTask(_) => "CreateTask",
-            Self::RecoverFailedMessage { .. } => "RecoverFailedMessage",
-            Self::RequestSnapshot(_) => "RequestSnapshot",
-            Self::ReadMessageImage(_) => "ReadMessageImage",
-            Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
-            Self::ReadComposerCatalog { .. } => "ReadComposerCatalog",
-            Self::ReadModelFavorites { .. } => "ReadModelFavorites",
-            Self::ListRegisteredProfiles => "ListRegisteredProfiles",
-            Self::ReadAccountUsage { .. } => "ReadAccountUsage",
-            Self::SetThreadEngineConfig(_) => "SetThreadEngineConfig",
-            Self::SetModelFavorite(_) => "SetModelFavorite",
-            Self::QueueFirstMessage(_) => "QueueFirstMessage",
-            Self::SubmitComposerDraft(_) => "SubmitComposerDraft",
-            Self::ResolveRichLink { .. } => "ResolveRichLink",
-            Self::QueryProjectRepository { .. } => "QueryProjectRepository",
-            Self::Subscribe { .. } => "Subscribe",
-            Self::Unsubscribe { .. } => "Unsubscribe",
-            Self::AcknowledgePatch { .. } => "AcknowledgePatch",
-            Self::Shutdown => "Shutdown",
-        };
-        formatter.write_str("NativeTransportCommand::")?;
-        formatter.write_str(variant)
-    }
-}
-
 /// Events crossing from the service thread to the GPUI application.
 ///
 /// `Eq` is deliberately absent: the engine observation arm carries sanitized
@@ -292,6 +255,7 @@ impl std::fmt::Debug for NativeTransportCommand {
 pub enum NativeTransportEvent {
     ComposerState(ComposerStateEvent),
     ComposerDraft(ComposerDraftEvent),
+    ForgeDecision(ForgeDecisionEvent),
     ActiveRun {
         thread_id: ThreadId,
         generation: u64,
@@ -687,6 +651,10 @@ pub(crate) use composer_state_operations::{ComposerStateCommand, ComposerStateEv
 #[path = "native_composer_draft_transport.rs"]
 mod composer_draft_operations;
 pub(crate) use composer_draft_operations::{ComposerDraftCommand, ComposerDraftEvent};
+
+#[path = "native_forge_decisions_transport.rs"]
+mod forge_decision_operations;
+pub(crate) use forge_decision_operations::{ForgeDecisionCommand, ForgeDecisionEvent};
 
 #[path = "native_profile_usage_transport.rs"]
 mod profile_usage_operations;

@@ -16,7 +16,6 @@ use super::{
     replace_text_preserving_raw, utf8_offset_to_utf16, utf16_offset_to_utf8, utf16_range_to_utf8,
 };
 use crate::composer::DraftDisposition;
-use crate::image_policy::ImageMediaType;
 use crate::native_composer_visuals::composer_placeholder_phrase;
 use artisan_domain::{AuthoredText, ImageAttachment, QueueMessagePayload};
 use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
@@ -34,7 +33,7 @@ pub(super) fn ready_attachment(id: &str, bytes: &[u8]) -> ComposerAttachment {
         id: id.to_owned(),
         name: format!("{id}.png"),
         format: Some(gpui::ImageFormat::Png),
-        mime_type: ImageMediaType::Png.as_mime_type().to_owned(),
+        mime_type: "image/png".to_owned(),
         bytes: Some(bytes.clone()),
         stored: None,
         thumbnail: Some(Arc::new(gpui::RenderImage::new(Vec::<image::Frame>::new()))),
@@ -623,7 +622,12 @@ fn image_only_recall_preserves_absent_text_order_and_exact_bytes(cx: &mut TestAp
     let expected = payload
         .attachments()
         .iter()
-        .map(|attachment| (attachment.name().to_owned(), attachment.bytes().to_vec()))
+        .map(|attachment| {
+            (
+                attachment.name().to_owned(),
+                Some(attachment.bytes().to_vec()),
+            )
+        })
         .collect::<Vec<_>>();
     let target = cx.update(|_, app| {
         view.update(app, |composer, composer_cx| {
@@ -646,26 +650,20 @@ fn image_only_recall_preserves_absent_text_order_and_exact_bytes(cx: &mut TestAp
         view.update(app, |composer, composer_cx| {
             composer.set_attachment_delivery_enabled(true, composer_cx);
             assert_eq!(composer.attachments.len(), expected.len());
-            assert!(
-                composer
-                    .attachments
-                    .iter()
-                    .all(ComposerAttachment::is_ready)
-            );
-            let (restored, token) = composer
-                .begin_payload_submission()
+            // The tray keeps the recalled bytes exactly as they were sent;
+            // the send below also proves every image is ready.
+            assert!(!composer.authored_text_present);
+            let kept = |attachment: &ComposerAttachment| {
+                (
+                    attachment.name.clone(),
+                    attachment.bytes.as_deref().cloned(),
+                )
+            };
+            let kept = composer.attachments.iter().map(kept).collect::<Vec<_>>();
+            assert_eq!(kept, expected);
+            let token = composer
+                .begin_draft_submission()
                 .expect("prepared recalled images submit");
-            assert!(restored.text().is_none());
-            assert_eq!(
-                restored
-                    .attachments()
-                    .iter()
-                    .map(|attachment| {
-                        (attachment.name().to_owned(), attachment.bytes().to_vec())
-                    })
-                    .collect::<Vec<_>>(),
-                expected
-            );
             composer.finish_submission(token, DraftDisposition::Retained, composer_cx);
         });
     });
@@ -695,10 +693,11 @@ fn image_only_recall_preserves_present_empty_text(cx: &mut TestAppContext) {
     cx.update(|_, app| {
         view.update(app, |composer, composer_cx| {
             composer.set_attachment_delivery_enabled(true, composer_cx);
-            let (restored, token) = composer
-                .begin_payload_submission()
+            assert!(composer.authored_text_present);
+            assert_eq!(composer.draft(), "");
+            let token = composer
+                .begin_draft_submission()
                 .expect("prepared recalled images submit");
-            assert_eq!(restored.text().map(AuthoredText::as_str), Some(""));
             composer.finish_submission(token, DraftDisposition::Retained, composer_cx);
         });
     });
@@ -751,12 +750,10 @@ fn image_only_typed_payload_has_no_placeholder_and_cleans_after_acceptance(
                 .attachments
                 .push(ready_attachment("image", &[1, 2, 3]));
             composer.set_attachment_delivery_enabled(true, composer_cx);
-            let (payload, token) = composer
-                .begin_payload_submission()
-                .expect("typed image-only payload begins");
-            assert_eq!(payload.text().expect("authored text").as_str(), "");
-            assert_eq!(payload.attachments().len(), 1);
-            assert!(composer.draft_matches_payload(&payload));
+            let token = composer
+                .begin_draft_submission()
+                .expect("an image-only draft begins");
+            assert_eq!(composer.draft(), "");
             token
         })
     });
@@ -1204,7 +1201,7 @@ fn eager_accept_removes_sent_images_without_clearing_new_typing(cx: &mut TestApp
                 .push(ready_attachment("sent-image", &[1, 2, 3]));
             composer.set_attachment_delivery_enabled(true, cx);
             composer.set_draft("original");
-            let (_, token) = composer.begin_payload_submission().expect("send");
+            let token = composer.begin_draft_submission().expect("send");
             assert_eq!(composer.draft(), "");
             composer.set_draft("new typing");
             composer.finish_submission(token, DraftDisposition::Accepted, cx);

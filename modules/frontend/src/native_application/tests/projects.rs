@@ -305,12 +305,12 @@ fn switching_to_an_empty_project_keeps_an_inflight_payload_in_its_source_thread(
             application.thread_listing = Some(listing.clone());
             application.pending_thread = Some(source.clone());
             application.try_mount_pending_thread(cx);
-            let (_, token) = application
+            let token = application
                 .composer
                 .update(cx, |composer, cx| {
                     composer.set_disabled(false, cx);
                     composer.set_draft("Alpha message awaiting receipt");
-                    composer.begin_payload_submission()
+                    composer.begin_draft_submission()
                 })
                 .expect("in-flight submission");
             application.message_flight = Some(NativeMessageFlight {

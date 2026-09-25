@@ -122,9 +122,24 @@ impl RequestHandler {
             .map_err(|error| origin_clock_failure(error, request_id))?;
         let mut attachments = Vec::with_capacity(payload.attachments().len());
         for image in payload.attachments() {
+            // A message image always fits the store's larger picked-image
+            // bound.
+            let image = artisan_domain::ComposerImage::new(
+                image.mime_type_str(),
+                image.bytes().to_vec(),
+                image.name(),
+            )
+            .map_err(|_| {
+                typed_failure(
+                    ErrorCode::Internal,
+                    "a message image does not fit the composer store",
+                    false,
+                    request_id,
+                )
+            })?;
             attachments.push(
                 self.repository
-                    .store_composer_attachment(image, saved_at)
+                    .store_composer_attachment(&image, saved_at)
                     .await
                     .map_err(|error| draft_failure(&error, request_id))?,
             );
@@ -206,6 +221,11 @@ pub(super) fn draft_failure(
         | ComposerDraftRepositoryError::AttachmentMismatch { .. } => (
             ErrorCode::InvalidInput,
             "composer attachment reference does not name stored bytes",
+            false,
+        ),
+        ComposerDraftRepositoryError::AttachmentNotSendable { .. } => (
+            ErrorCode::InvalidInput,
+            "a stored composer image is too large to send as it is; send the draft instead",
             false,
         ),
         ComposerDraftRepositoryError::CorruptData { .. }
