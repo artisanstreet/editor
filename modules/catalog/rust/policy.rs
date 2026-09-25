@@ -8,7 +8,7 @@ use crate::manifest::{
     NativeModelSelection, NativePermissionOption, NativeSpeedOption, NativeThinkingCapability,
     NativeThinkingOption,
 };
-use crate::{NATIVE_MODEL_CATALOG_JSON, NATIVE_MODEL_CATALOG_SOURCE};
+use crate::{NATIVE_HARNESS_MANIFEST_JSON, NATIVE_MODEL_CATALOG_SOURCE};
 /// Runtime route grouping metadata supplied by Forge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeModelRouteGroup {
@@ -146,7 +146,7 @@ pub struct NativeModelCatalog {
 }
 
 impl NativeModelCatalog {
-    /// Decodes the bundled full manifest in an offline, non-runnable state.
+    /// Builds an empty, non-runnable catalog with the supported harness descriptors.
     ///
     /// # Errors
     ///
@@ -154,7 +154,7 @@ impl NativeModelCatalog {
     /// decoding or validation, which would be a build-time invariant
     /// violation.
     pub fn offline() -> Result<Self, NativeModelCatalogError> {
-        let manifest = NativeModelManifest::from_json_str(NATIVE_MODEL_CATALOG_JSON)?;
+        let manifest = NativeModelManifest::from_json_str(NATIVE_HARNESS_MANIFEST_JSON)?;
         let revision = manifest.revision.clone();
         Ok(Self {
             provenance: NativeCatalogProvenance {
@@ -170,6 +170,17 @@ impl NativeModelCatalog {
             model_defaults: Vec::new(),
             scope: None,
         })
+    }
+
+    /// Decodes an explicit manifest supplied by the caller (for imported snapshots and fixtures).
+    ///
+    /// # Errors
+    /// Returns an error when the manifest is malformed.
+    pub fn from_manifest_json(json: &str) -> Result<Self, NativeModelCatalogError> {
+        Ok(Self::from_manifest(
+            NativeModelManifest::from_json_str(json)?,
+            NativeCatalogRuntime::default(),
+        ))
     }
 
     /// Builds a catalog from a manifest and an owner-supplied runtime layer.
@@ -461,10 +472,20 @@ impl NativeModelCatalog {
                 .speed
                 .clone()
                 .filter(|value| speed_value(model, value).is_some()),
-            context_window: policy
-                .context_window
-                .clone()
-                .filter(|value| context_value(model, value).is_some()),
+            context_window: policy.context_window.as_ref().and_then(|value| {
+                model
+                    .capabilities
+                    .context_window
+                    .as_ref()?
+                    .options
+                    .iter()
+                    .find(|option| option.id == value.id)
+                    .map(|option| NativeContextSelection {
+                        id: option.id.clone(),
+                        native_suffix: option.native_suffix.clone(),
+                        native_config: option.native_config.clone(),
+                    })
+            }),
             permission: policy
                 .permission
                 .clone()

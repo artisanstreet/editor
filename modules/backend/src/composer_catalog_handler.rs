@@ -237,8 +237,7 @@ async fn current_catalog(
     // Discovery warms in the background: startup and the first catalog
     // response never wait on engine processes, and the next read merges the
     // discovered rows.
-    crate::model_discovery::warm_discovery();
-    let discovery = crate::model_discovery::cached_bundle();
+    let discovery = Some(crate::model_discovery::discovery_bundle().await);
     let mut catalog = match result {
         Some(result) => match discovery {
             Some(discovery) => crate::native_model_catalog::from_catalog_result_with_discovery(
@@ -418,7 +417,10 @@ mod tests {
     use super::*;
 
     fn catalog(profile_id: &str, revision: &str) -> NativeModelCatalog {
-        let offline = NativeModelCatalog::offline().expect("bundled catalog is valid");
+        let offline = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .expect("bundled catalog is valid");
         NativeModelCatalog::from_manifest(
             offline.manifest,
             NativeCatalogRuntime {

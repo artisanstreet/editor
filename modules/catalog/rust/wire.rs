@@ -1,13 +1,6 @@
-//! Versioned, bounded JSON transport for a complete native model catalog.
-//!
-//! The bundled manifest remains the baseline and is never replaced by this
-//! module. A wire snapshot carries that baseline plus the owner-supplied
-//! runtime layer, provenance, scope, and authoritative favorites; runtime
-//! overlay may replace reported fields on bundled rows and append new rows,
-//! but every bundled provider and model identity must survive. The schema
-//! is intentionally explicit rather than derived from `Debug`: unknown keys,
-//! malformed numbers, oversized collections, stale references, and mismatched
-//! `OpenCode2` native identities are rejected before a snapshot is returned.
+//! Versioned, bounded transport for host-discovered model catalogs.
+//! Harness security descriptors are validated locally. Model identities and
+//! capabilities belong to discovery and need not include any baseline rows.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
@@ -104,7 +97,10 @@ mod tests {
     use super::*;
 
     fn dynamic_catalog() -> NativeModelCatalog {
-        let mut catalog = NativeModelCatalog::offline().expect("bundled catalog is valid");
+        let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .expect("bundled catalog is valid");
         let model_id = opencode2_catalog_id("runtime-model", "opencode-go", Some("balanced"))
             .expect("fixture identity is valid");
         catalog.manifest.providers.push(NativeModelProvider {
@@ -290,7 +286,10 @@ mod tests {
 
     #[test]
     fn favorite_wire_snapshot_has_the_domain_byte_ceiling() {
-        let mut catalog = NativeModelCatalog::offline().expect("bundled catalog is valid");
+        let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .expect("bundled catalog is valid");
         catalog.favorite_ids = (0..MAX_FAVORITES)
             .map(|index| {
                 format!(

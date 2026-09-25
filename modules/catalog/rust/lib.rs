@@ -1,10 +1,6 @@
-//! Typed, offline-readable model catalog and runtime admission policy.
-//!
-//! The bundled JSON is a checked-in snapshot of the catalog crate's real
-//! `ModelManifest`. This module deliberately uses `serde_json::Value` with
-//! explicit validation to preserve every capability field. Forge and the
-//! native picker share these definitions and reject unsupported selections
-//! through the same policy boundary.
+//! Shared model catalog schema and runtime admission policy.
+//! Models are supplied by host discovery. Only harness permission descriptors
+//! are shipped locally; disconnected clients have no fallback model list.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
@@ -22,15 +18,63 @@ pub use policy::*;
 pub const NATIVE_MODEL_CATALOG_SOURCE: &str = "modules/catalog/src/model-manifest.ts";
 /// The revision encoded by the bundled manifest snapshot.
 pub const NATIVE_MODEL_CATALOG_REVISION: &str = "2026-09-11.1";
-/// The complete static manifest bundled with the native selector.
-pub const NATIVE_MODEL_CATALOG_JSON: &str = include_str!("native_model_catalog.json");
+/// Harness permissions and provider descriptors; contains no model catalog.
+pub const NATIVE_HARNESS_MANIFEST_JSON: &str = include_str!("native_harnesses.json");
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn offline() -> NativeModelCatalog {
-        NativeModelCatalog::offline().expect("the checked-in catalog must decode")
+        NativeModelCatalog::from_manifest_json(include_str!(
+            "../../../tests/fixtures/model_catalog.json"
+        ))
+        .expect("the checked-in catalog must decode")
+    }
+
+    #[test]
+    fn production_offline_catalog_has_no_models() {
+        let catalog = NativeModelCatalog::offline().unwrap();
+        assert!(catalog.manifest.models.is_empty());
+        assert!(catalog.default_model_id.is_none());
+        assert!(catalog.runnable_harness_ids.is_empty());
+        wire::encode_catalog(&catalog).unwrap();
+    }
+
+    #[test]
+    fn context_refresh_preserves_extended_intent_and_updates_native_limit() {
+        let mut catalog = offline();
+        let old = catalog.selection_policy_for_model("codex-astra").unwrap();
+        catalog.catalog_revision = "host-refresh".to_owned();
+        let model = catalog
+            .manifest
+            .models
+            .iter_mut()
+            .find(|model| model.id == "codex-astra")
+            .unwrap();
+        let option = model
+            .capabilities
+            .context_window
+            .as_mut()
+            .unwrap()
+            .options
+            .iter_mut()
+            .find(|option| option.id == "extended")
+            .unwrap();
+        option.tokens = 872_000;
+        option.label = "872K".to_owned();
+        option.native_config.as_mut().unwrap().model_context_window = 872_000;
+        let rebased = catalog.rebase_policy(&old).unwrap();
+        assert_eq!(rebased.catalog_revision, "host-refresh");
+        assert_eq!(
+            rebased
+                .context_window
+                .unwrap()
+                .native_config
+                .unwrap()
+                .model_context_window,
+            872_000
+        );
     }
 
     #[test]

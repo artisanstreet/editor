@@ -1,14 +1,6 @@
-//! Best-effort live model discovery for every installed/built-in engine.
-//!
-//! Each adapter probes one engine with a bounded deadline and returns raw,
-//! engine-neutral rows. Probes never block a turn: a failed or absent engine
-//! simply contributes no rows, and the static catalogue remains the
-//! fallback. The overlay in `crate::native_model_catalog` merges these rows
-//! onto the static manifest, preserving the harness-level policy (context
-//! windows, speed economics, permissions) that discovery cannot report.
-//!
-//! Privacy: no prompt, credential, or file content crosses this module. Only
-//! model metadata returned by the engines themselves is retained.
+//! Bounded model discovery for installed engines.
+//! Failed or absent engines contribute no models; no bundled model fallback exists.
+//! Only model metadata is retained, never prompts or credentials.
 
 mod claude;
 mod codex;
@@ -137,6 +129,7 @@ pub(crate) struct DiscoveryBundle {
 impl DiscoveryBundle {
     /// Returns rows for one engine in reported order.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn for_engine(&self, engine_id: &str) -> Vec<&DiscoveredModel> {
         self.models
             .iter()
@@ -145,40 +138,12 @@ impl DiscoveryBundle {
     }
 }
 
-type Cache = Mutex<Option<(Instant, Arc<DiscoveryBundle>)>>;
+type Cache = Mutex<Option<(Instant, Duration, Arc<DiscoveryBundle>)>>;
 
 static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
-/// Guards against duplicate warm-up probes while one is already in flight.
-static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn cache() -> &'static Cache {
     CACHE.get_or_init(|| Mutex::new(None))
-}
-
-/// Returns a fresh cached bundle without blocking. `None` while the first
-/// warm-up is still running or the cache is empty/stale.
-pub(crate) fn cached_bundle() -> Option<Arc<DiscoveryBundle>> {
-    let guard = cache().try_lock().ok()?;
-    match guard.as_ref() {
-        Some((observed, bundle)) if observed.elapsed() < DISCOVERY_TTL => Some(Arc::clone(bundle)),
-        _ => None,
-    }
-}
-
-/// Starts a background warm-up probe when the cache is cold. Startup and the
-/// first catalog response never wait on engine processes; the next catalog
-/// read merges discovered rows.
-pub(crate) fn warm_discovery() {
-    if cached_bundle().is_some() {
-        return;
-    }
-    if WARMING.swap(true, std::sync::atomic::Ordering::AcqRel) {
-        return;
-    }
-    tokio::spawn(async {
-        let _ = Box::pin(discovery_bundle()).await;
-        WARMING.store(false, std::sync::atomic::Ordering::Release);
-    });
 }
 
 /// Returns the current discovery bundle, probing all engines when the cache is
@@ -186,8 +151,8 @@ pub(crate) fn warm_discovery() {
 /// bounded; an adapter that fails contributes nothing.
 pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
     let mut guard = cache().lock().await;
-    if let Some((observed, bundle)) = guard.as_ref()
-        && observed.elapsed() < DISCOVERY_TTL
+    if let Some((observed, ttl, bundle)) = guard.as_ref()
+        && observed.elapsed() < *ttl
     {
         return Arc::clone(bundle);
     }
@@ -203,6 +168,7 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
         discover_grok(grok_program.as_deref()),
     );
 
+    let mut retry_needed = false;
     let mut models = Vec::new();
     let mut probed_engines = Vec::new();
     let mut missing_engines = Vec::new();
@@ -219,12 +185,24 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
                 models.extend(rows);
             }
             // A CLI-backed engine whose executable does not resolve is
-            // definitively not installed; a resolved executable that fails
-            // its probe stays visible with the static fallback.
+            // definitively not installed; a failed probe is retried promptly.
             None if program.is_none() && matches!(engine_id, "opencode2" | "cursor" | "grok") => {
                 missing_engines.push(engine_id);
             }
-            None => {}
+            None => {
+                retry_needed = true;
+                // Retain only previously discovered runtime rows during a
+                // transient failure. A successful probe replaces them.
+                if let Some((_, _, previous)) = guard.as_ref() {
+                    models.extend(
+                        previous
+                            .models
+                            .iter()
+                            .filter(|model| model.engine_id == engine_id)
+                            .cloned(),
+                    );
+                }
+            }
         }
     }
 
@@ -233,7 +211,12 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
         probed_engines,
         missing_engines,
     });
-    *guard = Some((Instant::now(), Arc::clone(&bundle)));
+    let ttl = if retry_needed {
+        Duration::from_secs(10)
+    } else {
+        DISCOVERY_TTL
+    };
+    *guard = Some((Instant::now(), ttl, Arc::clone(&bundle)));
     bundle
 }
 

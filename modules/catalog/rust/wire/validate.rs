@@ -306,6 +306,8 @@ fn harnesses_match_identity(runtime: &[NativeHarness], bundled: &[NativeHarness]
             let mut runtime = runtime.clone();
             let mut bundled = bundled.clone();
             runtime.hidden = false;
+            runtime.compaction_default_model_id = None;
+            bundled.compaction_default_model_id = None;
             bundled.hidden = false;
             runtime == bundled
         })
@@ -320,36 +322,10 @@ fn validate_bundled_manifest_prefix(
     let bundled = NativeModelCatalog::offline()
         .map_err(|_| NativeModelCatalogWireError::InvalidCatalog)?
         .manifest;
-    // The bundled baseline must survive a runtime overlay: harness policy is
-    // immutable, every bundled provider identity is retained, and every
-    // bundled model keeps its id, harness, and native identity. Reported
-    // fields (name, description, capabilities) and the disabled flag may be
-    // overlaid, runtime rows may be appended after the baseline, and the
-    // presentation-only hidden flag may change when discovery determines an
-    // engine is not installed.
-    if !harnesses_match_identity(&manifest.harnesses, &bundled.harnesses)
-        || manifest.providers.len() < bundled.providers.len()
-        || manifest.models.len() < bundled.models.len()
-    {
+    if !harnesses_match_identity(&manifest.harnesses, &bundled.harnesses) {
         return Err(NativeModelCatalogWireError::InvalidCatalog);
     }
-    for provider in &bundled.providers {
-        if !manifest
-            .providers
-            .iter()
-            .any(|candidate| candidate.id == provider.id && candidate.label == provider.label)
-        {
-            return Err(NativeModelCatalogWireError::InvalidCatalog);
-        }
-    }
-    for model in &bundled.models {
-        let Some(current) = manifest.model(&model.id) else {
-            return Err(NativeModelCatalogWireError::InvalidCatalog);
-        };
-        if current.harness != model.harness || current.native_model_id != model.native_model_id {
-            return Err(NativeModelCatalogWireError::InvalidCatalog);
-        }
-    }
+
     Ok(())
 }
 

@@ -65,7 +65,9 @@ fn response_for(request_name: &str, payload: ResponsePayload) -> WireEnvelope {
 }
 
 fn scoped_catalog_with_long_native_id() -> NativeModelCatalog {
-    let mut catalog = NativeModelCatalog::offline().expect("bundled catalog is valid");
+    let mut catalog =
+        NativeModelCatalog::from_manifest_json(include_str!("../fixtures/model_catalog.json"))
+            .expect("bundled catalog is valid");
 
     // The bundled manifest is immutable in the shared wire format. Append a
     // dynamic non-OpenCode row so a native identifier longer than the legacy
@@ -192,7 +194,9 @@ fn catalog_snapshot_preserves_scope_and_long_native_identity() -> Result<(), Box
 
 #[test]
 fn catalog_result_rejects_missing_or_mismatched_runtime_scope() -> Result<(), Box<dyn Error>> {
-    let catalog = NativeModelCatalog::offline().expect("bundled catalog is valid");
+    let catalog =
+        NativeModelCatalog::from_manifest_json(include_str!("../fixtures/model_catalog.json"))
+            .expect("bundled catalog is valid");
     let wire = CatalogSnapshotWire::new(encode_catalog(&catalog)?)?;
     assert_eq!(
         ComposerCatalogResult::new(thread_id(), profile_id(), wire),

@@ -224,18 +224,14 @@ fn converts_all_runtime_rows_with_exact_route_variant_identity() {
             .as_deref(),
         Some("balanced")
     );
-    assert_eq!(
+    assert!(
         catalog
             .manifest
-            .model("codex-sol")
-            .expect("static row")
-            .harness,
-        "codex"
+            .models
+            .iter()
+            .all(|model| model.harness == "opencode2")
     );
-    assert!(
-        catalog.selectability("codex-sol").is_available(),
-        "fixture-proven codex harness is runnable"
-    );
+    assert!(!catalog.selectability("codex-sol").is_available());
     assert!(
         catalog
             .routes
@@ -286,21 +282,14 @@ fn runnable_set_admits_all_fixture_proven_engines() {
         catalog.runnable_harness_ids,
         vec!["opencode2", "codex", "claude", "grok", "cursor"]
     );
-    for model_id in [
-        "codex-sol",
-        "claude-fable",
-        "grok-4-6",
-        "cursor-composer-2-5",
-    ] {
-        assert!(
-            catalog.selectability(model_id).is_available(),
-            "{model_id} is selectable on its fixture-proven harness"
-        );
-        assert!(
-            catalog.policy_for_model(model_id).is_ok(),
-            "{model_id} admits a runnable policy"
-        );
-    }
+    assert!(
+        catalog
+            .manifest
+            .models
+            .iter()
+            .all(|model| model.harness == "opencode2")
+    );
+    assert!(!catalog.selectability("codex-sol").is_available());
 }
 
 #[test]
@@ -455,7 +444,10 @@ fn discovery_overlays_reported_fields_and_preserves_codex_context_policy() {
     )
     .expect("catalog builds");
 
-    let sol = catalog.manifest.model("codex-sol").expect("static sol row");
+    let sol = catalog
+        .manifest
+        .model("codex-gpt-5-6-sol")
+        .expect("static sol row");
     assert_eq!(sol.name, "Sol Discovered");
     assert_eq!(sol.metadata_confidence.as_deref(), Some("reported"));
     let context = sol
@@ -491,11 +483,13 @@ fn discovery_overlays_reported_fields_and_preserves_codex_context_policy() {
         stealth.capabilities.context_window.is_some(),
         "new extended-window codex rows inherit the 1M policy"
     );
-    let retired = catalog
-        .manifest
-        .model("codex-gpt-5-5")
-        .expect("static retired row");
-    assert!(retired.disabled.is_some(), "absent codex rows are disabled");
+    assert!(
+        catalog
+            .manifest
+            .models
+            .iter()
+            .all(|model| model.native_model_id != "gpt-5.5")
+    );
 }
 
 #[test]
@@ -617,7 +611,10 @@ fn discovered_display_names_are_dehyphenated() {
     )
     .expect("catalog builds");
 
-    let sol = catalog.manifest.model("codex-sol").expect("static sol row");
+    let sol = catalog
+        .manifest
+        .model("codex-gpt-5-6-sol")
+        .expect("static sol row");
     assert_eq!(sol.name, "GPT 5.6 Sol");
     let stealth = catalog
         .manifest
@@ -670,19 +667,18 @@ fn discovery_adds_claude_rows_with_1m_policy_only_when_eligible() {
         .context_window
         .as_ref()
         .expect("1M claude rows inherit the [1m] choice");
-    assert!(
-        context
-            .options
-            .iter()
-            .any(|option| option.native_suffix == "[1m]")
-    );
+    assert_eq!(context.options[0].tokens, 1_000_000);
+    assert!(context.options[0].native_suffix.is_empty());
     let haiku = catalog
         .manifest
         .models
         .iter()
         .find(|model| model.native_model_id == "claude-haiku-legacy")
         .expect("new haiku row");
-    assert!(haiku.capabilities.context_window.is_none());
+    assert_eq!(
+        haiku.capabilities.context_window.as_ref().unwrap().options[0].tokens,
+        200_000
+    );
 }
 
 #[test]
@@ -745,7 +741,7 @@ fn discovery_only_catalog_overlays_static_baseline() {
     assert_eq!(
         catalog
             .manifest
-            .model("codex-sol")
+            .model("codex-gpt-5-6-sol")
             .expect("static row")
             .name,
         "Sol Live"
@@ -753,16 +749,13 @@ fn discovery_only_catalog_overlays_static_baseline() {
     assert!(
         catalog
             .manifest
-            .model("codex-sol")
+            .model("codex-gpt-5-6-sol")
             .expect("static row")
             .capabilities
             .context_window
             .is_some()
     );
-    assert_eq!(
-        catalog.manifest.models.len(),
-        NativeModelCatalog::offline().unwrap().manifest.models.len()
-    );
+    assert_eq!(catalog.manifest.models.len(), 1);
 }
 
 #[test]

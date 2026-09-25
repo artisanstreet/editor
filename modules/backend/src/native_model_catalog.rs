@@ -1,11 +1,6 @@
-//! Conversion from the owner-scoped `OpenCode2` runtime result to the shared
-//! static-plus-runtime native model catalog.
-//!
-//! The engine-owner catalog worker owns discovery and returns typed data. This
-//! leaf performs no process, HTTP, or provider work. It only combines that
-//! result with the checked-in manifest and the authoritative durable favorites
-//! snapshot, preserving native route/variant identity all the way to policy
-//! admission.
+//! Converts owner-scoped and host-discovered models into the shared catalog.
+//! Model availability and capabilities come from discovery; local descriptors
+//! define supported harness permissions without inventing models.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
@@ -71,14 +66,7 @@ pub(crate) enum NativeModelCatalogBridgeError {
     InvalidCatalog,
 }
 
-/// Combines one typed `OpenCode2` discovery result with the exact bundled
-/// manifest and owner-authoritative favorites.
-///
-/// Only the discovered `opencode2` rows are added to the manifest. Static
-/// rows for the other fixture-proven harnesses are readable and runnable
-/// through [`RUNNABLE_ENGINE_IDS`]; `OpenCode2` rows arrive only
-/// through live discovery. No thinking, speed, MCP, web-search, permission,
-/// or cost value is inferred when `OpenCode2` did not report it.
+/// Converts the exact models and routes reported by an owner-scoped engine.
 pub(crate) fn from_catalog_result(
     result: CatalogResult,
     favorites: &ModelFavoritesSnapshot,
@@ -262,20 +250,14 @@ fn convert_route(route: CatalogRoute) -> NativeModelRoute {
 /// Combines the typed `OpenCode2` result with best-effort live discovery from
 /// every other engine.
 ///
-/// Discovery rows replace static reported fields (name, description,
-/// reasoning options, limits, modalities, pricing) while static harness
-/// policy survives: context-window choices (including Codex's 272K/1M
-/// override and Claude's `[1m]` selection), speed economics, MCP/web-search
-/// policy, and routing. Rows a fully authoritative probe (Codex, Claude) no
-/// longer returns are disabled with a truthful reason rather than deleted,
-/// so saved selections still render.
+/// Adds host discovery to scoped runtime routes; absent models stay absent.
 pub(crate) fn from_catalog_result_with_discovery(
     result: CatalogResult,
     discovery: &crate::model_discovery::DiscoveryBundle,
     favorites: &ModelFavoritesSnapshot,
 ) -> Result<NativeModelCatalog, NativeModelCatalogBridgeError> {
     let catalog = from_catalog_result(result, favorites)?;
-    if discovery.probed_engines.is_empty() {
+    if discovery.models.is_empty() && discovery.missing_engines.is_empty() {
         return Ok(catalog);
     }
     let mut runtime = catalog.runtime();
@@ -302,10 +284,7 @@ pub(crate) fn from_catalog_result_with_discovery(
     Ok(next)
 }
 
-/// Builds the scope-free catalog: the bundled baseline plus live discovery,
-/// with no `OpenCode2` profile or runtime routes. Used when a thread has no
-/// registered `OpenCode2` profile, so the picker still shows static and
-/// discovered models instead of failing empty.
+/// Builds a scope-free catalog using only host-discovered rows.
 pub(crate) fn from_discovery(
     discovery: &crate::model_discovery::DiscoveryBundle,
 ) -> Result<NativeModelCatalog, NativeModelCatalogBridgeError> {
@@ -315,7 +294,7 @@ pub(crate) fn from_discovery(
     let routes = apply_discovery(&mut manifest, discovery, true);
     let runtime = NativeCatalogRuntime {
         catalog_revision: Some(format!(
-            "static+discovery-{:016x}",
+            "discovery-{:016x}",
             discovery_revision_hash(discovery)
         )),
         runnable_harness_ids: RUNNABLE_ENGINE_IDS
@@ -334,122 +313,45 @@ pub(crate) fn from_discovery(
 /// Stable revision contribution for one discovery bundle.
 fn discovery_revision_hash(discovery: &crate::model_discovery::DiscoveryBundle) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for model in &discovery.models {
-        for byte in model.engine_id.bytes().chain(model.native_model_id.bytes()) {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        if let Some(variant_id) = model.variant_id.as_deref() {
-            for byte in variant_id.bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        }
-        hash ^= u64::from(model.hidden);
+    // The revision covers capabilities as well as identities: changing a
+    // context limit or reasoning option must invalidate old admission policies.
+    for byte in format!("{discovery:?}").bytes() {
+        hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
+
     hash
 }
 
-/// Engines whose probe is a complete account catalog, so an absent static row
-/// is truthfully unavailable rather than merely unreported.
-fn discovery_is_authoritative(engine_id: &str) -> bool {
-    matches!(engine_id, "codex" | "claude")
-}
-
+/// Adds only models actually reported by the host's engine discovery.
 fn apply_discovery(
     manifest: &mut NativeModelManifest,
     discovery: &crate::model_discovery::DiscoveryBundle,
     include_opencode2: bool,
 ) -> Vec<NativeModelRoute> {
     let mut routes = Vec::new();
-    for engine_id in &discovery.probed_engines {
-        // OpenCode2 rows carry route identity that the generic overlay cannot
-        // express, so they are built by their own converter. The runtime
-        // result, when present, already owns these rows.
-        if *engine_id == OPENCODE2_ENGINE_ID {
+    for row in discovery.models.iter().filter(|row| !row.hidden) {
+        if row.engine_id == OPENCODE2_ENGINE_ID {
             if include_opencode2 {
-                let rows = discovery.for_engine(engine_id);
-                apply_opencode2_rows(manifest, &rows, &mut routes);
+                apply_opencode2_rows(manifest, &[row], &mut routes);
             }
             continue;
         }
-        // Hidden rows are engine internals (Codex's `hide` visibility), not
-        // picker entries: they are never surfaced, overlaid, or counted as
-        // account availability.
-        let rows = discovery
-            .for_engine(engine_id)
-            .into_iter()
-            .filter(|row| !row.hidden)
-            .collect::<Vec<_>>();
-        if rows.is_empty() {
-            continue;
-        }
-        let Some(template) = manifest
-            .models
-            .iter()
-            .find(|model| model.harness == *engine_id)
-            .cloned()
-        else {
-            continue;
-        };
-        let discovered = rows
-            .iter()
-            .map(|row| row.native_model_id.as_str())
-            .collect::<HashSet<_>>();
-
-        for model in manifest
-            .models
-            .iter_mut()
-            .filter(|model| model.harness == *engine_id)
+        if manifest.harness(row.engine_id).is_none()
+            || manifest.models.iter().any(|model| {
+                model.harness == row.engine_id && model.native_model_id == row.native_model_id
+            })
         {
-            if let Some(row) = rows
-                .iter()
-                .find(|row| row.native_model_id == model.native_model_id)
-            {
-                overlay_reported(model, row);
-            }
+            continue;
         }
-
-        let mut existing = manifest
+        let existing = manifest
             .models
             .iter()
             .map(|model| model.id.clone())
-            .collect::<HashSet<_>>();
-        for row in &rows {
-            if manifest.models.iter().any(|model| {
-                model.harness == *engine_id && model.native_model_id == row.native_model_id
-            }) {
-                continue;
-            }
-            let id = unique_discovered_id(engine_id, &row.native_model_id, &existing);
-            existing.insert(id.clone());
-            ensure_discovered_provider(manifest, &row.provider);
-            manifest
-                .models
-                .push(discovered_definition(row, &template, id));
-        }
-
-        if discovery_is_authoritative(engine_id) {
-            let reason = format!(
-                "The {engine_id} engine did not return this model for the current account."
-            );
-            for model in manifest
-                .models
-                .iter_mut()
-                .filter(|model| model.harness == *engine_id)
-            {
-                if discovered.contains(model.native_model_id.as_str()) || model.status == "dynamic"
-                {
-                    continue;
-                }
-                if model.disabled.is_none() {
-                    model.disabled = Some(NativeDisabledModel {
-                        reason: reason.clone(),
-                    });
-                }
-            }
-        }
+            .collect();
+        let id = unique_discovered_id(row.engine_id, &row.native_model_id, &existing);
+        ensure_discovered_provider(manifest, &row.provider);
+        manifest.models.push(discovered_definition(row, id));
     }
     hide_missing_harnesses(manifest, discovery);
     routes
@@ -585,46 +487,8 @@ fn readable_name(raw: &str) -> String {
     name
 }
 
-/// Replaces reported fields on a matched static row, retaining that row's
-/// harness policy (context options, speed economics, routing, MCP/search).
-fn overlay_reported(model: &mut NativeModelDefinition, row: &DiscoveredModel) {
-    if !row.name.is_empty() {
-        model.name = readable_name(&row.name);
-    }
-    if row.description.is_some() {
-        model.description.clone_from(&row.description);
-    }
-    model.capabilities.thinking = thinking_from_discovery(&row.thinking);
-    model.capabilities.context_window_tokens = row
-        .context_window_tokens
-        .or(model.capabilities.context_window_tokens);
-    if row.engine_id == "codex"
-        && row.context_window_tokens.is_some()
-        && row.max_context_window_tokens.is_some()
-    {
-        model.capabilities.context_window = discovered_context_policy(row, model);
-    }
-    model.capabilities.output_tokens = row.output_tokens.or(model.capabilities.output_tokens);
-    model.capabilities.image_input = row.image_input;
-    model.capabilities.local_tools = row.tools;
-    model.upstream_model_id = row
-        .upstream_model_id
-        .clone()
-        .or_else(|| model.upstream_model_id.clone());
-    model.metadata_confidence = Some(row.metadata_confidence.to_owned());
-    model.cost = row.cost.map(|(input, output)| NativeModelCost {
-        input_usd_per_million: Some(input),
-        output_usd_per_million: Some(output),
-    });
-    model.disabled = None;
-}
-
 /// Builds one runtime-only row from discovery plus cloned harness policy.
-fn discovered_definition(
-    row: &DiscoveredModel,
-    template: &NativeModelDefinition,
-    id: String,
-) -> NativeModelDefinition {
+fn discovered_definition(row: &DiscoveredModel, id: String) -> NativeModelDefinition {
     NativeModelDefinition {
         id,
         name: readable_name(&row.name),
@@ -632,7 +496,7 @@ fn discovered_definition(
         description: row.description.clone(),
         harness: row.engine_id.to_owned(),
         provider: row.provider.clone(),
-        routing: template.routing.clone(),
+        routing: NativeModelRouting::Default,
         native_selection: None,
         status: "dynamic".to_owned(),
         upstream_model_id: row
@@ -647,60 +511,77 @@ fn discovered_definition(
         disabled: None,
         capabilities: NativeModelCapabilities {
             context_window_tokens: row.context_window_tokens,
-            context_window: discovered_context_policy(row, template),
+            context_window: discovered_context_policy(row),
             image_input: row.image_input,
             local_tools: row.tools,
-            mcp: template.capabilities.mcp,
+            mcp: row.tools,
             output_tokens: row.output_tokens,
-            reasoning_display: template.capabilities.reasoning_display.clone(),
-            speed_options: template.capabilities.speed_options.clone(),
+            reasoning_display: None,
+            speed_options: discovered_speed_options(row),
             thinking: thinking_from_discovery(&row.thinking),
-            web_search: template.capabilities.web_search,
+            web_search: row.web_search,
         },
     }
 }
 
-/// Applies the static harness context policy to a new discovered row.
-///
-/// Codex keeps its 272K/1M override only for models the cache reports as
-/// extending beyond their default window; Claude keeps the 200K/1M `[1m]`
-/// choice only for models whose runtime advertises a 1M input window.
-fn discovered_context_policy(
-    row: &DiscoveredModel,
-    template: &NativeModelDefinition,
-) -> Option<NativeContextWindowCapability> {
-    let applies = match row.engine_id {
-        "codex" => matches!(
-            (row.context_window_tokens, row.max_context_window_tokens),
-            (Some(context), Some(max)) if max > context
-        ),
-        "claude" => row
-            .context_window_tokens
-            .is_some_and(|tokens| tokens >= 1_000_000),
-        _ => false,
+/// Builds context choices from reported limits using the harness override protocol.
+fn discovered_context_policy(row: &DiscoveredModel) -> Option<NativeContextWindowCapability> {
+    use artisan_catalog::{NativeContextConfig, NativeContextWindowOption};
+    let base = row.context_window_tokens?;
+    let max = row.max_context_window_tokens.unwrap_or(base);
+    let option = |id: &str, tokens: u64, native_config| NativeContextWindowOption {
+        advisory: None,
+        description: None,
+        id: id.to_owned(),
+        label: if tokens % 1000 == 0 {
+            format!("{}K", tokens / 1000)
+        } else {
+            tokens.to_string()
+        },
+        native_config,
+        native_suffix: String::new(),
+        tokens,
     };
-    let mut policy = applies.then(|| template.capabilities.context_window.clone())??;
-    if row.engine_id == "codex" {
-        let base = row.context_window_tokens?;
-        let max = row.max_context_window_tokens?;
-        for option in &mut policy.options {
-            let tokens = if let Some(config) = option.native_config.as_mut() {
-                config.model_context_window = max;
-                max
-            } else {
-                base
-            };
-            if option.tokens != tokens {
-                option.label = if tokens.is_multiple_of(1_000) {
-                    format!("{}K", tokens / 1_000)
-                } else {
-                    tokens.to_string()
-                };
-            }
-            option.tokens = tokens;
-        }
+    let mut options = vec![option("standard", base, None)];
+    if row.engine_id == CODEX_ENGINE_ID && max > base {
+        options.push(option(
+            "extended",
+            max,
+            Some(NativeContextConfig {
+                model_context_window: max,
+            }),
+        ));
     }
-    Some(policy)
+    Some(NativeContextWindowCapability {
+        availability: "configurable".to_owned(),
+        default: "standard".to_owned(),
+        options,
+    })
+}
+
+fn discovered_speed_options(row: &DiscoveredModel) -> Vec<artisan_catalog::NativeSpeedOption> {
+    if !row.fast {
+        return Vec::new();
+    }
+    [("standard", "Standard", true), ("fast", "Fast", false)]
+        .into_iter()
+        .map(|(id, label, default)| artisan_catalog::NativeSpeedOption {
+            availability: "available".to_owned(),
+            consumption_basis: "unknown".to_owned(),
+            consumption_multiplier: None,
+            input_consumption_multiplier: None,
+            output_consumption_multiplier: None,
+            default,
+            description: label.to_owned(),
+            disabled: None,
+            id: id.to_owned(),
+            label: label.to_owned(),
+            native_value: id.to_owned(),
+            source_url: None,
+            speed_multiplier: None,
+            verified_at: None,
+        })
+        .collect()
 }
 
 fn thinking_from_discovery(

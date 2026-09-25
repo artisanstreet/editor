@@ -17,8 +17,8 @@ use serde_json::Value;
 use super::process::run_bounded;
 use super::{DiscoveredModel, DiscoveredThinking};
 
-/// Deadline for the listing command.
-const DEADLINE: Duration = Duration::from_secs(5);
+/// Total deadline for listing, including the cold-start retry.
+const DEADLINE: Duration = Duration::from_secs(15);
 /// Output bound for the listing command.
 const MAX_BYTES: usize = 1024 * 1024;
 /// Maximum accepted model rows from one listing.
@@ -31,13 +31,24 @@ const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 /// Probes the `OpenCode2` CLI; `None` when it does not answer.
 pub(super) async fn discover_opencode2(program: Option<&str>) -> Option<Vec<DiscoveredModel>> {
     let executable = program?;
-    let output = Box::pin(run_bounded(executable, &["models"], DEADLINE, MAX_BYTES)).await?;
-    if !output.success {
-        return None;
+    // The CLI can finish its cold initialization with an empty successful
+    // response. Retry once; this is not an authoritative empty catalogue.
+    let mut identifiers = Vec::new();
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    for _ in 0..2 {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Some(output) =
+            Box::pin(run_bounded(executable, &["models"], remaining, MAX_BYTES)).await
+            && output.success
+        {
+            identifiers = parse_model_list(&output.stdout);
+            if !identifiers.is_empty() {
+                break;
+            }
+        }
     }
-    let identifiers = parse_model_list(&output.stdout);
     if identifiers.is_empty() {
-        return Some(Vec::new());
+        return None;
     }
     let metadata = read_models_cache();
     Some(
@@ -311,6 +322,23 @@ fn capitalize(segment: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retries_empty_cold_start_before_publishing_models() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("artisan-model-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let program = directory.join("models");
+        std::fs::write(&program, "#!/bin/sh\nif [ ! -e \"$0.ready\" ]; then touch \"$0.ready\"; exit 0; fi\nprintf 'test-provider/test-model\\n'\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let models = discover_opencode2(program.to_str()).await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].provider, "test-provider");
+        assert_eq!(models[0].native_model_id, "test-model");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn parses_provider_model_lines_and_skips_noise() {
