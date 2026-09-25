@@ -13,16 +13,18 @@
 
 mod authority;
 mod path_registry;
+mod release;
 mod state;
 mod workflow;
 
 pub(crate) use authority::hash_file;
-pub(crate) use workflow::{
-    InstallIntegrationOptions, InstallOptions, diagnose, install, prepare_update, repair, uninstall,
+pub use release::install;
+pub use workflow::{
+    InstallIntegrationOptions, InstallOptions, diagnose, prepare_update, repair, uninstall,
 };
 
 #[cfg(test)]
-pub(crate) use self::workflow::platform_libc;
+pub(crate) use self::release::platform_libc;
 
 #[cfg(test)]
 use {

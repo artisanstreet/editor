@@ -7,6 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[lib]
+name = "artisan_install"
+path = "rust/lib.rs"
+
 [[bin]]
 name = "installer"
 path = "rust/main.rs"

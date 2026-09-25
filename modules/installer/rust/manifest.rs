@@ -102,6 +102,12 @@ pub struct TrustKey {
 impl TrustKey {
     /// Resolves the trust key for this process. Release builds use only their
     /// embedded anchor; development builds require an explicit override.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallerError`] when a release build lacks its anchor or is
+    /// given an override, a development build lacks a key, or the key is
+    /// malformed.
     pub fn resolve(configured: Option<&str>) -> Result<Self> {
         Self::resolve_for(build_trust(), configured)
     }
@@ -157,6 +163,7 @@ impl TrustKey {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn from_verifying_key(key: VerifyingKey) -> Self {
         Self {
             key,

@@ -1,24 +1,10 @@
-mod archive;
-mod background_process;
-mod error;
-mod install;
-mod integrations;
-mod manifest;
-mod payload;
-mod platform;
-mod processes;
-mod shortcuts;
-
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
-use error::{InstallerError, Result};
-use install::{
-    InstallIntegrationOptions, InstallOptions, diagnose, install, prepare_update, repair, uninstall,
+use artisan_install::{
+    InstallIntegrationOptions, InstallOptions, Platform, Result, RetirementPolicy, TrustKey,
+    diagnose, install, prepare_update, repair, schedule_self_cleanup, uninstall,
 };
-use manifest::TrustKey;
-use platform::Platform;
-use processes::RetirementPolicy;
+use clap::{Args, Parser, Subcommand};
 use url::Url;
 
 const DEFAULT_MANIFEST: &str = "https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release-manifest.json";
@@ -131,13 +117,13 @@ async fn run() -> Result<()> {
     let platform = Platform::detect()?;
     let install_root_env = std::env::var_os("ARTISAN_INSTALL_ROOT").map(PathBuf::from);
     let artisan_home_env = std::env::var_os("ARTISAN_HOME").map(PathBuf::from);
-    let root = platform::resolve_install_root(
+    let root = artisan_install::resolve_install_root(
         arguments.install_root.as_deref(),
         install_root_env.as_deref(),
         artisan_home_env.as_deref(),
     )?;
     #[cfg(debug_assertions)]
-    platform::forbid_default_install_root(&root)?;
+    artisan_install::forbid_default_install_root(&root)?;
 
     if let Some(operation) = arguments.operation.as_ref() {
         match operation {
@@ -213,48 +199,6 @@ fn make_install_options(
             force: arguments.activation.force,
         }),
     }
-}
-
-fn schedule_self_cleanup() -> Result<()> {
-    let executable = std::env::current_exe().map_err(InstallerError::CurrentExecutable)?;
-    let temporary_root = std::env::temp_dir()
-        .canonicalize()
-        .map_err(InstallerError::TemporaryDirectory)?;
-    let executable = executable
-        .canonicalize()
-        .map_err(InstallerError::CurrentExecutable)?;
-    if !executable.starts_with(&temporary_root) {
-        return Err(InstallerError::UnsafeSelfCleanup(executable));
-    }
-
-    #[cfg(windows)]
-    {
-        background_process::detached_background_command("cmd.exe")
-            .args([
-                "/d",
-                "/s",
-                "/c",
-                "ping 127.0.0.1 -n 3 > nul & del /f /q \"%ARTISAN_BOOTSTRAP_DELETE%\"",
-            ])
-            .env("ARTISAN_BOOTSTRAP_DELETE", &executable)
-            .spawn()
-            .map_err(InstallerError::CleanupHelper)?;
-    }
-    #[cfg(unix)]
-    {
-        std::process::Command::new("sh")
-            .args([
-                "-c",
-                "sleep 1; rm -f -- \"$1\"",
-                "ae-installer-cleanup",
-                executable
-                    .to_str()
-                    .ok_or_else(|| InstallerError::NonUtf8Path(executable.clone()))?,
-            ])
-            .spawn()
-            .map_err(InstallerError::CleanupHelper)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

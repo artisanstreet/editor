@@ -17,6 +17,12 @@ pub struct Platform {
 }
 
 impl Platform {
+    /// The platform this process runs on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallerError::UnsupportedPlatform`] for an operating system
+    /// or architecture Artisan does not ship.
     pub fn detect() -> Result<Self> {
         let os = match std::env::consts::OS {
             "windows" => "windows",
@@ -32,10 +38,17 @@ impl Platform {
         Ok(Self { os, arch })
     }
 
+    /// Release target name, e.g. `windows-x64`.
+    #[must_use]
     pub fn target(&self) -> String {
         format!("{}-{}", self.os, self.arch)
     }
 
+    /// The per-user default installation root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallerError`] when the user data directory is unavailable.
     pub fn default_install_root() -> Result<PathBuf> {
         let local_app_data = env::var_os("LOCALAPPDATA").map(PathBuf::from);
         let home = env::var_os("HOME").map(PathBuf::from);
@@ -50,6 +63,13 @@ impl Platform {
     }
 }
 
+/// Resolves the installation root from the command line, `ARTISAN_INSTALL_ROOT`,
+/// `ARTISAN_HOME`, or the per-user default, in that order.
+///
+/// # Errors
+///
+/// Returns [`InstallerError`] when explicit roots disagree, a root is not
+/// absolute, or an unmigrated legacy root is present.
 pub fn resolve_install_root(
     command_line: Option<&Path>,
     install_root_env: Option<&Path>,
@@ -310,6 +330,11 @@ fn lexical_normalize_absolute(path: &Path) -> Option<PathBuf> {
 /// Debug bootstrap builds are development tools. They must never operate on
 /// the real per-user installation root, so every operation aborts here unless
 /// a sandboxed root was supplied. Release builds carry no guard.
+///
+/// # Errors
+///
+/// Returns [`InstallerError::DebugBuildGuard`] when `root` is or lies inside
+/// the real per-user installation root.
 pub fn forbid_default_install_root(root: &Path) -> Result<()> {
     let Ok(installed) = Platform::default_install_root() else {
         return Ok(());
