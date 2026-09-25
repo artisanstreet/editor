@@ -54,6 +54,7 @@ pub mod editor_diagnostic_mapping;
 pub mod editor_language;
 pub mod editor_route_gate_policy;
 pub mod editor_route_screen;
+mod editor_settings;
 pub mod editor_view_state_policy;
 pub mod editor_workspace_identity;
 pub mod engine_approve_ui;

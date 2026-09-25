@@ -1,14 +1,18 @@
-//! Last-used composer model, Forge host, and project order preferences.
+//! Last-used composer model and project order preferences.
 //!
 //! Per-thread engine configuration stays authoritative: a thread with a saved
 //! run configuration always shows and sends with exactly that. These
 //! preferences only seed the choice where nothing durable exists yet — a new
 //! thread with no saved model starts from the last-used model instead of the
-//! catalog default, and a fresh launch selects the last-used host instead of
-//! always opening the local machine.
+//! catalog default. (The last-used host is an Editor pool hint in
+//! [`crate::editor_settings`].)
 //!
-//! Storage mirrors the frame-rate preference: one small file per preference
-//! under `<artisan home>/ui/`, written atomically through a pending sibling.
+//! Temporary Editor-side domain state: both preferences belong to the Forge
+//! pool and move there in step 7 of `docs/plans/stateless-editor.md`, which
+//! removes this module and its file writes.
+//!
+//! Storage: one small file per preference under `<artisan home>/ui/`,
+//! written atomically through a pending sibling.
 //! Every read is bounded and every failure falls back to current behavior
 //! (no preference), so a missing, corrupt, or stale file can never break
 //! startup or sending.
@@ -23,7 +27,6 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 const MODEL_FILE_NAME: &str = "last-used-model";
-const HOST_FILE_NAME: &str = "last-used-host";
 const MODEL_FILE_VERSION: i64 = 1;
 const PROJECT_ORDER_FILE_VERSION: i64 = 1;
 /// Upper bound for one preference file; ids are short strings.
@@ -304,30 +307,6 @@ fn optional_option(
     )))
 }
 
-/// Records the selected Forge host: `None` is the local machine, `Some` is a
-/// registered remote host home. Best-effort like the model preference.
-pub(crate) fn save_host(home: Option<&Path>) {
-    let Some(path) = ui_path(HOST_FILE_NAME) else {
-        return;
-    };
-    match home {
-        None => save_bytes(&path, &[]),
-        Some(home) => save_bytes(&path, home.as_os_str().as_encoded_bytes()),
-    }
-}
-
-/// Reads the last-used host: `None` means the local machine (or no
-/// preference is stored), `Some` is a registered remote host home.
-pub(crate) fn load_host() -> Option<PathBuf> {
-    let path = ui_path(HOST_FILE_NAME)?;
-    let bytes = load_bytes(&path)?;
-    if bytes.is_empty() || bytes.contains(&0) {
-        return None;
-    }
-    let text = std::str::from_utf8(&bytes).ok()?;
-    Some(PathBuf::from(text))
-}
-
 fn project_order_path_in(ui_directory: &Path, home: Option<&Path>) -> PathBuf {
     let Some(home) = home else {
         return ui_directory.join("local");
@@ -493,15 +472,15 @@ mod tests {
     }
 
     #[test]
-    fn host_preference_distinguishes_local_from_missing() {
+    fn preference_bytes_distinguish_empty_from_missing() {
         let dir =
             std::env::temp_dir().join(format!("artisan-last-used-test-{}", std::process::id()));
-        let path = dir.join("last-used-host");
+        let path = dir.join("preference");
         assert!(load_bytes(&path).is_none());
         save_bytes(&path, &[]);
-        assert_eq!(load_bytes(&path).expect("local marker"), Vec::<u8>::new());
-        save_bytes(&path, "/tmp/remote-home".as_bytes());
-        assert_eq!(load_bytes(&path).expect("host"), b"/tmp/remote-home");
+        assert_eq!(load_bytes(&path).expect("empty value"), Vec::<u8>::new());
+        save_bytes(&path, "value".as_bytes());
+        assert_eq!(load_bytes(&path).expect("value"), b"value");
         std::fs::remove_dir_all(&dir).ok();
     }
 

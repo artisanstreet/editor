@@ -163,11 +163,13 @@ impl NativeWorkspace {
                 view.profile_focus.focus(window, cx);
             });
         }
-        // Every explicit host switch refreshes the last-used preference so a
+        // Every explicit host switch refreshes the reopen-host hint so a
         // fresh launch reopens the selected machine instead of the local one.
         // Sessions retain older invitation incarnations under one identity,
         // so the effective session home (not the requested path) is stored.
-        crate::native_last_used::save_host(self.sessions[self.selected].home.as_deref());
+        // Best-effort: a hint that cannot be saved must not disturb the switch.
+        let home = self.sessions[self.selected].home.clone();
+        let _ = crate::editor_settings::update(cx, |settings| settings.with_reopen_host(home));
         cx.notify();
     }
 

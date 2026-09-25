@@ -1,10 +1,10 @@
 //! Local redraw preference, independent of Forge and model configuration.
+//!
+//! The limit and overlay live in the Editor pool ([`crate::editor_settings`]).
 
-use gpui::{App, Global, Window};
-use std::{
-    num::NonZeroU32,
-    path::{Path, PathBuf},
-};
+use crate::editor_settings::{self, SettingsPersistError};
+use gpui::{App, Window};
+use std::num::NonZeroU32;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub(crate) struct FrameRateLimit(Option<NonZeroU32>);
@@ -28,7 +28,7 @@ impl FrameRateLimit {
             .map_or_else(|| "Unlimited".into(), |fps| fps.to_string())
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::OPTIONS
             .iter()
             .copied()
@@ -36,39 +36,32 @@ impl FrameRateLimit {
     }
 }
 
-struct FrameRatePreference {
-    limit: FrameRateLimit,
-    overlay: bool,
-    path: Option<PathBuf>,
-}
-impl Global for FrameRatePreference {}
-
+/// Applies the stored limit and overlay to a newly opened window.
 pub(crate) fn initialize(window: &mut Window, cx: &mut App) {
-    let path = artisan_editor_cli::paths::Layout::discover()
-        .ok()
-        .map(|layout| layout.root.join("ui").join("frame-rate-limit"));
-    let limit = path
-        .as_ref()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|value| FrameRateLimit::parse(&value))
-        .unwrap_or_default();
-    window.set_max_frame_rate(limit.0);
-    window.set_vsync(limit.0.is_some());
-    let overlay = path
-        .as_ref()
-        .and_then(|path| std::fs::read_to_string(path.with_file_name("fps-overlay")).ok())
-        .is_none_or(|value| value.trim() != "false");
-    set_overlay_mode(overlay, window);
-    cx.set_global(FrameRatePreference {
-        limit,
-        overlay,
-        path,
-    });
+    let settings = editor_settings::get(cx);
+    set_limit(settings.frame_rate_limit(), window);
+    set_overlay_mode(settings.fps_overlay(), window);
 }
 
 pub(crate) fn current(cx: &App) -> FrameRateLimit {
-    cx.try_global::<FrameRatePreference>()
-        .map_or(FrameRateLimit::default(), |preference| preference.limit)
+    editor_settings::get(cx).frame_rate_limit()
+}
+
+fn set_limit(limit: FrameRateLimit, window: &mut Window) {
+    window.set_max_frame_rate(limit.0);
+    window.set_vsync(limit.0.is_some());
+}
+
+/// Maps a persistence failure to the settings screen's session-only notice.
+fn saved(result: Result<(), SettingsPersistError>, setting: &str) -> Result<(), String> {
+    result.map_err(|error| match error {
+        SettingsPersistError::Unavailable => {
+            "Applied for this session. The settings location is unavailable.".to_owned()
+        }
+        SettingsPersistError::Io(_) => {
+            format!("Applied for this session, but the {setting} could not be saved.")
+        }
+    })
 }
 
 pub(crate) fn apply(
@@ -76,26 +69,15 @@ pub(crate) fn apply(
     window: &mut Window,
     cx: &mut App,
 ) -> Result<(), String> {
-    window.set_max_frame_rate(limit.0);
-    window.set_vsync(limit.0.is_some());
-    let preference = cx.try_global::<FrameRatePreference>();
-    let overlay = overlay_visible(cx);
-    let path = preference.and_then(|preference| preference.path.clone());
-    cx.set_global(FrameRatePreference {
-        limit,
-        overlay,
-        path: path.clone(),
-    });
-    let path = path.ok_or_else(|| {
-        "Applied for this session. The settings location is unavailable.".to_owned()
-    })?;
-    save(&path, limit)
-        .map_err(|_| "Applied for this session, but the FPS limit could not be saved.".to_owned())
+    set_limit(limit, window);
+    saved(
+        editor_settings::update(cx, |settings| settings.with_frame_rate_limit(limit)),
+        "FPS limit",
+    )
 }
 
 pub(crate) fn overlay_visible(cx: &App) -> bool {
-    cx.try_global::<FrameRatePreference>()
-        .is_none_or(|preference| preference.overlay)
+    editor_settings::get(cx).fps_overlay()
 }
 
 fn set_overlay_mode(visible: bool, window: &mut Window) {
@@ -112,52 +94,32 @@ pub(crate) fn apply_overlay(
     cx: &mut App,
 ) -> Result<(), String> {
     set_overlay_mode(visible, window);
-    let limit = current(cx);
-    let path = cx
-        .try_global::<FrameRatePreference>()
-        .and_then(|preference| preference.path.clone());
-    cx.set_global(FrameRatePreference {
-        limit,
-        overlay: visible,
-        path: path.clone(),
-    });
-    let path = path.ok_or_else(|| {
-        "Applied for this session. The settings location is unavailable.".to_owned()
-    })?;
-    let path = path.with_file_name("fps-overlay");
-    save_value(&path, if visible { "true" } else { "false" }).map_err(|_| {
-        "Applied for this session, but the FPS overlay setting could not be saved.".to_owned()
-    })
-}
-
-fn save(path: &Path, limit: FrameRateLimit) -> std::io::Result<()> {
-    save_value(path, &limit.label())
-}
-
-fn save_value(path: &Path, value: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let pending = path.with_extension("pending");
-    std::fs::write(&pending, value)?;
-    std::fs::rename(pending, path)
+    saved(
+        editor_settings::update(cx, |settings| settings.with_fps_overlay(visible)),
+        "FPS overlay setting",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn stored(path: &std::path::Path, key: &str) -> serde_json::Value {
+        let bytes = std::fs::read(path).expect("saved settings");
+        serde_json::from_slice::<serde_json::Value>(&bytes).expect("settings json")[key].clone()
+    }
+
     #[gpui::test]
     fn settings_select_applies_and_saves_the_limit(cx: &mut gpui::TestAppContext) {
-        let path = std::env::temp_dir()
-            .join(format!("artisan-frame-rate-ui-test-{}", std::process::id()))
-            .join("limit");
+        let root =
+            std::env::temp_dir().join(format!("artisan-frame-rate-ui-test-{}", std::process::id()));
+        let path = editor_settings::settings_path(&root);
         cx.update(|app| {
-            app.set_global(FrameRatePreference {
-                limit: FrameRateLimit::default(),
-                overlay: true,
-                path: Some(path.clone()),
-            });
+            editor_settings::install(
+                editor_settings::EditorSettings::default(),
+                Some(path.clone()),
+                app,
+            );
         });
         let (_, cx) = cx.add_window_view(|_, cx| {
             crate::native_settings::SettingsScreen::new(
@@ -202,7 +164,7 @@ mod tests {
                 assert_eq!(window.max_frame_rate(), limit.0);
                 assert_eq!(current(app), limit);
             });
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), value);
+            assert_eq!(stored(&path, "frame_rate_limit"), value);
         }
         for visible in [false, true] {
             let toggle = cx
@@ -218,12 +180,26 @@ mod tests {
                 );
                 assert_eq!(current(app), FrameRateLimit::default());
             });
-            assert_eq!(
-                std::fs::read_to_string(path.with_file_name("fps-overlay")).unwrap(),
-                visible.to_string()
-            );
+            assert_eq!(stored(&path, "fps_overlay"), visible);
+            assert_eq!(stored(&path, "frame_rate_limit"), "Unlimited");
         }
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn changes_without_a_settings_location_apply_for_the_session(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|window, app| {
+            let limit = FrameRateLimit::parse("60").unwrap();
+            assert_eq!(
+                apply(limit, window, app),
+                Err("Applied for this session. The settings location is unavailable.".to_owned())
+            );
+            assert_eq!(current(app), limit);
+            assert_eq!(window.max_frame_rate(), limit.0);
+            assert!(apply_overlay(false, window, app).is_err());
+            assert!(!overlay_visible(app));
+        });
     }
 
     #[test]
@@ -254,19 +230,5 @@ mod tests {
             assert_eq!(FrameRateLimit::parse(invalid), None);
         }
         assert_eq!(FrameRateLimit::default().label(), "Unlimited");
-    }
-
-    #[test]
-    fn saving_replaces_the_previous_preference() {
-        let path = std::env::temp_dir()
-            .join(format!("artisan-frame-rate-test-{}", std::process::id()))
-            .join("limit");
-        save(&path, FrameRateLimit::parse("60").unwrap()).unwrap();
-        save(&path, FrameRateLimit::parse("240").unwrap()).unwrap();
-        assert_eq!(
-            FrameRateLimit::parse(&std::fs::read_to_string(&path).unwrap()),
-            FrameRateLimit::parse("240")
-        );
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

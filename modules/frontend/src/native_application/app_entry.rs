@@ -106,6 +106,7 @@ pub fn run() -> ExitCode {
             }
 
             bind_native_actions(cx);
+            crate::editor_settings::initialize(cx);
 
             let shutdown_for_action = Arc::clone(&shutdown_started);
             let view_for_action = Rc::clone(&application_view);
