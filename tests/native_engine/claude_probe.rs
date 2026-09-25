@@ -9,11 +9,17 @@
 
 use std::time::Duration;
 
+use artisan_domain::EngineProfileId;
 use artisan_native_engine::claude::{
     CLAUDE_ENGINE_ID, CLAUDE_PROTOCOL_VERSION, CLAUDE_TRANSPORT, ClaudeAuthState, ClaudeProbeError,
     ClaudeProbeOptions, ClaudeProbePhase, DEFAULT_AUTH_REASON_UNAVAILABLE, MAX_AUTH_REASON_BYTES,
     NATIVE_CONTINUATION_VERSION, classify_authentication, parse_auth_logged_in,
     parse_claude_version, sanitize_auth_reason,
+};
+use artisan_native_engine::{
+    CLAUDE_MINIMUM_CLI_VERSION, CLAUDE_NATIVE_CONTINUATION_VERSION,
+    CLAUDE_THINKING_DISPLAY_VERSION, ClaudeThinkingDisplaySupport, NativeClaudeAuthority,
+    claude_thinking_display_support,
 };
 
 #[test]
@@ -178,4 +184,64 @@ fn probe_errors_stay_path_free_and_classified() {
         .cli_reason(),
         "spawn_failed"
     );
+}
+
+#[test]
+fn thinking_display_support_is_separate_from_the_continuation_floor() {
+    assert_eq!(CLAUDE_THINKING_DISPLAY_VERSION, "2.1.282");
+    assert_eq!(CLAUDE_MINIMUM_CLI_VERSION, "2.1.220");
+    assert_eq!(CLAUDE_NATIVE_CONTINUATION_VERSION, "2.1.220");
+    assert_eq!(
+        claude_thinking_display_support("2.1.282 (Claude Code)"),
+        ClaudeThinkingDisplaySupport::Summarized
+    );
+    assert_eq!(
+        claude_thinking_display_support("2.1.281 (Claude Code)"),
+        ClaudeThinkingDisplaySupport::Unsupported
+    );
+    assert_eq!(
+        claude_thinking_display_support("unparseable"),
+        ClaudeThinkingDisplaySupport::Unsupported
+    );
+}
+
+#[test]
+fn verified_launch_carries_display_support_for_supported_and_older_clis() {
+    let directory = std::env::temp_dir().join(format!(
+        "artisan-claude-display-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).expect("fixture directory");
+    let executable = directory.join("claude");
+    std::fs::write(&executable, b"fixture").expect("fixture executable");
+    let profile = EngineProfileId::parse("claude-fixture").expect("profile id");
+    let authority = NativeClaudeAuthority::new();
+    let database = directory.join("artisan.sqlite");
+    let supported = authority
+        .resolve_launch_with_executable(&database, &profile, &executable, "2.1.282 (Claude Code)")
+        .expect("supported launch");
+    assert_eq!(
+        supported.thinking_display(),
+        ClaudeThinkingDisplaySupport::Summarized
+    );
+    // An older CLI above the unchanged continuation floor still launches; it
+    // only loses the display flag.
+    let older = authority
+        .resolve_launch_with_executable(&database, &profile, &executable, "2.1.220")
+        .expect("older launch stays certified");
+    assert_eq!(
+        older.thinking_display(),
+        ClaudeThinkingDisplaySupport::Unsupported
+    );
+    assert!(
+        authority
+            .resolve_launch_with_executable(&database, &profile, &executable, "2.1.219")
+            .is_err(),
+        "the continuation floor is unchanged"
+    );
+    std::fs::remove_dir_all(&directory).expect("fixture cleanup");
 }
