@@ -350,7 +350,7 @@ async fn inspect_candidate<C: ConnectionTrait>(
                 },
             ));
         }
-        AssistantRunLifecycle::Interrupted => {
+        AssistantRunLifecycle::Interrupted if query.engine_id != EngineId::Codex => {
             return Ok(SessionContinuationLookup::Unavailable(
                 SessionContinuationUnavailable {
                     run_id: run_id.clone(),
@@ -358,7 +358,10 @@ async fn inspect_candidate<C: ConnectionTrait>(
                 },
             ));
         }
-        AssistantRunLifecycle::Completed
+        // Codex resumes the exact durable session and sends only the new prompt.
+        // Its thread/resume handshake remains authoritative if the rollout is missing.
+        AssistantRunLifecycle::Interrupted
+        | AssistantRunLifecycle::Completed
         | AssistantRunLifecycle::Failed
         | AssistantRunLifecycle::Cancelled => {}
     }

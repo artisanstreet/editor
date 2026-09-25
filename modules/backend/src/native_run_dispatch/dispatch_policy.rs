@@ -98,9 +98,9 @@ pub(crate) fn notify_after_commit(notified_commit: bool, notify: impl FnOnce()) 
 
 /// Precise, bounded dispatcher diagnostic for a blocked provider continuation.
 ///
-/// Interrupted runs stay blocked: `thread/resume` against a missing rollout
-/// fails `-32600`, so no silent fresh start or old-prompt replay is attempted
-/// here. The returned text is persisted as the dispatch `last_error` the
+/// Unsupported interrupted sessions stay blocked. Codex sessions with validated
+/// bindings proceed through thread/resume; a missing rollout still fails closed,
+/// without a silent fresh start or replaying the old prompt. The returned text is persisted as the dispatch `last_error` the
 /// composer lip already renders, so the reader sees exactly why the send
 /// cannot proceed on this thread.
 pub(crate) fn continuation_unavailable_reason(

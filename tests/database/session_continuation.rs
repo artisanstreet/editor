@@ -279,7 +279,6 @@ fn is_settled(lifecycle: &AssistantRunLifecycle) -> bool {
         AssistantRunLifecycle::Completed
             | AssistantRunLifecycle::Failed
             | AssistantRunLifecycle::Cancelled
-            | AssistantRunLifecycle::Interrupted
     )
 }
 
@@ -700,5 +699,71 @@ async fn codex_run_never_continues_as_opencode2_and_reports_binding_engine() {
     assert_eq!(
         binding_mismatch.reason,
         SessionContinuationIncompatibility::ProviderBindingEngine
+    );
+}
+
+#[tokio::test]
+async fn interrupted_codex_resumes_only_its_bound_session() {
+    let (database, repository) = migrated_memory_database().await;
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("request-config-codex").expect("request id is valid"),
+            thread_id: ThreadId::parse(THREAD_ID).expect("thread id should be valid"),
+            precondition: EngineConfigUpdatePrecondition::Exact(
+                EngineConfigRevision::new(1).expect("revision is valid"),
+            ),
+            config: codex_config(),
+            accepted_at: UnixMillis::from_millis(20),
+        })
+        .await
+        .expect("codex configuration should persist");
+    let thread_blob = entities::thread::Entity::find_by_id(THREAD_ID)
+        .one(&database)
+        .await
+        .expect("thread should read")
+        .expect("thread should exist")
+        .engine_run_config
+        .expect("codex thread has a snapshot")
+        .into_vec();
+
+    seed_run_with_snapshot(
+        &database,
+        "run-interrupted-codex",
+        100,
+        AssistantRunLifecycle::Interrupted,
+        "profile-codex",
+        Some(
+            r#"{"engine":"codex","profile_id":"profile-codex","session_id":"saved-codex-session"}"#,
+        ),
+        None,
+        Some((2, thread_blob)),
+    )
+    .await;
+    let lookup = SessionContinuationQuery {
+        thread_id: ThreadId::parse(THREAD_ID).unwrap(),
+        engine_id: EngineId::Codex,
+        profile_id: EngineProfileId::parse("profile-codex").unwrap(),
+        exclude_run_id: None,
+    };
+    let SessionContinuationLookup::Usable(session) =
+        repository.read_session_continuation(lookup).await.unwrap()
+    else {
+        panic!("interrupted Codex with a durable session must remain resumable");
+    };
+    assert_eq!(session.session_id.as_str(), "saved-codex-session");
+    assert_eq!(
+        session.prior_run.lifecycle,
+        AssistantRunLifecycle::Interrupted
+    );
+    let SessionContinuationLookup::Unavailable(blocked) = repository
+        .read_session_continuation(query("profile-codex", None))
+        .await
+        .unwrap()
+    else {
+        panic!("this does not grant another harness recovery authority");
+    };
+    assert_eq!(
+        blocked.reason,
+        SessionContinuationUnavailableReason::AmbiguousRun
     );
 }
