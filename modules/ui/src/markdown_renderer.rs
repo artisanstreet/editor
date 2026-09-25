@@ -23,6 +23,15 @@
 //! project base the renderer must not open arbitrary local paths, and raw
 //! HTML stays inert text.
 //!
+//! Trailing citation attributions leave prose entirely: links whose authored
+//! label is exactly `Source`/`Sources` are hoisted out of the paragraph into
+//! secondary badge pills that trail the sentence on its own line (resolved
+//! title or host, favicon when the rich-link table has one), `ChatGPT`-chip
+//! style. Only trailing attributions qualify — GPUI flexbox has no inline
+//! layout (see `crate::badge`), so a pill can never flow mid-sentence — and
+//! only the bare source labels qualify, so ordinary titled links keep their
+//! inline treatment.
+//!
 //! Spacing and type follow [`ProseTypography`](crate::theme::ProseTypography):
 //! 16 px / 28 px body at weight 410, per-heading sizes with collapsing
 //! block margins, and fence chrome from the reference code snippet. Inline
@@ -38,9 +47,13 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Div, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement,
-    SharedString, Styled, div, prelude::InteractiveElement as _, px,
+    AnyElement, Div, ElementId, FontStyle, FontWeight, HighlightStyle, ImageSource, IntoElement,
+    ParentElement, SharedString, Styled, div, img,
+    prelude::{InteractiveElement as _, StatefulInteractiveElement as _},
+    px,
 };
+
+use crate::badge::BadgeStyle;
 
 use crate::markdown::{
     Block, CodeFence, CodeToken, CodeTokenKind, ListItem, MarkdownDocument, MarkdownEngine, Span,
@@ -179,6 +192,11 @@ impl MarkdownRenderer {
 /// their caching, freshness, and request policy; the renderer is synchronous
 /// and never fetches.
 pub trait RichLinkTitleSource {
+    /// An already decoded optional favicon. Never performs I/O.
+    fn favicon(&self, _destination: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
+        None
+    }
+
     /// Returns the resolved title for one absolute destination, if known.
     fn resolved_title(&self, destination: &str) -> Option<SharedString>;
 }
@@ -520,13 +538,68 @@ fn render_inline(
     titles: &dyn RichLinkTitleSource,
 ) -> AnyElement {
     let presentation = present_inline_with_titles(spans, *theme, titles);
+    let (body, citations) = split_trailing_source_links(presentation);
+    if citations.is_empty() {
+        return selectable_paragraph(selector, body, theme, titles);
+    }
+    // One nowrap row: the prose hugs its content and the pills trail the
+    // sentence on its line, bottom-aligned with the last line, instead of
+    // dropping to a chip row beneath the paragraph. The prose keeps
+    // `min-w-0` so narrow windows shrink and rewrap it instead of pushing
+    // the pills out; short prose leaves the pills hugging the sentence end.
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .flex_nowrap()
+        .items_end()
+        .gap(theme.spacing.steps(2.0))
+        .debug_selector({
+            let row_selector = format!("{selector}-cites");
+            move || row_selector.clone()
+        });
+    if !body.source.trim().is_empty() {
+        row = row.child(
+            div()
+                .min_w_0()
+                .debug_selector({
+                    let prose_selector = format!("{selector}-prose");
+                    move || prose_selector.clone()
+                })
+                .child(selectable_paragraph(selector, body, theme, titles)),
+        );
+    }
+    row.child(citation_chips(selector, &citations, theme, titles))
+        .into_any_element()
+}
+
+/// Renders one flattened paragraph as retained selectable text.
+///
+/// The selection element owns link clicks and suppresses drag activation,
+/// so no separate click handler lives beside it: one element, one behavior.
+fn selectable_paragraph(
+    selector: &str,
+    presentation: InlinePresentation,
+    theme: &ArtisanTheme,
+    titles: &dyn RichLinkTitleSource,
+) -> AnyElement {
+    let InlinePresentation {
+        source,
+        highlights,
+        links,
+        citation_links: _,
+        code_ranges,
+        icon_offsets,
+    } = presentation;
     let id = SharedString::from(selector.to_owned());
-    let text = SharedString::from(presentation.source);
+    let icons = icon_offsets
+        .iter()
+        .filter_map(|(index, destination)| titles.favicon(destination).map(|image| (*index, image)))
+        .collect();
+    let text = SharedString::from(source);
     // Inline code rides the frozen text-run contract: mono family plus
     // zero tracking per code range. Weight (400) and muted color already
     // ride the highlight runs.
-    let overrides = presentation
-        .code_ranges
+    let overrides = code_ranges
         .iter()
         .map(|range| TextRunOverride {
             range: range.clone(),
@@ -534,21 +607,17 @@ fn render_inline(
             letter_spacing: Some(px(0.0)),
         })
         .collect::<Vec<_>>();
-    let element = SelectableText::retained(id, text, *theme, presentation.highlights)
-        .with_text_run_overrides(overrides);
-    if presentation.links.is_empty() {
+    let element = SelectableText::retained(id, text, *theme, highlights)
+        .with_text_run_overrides(overrides)
+        .with_inline_images(icons);
+    if links.is_empty() {
         return element.into_any_element();
     }
-    // The selection element owns link clicks and suppresses drag
-    // activation, so no separate click handler lives beside it: one
-    // element, one behavior.
-    let ranges = presentation
-        .links
+    let ranges = links
         .iter()
         .map(|link| link.range.clone())
         .collect::<Vec<_>>();
-    let destinations = presentation
-        .links
+    let destinations = links
         .into_iter()
         .map(|link| link.destination)
         .collect::<Vec<_>>();
@@ -559,6 +628,199 @@ fn render_inline(
             }
         })
         .into_any_element()
+}
+
+/// Flattens one link label to plain text for attribution matching.
+///
+/// Nested emphasis, strong, code, and links contribute their leaves; the
+/// result names what the author wrote, never the resolved rich-link title.
+fn span_label_text(spans: &[Span]) -> String {
+    let mut text = String::new();
+    for span in spans {
+        match span {
+            Span::Text(inline) | Span::Html(inline) | Span::Code(inline) => {
+                text.push_str(inline);
+            }
+            Span::Emphasis(inner) | Span::Strong(inner) => {
+                text.push_str(&span_label_text(inner));
+            }
+            Span::Link { label, .. } => text.push_str(&span_label_text(label)),
+        }
+    }
+    text
+}
+
+/// Whether one authored link label is a bare citation attribution.
+///
+/// Only the exact `Source`/`Sources` labels (case-insensitive, surrounding
+/// whitespace ignored) qualify, so ordinary titled links — including
+/// citation-resolved titles — keep their inline treatment.
+fn is_source_attribution_label(label: &str) -> bool {
+    label.trim().eq_ignore_ascii_case("source") || label.trim().eq_ignore_ascii_case("sources")
+}
+
+/// Hoists trailing citation attributions out of one inline presentation.
+///
+/// Returns the body presentation plus the stripped attribution links in
+/// source order. A trailing run qualifies link by link from the end: each
+/// entry must be a recorded `Source`/`Sources` attribution whose range ends
+/// exactly where the remaining body ends (trailing whitespace ignored), so
+/// `…Morrissey.[Source](https://…)` strips the chip while `see [Source](…).
+/// Next.` and mid-sentence attributions stay inline. Stripped ranges are
+/// dropped from every channel — links, highlights, code ranges, and favicon
+/// slots — and the body is end-trimmed, so all surviving ranges still
+/// address the returned source.
+fn split_trailing_source_links(
+    mut presentation: InlinePresentation,
+) -> (InlinePresentation, Vec<InlineLink>) {
+    let mut stripped: Vec<InlineLink> = Vec::new();
+    loop {
+        let trimmed_len = presentation.source.trim_end().len();
+        let qualifies = presentation
+            .citation_links
+            .last()
+            .is_some_and(|last| last.range.end == trimmed_len);
+        if !qualifies {
+            break;
+        }
+        let Some(link) = presentation.citation_links.pop() else {
+            break;
+        };
+        presentation.source.truncate(link.range.start);
+        stripped.push(link);
+    }
+    stripped.reverse();
+    if stripped.is_empty() {
+        return (presentation, stripped);
+    }
+    let end = presentation.source.trim_end().len();
+    presentation.source.truncate(end);
+    presentation.highlights.retain_mut(|(range, _)| {
+        if range.start >= end {
+            false
+        } else {
+            range.end = range.end.min(end);
+            true
+        }
+    });
+    presentation.code_ranges.retain_mut(|range| {
+        if range.start >= end {
+            false
+        } else {
+            range.end = range.end.min(end);
+            true
+        }
+    });
+    presentation.links.retain(|link| link.range.end <= end);
+    presentation
+        .citation_links
+        .retain(|link| link.range.end <= end);
+    presentation
+        .icon_offsets
+        .retain(|(offset, _)| *offset < end);
+    (presentation, stripped)
+}
+
+/// Renders stripped citation attributions as trailing secondary pills.
+///
+/// Each pill carries the secondary badge recipe — same fitted 20 px pill
+/// geometry as the outline badge, but the filled `secondary` face with
+/// `secondary-foreground` text and no hairline — plus the resolved page
+/// title (host fallback, then `Source`), a 14 px favicon when the rich-link
+/// table has one, and opens its destination through the platform browser on
+/// click: the `ChatGPT` source-chip treatment the inline blue link replaces.
+/// The pills refuse to shrink and never wrap among themselves, so the prose
+/// row absorbs every width change instead.
+fn citation_chips(
+    selector: &str,
+    citations: &[InlineLink],
+    theme: &ArtisanTheme,
+    titles: &dyn RichLinkTitleSource,
+) -> AnyElement {
+    let style = BadgeStyle::resolve(*theme);
+    let chips_selector = format!("{selector}-chips");
+    // The row bottom-anchors the chips to the prose block bottom, which is
+    // the last line bottom: lifting by half the line/pill height difference
+    // centers the 20 px pill on the 28 px prose line instead of sinking it
+    // flush with the line bottom.
+    let center_lift = (px(ProseTypography::BODY_LINE_PX) - style.height) / 2.0;
+    let mut chips = div()
+        .flex()
+        .flex_row()
+        .flex_nowrap()
+        .flex_shrink_0()
+        .items_center()
+        .gap(style.child_gap)
+        .mb(center_lift)
+        .debug_selector(move || chips_selector.clone());
+    for (index, citation) in citations.iter().enumerate() {
+        let destination = SharedString::from(citation.destination.clone());
+        let label = citation_chip_label(&citation.destination, titles);
+        let pill_id = SharedString::from(format!("{selector}-cite-{index}"));
+        let pill_selector = format!("{selector}-cite-{index}");
+        let mut pill = div()
+            .id(ElementId::Name(pill_id))
+            .flex()
+            .flex_row()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .h(style.height)
+            .px(style.horizontal_padding)
+            .py(style.vertical_padding)
+            .gap(style.child_gap)
+            .rounded(style.corner_radius)
+            .bg(theme.colors.secondary.to_paint())
+            .text_color(theme.colors.secondary_foreground.to_paint())
+            .text_size(style.text_size)
+            .font_weight(FontWeight::MEDIUM)
+            .line_height(style.line_height)
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .cursor_pointer()
+            .aria_label(format!("Open cited source {label}"))
+            .debug_selector(move || pill_selector.clone())
+            .on_click(move |_, _, cx| cx.open_url(destination.as_ref()));
+        if let Some(icon) = titles.favicon(&citation.destination) {
+            pill = pill.child(img(ImageSource::Render(icon)).w(px(14.0)).h(px(14.0)));
+        }
+        chips = chips.child(pill.child(label));
+    }
+    chips.into_any_element()
+}
+
+/// Names one citation pill: the resolved page title, else the link host,
+/// else the bare `Source` fallback.
+fn citation_chip_label(destination: &str, titles: &dyn RichLinkTitleSource) -> SharedString {
+    if let Some(title) = titles.resolved_title(destination)
+        && !title.trim().is_empty()
+    {
+        return title;
+    }
+    if let Some(host) = citation_host(destination) {
+        return SharedString::from(host);
+    }
+    SharedString::from("Source")
+}
+
+/// Extracts the display host from one absolute HTTP(S) destination.
+///
+/// Strips credentials, port, path, and a leading `www.`; brackets fall off
+/// IPv6 literals. Returns `None` when no host survives.
+fn citation_host(destination: &str) -> Option<String> {
+    let authority = destination.split("://").nth(1)?;
+    let host = authority.split(['/', '?', '#']).next()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    let host = host.trim_matches(['[', ']']);
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_owned())
 }
 
 fn render_code(parent_selector: &str, fence: &CodeFence, theme: &ArtisanTheme) -> AnyElement {
@@ -644,6 +906,12 @@ pub struct InlineLink {
 /// non-overlapping and on character boundaries (exactly what
 /// `with_font_family_overrides` consumes for the mono face, with run-level
 /// tracking reset beside it). Additive changes only — never reshape.
+///
+/// `citation_links` is the additive citation-attribution channel: the subset
+/// of `links` whose authored label is exactly `Source`/`Sources` on an
+/// HTTP(S) destination, in source order with ranges addressing `source`.
+/// [`split_trailing_source_links`] consumes trailing entries into the chip
+/// row; mid-sentence entries stay inline through `links` untouched.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlinePresentation {
     /// Flattened visible text.
@@ -653,8 +921,13 @@ pub struct InlinePresentation {
     pub highlights: Vec<(Range<usize>, HighlightStyle)>,
     /// Openable links in source order.
     pub links: Vec<InlineLink>,
+    /// Citation-attribution links: the `Source`/`Sources`-labeled subset of
+    /// `links`, in source order, addressing the same `source`.
+    pub citation_links: Vec<InlineLink>,
     /// Inline-code ranges in source order for family/tracking treatment.
     pub code_ranges: Vec<Range<usize>>,
+    /// Decorative favicon slots, addressed by UTF-8 byte offset.
+    pub icon_offsets: Vec<(usize, String)>,
 }
 
 /// Flattens spans into presentation data with a single merged highlight
@@ -712,7 +985,9 @@ pub fn present_inline_with_titles(
         source: accumulator.source,
         highlights: accumulator.runs,
         links: accumulator.links,
+        citation_links: accumulator.citation_links,
         code_ranges: accumulator.code_ranges,
+        icon_offsets: accumulator.icon_offsets,
     }
 }
 
@@ -721,7 +996,9 @@ struct InlineAccumulator {
     source: String,
     runs: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<InlineLink>,
+    citation_links: Vec<InlineLink>,
     code_ranges: Vec<Range<usize>>,
+    icon_offsets: Vec<(usize, String)>,
 }
 
 /// Emits one leaf run, coalescing into the previous run when the style
@@ -753,6 +1030,10 @@ fn flatten_spans(
 /// Flattens with link-ancestor context: the reference resolves `a strong`
 /// and `a code` to `color: inherit`, so strong and code inside a link keep
 /// the link color instead of imposing foreground/muted.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one span flattener covers all six span variants plus citation-attribution recording; splitting the link branch would separate the shared link-color context"
+)]
 fn flatten_spans_in_link(
     spans: &[Span],
     inherited: HighlightStyle,
@@ -764,6 +1045,20 @@ fn flatten_spans_in_link(
     for span in spans {
         match span {
             Span::Text(inline) | Span::Html(inline) => {
+                let cleaned;
+                let inline = if inline.contains('\u{e200}') {
+                    cleaned = readable_citations(inline);
+                    &cleaned
+                } else {
+                    inline
+                };
+                if matches!(span, Span::Text(_))
+                    && !in_link
+                    && let Some(linked) = bare_url_spans(inline)
+                {
+                    flatten_spans_in_link(&linked, inherited, accumulator, theme, titles, true);
+                    continue;
+                }
                 let start = accumulator.source.len();
                 accumulator.source.push_str(inline);
                 emit_run(accumulator, start, accumulator.source.len(), inherited);
@@ -805,10 +1100,16 @@ fn flatten_spans_in_link(
             Span::Link { label, destination } => {
                 if is_openable_link_destination(destination) {
                     let start = accumulator.source.len();
+                    let source_attribution = is_rich_link_destination(destination)
+                        && is_source_attribution_label(&span_label_text(label));
                     let resolved = is_rich_link_destination(destination)
                         .then(|| titles.resolved_title(destination))
                         .flatten()
                         .filter(|title| !title.trim().is_empty());
+                    if titles.favicon(destination).is_some() {
+                        accumulator.icon_offsets.push((start, destination.clone()));
+                        accumulator.source.push_str("\u{2003}\u{2060}\u{00a0}");
+                    }
                     if let Some(title) = resolved {
                         accumulator.source.push_str(title.as_ref());
                         emit_run(
@@ -829,10 +1130,14 @@ fn flatten_spans_in_link(
                     }
                     let end = accumulator.source.len();
                     if start < end {
-                        accumulator.links.push(InlineLink {
+                        let link = InlineLink {
                             range: start..end,
                             destination: destination.clone(),
-                        });
+                        };
+                        if source_attribution {
+                            accumulator.citation_links.push(link.clone());
+                        }
+                        accumulator.links.push(link);
                     }
                 } else {
                     flatten_spans_in_link(label, inherited, accumulator, theme, titles, in_link);
@@ -840,6 +1145,73 @@ fn flatten_spans_in_link(
             }
         }
     }
+}
+
+/// Recognizes bare HTTP(S) URLs while leaving sentence punctuation outside.
+fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
+    let mut result = Vec::new();
+    let mut consumed = 0;
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let Some(relative) = text[cursor..].find("http") else {
+            break;
+        };
+        let start = cursor + relative;
+        cursor = start + 4;
+        if !(text[start..].starts_with("https://") || text[start..].starts_with("http://"))
+            || text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let tail = &text[start..];
+        let mut end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`'))
+            .unwrap_or(tail.len());
+        loop {
+            let candidate = &tail[..end];
+            let Some(last) = candidate.chars().next_back() else {
+                break;
+            };
+            let excess_closer = [('(', ')'), ('[', ']'), ('{', '}')]
+                .iter()
+                .any(|(open, close)| {
+                    last == *close
+                        && candidate.matches(*close).count() > candidate.matches(*open).count()
+                });
+            if matches!(last, '.' | ',' | ';' | ':' | '!' | '?') || excess_closer {
+                end -= last.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let destination = &tail[..end];
+        let authority = destination
+            .split_once("://")
+            .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default())
+            .unwrap_or_default();
+        if authority.is_empty() || !is_openable_link_destination(destination) {
+            continue;
+        }
+        if consumed < start {
+            result.push(Span::Text(text[consumed..start].to_owned()));
+        }
+        result.push(Span::Link {
+            label: vec![Span::Text(destination.to_owned())],
+            destination: destination.to_owned(),
+        });
+        consumed = start + end;
+        cursor = consumed;
+    }
+    if result.is_empty() {
+        return None;
+    }
+    if consumed < text.len() {
+        result.push(Span::Text(text[consumed..].to_owned()));
+    }
+    Some(result)
 }
 
 /// Only absolute `http(s)` and `mailto` destinations open through the
@@ -939,3 +1311,27 @@ fn code_token_style(theme: &ArtisanTheme, kind: CodeTokenKind) -> HighlightStyle
 #[cfg(test)]
 #[path = "markdown_renderer_tests.rs"]
 mod tests;
+
+/// Unresolved provider references are not display text or browser destinations.
+/// Keep an explicit readable fallback, and hide incomplete streaming markers.
+fn readable_citations(text: &str) -> String {
+    let mut output = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('\u{e200}') {
+        output.push_str(&rest[..start]);
+        let marker = &rest[start + '\u{e200}'.len_utf8()..];
+        let Some(end) = marker.find('\u{e201}') else {
+            return output;
+        };
+        if marker[..end].starts_with("cite\u{e202}") {
+            output.push_str(" [source unavailable]");
+        } else {
+            output.push_str(
+                &rest[start..start + '\u{e200}'.len_utf8() + end + '\u{e201}'.len_utf8()],
+            );
+        }
+        rest = &marker[end + '\u{e201}'.len_utf8()..];
+    }
+    output.push_str(rest);
+    output
+}

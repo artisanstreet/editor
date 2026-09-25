@@ -46,6 +46,7 @@ enum RichLinkTitleEntry {
 pub struct RichLinkTitleTable {
     entries: HashMap<String, RichLinkTitleEntry>,
     order: VecDeque<String>,
+    icons: HashMap<String, std::sync::Arc<gpui::RenderImage>>,
 }
 
 /// Canonicalizes one destination into the title table's cache key.
@@ -139,6 +140,55 @@ impl RichLinkTitleTable {
         self.insert(canonical, RichLinkTitleEntry::Failed);
     }
 
+    /// Retains a decoded, bounded favicon without making render-time HTTP requests.
+    pub fn resolve_icon(&mut self, destination: &str, bytes: &[u8]) {
+        let Some(key) = canonical_rich_link_title_url(destination) else {
+            return;
+        };
+        if !self.entries.contains_key(&key) {
+            return;
+        }
+        self.icons.remove(&key);
+        if bytes.is_empty() || bytes.len() > 65_536 {
+            return;
+        }
+        if let Some(icon) = decode_svg_favicon(bytes) {
+            self.icons.insert(key, icon);
+            return;
+        }
+        let Ok(mut reader) =
+            image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+        else {
+            return;
+        };
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(512);
+        limits.max_image_height = Some(512);
+        limits.max_alloc = Some(4 * 1024 * 1024);
+        reader.limits(limits);
+        let Ok(decoded) = reader.decode() else {
+            return;
+        };
+        let mut pixels = decoded.thumbnail(32, 32).into_rgba8();
+        // GPUI consumes BGRA pixels.
+        for pixel in pixels.pixels_mut() {
+            pixel.0.swap(0, 2);
+        }
+        let frame = image::Frame::new(pixels);
+        self.icons.insert(
+            key,
+            std::sync::Arc::new(gpui::RenderImage::new(vec![frame])),
+        );
+    }
+
+    /// Returns an already decoded icon for one canonical destination.
+    #[must_use]
+    pub fn icon(&self, destination: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
+        self.icons
+            .get(&canonical_rich_link_title_url(destination)?)
+            .cloned()
+    }
+
     fn insert(&mut self, url: String, entry: RichLinkTitleEntry) {
         self.entries.insert(url.clone(), entry);
         if let Some(position) = self.order.iter().position(|key| key == &url) {
@@ -150,6 +200,7 @@ impl RichLinkTitleTable {
                 break;
             };
             self.entries.remove(&oldest);
+            self.icons.remove(&oldest);
         }
     }
 
@@ -160,7 +211,54 @@ impl RichLinkTitleTable {
     }
 }
 
+/// Rasterizes uncompressed SVGs into a fixed 32px image. No external or embedded
+/// images are loaded; SVGs cannot access the editor's filesystem or network.
+fn decode_svg_favicon(bytes: &[u8]) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    let source = std::str::from_utf8(bytes).ok()?;
+    if !source
+        .trim_start_matches('\u{feff}')
+        .trim_start()
+        .starts_with('<')
+    {
+        return None;
+    }
+    let options = resvg::usvg::Options {
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..Default::default()
+    };
+    let tree = resvg::usvg::Tree::from_str(source, &options).ok()?;
+    let scale = (32.0 / tree.size().width()).min(32.0 / tree.size().height());
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(32, 32)?;
+    let transform = resvg::tiny_skia::Transform::from_row(
+        scale,
+        0.0,
+        0.0,
+        scale,
+        (32.0 - tree.size().width() * scale) / 2.0,
+        (32.0 - tree.size().height() * scale) / 2.0,
+    );
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let bytes = pixmap
+        .pixels()
+        .iter()
+        .flat_map(|pixel| {
+            let color = pixel.demultiply();
+            [color.blue(), color.green(), color.red(), color.alpha()]
+        })
+        .collect();
+    let pixels = image::RgbaImage::from_raw(32, 32, bytes)?;
+    Some(std::sync::Arc::new(gpui::RenderImage::new(vec![
+        image::Frame::new(pixels),
+    ])))
+}
+
 impl RichLinkTitleSource for RichLinkTitleTable {
+    fn favicon(&self, destination: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
+        self.icon(destination)
+    }
     fn resolved_title(&self, destination: &str) -> Option<SharedString> {
         self.lookup(destination)
     }
@@ -269,5 +367,60 @@ mod tests {
         table.resolve("https://example.com/page", title("   "), 1_000);
         assert!(table.lookup("https://example.com/page").is_none());
         assert_eq!(table.queue("https://example.com/page", 0), None);
+    }
+}
+
+#[cfg(test)]
+mod favicon_tests {
+    use super::*;
+    #[test]
+    fn decoded_icons_are_bounded_and_share_fragment_cache_keys() {
+        let mut table = RichLinkTitleTable::new();
+        let url = "https://example.com/page";
+        table.resolve(url, SharedString::from("Example"), 1000);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(16, 16)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        table.resolve_icon(url, png.get_ref());
+        assert!(table.icon("https://example.com/page#section").is_some());
+        let rendered = artisan_ui::markdown_renderer::present_inline_with_titles(
+            &[artisan_ui::markdown::Span::Text(
+                "See https://example.com/page#section.".into(),
+            )],
+            artisan_ui::theme::ArtisanTheme::for_mode(artisan_ui::theme::ThemeMode::Dark),
+            &table,
+        );
+        assert_eq!(rendered.source, "See \u{2003}\u{2060}\u{00a0}Example.");
+        assert_eq!(rendered.icon_offsets[0].0, 4);
+        assert_eq!(
+            rendered.links[0].destination,
+            "https://example.com/page#section"
+        );
+        assert_eq!(
+            &rendered.source[rendered.links[0].range.clone()],
+            "\u{2003}\u{2060}\u{00a0}Example"
+        );
+        table.resolve_icon(url, b"not an image");
+        assert!(table.icon(url).is_none());
+        assert_eq!(table.lookup(url).as_deref(), Some("Example"));
+        let mut huge = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(513, 1)
+            .write_to(&mut huge, image::ImageFormat::Png)
+            .unwrap();
+        table.resolve_icon(url, huge.get_ref());
+        assert!(table.icon(url).is_none());
+    }
+}
+
+#[cfg(test)]
+mod svg_favicon_tests {
+    use super::*;
+    #[test]
+    fn svg_icons_are_fixed_size_and_keep_their_color() {
+        let icon = decode_svg_favicon(br##"<svg xmlns="http://www.w3.org/2000/svg" width="10000" height="10000"><path fill="#ff0000" d="M0 0h10000v10000H0z"/></svg>"##).unwrap();
+        assert_eq!(icon.size(0).width.0, 32);
+        assert_eq!(&icon.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
+        assert!(decode_svg_favicon(b"garbage").is_none());
     }
 }

@@ -603,6 +603,7 @@ dependencies = [
  "gpui_ce_platform",
  "image",
  "native-dialog",
+ "resvg",
  "rustls-pki-types",
  "serde_json",
  "sha2 0.11.0",

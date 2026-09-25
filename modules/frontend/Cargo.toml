@@ -28,7 +28,8 @@ artisan-ui = { path = "../ui" }
 base64.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
-image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp", "ico"] }
+resvg = { version = "=0.48.1", default-features = false }
 rustls-pki-types.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

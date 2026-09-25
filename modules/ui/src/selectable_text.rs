@@ -497,6 +497,7 @@ pub struct SelectableText {
     text: SharedString,
     base_highlights: Vec<(Range<usize>, HighlightStyle)>,
     text_run_overrides: Vec<TextRunOverride>,
+    inline_images: Vec<(usize, std::sync::Arc<gpui::RenderImage>)>,
     selection_style: HighlightStyle,
     source: SelectionSource,
     link_ranges: Vec<Range<usize>>,
@@ -563,6 +564,7 @@ impl SelectableText {
             text: text.into(),
             base_highlights,
             text_run_overrides: Vec::new(),
+            inline_images: Vec::new(),
             selection_style: selection_style_for_theme(*theme),
             source,
             link_ranges: Vec::new(),
@@ -614,6 +616,16 @@ impl SelectableText {
     #[must_use]
     pub fn with_text_run_overrides(mut self, overrides: Vec<TextRunOverride>) -> Self {
         self.text_run_overrides = overrides;
+        self
+    }
+
+    /// Adds decorative images in reserved em-space slots, preserving text layout and selection.
+    #[must_use]
+    pub fn with_inline_images(
+        mut self,
+        images: Vec<(usize, std::sync::Arc<gpui::RenderImage>)>,
+    ) -> Self {
+        self.inline_images = images;
         self
     }
 
@@ -957,7 +969,9 @@ impl Element for SelectableText {
                     } else if is_copy_keystroke(key, modifiers)
                         && let Some(copied) = state.copy_text(&key_text)
                     {
-                        cx.write_to_clipboard(ClipboardItem::new_string(copied));
+                        cx.write_to_clipboard(ClipboardItem::new_string(
+                            copied.replace("\u{2003}\u{2060}\u{00a0}", ""),
+                        ));
                         window.prevent_default();
                         cx.stop_propagation();
                     }
@@ -972,6 +986,28 @@ impl Element for SelectableText {
                 });
             } else {
                 styled.paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
+            }
+        }
+        for (index, image) in &self.inline_images {
+            if let (Some(origin), Some(end)) = (
+                layout.position_for_index(*index),
+                layout.position_for_index(*index + '\u{2003}'.len_utf8()),
+            ) {
+                let side = end.x - origin.x;
+                if side > gpui::px(0.0) {
+                    let icon_bounds = Bounds::new(
+                        origin + gpui::point(gpui::px(0.0), (layout.line_height() - side) / 2.0),
+                        gpui::size(side, side),
+                    );
+                    let _ = window.paint_image(
+                        icon_bounds,
+                        icon_bounds,
+                        gpui::Corners::default(),
+                        image.clone(),
+                        0,
+                        false,
+                    );
+                }
             }
         }
     }

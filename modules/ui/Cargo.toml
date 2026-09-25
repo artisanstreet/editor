@@ -160,6 +160,10 @@ name = "ui_badge"
 path = "../../tests/ui/badge.rs"
 
 [[test]]
+name = "citation_chips"
+path = "../../tests/ui/citation_chips.rs"
+
+[[test]]
 name = "ui_scroll_area"
 path = "../../tests/ui/scroll_area.rs"
 
