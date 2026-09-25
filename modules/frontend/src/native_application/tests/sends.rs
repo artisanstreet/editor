@@ -1827,6 +1827,9 @@ fn each_new_message_submission_mints_a_fresh_request_id() {
     assert_ne!(first, second);
     assert!(first.as_str().starts_with("native-message-"));
     assert!(second.as_str().starts_with("native-message-"));
+    // Random UUIDv7, not a process counter: no pid or counter suffix that a
+    // restarted Editor could repeat.
+    assert_eq!(first.as_str().len(), "native-message-".len() + 36);
 }
 
 #[gpui::test]

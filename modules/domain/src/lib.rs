@@ -23,7 +23,9 @@
 //!
 //! The domain is independent of Cap'n Proto, Quinn, `SeaORM`, GPUI, Tokio,
 //! filesystem APIs, and wall-clock acquisition; it depends only on
-//! `thiserror`. External values return typed errors instead of panicking.
+//! `thiserror`, plus `uuid` for [`RequestId::mint`], the single client
+//! request-id mint (a `UUIDv7` reads the clock and the OS random source).
+//! External values return typed errors instead of panicking.
 //! Filesystem paths are carried as opaque descriptions without
 //! canonicalization.
 

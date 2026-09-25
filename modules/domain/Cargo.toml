@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+uuid.workspace = true
 
 [[test]]
 name = "assistant_message"

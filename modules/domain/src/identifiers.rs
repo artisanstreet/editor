@@ -132,6 +132,24 @@ wire_identifier! {
     RequestId
 }
 
+impl RequestId {
+    /// Mints a fresh request identity: `label`, a hyphen, then a random
+    /// `UUIDv7`.
+    ///
+    /// A `UUIDv7` carries a millisecond timestamp and 74 random bits, so ids stay
+    /// unique across restarts, processes and machines without a process
+    /// counter, and they sort by mint time in the Forge's receipt tables.
+    /// This is the one place clients mint request identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdentifierError`] only when `label` itself violates the
+    /// identifier rule (whitespace, control characters, or too long).
+    pub fn mint(label: &str) -> Result<Self, IdentifierError> {
+        Self::parse(format!("{label}-{}", uuid::Uuid::now_v7().hyphenated()))
+    }
+}
+
 wire_identifier! {
     /// Opaque identity Forge minted for one visible directory.
     ///

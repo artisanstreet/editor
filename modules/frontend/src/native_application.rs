@@ -246,8 +246,9 @@ use state::{
     FirstSendAdmission, NativeMessageFailure, NativeMessageFlight, NativeMessageRetry,
     NativeViewState, PendingFailedRecovery, PickerRoute, ThreadSwitchFlight, ThreadSwitchPhase,
     command_failure, create_message_request_id, create_save_request_id, empty_thread_listing,
-    intake_command, invalid_service_failure, picker_route, project_options_from_listing,
-    ready_membership_is_valid, scope_free_catalog_snapshot, submission_blocked_failure,
+    intake_command, invalid_service_failure, mint_request_id, picker_route,
+    project_options_from_listing, ready_membership_is_valid, scope_free_catalog_snapshot,
+    submission_blocked_failure,
 };
 
 #[cfg(test)]

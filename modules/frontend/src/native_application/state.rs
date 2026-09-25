@@ -182,71 +182,18 @@ pub(super) fn scope_free_catalog_snapshot() -> Option<NativeModelCatalog> {
         .ok()
 }
 
-static SAVE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-static MESSAGE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// Mints a random UUIDv7 request id (see [`RequestId::mint`]); ids stay
+/// unique across Editor restarts and processes.
+pub(super) fn mint_request_id(label: &str) -> Result<RequestId, ServiceFailure> {
+    RequestId::mint(label).map_err(|_| invalid_service_failure())
+}
 
-pub(super) fn create_save_request_id() -> Result<artisan_domain::RequestId, ServiceFailure> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let millis = u64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| ServiceFailure {
-                stage: ServiceFailureStage::Request,
-                category: ServiceFailureCategory::Integrity,
-            })?
-            .as_millis(),
-    )
-    .map_err(|_| ServiceFailure {
-        stage: ServiceFailureStage::Request,
-        category: ServiceFailureCategory::Integrity,
-    })?;
-    let counter = SAVE_COUNTER
-        .fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| current.checked_add(1),
-        )
-        .map_err(|_| ServiceFailure {
-            stage: ServiceFailureStage::Request,
-            category: ServiceFailureCategory::Integrity,
-        })?;
-    let value = format!("engine-save-{millis}-{counter}");
-    artisan_domain::RequestId::parse(value).map_err(|_| ServiceFailure {
-        stage: ServiceFailureStage::Request,
-        category: ServiceFailureCategory::Integrity,
-    })
+pub(super) fn create_save_request_id() -> Result<RequestId, ServiceFailure> {
+    mint_request_id("engine-save")
 }
 
 pub(super) fn create_message_request_id() -> Result<RequestId, ServiceFailure> {
-    let process_id = u64::from(std::process::id());
-    let millis = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| ServiceFailure {
-                stage: ServiceFailureStage::Request,
-                category: ServiceFailureCategory::Integrity,
-            })?
-            .as_millis(),
-    )
-    .map_err(|_| ServiceFailure {
-        stage: ServiceFailureStage::Request,
-        category: ServiceFailureCategory::Integrity,
-    })?;
-    let counter = MESSAGE_COUNTER
-        .fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| current.checked_add(1),
-        )
-        .map_err(|_| ServiceFailure {
-            stage: ServiceFailureStage::Request,
-            category: ServiceFailureCategory::Integrity,
-        })?;
-    let value = format!("native-message-{process_id}-{millis}-{counter}");
-    RequestId::parse(value).map_err(|_| ServiceFailure {
-        stage: ServiceFailureStage::Request,
-        category: ServiceFailureCategory::Integrity,
-    })
+    mint_request_id("native-message")
 }
 
 pub(super) fn submission_blocked_failure(blocked: SubmissionBlocked) -> Option<ServiceFailure> {
