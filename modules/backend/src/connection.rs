@@ -272,15 +272,15 @@ pub enum RequestStageError {
 }
 
 /// Returns whether a request-stage failure is the native client's known idle
-/// disconnect.
+/// disconnect, which the listener ends silently.
 ///
 /// `RequestStageError::Accept` is produced while waiting for the next
 /// bidirectional request stream, after the preceding request or delivery
 /// stage has returned. The exact application close code and reason are then
 /// required to identify the two close forms emitted by
 /// `transport::client_session`; every other connection error, including an
-/// arbitrary application close, remains terminal. Errors from a request,
-/// response, delivery, lifecycle, or mutation stage never qualify.
+/// arbitrary application close, is reported as a connection failure. Errors
+/// from request, response, delivery, lifecycle, or mutation stages never qualify.
 pub(crate) fn is_orderly_peer_disconnect(source: &DeadlineError<RequestStageError>) -> bool {
     let DeadlineError::Peer {
         operation: OperationKind::Receive,
