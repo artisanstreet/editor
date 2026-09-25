@@ -4,6 +4,7 @@ members = [
     "scripts/screen_demo",
     "modules/assets",
     "modules/backend",
+    "modules/build_info",
     "modules/catalog",
     "modules/cli",
     "modules/database",
