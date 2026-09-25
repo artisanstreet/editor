@@ -156,8 +156,18 @@ impl ClaudeSettings {
 
     /// Builds the first stdio user-message line for one session.
     ///
-    /// Mirrors `ToUserMessage` in `cli-engine.ts` (text-only; image parts are
-    /// a later packet).
+    /// Includes text and native image content in the same user message.
+    pub(crate) fn user_message_payload(
+        session: &ClaudeSession,
+        prompt: &artisan_domain::QueueMessagePayload,
+    ) -> String {
+        super::protocol::user_message_with_images(
+            session.session_id(),
+            prompt.text().map(|text| text.as_str()),
+            prompt.attachments(),
+        )
+    }
+
     pub(crate) fn user_message_line(session: &ClaudeSession, text: &str) -> String {
         user_message_line(session.session_id(), text)
     }

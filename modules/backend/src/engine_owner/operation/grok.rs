@@ -320,21 +320,34 @@ pub(super) async fn execute_grok_turn(
         .text()
         .map(|text| text.as_str().to_owned())
         .unwrap_or_default();
-    let content =
-        match acp_core::build_prompt_content(definition.image_mode, &prompt_text, &[], None) {
-            Ok(content) => content,
-            Err(error) => {
-                let _ = transport.shutdown_writer().await;
-                drop(transport);
-                return finish_grok_turn(
-                    child,
-                    Err(map_grok_acp_error(error)),
-                    respond,
-                    runtime.limits.close,
-                )
-                .await;
-            }
-        };
+    let mut prompt_parts = vec![acp_core::PromptPart::Text(prompt_text.clone())];
+    for (index, image) in input.prompt.attachments().iter().enumerate() {
+        prompt_parts.push(acp_core::PromptPart::Image(acp_core::ImageBlock {
+            id: format!("attachment-{index}"),
+            name: image.name().to_owned(),
+            media_type: image.mime_type_str().to_owned(),
+            bytes: image.bytes().to_vec(),
+        }));
+    }
+    let content = match acp_core::build_prompt_content(
+        definition.image_mode,
+        &prompt_text,
+        &prompt_parts,
+        None,
+    ) {
+        Ok(content) => content,
+        Err(error) => {
+            let _ = transport.shutdown_writer().await;
+            drop(transport);
+            return finish_grok_turn(
+                child,
+                Err(map_grok_acp_error(error)),
+                respond,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    };
     let prompt_id = match transport.prompt(&session, content).await {
         Ok(prompt_id) => prompt_id,
         Err(error) => {

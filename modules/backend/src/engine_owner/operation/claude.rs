@@ -152,13 +152,9 @@ pub(super) async fn execute_claude_turn(
     // First user message ----------------------------------------------------
     // The prompt travels as the first stdin line; there is no `turn/start`
     // RPC on this transport.
-    if let Some(prompt_text) = request
-        .input
-        .prompt
-        .text()
-        .map(|text| text.as_str().to_owned())
     {
-        let line = claude_runtime::ClaudeSettings::user_message_line(&session, &prompt_text);
+        let line =
+            claude_runtime::ClaudeSettings::user_message_payload(&session, &request.input.prompt);
         if claude_runtime::write_line(&mut parts.lifeline, &line)
             .await
             .is_err()

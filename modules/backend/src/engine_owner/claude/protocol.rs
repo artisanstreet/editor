@@ -44,9 +44,29 @@ pub(crate) enum ClaudeTurnError {
 /// messages into the live turn on its own timing, so Artisan documents the
 /// verb as experimental and never promises mid-turn interruption semantics.
 pub(crate) fn user_message_line(session_id: &str, text: &str) -> String {
+    user_message_with_images(session_id, Some(text), &[])
+}
+
+pub(crate) fn user_message_with_images(
+    session_id: &str,
+    text: Option<&str>,
+    images: &[artisan_domain::ImageAttachment],
+) -> String {
+    use base64::Engine as _;
+    let mut content = Vec::new();
+    if let Some(text) = text {
+        content.push(serde_json::json!({"type":"text", "text":text}));
+    }
+    for image in images {
+        content.push(serde_json::json!({"type":"image", "source":{
+            "type":"base64", "media_type":image.mime_type_str(),
+            "data":base64::engine::general_purpose::STANDARD.encode(image.bytes())
+        }}));
+    }
+
     serde_json::json!({
         "message": {
-            "content": [{ "text": text, "type": "text" }],
+            "content": content,
             "role": "user",
         },
         "parent_tool_use_id": null,
@@ -829,4 +849,29 @@ pub(crate) fn parse_claude_assistant_usage(
             Some(sample)
         },
     )
+}
+
+#[cfg(test)]
+mod image_input_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    #[test]
+    fn image_only_user_message_preserves_native_content_and_bytes() {
+        let bytes = vec![0, 127, 128, 255];
+        let image =
+            artisan_domain::ImageAttachment::new("image/png", bytes.clone(), "pasted.png").unwrap();
+        let line = user_message_with_images("session-images", None, &[image]);
+        let wire: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let content = wire["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(content[0]["source"]["data"].as_str().unwrap())
+                .unwrap(),
+            bytes
+        );
+    }
 }
