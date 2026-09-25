@@ -73,6 +73,9 @@ mod tests;
 
 // Re-exports keep the public surface identical to the pre-split module.
 pub use render::{notification_gap_notice, telemetry_choice_caption};
+
+#[cfg(test)]
+use render::about_rows;
 pub use screen::{
     SettingsEngineCatalogState, SettingsEngineModel, SettingsEngineNavEntry,
     SettingsEngineRegistryState, SettingsEngineSnapshot, SettingsScreenEvent, resolve_engine_label,

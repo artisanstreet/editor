@@ -252,6 +252,17 @@ impl BuildIdentity {
             Self::Unstaged(build) => Some(format!("Unstaged {} build", build.profile)),
         }
     }
+
+    /// In-app badge beside the wordmark: the title marker of installed
+    /// non-stable builds. Unstaged binaries are marked only in the OS window
+    /// title, so test and fixture renders keep the product's own chrome.
+    #[must_use]
+    pub fn badge(&self) -> Option<String> {
+        match self {
+            Self::Installed(_) => self.title_marker(),
+            Self::Unstaged(_) => None,
+        }
+    }
 }
 
 impl fmt::Display for BuildIdentity {

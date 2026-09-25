@@ -38,7 +38,8 @@ fn section_hrefs_match_legacy_settings_routes() {
     );
     assert_eq!(SettingsSection::Privacy.href(), "/settings/privacy");
     assert_eq!(SettingsSection::Threads.href(), "/settings/threads");
-    assert_eq!(SettingsSection::ALL.len(), 6);
+    assert_eq!(SettingsSection::About.href(), "/settings/about");
+    assert_eq!(SettingsSection::ALL.len(), 7);
 }
 
 #[test]
@@ -101,6 +102,7 @@ fn section_anchors_match_legacy_nav() {
         hashes(SettingsSection::Privacy),
         ["telemetry", "never-collected"]
     );
+    assert_eq!(hashes(SettingsSection::About), ["build"]);
 }
 
 #[test]
@@ -133,10 +135,10 @@ fn fixture_policies_resolve_through_existing_helpers() {
 
 #[test]
 fn primitive_recipes_resolve_for_fixture_theme() {
-    assert_eq!(nav_tab_specs().len(), 6);
+    assert_eq!(nav_tab_specs().len(), 7);
     assert_eq!(nav_tab_specs()[0].label(), "Models");
     // Legacy sticky-nav order (nav.svelte): Models, Threads,
-    // Appearance, Notifications, Privacy, Engines group last.
+    // Appearance, Notifications, Privacy, then About, Engines group last.
     let specs = nav_tab_specs();
     let labels: Vec<&str> = specs.iter().map(TabSpec::label).collect();
     assert_eq!(
@@ -147,6 +149,7 @@ fn primitive_recipes_resolve_for_fixture_theme() {
             "Appearance",
             "Notifications",
             "Privacy",
+            "About",
             "Engines"
         ]
     );
@@ -195,6 +198,10 @@ mod settings_screen_tests {
             settings_section_for_route(SettingsRoute::Threads),
             SettingsSection::Threads
         );
+        assert_eq!(
+            settings_section_for_route(SettingsRoute::About),
+            SettingsSection::About
+        );
     }
 
     #[test]
@@ -206,6 +213,7 @@ mod settings_screen_tests {
             SettingsRoute::Notifications,
             SettingsRoute::Privacy,
             SettingsRoute::Threads,
+            SettingsRoute::About,
         ] {
             assert_eq!(
                 settings_screen_selector(route),
@@ -381,5 +389,53 @@ mod settings_screen_tests {
         assert!(signin.installation_state().contains("unverified"));
         assert!(!signin.installation_state().contains("Installed"));
         assert!(signin.account_state().contains("No account"));
+    }
+}
+
+mod about_tests {
+    use std::path::Path;
+
+    use artisan_build_info::{BuildIdentity, BuildInfo, Channel, FORMAT_VERSION, UnstagedBuild};
+
+    use super::about_rows;
+
+    fn labels(rows: &[(&'static str, String)]) -> Vec<&'static str> {
+        rows.iter().map(|(label, _)| *label).collect()
+    }
+
+    #[test]
+    fn installed_builds_show_their_recorded_identity() {
+        let identity = BuildIdentity::Installed(BuildInfo {
+            format_version: FORMAT_VERSION,
+            version: "0.4.0-dev.12+g1a2b3c4d5e.dirty".to_owned(),
+            channel: Channel::Dev,
+            commit: Some("1a2b3c4d5e6f".to_owned()),
+            dirty: true,
+            profile: "dev".to_owned(),
+            target: "x86_64-pc-windows-msvc".to_owned(),
+            built_at: None,
+        });
+        let rows = about_rows(&identity, Some(Path::new("/root/versions/v/bin/editor")));
+        assert_eq!(
+            labels(&rows),
+            [
+                "Version",
+                "Channel",
+                "Commit",
+                "Profile",
+                "Target",
+                "Executable"
+            ]
+        );
+        assert_eq!(rows[1].1, "Dev");
+        assert_eq!(rows[2].1, "1a2b3c4d5e6f (with uncommitted changes)");
+    }
+
+    #[test]
+    fn unstaged_builds_say_so_instead_of_inventing_a_commit() {
+        let identity = BuildIdentity::Unstaged(UnstagedBuild::this_binary());
+        let rows = about_rows(&identity, None);
+        assert_eq!(labels(&rows), ["Version", "Channel", "Profile", "Target"]);
+        assert_eq!(rows[1].1, "Unstaged");
     }
 }

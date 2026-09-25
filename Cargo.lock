@@ -603,6 +603,7 @@ name = "artisan-frontend"
 version = "0.0.0"
 dependencies = [
  "artisan-assets",
+ "artisan-build-info",
  "artisan-catalog",
  "artisan-domain",
  "artisan-editor-cli",

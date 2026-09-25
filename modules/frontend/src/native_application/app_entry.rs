@@ -78,6 +78,17 @@ fn report_renderer(window: &mut Window) {
 #[cfg(not(target_os = "windows"))]
 fn report_renderer(_window: &mut Window) {}
 
+/// OS window title: product, selected host, and — for every build that is
+/// not a stable release — the channel and commit, so the taskbar and window
+/// switcher can never show a dev or unstaged build as the real app.
+fn window_title() -> String {
+    let host = crate::native_hosts::label(crate::native_hosts::selected_home().as_deref());
+    match artisan_build_info::BuildIdentity::current().title_marker() {
+        Some(marker) => format!("{WINDOW_TITLE} — {host} — {marker}"),
+        None => format!("{WINDOW_TITLE} — {host}"),
+    }
+}
+
 /// Launches the real native application window.
 #[must_use]
 pub fn run() -> ExitCode {
@@ -125,15 +136,7 @@ pub fn run() -> ExitCode {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some(
-                            format!(
-                                "{WINDOW_TITLE} — {}",
-                                crate::native_hosts::label(
-                                    crate::native_hosts::selected_home().as_deref()
-                                )
-                            )
-                            .into(),
-                        ),
+                        title: Some(window_title().into()),
                         // CE keeps native resizing; desktop_shell supplies caption hit areas.
                         appears_transparent: true,
                         ..Default::default()

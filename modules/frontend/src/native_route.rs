@@ -62,6 +62,8 @@ pub enum SettingsRoute {
     Privacy,
     /// `/settings/threads`.
     Threads,
+    /// `/settings/about`.
+    About,
 }
 
 impl NativeRoute {
@@ -95,6 +97,7 @@ impl SettingsRoute {
             Self::Notifications => "notifications",
             Self::Privacy => "privacy",
             Self::Threads => "threads",
+            Self::About => "about",
         }
     }
 }
@@ -220,6 +223,7 @@ mod tests {
             SettingsRoute::Notifications,
             SettingsRoute::Privacy,
             SettingsRoute::Threads,
+            SettingsRoute::About,
         ] {
             history.navigate(NativeRoute::Settings {
                 section,
@@ -246,6 +250,7 @@ mod tests {
         assert_eq!(SettingsRoute::Notifications.as_str(), "notifications");
         assert_eq!(SettingsRoute::Privacy.as_str(), "privacy");
         assert_eq!(SettingsRoute::Threads.as_str(), "threads");
+        assert_eq!(SettingsRoute::About.as_str(), "about");
         assert_eq!(SettingsRoute::default(), SettingsRoute::Models);
     }
 }

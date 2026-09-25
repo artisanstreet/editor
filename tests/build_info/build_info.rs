@@ -144,6 +144,12 @@ fn only_stable_builds_omit_the_title_marker() {
 
     let nightly = BuildIdentity::Installed(info(Channel::Nightly, None, false));
     assert_eq!(nightly.title_marker().as_deref(), Some("Nightly"));
+    assert_eq!(nightly.badge().as_deref(), Some("Nightly"));
+    assert_eq!(stable.badge(), None);
+    assert_eq!(
+        BuildIdentity::Unstaged(artisan_build_info::UnstagedBuild::this_binary()).badge(),
+        None
+    );
 }
 
 #[test]
