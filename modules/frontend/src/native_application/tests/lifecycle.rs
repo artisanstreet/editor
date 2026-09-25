@@ -1,4 +1,5 @@
 use super::*;
+use crate::composer_queue_state::ComposerQueueIdentity;
 
 #[gpui::test]
 fn ready_mounts_the_exact_returned_project_and_thread_and_requests_its_snapshot(
@@ -515,7 +516,7 @@ fn terminal_switch_refusal_preserves_old_host_and_disables_picker(cx: &mut TestA
             application.selected_thread = Some(source.clone());
             application.conversation_host = Some(source_host.clone());
             application.state = NativeViewState::Ready;
-            let (body, token) = application
+            let (_, token) = application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.set_disabled(false, composer_cx);
@@ -526,9 +527,6 @@ fn terminal_switch_refusal_preserves_old_host_and_disables_picker(cx: &mut TestA
             application.message_flight = Some(NativeMessageFlight {
                 thread_id: source.clone(),
                 request_id: request("message-stopped"),
-                payload: body,
-                steer_target: None,
-                engine_label: None,
                 token,
             });
             let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);
@@ -637,6 +635,22 @@ fn window_titles_name_the_host_and_mark_non_stable_builds() {
     assert!(title.contains("Unstaged"), "{title}");
 }
 
+fn seed_queued_row(application: &mut NativeApplication, thread: &ThreadId) {
+    application
+        .composer_queue
+        .state
+        .apply_outbox(&message_outbox(
+            thread,
+            vec![queued_summary(
+                thread,
+                "message-q",
+                artisan_domain::QueuedMessageState::Queued,
+            )],
+            Vec::new(),
+        ))
+        .expect("queued outbox");
+}
+
 #[gpui::test]
 fn terminal_service_failure_clears_transient_state_keeps_draft_and_transcript(
     cx: &mut TestAppContext,
@@ -661,7 +675,7 @@ fn terminal_service_failure_clears_transient_state_keeps_draft_and_transcript(
                 artisan_protocol::RunLiveStatus::Running,
                 artisan_domain::EngineId::Codex,
             );
-            seed_refresh_in_flight(application, &old_thread);
+            seed_queued_row(application, &old_thread);
             application.sync_composer_controls(application_cx);
             assert!(
                 application
@@ -671,7 +685,7 @@ fn terminal_service_failure_clears_transient_state_keeps_draft_and_transcript(
                     .run_active,
                 "stop control owns the observed run before the failure"
             );
-            assert!(application.composer_queue.state.queue_refresh_in_flight());
+            assert_eq!(application.composer_queue.state.entries().len(), 1);
 
             application.handle_service_event(
                 NativeTransportEvent::Failed(message_failure()),
@@ -682,7 +696,11 @@ fn terminal_service_failure_clears_transient_state_keeps_draft_and_transcript(
                 application.composer_queue.state.status(),
                 crate::composer_queue_state::QueueStatus::TransportFailed
             );
-            assert!(!application.composer_queue.state.queue_refresh_in_flight());
+            assert_eq!(
+                application.composer_queue.state.entries().len(),
+                1,
+                "the Forge's last outbox survives service death"
+            );
             assert!(
                 !application
                     .composer_controls
@@ -727,7 +745,7 @@ fn service_stopped_clears_stale_run_and_refresh_keeps_draft(cx: &mut TestAppCont
                 artisan_protocol::RunLiveStatus::Running,
                 artisan_domain::EngineId::Codex,
             );
-            seed_refresh_in_flight(application, &old_thread);
+            seed_queued_row(application, &old_thread);
             application.sync_composer_controls(application_cx);
             assert!(
                 application
@@ -744,7 +762,11 @@ fn service_stopped_clears_stale_run_and_refresh_keeps_draft(cx: &mut TestAppCont
                 application.composer_queue.state.status(),
                 crate::composer_queue_state::QueueStatus::TransportFailed
             );
-            assert!(!application.composer_queue.state.queue_refresh_in_flight());
+            assert_eq!(
+                application.composer_queue.state.entries().len(),
+                1,
+                "the Forge's last outbox survives service death"
+            );
             assert!(
                 !application
                     .composer_controls
@@ -763,63 +785,31 @@ fn service_stopped_clears_stale_run_and_refresh_keeps_draft(cx: &mut TestAppCont
     });
 }
 
-#[gpui::test]
-fn failed_recovery_creates_same_project_task_without_autosend(cx: &mut TestAppContext) {
-    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
-    let (sink, commands) = command_sink([]);
-    let project_id = ProjectId::parse("forge-p1").expect("project");
-    let old_thread = ThreadId::parse("forge-t1").expect("old thread");
-    cx.update(|app| {
-        view.update(app, |application, application_cx| {
-            application.selected_project = Some(project_id.clone());
-            install_ready_message_surface(
-                application,
-                application_cx,
-                old_thread.clone(),
-                "",
-                sink,
-            );
-            application
-                .composer
-                .update(application_cx, |composer, composer_cx| {
-                    composer.switch_thread(old_thread.as_str(), true, composer_cx);
-                });
-            seed_failed_entry(application, &old_thread, 5);
-            application.sync_composer_controls(application_cx);
-            application.begin_failed_prompt_recovery("queue-1", 5, application_cx);
+fn recovery_identity(command_id: &str, generation: u64) -> ComposerQueueIdentity {
+    ComposerQueueIdentity::new(command_id, generation)
+}
 
-            let recorded = commands.borrow();
-            assert_eq!(recorded.len(), 1);
-            assert!(
-                matches!(
-                    recorded[0],
-                    NativeTransportCommand::CreateTask(ref created) if created == &project_id
-                ),
-                "recovery creates the same project task and nothing else"
-            );
-            let pending = application
-                .pending_failed_recovery
-                .as_ref()
-                .expect("pending recovery");
-            assert_eq!(pending.old_thread, old_thread);
-            assert_eq!(
-                pending.message_id,
-                artisan_domain::MessageId::parse("message-1").expect("message")
-            );
-            assert!(pending.new_thread.is_none());
-            assert!(!pending.recalled);
-        });
-    });
+fn recover_commands(
+    commands: &[NativeTransportCommand],
+) -> Vec<(&ProjectId, &artisan_domain::RecoverFailedMessage)> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            NativeTransportCommand::RecoverFailedMessage {
+                project_id,
+                command,
+            } => Some((project_id, command.as_ref())),
+            _ => None,
+        })
+        .collect()
 }
 
 #[gpui::test]
-fn failed_recovery_full_chain_restores_prompt_model_and_project_unsent(cx: &mut TestAppContext) {
-    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+fn failed_recovery_is_one_forge_command_without_autosend(cx: &mut TestAppContext) {
+    let (view, _) = cx.add_window_view(test_application);
     let (sink, commands) = command_sink([]);
     let project_id = ProjectId::parse("forge-p1").expect("project");
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
-    let new_thread = ThreadId::parse("forge-t2").expect("new thread");
-    let policy = failed_policy();
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             application.selected_project = Some(project_id.clone());
@@ -830,103 +820,37 @@ fn failed_recovery_full_chain_restores_prompt_model_and_project_unsent(cx: &mut 
                 "",
                 sink,
             );
-            application
-                .composer
-                .update(application_cx, |composer, composer_cx| {
-                    composer.switch_thread(old_thread.as_str(), true, composer_cx);
-                });
-            application.composer_model_choice = Some((Some(old_thread.clone()), policy.clone()));
             seed_failed_entry(application, &old_thread, 5);
             application.sync_composer_controls(application_cx);
-            application.begin_failed_prompt_recovery("queue-1", 5, application_cx);
-            assert!(
-                application.pending_failed_recovery.is_some(),
-                "recovery arms before intake resolves"
-            );
-
-            let projects =
-                ProjectListing::new(vec![project("forge-p1", "First")]).expect("projects");
-            let threads = ThreadListing::new(vec![
-                thread("forge-t1", "forge-p1", "Old"),
-                thread("forge-t2", "forge-p1", "New"),
-            ])
-            .expect("threads");
-            application.handle_intake_progress(
-                NativeProjectIntakeStage::RefreshingThreads,
-                application_cx,
-            );
-            application.handle_intake_ready(
-                &projects,
-                project_id.clone(),
-                &threads,
-                new_thread.clone(),
-                application_cx,
-            );
-            let pending = application
-                .pending_failed_recovery
-                .as_ref()
-                .expect("pending survives intake");
-            assert_eq!(pending.new_thread.as_ref(), Some(&new_thread));
-            assert!(!pending.recalled, "source stop must precede recall");
-            assert_eq!(application.selected_thread.as_ref(), Some(&old_thread));
-            super::projects::finish_project_transition(application, application_cx);
-            let pending = application
-                .pending_failed_recovery
-                .as_ref()
-                .expect("pending survives intake");
-            assert_eq!(pending.new_thread.as_ref(), Some(&new_thread));
-            assert!(pending.recalled, "mount recalls the exact failed payload");
-            assert_eq!(
-                application.composer_model_choice,
-                Some((Some(new_thread.clone()), policy.clone())),
-                "the old thread policy seeds the new thread"
-            );
-            assert!(
-                matches!(application.state, NativeViewState::Ready),
-                "the real snapshot event readies the new thread before restore"
-            );
+            application
+                .begin_failed_prompt_recovery(&recovery_identity("queue-1", 5), application_cx);
 
             let recorded = commands.borrow();
-            assert!(
-                recorded.iter().any(|command| matches!(
-                    command,
-                    NativeTransportCommand::ComposerState(
-                        crate::native_transport_service::ComposerStateCommand::ReadRecalledMessage {
-                            ..
-                        }
-                    )
-                )),
-                "recovery recalls the exact failed payload, never sends"
+            assert_eq!(recorded.len(), 1, "recovery is exactly one Forge command");
+            let recovered = recover_commands(&recorded);
+            let (recovered_project, command) = recovered[0];
+            assert_eq!(recovered_project, &project_id);
+            assert_eq!(
+                command.target,
+                artisan_domain::FailedMessageTarget {
+                    thread_id: old_thread.clone(),
+                    message_id: artisan_domain::MessageId::parse("message-1").expect("message"),
+                    original_request_id: request("queue-1"),
+                }
             );
+            assert!(command.request_id.as_str().starts_with("native-recover-"));
             assert!(
-                !recorded
-                    .iter()
-                    .any(|command| matches!(command, NativeTransportCommand::QueueMessage(_))),
-                "nothing is autosent during recovery"
+                application.intake_opens_forge_draft,
+                "the new thread opens on the draft the Forge stored"
             );
-
-            let payload = artisan_domain::QueueMessagePayload::text_only("hello").expect("payload");
-            assert!(
-                application
-                    .accept_failed_recovery_result(&recovery_result(Some(payload)), application_cx),
-                "the armed result is consumed"
-            );
-            assert!(application.pending_failed_recovery.is_none());
-            assert_eq!(application.composer.read(application_cx).draft(), "hello");
-            assert!(
-                !commands
-                    .borrow()
-                    .iter()
-                    .any(|command| matches!(command, NativeTransportCommand::QueueMessage(_))),
-                "restore never sends"
-            );
+            assert!(matches!(application.state, NativeViewState::Loading));
         });
     });
 }
 
 #[gpui::test]
 fn failed_recovery_event_routes_through_controls_subscription(cx: &mut TestAppContext) {
-    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (view, _) = cx.add_window_view(test_application);
     let (sink, commands) = command_sink([]);
     let project_id = ProjectId::parse("forge-p1").expect("project");
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
@@ -940,11 +864,6 @@ fn failed_recovery_event_routes_through_controls_subscription(cx: &mut TestAppCo
                 "",
                 sink,
             );
-            application
-                .composer
-                .update(application_cx, |composer, composer_cx| {
-                    composer.switch_thread(old_thread.as_str(), true, composer_cx);
-                });
             seed_failed_entry(application, &old_thread, 5);
             application.sync_composer_controls(application_cx);
             application
@@ -959,53 +878,14 @@ fn failed_recovery_event_routes_through_controls_subscription(cx: &mut TestAppCo
                 });
         });
     });
-    cx.update(|app| {
-        view.update(app, |application, _| {
-            let recorded = commands.borrow();
-            assert_eq!(recorded.len(), 1);
-            assert!(
-                matches!(
-                    recorded[0],
-                    NativeTransportCommand::CreateTask(ref created) if created == &project_id
-                ),
-                "the subscription routes the failed event into same-project creation"
-            );
-            assert!(
-                application.pending_failed_recovery.is_some(),
-                "the routed event arms the exact failed recovery"
-            );
-            assert!(
-                !recorded
-                    .iter()
-                    .any(|command| matches!(command, NativeTransportCommand::QueueMessage(_))),
-                "routing never sends"
-            );
-        });
-    });
+    let recorded = commands.borrow();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recover_commands(&recorded).len(), 1);
 }
 
 #[gpui::test]
 fn failed_recovery_unknown_identity_is_a_noop(cx: &mut TestAppContext) {
-    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
-    let (sink, commands) = command_sink([]);
-    let old_thread = ThreadId::parse("forge-t1").expect("old thread");
-    cx.update(|app| {
-        view.update(app, |application, application_cx| {
-            application.test_command_sink = Some(sink);
-            application.selected_project = Some(ProjectId::parse("forge-p1").expect("project"));
-            application.selected_thread = Some(old_thread.clone());
-            seed_failed_entry(application, &old_thread, 5);
-            application.begin_failed_prompt_recovery("queue-unknown", 5, application_cx);
-            application.begin_failed_prompt_recovery("queue-1", 6, application_cx);
-            assert!(application.pending_failed_recovery.is_none());
-            assert!(commands.borrow().is_empty());
-        });
-    });
-}
-
-#[gpui::test]
-fn failed_recovery_busy_composer_refuses_with_notice(cx: &mut TestAppContext) {
-    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (view, _) = cx.add_window_view(test_application);
     let (sink, commands) = command_sink([]);
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
     cx.update(|app| {
@@ -1018,181 +898,86 @@ fn failed_recovery_busy_composer_refuses_with_notice(cx: &mut TestAppContext) {
                 "",
                 sink,
             );
+            seed_failed_entry(application, &old_thread, 5);
+            application.begin_failed_prompt_recovery(
+                &recovery_identity("queue-unknown", 5),
+                application_cx,
+            );
+            application
+                .begin_failed_prompt_recovery(&recovery_identity("queue-1", 6), application_cx);
+            assert!(!application.intake_opens_forge_draft);
+        });
+    });
+    assert!(commands.borrow().is_empty());
+}
+
+#[gpui::test]
+fn recovered_thread_opens_on_its_forge_draft_not_the_old_composer(cx: &mut TestAppContext) {
+    let (view, _) = cx.add_window_view(test_application);
+    let (sink, commands) = command_sink([]);
+    let project_id = ProjectId::parse("forge-p1").expect("project");
+    let old_thread = ThreadId::parse("forge-t1").expect("old thread");
+    let new_thread = ThreadId::parse("forge-t2").expect("new thread");
+    cx.update(|app| {
+        view.update(app, |application, application_cx| {
+            application.selected_project = Some(project_id.clone());
+            install_ready_message_surface(
+                application,
+                application_cx,
+                old_thread.clone(),
+                "",
+                sink,
+            );
             application
                 .composer
                 .update(application_cx, |composer, composer_cx| {
                     composer.switch_thread(old_thread.as_str(), true, composer_cx);
-                    composer.set_draft("already typing");
+                    composer.set_draft("kept on the old thread");
                 });
             seed_failed_entry(application, &old_thread, 5);
-            application.begin_failed_prompt_recovery("queue-1", 5, application_cx);
-            assert!(application.pending_failed_recovery.is_none());
-            assert!(application.message_failure.is_some());
-            assert!(commands.borrow().is_empty());
-            assert_eq!(
-                application.composer.read(application_cx).draft(),
-                "already typing"
-            );
-        });
-    });
-}
-
-#[gpui::test]
-fn failed_recovery_accept_into_typed_composer_keeps_text(cx: &mut TestAppContext) {
-    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
-    let (_sink, commands) = command_sink([]);
-    let old_thread = ThreadId::parse("forge-t1").expect("old thread");
-    let new_thread = ThreadId::parse("forge-t2").expect("new thread");
-    cx.update(|app| {
-        view.update(app, |application, application_cx| {
-            application.selected_thread = Some(new_thread.clone());
-            application.pending_failed_recovery = Some(PendingFailedRecovery {
-                old_thread: old_thread.clone(),
-                message_id: artisan_domain::MessageId::parse("message-1").expect("message"),
-                original_request_id: request("queue-1"),
-                policy: None,
-                new_thread: Some(new_thread.clone()),
-                recalled: true,
-            });
             application
-                .composer
-                .update(application_cx, |composer, composer_cx| {
-                    composer.switch_thread(new_thread.as_str(), true, composer_cx);
-                    composer.set_draft("typed during the race");
-                });
-            let payload = artisan_domain::QueueMessagePayload::text_only("hello").expect("payload");
-            assert!(
-                application
-                    .accept_failed_recovery_result(&recovery_result(Some(payload)), application_cx),
-                "the armed result is consumed"
-            );
-            assert!(application.pending_failed_recovery.is_none());
-            assert_eq!(
-                application.composer.read(application_cx).draft(),
-                "typed during the race",
-                "already-typed input is never overwritten"
-            );
-            assert!(application.message_failure.is_some());
-            assert!(
-                !commands
-                    .borrow()
-                    .iter()
-                    .any(|command| matches!(command, NativeTransportCommand::QueueMessage(_))),
-                "refusal never sends"
-            );
-        });
-    });
-}
+                .begin_failed_prompt_recovery(&recovery_identity("queue-1", 5), application_cx);
 
-#[gpui::test]
-fn failed_recovery_delayed_read_to_another_thread_drops_quietly(cx: &mut TestAppContext) {
-    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
-    let (_sink, _commands) = command_sink([]);
-    let old_thread = ThreadId::parse("forge-t1").expect("old thread");
-    cx.update(|app| {
-        view.update(app, |application, application_cx| {
-            application.selected_thread = Some(ThreadId::parse("forge-t3").expect("other thread"));
-            application.pending_failed_recovery = Some(PendingFailedRecovery {
-                old_thread: old_thread.clone(),
-                message_id: artisan_domain::MessageId::parse("message-1").expect("message"),
-                original_request_id: request("queue-1"),
-                policy: None,
-                new_thread: Some(ThreadId::parse("forge-t2").expect("new thread")),
-                recalled: true,
-            });
-            let payload = artisan_domain::QueueMessagePayload::text_only("hello").expect("payload");
-            assert!(
-                application
-                    .accept_failed_recovery_result(&recovery_result(Some(payload)), application_cx),
-                "the mismatched destination consumes the stale read"
-            );
-            assert!(application.pending_failed_recovery.is_none());
-            assert!(application.message_failure.is_none());
-        });
-    });
-}
-
-#[gpui::test]
-fn failed_recovery_navigation_cancels_pending(cx: &mut TestAppContext) {
-    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
-    let (_sink, _commands) = command_sink([]);
-    cx.update(|app| {
-        view.update(app, |application, application_cx| {
-            application.pending_failed_recovery = Some(PendingFailedRecovery {
-                old_thread: ThreadId::parse("forge-t1").expect("old thread"),
-                message_id: artisan_domain::MessageId::parse("message-1").expect("message"),
-                original_request_id: request("queue-1"),
-                policy: None,
-                new_thread: None,
-                recalled: false,
-            });
-            application.selected_thread = Some(ThreadId::parse("forge-t1").expect("old thread"));
-            application.begin_thread_transition(
-                Some(ThreadId::parse("forge-t3").expect("other thread")),
-                ThreadId::parse("forge-t1").expect("old thread"),
-                false,
+            let projects =
+                ProjectListing::new(vec![project("forge-p1", "First")]).expect("projects");
+            let threads = ThreadListing::new(vec![
+                thread("forge-t1", "forge-p1", "Old"),
+                thread("forge-t2", "forge-p1", "New"),
+            ])
+            .expect("threads");
+            application.handle_intake_ready(
+                &projects,
+                project_id.clone(),
+                &threads,
+                new_thread.clone(),
                 application_cx,
             );
-            assert!(application.pending_failed_recovery.is_none());
-
-            application.pending_failed_recovery = Some(PendingFailedRecovery {
-                old_thread: ThreadId::parse("forge-t1").expect("old thread"),
-                message_id: artisan_domain::MessageId::parse("message-1").expect("message"),
-                original_request_id: request("queue-1"),
-                policy: None,
-                new_thread: None,
-                recalled: false,
-            });
-            application.prepare_shutdown(application_cx);
-            assert!(application.pending_failed_recovery.is_none());
+            assert!(
+                !application.intake_opens_forge_draft,
+                "the flag is consumed by the intake it armed"
+            );
+            super::projects::finish_project_transition(application, application_cx);
+            assert_eq!(application.selected_thread.as_ref(), Some(&new_thread));
+            assert_ne!(
+                application.composer.read(application_cx).draft(),
+                "kept on the old thread",
+                "the old composer draft is not carried into the recovered thread"
+            );
+            application.reply_forge_draft("hello", application_cx);
+            assert_eq!(application.composer.read(application_cx).draft(), "hello");
         });
     });
+    assert!(
+        commands
+            .borrow()
+            .iter()
+            .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_))),
+        "nothing is autosent during recovery"
+    );
 }
 
 #[gpui::test]
-fn failed_recovery_continue_waits_for_armed_mount(cx: &mut TestAppContext) {
-    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
-    let (sink, commands) = command_sink([]);
-    let old_thread = ThreadId::parse("forge-t1").expect("old thread");
-    let new_thread = ThreadId::parse("forge-t2").expect("new thread");
-    cx.update(|app| {
-        view.update(app, |application, application_cx| {
-            application.test_command_sink = Some(sink);
-            application.selected_thread = Some(new_thread.clone());
-            application.pending_failed_recovery = Some(PendingFailedRecovery {
-                old_thread: old_thread.clone(),
-                message_id: artisan_domain::MessageId::parse("message-1").expect("message"),
-                original_request_id: request("queue-1"),
-                policy: None,
-                new_thread: None,
-                recalled: false,
-            });
-            application.continue_failed_recovery(application_cx);
-            assert!(commands.borrow().is_empty());
-            assert!(
-                application.pending_failed_recovery.is_some(),
-                "unarmed recovery waits"
-            );
-
-            application
-                .pending_failed_recovery
-                .as_mut()
-                .expect("pending")
-                .new_thread = Some(new_thread.clone());
-            application.continue_failed_recovery(application_cx);
-            assert!(commands.borrow().is_empty());
-            assert!(
-                application.pending_failed_recovery.is_some(),
-                "unmounted recovery waits"
-            );
-        });
-    });
-}
-
-#[gpui::test]
-fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(
-    cx: &mut TestAppContext,
-) {
+fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(cx: &mut TestAppContext) {
     let (view, _) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|app| {
@@ -1225,10 +1010,8 @@ fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(
             )])
             .unwrap();
             application.handle_intake_ready(&projects, beta, &threads, destination.clone(), cx);
-            application.handle_service_event(
-                fresh_start_event(&destination, "home-draft-start", 1),
-                cx,
-            );
+            application
+                .handle_service_event(fresh_start_event(&destination, "home-draft-start", 1), cx);
             assert_eq!(application.selected_thread.as_ref(), Some(&destination));
             assert_eq!(application.composer.read(cx).draft(), "Alpha idea");
             assert!(matches!(application.state, NativeViewState::Ready));

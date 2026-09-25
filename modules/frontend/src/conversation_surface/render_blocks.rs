@@ -345,18 +345,17 @@ impl ConversationSurface {
             );
         }
         // transitions-dev rise-and-fade tokens, evaluated against one clock so
-        // replacing the optimistic row with its durable echo never restarts it.
+        // the Forge row handing over to its transcript item never restarts it.
         if !cx.reduce_motion()
             && let Some(entrance) = &self.send_entrance
         {
             let elapsed = entrance.started.elapsed();
             let pending = entrance.target.is_none()
-                && block.id.as_str().starts_with("local-send-")
-                && block.id.as_str()
-                    == format!(
-                        "local-send-{}",
-                        self.pending_messages.len().saturating_sub(1)
-                    );
+                && self
+                    .pending_messages
+                    .iter()
+                    .position(|row| row.message_id == entrance.message_id)
+                    .is_some_and(|index| block.id.as_str() == format!("pending-send-{index}"));
             if elapsed < Duration::from_millis(350)
                 && (pending || entrance.target.as_ref() == Some(&block.id))
             {

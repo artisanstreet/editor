@@ -292,6 +292,9 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::CreateTask(project_id) => {
                         create_task_in_project(runtime, frames, events, project_id).await?;
                     }
+                    NativeTransportCommand::RecoverFailedMessage { project_id, command } => {
+                        project_intake::recover_failed_message(runtime, frames, events, project_id, *command).await?;
+                    }
                     NativeTransportCommand::ComposerState(command) => {
                         composer_state_operations::handle_composer_state_command(runtime, frames, events, command).await?;
                     }

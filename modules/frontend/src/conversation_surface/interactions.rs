@@ -27,23 +27,6 @@ impl ConversationSurface {
         cx.notify();
     }
 
-    pub(crate) fn has_pending_messages(&self) -> bool {
-        !self.pending_messages.is_empty()
-    }
-
-    pub(crate) fn set_pending_messages(
-        &mut self,
-        rows: Vec<(String, String, Vec<artisan_domain::ImageAttachmentRef>)>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.pending_messages != rows {
-            self.pending_messages = rows;
-            cx.notify();
-            return true;
-        }
-        false
-    }
-
     /// Creates a surface with keyboard-focusable transcript and disclosure
     /// handles. The surface starts with the supplied scene and no actions.
     #[must_use]
@@ -233,23 +216,6 @@ impl ConversationSurface {
         );
         self.scroll_handle.scroll_to_bottom();
         cx.notify();
-    }
-
-    pub(crate) fn begin_send_entrance(&mut self, request: String, cx: &mut Context<Self>) {
-        self.send_entrance = (!cx.reduce_motion()).then(|| SendEntrance {
-            started: Instant::now(),
-            request,
-            target: None,
-        });
-        cx.notify();
-    }
-
-    pub(crate) fn bind_send_entrance(&mut self, request: &str, item_id: &str) {
-        if let Some(entrance) = &mut self.send_entrance
-            && entrance.request == request
-        {
-            entrance.target = SceneId::parse(item_id.to_owned()).ok();
-        }
     }
 
     /// Replaces the accepted scene. Disclosure state is not changed locally;

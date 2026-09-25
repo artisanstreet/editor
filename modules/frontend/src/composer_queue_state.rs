@@ -1,10 +1,11 @@
-//! Bounded application state for queued-message lip rows and run usage.
+//! Bounded application state for the Forge message outbox and run usage.
 //!
 //! This module is deliberately independent of GPUI widgets and the transport
-//! service. It owns the identities and fences that make those two surfaces
-//! safe to compose: a queue page is byte-free, a withdrawal remains visible
-//! until Forge confirms it, and a recalled payload is never lost when the
-//! composer changes underneath an in-flight read.
+//! service. The queued and failed rows are exactly the outbox the Forge
+//! pushes over the thread subscription: the Editor keeps no local copy of a
+//! sent message, no retry payload, and no transcript echo matching. It owns
+//! only the identities and fences that keep controls events and withdrawals
+//! exact, plus the run-usage read fence.
 //!
 //! The parent application supplies the current thread and composer
 //! generation. This module never invents either value, never invents queue
@@ -19,16 +20,11 @@ use std::{
 };
 
 use artisan_domain::{
-    AuthoredText, DispatchError, EngineModelId, EngineRouteId, EngineVariantId,
-    FailedMessageListing, FailedMessageSummary, ImageAttachmentRef, MessageId,
-    QueuedMessageListOrder, QueuedMessageListing, QueuedMessageWithdrawalOutcome,
-    QueuedMessageWithdrawalResult, ReadRecalledMessage, RecalledMessageResult, RequestId, RunId,
-    RunUsageReport, RunUsageResult, ThreadId, UnixMillis, WithdrawQueuedMessageCommand,
+    AuthoredText, DispatchError, EngineId, EngineModelId, EngineRouteId, EngineVariantId,
+    FailedMessageSummary, FailedMessageTarget, ImageAttachmentRef, MessageId, MessageOutbox,
+    QueuedMessageState, QueuedMessageWithdrawalOutcome, QueuedMessageWithdrawalResult, RequestId,
+    RunId, RunUsageReport, RunUsageResult, ThreadId, WithdrawQueuedMessageCommand,
 };
-
-use crate::native_composer::ComposerRecallTarget;
-
-// Phase-1 split submodules (see composer_queue_state/).
 
 #[path = "composer_queue_state/types.rs"]
 mod types;

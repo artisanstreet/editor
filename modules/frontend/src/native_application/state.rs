@@ -16,9 +16,7 @@ use crate::native_transport_service::{
     ServiceFailureStage,
 };
 use crate::project_picker::{ProjectOption, ProjectPickerAction};
-use artisan_domain::{
-    MessageId, ProjectId, ProjectListing, QueueMessagePayload, RequestId, ThreadId, ThreadListing,
-};
+use artisan_domain::{ProjectId, ProjectListing, RequestId, ThreadId, ThreadListing};
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -41,41 +39,14 @@ pub(super) enum NativeViewState {
 
 /// Application-owned identity for one admitted message queue.
 ///
-/// The body is intentionally retained here until the application observes a
-/// correlated terminal result. This type owns message text and therefore
-/// implements neither `Debug` nor `Display`.
+/// Only identities: the Forge holds the payload from the moment it accepts
+/// the message, and the composer keeps its own draft until the receipt. The
+/// flight ends at the correlated receipt or failure; the connection hold
+/// that covers it lives beside it on the application.
 pub(super) struct NativeMessageFlight {
     pub(super) thread_id: ThreadId,
     pub(super) request_id: RequestId,
-    pub(super) payload: QueueMessagePayload,
-    /// Observed-run steer target named at send time, preserved verbatim
-    /// for the same-identity retry. `None` is a fresh send.
-    pub(super) steer_target: Option<artisan_domain::SteerTarget>,
-    /// Validated routed engine display label captured at send from the
-    /// authoritative config (never the picker). Preserved verbatim for the
-    /// retry and the Waiting narration; `None` renders the generic fallback.
-    pub(super) engine_label: Option<String>,
     pub(super) token: SubmissionToken,
-}
-
-/// One explicit new-chat recovery over an exact terminally failed dispatch.
-///
-/// The recovery carries only identities until the recalled payload arrives:
-/// the old thread/message/original-request triple that owns the failed
-/// prompt, the exact policy displayed for the old thread, and the created
-/// thread once intake resolves it. The prompt moves to the newly created
-/// thread as an unsent draft through the existing recalled-payload restore;
-/// the old thread keeps its history, the failed row stays terminal, and
-/// nothing is ever autosent. The policy and thread identities own no message
-/// text and are safe to `Debug`.
-#[derive(Clone)]
-pub(super) struct PendingFailedRecovery {
-    pub(super) old_thread: ThreadId,
-    pub(super) message_id: MessageId,
-    pub(super) original_request_id: RequestId,
-    pub(super) policy: Option<crate::native_model_catalog::NativeModelPolicy>,
-    pub(super) new_thread: Option<ThreadId>,
-    pub(super) recalled: bool,
 }
 
 /// Outcome of first-send admission for a thread without a persisted engine
@@ -87,22 +58,6 @@ pub(super) enum FirstSendAdmission {
     /// The send was held for a save, adopted, blocked, or suppressed; the
     /// gate already synced and notified.
     Held,
-}
-
-/// Application-owned identity for one explicitly retryable message
-/// queue. This type owns message text and therefore implements neither
-/// `Debug` nor `Display`.
-pub(super) struct NativeMessageRetry {
-    pub(super) thread_id: ThreadId,
-    pub(super) request_id: RequestId,
-    pub(super) payload: QueueMessagePayload,
-    /// Original steer target from the failed send. A retry replays it
-    /// verbatim and never re-resolves the current live run.
-    pub(super) steer_target: Option<artisan_domain::SteerTarget>,
-    /// Original engine label from the failed send. A retry replays it
-    /// verbatim and never re-resolves a changed picker after the send.
-    pub(super) engine_label: Option<String>,
-    pub(super) draft_matches: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -182,7 +137,7 @@ pub(super) fn scope_free_catalog_snapshot() -> Option<NativeModelCatalog> {
         .ok()
 }
 
-/// Mints a random UUIDv7 request id (see [`RequestId::mint`]); ids stay
+/// Mints a random `UUIDv7` request id (see [`RequestId::mint`]); ids stay
 /// unique across Editor restarts and processes.
 pub(super) fn mint_request_id(label: &str) -> Result<RequestId, ServiceFailure> {
     RequestId::mint(label).map_err(|_| invalid_service_failure())

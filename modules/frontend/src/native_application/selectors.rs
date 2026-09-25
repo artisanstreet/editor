@@ -55,14 +55,6 @@ pub(crate) const NATIVE_RAIL_ADD_PROJECT_SELECTOR: &str = "artisan-native-rail-a
 #[cfg(test)]
 pub(crate) const NATIVE_RAIL_ADD_PROJECT_LABEL: &str = "Add project";
 
-/// Stable selector for the explicit first-message retry action.
-#[cfg(test)]
-pub(crate) const NATIVE_MESSAGE_RETRY_SELECTOR: &str = "artisan-native-message-retry";
-
-/// Visible and accessible name retained by the first-message retry action.
-#[cfg(test)]
-pub(super) const NATIVE_MESSAGE_RETRY_LABEL: &str = "Retry send";
-
 pub(super) const NATIVE_KEY_CONTEXT: &str = "artisan-native-application";
 pub(super) const SURFACE_WIDTH: f32 = 1_024.0;
 pub(super) const SURFACE_HEIGHT: f32 = 720.0;

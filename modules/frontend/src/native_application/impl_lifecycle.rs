@@ -26,7 +26,6 @@ impl NativeApplication {
         let focus_handle = cx.focus_handle();
         #[cfg(test)]
         let add_project_focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
-        let message_retry_focus_handle = cx.focus_handle().tab_index(2).tab_stop(false);
         focus_handle.focus(window, cx);
         let state = if service.is_some() {
             NativeViewState::Loading
@@ -62,25 +61,15 @@ impl NativeApplication {
                         application.begin_new_task(cx);
                     }
                 }
-                NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
-                    command_id,
-                    generation,
-                } => {
-                    application.begin_failed_prompt_recovery(command_id, *generation, cx);
-                }
-                NativeComposerControlsEvent::DismissFailure { failure_id } => {
-                    if application.message_failure.is_some_and(|failure| failure.id == *failure_id) {
+                NativeComposerControlsEvent::DismissFailure { failure_id }
+                    if application.message_failure.is_some_and(|failure| failure.id == *failure_id) => {
                         application.message_failure = None;
                         application.message_failure_note = None;
-                        application.clear_message_retry();
                         application.sync_composer_controls(cx);
                     }
-                }
-                NativeComposerControlsEvent::RetryFailure { failure_id }
-                    if application.message_failure.is_some_and(|failure| failure.id == *failure_id) => {
-                        application.activate_message_retry(cx);
-                        application.sync_composer_controls(cx);
-                    }
+                // Failed sends are retried by the Forge from its stored
+                // payload (the failure card), never from a local copy, so the
+                // banner never offers a retry.
                 _ => {}
             }
         });
@@ -117,8 +106,8 @@ impl NativeApplication {
                     cx,
                 ),
             });
-        let composer_observation = cx.observe(&composer, |application, composer, cx| {
-            application.observe_composer_change(&composer, cx);
+        let composer_observation = cx.observe(&composer, |application, _composer, cx| {
+            application.observe_composer_change(cx);
         });
         let command_menu = cx.new(|menu_cx| {
             NativeCommandMenu::new(
@@ -148,7 +137,6 @@ impl NativeApplication {
             focus_handle,
             #[cfg(test)]
             add_project_focus_handle,
-            message_retry_focus_handle,
             service,
             composer,
             run_controls: composer_run_controls::RunControlsState::default(),
@@ -159,8 +147,6 @@ impl NativeApplication {
             deferred_composer_policy: None,
             last_used_model: crate::native_last_used::load_stored_model(),
             composer_model_run_error: None,
-            pending_account_send: None,
-            pending_failed_recovery: None,
             catalog_controller: NativeCatalogController::new(),
             host_model_catalog: None,
             connection_retry_pending: false,
@@ -205,8 +191,6 @@ impl NativeApplication {
             message_flight: None,
             message_flight_hold: None,
             composer_drafts: super::composer_drafts::ComposerDrafts::default(),
-            optimistic_messages: Vec::new(),
-            message_retry: None,
             message_receipt: None,
             message_failure: None,
             message_failure_note: None,
@@ -256,6 +240,7 @@ impl NativeApplication {
             intake_failure_operation: None,
             intake_retry_available: false,
             intake_restore_state: None,
+            intake_opens_forge_draft: false,
             service_stopped: false,
             shutdown_prepared: false,
             #[cfg(test)]

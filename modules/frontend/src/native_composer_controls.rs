@@ -55,6 +55,11 @@ pub const NATIVE_COMPOSER_FAILURE_SELECTOR: &str = "artisan-native-composer-acti
 /// Stable selector prefix for one failed-dispatch new-chat action.
 pub const NATIVE_COMPOSER_FAILED_NEW_THREAD_SELECTOR: &str =
     "artisan-native-composer-failed-new-thread";
+/// Stable selector prefix for one failed-dispatch Forge retry action.
+pub const NATIVE_COMPOSER_FAILED_RETRY_SELECTOR: &str = "artisan-native-composer-failed-retry";
+
+#[path = "native_composer_controls/failed_dispatches.rs"]
+mod failed_dispatches;
 
 const ROW_SELECTOR_PREFIX: &str = "artisan-native-composer-steering-row";
 const ROW_EDIT_SELECTOR_SUFFIX: &str = "edit";
@@ -127,16 +132,15 @@ impl PendingSteeringRow {
     }
 }
 
-/// One parent-projected terminally failed dispatch.
+/// One parent-projected Forge failure row.
 ///
-/// The identity binds the recovery action to the exact failed message and
-/// the generation that projected it: never to current composer text or a
-/// run id. The reason is the verbatim dispatcher diagnostic. There is no
-/// retry affordance: a terminal failure will never send on this thread, so
-/// the only action is the explicit new chat.
+/// The identity binds the retry and recovery actions to the exact failed
+/// message and the generation that projected it: never to current composer
+/// text or a run id. The reason is the verbatim dispatcher diagnostic, and
+/// `retryable` is the Forge's verdict on re-dispatching its stored payload.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct FailedDispatchRow {
-    /// Exact command/generation identity that fences the new-chat intent.
+    /// Exact command/generation identity that fences both intents.
     pub identity: QueuedSteeringIdentity,
     /// Prompt text of the failed send, empty for image-only failures.
     pub text: String,
@@ -144,6 +148,8 @@ pub struct FailedDispatchRow {
     pub has_attachments: bool,
     /// Verbatim dispatcher diagnostic for the terminal failure.
     pub reason: String,
+    /// Whether the Forge offers a retry of this failure.
+    pub retryable: bool,
 }
 
 impl FailedDispatchRow {
@@ -161,7 +167,15 @@ impl FailedDispatchRow {
             text: text.into(),
             has_attachments,
             reason: reason.into(),
+            retryable: false,
         }
+    }
+
+    /// Offers the Forge retry for this failure.
+    #[must_use]
+    pub const fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
     }
 
     /// Returns the immutable command id.
@@ -241,13 +255,12 @@ pub struct NativeComposerControlsSnapshot {
     pub show_jump_to_latest: bool,
     /// Pending steering rows. Rows leave only when this projection changes.
     pub pending_steering: Vec<PendingSteeringRow>,
-    /// Terminally failed dispatches, newest first. Rows leave only when this
-    /// projection changes. Each row offers the explicit new chat only; a
-    /// terminal failure is never retried on its thread.
+    /// Forge failure rows, newest first. Rows leave only when this
+    /// projection changes. Each row offers the new chat, and a Forge retry
+    /// when the row is retryable.
     pub failed_dispatches: Vec<FailedDispatchRow>,
-    /// Whether the new-chat recovery is currently admissible. The parent
-    /// projects composer emptiness here so a conflicting draft disables the
-    /// action with a clear state instead of stranding either prompt.
+    /// Whether the failure actions are currently admissible (a connected,
+    /// idle Forge command path).
     pub failed_new_chat_ready: bool,
     /// Last actionable failure, if any.
     pub failure: Option<NativeComposerFailure>,
@@ -299,6 +312,14 @@ pub enum NativeComposerControlsEvent {
         /// Generation of the row that was clicked.
         generation: u64,
     },
+    /// Ask the Forge to dispatch one exact failed message again from its
+    /// stored payload.
+    RetryFailedDispatch {
+        /// Original queue command id of the failed row that was clicked.
+        command_id: String,
+        /// Generation of the row that was clicked.
+        generation: u64,
+    },
     /// Ask the transcript owner to scroll to its latest content.
     JumpToLatest,
     /// Recall one exact queued steer into the editor.
@@ -345,7 +366,7 @@ pub struct NativeComposerControls {
     failure_retry_focus: FocusHandle,
     failure_dismiss_focus: FocusHandle,
     steering_focus: HashMap<SteeringFocusKey, FocusHandle>,
-    failed_focus: HashMap<QueuedSteeringIdentity, FocusHandle>,
+    failed_focus: HashMap<(QueuedSteeringIdentity, failed_dispatches::FailedAction), FocusHandle>,
     /// Presentation-only lip motion state.
     ///
     /// `lip_row_nonces` gives each newly arrived steer a fresh entrance
@@ -424,7 +445,7 @@ impl NativeComposerControls {
             .map(|row| row.identity.clone())
             .collect::<Vec<_>>();
         self.failed_focus
-            .retain(|identity, _| failed.contains(identity));
+            .retain(|(identity, _), _| failed.contains(identity));
         cx.notify();
     }
 
@@ -905,161 +926,6 @@ impl NativeComposerControls {
         self.render_failure(theme, cx)
     }
 
-    /// Renders one terminal-failure card per failed dispatch, newest first.
-    ///
-    /// Each card states the verbatim dispatcher reason and offers the single
-    /// honest action: `Start new chat` carries the exact failed prompt into a
-    /// new thread as an unsent draft. There is deliberately no retry: a
-    /// terminal failure will never send on its thread.
-    #[must_use]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one GPUI builder composes every terminal-failure card and its copy in list order"
-    )]
-    pub fn render_failed_dispatches(
-        &mut self,
-        theme: ArtisanTheme,
-        cx: &mut Context<Self>,
-    ) -> Option<Stateful<Div>> {
-        let rows = self.snapshot.failed_dispatches.clone();
-        if rows.is_empty() {
-            return None;
-        }
-        let entity = cx.entity();
-        let desktop_theme = DesktopTheme::neutral_dark();
-        let mut cards = div()
-            .id(ElementId::Name(
-                "artisan-native-composer-failed-dispatches".into(),
-            ))
-            .debug_selector(|| "artisan-native-composer-failed-dispatches".to_owned())
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(8.0));
-        for (index, row) in rows.into_iter().take(1).enumerate() {
-            let cancelled = row.reason == "run cancelled";
-            let row_index = isize::try_from(index).unwrap_or(isize::MAX);
-            let tab_index = 30isize.saturating_add(row_index);
-            let focus = self.failed_focus(&row.identity, tab_index, cx);
-            let selector = format!(
-                "{NATIVE_COMPOSER_FAILED_NEW_THREAD_SELECTOR}-{}",
-                row.command_id()
-            );
-            let action_entity = entity.clone();
-            let command_id = row.command_id().to_owned();
-            let generation = row.generation();
-            let action = Button::new(
-                ElementId::Name(selector.clone().into()),
-                focus,
-                theme,
-                MotionPolicy::Reduced,
-                ButtonVariant::Ghost,
-                ButtonSize::Small,
-                ButtonContent::text("Start new chat"),
-            )
-            .map(|button| {
-                button
-                    .focus_visibility(FocusVisibility::Visible)
-                    .disabled(self.snapshot.disabled || !self.snapshot.failed_new_chat_ready)
-                    .debug_selector(selector.clone())
-                    .on_activate(move |_, _, app| {
-                        action_entity.update(app, |controls, controls_cx| {
-                            controls.emit_if_allowed(
-                                NativeComposerControlsEvent::StartNewThreadWithFailedPrompt {
-                                    command_id: command_id.clone(),
-                                    generation,
-                                },
-                                controls_cx,
-                            );
-                        });
-                    })
-            });
-            let mut body = div()
-                .min_w(px(0.0))
-                .flex_1()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(theme.typography.control_text)
-                        .text_color(desktop_theme.foreground)
-                        .child(if cancelled {
-                            "Message not sent"
-                        } else {
-                            "Send failed"
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(theme.typography.control_text)
-                        .text_color(desktop_theme.secondary)
-                        .child(if cancelled {
-                            "The run was stopped before this queued message was sent.".into()
-                        } else {
-                            if row.reason == "OpenCode2 provider turn interrupted" {
-                                "The provider session was interrupted.".into()
-                            } else {
-                                row.reason.clone()
-                            }
-                        }),
-                );
-            if !row.text.is_empty() {
-                body = body.child(
-                    div()
-                        .text_size(theme.typography.control_text)
-                        .text_color(desktop_theme.secondary)
-                        .child(row.text.clone()),
-                );
-            }
-            if row.has_attachments {
-                body = body.child(
-                    div()
-                        .text_size(theme.typography.label_text)
-                        .text_color(desktop_theme.secondary)
-                        .child("Images move with the prompt."),
-                );
-            }
-            if !self.snapshot.failed_new_chat_ready {
-                body = body.child(
-                    div()
-                        .text_size(theme.typography.label_text)
-                        .text_color(desktop_theme.secondary)
-                        .child("Start a new chat once the composer is empty and idle."),
-                );
-            }
-            let mut card = div()
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap(px(12.0))
-                .rounded(px(14.0))
-                .border_1()
-                .border_color(if cancelled {
-                    desktop_theme.secondary
-                } else {
-                    theme.colors.destructive.with_alpha(0.4).to_paint()
-                })
-                .bg(desktop_theme.field)
-                .px(px(16.0))
-                .py(px(12.0))
-                .child(body);
-            if let Ok(action) = action {
-                card = card.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .child(action),
-                );
-            }
-            cards = cards.child(card);
-        }
-        Some(cards)
-    }
-
     /// Renders the owner-gated transcript escape action above the feedback
     /// surfaces. It has no element at all when the transcript owner says the
     /// latest-content affordance is unnecessary.
@@ -1329,28 +1195,6 @@ impl NativeComposerControls {
         focus
     }
 
-    fn failed_focus(
-        &mut self,
-        identity: &QueuedSteeringIdentity,
-        tab_index: isize,
-        cx: &mut Context<Self>,
-    ) -> FocusHandle {
-        if let Some(focus) = self.failed_focus.get(identity) {
-            let focus = focus
-                .clone()
-                .tab_index(tab_index)
-                .tab_stop(!self.snapshot.disabled);
-            self.failed_focus.insert(identity.clone(), focus.clone());
-            return focus;
-        }
-        let focus = cx
-            .focus_handle()
-            .tab_index(tab_index)
-            .tab_stop(!self.snapshot.disabled);
-        self.failed_focus.insert(identity.clone(), focus.clone());
-        focus
-    }
-
     fn emit_if_allowed(&self, event: NativeComposerControlsEvent, cx: &mut Context<Self>) {
         if native_composer_controls_event_is_allowed(&self.snapshot, &event) {
             cx.emit(event);
@@ -1399,6 +1243,17 @@ pub fn native_composer_controls_event_is_allowed(
             snapshot.failed_new_chat_ready
                 && snapshot.failed_dispatches.iter().any(|row| {
                     row.identity.command_id == *command_id && row.identity.generation == *generation
+                })
+        }
+        NativeComposerControlsEvent::RetryFailedDispatch {
+            command_id,
+            generation,
+        } => {
+            snapshot.failed_new_chat_ready
+                && snapshot.failed_dispatches.iter().any(|row| {
+                    row.retryable
+                        && row.identity.command_id == *command_id
+                        && row.identity.generation == *generation
                 })
         }
         NativeComposerControlsEvent::JumpToLatest => snapshot.show_jump_to_latest,

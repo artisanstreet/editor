@@ -166,6 +166,17 @@ impl NativeComposer {
         cx.notify();
     }
 
+    /// Waits for the current scope's Forge draft again, when the Forge wrote
+    /// it (a recalled queued message). Only an empty composer waits; its
+    /// scope is returned for the read.
+    pub(crate) fn await_forge_draft(&mut self) -> Option<ComposerDraftScope> {
+        if !self.state.draft().is_empty() || !self.attachments.is_empty() {
+            return None;
+        }
+        self.awaiting_forge_draft = true;
+        self.draft_scope()
+    }
+
     /// Shows the Forge draft of the scope just opened, unless the user has
     /// already typed into it. Returns the digests whose bytes must be read.
     pub(crate) fn apply_forge_draft(

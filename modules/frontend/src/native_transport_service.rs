@@ -137,6 +137,14 @@ pub enum NativeTransportCommand {
     },
     /// Create a new task in an existing, authoritative project.
     CreateTask(ProjectId),
+    /// Ask the Forge to move one failed message into a new thread of its
+    /// project, then open that thread like a created task.
+    RecoverFailedMessage {
+        /// Project of the failed message's thread.
+        project_id: ProjectId,
+        /// Exact durable recovery command.
+        command: Box<artisan_domain::RecoverFailedMessage>,
+    },
     /// Request a real snapshot for a host mounted on a known thread.
     RequestSnapshot(ThreadId),
     /// Load one persisted image named by a bounded history reference.
@@ -251,6 +259,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::SelectProject(_) => "SelectProject",
             Self::ReadSidebarThreads { .. } => "ReadSidebarThreads",
             Self::CreateTask(_) => "CreateTask",
+            Self::RecoverFailedMessage { .. } => "RecoverFailedMessage",
             Self::RequestSnapshot(_) => "RequestSnapshot",
             Self::ReadMessageImage(_) => "ReadMessageImage",
             Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",

@@ -336,11 +336,97 @@ pub(super) async fn create_task_in_project(
     project_id: ProjectId,
 ) -> Result<(), ServiceFailure> {
     runtime.intake.reset();
-    let payload = match runtime
+    let Some(projects) = read_projects_containing(runtime, frames, events, &project_id).await?
+    else {
+        return Ok(());
+    };
+    let title = ThreadTitle::parse("New task").expect("static task title is valid");
+    create_thread(runtime, frames, events, projects, project_id, title).await
+}
+
+/// Reads the attached projects for a task in `project_id`. A failure is
+/// reported as a failed thread creation and answers `None`.
+async fn read_projects_containing(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    project_id: &ProjectId,
+) -> Result<Option<ProjectListing>, ServiceFailure> {
+    let error = match runtime
         .request(frames, project_request(), ExpectedResponse::Projects)
         .await
     {
-        Ok(payload) => payload,
+        Ok(ResponsePayload::ProjectListing(projects))
+            if projects
+                .projects()
+                .iter()
+                .any(|project| &project.project_id == project_id) =>
+        {
+            runtime.intake.projects = Some(projects.clone());
+            return Ok(Some(projects));
+        }
+        Ok(_) => RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+        Err(error) => error,
+    };
+    report_intake_failure(
+        runtime,
+        events,
+        NativeProjectIntakeOperation::CreateThread,
+        error,
+        None,
+        false,
+    )
+    .map(|()| None)
+}
+
+/// Asks the Forge to move one failed message into a new thread of its
+/// project, then opens that thread exactly like a created task. The Forge
+/// stores the prompt as the new thread's draft; nothing is sent.
+pub(super) async fn recover_failed_message(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    project_id: ProjectId,
+    command: artisan_domain::RecoverFailedMessage,
+) -> Result<(), ServiceFailure> {
+    runtime.intake.reset();
+    if read_projects_containing(runtime, frames, events, &project_id)
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    publish(
+        events,
+        NativeTransportEvent::ProjectIntakeProgress(NativeProjectIntakeStage::CreatingThread),
+    )?;
+    let invalid =
+        || RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request));
+    let outcome = match super::composer_state_operations::stable_mutation(
+        &command.request_id,
+        Command::RecoverFailedMessage(command.clone()),
+    ) {
+        Ok(mutation) => {
+            runtime
+                .request_stable(
+                    frames,
+                    &mutation,
+                    ExpectedResponse::FailedMessageRecovered {
+                        request_id: command.request_id.clone(),
+                    },
+                    false,
+                )
+                .await
+        }
+        Err(failure) => Err(RequestFailure::terminal(failure)),
+    };
+    let thread_id = match outcome {
+        Ok(ResponsePayload::FailedMessageRecovered(recovered))
+            if recovered.target == command.target =>
+        {
+            recovered.new_thread_id
+        }
+        Ok(_) => None,
         Err(error) => {
             return report_intake_failure(
                 runtime,
@@ -352,33 +438,48 @@ pub(super) async fn create_task_in_project(
             );
         }
     };
-    let ResponsePayload::ProjectListing(projects) = payload else {
+    let Some(thread_id) = thread_id else {
         return report_intake_failure(
             runtime,
             events,
             NativeProjectIntakeOperation::CreateThread,
-            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            invalid(),
             None,
             false,
         );
     };
-    if !projects
-        .projects()
-        .iter()
-        .any(|project| project.project_id == project_id)
+    publish(
+        events,
+        NativeTransportEvent::ProjectIntakeProgress(NativeProjectIntakeStage::RefreshingThreads),
+    )?;
+    let threads = match runtime
+        .request(
+            frames,
+            threads_request(project_id.clone()),
+            ExpectedResponse::Threads(project_id.clone()),
+        )
+        .await
     {
-        return report_intake_failure(
-            runtime,
-            events,
-            NativeProjectIntakeOperation::CreateThread,
-            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
-            None,
-            false,
-        );
-    }
-    runtime.intake.projects = Some(projects.clone());
-    let title = ThreadTitle::parse("New task").expect("static task title is valid");
-    create_thread(runtime, frames, events, projects, project_id, title).await
+        Ok(ResponsePayload::ThreadListing(threads))
+            if threads
+                .threads()
+                .iter()
+                .any(|thread| thread.thread_id == thread_id && thread.project_id == project_id) =>
+        {
+            threads
+        }
+        other => {
+            return report_intake_failure(
+                runtime,
+                events,
+                NativeProjectIntakeOperation::RefreshThreads,
+                other.err().unwrap_or_else(invalid),
+                None,
+                false,
+            );
+        }
+    };
+    finish_intake(runtime, events, project_id, threads, thread_id)
 }
 
 async fn create_thread(
@@ -537,6 +638,17 @@ async fn refresh_threads(
             false,
         );
     }
+    finish_intake(runtime, events, project_id, threads, created.thread_id)
+}
+
+/// Completes an intake with the authoritative listings and opens `thread_id`.
+fn finish_intake(
+    runtime: &mut ServiceRuntime,
+    events: &SyncSender<NativeTransportEvent>,
+    project_id: ProjectId,
+    threads: ThreadListing,
+    thread_id: ThreadId,
+) -> Result<(), ServiceFailure> {
     let Some(projects) = runtime.intake.projects.clone() else {
         return report_intake_failure(
             runtime,
@@ -561,7 +673,7 @@ async fn refresh_threads(
             projects,
             project_id,
             threads,
-            thread_id: created.thread_id,
+            thread_id,
         },
     )
 }

@@ -12,22 +12,17 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) enum ExpectedResponse {
-    QueuedMessages {
-        thread_id: ThreadId,
-    },
-    FailedMessages {
-        thread_id: ThreadId,
-    },
     MessageWithdrawn {
         thread_id: ThreadId,
         message_id: artisan_domain::MessageId,
         original_request_id: RequestId,
         request_id: RequestId,
     },
-    RecalledMessage {
-        thread_id: ThreadId,
-        message_id: artisan_domain::MessageId,
-        original_request_id: RequestId,
+    FailedMessageRetried {
+        request_id: RequestId,
+    },
+    FailedMessageRecovered {
+        request_id: RequestId,
     },
     RunUsage {
         thread_id: ThreadId,
@@ -129,14 +124,6 @@ pub(super) fn validate_response_family(
 ) -> Result<ResponsePayload, ServiceFailure> {
     match (expected, payload) {
         (
-            ExpectedResponse::QueuedMessages { thread_id },
-            ResponsePayload::QueuedMessages(value),
-        ) if value.thread_id() == &thread_id => Ok(ResponsePayload::QueuedMessages(value)),
-        (
-            ExpectedResponse::FailedMessages { thread_id },
-            ResponsePayload::FailedMessages(value),
-        ) if value.thread_id() == &thread_id => Ok(ResponsePayload::FailedMessages(value)),
-        (
             ExpectedResponse::MessageWithdrawn {
                 thread_id,
                 message_id,
@@ -152,18 +139,13 @@ pub(super) fn validate_response_family(
             Ok(ResponsePayload::MessageWithdrawn(value))
         }
         (
-            ExpectedResponse::RecalledMessage {
-                thread_id,
-                message_id,
-                original_request_id,
-            },
-            ResponsePayload::RecalledMessage(value),
-        ) if value.thread_id == thread_id
-            && value.message_id == message_id
-            && value.original_request_id == original_request_id =>
-        {
-            Ok(ResponsePayload::RecalledMessage(value))
-        }
+            ExpectedResponse::FailedMessageRetried { request_id },
+            ResponsePayload::FailedMessageRetried(value),
+        ) if value.request_id == request_id => Ok(ResponsePayload::FailedMessageRetried(value)),
+        (
+            ExpectedResponse::FailedMessageRecovered { request_id },
+            ResponsePayload::FailedMessageRecovered(value),
+        ) if value.request_id == request_id => Ok(ResponsePayload::FailedMessageRecovered(value)),
         (ExpectedResponse::RunUsage { thread_id, run_id }, ResponsePayload::RunUsage(value))
             if value.thread_id == thread_id && value.run_id == run_id =>
         {

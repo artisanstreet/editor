@@ -172,6 +172,20 @@ impl NativeApplication {
         }
     }
 
+    /// Shows the scope's Forge draft again after the Forge wrote it itself
+    /// (an edit recalled a queued message into it). The view waits for the
+    /// draft exactly as when the scope opened; a composer that is no longer
+    /// empty keeps its text.
+    pub(super) fn reload_forge_draft(&mut self, cx: &mut Context<Self>) {
+        let scope = self
+            .composer
+            .update(cx, |composer, _| composer.await_forge_draft());
+        if let Some(scope) = scope {
+            self.composer_drafts.opened = Some(scope.clone());
+            let _ = self.submit_draft(ComposerDraftCommand::Read(scope), None);
+        }
+    }
+
     /// Sends every unsent draft body before the connection closes, then
     /// releases the draft holds; each flushed save keeps its own transport
     /// hold, so the close still waits for it.

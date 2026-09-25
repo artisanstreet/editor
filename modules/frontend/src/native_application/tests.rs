@@ -4,15 +4,14 @@
 )]
 use super::NATIVE_STATUS_SELECTOR;
 use super::{
-    NATIVE_MESSAGE_RETRY_LABEL, NATIVE_MESSAGE_RETRY_SELECTOR, NATIVE_RAIL_ADD_PROJECT_LABEL,
-    NativeApplication, NativeMessageFailure, NativeMessageFlight, NativeProjectIntakeOperation,
-    NativeProjectIntakeStage, NativeTestCommandSink, NativeTransportCommand, NativeTransportEvent,
-    NativeViewState, PendingFailedRecovery, PickerRoute, ServiceFailure, ServiceStopStatus,
-    TITLEBAR_HEADER_SELECTOR, TITLEBAR_PROJECT_FOLDER_SELECTOR, TITLEBAR_REPOSITORY_LABEL_SELECTOR,
-    TITLEBAR_REPOSITORY_MARK_SELECTOR, TITLEBAR_ROUTE_TITLE_SELECTOR,
-    TITLEBAR_THREAD_SEPARATOR_SELECTOR, ThreadSwitchFlight, ThreadSwitchPhase, TitlebarRepository,
-    WINDOW_TITLE, create_message_request_id, intake_command, message_status_detail, picker_route,
-    project_options_from_listing, ready_membership_is_valid,
+    NATIVE_RAIL_ADD_PROJECT_LABEL, NativeApplication, NativeMessageFailure, NativeMessageFlight,
+    NativeProjectIntakeOperation, NativeProjectIntakeStage, NativeTestCommandSink,
+    NativeTransportCommand, NativeTransportEvent, NativeViewState, PickerRoute, ServiceFailure,
+    ServiceStopStatus, TITLEBAR_HEADER_SELECTOR, TITLEBAR_PROJECT_FOLDER_SELECTOR,
+    TITLEBAR_REPOSITORY_LABEL_SELECTOR, TITLEBAR_REPOSITORY_MARK_SELECTOR,
+    TITLEBAR_ROUTE_TITLE_SELECTOR, TITLEBAR_THREAD_SEPARATOR_SELECTOR, ThreadSwitchFlight,
+    ThreadSwitchPhase, TitlebarRepository, WINDOW_TITLE, create_message_request_id, intake_command,
+    message_status_detail, picker_route, project_options_from_listing, ready_membership_is_valid,
 };
 use crate::composer::{ComposerState, DraftDisposition};
 use crate::desktop_shell::{
@@ -52,9 +51,7 @@ use artisan_protocol::{
     RepositoryBranchState, RepositoryHost as ProtocolRepositoryHost,
     RepositoryRemote as ProtocolRepositoryRemote, RepositorySnapshot as ProtocolRepositorySnapshot,
 };
-use artisan_ui::button::{
-    Button, ButtonContent, ButtonSize, ButtonStyle, ButtonVariant, FocusVisibility,
-};
+use artisan_ui::button::{ButtonSize, ButtonStyle, ButtonVariant};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{Context, Focusable as _, SharedString, TestAppContext};
@@ -94,10 +91,11 @@ fn signed_in_test_application(
 ) -> NativeApplication {
     let mut application = test_application(window, cx);
     for (engine_id, display_name) in [("codex", "Codex"), ("claude", "Claude")] {
-        application
-            .profile_usage
-            .entries
-            .push(reported_usage_entry(engine_id, display_name, Vec::new()));
+        application.profile_usage.entries.push(reported_usage_entry(
+            engine_id,
+            display_name,
+            Vec::new(),
+        ));
     }
     application
 }
@@ -121,12 +119,15 @@ fn signed_out_test_application(
 ) -> NativeApplication {
     let mut application = test_application(window, cx);
     for (engine_id, display_name) in [("codex", "Codex"), ("claude", "Claude")] {
-        application.profile_usage.entries.push(reported_usage_entry_with_auth(
-            engine_id,
-            display_name,
-            NativeUsageAuthentication::Unauthenticated,
-            Vec::new(),
-        ));
+        application
+            .profile_usage
+            .entries
+            .push(reported_usage_entry_with_auth(
+                engine_id,
+                display_name,
+                NativeUsageAuthentication::Unauthenticated,
+                Vec::new(),
+            ));
     }
     application
 }
@@ -665,45 +666,6 @@ fn staged_status(scene: &TurnScene) -> Option<(TurnNarration, Option<String>)> {
     })
 }
 
-fn admit_message_flight(
-    application: &mut NativeApplication,
-    cx: &mut Context<NativeApplication>,
-    request_id: &str,
-) {
-    let (body, token) = application.composer.update(cx, |composer, _| {
-        composer
-            .begin_payload_submission()
-            .expect("message draft admits one flight")
-    });
-    let thread_id = application
-        .selected_thread
-        .clone()
-        .expect("selected message thread");
-    application.message_flight = Some(NativeMessageFlight {
-        thread_id,
-        request_id: request(request_id),
-        payload: body,
-        steer_target: None,
-        engine_label: None,
-        token,
-    });
-}
-
-fn fail_active_message(application: &mut NativeApplication, cx: &mut Context<NativeApplication>) {
-    let (thread_id, request_id) = {
-        let flight = application.message_flight.as_ref().expect("message flight");
-        (flight.thread_id.clone(), flight.request_id.clone())
-    };
-    application.handle_service_event(
-        NativeTransportEvent::MessageFailed {
-            thread_id,
-            request_id,
-            failure: message_failure(),
-        },
-        cx,
-    );
-}
-
 /// Installs a single listed thread titled with the creation placeholder.
 fn install_unnamed_title_task(
     application: &mut NativeApplication,
@@ -808,7 +770,7 @@ fn prepare_thread_switch_fixture(
     application.active_subscription_request_id = Some(request("switch-start-a-1"));
     application.state = NativeViewState::Ready;
 
-    let (body, token) = application
+    let (_, token) = application
         .composer
         .update(application_cx, |composer, composer_cx| {
             composer.set_disabled(false, composer_cx);
@@ -820,9 +782,6 @@ fn prepare_thread_switch_fixture(
     application.message_flight = Some(NativeMessageFlight {
         thread_id: source.clone(),
         request_id: request("message-switch"),
-        payload: body,
-        steer_target: None,
-        engine_label: None,
         token,
     });
 
@@ -1055,33 +1014,30 @@ fn return_to_source_and_reject_old_generation(
     assert_eq!(composer.draft(), "retained switch draft");
 }
 
-fn seed_refresh_in_flight(application: &mut NativeApplication, thread: &ThreadId) {
-    application
-        .composer_queue
-        .state
-        .set_scope(Some(thread.clone()), 5);
-    application
-        .composer_queue
-        .state
-        .begin_queue_refresh(true, true, false, false, true)
-        .expect("queue refresh in flight");
-}
-
 fn failed_reason() -> String {
     "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue".to_owned()
 }
 
-fn seed_failed_entry(application: &mut NativeApplication, thread: &ThreadId, generation: u64) {
-    application
-        .composer_queue
-        .state
-        .set_scope(Some(thread.clone()), generation);
-    let token = application
-        .composer_queue
-        .state
-        .begin_failed_refresh(true, true, false, true)
-        .expect("failed refresh");
-    let summary = artisan_domain::FailedMessageSummary {
+fn queued_summary(
+    thread: &ThreadId,
+    message: &str,
+    state: artisan_domain::QueuedMessageState,
+) -> artisan_domain::QueuedMessageSummary {
+    artisan_domain::QueuedMessageSummary {
+        message_id: artisan_domain::MessageId::parse(message).expect("message"),
+        thread_id: thread.clone(),
+        original_request_id: request(&format!("request-{message}")),
+        text: Some(artisan_domain::AuthoredText::parse(message).expect("text")),
+        attachments: Vec::new(),
+        accepted_at: UnixMillis::from_millis(300),
+        last_error: None,
+        state,
+        engine: Some(artisan_domain::EngineId::Codex),
+    }
+}
+
+fn failed_summary(thread: &ThreadId, retryable: bool) -> artisan_domain::FailedMessageSummary {
+    artisan_domain::FailedMessageSummary {
         message_id: artisan_domain::MessageId::parse("message-1").expect("message"),
         thread_id: thread.clone(),
         original_request_id: request("queue-1"),
@@ -1090,41 +1046,45 @@ fn seed_failed_entry(application: &mut NativeApplication, thread: &ThreadId, gen
         accepted_at: UnixMillis::from_millis(300),
         failed_at: UnixMillis::from_millis(500),
         reason: artisan_domain::DispatchError::parse(failed_reason()).expect("diagnostic"),
-    };
-    let listing = artisan_domain::FailedMessageListing::new(thread.clone(), 32, 1, vec![summary])
-        .expect("failed listing");
-    application
-        .composer_queue
-        .state
-        .apply_failed_listing(&token, &listing)
-        .expect("failed page");
-}
-
-fn failed_policy() -> artisan_catalog::NativeModelPolicy {
-    artisan_catalog::NativeModelPolicy {
-        catalog_revision: "rev-1".to_owned(),
-        profile_id: Some("default".to_owned()),
-        engine_id: "codex".to_owned(),
-        model_id: "model-a".to_owned(),
-        native_model_id: "model-a".to_owned(),
-        native_selection: None,
-        reasoning_effort: None,
-        speed: None,
-        context_window: None,
-        permission: None,
+        retryable,
     }
 }
 
-fn recovery_result(
-    payload: Option<artisan_domain::QueueMessagePayload>,
-) -> artisan_domain::RecalledMessageResult {
-    artisan_domain::RecalledMessageResult::new(
-        ThreadId::parse("forge-t1").expect("old thread"),
-        artisan_domain::MessageId::parse("message-1").expect("message"),
-        request("queue-1"),
-        payload,
+/// The Forge's pushed outbox for `thread`.
+fn message_outbox(
+    thread: &ThreadId,
+    queued: Vec<artisan_domain::QueuedMessageSummary>,
+    failed: Vec<artisan_domain::FailedMessageSummary>,
+) -> artisan_domain::MessageOutbox {
+    artisan_domain::MessageOutbox::new(
+        artisan_domain::QueuedMessageListing::new(
+            thread.clone(),
+            artisan_domain::QueuedMessageListOrder::OldestFirst,
+            32,
+            queued.len() as u64,
+            queued,
+        )
+        .expect("queued listing"),
+        artisan_domain::FailedMessageListing::new(thread.clone(), 32, failed.len() as u64, failed)
+            .expect("failed listing"),
     )
-    .expect("recovery result")
+    .expect("outbox")
+}
+
+fn seed_failed_entry(application: &mut NativeApplication, thread: &ThreadId, generation: u64) {
+    application
+        .composer_queue
+        .state
+        .set_scope(Some(thread.clone()), generation);
+    application
+        .composer_queue
+        .state
+        .apply_outbox(&message_outbox(
+            thread,
+            Vec::new(),
+            vec![failed_summary(thread, true)],
+        ))
+        .expect("failed outbox");
 }
 
 #[path = "tests/forge_drafts.rs"]
@@ -1133,10 +1093,10 @@ mod forge_drafts;
 mod lifecycle;
 #[path = "tests/navigation.rs"]
 mod navigation;
-#[path = "tests/projects.rs"]
-mod projects;
 #[path = "tests/project_draft_transition.rs"]
 mod project_draft_transition;
+#[path = "tests/projects.rs"]
+mod projects;
 
 #[path = "tests/retry.rs"]
 mod retry;
