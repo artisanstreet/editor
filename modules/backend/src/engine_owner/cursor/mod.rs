@@ -25,17 +25,11 @@
 //! dashboard usage read and model inventory, the probe/authority launch, and
 //! any engine beyond the cursor row.
 //!
-//! Later packet: cursor-account catalog merge design (recorded, not
-//! implemented).
-//!
-//! The curated Cursor catalog stays unread in C1. A later packet merges the
-//! authenticated dashboard account surface (`MakeCursorUsage` in
-//! `modules/engines/src/cursor/usage.ts`) with the curated model list the way
-//! `crate::native_model_catalog` merges the `OpenCode2` runtime result: only
-//! rows disclosed for this account become runnable, static rows for other
-//! harnesses stay readable but unavailable to new policy admission, and no
-//! thinking, speed, cost, or image-input value is inferred when the provider
-//! did not report it. Usage stays non-billable and never starts a run.
+//! Cursor model rows come only from `crate::model_discovery::cursor`, which
+//! lists what the installed CLI reports for this account; no curated list
+//! exists. No thinking, speed, cost, or image-input value is inferred when
+//! the provider did not report it. Usage stays non-billable and never starts
+//! a run.
 //!
 //! C3 notes: continuation resumes provider-owned state only (never invented
 //! checkpoints) through `session/load` behind

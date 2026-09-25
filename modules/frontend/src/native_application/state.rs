@@ -157,10 +157,11 @@ pub(super) enum ThreadSwitchPhase {
 
 /// Loads the Forge-published scope-free catalog snapshot, if present.
 ///
-/// The Forge writes `<home>/readiness/model-catalog.json` (static baseline
-/// plus live discovery) next to its readiness receipt. Surfaces without a
-/// thread-scoped runtime read (the home picker) use this snapshot when it is
-/// available and fall back to the bundled manifest otherwise.
+/// The Forge writes `<home>/readiness/model-catalog.json` (live discovery
+/// only) next to its readiness receipt. Surfaces without a thread-scoped
+/// runtime read (the home picker) use this snapshot when it is available and
+/// otherwise show no models. Snapshots from an older harness revision fail
+/// wire validation, so rows published before an update never resurface.
 #[cfg(test)]
 pub(super) fn scope_free_catalog_snapshot() -> Option<NativeModelCatalog> {
     None

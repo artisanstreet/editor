@@ -533,7 +533,7 @@ fn readiness_follows_only_probed_authentication() {
         engine_readiness(&state, "codex", READINESS_NOW_MS),
         EngineReadiness::NotReady
     );
-    assert!(!engine_static_models_admittable(
+    assert!(!engine_models_admittable(
         &state,
         "codex",
         READINESS_NOW_MS
@@ -554,7 +554,7 @@ fn readiness_follows_only_probed_authentication() {
         engine_readiness(&state, "codex", READINESS_NOW_MS),
         EngineReadiness::Ready
     );
-    assert!(engine_static_models_admittable(
+    assert!(engine_models_admittable(
         &state,
         "codex",
         READINESS_NOW_MS
@@ -585,7 +585,7 @@ fn readiness_follows_only_probed_authentication() {
         engine_readiness(&state, "claude", READINESS_NOW_MS),
         EngineReadiness::NeedsSignIn
     );
-    assert!(!engine_static_models_admittable(
+    assert!(!engine_models_admittable(
         &state,
         "claude",
         READINESS_NOW_MS
@@ -596,7 +596,7 @@ fn readiness_follows_only_probed_authentication() {
         engine_readiness(&state, "unknown-engine", READINESS_NOW_MS),
         EngineReadiness::NotReady
     );
-    assert!(!engine_static_models_admittable(
+    assert!(!engine_models_admittable(
         &state,
         "unknown-engine",
         READINESS_NOW_MS
@@ -616,7 +616,7 @@ fn stale_last_good_is_not_fresh_readiness() {
         engine_readiness(&state, "codex", READINESS_NOW_MS),
         EngineReadiness::NotReady
     );
-    assert!(!engine_static_models_admittable(
+    assert!(!engine_models_admittable(
         &state,
         "codex",
         READINESS_NOW_MS
@@ -667,7 +667,7 @@ fn readiness_overlay_recomputes_the_gated_subset() {
     let catalog = NativeModelCatalog::from_manifest_json(include_str!(
         "../../../../tests/fixtures/model_catalog.json"
     ))
-    .expect("bundled catalog");
+    .expect("fixture catalog");
     assert!(catalog.runnable_harness_ids.is_empty());
 
     let mut usage = NativeProfileUsageState::default();
@@ -701,7 +701,7 @@ fn signed_out_report_removes_a_previously_admitted_engine() {
     let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
         "../../../../tests/fixtures/model_catalog.json"
     ))
-    .expect("bundled catalog");
+    .expect("fixture catalog");
     catalog.runnable_harness_ids = vec![
         "opencode2".to_owned(),
         "codex".to_owned(),
@@ -755,7 +755,7 @@ fn dashboard_auth_never_admits_cursor_models_to_run() {
         EngineReadiness::Ready
     );
     // ...but dashboard auth never proves a local CLI installation.
-    assert!(!engine_static_models_admittable(
+    assert!(!engine_models_admittable(
         &usage,
         "cursor",
         READINESS_NOW_MS
@@ -766,7 +766,7 @@ fn dashboard_auth_never_admits_cursor_models_to_run() {
     let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
         "../../../../tests/fixtures/model_catalog.json"
     ))
-    .expect("bundled catalog");
+    .expect("fixture catalog");
     catalog.runnable_harness_ids = vec!["cursor".to_owned()];
     let overlaid = catalog_with_usage_readiness(catalog, &usage, READINESS_NOW_MS);
     assert_eq!(overlaid.runnable_harness_ids, vec!["cursor".to_owned()]);
@@ -774,7 +774,7 @@ fn dashboard_auth_never_admits_cursor_models_to_run() {
     let bare = NativeModelCatalog::from_manifest_json(include_str!(
         "../../../../tests/fixtures/model_catalog.json"
     ))
-    .expect("bundled catalog");
+    .expect("fixture catalog");
     let overlaid = catalog_with_usage_readiness(bare, &usage, READINESS_NOW_MS);
     assert!(overlaid.runnable_harness_ids.is_empty());
 }

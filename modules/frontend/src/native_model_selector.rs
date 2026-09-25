@@ -1,7 +1,7 @@
 //! Reusable GPUI model-selector popover for the native composer.
 //!
 //! The selector mirrors the Electron model picker at the presentation
-//! boundary: the full static catalog remains readable when disconnected, and
+//! boundary: the last discovered catalog remains readable when disconnected, and
 //! every mutation is an explicit event for the application owner. Runtime
 //! harness readiness is deliberately outside this picker; the run boundary
 //! checks it when a policy is used. Persistence and backend authority stay

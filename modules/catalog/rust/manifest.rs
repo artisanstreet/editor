@@ -1,4 +1,4 @@
-//! Static manifest types, snapshot decoding, and reference validation.
+//! Manifest types, snapshot decoding, and reference validation.
 
 use std::collections::HashSet;
 
@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::validation::{
     array, parse_harness, parse_model, required_string, required_value, value_object,
 };
-/// A failure while decoding or validating the checked-in catalog snapshot.
+/// A failure while decoding or validating a catalog manifest.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum NativeModelCatalogError {
     /// The JSON or one of its typed fields is malformed.
@@ -30,7 +30,7 @@ impl NativeModelCatalogError {
     }
 }
 
-/// The static provider descriptor used by model rows.
+/// The provider descriptor used by model rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeModelProvider {
     /// Stable provider identifier.
@@ -80,7 +80,7 @@ pub struct NativePermissionCapability {
     pub options: Vec<NativePermissionOption>,
 }
 
-/// A static engine/harness descriptor.
+/// A shipped engine/harness descriptor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeHarness {
     /// Optional compaction model selected by this harness.
@@ -282,7 +282,7 @@ pub struct NativeModelSelection {
     pub variant_id: Option<String>,
 }
 
-/// A complete static model definition.
+/// A complete discovered model definition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeModelDefinition {
     /// Stable catalog identifier used by favorites and policy events.
@@ -315,7 +315,7 @@ pub struct NativeModelDefinition {
     pub capabilities: NativeModelCapabilities,
 }
 
-/// The static manifest represented by the bundled JSON.
+/// Harness descriptors plus the models discovery reported for them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeModelManifest {
     /// Manifest revision.

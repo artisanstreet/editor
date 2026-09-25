@@ -67,9 +67,9 @@ fn response_for(request_name: &str, payload: ResponsePayload) -> WireEnvelope {
 fn scoped_catalog_with_long_native_id() -> NativeModelCatalog {
     let mut catalog =
         NativeModelCatalog::from_manifest_json(include_str!("../fixtures/model_catalog.json"))
-            .expect("bundled catalog is valid");
+            .expect("fixture catalog is valid");
 
-    // The bundled manifest is immutable in the shared wire format. Append a
+    // The fixture manifest is immutable in the shared wire format. Append a
     // dynamic non-OpenCode row so a native identifier longer than the legacy
     // 128-byte identifier rule is exercised without changing its prefix.
     let mut dynamic = catalog
@@ -78,7 +78,7 @@ fn scoped_catalog_with_long_native_id() -> NativeModelCatalog {
         .iter()
         .find(|model| model.native_selection.is_none())
         .cloned()
-        .expect("bundled catalog has a model without a native selection");
+        .expect("fixture catalog has a model without a native selection");
     dynamic.id = "dynamic-long-native-model-".to_owned() + &"x".repeat(128);
     "Dynamic long native model".clone_into(&mut dynamic.name);
     "native-model".clone_into(&mut dynamic.native_model_id);
@@ -196,7 +196,7 @@ fn catalog_snapshot_preserves_scope_and_long_native_identity() -> Result<(), Box
 fn catalog_result_rejects_missing_or_mismatched_runtime_scope() -> Result<(), Box<dyn Error>> {
     let catalog =
         NativeModelCatalog::from_manifest_json(include_str!("../fixtures/model_catalog.json"))
-            .expect("bundled catalog is valid");
+            .expect("fixture catalog is valid");
     let wire = CatalogSnapshotWire::new(encode_catalog(&catalog)?)?;
     assert_eq!(
         ComposerCatalogResult::new(thread_id(), profile_id(), wire),

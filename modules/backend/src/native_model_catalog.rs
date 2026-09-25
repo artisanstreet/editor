@@ -49,9 +49,9 @@ pub(crate) enum NativeModelCatalogBridgeError {
     /// The result came from an engine other than the supported native engine.
     #[error("native catalog result is from an unsupported engine")]
     UnsupportedEngine,
-    /// The checked-in manifest could not be decoded.
-    #[error("bundled native catalog manifest is invalid")]
-    BundledManifest,
+    /// The shipped harness descriptors could not be decoded.
+    #[error("shipped harness descriptors are invalid")]
+    HarnessManifest,
     /// A runtime route did not satisfy the `OpenCode2` route contract.
     #[error("native catalog route is invalid")]
     InvalidRoute,
@@ -78,8 +78,8 @@ pub(crate) fn from_catalog_result(
         return Err(NativeModelCatalogBridgeError::InvalidCatalog);
     }
 
-    let mut manifest = NativeModelCatalog::offline()
-        .map_err(|_| NativeModelCatalogBridgeError::BundledManifest)?
+    let mut manifest = NativeModelCatalog::harnesses_only()
+        .map_err(|_| NativeModelCatalogBridgeError::HarnessManifest)?
         .manifest;
 
     let mut route_ids = HashSet::with_capacity(result.routes.len());
@@ -288,8 +288,8 @@ pub(crate) fn from_catalog_result_with_discovery(
 pub(crate) fn from_discovery(
     discovery: &crate::model_discovery::DiscoveryBundle,
 ) -> Result<NativeModelCatalog, NativeModelCatalogBridgeError> {
-    let mut manifest = NativeModelCatalog::offline()
-        .map_err(|_| NativeModelCatalogBridgeError::BundledManifest)?
+    let mut manifest = NativeModelCatalog::harnesses_only()
+        .map_err(|_| NativeModelCatalogBridgeError::HarnessManifest)?
         .manifest;
     let routes = apply_discovery(&mut manifest, discovery, true);
     let runtime = NativeCatalogRuntime {

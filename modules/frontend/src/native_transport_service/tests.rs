@@ -71,7 +71,7 @@ fn catalog_result(thread_id: &str, profile_id: &str) -> ComposerCatalogResult {
     let mut catalog = crate::native_model_catalog::NativeModelCatalog::from_manifest_json(
         include_str!("../../../../tests/fixtures/model_catalog.json"),
     )
-    .expect("bundled catalog");
+    .expect("fixture catalog");
     catalog.scope = Some(artisan_catalog::NativeCatalogScope {
         profile_id: profile_id.as_str().to_owned(),
         working_directory: "C:/workspace".to_owned(),

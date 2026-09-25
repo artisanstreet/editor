@@ -40,7 +40,7 @@ impl NativeApplication {
         let composer_controls =
             cx.new(|cx| NativeComposerControls::new(NativeComposerControlsSnapshot::idle(), cx));
         let catalog =
-            NativeModelCatalog::offline().expect("the bundled model catalog is validated");
+            NativeModelCatalog::harnesses_only().expect("the shipped harness descriptors are validated");
         let model_selector =
             cx.new(|cx| NativeModelSelector::new(catalog, None, ThemeMode::Dark, cx));
         let composer_controls_subscription = cx.subscribe(&composer_controls, |application, _, event, cx| {

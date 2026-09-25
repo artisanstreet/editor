@@ -327,7 +327,7 @@ mod tests {
         );
         assert!(
             catalog.manifest.harness("hermes").is_none(),
-            "hermes is not part of the bundled manifest"
+            "hermes is not a shipped harness"
         );
     }
 }

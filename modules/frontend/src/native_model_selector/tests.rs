@@ -176,12 +176,12 @@ fn option_hover_slides_across_rows_and_clears_on_surface_departure(cx: &mut gpui
     cx.run_until_parked();
     cx.update(|_, app| assert!(!view.read(app).axis_hover.borrow().visible()));
 }
-fn state_with_offline_catalog() -> NativeModelSelectorState {
+fn state_with_fixture_catalog() -> NativeModelSelectorState {
     NativeModelSelectorState::new(
         NativeModelCatalog::from_manifest_json(include_str!(
             "../../../../tests/fixtures/model_catalog.json"
         ))
-        .expect("the real bundled catalog must decode"),
+        .expect("the discovery fixture must decode"),
         None,
     )
 }
@@ -191,10 +191,10 @@ fn hidden_harnesses_are_skipped_by_the_picker() {
     let snapshot = NativeModelCatalog::from_manifest_json(include_str!(
         "../../../../tests/fixtures/model_catalog.json"
     ))
-    .expect("bundled catalog");
+    .expect("fixture catalog");
     assert!(
         snapshot.manifest.harness("hermes").is_none(),
-        "hermes is not part of the bundled manifest"
+        "hermes is not a shipped harness"
     );
 
     // Hiding the first harness must move the default tab to the next
@@ -211,7 +211,7 @@ fn hidden_harnesses_are_skipped_by_the_picker() {
 
 #[test]
 fn keyboard_commit_selects_policy_and_preserves_native_values() {
-    let mut state = state_with_offline_catalog();
+    let mut state = state_with_fixture_catalog();
     state.press_trigger();
     assert_eq!(state.highlighted_model_id(), Some("codex-astra"));
     state.handle_key(NativeModelSelectorKey::ArrowDown);
@@ -235,7 +235,7 @@ fn keyboard_commit_selects_policy_and_preserves_native_values() {
 
 #[test]
 fn escape_and_tab_cancel_preview_without_emitting_policy() {
-    let mut state = state_with_offline_catalog();
+    let mut state = state_with_fixture_catalog();
     state.press_trigger();
     state.handle_key(NativeModelSelectorKey::ArrowDown);
     state.handle_key(NativeModelSelectorKey::Escape);
@@ -249,7 +249,7 @@ fn escape_and_tab_cancel_preview_without_emitting_policy() {
 
 #[test]
 fn favorite_event_is_explicit_and_does_not_fake_authoritative_state() {
-    let mut state = state_with_offline_catalog();
+    let mut state = state_with_fixture_catalog();
     let event = state
         .toggle_favorite("codex-sol")
         .expect("offline model emits favorite intent");
@@ -265,7 +265,7 @@ fn favorite_event_is_explicit_and_does_not_fake_authoritative_state() {
 
 #[test]
 fn offline_model_can_be_selected_without_runtime_readiness() {
-    let mut state = state_with_offline_catalog();
+    let mut state = state_with_fixture_catalog();
     assert!(!state.snapshot().selectability("codex-sol").is_available());
     state.press_trigger();
     state.preview_model("codex-sol");
@@ -279,7 +279,7 @@ fn offline_model_can_be_selected_without_runtime_readiness() {
 
 #[test]
 fn invalid_option_is_rejected_without_runtime_readiness() {
-    let mut state = state_with_offline_catalog();
+    let mut state = state_with_fixture_catalog();
     state.press_trigger();
     state.preview_model("codex-sol");
     assert!(matches!(
@@ -526,7 +526,7 @@ fn rebase_keeps_explicit_native_profile_for_saved_policies() {
 
 #[test]
 fn offline_rows_keep_runtime_readiness_out_of_picker_selection() {
-    let mut state = state_with_offline_catalog();
+    let mut state = state_with_fixture_catalog();
     let groups = state.model_groups();
     let row = groups
         .iter()
@@ -859,7 +859,7 @@ fn settings_scroll_only_when_the_real_options_exceed_the_viewport(cx: &mut gpui:
 
 #[test]
 fn model_projections_survive_redraws_and_preview_changes() {
-    let mut state = state_with_offline_catalog();
+    let mut state = state_with_fixture_catalog();
     let groups = state.model_groups();
     for model in groups.iter().flat_map(|group| &group.models) {
         state.preview_model(&model.id);
@@ -883,7 +883,7 @@ fn model_projections_survive_redraws_and_preview_changes() {
 
 #[test]
 fn model_projections_refresh_for_selection_and_authoritative_catalog_changes() {
-    let mut state = state_with_offline_catalog();
+    let mut state = state_with_fixture_catalog();
     let before = state.model_groups();
     let model_id = before
         .iter()

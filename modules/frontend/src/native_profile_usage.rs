@@ -532,7 +532,7 @@ pub const ACCOUNT_GATED_ENGINES: [&str; 3] = ["codex", "claude", "cursor"];
 ///
 /// Only `codex` (`account/rateLimits/read`) and `claude` (`claude -p
 /// /usage`) probe an installed executable, so only their authenticated
-/// usage admits static models to run. `cursor` posts an HTTP dashboard
+/// usage admits that engine's discovered models to run. `cursor` posts an HTTP dashboard
 /// endpoint: its account verdict stays visible, but dashboard auth never
 /// proves a local CLI installation, so Cursor runtime admission follows
 /// the backend catalog marking instead of the usage overlay.
@@ -543,14 +543,14 @@ pub const CLI_PROBED_ENGINES: [&str; 2] = ["codex", "claude"];
 /// Derived only from the provider-owned usage rows the backend probed with
 /// real non-billable reads. A fresh `Authenticated` report proves the
 /// installed executable and the shared ambient account at once, so the
-/// static catalog models for that engine are admittable without any managed
+/// discovered models for that engine are admittable without any managed
 /// `OpenCode` profile or registry. Anything else stays unrunnable with an
 /// honest reason; readiness is never synthesized from a missing row, and a
 /// stale last-good report never counts as fresh readiness indefinitely.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EngineReadiness {
     /// The provider authenticated this account inside the freshness window;
-    /// static models may run.
+    /// its discovered models may run.
     Ready,
     /// The provider reports no signed-in account.
     NeedsSignIn,
@@ -630,7 +630,7 @@ pub fn engine_refresh_failure(state: &NativeProfileUsageState, engine_id: &str) 
         .or_else(|| entry.failure.clone())
 }
 
-/// Returns whether one CLI-probed engine's static catalog models may run.
+/// Returns whether one CLI-probed engine's discovered models may run.
 ///
 /// Only a fresh backend-authenticated usage report admits them, and only
 /// for the CLI-probed subset ([`CLI_PROBED_ENGINES`]): a dashboard read
@@ -638,7 +638,7 @@ pub fn engine_refresh_failure(state: &NativeProfileUsageState, engine_id: &str) 
 /// surface (`grok`, `opencode2`) never qualify here either; the
 /// overlay preserves their snapshot marking instead.
 #[must_use]
-pub fn engine_static_models_admittable(
+pub fn engine_models_admittable(
     state: &NativeProfileUsageState,
     engine_id: &str,
     now_ms: i64,
@@ -662,7 +662,7 @@ pub fn engine_static_models_admittable(
 /// surfaceless engines, and the backend catalog marking for the
 /// dashboard-read `cursor` engine (whose usage auth never proves a local
 /// CLI). The shared admission policy (`admit_policy`, `validate_policy`)
-/// then treats the probed static models as runnable without inventing
+/// then treats the probed engine's models as runnable without inventing
 /// routes, versions, or account facts.
 #[must_use]
 pub fn catalog_with_usage_readiness(
@@ -678,7 +678,7 @@ pub fn catalog_with_usage_readiness(
         .cloned()
         .collect();
     for engine_id in CLI_PROBED_ENGINES {
-        if engine_static_models_admittable(usage, engine_id, now_ms)
+        if engine_models_admittable(usage, engine_id, now_ms)
             && !runnable.iter().any(|ready| ready == engine_id)
         {
             runnable.push(engine_id.to_owned());

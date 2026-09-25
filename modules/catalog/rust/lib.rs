@@ -14,10 +14,12 @@ mod validation;
 pub use manifest::*;
 pub use policy::*;
 
-/// The exact TypeScript source that produced the bundled manifest.
-pub const NATIVE_MODEL_CATALOG_SOURCE: &str = "modules/catalog/src/model-manifest.ts";
-/// The revision encoded by the bundled manifest snapshot.
-pub const NATIVE_MODEL_CATALOG_REVISION: &str = "2026-09-11.1";
+/// The shipped harness descriptor file every catalog is built on.
+pub const NATIVE_MODEL_CATALOG_SOURCE: &str = "modules/catalog/rust/native_harnesses.json";
+/// The revision of the shipped harness descriptors. Snapshots published under
+/// any other revision, including those that still carried bundled models,
+/// fail wire validation.
+pub const NATIVE_MODEL_CATALOG_REVISION: &str = "2026-09-25.1";
 /// Harness permissions and provider descriptors; contains no model catalog.
 pub const NATIVE_HARNESS_MANIFEST_JSON: &str = include_str!("native_harnesses.json");
 
@@ -29,16 +31,34 @@ mod tests {
         NativeModelCatalog::from_manifest_json(include_str!(
             "../../../tests/fixtures/model_catalog.json"
         ))
-        .expect("the checked-in catalog must decode")
+        .expect("the discovery fixture must decode")
     }
 
     #[test]
-    fn production_offline_catalog_has_no_models() {
-        let catalog = NativeModelCatalog::offline().unwrap();
+    fn shipped_catalog_has_no_models() {
+        let catalog = NativeModelCatalog::harnesses_only().unwrap();
         assert!(catalog.manifest.models.is_empty());
         assert!(catalog.default_model_id.is_none());
         assert!(catalog.runnable_harness_ids.is_empty());
         wire::encode_catalog(&catalog).unwrap();
+    }
+
+    #[test]
+    fn shipped_harness_manifest_rejects_models() {
+        let json = NATIVE_HARNESS_MANIFEST_JSON.replace(
+            "\"models\": []",
+            &format!(
+                "\"models\": [{}]",
+                serde_json::to_string(
+                    &serde_json::from_str::<serde_json::Value>(include_str!(
+                        "../../../tests/fixtures/model_catalog.json"
+                    ))
+                    .unwrap()["models"][0]
+                )
+                .unwrap()
+            ),
+        );
+        assert!(NativeModelCatalog::from_harness_manifest_json(&json).is_err());
     }
 
     #[test]
@@ -78,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_snapshot_preserves_real_manifest_provenance_and_shape() {
+    fn fixture_snapshot_preserves_manifest_provenance_and_shape() {
         let catalog = offline();
         assert_eq!(catalog.provenance.source, NATIVE_MODEL_CATALOG_SOURCE);
         assert_eq!(catalog.provenance.revision, NATIVE_MODEL_CATALOG_REVISION);

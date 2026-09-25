@@ -225,8 +225,8 @@ async fn current_catalog(
     let result = match service.discover(thread, profile).await {
         Ok(result) => Some(result),
         // A thread without a registered OpenCode2 profile still gets a usable
-        // catalogue: the static baseline plus whatever discovery has warmed.
-        // This is the shape every non-OpenCode2 thread runs with.
+        // catalogue: whatever host discovery has warmed. This is the shape
+        // every non-OpenCode2 thread runs with.
         Err(ComposerCatalogServiceError::ProfileUnavailable) => None,
         Err(error) => return Err(service_error(error)),
     };
@@ -420,7 +420,7 @@ mod tests {
         let offline = NativeModelCatalog::from_manifest_json(include_str!(
             "../../../tests/fixtures/model_catalog.json"
         ))
-        .expect("bundled catalog is valid");
+        .expect("fixture catalog is valid");
         NativeModelCatalog::from_manifest(
             offline.manifest,
             NativeCatalogRuntime {
@@ -458,7 +458,7 @@ mod tests {
             .manifest
             .models
             .first()
-            .expect("bundled catalog has a model")
+            .expect("fixture catalog has a model")
             .id
             .clone();
 

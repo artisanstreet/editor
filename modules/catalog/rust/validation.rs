@@ -1,4 +1,4 @@
-//! JSON-shape decoding helpers and parsers for the static manifest.
+//! JSON-shape decoding helpers and parsers for the catalog manifest.
 
 use serde_json::{Map, Value};
 

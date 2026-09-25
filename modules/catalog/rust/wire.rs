@@ -67,7 +67,7 @@ pub enum NativeModelCatalogWireError {
     /// A collection repeated a stable identity.
     #[error("model catalog wire contains a duplicate identity")]
     DuplicateIdentifier,
-    /// A runtime value pointed outside the decoded static manifest.
+    /// A runtime value pointed outside the decoded manifest.
     #[error("model catalog wire contains an unknown reference")]
     UnknownReference,
     /// A route/variant/native model identity was inconsistent.
@@ -76,7 +76,7 @@ pub enum NativeModelCatalogWireError {
     /// A runtime scope was malformed or inconsistent.
     #[error("model catalog wire contains an invalid scope")]
     InvalidScope,
-    /// The bundled/static catalog was not a valid complete catalog.
+    /// The shipped harness descriptors were not a valid complete catalog.
     #[error("model catalog wire contains an invalid catalog")]
     InvalidCatalog,
     /// Serialization failed or produced a payload outside the bound.
@@ -100,7 +100,7 @@ mod tests {
         let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
             "../../../tests/fixtures/model_catalog.json"
         ))
-        .expect("bundled catalog is valid");
+        .expect("fixture catalog is valid");
         let model_id = opencode2_catalog_id("runtime-model", "opencode-go", Some("balanced"))
             .expect("fixture identity is valid");
         catalog.manifest.providers.push(NativeModelProvider {
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_static_and_runtime_snapshot_roundtrips_losslessly() {
+    fn complete_manifest_and_runtime_snapshot_roundtrips_losslessly() {
         let catalog = dynamic_catalog();
         let encoded = encode_catalog(&catalog).expect("complete catalog encodes");
         assert!(encoded.len() < MAX_WIRE_BYTES);
@@ -289,7 +289,7 @@ mod tests {
         let mut catalog = NativeModelCatalog::from_manifest_json(include_str!(
             "../../../tests/fixtures/model_catalog.json"
         ))
-        .expect("bundled catalog is valid");
+        .expect("fixture catalog is valid");
         catalog.favorite_ids = (0..MAX_FAVORITES)
             .map(|index| {
                 format!(

@@ -94,7 +94,7 @@ pub struct NativeModelDefaults {
     pub permission: Option<NativeOptionValue>,
 }
 
-/// Runtime state layered over the bundled static manifest.
+/// Runtime state layered over the discovered manifest.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NativeCatalogRuntime {
     /// Runtime revision, if Forge supplied one.
@@ -113,19 +113,19 @@ pub struct NativeCatalogRuntime {
     pub scope: Option<NativeCatalogScope>,
 }
 
-/// Provenance retained alongside the static manifest.
+/// Provenance retained alongside the manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeCatalogProvenance {
     /// Source file that produced the snapshot.
     pub source: String,
-    /// Static manifest revision.
+    /// Shipped harness descriptor revision.
     pub revision: String,
 }
 
-/// A complete static-plus-runtime catalog snapshot.
+/// A complete manifest-plus-runtime catalog snapshot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeModelCatalog {
-    /// Complete static manifest, including unavailable models.
+    /// Harness descriptors and every discovered model, including unavailable ones.
     pub manifest: NativeModelManifest,
     /// Current runtime snapshot revision.
     pub catalog_revision: String,
@@ -141,20 +141,37 @@ pub struct NativeModelCatalog {
     pub model_defaults: Vec<NativeModelDefaults>,
     /// Optional runtime discovery scope.
     pub scope: Option<NativeCatalogScope>,
-    /// Static snapshot provenance.
+    /// Snapshot provenance.
     pub provenance: NativeCatalogProvenance,
 }
 
 impl NativeModelCatalog {
-    /// Builds an empty, non-runnable catalog with the supported harness descriptors.
+    /// Builds an empty, non-runnable catalog with the supported harness
+    /// descriptors. Every model row comes from host discovery on top of this.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeModelCatalogError`] if the checked-in snapshot fails
-    /// decoding or validation, which would be a build-time invariant
+    /// Returns [`NativeModelCatalogError`] if the shipped harness descriptors
+    /// fail decoding or validation, which would be a build-time invariant
     /// violation.
-    pub fn offline() -> Result<Self, NativeModelCatalogError> {
-        let manifest = NativeModelManifest::from_json_str(NATIVE_HARNESS_MANIFEST_JSON)?;
+    pub fn harnesses_only() -> Result<Self, NativeModelCatalogError> {
+        Self::from_harness_manifest_json(NATIVE_HARNESS_MANIFEST_JSON)
+    }
+
+    /// Decodes harness descriptors, refusing any manifest that carries models.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeModelCatalogError`] when the JSON is malformed or lists
+    /// a model: the shipped manifest may never become a model catalog again.
+    pub fn from_harness_manifest_json(json: &str) -> Result<Self, NativeModelCatalogError> {
+        let manifest = NativeModelManifest::from_json_str(json)?;
+        if !manifest.models.is_empty() {
+            return Err(NativeModelCatalogError::invalid(
+                "models",
+                "the shipped harness manifest must not list models; models come from discovery",
+            ));
+        }
         let revision = manifest.revision.clone();
         Ok(Self {
             provenance: NativeCatalogProvenance {
@@ -204,7 +221,7 @@ impl NativeModelCatalog {
         }
     }
 
-    /// Replaces only the owner/runtime layer while retaining the static
+    /// Replaces only the owner/runtime layer while retaining the discovered
     /// manifest and its provenance.
     pub fn replace_runtime(&mut self, runtime: NativeCatalogRuntime) {
         self.catalog_revision = runtime
@@ -232,12 +249,12 @@ impl NativeModelCatalog {
         }
     }
 
-    /// Returns a model's exact static identity, including route/variant IDs.
+    /// Returns a model's exact catalog identity, including route/variant IDs.
     ///
     /// # Errors
     ///
     /// Returns [`NativePolicyValidationError::UnknownModel`] when `model_id`
-    /// is not present in the static manifest.
+    /// is not present in the manifest.
     pub fn model_identity(
         &self,
         model_id: &str,
@@ -895,10 +912,10 @@ pub struct NativeModelPolicy {
 /// Validation failures for owner-supplied or user-selected policy values.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum NativePolicyValidationError {
-    /// Model ID is not present in the static manifest.
+    /// Model ID is not present in the manifest.
     #[error("unknown model '{0}'")]
     UnknownModel(String),
-    /// Harness ID is not present in the static manifest.
+    /// Harness ID is not present in the manifest.
     #[error("unknown harness '{0}'")]
     UnknownHarness(String),
     /// The policy engine does not match the model's harness.

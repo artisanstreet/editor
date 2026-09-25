@@ -414,7 +414,7 @@ fn discovered(
 }
 
 #[test]
-fn discovery_overlays_reported_fields_and_preserves_codex_context_policy() {
+fn discovered_codex_rows_carry_reported_fields_and_context_policy() {
     let discovery = crate::model_discovery::DiscoveryBundle {
         models: vec![
             discovered(
@@ -447,14 +447,14 @@ fn discovery_overlays_reported_fields_and_preserves_codex_context_policy() {
     let sol = catalog
         .manifest
         .model("codex-gpt-5-6-sol")
-        .expect("static sol row");
+        .expect("discovered sol row");
     assert_eq!(sol.name, "Sol Discovered");
     assert_eq!(sol.metadata_confidence.as_deref(), Some("reported"));
     let context = sol
         .capabilities
         .context_window
         .as_ref()
-        .expect("codex 1M policy survives overlay");
+        .expect("codex rows carry the extended context policy");
     assert_eq!(context.default, "standard");
     assert!(context.options.iter().any(|option| {
         option
@@ -573,7 +573,7 @@ fn missing_engine_harnesses_are_hidden() {
     assert!(hidden("grok"));
     assert!(
         catalog.manifest.harness("hermes").is_none(),
-        "hermes is not part of the bundled manifest"
+        "hermes is not a shipped harness"
     );
     assert!(!hidden("codex"));
     assert!(!hidden("claude"));
@@ -614,7 +614,7 @@ fn discovered_display_names_are_dehyphenated() {
     let sol = catalog
         .manifest
         .model("codex-gpt-5-6-sol")
-        .expect("static sol row");
+        .expect("discovered sol row");
     assert_eq!(sol.name, "GPT 5.6 Sol");
     let stealth = catalog
         .manifest
@@ -724,7 +724,29 @@ fn hidden_discovered_rows_are_never_surfaced() {
 }
 
 #[test]
-fn discovery_only_catalog_overlays_static_baseline() {
+fn picker_rows_follow_the_engine_reported_order() {
+    let reported = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5"];
+    let catalog = from_discovery(&crate::model_discovery::DiscoveryBundle {
+        models: reported
+            .iter()
+            .map(|id| discovered("codex", "openai", id, id, Some(272_000), Some(872_000)))
+            .collect(),
+        probed_engines: vec!["codex"],
+        missing_engines: Vec::new(),
+    })
+    .expect("scope-free catalog builds");
+    let rows = catalog.models_for_engine("codex", "", None);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.native_model_id.as_str())
+            .collect::<Vec<_>>(),
+        reported,
+        "the picker must keep the order the engine reported, with nothing ahead of it"
+    );
+}
+
+#[test]
+fn discovery_only_catalog_contains_exactly_the_discovered_rows() {
     let catalog = from_discovery(&crate::model_discovery::DiscoveryBundle {
         models: vec![discovered(
             "codex",
@@ -742,7 +764,7 @@ fn discovery_only_catalog_overlays_static_baseline() {
         catalog
             .manifest
             .model("codex-gpt-5-6-sol")
-            .expect("static row")
+            .expect("discovered row")
             .name,
         "Sol Live"
     );
@@ -750,7 +772,7 @@ fn discovery_only_catalog_overlays_static_baseline() {
         catalog
             .manifest
             .model("codex-gpt-5-6-sol")
-            .expect("static row")
+            .expect("discovered row")
             .capabilities
             .context_window
             .is_some()

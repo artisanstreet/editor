@@ -42,9 +42,9 @@ impl NativeApplication {
     }
 
     pub(super) fn reset_model_selector_offline(&mut self, cx: &mut Context<Self>) {
-        // The Forge publishes a scope-free catalog snapshot (static baseline
-        // plus live discovery) for surfaces without a thread-scoped runtime
-        // read; fall back to the bundled manifest when it is absent.
+        // The Forge publishes a scope-free catalog snapshot built only from
+        // live discovery for surfaces without a thread-scoped runtime read.
+        // Without one the picker shows no models until discovery answers.
         let catalog = self
             .host_model_catalog
             .clone()
@@ -55,8 +55,8 @@ impl NativeApplication {
                     .flatten()
             })
             .unwrap_or_else(|| {
-                NativeModelCatalog::offline()
-                    .expect("the bundled model catalog is validated at the native boundary")
+                NativeModelCatalog::harnesses_only()
+                    .expect("the shipped harness descriptors are validated at the native boundary")
             });
         self.model_selector.update(cx, |selector, cx| {
             selector.set_snapshot(catalog, cx);

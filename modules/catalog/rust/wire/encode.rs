@@ -14,7 +14,7 @@ use crate::{
     NativeModelSelection, NativeOptionValue, NativePermissionOption, NativeSpeedOption,
     NativeThinkingCapability, NativeThinkingOption,
 };
-/// Encodes the complete static-plus-runtime catalog snapshot.
+/// Encodes the complete manifest-plus-runtime catalog snapshot.
 ///
 /// The emitted object is deterministic for a given catalog and contains no
 /// debug representation or raw provider envelope. The encoded length is

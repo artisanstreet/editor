@@ -147,7 +147,7 @@ pub(super) fn validate_manifest_semantics(
     manifest: &NativeModelManifest,
     runtime_routes: Option<&[NativeModelRoute]>,
 ) -> Result<(), NativeModelCatalogWireError> {
-    validate_bundled_manifest_prefix(manifest)?;
+    validate_shipped_harnesses(manifest)?;
     let provider_ids = validate_manifest_providers(manifest)?;
     let harness_ids = validate_manifest_harnesses(manifest)?;
     validate_manifest_models(manifest, runtime_routes, &provider_ids, &harness_ids)
@@ -298,31 +298,31 @@ fn validate_manifest_models(
     Ok(())
 }
 
-/// Compares bundled and runtime harness descriptors by identity, ignoring the
+/// Compares shipped and runtime harness descriptors by identity, ignoring the
 /// presentation-only hidden flag that discovery may set.
-fn harnesses_match_identity(runtime: &[NativeHarness], bundled: &[NativeHarness]) -> bool {
-    runtime.len() == bundled.len()
-        && runtime.iter().zip(bundled).all(|(runtime, bundled)| {
+fn harnesses_match_identity(runtime: &[NativeHarness], shipped: &[NativeHarness]) -> bool {
+    runtime.len() == shipped.len()
+        && runtime.iter().zip(shipped).all(|(runtime, shipped)| {
             let mut runtime = runtime.clone();
-            let mut bundled = bundled.clone();
+            let mut shipped = shipped.clone();
             runtime.hidden = false;
             runtime.compaction_default_model_id = None;
-            bundled.compaction_default_model_id = None;
-            bundled.hidden = false;
-            runtime == bundled
+            shipped.compaction_default_model_id = None;
+            shipped.hidden = false;
+            runtime == shipped
         })
 }
 
-fn validate_bundled_manifest_prefix(
+fn validate_shipped_harnesses(
     manifest: &NativeModelManifest,
 ) -> Result<(), NativeModelCatalogWireError> {
     if manifest.revision != crate::NATIVE_MODEL_CATALOG_REVISION {
         return Err(NativeModelCatalogWireError::InvalidCatalog);
     }
-    let bundled = NativeModelCatalog::offline()
+    let shipped = NativeModelCatalog::harnesses_only()
         .map_err(|_| NativeModelCatalogWireError::InvalidCatalog)?
         .manifest;
-    if !harnesses_match_identity(&manifest.harnesses, &bundled.harnesses) {
+    if !harnesses_match_identity(&manifest.harnesses, &shipped.harnesses) {
         return Err(NativeModelCatalogWireError::InvalidCatalog);
     }
 
