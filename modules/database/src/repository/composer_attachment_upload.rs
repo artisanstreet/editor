@@ -60,11 +60,21 @@ impl Repository {
             .map_err(|source| database_error("begin composer attachment chunk", source))?;
         let applied = apply_chunk(&transaction, chunk, stored_at).await;
         // A rejected chunk still commits: discarding the upload is its
-        // outcome, and the pruning is harmless.
-        transaction
-            .commit()
-            .await
-            .map_err(|source| database_error("commit composer attachment chunk", source))?;
+        // outcome. Any other failure writes nothing.
+        if matches!(
+            applied,
+            Ok(_) | Err(ComposerDraftRepositoryError::ChunkRejected { .. })
+        ) {
+            transaction
+                .commit()
+                .await
+                .map_err(|source| database_error("commit composer attachment chunk", source))?;
+        } else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|source| database_error("rollback composer attachment chunk", source))?;
+        }
         let pending_bytes = applied?;
         let reference = ComposerAttachmentRef::new(
             *chunk.digest(),
