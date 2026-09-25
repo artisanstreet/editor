@@ -604,7 +604,11 @@ fn echo_watches_retire_per_source_id_and_clear_on_scope_change() {
     let mut state = ComposerQueueState::new();
     state.set_scope(Some(thread_id.clone()), 4);
     assert_eq!(state.echo_watch_count(), 0);
-    state.stage_echo_watch(message("message-a"), None, Some("Codex".to_owned()));
+    state.stage_echo_watch(
+        message("message-a"),
+        None,
+        Some(TurnEngineLabel::for_engine(artisan_domain::EngineId::Codex)),
+    );
     state.stage_echo_watch(message("message-b"), None, None);
     assert_eq!(state.echo_watch_count(), 2);
     let watch = state
@@ -633,9 +637,17 @@ fn echo_watch_replay_replaces_and_overflow_evicts_oldest() {
     let thread_id = thread("thread-a");
     let mut state = ComposerQueueState::new();
     state.set_scope(Some(thread_id.clone()), 4);
-    state.stage_echo_watch(message("message-a"), None, Some("Old".to_owned()));
+    state.stage_echo_watch(
+        message("message-a"),
+        None,
+        Some(TurnEngineLabel::new(None, "Old".to_owned())),
+    );
     // A replayed receipt for the same message replaces, not duplicates.
-    state.stage_echo_watch(message("message-a"), None, Some("New".to_owned()));
+    state.stage_echo_watch(
+        message("message-a"),
+        None,
+        Some(TurnEngineLabel::new(None, "New".to_owned())),
+    );
     assert_eq!(state.echo_watch_count(), 1);
     assert_eq!(
         state

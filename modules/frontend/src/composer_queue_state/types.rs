@@ -601,9 +601,9 @@ pub(crate) struct EchoWatch {
     /// proof: only an observed run equal to this id may override the
     /// captured label.
     pub(super) steer_run_id: Option<RunId>,
-    /// Validated routed engine display label captured at send, if any.
-    /// `None` renders the generic fallback, never "Waiting for Other".
-    pub(super) engine_label: Option<String>,
+    /// Typed engine and display label captured at send, if any. `None`
+    /// renders the generic fallback, never "Waiting for Other".
+    pub(super) engine_label: Option<TurnEngineLabel>,
 }
 
 impl EchoWatch {
@@ -620,8 +620,15 @@ impl EchoWatch {
     }
 
     /// Returns the send-time engine label, if one was captured.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn engine_label(&self) -> Option<&str> {
         self.engine_label.as_deref()
+    }
+
+    /// Returns the send-time typed engine metadata, if captured.
+    #[must_use]
+    pub(crate) const fn turn_engine_label(&self) -> Option<&TurnEngineLabel> {
+        self.engine_label.as_ref()
     }
 }

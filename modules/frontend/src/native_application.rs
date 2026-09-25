@@ -52,6 +52,7 @@ use gpui::{
 };
 
 use crate::composer::{DraftDisposition, SubmissionToken};
+use crate::conversation_scene::TurnEngineLabel;
 use crate::desktop_shell::{
     DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, DesktopShellStyle, desktop_nav_glyph,
     desktop_shell,
@@ -164,6 +165,8 @@ mod impl_profile_menu;
 #[path = "native_application/impl_message_flight.rs"]
 mod impl_message_flight;
 
+#[path = "native_application/echo_watch.rs"]
+mod echo_watch;
 #[path = "native_application/impl_service_events.rs"]
 mod impl_service_events;
 

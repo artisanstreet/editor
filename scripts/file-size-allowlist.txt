@@ -40,10 +40,10 @@
 1161 modules/frontend/src/composer_queue_state/state.rs
 965 modules/frontend/src/conversation_host.rs
 953 modules/frontend/src/conversation_projection.rs
-1083 modules/frontend/src/conversation_scene/build.rs
+1077 modules/frontend/src/conversation_scene/build.rs
 1216 modules/frontend/src/conversation_state_machine/impl_dispatch.rs
 1072 modules/frontend/src/conversation_surface/interactions.rs
-1158 modules/frontend/src/conversation_surface/render_blocks.rs
+1056 modules/frontend/src/conversation_surface/render_blocks.rs
 812 modules/frontend/src/conversation_surface/render_sections.rs
 1172 modules/frontend/src/conversation_surface/tests/work_groups.rs
 1049 modules/frontend/src/conversation_turn_machine.rs
@@ -51,7 +51,7 @@
 1475 modules/frontend/src/editor_route_screen.rs
 1027 modules/frontend/src/engine_observation_state/state.rs
 1605 modules/frontend/src/native_application/impl_profile_menu.rs
-1726 modules/frontend/src/native_application/impl_service_events.rs
+1578 modules/frontend/src/native_application/impl_service_events.rs
 1076 modules/frontend/src/native_application/tests.rs
 1194 modules/frontend/src/native_application/tests/lifecycle.rs
 1231 modules/frontend/src/native_application/tests/navigation.rs

@@ -25,23 +25,14 @@ impl ConversationSurface {
                 .any(|block| matches!(block, TurnBlock::WorkGroup(_)))
         });
         // The thinking line is the scene summary reduced to one line by the
-        // turn's engine policy when one rides the block; settled rows never
-        // carry it (builder guarantee). A summary that reduces to nothing
-        // falls back to the narration, exactly like the reference. Otherwise
-        // the narration supplies the verb, with the engine-named wait for a
-        // known provider. Copy and cadence share this one reduction.
-        let has_summary = status_summary_copy(
-            block.reasoning_summary.as_deref(),
-            block.engine_label.as_deref(),
-        )
-        .is_some();
-        let copy = turn_status_copy_text(
-            block.narration,
-            block.active_started_at_ms,
-            self.active_now_ms,
-            block.reasoning_summary.as_deref(),
-            block.engine_label.as_deref(),
-        )?;
+        // turn's typed engine policy when one rides the block; settled rows
+        // never carry it (builder guarantee). A summary that reduces to
+        // nothing falls back to the narration, exactly like the reference.
+        // Otherwise the narration supplies the verb, with the engine-named
+        // wait for a known provider. Copy and cadence share this reduction.
+        let has_summary =
+            status_summary_copy(block.reasoning_summary.as_deref(), block.engine).is_some();
+        let copy = turn_status_block_copy(block, self.active_now_ms)?;
         // A live line identical to the owning group header paints once, in
         // the header; a distinct narration (a summary counts) still paints.
         // Render and scroll identities share this exact decision.

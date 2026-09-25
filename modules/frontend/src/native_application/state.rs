@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use crate::composer::{SubmissionBlocked, SubmissionToken};
+use crate::conversation_scene::TurnEngineLabel;
 use crate::native_model_catalog::NativeModelCatalog;
 use crate::native_transport_service::{
     CommandSendError, NativeTransportCommand, ServiceFailure, ServiceFailureCategory,
@@ -54,7 +55,7 @@ pub(super) struct NativeMessageFlight {
     /// Validated routed engine display label captured at send from the
     /// authoritative config (never the picker). Preserved verbatim for the
     /// retry and the Waiting narration; `None` renders the generic fallback.
-    pub(super) engine_label: Option<String>,
+    pub(super) engine_label: Option<TurnEngineLabel>,
     pub(super) token: SubmissionToken,
 }
 
@@ -101,7 +102,7 @@ pub(super) struct NativeMessageRetry {
     pub(super) steer_target: Option<artisan_domain::SteerTarget>,
     /// Original engine label from the failed send. A retry replays it
     /// verbatim and never re-resolves a changed picker after the send.
-    pub(super) engine_label: Option<String>,
+    pub(super) engine_label: Option<TurnEngineLabel>,
     pub(super) draft_matches: bool,
 }
 

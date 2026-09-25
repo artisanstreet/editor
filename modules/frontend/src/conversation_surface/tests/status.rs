@@ -1,4 +1,6 @@
 use super::*;
+use crate::conversation_scene::TurnStatusBlock;
+use artisan_domain::EngineId;
 
 #[test]
 fn quiet_and_suppressed_narrations_paint_no_status_row() {
@@ -171,7 +173,7 @@ fn multiline_reasoning_reduces_to_one_headline() {
     assert_eq!(
         status_summary_copy(
             Some("**First thought**\n\nSome body.\n\n**Planning playful ambiguous response**"),
-            Some("Codex"),
+            Some(EngineId::Codex),
         ),
         Some("Planning playful ambiguous response".to_owned())
     );
@@ -182,43 +184,76 @@ fn multiline_reasoning_reduces_to_one_headline() {
     assert_eq!(status_summary_copy(None, None), None);
 }
 
+fn live_status(summary: &str, engine: Option<EngineId>, label: &str) -> TurnStatusBlock {
+    TurnStatusBlock {
+        narration: TurnNarration::Thinking,
+        active_started_at_ms: Some(0),
+        reasoning_summary: Some(summary.to_owned()),
+        engine_label: Some(label.to_owned()),
+        engine,
+    }
+}
+
 #[test]
 fn claude_turns_take_the_first_line_without_punctuation() {
     let prose = "Checking the pair sums\n\nThen **comparing** the margins.";
     assert_eq!(
-        SummaryLinePolicy::for_engine_label(Some("Claude")),
+        SummaryLinePolicy::for_engine(Some(EngineId::Claude)),
         SummaryLinePolicy::FirstLine
     );
+    for other in [Some(EngineId::Codex), Some(EngineId::Cursor), None] {
+        assert_eq!(
+            SummaryLinePolicy::for_engine(other),
+            SummaryLinePolicy::Sentence
+        );
+    }
     assert_eq!(
-        SummaryLinePolicy::for_engine_label(Some("Codex")),
-        SummaryLinePolicy::Sentence
-    );
-    assert_eq!(
-        SummaryLinePolicy::for_engine_label(None),
-        SummaryLinePolicy::Sentence
-    );
-    assert_eq!(
-        status_summary_copy(Some(prose), Some("Claude")),
+        status_summary_copy(Some(prose), Some(EngineId::Claude)),
         Some("Checking the pair sums".to_owned())
     );
     // The Codex policy is unchanged for the same prose.
     assert_eq!(
-        status_summary_copy(Some(prose), Some("Codex")),
+        status_summary_copy(Some(prose), Some(EngineId::Codex)),
         Some("Then comparing the margins.".to_owned())
     );
     // Copy and the summary decision agree for a live Claude row.
+    let status = live_status(
+        "Recommending a modern tech stack",
+        Some(EngineId::Claude),
+        "Claude",
+    );
     assert_eq!(
-        turn_status_copy_text(
-            TurnNarration::Thinking,
-            Some(0),
-            Some(5_000),
-            Some("Recommending a modern tech stack"),
-            Some("Claude"),
-        ),
+        turn_status_block_copy(&status, Some(5_000)),
         Some("Recommending a modern tech stack".to_owned())
     );
     // Formatting-only prose reduces to nothing and keeps the narration.
-    assert_eq!(status_summary_copy(Some("---\n**\n"), Some("Claude")), None);
+    assert_eq!(
+        status_summary_copy(Some("---\n**\n"), Some(EngineId::Claude)),
+        None
+    );
+}
+
+#[test]
+fn summary_policy_follows_the_typed_engine_not_the_label() {
+    let prose = "Checking the pair sums\n\nThen comparing the margins.";
+    // A Claude engine under another display label still takes its label.
+    let claude = live_status(prose, Some(EngineId::Claude), "Codex");
+    assert_eq!(
+        turn_status_block_copy(&claude, Some(5_000)),
+        Some("Checking the pair sums".to_owned())
+    );
+    // A "Claude" display label on another engine keeps the sentence policy.
+    let codex = live_status(prose, Some(EngineId::Codex), "Claude");
+    assert_eq!(
+        turn_status_block_copy(&codex, Some(5_000)),
+        Some("Then comparing the margins.".to_owned())
+    );
+    // A label with no typed engine never selects the Claude policy.
+    let untyped = live_status(prose, None, "Claude");
+    assert_eq!(
+        turn_status_block_copy(&untyped, Some(5_000)),
+        Some("Then comparing the margins.".to_owned())
+    );
 }
 
 #[test]

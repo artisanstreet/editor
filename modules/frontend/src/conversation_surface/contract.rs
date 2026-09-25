@@ -2,7 +2,10 @@
 //! observations, block kinds, selectors, and pure copy helpers.
 
 use super::*;
+use artisan_domain::EngineId;
 use artisan_ui::inline_code_text::claude_label_line;
+
+use crate::conversation_scene::TurnStatusBlock;
 
 /// Stable debug selector for the conversation surface root.
 pub const CONVERSATION_SURFACE_SELECTOR: &str = "artisan-conversation-surface";
@@ -533,21 +536,13 @@ pub enum SummaryLinePolicy {
 }
 
 impl SummaryLinePolicy {
-    /// Resolves the policy from the turn's validated engine label.
-    ///
-    /// The label is the roster display name every engine-label setter
-    /// derives from the run's engine id; an absent or unknown label keeps
-    /// the existing sentence policy.
+    /// Resolves the policy from the turn's typed engine identity only; display
+    /// labels never select it. Absent or other engines keep the sentence one.
     #[must_use]
-    pub fn for_engine_label(engine_label: Option<&str>) -> Self {
-        if engine_label
-            == Some(crate::native_profile_usage::profile_usage_display_name(
-                "claude",
-            ))
-        {
-            Self::FirstLine
-        } else {
-            Self::Sentence
+    pub fn for_engine(engine: Option<EngineId>) -> Self {
+        match engine {
+            Some(EngineId::Claude) => Self::FirstLine,
+            _ => Self::Sentence,
         }
     }
 
@@ -563,13 +558,13 @@ impl SummaryLinePolicy {
 
 /// Reduces the raw scene summary to the one thinking line, if any.
 ///
-/// The turn's engine label selects the [`SummaryLinePolicy`]; a summary that
-/// reduces to nothing yields `None` so the caller falls back to the
+/// The turn's typed engine selects the [`SummaryLinePolicy`]; a summary
+/// that reduces to nothing yields `None` so the caller falls back to the
 /// narration, exactly like the reference. Copy and visibility decisions both
 /// call this one function.
 #[must_use]
-pub fn status_summary_copy(summary: Option<&str>, engine_label: Option<&str>) -> Option<String> {
-    let policy = SummaryLinePolicy::for_engine_label(engine_label);
+pub fn status_summary_copy(summary: Option<&str>, engine: Option<EngineId>) -> Option<String> {
+    let policy = SummaryLinePolicy::for_engine(engine);
     summary.and_then(|summary| policy.reduce(summary))
 }
 
@@ -600,8 +595,22 @@ pub fn turn_owner_header(turn: &TurnScene, frame_now_ms: Option<i64>) -> Option<
     live_group_header_copy(narration, basis, frame_now_ms)
 }
 
-/// Computes the exact status row copy: reduced scene summary, engine-named
-/// wait, or live narration copy.
+/// Computes the exact status row copy for one scene status block: summary
+/// reduced under the block's typed engine policy, engine-named wait, or live
+/// narration. Render and scroll-identity code share this one decision.
+#[must_use]
+pub fn turn_status_block_copy(status: &TurnStatusBlock, now_ms: Option<i64>) -> Option<String> {
+    status_copy(
+        status.narration,
+        status.active_started_at_ms,
+        now_ms,
+        status_summary_copy(status.reasoning_summary.as_deref(), status.engine),
+        status.engine_label.as_deref(),
+    )
+}
+
+/// Computes status row copy for callers without a typed engine: the summary
+/// reduces under the sentence policy, as for every non-Claude engine.
 ///
 /// Unfinished or absent summaries fall back through the narration path, so
 /// this returns `None` exactly when no row paints for copy reasons.
@@ -613,13 +622,27 @@ pub fn turn_status_copy_text(
     reasoning_summary: Option<&str>,
     engine_label: Option<&str>,
 ) -> Option<String> {
-    match status_summary_copy(reasoning_summary, engine_label) {
-        Some(summary) => Some(summary),
-        None => match narration {
-            TurnNarration::ProviderWait => Some(provider_wait_copy(engine_label)),
-            _ => live_status_copy(narration, active_started_at_ms, frame_now_ms),
-        },
-    }
+    let summary = status_summary_copy(reasoning_summary, None);
+    status_copy(
+        narration,
+        active_started_at_ms,
+        frame_now_ms,
+        summary,
+        engine_label,
+    )
+}
+
+fn status_copy(
+    narration: TurnNarration,
+    active_started_at_ms: Option<i64>,
+    frame_now_ms: Option<i64>,
+    summary: Option<String>,
+    engine_label: Option<&str>,
+) -> Option<String> {
+    summary.or_else(|| match narration {
+        TurnNarration::ProviderWait => Some(provider_wait_copy(engine_label)),
+        _ => live_status_copy(narration, active_started_at_ms, frame_now_ms),
+    })
 }
 
 /// Returns whether a turn status block paints a child row.

@@ -116,8 +116,8 @@ impl ConversationStateController {
                 }
                 // Explicit send-time engine labels travel the same entry so
                 // the row can name the engine without session state.
-                if let Some(label) = self.turn_engine_labels.get(turn_id) {
-                    entry = entry.with_engine_label(label.clone());
+                if let Some(engine) = self.turn_engine_labels.get(turn_id) {
+                    entry = entry.with_turn_engine(engine);
                 }
                 narrations.push(entry);
             }

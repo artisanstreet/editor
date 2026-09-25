@@ -541,6 +541,9 @@ pub struct TurnStatusBlock {
     /// Handoff target label from the turn's model transition, for
     /// `Waiting for {engine}` wording and header attribution.
     pub engine_label: Option<String>,
+    /// Typed engine from the turn's send-time metadata, when known; the
+    /// summary line policy keys off this, never off the display label.
+    pub engine: Option<EngineId>,
 }
 
 /// Settled response facts for one turn footer.

@@ -292,7 +292,7 @@ fn claude_stretch() -> Vec<Observation> {
 
 #[test]
 fn claude_label_is_stable_while_streaming_and_after_replay() {
-    let policy = SummaryLinePolicy::for_engine_label(Some("Claude"));
+    let policy = SummaryLinePolicy::for_engine(Some(artisan_domain::EngineId::Claude));
     let mut live = state();
     let mut labels = Vec::new();
     for (cursor, observation) in claude_stretch().into_iter().enumerate() {
