@@ -95,10 +95,10 @@ use crate::native_transport::{
     NativeCatalogScope,
 };
 use crate::native_transport_service::{
-    CommandSendError, ComposerStateCommand, EventReceiveError, NativeProjectIntakeOperation,
-    NativeProjectIntakeStage, NativeTransportCommand, NativeTransportEvent, NativeTransportService,
-    ServiceFailure, ServiceFailureCategory, ServiceFailureStage, ServiceStopStatus,
-    SettingsLoadGeneration,
+    CommandSendError, ComposerStateCommand, EventReceiveError, HoldKind,
+    NativeProjectIntakeOperation, NativeProjectIntakeStage, NativeTransportCommand,
+    NativeTransportEvent, NativeTransportService, ServiceFailure, ServiceFailureCategory,
+    ServiceFailureStage, ServiceStopStatus, SettingsLoadGeneration,
 };
 use crate::onboarding_harness_presentation::{
     HarnessCatalog, HarnessSetupAction, HarnessSetupState,
@@ -147,6 +147,7 @@ mod presentation;
 
 // Phase-2 split submodules (see native_application/).
 
+mod host_switch;
 #[path = "native_application/impl_lifecycle.rs"]
 mod impl_lifecycle;
 mod impl_machines;
@@ -311,6 +312,8 @@ pub struct NativeApplication {
     machine_home: Option<std::path::PathBuf>,
     machine_label: String,
     machine_menu: impl_machines::MachineMenu,
+    /// A switch away from this host that is draining its connection.
+    host_switch: Option<host_switch::HostSwitchNotice>,
     theme: ArtisanTheme,
     desktop_theme: DesktopTheme,
     focus_handle: FocusHandle,
@@ -331,7 +334,7 @@ pub struct NativeApplication {
     /// Last-used model preference backing new threads without saved config.
     last_used_model: Option<crate::native_last_used::StoredModelPolicy>,
     composer_model_run_error: Option<String>,
-    pending_account_send: Option<impl_message_flight::PendingAccountSend>,
+    pending_account_send: Option<impl_profile_usage::PendingAccountSend>,
     pending_failed_recovery: Option<PendingFailedRecovery>,
     catalog_controller: NativeCatalogController,
     host_model_catalog: Option<NativeModelCatalog>,
@@ -385,6 +388,8 @@ pub struct NativeApplication {
     sidebar_hover: Rc<RefCell<SlidingHoverState>>,
     sidebar_hover_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     message_flight: Option<NativeMessageFlight>,
+    /// Keeps the connection open until the message flight's reply arrives.
+    message_flight_hold: Option<crate::native_transport_service::Hold>,
     optimistic_messages: Vec<optimistic_messages::LocalSend>,
     message_retry: Option<NativeMessageRetry>,
     message_receipt: Option<QueueMessageReceipt>,
@@ -479,9 +484,9 @@ mod native_composer_models;
 #[path = "native_composer_queue_application.rs"]
 mod composer_queue_application;
 
-#[path = "native_application/impl_sidebar_threads.rs"]
-mod impl_sidebar_threads;
 #[path = "native_application/impl_projects.rs"]
 mod impl_projects;
+#[path = "native_application/impl_sidebar_threads.rs"]
+mod impl_sidebar_threads;
 
 mod optimistic_messages;

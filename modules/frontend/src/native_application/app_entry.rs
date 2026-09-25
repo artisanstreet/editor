@@ -4,7 +4,7 @@
 //! Extracted verbatim from `native_application.rs` during the phase-5 module
 //! split; the test-facing action binding was widened to `pub(super)`.
 
-use super::workspace::NativeWorkspace;
+use super::workspace::{NativeWorkspace, QUIT_DRAIN_LIMIT, close_connection};
 use super::*;
 
 pub(super) fn bind_native_actions(cx: &mut App) {
@@ -23,26 +23,20 @@ pub(super) fn bind_native_actions(cx: &mut App) {
     ]);
 }
 
+/// Quits after the one connection is sealed, given a bounded chance to land
+/// its in-flight mutations, and shut down.
 fn request_app_shutdown(
     cx: &mut App,
-    services: Vec<Arc<NativeTransportService>>,
+    service: Option<Arc<NativeTransportService>>,
     shutdown_started: &Arc<AtomicBool>,
 ) {
     if shutdown_started.swap(true, Ordering::AcqRel) {
         return;
     }
     let task = cx.spawn(async move |cx| {
-        for service in services {
-            let timer_executor = cx.background_executor().clone();
-            loop {
-                if service.is_finished() {
-                    let _ = service.join();
-                    break;
-                }
-                let _ = service.request_shutdown();
-                while matches!(service.try_recv(), Ok(Some(_))) {}
-                timer_executor.timer(POLL_INTERVAL).await;
-            }
+        if let Some(service) = service {
+            let executor = cx.background_executor().clone();
+            close_connection(service, executor, QUIT_DRAIN_LIMIT, None).await;
         }
         let () = cx.update(|cx| cx.quit());
     });
@@ -52,10 +46,9 @@ fn request_app_shutdown(
 fn prepare_application_shutdown(
     view: &Rc<RefCell<Option<Entity<NativeWorkspace>>>>,
     cx: &mut App,
-) -> Vec<Arc<NativeTransportService>> {
-    view.borrow().clone().map_or_else(Vec::new, |view| {
-        view.update(cx, NativeWorkspace::prepare_shutdown)
-    })
+) -> Option<Arc<NativeTransportService>> {
+    let view = view.borrow().clone()?;
+    view.update(cx, NativeWorkspace::prepare_shutdown)
 }
 
 /// Logs which GPU renderer backs the opened window.
@@ -111,16 +104,16 @@ pub fn run() -> ExitCode {
             let shutdown_for_action = Arc::clone(&shutdown_started);
             let view_for_action = Rc::clone(&application_view);
             cx.on_action(move |_: &Quit, cx| {
-                let services = prepare_application_shutdown(&view_for_action, cx);
-                request_app_shutdown(cx, services, &shutdown_for_action);
+                let service = prepare_application_shutdown(&view_for_action, cx);
+                request_app_shutdown(cx, service, &shutdown_for_action);
             });
 
             let shutdown_for_close = Arc::clone(&shutdown_started);
             let view_for_close = Rc::clone(&application_view);
             cx.on_window_closed(move |cx, _window_id| {
                 if cx.windows().is_empty() {
-                    let services = prepare_application_shutdown(&view_for_close, cx);
-                    request_app_shutdown(cx, services, &shutdown_for_close);
+                    let service = prepare_application_shutdown(&view_for_close, cx);
+                    request_app_shutdown(cx, service, &shutdown_for_close);
                 }
             })
             .detach();
@@ -167,7 +160,7 @@ pub fn run() -> ExitCode {
                 }
                 cx.activate(true);
             } else {
-                request_app_shutdown(cx, service.clone().into_iter().collect(), &shutdown_started);
+                request_app_shutdown(cx, service.clone(), &shutdown_started);
             }
         });
 
