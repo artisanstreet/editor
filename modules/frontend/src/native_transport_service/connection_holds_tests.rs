@@ -181,3 +181,42 @@ fn only_mutations_take_holds() {
         assert_eq!(read.hold_kind(), None, "{read:?} must not hold");
     }
 }
+
+#[test]
+fn a_live_hold_extends_on_a_sealed_connection_and_draft_saves_hold() {
+    let holds = ConnectionHolds::new();
+    let chain = holds.try_hold(HoldKind::Draft).expect("unsealed");
+    holds.seal();
+    assert!(
+        holds.try_hold(HoldKind::Draft).is_none(),
+        "sealed refuses new work"
+    );
+    let follow_up = chain.extend();
+    assert_eq!(holds.status().count_of(HoldKind::Draft), 2);
+    drop(chain);
+    assert!(!holds.status().is_idle(), "the extended save still holds");
+    drop(follow_up);
+    assert!(holds.status().is_idle());
+    assert_eq!(HoldState::default().summary(), None);
+
+    let save = artisan_domain::SaveComposerDraft::new(
+        artisan_domain::RequestId::parse("draft-save").expect("request"),
+        artisan_domain::ComposerDraftScope::Thread(
+            artisan_domain::ThreadId::parse("draft-thread").expect("thread"),
+        ),
+        artisan_domain::AuthoredText::empty(),
+        Vec::new(),
+    )
+    .expect("save");
+    let command = NativeTransportCommand::ComposerDraft(ComposerDraftCommand::Save {
+        sequence: 1,
+        command: Box::new(save),
+    });
+    assert_eq!(command.hold_kind(), Some(HoldKind::Draft));
+    let read = NativeTransportCommand::ComposerDraft(ComposerDraftCommand::Read(
+        artisan_domain::ComposerDraftScope::Thread(
+            artisan_domain::ThreadId::parse("draft-thread").expect("thread"),
+        ),
+    ));
+    assert_eq!(read.hold_kind(), None, "reads never hold");
+}

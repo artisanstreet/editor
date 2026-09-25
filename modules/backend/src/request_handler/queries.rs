@@ -318,6 +318,10 @@ impl RequestHandler {
                 self.read_recalled_composer_message(request_id, query).await
             }
             Query::ReadRunUsage(query) => self.read_composer_usage(request_id, query).await,
+            Query::ReadComposerDraft(read) => self.read_composer_draft(request_id, read).await,
+            Query::ReadComposerAttachment(read) => {
+                self.read_composer_attachment(request_id, read).await
+            }
             Query::ReadComposerCatalog(read) => {
                 crate::composer_catalog_handler::read_composer_catalog(
                     self.composer_catalog.as_ref(),

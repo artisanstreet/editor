@@ -5043,3 +5043,222 @@ async fn sidebar_listing_tracks_live_ownership_and_latest_message() {
     assert!(!listing.threads()[0].has_active_work);
     storage.close().await.expect("close");
 }
+
+fn draft_scope(thread: &str) -> artisan_domain::ComposerDraftScope {
+    artisan_domain::ComposerDraftScope::Thread(ThreadId::parse(thread).expect("valid thread id"))
+}
+
+fn save_draft_command(
+    request_id: &str,
+    thread: &str,
+    text: &str,
+    attachments: Vec<artisan_domain::ComposerAttachmentRef>,
+) -> ClientRequest {
+    ClientRequest::Command(Command::SaveComposerDraft(
+        artisan_domain::SaveComposerDraft::new(
+            request(request_id),
+            draft_scope(thread),
+            artisan_domain::AuthoredText::parse(text).expect("valid text"),
+            attachments,
+        )
+        .expect("valid save"),
+    ))
+}
+
+async fn saved_draft(
+    handler: &RequestHandler,
+    request_id: &str,
+    command: &ClientRequest,
+) -> artisan_domain::ComposerDraftSaved {
+    let response = handler
+        .respond(&request(request_id), command)
+        .await
+        .expect("draft save should succeed");
+    let ResponsePayload::ComposerDraftSaved(saved) = response.payload else {
+        panic!("expected a draft-save acknowledgement");
+    };
+    saved
+}
+
+async fn read_draft(
+    handler: &RequestHandler,
+    thread: &str,
+) -> Option<artisan_domain::ComposerDraft> {
+    let response = handler
+        .respond(
+            &request("request-read-draft"),
+            &ClientRequest::Query(Query::ReadComposerDraft(
+                artisan_domain::ReadComposerDraft {
+                    scope: draft_scope(thread),
+                },
+            )),
+        )
+        .await
+        .expect("draft read should succeed");
+    let ResponsePayload::ComposerDraft(result) = response.payload else {
+        panic!("expected a draft read result");
+    };
+    assert_eq!(result.scope, draft_scope(thread));
+    result.draft
+}
+
+#[tokio::test]
+async fn composer_draft_saves_always_apply_with_forge_assigned_revisions() {
+    let (_temporary, storage) = opened_storage("draft-save").await;
+    seed_conversation(storage.repository(), "thread-draft", "draft").await;
+    let handler = RequestHandler::new(storage.repository().clone());
+    assert_eq!(read_draft(&handler, "thread-draft").await, None);
+
+    let first = save_draft_command("request-draft-a", "thread-draft", "editor a", Vec::new());
+    let saved = saved_draft(&handler, "request-draft-a", &first).await;
+    assert_eq!(saved.request_id, request("request-draft-a"));
+    assert_eq!(saved.revision.get(), 1);
+
+    // A second Editor that never saw revision 1 still persists: the last
+    // save to arrive wins and gets the next revision.
+    let second = save_draft_command("request-draft-b", "thread-draft", "editor b", Vec::new());
+    assert_eq!(
+        saved_draft(&handler, "request-draft-b", &second)
+            .await
+            .revision
+            .get(),
+        2
+    );
+    let draft = read_draft(&handler, "thread-draft")
+        .await
+        .expect("draft stored");
+    assert_eq!(draft.text().as_str(), "editor b");
+    assert_eq!(draft.revision().get(), 2);
+
+    let unknown = save_draft_command("request-draft-x", "thread-missing", "x", Vec::new());
+    let failure = failure_of(handler.respond(&request("request-draft-x"), &unknown).await);
+    assert_eq!(failure.code, ErrorCode::ThreadUnknown);
+    assert!(!failure.retryable);
+}
+
+#[tokio::test]
+async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
+    let (_temporary, storage) = opened_storage("draft-attachment").await;
+    seed_conversation(storage.repository(), "thread-attach", "attach").await;
+    let handler = RequestHandler::new(storage.repository().clone());
+    let bytes = vec![0x89, 0x50, 0x4e, 0x47, 7];
+    let upload = ClientRequest::Command(Command::UploadComposerAttachment(
+        artisan_domain::UploadComposerAttachment {
+            request_id: request("request-upload"),
+            image: ImageAttachment::new("image/png", bytes.clone(), "chart.png")
+                .expect("valid image"),
+        },
+    ));
+    let response = handler
+        .respond(&request("request-upload"), &upload)
+        .await
+        .expect("upload should succeed");
+    let ResponsePayload::ComposerAttachmentUploaded(uploaded) = response.payload else {
+        panic!("expected an upload acknowledgement");
+    };
+    let reference = uploaded.reference;
+    assert_eq!(reference.name(), "chart.png");
+    assert_eq!(reference.size_bytes(), 5);
+
+    let save = save_draft_command(
+        "request-draft-image",
+        "thread-attach",
+        "see chart",
+        vec![reference.clone()],
+    );
+    assert!(
+        saved_draft(&handler, "request-draft-image", &save)
+            .await
+            .revision
+            .get()
+            == 1
+    );
+    let draft = read_draft(&handler, "thread-attach").await.expect("draft");
+    assert_eq!(draft.attachments(), [reference.clone()]);
+
+    let response = handler
+        .respond(
+            &request("request-read-attachment"),
+            &ClientRequest::Query(Query::ReadComposerAttachment(
+                artisan_domain::ReadComposerAttachment {
+                    digest: *reference.digest(),
+                },
+            )),
+        )
+        .await
+        .expect("attachment read should succeed");
+    let ResponsePayload::ComposerAttachment(stored) = response.payload else {
+        panic!("expected stored attachment bytes");
+    };
+    assert_eq!(stored.bytes, bytes);
+
+    let send = ClientRequest::Command(Command::QueueStoredMessage(
+        artisan_domain::QueueStoredMessage::new(
+            request("request-send-stored"),
+            ThreadId::parse("thread-attach").expect("valid thread id"),
+            Some(artisan_domain::AuthoredText::parse("see chart").expect("valid text")),
+            vec![reference.clone()],
+            None,
+        )
+        .expect("valid stored message"),
+    ));
+    let receipt = queued_message_of(
+        handler
+            .respond(&request("request-send-stored"), &send)
+            .await
+            .expect("stored send should queue"),
+    );
+    assert_eq!(receipt.disposition, ReceiptDisposition::Accepted);
+    let image = handler
+        .respond(
+            &request("request-read-sent-image"),
+            &ClientRequest::Query(Query::ReadMessageImage(
+                artisan_domain::ReadMessageImage::new(
+                    ThreadId::parse("thread-attach").expect("valid thread id"),
+                    receipt.message_id.clone(),
+                    0,
+                ),
+            )),
+        )
+        .await
+        .expect("sent image should read back");
+    let ResponsePayload::MessageImage(image) = image.payload else {
+        panic!("expected message image bytes");
+    };
+    assert_eq!(image.bytes, bytes);
+    assert_eq!(image.reference.name, "chart.png");
+
+    // A retried stored send replays the original receipt.
+    let replay = queued_message_of(
+        handler
+            .respond(&request("request-send-stored"), &send)
+            .await
+            .expect("stored send replay should answer"),
+    );
+    assert_eq!(replay.message_id, receipt.message_id);
+    assert_eq!(replay.disposition, ReceiptDisposition::Duplicate);
+
+    let ghost = artisan_domain::ComposerAttachmentRef::new(
+        artisan_domain::ComposerAttachmentDigest::new([3; 32]),
+        artisan_domain::ImageMimeType::Png,
+        "ghost.png",
+        5,
+    )
+    .expect("valid reference");
+    let ghost_send = ClientRequest::Command(Command::QueueStoredMessage(
+        artisan_domain::QueueStoredMessage::new(
+            request("request-send-ghost"),
+            ThreadId::parse("thread-attach").expect("valid thread id"),
+            None,
+            vec![ghost],
+            None,
+        )
+        .expect("valid stored message"),
+    ));
+    let failure = failure_of(
+        handler
+            .respond(&request("request-send-ghost"), &ghost_send)
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::InvalidInput);
+}

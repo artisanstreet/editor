@@ -840,6 +840,14 @@ struct Request {
     # Authenticated client-side chooser result. Forge canonicalizes and validates
     # this host-native path before issuing the usual one-use DirectoryId.
     validateDirectory @31 :Text;
+
+    # Forge-owned composer drafts and stored attachments. Appended after
+    # validateDirectory; fresh ordinals, existing ordinals frozen.
+    saveComposerDraft @32 :ComposerState.SaveComposerDraftRequest;
+    readComposerDraft @33 :ComposerState.ReadComposerDraftRequest;
+    uploadComposerAttachment @34 :ComposerState.UploadComposerAttachmentRequest;
+    readComposerAttachment @35 :ComposerState.ReadComposerAttachmentRequest;
+    queueStoredMessage @36 :ComposerState.QueueStoredMessageRequest;
   }
 }
 
@@ -915,6 +923,13 @@ struct Response {
     # Repository state per requested project for one queryProjectRepository
     # request. Appended after richLink; fresh ordinal, existing ordinals frozen.
     projectRepository @31 :ProjectRepositoryQueryResult;
+
+    # Composer draft and stored-attachment results. Appended after
+    # projectRepository; fresh ordinals, existing ordinals frozen.
+    composerDraftSaved @32 :ComposerState.ComposerDraftSaved;
+    composerDraft @33 :ComposerState.ComposerDraftResult;
+    composerAttachmentUploaded @34 :ComposerState.ComposerAttachmentUploaded;
+    composerAttachment @35 :ComposerState.ComposerAttachmentResult;
   }
 }
 

@@ -87,6 +87,7 @@ use crate::types::{
     VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
 
+mod composer_draft;
 mod conversation;
 mod engine_config;
 mod envelope;
@@ -96,6 +97,7 @@ mod observation;
 mod repository;
 mod server;
 
+pub(crate) use composer_draft::*;
 pub(crate) use conversation::*;
 pub(crate) use engine_config::*;
 pub(crate) use envelope::*;

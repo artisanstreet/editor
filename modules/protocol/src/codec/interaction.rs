@@ -88,6 +88,38 @@ pub(crate) fn decode_queue_message(
     Ok(ClientRequest::Command(Command::QueueMessage(command)))
 }
 
+/// Encodes one general message with its ordered inline image bytes.
+pub(crate) fn encode_queue_message(
+    mut queue: artisan_capnp::queue_message_request::Builder<'_>,
+    command: &QueueMessage,
+) -> Result<(), ProtocolEncodeError> {
+    queue.set_thread_id(command.thread_id.as_str());
+    match command.payload.text() {
+        Some(text) => queue.reborrow().init_text().set_present(text.as_str()),
+        None => queue.reborrow().init_text().set_absent(()),
+    }
+    let mut attachments = queue.reborrow().init_attachments(list_length(
+        "request.queueMessage.attachments",
+        command.payload.attachments().len(),
+    )?);
+    for (index, attachment) in command.payload.attachments().iter().enumerate() {
+        let mut encoded = attachments
+            .reborrow()
+            .get(list_index("request.queueMessage.attachments", index)?);
+        encoded.set_mime_type(attachment.mime_type_str());
+        encoded.set_name(attachment.name());
+        encoded.set_bytes(attachment.bytes());
+    }
+    // Empty steer text is the unnamed (fresh send) encoding; a non-empty
+    // value must parse as a RunId on decode.
+    queue.set_steer_run_id(
+        command
+            .steer_target()
+            .map_or("", |target| target.run_id().as_str()),
+    );
+    Ok(())
+}
+
 pub(crate) fn decode_stop_run(
     command: artisan_capnp::stop_run_request::Reader<'_>,
     request_id: RequestId,

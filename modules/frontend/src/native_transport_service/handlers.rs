@@ -472,7 +472,7 @@ pub(super) async fn queue_message(
             },
         );
     }
-    let mutation = match message_stable_mutation(command) {
+    let mutation = match message_stable_mutation(command, &runtime.stored_attachments) {
         Ok(mutation) => mutation,
         Err(failure) => {
             return publish(

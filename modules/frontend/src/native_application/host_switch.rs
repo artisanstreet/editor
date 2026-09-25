@@ -31,6 +31,22 @@ impl NativeApplication {
         self.service.as_ref()?.holds().try_hold(kind)
     }
 
+    /// Admits one command on this view's connection.
+    pub(super) fn submit_command(
+        &self,
+        command: NativeTransportCommand,
+    ) -> Result<(), CommandSendError> {
+        #[cfg(test)]
+        if let Some(sink) = &self.test_command_sink {
+            sink.commands.borrow_mut().push(command);
+            return sink.outcomes.borrow_mut().pop_front().unwrap_or(Ok(()));
+        }
+        let Some(service) = self.service.as_ref() else {
+            return Err(CommandSendError::Stopped);
+        };
+        service.submit(command)
+    }
+
     /// Releases the message-flight hold once the flight has ended, its
     /// correlated reply has arrived, or the connection is gone.
     pub(super) fn settle_message_flight_hold(&mut self, replied: Option<&RequestId>) {
@@ -136,10 +152,11 @@ impl NativeApplication {
     /// application starts service shutdown. This runs on the GPUI
     /// application thread.
     pub(super) fn prepare_shutdown(&mut self, cx: &mut Context<Self>) {
-        self.shutdown_prepared = true;
         if let Some(holds) = self.connection_holds() {
             holds.seal();
         }
+        self.flush_composer_drafts(cx);
+        self.shutdown_prepared = true;
         self.pending_account_send = None;
         self.thread_switch_flight = None;
         self.ordinary_unsubscribe_thread = None;

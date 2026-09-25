@@ -356,7 +356,7 @@ pub enum ImageAttachmentError {
     },
 }
 
-fn validate_attachment_name(name: &str) -> Result<(), ImageAttachmentError> {
+pub(crate) fn validate_attachment_name(name: &str) -> Result<(), ImageAttachmentError> {
     if name.len() > MESSAGE_IMAGE_ATTACHMENT_NAME_MAX_BYTES {
         return Err(ImageAttachmentError::NameTooLong {
             length: name.len(),

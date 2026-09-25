@@ -1237,9 +1237,7 @@ fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(
                 composer.switch_thread(&format!("project:{}", alpha.as_str()), false, cx);
             });
             assert_eq!(application.composer.read(cx).draft(), "");
-            application.composer.update(cx, |composer, cx| {
-                composer.switch_thread(destination.as_str(), false, cx);
-            });
+            application.reopen_with_forge_draft(destination.as_str(), "Alpha idea", cx);
             assert_eq!(application.composer.read(cx).draft(), "Alpha idea");
             assert!(!commands.borrow().iter().any(|command| matches!(
                 command,

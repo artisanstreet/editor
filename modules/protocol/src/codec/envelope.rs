@@ -106,30 +106,7 @@ pub(crate) fn encode_request(
             queue.set_body(command.body.as_str());
         }
         ClientRequest::Command(Command::QueueMessage(command)) => {
-            let mut queue = builder.reborrow().init_queue_message();
-            queue.set_thread_id(command.thread_id.as_str());
-            match command.payload.text() {
-                Some(text) => queue.reborrow().init_text().set_present(text.as_str()),
-                None => queue.reborrow().init_text().set_absent(()),
-            }
-            let mut attachments = queue.reborrow().init_attachments(list_length(
-                "request.queueMessage.attachments",
-                command.payload.attachments().len(),
-            )?);
-            for (index, attachment) in command.payload.attachments().iter().enumerate() {
-                let mut encoded = attachments
-                    .reborrow()
-                    .get(list_index("request.queueMessage.attachments", index)?);
-                encoded.set_mime_type(attachment.mime_type_str());
-                encoded.set_name(attachment.name());
-                encoded.set_bytes(attachment.bytes());
-            }
-            // Empty steer text is the unnamed (fresh send) encoding; a
-            // non-empty value must parse as a RunId on decode.
-            match command.steer_target() {
-                Some(target) => queue.set_steer_run_id(target.run_id().as_str()),
-                None => queue.set_steer_run_id(""),
-            }
+            encode_queue_message(builder.reborrow().init_queue_message(), command)?;
         }
         ClientRequest::Command(Command::StopRun(command)) => {
             let mut stop = builder.reborrow().init_stop_run();
@@ -276,6 +253,14 @@ pub(crate) fn encode_request(
             )
             .map_err(|_| ProtocolEncodeError::ComposerState)?;
         }
+        ClientRequest::Command(
+            Command::SaveComposerDraft(_)
+            | Command::UploadComposerAttachment(_)
+            | Command::QueueStoredMessage(_),
+        )
+        | ClientRequest::Query(Query::ReadComposerDraft(_) | Query::ReadComposerAttachment(_)) => {
+            encode_composer_draft_request(builder, value)?;
+        }
         ClientRequest::ResolveRichLink(request) => {
             builder
                 .reborrow()
@@ -343,6 +328,12 @@ pub(crate) fn encode_response_payload(
                 value,
             )
             .map_err(|_| ProtocolEncodeError::ComposerState)?;
+        }
+        ResponsePayload::ComposerDraftSaved(_)
+        | ResponsePayload::ComposerDraft(_)
+        | ResponsePayload::ComposerAttachmentUploaded(_)
+        | ResponsePayload::ComposerAttachment(_) => {
+            encode_composer_draft_response(builder, payload, outer_request_id)?;
         }
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
@@ -791,35 +782,13 @@ pub(crate) fn decode_request(
             Query::ReadModelFavorites(ReadModelFavorites),
         )),
         request::Which::SetModelFavorite(command) => {
-            let command = command?;
-            let catalog_revision = CatalogRevision::parse(read_text(
-                command.get_catalog_revision(),
-                "request.setModelFavorite.catalogRevision",
-            )?)?;
-            let model_id = ModelFavoriteId::parse(read_text(
-                command.get_model_id(),
-                "request.setModelFavorite.modelId",
-            )?)?;
-            Ok(ClientRequest::Command(Command::SetModelFavorite(
-                SetModelFavorite::new(
-                    request_id,
-                    parse_thread_id(
-                        read_text(command.get_thread_id(), "request.setModelFavorite.threadId")?,
-                        "request.setModelFavorite.threadId",
-                    )?,
-                    parse_profile_id(
-                        read_text(
-                            command.get_profile_id(),
-                            "request.setModelFavorite.profileId",
-                        )?,
-                        "request.setModelFavorite.profileId",
-                    )?,
-                    catalog_revision,
-                    model_id,
-                    command.get_favorite(),
-                ),
-            )))
+            decode_set_model_favorite(command?, request_id)
         }
+        request::Which::SaveComposerDraft(_)
+        | request::Which::ReadComposerDraft(_)
+        | request::Which::UploadComposerAttachment(_)
+        | request::Which::ReadComposerAttachment(_)
+        | request::Which::QueueStoredMessage(_) => decode_composer_draft_request(value, request_id),
     }
 }
 
@@ -958,6 +927,12 @@ pub(crate) fn decode_response(
             decode_registered_engine_profiles_result(result?)?
         }
         response::Which::RichLink(result) => decode_rich_link_page_metadata(result?)?,
+        response::Which::ComposerDraftSaved(_)
+        | response::Which::ComposerDraft(_)
+        | response::Which::ComposerAttachmentUploaded(_)
+        | response::Which::ComposerAttachment(_) => {
+            decode_composer_draft_response(value, &request_id)?
+        }
         response::Which::ProjectRepository(result) => {
             decode_project_repository_query_result(result?)?
         }

@@ -464,11 +464,10 @@ fn image_message_retry_preserves_full_payload_and_wire_identity() {
         ],
     )
     .expect("image-only payload");
-    let mutation = message_stable_mutation(artisan_domain::QueueMessage::new(
-        request_id.clone(),
-        thread_id.clone(),
-        payload.clone(),
-    ))
+    let mutation = message_stable_mutation(
+        artisan_domain::QueueMessage::new(request_id.clone(), thread_id.clone(), payload.clone()),
+        &std::collections::HashSet::new(),
+    )
     .expect("stable image mutation");
     let (first, first_id) = mutation.envelope(ProtocolVersion::V1).expect("first");
     let (retry, retry_id) = mutation.envelope(ProtocolVersion::V1).expect("retry");

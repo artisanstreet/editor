@@ -483,6 +483,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         self.sync_composer_controls(cx);
+        self.sync_composer_draft(cx);
         let Some(retry) = self.message_retry.as_mut() else {
             return;
         };
@@ -658,6 +659,7 @@ impl NativeApplication {
     pub(super) fn clear_transient_service_state(&mut self) {
         self.drop_transient_service_reads();
         self.run_controls.clear_transient_observation();
+        self.release_composer_drafts();
     }
 
     pub(super) fn handle_message_receipt(

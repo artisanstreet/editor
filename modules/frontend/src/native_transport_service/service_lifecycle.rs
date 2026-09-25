@@ -134,6 +134,28 @@ impl NativeTransportService {
         }
     }
 
+    /// Admits one mutating command under a live application-level hold.
+    ///
+    /// The command takes an extension of `parent` instead of a fresh hold,
+    /// so work that began before the connection was sealed (a draft's next
+    /// coalesced save) is still admitted while the connection drains.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommandSendError::Busy`] when the bounded command queue is
+    /// full, or [`CommandSendError::Stopped`] after the service has stopped.
+    pub fn submit_under(
+        &self,
+        command: NativeTransportCommand,
+        parent: &Hold,
+    ) -> Result<(), CommandSendError> {
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Err(CommandSendError::Stopped);
+        }
+        let hold = command.hold_kind().map(|_| parent.extend());
+        try_send_command(&self.commands, QueuedCommand { command, hold })
+    }
+
     /// Requests shutdown once, retaining nonblocking admission semantics.
     ///
     /// # Errors
@@ -282,6 +304,7 @@ impl ServiceRuntime {
             cancel: CancelHandle::new(),
             shutdown_grace: Duration::ZERO,
             known_threads: HashSet::new(),
+            stored_attachments: HashSet::new(),
             intake: IntakeState::new(),
             custody: SubscriptionCustody::new(),
             delivery_cancel: None,
@@ -410,6 +433,7 @@ async fn attach_to_owned_forge(
             cancel,
             shutdown_grace,
             known_threads: HashSet::new(),
+            stored_attachments: HashSet::new(),
             intake: IntakeState::new(),
             custody: SubscriptionCustody::new(),
             delivery_cancel: None,
@@ -526,6 +550,7 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
             cancel,
             shutdown_grace,
             known_threads: HashSet::new(),
+            stored_attachments: HashSet::new(),
             intake: IntakeState::new(),
             custody: SubscriptionCustody::new(),
             delivery_cancel: None,

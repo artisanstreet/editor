@@ -1050,10 +1050,9 @@ fn return_to_source_and_reject_old_generation(
     assert_eq!(application.conversation_host.as_ref(), Some(&returned_host));
     assert_eq!(application.selected_thread.as_ref(), Some(source));
     assert_eq!(switch_protocol_commands(commands).len(), 4);
-    assert_eq!(
-        application.composer.read(application_cx).draft(),
-        "retained switch draft"
-    );
+    application.reply_forge_draft("retained switch draft", application_cx);
+    let composer = application.composer.read(application_cx);
+    assert_eq!(composer.draft(), "retained switch draft");
 }
 
 fn seed_refresh_in_flight(application: &mut NativeApplication, thread: &ThreadId) {
@@ -1128,9 +1127,10 @@ fn recovery_result(
     .expect("recovery result")
 }
 
+#[path = "tests/forge_drafts.rs"]
+mod forge_drafts;
 #[path = "tests/lifecycle.rs"]
 mod lifecycle;
-
 #[path = "tests/navigation.rs"]
 mod navigation;
 #[path = "tests/projects.rs"]

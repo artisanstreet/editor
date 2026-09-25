@@ -14,7 +14,6 @@ use std::{
     sync::Arc,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, RenderImage, SvgRenderer};
 use image::{
     DynamicImage, ImageDecoder, ImageFormat as EncodedImageFormat, ImageReader, Limits,
@@ -22,9 +21,10 @@ use image::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{
-    composer_draft_session_policy::ComposerImageAttachment,
-    image_policy::{ImageDimensions, ImageMediaType, best_image_format, image_rescale_target},
+use artisan_domain::ComposerAttachmentRef;
+
+use crate::image_policy::{
+    ImageDimensions, ImageMediaType, best_image_format, image_rescale_target,
 };
 
 /// The maximum number of images accepted by one composer draft.
@@ -44,7 +44,6 @@ pub(super) const MAXIMUM_RAW_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const MAXIMUM_RAW_ATTACHMENT_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// The maximum decoded RGBA pixel count allowed before a preview is retained.
 pub(super) const MAXIMUM_DECODED_IMAGE_PIXELS: usize = 16 * 1024 * 1024;
-const MAXIMUM_BASE64_INPUT_BYTES: usize = MAXIMUM_RAW_ATTACHMENT_BYTES.div_ceil(3) * 4 + 4;
 
 pub(super) const ATTACHMENT_COUNT_LIMIT_MESSAGE: &str = "Attach up to 10 images at a time.";
 pub(super) const ATTACHMENT_TOTAL_LIMIT_MESSAGE: &str =
@@ -174,11 +173,6 @@ pub(super) enum AttachmentPreparationError {
     InvalidImage,
     /// The decoded preview would exceed the decompression ceiling.
     DecodedImageTooLarge { width: u32, height: u32 },
-    /// Restored base64 content was malformed.
-    InvalidBase64,
-    /// Restored content did not match a source digest when an exact raw-byte
-    /// comparison was possible.
-    DigestMismatch,
 }
 
 impl fmt::Display for AttachmentPreparationError {
@@ -202,9 +196,6 @@ impl fmt::Display for AttachmentPreparationError {
             Self::DecodedImageTooLarge { .. } => {
                 formatter.write_str("That image is too large to preview safely.")
             }
-            Self::InvalidBase64 | Self::DigestMismatch => {
-                formatter.write_str("That saved image could not be restored safely.")
-            }
         }
     }
 }
@@ -227,8 +218,6 @@ pub(super) struct PreparedComposerAttachment {
     pub(super) format: ImageFormat,
     pub(super) mime_type: String,
     pub(super) bytes: Arc<Vec<u8>>,
-    /// Draft-safe base64 prepared with the encoded payload off the UI thread.
-    pub(super) content_base64: String,
     pub(super) thumbnail: Arc<RenderImage>,
     #[cfg(test)]
     pub(super) dimensions: ImageDimensions,
@@ -251,8 +240,9 @@ pub(super) struct ComposerAttachment {
     pub(super) format: Option<ImageFormat>,
     pub(super) mime_type: String,
     pub(super) bytes: Option<Arc<Vec<u8>>>,
-    /// Draft-safe base64 for the encoded payload. Pending slots keep this empty.
-    pub(super) content_base64: String,
+    /// The Forge attachment store's reference to these exact bytes, once
+    /// uploaded (or when restored from a Forge draft).
+    pub(super) stored: Option<ComposerAttachmentRef>,
     pub(super) thumbnail: Option<Arc<RenderImage>>,
     pub(super) source_digest: String,
     pub(super) encoded_digest: String,
@@ -274,7 +264,7 @@ impl ComposerAttachment {
             format,
             mime_type: mime_type.into(),
             bytes: None,
-            content_base64: String::new(),
+            stored: None,
             thumbnail: None,
             source_digest: String::new(),
             encoded_digest: String::new(),
@@ -290,7 +280,7 @@ impl ComposerAttachment {
             format: Some(prepared.format),
             mime_type: prepared.mime_type,
             bytes: Some(prepared.bytes),
-            content_base64: prepared.content_base64,
+            stored: None,
             thumbnail: Some(prepared.thumbnail),
             source_digest: prepared.source_digest,
             encoded_digest: prepared.encoded_digest,
@@ -327,33 +317,6 @@ impl ComposerAttachment {
             position,
         })
     }
-
-    pub(super) fn draft_value(&self) -> ComposerImageAttachment {
-        ComposerImageAttachment {
-            content_base64: self.content_base64.clone(),
-            id: self.id.clone(),
-            mime_type: self.mime_type.clone(),
-            name: self.name.clone(),
-            preview_url: format!("native://composer/attachment/{}", self.id),
-            ready: self.is_ready(),
-            size_bytes: self.size_bytes,
-            source_digest: self.source_digest.clone(),
-            source_size_bytes: self.source_size_bytes,
-        }
-    }
-}
-
-/// Input needed to revive one stored attachment without interpreting its
-/// preview reference.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RestoredAttachmentInput {
-    pub(super) id: String,
-    pub(super) name: String,
-    pub(super) mime_type: String,
-    pub(super) content_base64: String,
-    pub(super) size_bytes: usize,
-    pub(super) source_digest: String,
-    pub(super) source_size_bytes: usize,
 }
 
 /// One already-validated encoded image being recalled from a queued message.
@@ -417,26 +380,6 @@ pub(super) fn prepare_file_batch(
             let name = display_file_name(&path);
             let result = limit_batch_output(
                 read_and_prepare_file(id.clone(), &path, engine_id),
-                &mut output_total,
-            );
-            AttachmentPreparationOutcome { id, name, result }
-        })
-        .collect()
-}
-
-/// Revives ready values retained by the draft policy.
-pub(super) fn prepare_restored_batch(
-    items: Vec<RestoredAttachmentInput>,
-    engine_id: Option<&str>,
-) -> Vec<AttachmentPreparationOutcome> {
-    let mut output_total = 0;
-    items
-        .into_iter()
-        .map(|item| {
-            let id = item.id.clone();
-            let name = item.name.clone();
-            let result = limit_batch_output(
-                decode_and_prepare_restored(item, engine_id),
                 &mut output_total,
             );
             AttachmentPreparationOutcome { id, name, result }
@@ -576,7 +519,6 @@ pub(super) fn prepare_image_bytes(
         format: output_format,
         mime_type: output_format.mime_type().to_owned(),
         bytes: Arc::new(output_bytes.clone()),
-        content_base64: BASE64.encode(&output_bytes),
         thumbnail,
         #[cfg(test)]
         dimensions: output_dimensions,
@@ -600,58 +542,6 @@ fn read_and_prepare_file(
     let bytes = read_bounded_file(path)?;
     let format = detect_image_format(&bytes)?;
     prepare_image_bytes(id, &name, format, &bytes, engine_id)
-}
-
-fn decode_and_prepare_restored(
-    item: RestoredAttachmentInput,
-    _engine_id: Option<&str>,
-) -> Result<PreparedComposerAttachment, AttachmentPreparationError> {
-    let format = ImageFormat::from_mime_type(&item.mime_type)
-        .ok_or(AttachmentPreparationError::UnsupportedFormat)?;
-    if item.size_bytes > MAXIMUM_ATTACHMENT_BYTES {
-        return Err(AttachmentPreparationError::TooLarge {
-            size: item.size_bytes,
-            maximum: MAXIMUM_ATTACHMENT_BYTES,
-        });
-    }
-    if item.source_size_bytes > MAXIMUM_RAW_ATTACHMENT_BYTES {
-        return Err(AttachmentPreparationError::TooLarge {
-            size: item.source_size_bytes,
-            maximum: MAXIMUM_RAW_ATTACHMENT_BYTES,
-        });
-    }
-    if item.content_base64.len() > MAXIMUM_BASE64_INPUT_BYTES {
-        return Err(AttachmentPreparationError::TooLarge {
-            size: item.content_base64.len(),
-            maximum: MAXIMUM_BASE64_INPUT_BYTES,
-        });
-    }
-    let bytes = BASE64
-        .decode(item.content_base64)
-        .map_err(|_| AttachmentPreparationError::InvalidBase64)?;
-    validate_raw_size(bytes.len())?;
-    if item.size_bytes != 0 && item.size_bytes != bytes.len() {
-        return Err(AttachmentPreparationError::DigestMismatch);
-    }
-
-    if item.source_size_bytes != 0
-        && item.source_size_bytes == bytes.len()
-        && !item.source_digest.is_empty()
-        && item.source_digest != sha256_hex(&bytes)
-    {
-        return Err(AttachmentPreparationError::DigestMismatch);
-    }
-
-    let source_digest = item.source_digest;
-    let source_size_bytes = item.source_size_bytes;
-    prepare_preserved_encoded(
-        item.id,
-        item.name,
-        format,
-        bytes,
-        source_digest,
-        source_size_bytes,
-    )
 }
 
 /// Decodes an encoded image only for metadata and preview generation.
@@ -704,7 +594,6 @@ fn prepare_preserved_encoded(
         name,
         format,
         mime_type: format.mime_type().to_owned(),
-        content_base64: BASE64.encode(bytes.as_ref()),
         bytes,
         thumbnail,
         #[cfg(test)]
@@ -994,10 +883,6 @@ mod tests {
         assert_eq!(prepared.size_bytes, prepared.bytes.len());
         assert_eq!(prepared.source_digest.len(), 64);
         assert_eq!(prepared.encoded_digest.len(), 64);
-        assert_eq!(
-            prepared.content_base64,
-            BASE64.encode(prepared.bytes.as_ref())
-        );
         assert_eq!(prepared.source_digest, sha256_hex(ONE_BY_ONE_PNG));
         assert_eq!(prepared.encoded_digest, sha256_hex(prepared.bytes.as_ref()));
         assert!(prepared.size_bytes <= MAXIMUM_ATTACHMENT_BYTES);
@@ -1019,7 +904,6 @@ mod tests {
             .expect("PNG fixture decodes");
 
         assert_eq!(prepared.bytes.as_ref(), ONE_BY_ONE_PNG);
-        assert_eq!(prepared.content_base64, BASE64.encode(ONE_BY_ONE_PNG));
         assert_eq!(prepared.encoded_digest, sha256_hex(ONE_BY_ONE_PNG));
         assert_eq!(prepared.source_digest, sha256_hex(ONE_BY_ONE_PNG));
         assert!(prepared.rescale_target.is_none());
@@ -1084,16 +968,6 @@ mod tests {
                 maximum: MAXIMUM_RAW_ATTACHMENT_BYTES,
             }) if size == MAXIMUM_RAW_ATTACHMENT_BYTES + 1
         ));
-    }
-
-    #[test]
-    fn base64_round_trip_uses_the_shared_engine_and_is_bounded() {
-        for bytes in [b"".as_slice(), b"f", b"fo", b"foo", b"native image"] {
-            let encoded = BASE64.encode(bytes);
-            assert_eq!(BASE64.decode(encoded).expect("valid base64"), bytes);
-        }
-        assert_eq!(BASE64.encode(b"foobar"), "Zm9vYmFy");
-        assert!(BASE64.decode("not-base64!").is_err());
     }
 
     #[test]

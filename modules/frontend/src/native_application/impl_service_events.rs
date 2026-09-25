@@ -63,6 +63,7 @@ impl NativeApplication {
             NativeTransportEvent::ComposerState(event) => {
                 self.handle_composer_state_event(event, cx);
             }
+            NativeTransportEvent::ComposerDraft(event) => self.receive_draft_event(event, cx),
             NativeTransportEvent::ActiveRun {
                 thread_id,
                 generation,
@@ -1283,21 +1284,6 @@ impl NativeApplication {
         self.sync_thread_picker_disabled(cx);
         self.sync_composer_availability(cx);
         self.submit_thread_switch_unsubscribe(cx);
-    }
-
-    pub(super) fn submit_command(
-        &self,
-        command: NativeTransportCommand,
-    ) -> Result<(), CommandSendError> {
-        #[cfg(test)]
-        if let Some(sink) = &self.test_command_sink {
-            sink.commands.borrow_mut().push(command);
-            return sink.outcomes.borrow_mut().pop_front().unwrap_or(Ok(()));
-        }
-        let Some(service) = self.service.as_ref() else {
-            return Err(CommandSendError::Stopped);
-        };
-        service.submit(command)
     }
 
     pub(super) fn submit_thread_switch_unsubscribe(&mut self, cx: &mut Context<Self>) {

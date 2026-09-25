@@ -21,7 +21,7 @@ pub mod command_ranking;
 pub mod component_gallery_policy;
 pub mod composer;
 pub mod composer_action_failure;
-pub mod composer_draft_session_policy;
+pub(crate) mod composer_draft_sync;
 pub mod composer_gesture;
 pub mod composer_send_readiness;
 pub mod context_auto_compaction;
