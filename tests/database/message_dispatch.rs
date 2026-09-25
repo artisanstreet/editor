@@ -105,9 +105,32 @@ async fn seed_dispatch(
     available_at_ms: i64,
     attempt_count: i32,
 ) {
+    seed_dispatch_in_thread(
+        database,
+        "thread-1",
+        message_id,
+        correlation_id,
+        ordinal,
+        queued_at_ms,
+        available_at_ms,
+        attempt_count,
+    )
+    .await;
+}
+
+async fn seed_dispatch_in_thread(
+    database: &DatabaseConnection,
+    thread_id: &str,
+    message_id: &str,
+    correlation_id: &str,
+    ordinal: i64,
+    queued_at_ms: i64,
+    available_at_ms: i64,
+    attempt_count: i32,
+) {
     entities::message::ActiveModel {
         message_id: Set(message_id.to_owned()),
-        thread_id: Set("thread-1".to_owned()),
+        thread_id: Set(thread_id.to_owned()),
         ordinal: Set(ordinal),
         body: Set(format!("body-{message_id}")),
         accepted_at_ms: Set(queued_at_ms),
@@ -203,9 +226,8 @@ async fn claim_is_deterministic_atomic_and_redacts_ownership() {
     let second = repository
         .claim_next_message_dispatch(claim(0xbc, 10, 20))
         .await
-        .expect("second claim should succeed")
-        .expect("another dispatch should be eligible");
-    assert_eq!(second.message_id.as_str(), "message-a");
+        .expect("second claim should succeed");
+    assert!(second.is_none(), "a leased message serializes its thread");
 }
 
 #[tokio::test]
@@ -338,11 +360,10 @@ async fn exhausted_queued_head_does_not_block_later_claimable_dispatch() {
     let exhausted = repository
         .claim_next_message_dispatch(claim(0x22, 10, 30))
         .await;
-    assert!(matches!(
-        exhausted,
-        Err(RepositoryError::DispatchAttemptLimit { message_id })
-            if message_id.as_str() == "message-exhausted"
-    ));
+    assert!(
+        matches!(exhausted, Ok(None)),
+        "busy threads are not eligible, including exhausted rows"
+    );
     assert_eq!(
         dispatch(&database, "message-exhausted").await,
         exhausted_before
@@ -451,4 +472,41 @@ impl Drop for TemporaryDatabase {
         let _ = std::fs::remove_file(format!("{}-wal", self.path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", self.path.display()));
     }
+}
+
+#[tokio::test]
+async fn busy_thread_does_not_block_another_thread_or_allow_same_thread_overlap() {
+    let (database, repository) = memory_database().await;
+    seed_foundation(&database).await;
+    let mut other = entities::thread::Entity::find_by_id("thread-1")
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_active_model();
+    other.thread_id = Set("thread-2".to_owned());
+    other.insert(&database).await.unwrap();
+    seed_dispatch(&database, "message-1", "request-1", 0, 4, 4, 0).await;
+    seed_dispatch(&database, "message-2", "request-2", 1, 5, 5, 0).await;
+    seed_dispatch_in_thread(&database, "thread-2", "message-3", "request-3", 0, 6, 6, 0).await;
+    let first = repository
+        .claim_next_message_dispatch(claim(1, 10, 30))
+        .await
+        .unwrap()
+        .unwrap();
+    let second = repository
+        .claim_next_message_dispatch(claim(2, 10, 30))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.message_id.as_str(), "message-1");
+    assert_eq!(second.message_id.as_str(), "message-3");
+    assert!(
+        repository
+            .claim_next_message_dispatch(claim(3, 10, 30))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(dispatch(&database, "message-2").await.attempt_count, 0);
 }

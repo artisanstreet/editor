@@ -208,13 +208,8 @@ fn validate_terminal_chronology(
             });
         }
     }
-    if scope.claimed.lease_expires_at.as_millis() <= operated_at.as_millis() {
-        return Err(RepositoryError::DispatchLeaseExpired {
-            message_id: scope.claimed.message_id.clone(),
-            lease_expires_at_ms: scope.claimed.lease_expires_at.as_millis(),
-            operated_at_ms: operated_at.as_millis(),
-        });
-    }
+    // The claimed snapshot predates heartbeats. Expiry is checked against
+    // the owner-fenced durable lease inside the write transaction.
     Ok(())
 }
 

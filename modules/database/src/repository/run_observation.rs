@@ -56,7 +56,7 @@ WHERE message_id = ?
   AND available_at_ms = ?
   AND state = 'running'
   AND lease_owner = ?
-  AND lease_expires_at_ms = ?
+  AND lease_expires_at_ms >= ?
   AND updated_at_ms = ?
   AND lease_expires_at_ms > ?
 RETURNING message_id

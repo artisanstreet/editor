@@ -97,9 +97,9 @@ use turn::{TurnConsumptionContext, TurnConsumptionState, consume_turn, handle_ob
 const PROMPT_DELIVERY_MAX_BYTES: usize = 256;
 const PROVIDER_BINDING_VERSION: i64 = 1;
 const PROVIDER_FAILURE_CODE: &str = "provider_failed";
-const PROVIDER_FAILURE_MESSAGE: &str = "OpenCode2 provider turn failed";
+const PROVIDER_FAILURE_MESSAGE: &str = "The provider run failed.";
 const INTERRUPTED_CODE: &str = "provider_interrupted";
-const INTERRUPTED_MESSAGE: &str = "OpenCode2 provider turn interrupted";
+const INTERRUPTED_MESSAGE: &str = "The provider session was interrupted.";
 
 /// Validation failures for the explicit Forge native-run scheduler.
 #[allow(clippy::module_name_repetitions)]
@@ -496,10 +496,10 @@ impl NativeRunDispatcher {
         // constructor failure is zero capacity.
         let interactions = RunInteractionRegistry::new(config.queue_capacity.get())
             .expect("dispatcher queue capacity should be nonzero");
-        let join = runtime.spawn(dispatch_loop(DispatchLoopContext {
+        let join = runtime.spawn(dispatch_workers(DispatchLoopContext {
             repository,
             database_path,
-            config,
+            config: Arc::new(config),
             stop: Arc::clone(&stop),
             process_cancel,
             cancellation,
@@ -567,7 +567,7 @@ struct DispatchLoopExit {
 struct DispatchLoopContext {
     repository: Repository,
     database_path: PathBuf,
-    config: NativeRunDispatcherConfig,
+    config: Arc<NativeRunDispatcherConfig>,
     stop: Arc<CancelHandle>,
     process_cancel: Arc<CancelHandle>,
     cancellation: RunCancellationRegistry,
@@ -575,6 +575,61 @@ struct DispatchLoopContext {
     owner: EngineOwner,
     activity: ActivityGateImpl,
     launch_mode: DispatchLaunchMode,
+}
+
+// Independent threads have independent provider owners; SQLite still serializes
+// dispatch claims and prevents two workers from claiming the same thread.
+async fn dispatch_workers(mut context: DispatchLoopContext) -> DispatchLoopExit {
+    if let Some(now) = wall_clock(&SystemCommandOrigin) {
+        let _ = context
+            .repository
+            .fail_orphaned_steered_dispatches(now)
+            .await;
+    }
+    #[cfg(test)]
+    if matches!(&context.launch_mode, DispatchLaunchMode::Fixture(_)) {
+        return dispatch_loop(context).await;
+    }
+    let mut workers = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        workers.spawn(dispatch_loop(DispatchLoopContext {
+            repository: context.repository.clone(),
+            database_path: context.database_path.clone(),
+            config: Arc::clone(&context.config),
+            stop: Arc::clone(&context.stop),
+            process_cancel: Arc::clone(&context.process_cancel),
+            cancellation: context.cancellation.clone(),
+            interactions: context.interactions.clone(),
+            owner: EngineOwner::start_configured(
+                context.config.queue_capacity,
+                &tokio::runtime::Handle::current(),
+            ),
+            activity: context.activity.clone(),
+            launch_mode: DispatchLaunchMode::Configured,
+        }));
+    }
+    let mut outcome = EngineOwnerShutdown::Joined;
+    while let Some(result) = workers.join_next().await {
+        match result {
+            Ok(exit) if exit.owner == EngineOwnerShutdown::Joined => {}
+            Ok(exit) => {
+                if outcome != EngineOwnerShutdown::TaskLost {
+                    outcome = exit.owner;
+                }
+                context.stop.cancel();
+            }
+            Err(_) => {
+                outcome = EngineOwnerShutdown::TaskLost;
+                context.stop.cancel();
+            }
+        }
+    }
+    // The catalog owner remains responsive even when every run slot is busy.
+    let catalog = shutdown_owner_bounded(&mut context.owner).await;
+    if catalog != EngineOwnerShutdown::Joined && outcome != EngineOwnerShutdown::TaskLost {
+        outcome = catalog;
+    }
+    DispatchLoopExit { owner: outcome }
 }
 
 #[expect(
@@ -595,17 +650,6 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
         mut launch_mode,
     } = context;
     let origin = SystemCommandOrigin;
-    // Fail steered rows orphaned by a previous process lifetime exactly
-    // once here, while no turn loop can be pumping: rows whose target run
-    // is still live cannot exist at this point (leases die with their
-    // loops), so every open steered row left behind is terminally
-    // unrecoverable in place. Payloads stay preserved for user recovery.
-    // A failed sweep never blocks the loop; the next start retries it.
-    if let Some(operated_at) = wall_clock(&origin) {
-        let _ = repository
-            .fail_orphaned_steered_dispatches(operated_at)
-            .await;
-    }
     // `AcceptedTurn::finish` can report an unresolved reap while the owner
     // quarantines a retained child. Keep its activity lease until owner
     // shutdown proves that custody has resolved.
@@ -755,9 +799,13 @@ where
     loop {
         tokio::select! {
             output = &mut turn => break output,
-            _ = renew_at.tick() => {
+            () = async {
+                renew_at.tick().await;
+                // The turn may hold the SQLite writer across an await.
+                // Poll it while renewal waits for that same writer, so it
+                // can finish its transaction or react to cancellation.
                 renew_claim_lease(repository, origin, claimed, claim_lease).await;
-            }
+            } => {}
         }
     }
 }

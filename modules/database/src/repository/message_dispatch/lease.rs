@@ -25,9 +25,9 @@ use super::{DispatchLeaseOwner, TransitionedMessageDispatch};
 const RENEW_DISPATCH_LEASE_SQL: &str = r"
 UPDATE message_dispatches
 SET lease_expires_at_ms = ?,
-    updated_at_ms = ?
+    updated_at_ms = CASE WHEN state = 'leased' THEN ? ELSE updated_at_ms END
 WHERE message_id = ?
-  AND state = 'leased'
+  AND state IN ('leased', 'running')
   AND lease_owner = ?
 RETURNING message_id,
           attempt_count,
@@ -158,7 +158,7 @@ fn renewed_from_row(
         });
     }
     let updated_at_ms = row_value::<i64, _>(row, 4, "updated_at_ms", "message_dispatches")?;
-    if updated_at_ms != operated_at_ms {
+    if updated_at_ms > operated_at_ms {
         return Err(RepositoryError::Invariant {
             reason: "renewed lease returned inconsistent update timestamps",
         });
@@ -195,7 +195,7 @@ async fn classify_unfenced_lease_renewal(
             message_id: message_id.clone(),
         };
     };
-    if row.state != DispatchState::Leased {
+    if !matches!(row.state, DispatchState::Leased | DispatchState::Running) {
         return RepositoryError::InvalidDispatchState {
             message_id: message_id.clone(),
             state: state_label(&row.state),

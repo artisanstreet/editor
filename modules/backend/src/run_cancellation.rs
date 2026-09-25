@@ -182,10 +182,31 @@ impl RunCancellationRegistry {
         thread_id: ThreadId,
         run_id: RunId,
     ) -> Result<RunCancellationLease, RunCancellationError> {
+        self.register_inner(thread_id, run_id, false)
+    }
+
+    /// Reserves a thread until its previous provider child has been reaped,
+    /// even if database lease recovery has already interrupted that run.
+    pub(crate) fn register_exclusive(
+        &self,
+        thread_id: ThreadId,
+        run_id: RunId,
+    ) -> Result<RunCancellationLease, RunCancellationError> {
+        self.register_inner(thread_id, run_id, true)
+    }
+
+    fn register_inner(
+        &self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        exclusive: bool,
+    ) -> Result<RunCancellationLease, RunCancellationError> {
         let key = (thread_id.clone(), run_id.clone());
         let mut state = self.inner.lock()?;
 
-        if state.active.contains_key(&key) {
+        if state.active.contains_key(&key)
+            || (exclusive && state.active.keys().any(|(thread, _)| thread == &thread_id))
+        {
             return Err(RunCancellationError::Duplicate);
         }
         if state.active.len() >= self.inner.capacity {
@@ -445,6 +466,26 @@ mod tests {
             Ok(CancelRequestOutcome::NotActive)
         );
         assert!(!handle.is_cancelled());
+    }
+
+    #[test]
+    fn exclusive_registration_holds_thread_until_child_custody_is_released() {
+        let registry = registry(4);
+        let first = registry
+            .register_exclusive(thread_id("a"), run_id("1"))
+            .unwrap();
+        let other = registry
+            .register_exclusive(thread_id("b"), run_id("2"))
+            .unwrap();
+        assert!(matches!(
+            registry.register_exclusive(thread_id("a"), run_id("3")),
+            Err(RunCancellationError::Duplicate)
+        ));
+        drop(first);
+        let next = registry
+            .register_exclusive(thread_id("a"), run_id("3"))
+            .unwrap();
+        drop((next, other));
     }
 
     #[test]

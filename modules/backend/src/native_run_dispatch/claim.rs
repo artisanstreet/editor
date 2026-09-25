@@ -92,7 +92,7 @@ pub(super) async fn execute_claim(
     let Ok(cancellation) = loaded
         .context
         .cancellation
-        .register(loaded.payload.thread_id.clone(), ids.run_id.clone())
+        .register_exclusive(loaded.payload.thread_id.clone(), ids.run_id.clone())
     else {
         loaded.context.requeue("run cancellation unavailable").await;
         return None;

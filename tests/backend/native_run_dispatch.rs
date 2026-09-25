@@ -2730,7 +2730,7 @@ async fn dispatch_fixture_midturn_engine_loss_recovers_without_second_spawn() {
     // child spawn, session creation, or prompt, and no durable mutation.
     let settled_counts = crate::engine_owner::witness_counts();
     let (reopened_database, reopened_repository) =
-        restart_midturn_dispatcher(repository, database, temp, fixture).await;
+        restart_midturn_dispatcher(repository, database, &temp, fixture).await;
     let restart_counts = crate::engine_owner::witness_counts();
     assert_eq!(restart_counts.spawned, settled_counts.spawned);
     assert_eq!(restart_counts.reaps_observed, settled_counts.reaps_observed);
@@ -2771,7 +2771,7 @@ fn assert_midturn_interrupted_dispatch_run(after: &AllRows, message_id: &Message
     assert!(dispatch.lease_expires_at_ms.is_none());
     assert_eq!(
         dispatch.last_error.as_deref(),
-        Some("OpenCode2 provider turn interrupted")
+        Some("The provider session was interrupted.")
     );
     let run = after
         .runs
@@ -2783,7 +2783,7 @@ fn assert_midturn_interrupted_dispatch_run(after: &AllRows, message_id: &Message
     assert_eq!(run.error_code.as_deref(), Some("provider_interrupted"));
     assert_eq!(
         run.error_message.as_deref(),
-        Some("OpenCode2 provider turn interrupted")
+        Some("The provider session was interrupted.")
     );
     assert!(run.terminal_at_ms.is_none());
     assert!(run.owner.is_none());
@@ -2921,7 +2921,7 @@ async fn assert_midturn_quiescent_sweep(
 async fn restart_midturn_dispatcher(
     repository: Repository,
     database: DatabaseConnection,
-    temp: TempDatabase,
+    temp: &TempDatabase,
     fixture: PathBuf,
 ) -> (DatabaseConnection, Repository) {
     drop(repository);
@@ -4361,4 +4361,268 @@ async fn dispatch_lease_heartbeat_carries_a_turn_past_its_claim_window() {
         .expect("dispatch should exist");
     assert_eq!(settled.state, DispatchState::Completed);
     assert!(settled.lease_expires_at_ms.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_lease_heartbeat_keeps_polling_a_turn_with_an_open_transaction() {
+    assert_heartbeat_allows_transaction_progress(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_lease_heartbeat_allows_cancellation_with_an_open_transaction() {
+    assert_heartbeat_allows_transaction_progress(true).await;
+}
+
+async fn assert_heartbeat_allows_transaction_progress(cancel_turn: bool) {
+    use crate::SystemCommandOrigin;
+    use crate::native_run_dispatch::drive_turn_with_lease_heartbeat;
+    use sea_orm::{ConnectionTrait, SqliteTransactionMode, TransactionOptions, TransactionTrait};
+
+    let (database, repository, _temp) = temp_repository("heartbeat-open-transaction").await;
+    let thread = ThreadId::parse("thread-heartbeat-transaction").expect("thread id");
+    seed_project_and_thread(&database, &repository, thread.as_str()).await;
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("req-heartbeat-transaction").expect("request id"),
+            message_id: MessageId::parse("message-heartbeat-transaction").expect("message id"),
+            thread_id: thread.clone(),
+            body: MessageBody::parse("hello").expect("message body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("message queues");
+    let origin = SystemCommandOrigin;
+    let now = origin.acceptance_instant().expect("wall clock");
+    let claimed = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: artisan_database::DispatchLeaseOwner::new([0x5b; 32]),
+            claimed_at: now,
+            lease_expires_at: UnixMillis::from_millis(now.as_millis() + 300),
+        })
+        .await
+        .expect("claim succeeds")
+        .expect("dispatch is claimed");
+
+    let cancel = CancelHandle::new();
+    let writer_acquired = tokio::sync::Notify::new();
+    let drive = drive_turn_with_lease_heartbeat(
+        &repository,
+        &origin,
+        &claimed,
+        Duration::from_millis(300),
+        async {
+            let transaction = database
+                .begin_with_options(TransactionOptions {
+                    sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
+                    ..Default::default()
+                })
+                .await
+                .expect("turn acquires the SQLite writer");
+            transaction
+                .execute_unprepared(
+                    "UPDATE threads SET title = 'transaction committed' \
+                     WHERE thread_id = 'thread-heartbeat-transaction'",
+                )
+                .await
+                .expect("turn stages its write");
+            writer_acquired.notify_one();
+            // Renewal starts while this future owns the writer. It must
+            // keep being polled so it can release the lock renewal needs.
+            if cancel_turn {
+                cancel.wait().await;
+                transaction
+                    .rollback()
+                    .await
+                    .expect("cancel rolls back the write");
+            } else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                transaction.commit().await.expect("turn commits its write");
+            }
+        },
+    );
+    let request_stop = async {
+        writer_acquired.notified().await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        cancel.cancel();
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(drive, request_stop);
+    })
+    .await
+    .expect("heartbeat must not suspend a turn that holds its SQLite writer");
+
+    let now = origin.acceptance_instant().expect("wall clock");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        repository.renew_message_dispatch_lease(
+            &claimed.message_id,
+            &claimed.owner,
+            now,
+            UnixMillis::from_millis(now.as_millis() + 300),
+        ),
+    )
+    .await
+    .expect("dropping the pending heartbeat must release its writer")
+    .expect("another write succeeds after the turn finishes");
+    let persisted = entities::thread::Entity::find_by_id(thread.as_str())
+        .one(&database)
+        .await
+        .expect("thread reads")
+        .expect("thread exists");
+    if cancel_turn {
+        assert_ne!(persisted.title, "transaction committed");
+    } else {
+        assert_eq!(persisted.title, "transaction committed");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_approval_is_persisted_and_can_be_answered() {
+    use crate::SystemCommandOrigin;
+    use crate::native_run_dispatch::{SubagentCommitCursor, commit_activity_observation};
+    use artisan_domain::{EngineId, Observation, ObservationId, ObservationSequence, Revision};
+
+    let (database, repository, _temp) = temp_repository("activity-history").await;
+    seed_project_and_thread(&database, &repository, "thread-activity-history").await;
+    let thread = ThreadId::parse("thread-activity-history").expect("tid");
+
+    // First run: text first (production order), then one activity row whose
+    // source-local sequence (41) must never cross into durable history.
+    // The claim lease is wall-clock wide: activity commits stamp wall-clock
+    // `operated_at` through `SystemCommandOrigin`, so the shared helper's
+    // 600 ms lease would expire immediately.
+    let config = config_for_fixture_dispatch(ConversationCommitNotifier::new()).expect("config");
+    let origin = SystemCommandOrigin;
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("req-message-activity-1").expect("req"),
+            message_id: MessageId::parse("message-activity-1").expect("mid"),
+            thread_id: thread.clone(),
+            body: MessageBody::parse("hello").expect("body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("first message should queue");
+    let wall1_ms = origin
+        .acceptance_instant()
+        .expect("clock should succeed")
+        .as_millis();
+    let claimed1 = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: artisan_database::DispatchLeaseOwner::new([DISPATCH_OWNER_BYTE; 32]),
+            claimed_at: UnixMillis::from_millis(100),
+            lease_expires_at: UnixMillis::from_millis(wall1_ms.saturating_add(3_600_000)),
+        })
+        .await
+        .expect("claim")
+        .expect("first dispatch claimed");
+    let mut start_bytes1 = [0u8; 32];
+    for (idx, byte) in "run-activity-1".bytes().cycle().take(32).enumerate() {
+        start_bytes1[idx] = byte ^ 0x5a;
+    }
+    start_bytes1[0] = start_bytes1[0].wrapping_add(14);
+    let key1 = RunStartKey::new(start_bytes1);
+    let creds1 = RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES);
+    let engine_settings = repository
+        .read_thread_engine_settings(&thread)
+        .await
+        .expect("engine settings read")
+        .expect("engine settings present");
+    let launched1 = match repository
+        .launch_claimed_run(artisan_database::LaunchClaimedRun {
+            claimed: &claimed1,
+            run_id: &RunId::parse("run-activity-1").expect("run"),
+            turn_id: &TurnId::parse("turn-activity-1").expect("turn"),
+            item_id: &ItemId::parse("item-run-activity-1").expect("item"),
+            first_patch_id: &PatchId::parse("patch-run-activity-1-a").expect("patch"),
+            second_patch_id: &PatchId::parse("patch-run-activity-1-b").expect("patch"),
+            operated_at: UnixMillis::from_millis(150),
+            run_start_key: &key1,
+            credentials: &creds1,
+            engine_settings: &engine_settings,
+        })
+        .await
+        .expect("first run should launch")
+    {
+        artisan_database::LaunchClaimedRunOutcome::Started(receipt) => receipt,
+        artisan_database::LaunchClaimedRunOutcome::AlreadyStarted(_) => {
+            panic!("first launch should be fresh")
+        }
+    };
+    let bound1 = bind_running(&repository, &claimed1, &launched1, &key1, &creds1).await;
+    let item1 = ItemId::parse("assistant-activity-1").expect("item");
+    commit_running_item(
+        &repository,
+        RunningItemSeed {
+            claimed: &claimed1,
+            receipt: &launched1,
+            bound: &bound1,
+            start_key: &key1,
+            credentials: &creds1,
+            item_id: &item1,
+            turn_patch_id: &PatchId::parse("patch-activity-1-turn").expect("patch"),
+            item_patch_id: &PatchId::parse("patch-activity-1-item").expect("patch"),
+        },
+    )
+    .await;
+    let mut cursor1 = SubagentCommitCursor {
+        assistant_phase: artisan_domain::AssistantMessagePhase::Unspecified,
+        scope: artisan_database::RunBatchScope {
+            claimed: &claimed1,
+            launched: &launched1,
+            bound: &bound1,
+            run_start_key: &key1,
+            credentials: &creds1,
+            expected_launch_at: UnixMillis::from_millis(150),
+            expected_updated_at: UnixMillis::from_millis(250),
+        },
+        engine: EngineId::OpenCode2,
+        batch_sequence: 2,
+        assistant_item: Some(item1),
+        assistant_revision: Revision::new(0),
+        assistant_body: String::from("hello assistant"),
+    };
+    let approval_id = ObservationId::parse("provider-approval-42").unwrap();
+    let source = Observation::Approval(
+        artisan_domain::ApprovalObservation::requested(
+            ObservationId::parse("approval-event").unwrap(),
+            ObservationSequence::new(41).unwrap(),
+            approval_id.clone(),
+            "Inspect the Windows editor".to_owned(),
+            artisan_domain::ApprovalRequest::command(
+                "powershell.exe Get-Process editor".to_owned(),
+                None,
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    assert!(commit_activity_observation(&repository, &config, &origin, &mut cursor1, source).await);
+    let pending = repository
+        .pending_interactions(&launched1.run_id)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    let response = artisan_domain::RespondApproval::new(
+        RequestId::parse("approve-42").unwrap(),
+        thread,
+        launched1.run_id.clone(),
+        approval_id,
+        true,
+    );
+    let result = repository
+        .resolve_approval_response(
+            &response,
+            &artisan_database::ResolveScope {
+                binding_version: bound1.binding_version,
+                responded_at: origin.acceptance_instant().unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        artisan_database::ResolveInteractionOutcome::Applied(_)
+    ));
 }

@@ -1049,3 +1049,53 @@ fn auxiliary_error_values_are_bounded_and_redacted_in_debug() {
     assert!(RunErrorCode::parse(String::new()).is_err());
     assert!(RunErrorMessage::parse(String::new()).is_err());
 }
+
+#[tokio::test]
+async fn renewed_running_lease_allows_progress_and_completion_past_original_expiry() {
+    let (pair, item, _, _) = seeded_with_item().await;
+    pair.repository
+        .renew_message_dispatch_lease(
+            &pair.claimed.message_id,
+            &pair.claimed.owner,
+            UnixMillis::from_millis(500),
+            UnixMillis::from_millis(1200),
+        )
+        .await
+        .expect("running lease renews");
+    let body = assistant_body("continued after original expiry");
+    let patch = PatchId::parse("heartbeat-progress").unwrap();
+    pair.repository
+        .commit_run_batch(CommitRunBatch {
+            scope: terminal_scope(&pair),
+            batch_sequence: 2,
+            operated_at: UnixMillis::from_millis(700),
+            activate_turn_patch_id: None,
+            changes: &[AssistantChange::Replace {
+                item_id: &item,
+                expected_revision: Revision::new(0),
+                body: &body,
+                phase: AssistantMessagePhase::Unspecified,
+                patch_id: &patch,
+            }],
+            checkpoint: CheckpointUpdate::Keep,
+        })
+        .await
+        .expect("progress uses renewed lease and unchanged content fence");
+    let mut scope = terminal_scope(&pair);
+    scope.expected_updated_at = UnixMillis::from_millis(700);
+    let item_patch = PatchId::parse("heartbeat-complete-item").unwrap();
+    let turn_patch = PatchId::parse("heartbeat-complete-turn").unwrap();
+    pair.repository
+        .complete_run(CompleteRun {
+            scope,
+            operated_at: UnixMillis::from_millis(800),
+            item_id: &item,
+            expected_revision: Revision::new(1),
+            body: &body,
+            phase: AssistantMessagePhase::Final,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+        })
+        .await
+        .expect("completion uses renewed lease");
+}

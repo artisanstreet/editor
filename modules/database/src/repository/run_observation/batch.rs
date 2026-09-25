@@ -137,15 +137,8 @@ fn validate_chronology(command: &CommitRunBatch<'_>) -> Result<(), RunObservatio
             ));
         }
     }
-    if scope.claimed.lease_expires_at.as_millis() <= command.operated_at.as_millis() {
-        return Err(RunObservationError::Repository(
-            RepositoryError::DispatchLeaseExpired {
-                message_id: scope.claimed.message_id.clone(),
-                lease_expires_at_ms: scope.claimed.lease_expires_at.as_millis(),
-                operated_at_ms: command.operated_at.as_millis(),
-            },
-        ));
-    }
+    // The claimed snapshot predates heartbeats. Expiry is checked against
+    // the owner-fenced durable lease inside the write transaction.
     Ok(())
 }
 
