@@ -47,10 +47,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let paths = credentials::provision_or_load(&home)?;
     let ready = home.join("readiness.json");
-    // Never erase a receipt for a possibly live daemon. Service shutdown removes it.
-    if ready.exists() {
-        return Err("readiness already exists; stop the previous Forge and verify it has exited before removing a stale receipt".into());
-    }
+    // Serialize supervisors before checking custody or replacing crash leftovers.
+    let _supervisor = lock_supervisor(&home)?;
+    remove_stale_readiness(&home, &ready)?;
     let incarnation = artisan_editor_cli::instance::mint_instance_id()?;
     let mut command = Command::new(forge);
     for (key, value) in [
@@ -191,5 +190,67 @@ fn wait_for_previous(path: &std::path::Path) -> Result<(), Box<dyn std::error::E
             }
             Err(error) => return Err(error.into()),
         }
+    }
+}
+
+fn lock_supervisor(home: &std::path::Path) -> Result<std::fs::File, std::io::Error> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(home.join("supervisor.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&file)?;
+    Ok(file)
+}
+
+fn remove_stale_readiness(
+    home: &std::path::Path,
+    ready: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The daemon holds custody for its whole lifetime. Refuse cleanup while
+    // a live owner holds it, including a child surviving a supervisor crash.
+    let custody = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(home.join("custody"))?;
+    fs2::FileExt::try_lock_exclusive(&custody)?;
+    match std::fs::remove_file(ready) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn stale_receipt_is_removed_only_without_a_live_owner() {
+        let home = std::env::temp_dir().join(format!("forge-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let ready = home.join("readiness.json");
+        std::fs::write(&ready, b"stale").unwrap();
+        let owner = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(home.join("custody"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&owner).unwrap();
+        assert!(remove_stale_readiness(&home, &ready).is_err());
+        assert!(ready.exists());
+        drop(owner);
+        let supervisor = lock_supervisor(&home).unwrap();
+        assert!(lock_supervisor(&home).is_err());
+        remove_stale_readiness(&home, &ready).unwrap();
+        assert!(!ready.exists());
+        remove_stale_readiness(&home, &ready).unwrap();
+        drop(supervisor);
+        std::fs::remove_dir_all(home).unwrap();
     }
 }
