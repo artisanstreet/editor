@@ -1,8 +1,6 @@
 1514 modules/backend/src/connection.rs
 1136 modules/backend/src/engine_owner/acp/tests.rs
 975 modules/backend/src/engine_owner/catalog.rs
-1096 modules/backend/src/engine_owner/claude/adapter.rs
-832 modules/backend/src/engine_owner/claude/protocol.rs
 946 modules/backend/src/engine_owner/codex/adapter.rs
 1315 modules/backend/src/engine_owner/codex/protocol.rs
 1027 modules/backend/src/engine_owner/cursor/tests.rs

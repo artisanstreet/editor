@@ -1,24 +1,27 @@
 use std::collections::HashMap;
 
 use artisan_domain::{
-    EngineModelId, EngineRouteId, MessagePhase, Observation, ObservationId, ObservationSequence,
-    RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, SubagentInput, SubagentObservation,
-    SubagentState, SubagentTranscriptObservation, ThreadId, TranscriptAgentMessageDelta,
-    TranscriptContent, UnixMillis,
+    MessagePhase, Observation, ObservationId, ObservationSequence, RunId, SubagentInput,
+    SubagentObservation, SubagentState, SubagentTranscriptObservation, TranscriptAgentMessageDelta,
+    TranscriptContent,
 };
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 
 #[cfg(test)]
 use super::super::observation::TerminalObservation;
-use super::super::observation::{EngineObservation, TerminalState, UsageObservation, chunk_text};
+use super::super::observation::{EngineObservation, TerminalState, chunk_text};
 
+use super::content::ClaudeAssistantContent;
+use super::launch::ClaudeThinkingDisplay;
 #[cfg(test)]
 use super::protocol::{CLAUDE_MAX_ANSWERS, approval_response_line, question_response_line};
 use super::protocol::{
     ClaudeApprovalRequest, ClaudeEvent, ClaudeQuestion, ClaudeQuestionRequest, ClaudeTurnError,
-    ClaudeUsageSample, user_message_line, write_line,
+    user_message_line, write_line,
 };
+use super::thinking::ClaudeThinkingTracker;
+use super::usage::{ClaudeUsageScope, project_usage_sample};
 
 /// Builds one validated subagent discovery row.
 ///
@@ -97,11 +100,8 @@ fn child_transcript_row(
 /// continues. Subagent discoveries emit validated `Discovered` rows and child
 /// transcript frames project validated transcript rows; both accumulate for
 /// the consumer drain without ever reaching the root turn. Thinking
-/// estimates and reasoning settlement are retained as plumbing.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "the tracker records independent provider lifecycle flags; folding them into a state enum would not reduce ambiguity"
-)]
+/// estimates stay plumbing; thinking stretches project through the run-local
+/// [`ClaudeThinkingTracker`].
 #[derive(Debug, Default)]
 pub(crate) struct ClaudePendingTracker {
     approvals: HashMap<String, ClaudeApprovalRequest>,
@@ -110,8 +110,7 @@ pub(crate) struct ClaudePendingTracker {
     child_frames: Vec<(String, u64)>,
     subagent_rows: Vec<Observation>,
     thinking_tokens: Option<u64>,
-    thinking_deltas: u64,
-    reasoning_settled: bool,
+    thinking: ClaudeThinkingTracker,
     permission_denials: usize,
     stream_message_id: Option<String>,
     init_seen: bool,
@@ -121,9 +120,19 @@ pub(crate) struct ClaudePendingTracker {
 }
 
 impl ClaudePendingTracker {
-    /// Creates an empty tracker for one turn.
+    /// Creates an empty tracker for one turn that projects no thinking text.
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an empty tracker for one turn under the launch's thinking
+    /// display policy.
+    pub(crate) fn with_thinking_display(display: ClaudeThinkingDisplay) -> Self {
+        Self {
+            thinking: ClaudeThinkingTracker::new(display),
+            ..Self::default()
+        }
     }
 
     /// Notes one approval request; re-noting the same id is a no-op.
@@ -228,17 +237,6 @@ impl ClaudePendingTracker {
         self.thinking_tokens = Some(estimated_tokens);
     }
 
-    /// Counts one non-empty thinking delta (never root text).
-    pub(crate) fn note_reasoning_delta(&mut self) {
-        self.thinking_deltas += 1;
-    }
-
-    /// Marks reasoning settled by a buffered thinking block, even when its
-    /// text arrived empty (encrypted reasoning has no delta to complete).
-    pub(crate) fn note_reasoning_settled(&mut self) {
-        self.reasoning_settled = true;
-    }
-
     /// Retains the denied-permission count without approval semantics.
     pub(crate) fn note_permission_denials(&mut self, count: usize) {
         self.permission_denials += count;
@@ -314,22 +312,10 @@ impl ClaudePendingTracker {
         self.thinking_tokens
     }
 
-    /// Returns whether reasoning settled without delta text.
-    #[cfg(test)]
-    pub(crate) fn reasoning_settled(&self) -> bool {
-        self.reasoning_settled
-    }
-
     /// Returns whether the init gate accepted the spawned session.
     #[cfg(test)]
     pub(crate) fn init_seen(&self) -> bool {
         self.init_seen
-    }
-
-    /// Returns how many non-empty thinking deltas were counted.
-    #[cfg(test)]
-    pub(crate) fn thinking_deltas(&self) -> u64 {
-        self.thinking_deltas
     }
 
     /// Returns the retained denied-permission count.
@@ -348,505 +334,111 @@ pub(crate) enum ClaudeApplyOutcome {
     Terminal(TerminalState),
 }
 
-/// Immutable attribution for one Claude usage report.
+/// Chunks one text part onto the shared vocabulary with its verbatim phase.
 ///
-/// Model and thread come from the immutable launch snapshot; the provider
-/// session is the authenticated native session, never an envelope claim.
-pub(crate) struct ClaudeUsageContext<'a> {
-    pub run_id: &'a RunId,
-    pub thread_id: &'a ThreadId,
-    pub provider_session_id: &'a str,
-    pub model_id: &'a EngineModelId,
-    pub observed_at: UnixMillis,
-}
-
-/// Best-effort usage scope carried beside the text channel.
-///
-/// `None` (no explicit model or no thread scope) skips usage projection
-/// without disturbing the turn: usage never blocks turns.
-#[derive(Clone, Debug)]
-pub(crate) struct ClaudeUsageAttribution {
-    pub thread_id: ThreadId,
-    pub model_id: EngineModelId,
-}
-
-/// Borrowed usage scope for one pump loop.
-#[expect(
-    clippy::struct_field_names,
-    reason = "fields mirror ClaudeUsageAttribution and the wire usage vocabulary; renaming would obscure the mapping"
-)]
-pub(crate) struct ClaudeUsageScope<'a> {
-    pub thread_id: &'a ThreadId,
-    pub model_id: &'a EngineModelId,
-    pub provider_session_id: &'a str,
-}
-
-/// Builds the cumulative usage report for one sample.
-///
-/// Fails closed (`None`) when identities or bounds reject: usage is never
-/// synthesized from partial identities. The context gauge always replaces
-/// the previous report regardless of basis — the codec performs no
-/// arithmetic at all. Claude names no provider route, so reports attribute
-/// to the engine's own `claude` route namespace; quota windows are never
-/// copied here, so no quota is invented. Claude discloses no provider turn
-/// identity on usage frames, so none is attributed rather than synthesized.
-pub(crate) fn claude_usage_report(
-    context: &ClaudeUsageContext<'_>,
-    source_sequence: u64,
-    sample: &ClaudeUsageSample,
-) -> Option<RunUsageReport> {
-    let provider_route_id = EngineRouteId::parse("claude").ok()?;
-    RunUsageReport::new(RunUsageReportInput {
-        run_id: context.run_id.clone(),
-        thread_id: context.thread_id.clone(),
-        provider_session_id: context.provider_session_id.to_owned(),
-        source_sequence,
-        model_id: context.model_id.clone(),
-        provider_route_id,
-        variant_id: None,
-        basis: RunUsageBasis::Cumulative,
-        provider_turn_id: None,
-        input_tokens: sample.input,
-        cached_input_tokens: sample.cached_input,
-        output_tokens: sample.output,
-        context_tokens: sample.context,
-        context_window_tokens: None,
-        observed_at: context.observed_at,
-    })
-    .ok()
-}
-
-fn current_unix_millis() -> Option<UnixMillis> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
-    let millis = i64::try_from(duration.as_millis()).ok()?;
-    Some(UnixMillis::from_millis(millis))
-}
-
-/// Projects one usage sample best-effort onto the shared usage vocabulary.
-///
-/// Returns `Some(TerminalState::Interrupted)` only when the observation sink
-/// closed mid-send. Skipping (no scope, no clock, or unattributable sample)
-/// is never terminal: usage never blocks turns.
-async fn project_usage_sample(
+/// The current stream message id (when announced) becomes the explicit part
+/// identity so one message and its completion stay grouped. Returns the
+/// terminal state when the observation sink closed mid-send.
+async fn emit_text(
     observations: &mpsc::Sender<EngineObservation>,
     run_id: &RunId,
-    scope: Option<&ClaudeUsageScope<'_>>,
-    source_sequence: u64,
-    sample: &ClaudeUsageSample,
-) -> Option<TerminalState> {
-    let scope = scope?;
-    let observed_at = current_unix_millis()?;
-    let report = claude_usage_report(
-        &ClaudeUsageContext {
-            run_id,
-            thread_id: scope.thread_id,
-            provider_session_id: scope.provider_session_id,
-            model_id: scope.model_id,
-            observed_at,
-        },
-        source_sequence,
-        sample,
-    )?;
-    if observations
-        .send(EngineObservation::Usage(UsageObservation::new(report)))
-        .await
-        .is_err()
-    {
-        return Some(TerminalState::Interrupted);
-    }
-    None
-}
-
-/// Kind of one Claude quota window, classified from its provider window.
-///
-/// Mirrors `parse_claude_cli_usage_windows` in
-/// `modules/engines/src/claude/usage.ts`: 300 minutes is a session window,
-/// 10,080 a weekly window; anything else is unknown rather than guessed.
-/// Claude names no monthly bucket.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg(test)]
-pub(crate) enum ClaudeQuotaWindowKind {
-    Session,
-    Weekly,
-    Unknown,
-}
-
-/// Classifies one quota window duration.
-#[cfg(test)]
-pub(crate) fn classify_claude_quota_window_kind(
-    window_minutes: Option<u64>,
-) -> ClaudeQuotaWindowKind {
-    match window_minutes {
-        Some(300) => ClaudeQuotaWindowKind::Session,
-        Some(10_080) => ClaudeQuotaWindowKind::Weekly,
-        _ => ClaudeQuotaWindowKind::Unknown,
-    }
-}
-
-/// Clamps one percent reading into `0..=100`.
-///
-/// Absent or non-finite readings become `0`: usage display never blocks on a
-/// corrupt gauge and never invents quota from it.
-#[cfg(test)]
-pub(crate) fn clamp_claude_percent_used(used_percent: Option<f64>) -> f64 {
-    match used_percent {
-        Some(value) if value.is_finite() => value.clamp(0.0, 100.0),
-        _ => 0.0,
-    }
-}
-
-/// The exact non-billable CLI invocation that reads account usage.
-///
-/// Mirrors `claude_cli_usage_args` in `modules/engines/src/claude/usage.ts`
-/// (`-p /usage` over JSON): the slash command travels in argv and stdin
-/// closes immediately, so no prompt is ever billed.
-#[cfg(test)]
-pub(crate) fn claude_cli_usage_args() -> [&'static str; 4] {
-    ["-p", "/usage", "--output-format", "json"]
-}
-
-/// One provider-neutral Claude quota window: diagnostics only, never quota.
-///
-/// Quota windows are read through the non-billable `/usage` surface and
-/// classified here; they are never copied into [`RunUsageReport`] and never
-/// gate a turn.
-#[derive(Clone, Debug, PartialEq)]
-#[cfg(test)]
-pub(crate) struct ClaudeQuotaWindow {
-    pub id: String,
-    pub kind: ClaudeQuotaWindowKind,
-    pub label: Option<String>,
-    pub percent_used: f64,
-    pub resets_at: Option<String>,
-    pub window_minutes: Option<u64>,
-    /// `"shared"` for the session and all-models weekly buckets, `"model"`
-    /// for per-model weekly buckets. Mirrors the TypeScript scope rule
-    /// without inventing quota attribution.
-    pub scope: &'static str,
-}
-
-/// Turns a provider-supplied weekly label into a stable id fragment.
-///
-/// Mirrors `slugify_claude_cli_label` in `modules/engines/src/claude/usage.ts`:
-/// lowercase, non-alphanumeric runs become one dash, edge dashes trimmed.
-#[cfg(test)]
-pub(crate) fn slugify_claude_cli_label(label: &str) -> String {
-    let mut slug = String::with_capacity(label.len());
-    let mut pending_dash = false;
-    for character in label.chars().flat_map(char::to_lowercase) {
-        if character.is_ascii_alphanumeric() {
-            if pending_dash && !slug.is_empty() {
-                slug.push('-');
-            }
-            pending_dash = false;
-            slug.push(character);
-        } else if !slug.is_empty() || pending_dash {
-            pending_dash = true;
-        }
-    }
-    slug
-}
-
-#[cfg(test)]
-const CLAUDE_CLI_MONTHS: [(&str, i64); 12] = [
-    ("jan", 1),
-    ("feb", 2),
-    ("mar", 3),
-    ("apr", 4),
-    ("may", 5),
-    ("jun", 6),
-    ("jul", 7),
-    ("aug", 8),
-    ("sep", 9),
-    ("oct", 10),
-    ("nov", 11),
-    ("dec", 12),
-];
-
-#[cfg(test)]
-fn claude_cli_month(name: &str) -> Option<i64> {
-    let prefix: String = name.chars().take(3).flat_map(char::to_lowercase).collect();
-    CLAUDE_CLI_MONTHS
-        .iter()
-        .find(|(month, _)| *month == prefix)
-        .map(|(_, number)| *number)
-}
-
-/// Converts a civil date to days since the Unix epoch (Howard Hinnant's
-/// algorithm), mirroring the epoch math behind the TypeScript reset parse
-/// without a date dependency.
-#[cfg(test)]
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let adjusted_year = if month <= 2 { year - 1 } else { year };
-    let era = adjusted_year.div_euclid(400);
-    let year_of_era = adjusted_year.rem_euclid(400);
-    let month_index = (month + 9) % 12;
-    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
-/// Converts days since the Unix epoch back to a civil date.
-#[cfg(test)]
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_pair = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_pair + 2) / 5 + 1;
-    let month = if month_pair < 10 {
-        month_pair + 3
-    } else {
-        month_pair - 9
+    part_id: Option<&str>,
+    frame_sequence: u64,
+    delta: &str,
+    phase: &str,
+) -> Result<(), TerminalState> {
+    let phase = match phase {
+        "commentary" => artisan_domain::AssistantMessagePhase::Commentary,
+        "final" => artisan_domain::AssistantMessagePhase::Final,
+        _ => artisan_domain::AssistantMessagePhase::Unspecified,
     };
-    (if month <= 2 { year + 1 } else { year }, month, day)
-}
-
-/// Parses the provider's English wall-clock reset clause to a UTC instant.
-///
-/// Mirrors `parse_claude_cli_reset_at` in `modules/engines/src/claude/usage.ts`
-/// (`resets <Mon> <D>, <H>[:<MM>] <am|pm> (<Zone>)` at end of line). Only
-/// `UTC`/`GMT`/`UT` zones resolve to a real instant: named IANA zones need a
-/// zone database this owner does not carry, so they stay `None` rather than
-/// becoming an invented instant. `at_ms` is the caller-observed now used for
-/// year inference (December rolling into a January reset).
-#[cfg(test)]
-pub(crate) fn parse_claude_cli_reset_at(line: &str, at_ms: i64) -> Option<String> {
-    // Scan left to right for the first `resets <clause>` that fully parses,
-    // mirroring the unanchored regex scan in the TypeScript reader. The scan
-    // is ASCII-boundary safe: `resets ` is pure ASCII and the cursor always
-    // rests on a character boundary.
-    let bytes = line.as_bytes();
-    let mut index = 0;
-    while index + 7 <= bytes.len() {
-        if bytes[index..index + 7].eq_ignore_ascii_case(b"resets ")
-            && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric())
-            && let Some(instant) = parse_reset_clause(&line[index + 7..], at_ms)
+    let native_id = format!("claude:{frame_sequence}");
+    for chunk in chunk_text(run_id, frame_sequence, &native_id, delta) {
+        let chunk = chunk.with_phase(phase);
+        let chunk = match part_id {
+            Some(part) => chunk.with_part_id(part.to_owned()),
+            None => chunk,
+        };
+        if observations
+            .send(EngineObservation::TextDelta(chunk))
+            .await
+            .is_err()
         {
-            return Some(instant);
+            return Err(TerminalState::Interrupted);
         }
-        index += line[index..].chars().next()?.len_utf8();
     }
-    None
+    Ok(())
 }
 
-#[cfg(test)]
-fn parse_reset_clause(clause: &str, at_ms: i64) -> Option<String> {
-    let clause = clause.trim_end();
-    let (date_part, zone_part) = clause.rsplit_once('(')?;
-    let zone = zone_part.strip_suffix(')')?;
-    if !zone.eq_ignore_ascii_case("UTC")
-        && !zone.eq_ignore_ascii_case("GMT")
-        && !zone.eq_ignore_ascii_case("UT")
-    {
-        return None;
-    }
-    let mut tokens = date_part.split_whitespace();
-    let month_token = tokens.next()?;
-    if !month_token
-        .chars()
-        .all(|character| character.is_ascii_alphabetic())
-    {
-        return None;
-    }
-    let day_token = tokens.next()?.strip_suffix(',')?;
-    let month = claude_cli_month(month_token)?;
-    let day: i64 = day_token.parse().ok()?;
-    let (hour_token, minute_token, meridiem_token) = match (tokens.next(), tokens.next()) {
-        (Some(time), Some(meridiem)) => {
-            let (hour, minute) = match time.split_once(':') {
-                Some((hour, minute)) => {
-                    if minute.len() != 2 {
-                        return None;
-                    }
-                    (hour, Some(minute))
-                }
-                None => (time, None),
-            };
-            (hour, minute, meridiem)
+/// Sends validated activity rows (reasoning observations) in order.
+async fn emit_rows(
+    observations: &mpsc::Sender<EngineObservation>,
+    rows: Vec<Observation>,
+) -> Result<(), TerminalState> {
+    for row in rows {
+        if observations
+            .send(EngineObservation::Activity(row))
+            .await
+            .is_err()
+        {
+            return Err(TerminalState::Interrupted);
         }
-        _ => return None,
-    };
-    if tokens.next().is_some() {
-        return None;
     }
-    let hour12: i64 = hour_token.parse().ok()?;
-    let minute: i64 = match minute_token {
-        Some(text) => text.parse().ok()?,
-        None => 0,
-    };
-    let meridiem = meridiem_token.to_ascii_lowercase();
-    if !(1..=31).contains(&day) || !(1..=12).contains(&hour12) || !(0..=59).contains(&minute) {
-        return None;
-    }
-    let hour = match meridiem.as_str() {
-        "am" => hour12 % 12,
-        "pm" => hour12 % 12 + 12,
-        _ => return None,
-    };
-    let (current_year, current_month, _) = civil_from_days(at_ms.div_euclid(86_400_000));
-    let year = current_year + i64::from(current_month == 12 && month == 1);
-    if civil_from_days(days_from_civil(year, month, day)) != (year, month, day) {
-        return None;
-    }
-    Some(format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z"
-    ))
+    Ok(())
 }
 
-#[cfg(test)]
-fn claude_usage_bucket_window(
-    id: String,
-    label: Option<String>,
-    percent_text: &str,
-    line: &str,
-    at_ms: i64,
-    scope: &'static str,
-    window_minutes: u64,
-) -> ClaudeQuotaWindow {
-    ClaudeQuotaWindow {
-        id,
-        kind: classify_claude_quota_window_kind(Some(window_minutes)),
-        label,
-        percent_used: clamp_claude_percent_used(percent_text.parse::<f64>().ok()),
-        resets_at: parse_claude_cli_reset_at(line, at_ms),
-        window_minutes: Some(window_minutes),
-        scope,
-    }
-}
-
-#[cfg(test)]
-fn match_percent_tail(text: &str) -> Option<&str> {
-    let end = text
-        .find(|character: char| !character.is_ascii_digit())
-        .unwrap_or(text.len());
-    if end == 0 {
-        return None;
-    }
-    let (digits, rest) = (&text[..end], &text[end..]);
-    let rest = rest.strip_prefix('%')?;
-    let rest = rest.trim_start();
-    let after_used = rest.strip_prefix("used")?;
-    if after_used
-        .chars()
-        .next()
-        .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
-    {
-        return None;
-    }
-    Some(digits)
-}
-
-/// Parses provider-owned `/usage` CLI text into quota windows.
-///
-/// Mirrors `parse_claude_cli_usage_windows` in
-/// `modules/engines/src/claude/usage.ts` without retaining credentials or raw
-/// account data: one `five_hour` session window, one shared `seven_day`
-/// weekly window, plus one per-model `seven_day:<slug>` weekly window.
-/// Duplicate ids keep the first row; malformed lines yield nothing.
-#[cfg(test)]
-pub(crate) fn parse_claude_cli_usage_windows(
-    result_text: &str,
-    at_ms: i64,
-) -> Vec<ClaudeQuotaWindow> {
-    let mut windows: Vec<ClaudeQuotaWindow> = Vec::new();
-    for raw_line in result_text.split('\n') {
-        let line = raw_line.trim();
-        if let Some(rest) = line.strip_prefix("Current session:") {
-            let rest = rest.trim_start();
-            if let Some(percent) = match_percent_tail(rest) {
-                push_quota_window(
-                    &mut windows,
-                    claude_usage_bucket_window(
-                        "five_hour".to_owned(),
-                        None,
-                        percent,
-                        line,
-                        at_ms,
-                        "shared",
-                        300,
-                    ),
-                );
+/// Projects one buffered assistant frame: every supported part in provider
+/// order, then its usage sample exactly once.
+async fn apply_assistant_frame(
+    frame: super::content::ClaudeAssistantFrame,
+    run_id: &RunId,
+    tracker: &mut ClaudePendingTracker,
+    observations: &mpsc::Sender<EngineObservation>,
+    frame_sequence: u64,
+    usage: Option<&ClaudeUsageScope<'_>>,
+) -> Result<(), TerminalState> {
+    let message_id = frame
+        .message_id
+        .clone()
+        .or_else(|| tracker.stream_message_id.clone());
+    for part in &frame.content {
+        match part {
+            ClaudeAssistantContent::Text { text, phase } => {
+                let part_id = tracker.stream_message_id.as_deref();
+                emit_text(observations, run_id, part_id, frame_sequence, text, phase).await?;
             }
-            continue;
-        }
-        // The all-models bucket is checked before the labeled pattern below.
-        if let Some(rest) = line.strip_prefix("Current week (all models):") {
-            let rest = rest.trim_start();
-            if let Some(percent) = match_percent_tail(rest) {
-                push_quota_window(
-                    &mut windows,
-                    claude_usage_bucket_window(
-                        "seven_day".to_owned(),
-                        None,
-                        percent,
-                        line,
-                        at_ms,
-                        "shared",
-                        10_080,
-                    ),
-                );
-            }
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("Current week (") {
-            let Some(close) = rest.find(')') else {
-                continue;
-            };
-            // The labeled shape requires the exact `(<Label>): N% used`
-            // form: the colon follows the parenthesis immediately.
-            let label = &rest[..close];
-            if label.is_empty() {
-                continue;
-            }
-            let Some(after) = rest[close + 1..].strip_prefix(':') else {
-                continue;
-            };
-            let after = after.trim_start();
-            if let Some(percent) = match_percent_tail(after) {
-                let slug = slugify_claude_cli_label(label);
-                push_quota_window(
-                    &mut windows,
-                    claude_usage_bucket_window(
-                        format!("seven_day:{slug}"),
-                        Some(label.to_owned()),
-                        percent,
-                        line,
-                        at_ms,
-                        "model",
-                        10_080,
-                    ),
-                );
+            ClaudeAssistantContent::Thinking { text } => {
+                let rows =
+                    tracker
+                        .thinking
+                        .buffered(run_id, frame_sequence, message_id.as_deref(), text);
+                emit_rows(observations, rows).await?;
             }
         }
     }
-    windows
-}
-
-#[cfg(test)]
-fn push_quota_window(windows: &mut Vec<ClaudeQuotaWindow>, window: ClaudeQuotaWindow) {
-    if windows.iter().any(|known| known.id == window.id) {
-        return;
+    match frame.usage.as_ref() {
+        Some(sample) => {
+            match project_usage_sample(observations, run_id, usage, frame_sequence, sample).await {
+                Some(state) => Err(state),
+                None => Ok(()),
+            }
+        }
+        None => Ok(()),
     }
-    windows.push(window);
 }
 
 /// Applies one typed event; returns how the pump continues.
 ///
-/// Text deltas chunk onto the shared vocabulary with the verbatim phase
-/// carried on the event; the current stream message id (when announced)
-/// becomes the explicit part identity so one message and its completion stay
-/// grouped. Usage samples project best-effort onto the shared usage
-/// vocabulary when a usage scope travels with the pump; without one (or on
-/// any attribution failure) they are diagnostics that never disturb the turn.
-/// Usage collection never blocks turns: only the observation sink closing is
-/// terminal. Session identity mismatches fail the turn closed: only the exact
-/// spawned session may speak for it.
+/// Text chunks onto the shared vocabulary with the verbatim phase carried on
+/// the event. Buffered assistant frames project text and thinking in order
+/// plus one usage sample; thinking stretches project onto the shared
+/// reasoning observations through the run-local thinking tracker. Usage
+/// samples project best-effort onto the shared usage vocabulary when a usage
+/// scope travels with the pump; without one (or on any attribution failure)
+/// they are diagnostics that never disturb the turn. Usage collection never
+/// blocks turns: only the observation sink closing is terminal. Session
+/// identity mismatches fail the turn closed: only the exact spawned session
+/// may speak for it.
 #[expect(
     clippy::too_many_lines,
     reason = "single event dispatch table projecting typed events; extracting arms would thread the same sink and tracker"
@@ -862,80 +454,56 @@ pub(crate) async fn apply_event(
     frame_sequence: u64,
     usage: Option<&ClaudeUsageScope<'_>>,
 ) -> ClaudeApplyOutcome {
+    let continued = ClaudeApplyOutcome::Continue { end_input: false };
+    let settle = |sent: Result<(), TerminalState>| match sent {
+        Ok(()) => continued,
+        Err(state) => ClaudeApplyOutcome::Terminal(state),
+    };
     match event {
         ClaudeEvent::Init { session_id } => {
             if session_id != expected_session {
                 return ClaudeApplyOutcome::Terminal(TerminalState::Failed);
             }
             tracker.init_seen = true;
-            ClaudeApplyOutcome::Continue { end_input: false }
+            continued
         }
         ClaudeEvent::MessageStart { message_id } => {
             tracker.stream_message_id = Some(message_id);
-            ClaudeApplyOutcome::Continue { end_input: false }
+            tracker.thinking.message_started();
+            continued
         }
-        ClaudeEvent::TextDelta {
-            delta,
-            phase,
-            usage: sample,
-        } => {
-            let phase = match phase {
-                "commentary" => artisan_domain::AssistantMessagePhase::Commentary,
-                "final" => artisan_domain::AssistantMessagePhase::Final,
-                _ => artisan_domain::AssistantMessagePhase::Unspecified,
-            };
+        ClaudeEvent::TextDelta { delta, phase } => {
             if active_turn.is_none() {
                 *active_turn = Some(expected_session.to_owned());
             }
-            let native_id = format!("claude:{frame_sequence}");
-            let part_id = tracker.stream_message_id.clone();
-            for chunk in chunk_text(run_id, frame_sequence, &native_id, &delta) {
-                let chunk = chunk.with_phase(phase);
-                let chunk = match part_id.clone() {
-                    Some(part) => chunk.with_part_id(part),
-                    None => chunk,
-                };
-                if observations
-                    .send(EngineObservation::TextDelta(chunk))
-                    .await
-                    .is_err()
-                {
-                    return ClaudeApplyOutcome::Terminal(TerminalState::Interrupted);
-                }
+            let part_id = tracker.stream_message_id.as_deref();
+            settle(emit_text(observations, run_id, part_id, frame_sequence, &delta, phase).await)
+        }
+        ClaudeEvent::Assistant(frame) => {
+            if frame.text().is_some() && active_turn.is_none() {
+                *active_turn = Some(expected_session.to_owned());
             }
-            if let Some(sample) = sample.as_ref()
-                && let Some(state) =
-                    project_usage_sample(observations, run_id, usage, frame_sequence, sample).await
-            {
-                return ClaudeApplyOutcome::Terminal(state);
-            }
-            ClaudeApplyOutcome::Continue { end_input: false }
+            settle(
+                apply_assistant_frame(frame, run_id, tracker, observations, frame_sequence, usage)
+                    .await,
+            )
         }
         ClaudeEvent::ThinkingTokens { estimated_tokens } => {
             tracker.note_thinking_tokens(estimated_tokens);
-            ClaudeApplyOutcome::Continue { end_input: false }
+            continued
         }
-        ClaudeEvent::ReasoningDelta => {
-            tracker.note_reasoning_delta();
-            ClaudeApplyOutcome::Continue { end_input: false }
+        ClaudeEvent::ThinkingStarted { index } => {
+            let message_id = tracker.stream_message_id.clone();
+            tracker.thinking.start(message_id.as_deref(), index);
+            continued
         }
-        ClaudeEvent::ReasoningSettled { usage: sample } => {
-            tracker.note_reasoning_settled();
-            if let Some(sample) = sample.as_ref()
-                && let Some(state) =
-                    project_usage_sample(observations, run_id, usage, frame_sequence, sample).await
-            {
-                return ClaudeApplyOutcome::Terminal(state);
-            }
-            ClaudeApplyOutcome::Continue { end_input: false }
+        ClaudeEvent::ThinkingDelta { index, text } => {
+            let rows = tracker.thinking.delta(run_id, frame_sequence, index, &text);
+            settle(emit_rows(observations, rows).await)
         }
-        ClaudeEvent::Usage { sample } => {
-            if let Some(state) =
-                project_usage_sample(observations, run_id, usage, frame_sequence, &sample).await
-            {
-                return ClaudeApplyOutcome::Terminal(state);
-            }
-            ClaudeApplyOutcome::Continue { end_input: false }
+        ClaudeEvent::ContentBlockStopped { index } => {
+            let rows = tracker.thinking.stop(run_id, frame_sequence, index);
+            settle(emit_rows(observations, rows).await)
         }
         ClaudeEvent::ApprovalRequested(request) => {
             tracker.note_approval(request);

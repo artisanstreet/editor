@@ -6,6 +6,12 @@ use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
 
+use super::content::{
+    ClaudeAssistantFrame, assistant_content, decode_block_start, decode_block_stop,
+    decode_thinking_delta,
+};
+use super::usage::{ClaudeUsageSample, parse_claude_assistant_usage, parse_claude_result_usage};
+
 pub(crate) const CLAUDE_MAX_FRAME_BYTES: usize = 1_048_576;
 
 /// Maximum UTF-8 bytes retained for one approval/question text field.
@@ -281,32 +287,32 @@ pub(crate) enum ClaudeEvent {
     MessageStart {
         message_id: String,
     },
+    /// Streamed assistant text.
     TextDelta {
         delta: String,
         /// Verbatim TypeScript phase (`unspecified` or `commentary`).
         phase: &'static str,
-        /// Per-response usage from the same assistant frame, if any disclosed
-        /// a measurable sample. Projects best-effort beside the delta and
-        /// never disturbs it.
-        usage: Option<ClaudeUsageSample>,
     },
     /// Encrypted-thinking estimate: preserved in the tracker, never root text.
     ThinkingTokens {
         estimated_tokens: u64,
     },
-    /// Non-empty thinking delta: counted in the tracker, never root text.
-    ReasoningDelta,
-    /// Buffered thinking block settled (possibly with empty encrypted text).
-    ReasoningSettled {
-        /// Per-response usage from the same assistant frame, if any.
-        usage: Option<ClaudeUsageSample>,
+    /// A streamed thinking block opened at this content-block index.
+    ThinkingStarted {
+        index: u64,
     },
-    /// Usage-only assistant frame: no public text, but the provider disclosed
-    /// a measurable per-response sample, so the gauge still projects
-    /// best-effort instead of being dropped with the bookkeeping.
-    Usage {
-        sample: ClaudeUsageSample,
+    /// One non-empty streamed thinking fragment of the block at `index`.
+    ThinkingDelta {
+        index: u64,
+        text: String,
     },
+    /// A streamed content block (of any kind) closed at this index.
+    ContentBlockStopped {
+        index: u64,
+    },
+    /// One buffered assistant frame: ordered text and thinking parts plus at
+    /// most one usage sample. A usage-only frame still projects its gauge.
+    Assistant(ClaudeAssistantFrame),
     ApprovalRequested(ClaudeApprovalRequest),
     QuestionRequested(ClaudeQuestionRequest),
     SubagentLifecycle {
@@ -441,7 +447,8 @@ fn decode_typed(kind: &str, envelope: &Value) -> ClaudeEvent {
 fn child_display_text(envelope: &Value) -> Option<(String, &'static str)> {
     let kind = envelope.get("type")?.as_str()?;
     match decode_typed(kind, envelope) {
-        ClaudeEvent::TextDelta { delta, phase, .. } if !delta.is_empty() => Some((delta, phase)),
+        ClaudeEvent::TextDelta { delta, phase } if !delta.is_empty() => Some((delta, phase)),
+        ClaudeEvent::Assistant(frame) => frame.text().map(|(text, phase)| (text.to_owned(), phase)),
         _ => None,
     }
 }
@@ -486,17 +493,15 @@ fn decode_stream_event(envelope: &Value) -> ClaudeEvent {
                     Some(text) => ClaudeEvent::TextDelta {
                         delta: text.to_owned(),
                         phase: "unspecified",
-                        usage: None,
                     },
                     None => ClaudeEvent::Unknown,
                 },
-                "thinking_delta" => match delta.get("thinking").and_then(Value::as_str) {
-                    Some(thinking) if !thinking.is_empty() => ClaudeEvent::ReasoningDelta,
-                    _ => ClaudeEvent::Unknown,
-                },
+                "thinking_delta" => decode_thinking_delta(event, delta),
                 _ => ClaudeEvent::Unknown,
             }
         }
+        "content_block_start" => decode_block_start(event),
+        "content_block_stop" => decode_block_stop(event),
         "message_start" => match event
             .get("message")
             .and_then(|message| message.get("id"))
@@ -514,68 +519,25 @@ fn decode_stream_event(envelope: &Value) -> ClaudeEvent {
 }
 
 fn decode_assistant(envelope: &Value) -> ClaudeEvent {
-    let Some(content) = envelope
-        .get("message")
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_array)
-    else {
+    let Some(message) = envelope.get("message") else {
         return ClaudeEvent::Unknown;
     };
-    let mut text_parts = Vec::new();
-    let mut has_tool_use = false;
-    let mut has_thinking = false;
-    for item in content {
-        let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
-        match item_type {
-            "text" => {
-                if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    text_parts.push(text.to_owned());
-                }
-            }
-            "tool_use" => {
-                if item.get("id").and_then(Value::as_str).is_some() {
-                    has_tool_use = true;
-                }
-            }
-            "thinking" => {
-                has_thinking = true;
-            }
-            _ => {}
-        }
-    }
-    let message = text_parts.join("");
-    // Per-response usage rides the same frame and projects beside whatever
-    // else the frame carried; see `parse_claude_assistant_usage`. A corrupt
-    // usage value poisons the frame exactly like the TypeScript schema
-    // decode failing: nothing canonical is emitted from it.
-    let usage = match envelope
-        .get("message")
-        .and_then(|message| message.get("usage"))
-    {
+    let Some(content) = message.get("content").and_then(Value::as_array) else {
+        return ClaudeEvent::Unknown;
+    };
+    // Per-response usage rides the same frame and projects once beside
+    // whatever else the frame carried; see `parse_claude_assistant_usage`. A
+    // corrupt usage value poisons the frame exactly like the TypeScript
+    // schema decode failing: nothing canonical is emitted from it.
+    let usage = match message.get("usage") {
         None => None,
         Some(value) => match parse_claude_assistant_usage(value) {
             Ok(sample) => sample,
             Err(_) => return ClaudeEvent::Unknown,
         },
     };
-    if !message.is_empty() {
-        return ClaudeEvent::TextDelta {
-            delta: message,
-            phase: if has_tool_use {
-                "commentary"
-            } else {
-                "unspecified"
-            },
-            usage,
-        };
-    }
-    if has_thinking {
-        return ClaudeEvent::ReasoningSettled { usage };
-    }
-    match usage {
-        Some(sample) => ClaudeEvent::Usage { sample },
-        None => ClaudeEvent::Unknown,
-    }
+    assistant_content(bounded_id(message, "id"), content, usage)
+        .map_or(ClaudeEvent::Unknown, ClaudeEvent::Assistant)
 }
 
 fn decode_result(envelope: &Value) -> ClaudeEvent {
@@ -736,119 +698,6 @@ pub(crate) fn has_stalled(
     now: Instant,
 ) -> bool {
     turn_active && now.saturating_duration_since(last_activity) >= inactivity
-}
-
-/// Cumulative usage sample from one frame's `usage` object.
-///
-/// Mirrors the TypeScript `UsageSchema` shape: terminal `result.usage`
-/// totals carry the running counters, while an assistant frame's
-/// per-response usage gauges the current window (see
-/// [`parse_claude_assistant_usage`]).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ClaudeUsageSample {
-    pub input: Option<u64>,
-    pub cached_input: Option<u64>,
-    pub output: Option<u64>,
-    /// Window gauge from one assistant response only — never a sum and never
-    /// taken from terminal totals, which re-count the context on every model
-    /// call. Absent stays absent rather than becoming a wrong zero.
-    pub context: Option<u64>,
-}
-
-fn claude_token_field(
-    usage: &serde_json::Map<String, Value>,
-    field: &str,
-) -> Result<Option<u64>, ClaudeUsageCorrupt> {
-    match usage.get(field) {
-        None => Ok(None),
-        Some(value) => value.as_u64().map(Some).ok_or(ClaudeUsageCorrupt),
-    }
-}
-
-/// Marker: one frame's `usage` value was present but uninterpretable.
-///
-/// A present-but-corrupt usage object poisons its whole frame (which then
-/// decodes `Unknown` at every entry point): the TypeScript adapter fails the
-/// frame's schema decode the same way, so no text, gauge, or terminal ever
-/// settles on corrupt provider numbers. Absent or empty usage stays
-/// `Ok(None)` and never disturbs its frame.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ClaudeUsageCorrupt;
-
-/// Extracts terminal usage totals from a `result` frame's `usage` object.
-///
-/// A non-object value or a present field outside `u64` (string, negative,
-/// fraction, boolean, null, or container) fails the whole sample closed:
-/// corrupt provider numbers never become a report and the frame carries
-/// none. Absent stays absent rather than becoming zero, and an empty
-/// measurement (`Ok(None)`) is not a report. The terminal totals never
-/// become a context gauge: they accumulate input across every model call in
-/// the turn, re-counting the context each call resent.
-///
-/// # Errors
-///
-/// Returns [`ClaudeUsageCorrupt`] when the usage value is present but
-/// uninterpretable.
-pub(crate) fn parse_claude_result_usage(
-    usage: &Value,
-) -> Result<Option<ClaudeUsageSample>, ClaudeUsageCorrupt> {
-    let object = usage.as_object().ok_or(ClaudeUsageCorrupt)?;
-    let sample = ClaudeUsageSample {
-        input: claude_token_field(object, "input_tokens")?,
-        cached_input: claude_token_field(object, "cache_read_input_tokens")?,
-        output: claude_token_field(object, "output_tokens")?,
-        context: None,
-    };
-    Ok(
-        if sample.input.is_none() && sample.cached_input.is_none() && sample.output.is_none() {
-            None
-        } else {
-            Some(sample)
-        },
-    )
-}
-
-/// Extracts the per-response sample from an `assistant` frame's `usage`
-/// object, including the context-window gauge.
-///
-/// The gauge is the response's input plus the cache reads and writes that
-/// carried the prior conversation — what actually occupies the window right
-/// now. Corruption rules match [`parse_claude_result_usage`]: a present but
-/// uninterpretable value fails the whole sample closed.
-///
-/// # Errors
-///
-/// Returns [`ClaudeUsageCorrupt`] when the usage value is present but
-/// uninterpretable.
-pub(crate) fn parse_claude_assistant_usage(
-    usage: &Value,
-) -> Result<Option<ClaudeUsageSample>, ClaudeUsageCorrupt> {
-    let object = usage.as_object().ok_or(ClaudeUsageCorrupt)?;
-    let input = claude_token_field(object, "input_tokens")?;
-    let creation = claude_token_field(object, "cache_creation_input_tokens")?;
-    let read = claude_token_field(object, "cache_read_input_tokens")?;
-    let context = input.and_then(|tokens| {
-        tokens
-            .checked_add(creation.unwrap_or(0))?
-            .checked_add(read.unwrap_or(0))
-    });
-    let sample = ClaudeUsageSample {
-        input,
-        cached_input: read,
-        output: claude_token_field(object, "output_tokens")?,
-        context,
-    };
-    Ok(
-        if sample.input.is_none()
-            && sample.cached_input.is_none()
-            && sample.output.is_none()
-            && sample.context.is_none()
-        {
-            None
-        } else {
-            Some(sample)
-        },
-    )
 }
 
 #[cfg(test)]
