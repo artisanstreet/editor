@@ -257,7 +257,7 @@ pub async fn delivery_task_loop(
     reason = "one select loop coordinates commands, private delivery, and shutdown; splitting it would scatter the shared frame factory"
 )]
 pub(super) async fn command_loop_with_delivery(
-    commands: &mut tokio::sync::mpsc::Receiver<NativeTransportCommand>,
+    commands: &mut tokio::sync::mpsc::Receiver<QueuedCommand>,
     delivery_rx: &mut tokio::sync::mpsc::Receiver<PrivateDelivery>,
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
@@ -266,69 +266,74 @@ pub(super) async fn command_loop_with_delivery(
     loop {
         tokio::select! {
             cmd = commands.recv() => {
-                match cmd {
-                    Some(NativeTransportCommand::Shutdown) | None => return Ok(()),
-                    Some(NativeTransportCommand::BeginProjectIntakeAt(path)) => {
+                // The hold travels with its command and drops when this arm
+                // ends: after the handler returns, or with its failure.
+                let Some(QueuedCommand { command, hold: _hold }) = cmd else {
+                    return Ok(());
+                };
+                match command {
+                    NativeTransportCommand::Shutdown => return Ok(()),
+                    NativeTransportCommand::BeginProjectIntakeAt(path) => {
                         project_intake::begin_project_intake_at(runtime, frames, events, path).await?;
                     }
-                    Some(NativeTransportCommand::BeginProjectIntake) => {
+                    NativeTransportCommand::BeginProjectIntake => {
                         begin_project_intake(runtime, frames, events).await?;
                     }
-                    Some(NativeTransportCommand::RetryProjectIntake) => {
+                    NativeTransportCommand::RetryProjectIntake => {
                         retry_project_intake(runtime, frames, events).await?;
                     }
-                    Some(NativeTransportCommand::ReadSidebarThreads { project_id, generation }) => {
+                    NativeTransportCommand::ReadSidebarThreads { project_id, generation } => {
                         handlers::read_sidebar_threads(runtime, frames, events, project_id, generation).await?;
                     }
-                    Some(NativeTransportCommand::SelectProject(project_id)) => {
+                    NativeTransportCommand::SelectProject(project_id) => {
                         select_project(runtime, frames, events, project_id).await?;
                     }
-                    Some(NativeTransportCommand::CreateTask(project_id)) => {
+                    NativeTransportCommand::CreateTask(project_id) => {
                         create_task_in_project(runtime, frames, events, project_id).await?;
                     }
-                    Some(NativeTransportCommand::ComposerState(command)) => {
+                    NativeTransportCommand::ComposerState(command) => {
                         composer_state_operations::handle_composer_state_command(runtime, frames, events, command).await?;
                     }
-                    Some(NativeTransportCommand::ReadActiveRun { thread_id, generation }) => {
+                    NativeTransportCommand::ReadActiveRun { thread_id, generation } => {
                         composer_operations::read_active_run(runtime, frames, events, thread_id, generation).await?;
                     }
-                    Some(NativeTransportCommand::StopRun(command)) => {
+                    NativeTransportCommand::StopRun(command) => {
                         composer_operations::stop_run(runtime, frames, events, command).await?;
                     }
-                    Some(NativeTransportCommand::RespondApproval(command)) => {
+                    NativeTransportCommand::RespondApproval(command) => {
                         respond_approval(runtime, frames, events, *command).await?;
                     }
-                    Some(NativeTransportCommand::RespondQuestion(command)) => {
+                    NativeTransportCommand::RespondQuestion(command) => {
                         respond_question(runtime, frames, events, *command).await?;
                     }
-                    Some(NativeTransportCommand::ReadMessageImage(reference)) => {
+                    NativeTransportCommand::ReadMessageImage(reference) => {
                         read_message_image(runtime, frames, events, reference).await?;
                     }
-                    Some(NativeTransportCommand::RequestSnapshot(thread_id)) => {
+                    NativeTransportCommand::RequestSnapshot(thread_id) => {
                         request_snapshot(runtime, frames, events, thread_id).await?;
                     }
-                    Some(NativeTransportCommand::LoadThreadEngineSettings { thread_id, generation }) => {
+                    NativeTransportCommand::LoadThreadEngineSettings { thread_id, generation } => {
                         load_thread_engine_settings(runtime, frames, events, thread_id, generation).await?;
                     }
-                    Some(NativeTransportCommand::ReadComposerCatalog { thread_id, profile_id, generation }) => {
+                    NativeTransportCommand::ReadComposerCatalog { thread_id, profile_id, generation } => {
                         composer_operations::read_composer_catalog(
                             runtime, frames, events, thread_id, profile_id, generation,
                         ).await?;
                     }
-                    Some(NativeTransportCommand::ReadModelFavorites { thread_id, profile_id, generation }) => {
+                    NativeTransportCommand::ReadModelFavorites { thread_id, profile_id, generation } => {
                         composer_operations::read_model_favorites(
                             runtime, frames, events, thread_id, profile_id, generation,
                         ).await?;
                     }
-                    Some(NativeTransportCommand::ListRegisteredProfiles) => {
+                    NativeTransportCommand::ListRegisteredProfiles => {
                         list_registered_profiles(runtime, frames, events).await?;
                     }
-                    Some(NativeTransportCommand::ReadAccountUsage {
+                    NativeTransportCommand::ReadAccountUsage {
                         engine_id,
                         generation,
                         request_seq,
                         force,
-                    }) => {
+                    } => {
                         profile_usage_operations::read_account_usage(
                             runtime,
                             frames,
@@ -340,33 +345,33 @@ pub(super) async fn command_loop_with_delivery(
                         )
                         .await?;
                     }
-                    Some(NativeTransportCommand::SetThreadEngineConfig(command)) => {
+                    NativeTransportCommand::SetThreadEngineConfig(command) => {
                         set_thread_engine_config(runtime, frames, events, command).await?;
                     }
-                    Some(NativeTransportCommand::SetModelFavorite(command)) => {
+                    NativeTransportCommand::SetModelFavorite(command) => {
                         composer_operations::set_model_favorite(runtime, frames, events, *command).await?;
                     }
-                    Some(NativeTransportCommand::QueueFirstMessage(command)) => {
+                    NativeTransportCommand::QueueFirstMessage(command) => {
                         queue_first_message(runtime, frames, events, *command).await?;
                     }
-                    Some(NativeTransportCommand::QueueMessage(command)) => {
+                    NativeTransportCommand::QueueMessage(command) => {
                         queue_message(runtime, frames, events, *command).await?;
                     }
-                    Some(NativeTransportCommand::ResolveRichLink { url }) => {
+                    NativeTransportCommand::ResolveRichLink { url } => {
                         resolve_rich_link(runtime, frames, events, url).await?;
                     }
-                    Some(NativeTransportCommand::QueryProjectRepository { project_id }) => {
+                    NativeTransportCommand::QueryProjectRepository { project_id } => {
                         query_project_repository(runtime, frames, events, project_id).await?;
                     }
-                    Some(NativeTransportCommand::Subscribe { thread_id, after }) => {
+                    NativeTransportCommand::Subscribe { thread_id, after } => {
                         handle_subscribe_command(runtime, frames, events, thread_id, after).await?;
                     }
-                    Some(NativeTransportCommand::Unsubscribe { thread_id }) => {
+                    NativeTransportCommand::Unsubscribe { thread_id } => {
                         // The host is retiring; never turn an unsubscribe failure into a
                         // recovery Subscribe for that same host.
                         handle_unsubscribe(runtime, frames, events, thread_id).await?;
                     }
-                    Some(NativeTransportCommand::AcknowledgePatch { thread_id, cursor }) =>
+                    NativeTransportCommand::AcknowledgePatch { thread_id, cursor } =>
                         handle_acknowledge_patch(runtime, &thread_id, cursor)?,
                 }
             }

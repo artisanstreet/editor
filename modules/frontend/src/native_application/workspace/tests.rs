@@ -1,4 +1,5 @@
 use super::*;
+use crate::native_transport_service::QueuedCommand;
 use gpui::{TestAppContext, VisualTestContext};
 
 fn selected(
@@ -444,7 +445,7 @@ fn retry_closes_a_failed_live_worker_before_replacing_it(cx: &mut TestAppContext
         workspace.update(cx, |workspace, cx| workspace.select(None, window, cx));
     });
     assert!(matches!(
-        commands.try_recv(),
+        commands.try_recv().as_ref().map(QueuedCommand::command),
         Ok(NativeTransportCommand::Shutdown)
     ));
     cx.run_until_parked();
