@@ -343,6 +343,7 @@ impl RequestHandler {
                 )
                 .await
             }
+            Query::ReadUserPreferences(_) => self.read_user_preferences_outcome(request_id).await,
             Query::ReadModelFavorites(_) => {
                 crate::composer_catalog_handler::read_model_favorites(&self.repository, request_id)
                     .await

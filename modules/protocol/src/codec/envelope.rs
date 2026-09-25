@@ -257,6 +257,10 @@ pub(crate) fn encode_request(
         ClientRequest::Query(Query::ReadHostCatalog(_) | Query::ResolveModelSelection(_)) => {
             encode_forge_decision_request(builder, value)?;
         }
+        ClientRequest::Query(Query::ReadUserPreferences(_))
+        | ClientRequest::Command(
+            Command::RecordNavigation(_) | Command::ImportLegacyPreferences(_),
+        ) => encode_user_preferences_request(builder, value)?,
         ClientRequest::ResolveRichLink(request) => {
             builder
                 .reborrow()
@@ -338,6 +342,9 @@ pub(crate) fn encode_response_payload(
         }
         ResponsePayload::HostCatalog(_) | ResponsePayload::ModelSelectionResolved(_) => {
             encode_forge_decision_response(builder, payload)?;
+        }
+        ResponsePayload::UserPreferences(_) | ResponsePayload::LegacyPreferencesImported(_) => {
+            encode_user_preferences_response(builder, payload)?;
         }
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
@@ -696,22 +703,7 @@ pub(crate) fn decode_request(
                 artisan_domain::commands::ListRegisteredEngineProfiles,
             )))
         }
-        request::Which::ReadMessageImage(query) => {
-            let query = query?;
-            Ok(ClientRequest::Query(Query::ReadMessageImage(
-                artisan_domain::ReadMessageImage::new(
-                    parse_thread_id(
-                        read_text(query.get_thread_id(), "request.readMessageImage.threadId")?,
-                        "request.readMessageImage.threadId",
-                    )?,
-                    parse_message_id(
-                        read_text(query.get_message_id(), "request.readMessageImage.messageId")?,
-                        "request.readMessageImage.messageId",
-                    )?,
-                    query.get_index(),
-                ),
-            )))
-        }
+        request::Which::ReadMessageImage(query) => decode_read_message_image_request(query?),
         request::Which::ReadActiveRun(query) => {
             let query = query?;
             Ok(ClientRequest::Query(Query::ReadActiveRun(
@@ -721,27 +713,7 @@ pub(crate) fn decode_request(
                 )?),
             )))
         }
-        request::Which::ReadComposerCatalog(query) => {
-            let query = query?;
-            Ok(ClientRequest::Query(Query::ReadComposerCatalog(
-                ReadComposerCatalog::new(
-                    parse_thread_id(
-                        read_text(
-                            query.get_thread_id(),
-                            "request.readComposerCatalog.threadId",
-                        )?,
-                        "request.readComposerCatalog.threadId",
-                    )?,
-                    parse_profile_id(
-                        read_text(
-                            query.get_profile_id(),
-                            "request.readComposerCatalog.profileId",
-                        )?,
-                        "request.readComposerCatalog.profileId",
-                    )?,
-                ),
-            )))
-        }
+        request::Which::ReadComposerCatalog(query) => decode_read_composer_catalog_request(query?),
         request::Which::ListQueuedMessages(value) => {
             Ok(ClientRequest::Query(Query::ListQueuedMessages(
                 crate::composer_state_codec::decode_list_queued_messages_request(value?)?,
@@ -795,6 +767,11 @@ pub(crate) fn decode_request(
         }
         request::Which::ReadHostCatalog(()) | request::Which::ResolveModelSelection(_) => {
             decode_forge_decision_request(value)
+        }
+        request::Which::ReadUserPreferences(())
+        | request::Which::RecordNavigation(_)
+        | request::Which::ImportLegacyPreferences(_) => {
+            decode_user_preferences_request(value, &request_id)
         }
     }
 }
@@ -947,6 +924,9 @@ pub(crate) fn decode_response(
         }
         response::Which::HostCatalog(_) | response::Which::ModelSelectionResolved(_) => {
             decode_forge_decision_response(value)?
+        }
+        response::Which::UserPreferences(_) | response::Which::LegacyPreferencesImported(_) => {
+            decode_user_preferences_response(value)?
         }
         response::Which::ProjectRepository(result) => {
             decode_project_repository_query_result(result?)?

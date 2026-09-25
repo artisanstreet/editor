@@ -37,6 +37,7 @@ const COMPOSER_DRAFTS_MIGRATION: &str = "m20260925_000015_composer_drafts";
 const FAILED_MESSAGE_RECOVERIES_MIGRATION: &str = "m20260926_000016_failed_message_recoveries";
 const DRAFT_SUBMISSIONS_MIGRATION: &str = "m20260927_000017_composer_draft_submissions";
 const ATTACHMENT_SOURCES_MIGRATION: &str = "m20260928_000018_composer_attachment_sources";
+const USER_PREFERENCES_MIGRATION: &str = "m20260929_000019_user_preferences";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -123,7 +124,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        18
+        19
     );
     first
         .execute_unprepared(
@@ -157,7 +158,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        18
+        19
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -229,7 +230,8 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             COMPOSER_DRAFTS_MIGRATION.to_string(),
             FAILED_MESSAGE_RECOVERIES_MIGRATION.to_string(),
             DRAFT_SUBMISSIONS_MIGRATION.to_string(),
-            ATTACHMENT_SOURCES_MIGRATION.to_string()
+            ATTACHMENT_SOURCES_MIGRATION.to_string(),
+            USER_PREFERENCES_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -992,7 +994,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
     migrate_to_current(&database).await?;
     assert_eq!(
         scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
-        18
+        19
     );
     for (table, expected) in [
         ("messages", 1),
@@ -1099,7 +1101,7 @@ async fn seed_legacy_queue_database(
     Ok(())
 }
 
-/// Verifies a migrated database carries the full schema: all eighteen
+/// Verifies a migrated database carries the full schema: all nineteen
 /// migration records, exactly one copy of each engine-config shape
 /// trigger, and the widened version guard live.
 async fn assert_migrated_schema(
@@ -1107,7 +1109,7 @@ async fn assert_migrated_schema(
 ) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         scalar_i64(database, "SELECT count(*) FROM seaql_migrations").await?,
-        18,
+        19,
         "migration must record every version exactly once"
     );
     assert_eq!(
@@ -1151,5 +1153,64 @@ async fn sequential_fresh_files_migrate_and_reenter_idempotently() -> Result<(),
         assert_migrated_schema(&database).await?;
         database.close().await?;
     }
+    Ok(())
+}
+
+/// The user-preferences migration seeds the singleton at revision zero,
+/// keeps its revision from decreasing, and clears navigation references to
+/// deleted projects and threads.
+#[tokio::test]
+async fn user_preferences_start_empty_and_follow_their_projects() -> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    migrate_to_current(&database).await?;
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT count(*) FROM user_preferences WHERE state_id = 1 AND revision = 0 AND default_engine_config IS NULL"
+        )
+        .await?,
+        1
+    );
+    for statement in [
+        "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/p1', 'P1', 1)",
+        "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'T', 2, 2)",
+        "INSERT INTO navigation_projects (project_id, recency, last_thread_id) VALUES ('p1', 1, 't1')",
+        "UPDATE user_preferences SET revision = 1, route_project_id = 'p1', route_thread_id = 't1' WHERE state_id = 1",
+    ] {
+        database.execute_unprepared(statement).await?;
+    }
+    assert!(
+        database
+            .execute_unprepared("UPDATE user_preferences SET revision = 0 WHERE state_id = 1")
+            .await
+            .is_err()
+    );
+    database
+        .execute_unprepared("DELETE FROM threads WHERE thread_id = 't1'")
+        .await?;
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT count(*) FROM navigation_projects WHERE last_thread_id IS NULL"
+        )
+        .await?,
+        1
+    );
+    database
+        .execute_unprepared("DELETE FROM attached_projects WHERE project_id = 'p1'")
+        .await?;
+    assert_eq!(
+        scalar_i64(&database, "SELECT count(*) FROM navigation_projects").await?,
+        0
+    );
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT count(*) FROM user_preferences WHERE route_project_id IS NULL AND route_thread_id IS NULL"
+        )
+        .await?,
+        1
+    );
+    database.close().await?;
     Ok(())
 }

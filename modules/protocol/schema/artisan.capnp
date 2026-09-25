@@ -868,6 +868,12 @@ struct Request {
     # would run for the thread, without saving it. Fresh ordinal, existing
     # ordinals frozen.
     resolveModelSelection @41 :ResolveModelSelectionRequest;
+
+    # The Forge user's preferences, navigation record, and account profile
+    # (stateless Editor step 7). Fresh ordinals, existing ordinals frozen.
+    readUserPreferences @42 :Void;
+    recordNavigation @43 :RecordNavigationRequest;
+    importLegacyPreferences @44 :ImportLegacyPreferencesRequest;
   }
 }
 
@@ -964,6 +970,11 @@ struct Response {
 
     # Answer to resolveModelSelection. Fresh ordinal, existing ordinals frozen.
     modelSelectionResolved @40 :ModelSelectionResolution;
+
+    # Answer to readUserPreferences and recordNavigation, and to
+    # importLegacyPreferences. Fresh ordinals, existing ordinals frozen.
+    userPreferences @41 :UserPreferences;
+    legacyPreferencesImported @42 :LegacyPreferencesImported;
   }
 }
 
@@ -2560,4 +2571,64 @@ struct ModelSelectionResolution {
     resolved @2 :EngineRunConfig;
     refused @3 :ComposerState.SubmissionRefusal;
   }
+}
+
+# ---------------------------------------------------------------------------
+# Stateless Editor step 7: the Forge user's preferences and navigation.
+# Appended so existing node identities stay stable.
+# ---------------------------------------------------------------------------
+
+# One project of the navigation record; an empty lastThreadId means none.
+struct NavigationProject {
+  projectId @0 :Text;
+  lastThreadId @1 :Text;
+}
+
+# Where the user last was; an empty threadId means no open thread.
+struct NavigationRoute {
+  projectId @0 :Text;
+  threadId @1 :Text;
+}
+
+# The host account the Forge runs as, for presentation.
+struct AccountProfile {
+  displayName @0 :Text;
+  hostName @1 :Text;
+}
+
+struct UserPreferences {
+  revision @0 :UInt64;
+  # A null pointer means the user has not chosen a model yet.
+  defaultEngineConfig @1 :EngineRunConfig;
+  # Most recently used first, at most 256 projects.
+  projects @2 :List(NavigationProject);
+  # A null pointer means no route was recorded yet.
+  route @3 :NavigationRoute;
+  account @4 :AccountProfile;
+}
+
+# The user opened projectId, and threadId in it when not empty.
+struct RecordNavigationRequest {
+  projectId @0 :Text;
+  threadId @1 :Text;
+}
+
+# Preferences an older Editor kept in files, adopted by the Forge only where
+# it has none of its own. A null selection means no last-used model.
+struct ImportLegacyPreferencesRequest {
+  defaultSelection @0 :ComposerState.CatalogSelection;
+  projectOrder @1 :List(Text);
+}
+
+enum LegacyImportOutcome {
+  absent @0;
+  imported @1;
+  kept @2;
+  refused @3;
+}
+
+struct LegacyPreferencesImported {
+  defaultModel @0 :LegacyImportOutcome;
+  projectOrder @1 :LegacyImportOutcome;
+  preferences @2 :UserPreferences;
 }

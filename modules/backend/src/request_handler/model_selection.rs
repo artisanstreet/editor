@@ -41,6 +41,13 @@ pub(super) struct ResolvedSelection {
     config: EngineRunConfig,
 }
 
+impl ResolvedSelection {
+    /// The configuration the selection resolved to.
+    pub(super) fn into_config(self) -> EngineRunConfig {
+        self.config
+    }
+}
+
 /// How a draft submission is admitted.
 pub(super) enum SubmissionAdmission {
     /// Queue it on `engine`, steering into `steer_run_id` when named. A
@@ -348,7 +355,11 @@ impl RequestHandler {
             })
             .await
         {
-            Ok(_) => Ok(true),
+            Ok(_) => {
+                // The selection a send saved is the user's latest choice.
+                self.remember_default_engine_config(config).await;
+                Ok(true)
+            }
             Err(artisan_database::RepositoryError::EngineConfigRevisionConflict { .. }) => {
                 Ok(false)
             }

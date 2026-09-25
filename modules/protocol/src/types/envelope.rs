@@ -115,6 +115,10 @@ pub enum ResponsePayload {
     FailedMessageRecovered(artisan_domain::FailedMessageRecovered),
     /// Correlated answer to a draft submission.
     ComposerDraftSubmitted(artisan_domain::ComposerDraftSubmitted),
+    /// The Forge user's preferences, after a read or a recorded navigation.
+    UserPreferences(artisan_domain::UserPreferences),
+    /// The Forge's answer to a one-time legacy preference import.
+    LegacyPreferencesImported(artisan_domain::LegacyPreferencesImported),
 }
 
 /// Successful response correlated to a client request frame.

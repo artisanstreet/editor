@@ -998,8 +998,14 @@ impl RequestHandler {
                 self.respond_question_outcome(request_id, respond).await
             }
             Command::SetThreadEngineConfig(config) => {
-                self.set_thread_engine_config_outcome(request_id, config.as_ref())
-                    .await
+                let response = self
+                    .set_thread_engine_config_outcome(request_id, config.as_ref())
+                    .await;
+                if response.is_ok() {
+                    // A configuration the user saves is the new default.
+                    self.remember_default_engine_config(config.config()).await;
+                }
+                response
             }
             Command::WithdrawQueuedMessage(command) => {
                 self.withdraw_composer_message(request_id, command).await
@@ -1023,6 +1029,13 @@ impl RequestHandler {
             }
             Command::SubmitComposerDraft(submit) => {
                 self.submit_composer_draft_outcome(request_id, submit).await
+            }
+            Command::RecordNavigation(record) => {
+                self.record_navigation_outcome(request_id, record).await
+            }
+            Command::ImportLegacyPreferences(import) => {
+                self.import_legacy_preferences_outcome(request_id, import)
+                    .await
             }
         };
         if response.is_ok() {
@@ -1258,6 +1271,9 @@ mod engine_config;
 
 #[path = "request_handler/model_selection.rs"]
 mod model_selection;
+
+#[path = "request_handler/user_preferences.rs"]
+mod user_preferences;
 
 #[path = "request_handler/attach_project.rs"]
 mod attach_project;

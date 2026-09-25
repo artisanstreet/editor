@@ -115,6 +115,10 @@ name = "composer_drafts"
 path = "../../tests/database/composer_drafts.rs"
 
 [[test]]
+name = "user_preferences"
+path = "../../tests/database/user_preferences.rs"
+
+[[test]]
 name = "run_usage"
 path = "../../tests/database/run_usage.rs"
 

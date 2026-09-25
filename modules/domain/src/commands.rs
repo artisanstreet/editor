@@ -14,10 +14,10 @@ use crate::message::QueueMessagePayload;
 use crate::run_interaction::{RespondApproval, RespondQuestion};
 use crate::text::{MessageBody, ThreadTitle};
 use crate::{
-    ListFailedMessages, ListQueuedMessages, QueueStoredMessage, ReadAccountUsage,
-    ReadComposerAttachment, ReadComposerDraft, ReadRecalledMessage, ReadRunUsage,
-    RecoverFailedMessage, RetryFailedMessage, SaveComposerDraft, SubmitComposerDraft,
-    UploadComposerAttachment, WithdrawQueuedMessageCommand,
+    ImportLegacyPreferences, ListFailedMessages, ListQueuedMessages, QueueStoredMessage,
+    ReadAccountUsage, ReadComposerAttachment, ReadComposerDraft, ReadRecalledMessage, ReadRunUsage,
+    ReadUserPreferences, RecordNavigation, RecoverFailedMessage, RetryFailedMessage,
+    SaveComposerDraft, SubmitComposerDraft, UploadComposerAttachment, WithdrawQueuedMessageCommand,
 };
 
 pub use crate::catalog_selection::ResolveModelSelection;
@@ -298,6 +298,10 @@ pub enum Command {
     RecoverFailedMessage(RecoverFailedMessage),
     /// See [`SubmitComposerDraft`].
     SubmitComposerDraft(SubmitComposerDraft),
+    /// See [`RecordNavigation`].
+    RecordNavigation(RecordNavigation),
+    /// See [`ImportLegacyPreferences`].
+    ImportLegacyPreferences(ImportLegacyPreferences),
 }
 
 impl Command {
@@ -321,6 +325,8 @@ impl Command {
             Self::RetryFailedMessage(command) => &command.request_id,
             Self::RecoverFailedMessage(command) => &command.request_id,
             Self::SubmitComposerDraft(command) => &command.request_id,
+            Self::RecordNavigation(command) => &command.request_id,
+            Self::ImportLegacyPreferences(command) => &command.request_id,
         }
     }
 }
@@ -478,4 +484,6 @@ pub enum Query {
     ReadComposerDraft(ReadComposerDraft),
     /// See [`ReadComposerAttachment`].
     ReadComposerAttachment(ReadComposerAttachment),
+    /// See [`ReadUserPreferences`].
+    ReadUserPreferences(ReadUserPreferences),
 }

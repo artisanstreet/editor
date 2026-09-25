@@ -284,6 +284,9 @@ pub use queued_message::{
     FailedMessageRecovery, MessageOutboxFingerprint, QueuedMessageRepositoryError,
 };
 
+mod user_preferences;
+pub use user_preferences::{LegacyImport, StoredUserPreferences};
+
 mod session_continuation;
 pub use session_continuation::{
     PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint,

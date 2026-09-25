@@ -212,3 +212,11 @@ pub use composer_draft::{
     UploadComposerAttachment,
 };
 pub use draft_submission::{ComposerDraftSubmitted, DraftSubmissionOutcome, SubmitComposerDraft};
+
+pub mod user_preferences;
+pub use user_preferences::{
+    AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,
+    NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord, NavigationRecordError,
+    NavigationRoute, ReadUserPreferences, RecordNavigation, UserPreferences,
+    UserPreferencesRevision,
+};
