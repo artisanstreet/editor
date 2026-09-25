@@ -13,6 +13,8 @@ use super::RICH_LINK_PAGE_NAME_MAX_CHARS;
 /// Normalized text-only metadata extracted from one HTML document.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ParsedRichLinkHtml {
+    /// Declared icon URL, resolved against the final page URL by the fetcher.
+    pub icon: Option<String>,
     /// Document `<title>` text, normalized and bounded.
     pub title: Option<String>,
     /// First `og:title` metadata value.
@@ -87,6 +89,17 @@ pub fn parse_rich_link_html(html: &str) -> ParsedRichLinkHtml {
                 cursor = next;
                 continue;
             }
+            "link" if parsed.icon.is_none() => {
+                let attrs = parse_meta_attributes(&html[tag_start + 1 + name_end..tag_end]);
+                if attrs.rel.as_deref().is_some_and(|rel| {
+                    rel.split_ascii_whitespace().any(|token| {
+                        token.eq_ignore_ascii_case("icon")
+                            || token.eq_ignore_ascii_case("apple-touch-icon")
+                    })
+                }) {
+                    parsed.icon = attrs.href;
+                }
+            }
             "meta" => {
                 let attributes = &html[tag_start + 1 + name_end..tag_end];
                 let meta = parse_meta_attributes(attributes);
@@ -121,6 +134,8 @@ fn apply_meta(parsed: &mut ParsedRichLinkHtml, meta: &MetaAttributes) {
 
 #[derive(Default)]
 struct MetaAttributes {
+    rel: Option<String>,
+    href: Option<String>,
     property: Option<String>,
     name: Option<String>,
     content: Option<String>,
@@ -160,6 +175,8 @@ fn parse_meta_attributes(attributes: &str) -> MetaAttributes {
             String::new()
         };
         match attribute_name.as_str() {
+            "rel" => meta.rel = Some(value),
+            "href" => meta.href = Some(value),
             "property" => meta.property = Some(value),
             "name" => meta.name = Some(value),
             "content" => meta.content = Some(value),

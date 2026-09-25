@@ -99,6 +99,8 @@ pub enum RichLinkError {
 /// One resolved display title with its backend cache expiry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RichLinkResolution {
+    /// Optional bounded favicon image bytes. Empty when unavailable.
+    pub favicon: Vec<u8>,
     /// Exact canonical URL the resolution answers.
     pub requested_url: String,
     /// Resolved display title, already bounded and non-empty.
@@ -169,6 +171,10 @@ pub type RichLinkFetchFuture =
 pub trait RichLinkPageFetcher: Send + Sync + 'static {
     /// Fetches one already-validated absolute HTTP(S) URL.
     fn fetch(&self, url: Url) -> RichLinkFetchFuture;
+    /// Fetches an optional icon through the same public-address policy.
+    fn fetch_icon(&self, _url: Url) -> Pin<Box<dyn Future<Output = Vec<u8>> + Send>> {
+        Box::pin(async { Vec::new() })
+    }
 }
 
 /// Monotonic-enough wall clock seam for cache expiry tests.
@@ -293,6 +299,32 @@ impl HttpRichLinkFetcher {
 }
 
 impl RichLinkPageFetcher for HttpRichLinkFetcher {
+    fn fetch_icon(&self, url: Url) -> Pin<Box<dyn Future<Output = Vec<u8>> + Send>> {
+        let client = self.client.clone();
+        Box::pin(async move {
+            let fetch = async {
+                let url = canonical_rich_link_url(url.as_str()).ok()?;
+                let mut response = client.ok()?.get(url).send().await.ok()?;
+                if !response.status().is_success() {
+                    return None;
+                }
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response.chunk().await.ok()? {
+                    if bytes.len().saturating_add(chunk.len()) > 65_536 {
+                        return None;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Some(bytes)
+            };
+            timeout(Duration::from_secs(2), fetch)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        })
+    }
+
     fn fetch(&self, url: Url) -> RichLinkFetchFuture {
         let fetcher = Self {
             client: self.client.clone(),
@@ -363,6 +395,7 @@ pub fn canonical_rich_link_url(input: &str) -> Result<Url, RichLinkError> {
 
 #[derive(Clone)]
 struct RichLinkCacheEntry {
+    favicon: Vec<u8>,
     page_name: String,
     expires_at_ms: i64,
 }
@@ -492,6 +525,7 @@ impl RichLinkResolver {
         if let Some(entry) = state.fresh(&cache_key, now_ms) {
             return Ok(RichLinkResolution {
                 requested_url: cache_key,
+                favicon: entry.favicon,
                 page_name: entry.page_name,
                 expires_at_ms: entry.expires_at_ms,
             });
@@ -513,6 +547,7 @@ impl RichLinkResolver {
                 state.retain(
                     owner_key.clone(),
                     RichLinkCacheEntry {
+                        favicon: resolution.favicon.clone(),
                         page_name: resolution.page_name.clone(),
                         expires_at_ms: resolution.expires_at_ms,
                     },
@@ -551,8 +586,24 @@ impl RichLinkResolverInner {
         else {
             return Err(RichLinkError::UnsupportedContentType);
         };
+        let icon_url = Url::parse(&page.final_url).ok().and_then(|base| {
+            base.join(parsed.icon.as_deref().unwrap_or("/favicon.ico"))
+                .ok()
+        });
+        let favicon = match icon_url {
+            Some(url) => timeout(Duration::from_secs(2), self.fetcher.fetch_icon(url))
+                .await
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let favicon = if favicon.len() <= 65_536 {
+            favicon
+        } else {
+            Vec::new()
+        };
         let ttl_ms = i64::try_from(self.options.cache_ttl.as_millis()).unwrap_or(i64::MAX);
         Ok(RichLinkResolution {
+            favicon,
             requested_url: cache_key.to_owned(),
             page_name,
             expires_at_ms: self.clock.now_ms().saturating_add(ttl_ms),

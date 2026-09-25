@@ -506,6 +506,7 @@ pub(crate) fn encode_response_payload(
             let mut encoded = builder.reborrow().init_rich_link();
             encoded.set_requested_url(&result.requested_url);
             encoded.set_page_name(&result.page_name);
+            encoded.set_favicon(&result.favicon);
             encoded.set_cache_expires_at_ms(result.cache_expires_at_ms);
         }
         ResponsePayload::ProjectRepository(result) => {

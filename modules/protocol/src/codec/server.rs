@@ -384,11 +384,14 @@ pub(crate) const fn encode_error_code(value: ErrorCode) -> artisan_capnp::ErrorC
 pub(crate) fn decode_rich_link_page_metadata(
     value: artisan_capnp::rich_link_page_metadata::Reader<'_>,
 ) -> Result<ResponsePayload, ProtocolDecodeError> {
-    Ok(ResponsePayload::RichLink(RichLinkPageMetadata::new(
-        read_text(value.get_requested_url(), "response.richLink.requestedUrl")?,
-        read_text(value.get_page_name(), "response.richLink.pageName")?,
-        value.get_cache_expires_at_ms(),
-    )?))
+    Ok(ResponsePayload::RichLink(
+        RichLinkPageMetadata::new(
+            read_text(value.get_requested_url(), "response.richLink.requestedUrl")?,
+            read_text(value.get_page_name(), "response.richLink.pageName")?,
+            value.get_cache_expires_at_ms(),
+        )?
+        .with_favicon(value.get_favicon()?.to_vec())?,
+    ))
 }
 
 pub(crate) fn decode_event(
@@ -785,7 +788,9 @@ mod tests {
             "Example — Docs",
             1_700_000_060_000,
         )
-        .expect("metadata is valid");
+        .expect("metadata is valid")
+        .with_favicon(vec![1, 2, 3, 4])
+        .expect("bounded icon");
         let wire = envelope(WireEnvelopeBody::Response(ServerResponse {
             request_id: RequestId::parse("frame-1").expect("request id is valid"),
             payload: ResponsePayload::RichLink(metadata),

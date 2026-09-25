@@ -196,6 +196,8 @@ impl ResolveRichLinkRequest {
 /// freshness decision Forge used; the URL is echoed for exact correlation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RichLinkPageMetadata {
+    /// Optional favicon bytes, bounded to 64 KiB.
+    pub favicon: Vec<u8>,
     /// Exact URL the caller requested, echoed for correlation.
     pub requested_url: String,
     /// Resolved display title.
@@ -205,6 +207,16 @@ pub struct RichLinkPageMetadata {
 }
 
 impl RichLinkPageMetadata {
+    /// Adds a bounded optional favicon.
+    ///
+    /// # Errors
+    /// Returns an error when the image exceeds 64 KiB.
+    pub fn with_favicon(mut self, favicon: Vec<u8>) -> Result<Self, ProtocolValueError> {
+        self.favicon = favicon;
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Creates response metadata after checking both bounded text fields.
     ///
     /// # Errors
@@ -219,6 +231,7 @@ impl RichLinkPageMetadata {
         cache_expires_at_ms: i64,
     ) -> Result<Self, ProtocolValueError> {
         let metadata = Self {
+            favicon: Vec::new(),
             requested_url: requested_url.into(),
             page_name: page_name.into(),
             cache_expires_at_ms,
@@ -237,6 +250,11 @@ impl RichLinkPageMetadata {
     /// payload.
     pub fn validate(&self) -> Result<(), ProtocolValueError> {
         validate_rich_link_url(&self.requested_url)?;
+        if self.favicon.len() > 65_536 {
+            return Err(ProtocolValueError::RichLink {
+                reason: "favicon exceeds its byte bound",
+            });
+        }
         if self.page_name.trim().is_empty() || self.page_name.len() > RICH_LINK_PAGE_NAME_MAX_BYTES
         {
             return Err(ProtocolValueError::RichLink {

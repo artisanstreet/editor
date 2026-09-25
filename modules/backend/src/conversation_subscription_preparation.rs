@@ -129,6 +129,7 @@ pub async fn prepare_conversation_subscription(
                 },
             };
             let snapshot = repository.read_conversation_snapshot(&query).await?;
+            let snapshot = crate::citation_projection::resolve_snapshot(repository, snapshot).await;
             let cursor = snapshot.cursor();
             let lease = registry.register_pending(subscribe.thread_id.clone(), cursor)?;
             let started = ConversationSubscriptionStarted::Fresh(

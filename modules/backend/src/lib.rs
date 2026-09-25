@@ -259,3 +259,5 @@ mod native_model_catalog;
 mod model_discovery;
 
 mod composer_catalog_handler;
+
+mod citation_projection;

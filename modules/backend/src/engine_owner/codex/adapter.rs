@@ -607,6 +607,7 @@ pub(crate) async fn apply_event(
             if tracker.native_thread_id() != Some(thread_id.as_str()) {
                 return None;
             }
+            let text = crate::citation_projection::resolve_message(&thread_id, text).await;
             let snapshot = super::super::observation::TextSnapshot::new(
                 run_id.clone(),
                 frame_sequence,

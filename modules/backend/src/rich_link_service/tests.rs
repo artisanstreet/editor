@@ -456,3 +456,48 @@ async fn fetcher_refuses_hostname_resolving_to_loopback() {
     assert_eq!(fetcher.fetch(target).await, Err(RichLinkError::Transport));
     server.abort();
 }
+
+#[test]
+fn favicon_metadata_uses_declared_icon_and_decodes_entities() {
+    let page = parse_rich_link_html(
+        r#"<link rel="stylesheet" href="bad"><link href="/icon.png?a=1&amp;b=2" rel="shortcut ICON"><title>Example</title>"#,
+    );
+    assert_eq!(page.icon.as_deref(), Some("/icon.png?a=1&b=2"));
+    assert_eq!(page.page_name(), Some("Example"));
+}
+
+#[tokio::test]
+async fn favicon_fetch_rejects_private_addresses() {
+    let fetcher = HttpRichLinkFetcher::with_defaults();
+    for address in [
+        "http://127.0.0.1/favicon.ico",
+        "http://[::1]/icon.png",
+        "file:///tmp/icon.png",
+    ] {
+        assert!(
+            fetcher
+                .fetch_icon(Url::parse(address).unwrap())
+                .await
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual public internet probe"]
+async fn live_rich_link_probe() {
+    let resolver = RichLinkResolver::with_defaults();
+    for url in [
+        "https://github.com/rust-lang/rust",
+        "https://www.rust-lang.org/",
+    ] {
+        let value = resolver.resolve(url).await.expect("live metadata resolves");
+        println!(
+            "{} | {} | favicon={} bytes",
+            value.requested_url,
+            value.page_name,
+            value.favicon.len()
+        );
+        assert!(!value.page_name.is_empty());
+    }
+}

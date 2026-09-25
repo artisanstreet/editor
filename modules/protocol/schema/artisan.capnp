@@ -682,6 +682,7 @@ struct RichLinkPageMetadata {
   requestedUrl @0 :Text;
   pageName @1 :Text;
   cacheExpiresAtMs @2 :Int64;
+  favicon @3 :Data; # Optional image, bounded to 64 KiB.
 }
 
 # The hosting service identified from a Git remote URL. Detection is

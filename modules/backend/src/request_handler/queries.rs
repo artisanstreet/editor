@@ -109,6 +109,7 @@ impl RequestHandler {
             resolution.page_name,
             resolution.expires_at_ms,
         )
+        .and_then(|metadata| metadata.with_favicon(resolution.favicon))
         .map_err(|_| {
             typed_failure(
                 ErrorCode::Internal,
@@ -396,7 +397,10 @@ impl RequestHandler {
                     .map_err(|error| repository_failure(&error, request_id))?;
                 Ok(outcome(
                     request_id,
-                    ResponsePayload::ConversationSnapshot(snapshot),
+                    ResponsePayload::ConversationSnapshot(
+                        crate::citation_projection::resolve_snapshot(&self.repository, snapshot)
+                            .await,
+                    ),
                 ))
             }
             ConversationRequest::Subscribe(_) => {
