@@ -72,6 +72,11 @@ fn machine_dropdown_click_switches_in_place_and_preserves_drafts(cx: &mut TestAp
         );
         assert_eq!(workspace.read(cx).sessions.len(), 2);
         assert_eq!(
+            crate::editor_settings::get(cx).reopen_host(),
+            Some(std::path::Path::new("/test/ubuntu")),
+            "a host switch records the reopen-host hint"
+        );
+        assert_eq!(
             local.read(cx).composer.read(cx).draft(),
             "local unsent draft"
         );
@@ -88,6 +93,7 @@ fn machine_dropdown_click_switches_in_place_and_preserves_drafts(cx: &mut TestAp
     cx.run_until_parked();
     assert_eq!(selected(&workspace, cx), local);
     cx.update(|_, cx| {
+        assert_eq!(crate::editor_settings::get(cx).reopen_host(), None);
         assert_eq!(
             local.read(cx).composer.read(cx).draft(),
             "local unsent draft"
