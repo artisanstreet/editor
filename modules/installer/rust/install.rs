@@ -14,17 +14,19 @@
 mod authority;
 mod path_registry;
 mod release;
+mod source;
 mod state;
 mod workflow;
 
 pub(crate) use authority::hash_file;
 pub use release::install;
+pub use source::{RELEASE_MANIFEST_NAME, RELEASE_SIGNATURE_NAME, ReleaseSource};
 pub use workflow::{
     InstallIntegrationOptions, InstallOptions, diagnose, prepare_update, repair, uninstall,
 };
 
 #[cfg(test)]
-pub(crate) use self::release::platform_libc;
+pub(crate) use self::source::platform_libc;
 
 #[cfg(test)]
 use {

@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use artisan_install::{
-    InstallIntegrationOptions, InstallOptions, Platform, Result, RetirementPolicy, TrustKey,
-    diagnose, install, prepare_update, repair, schedule_self_cleanup, uninstall,
+    InstallIntegrationOptions, InstallOptions, LOCAL_CHANNEL, Platform, ReleaseSource, Result,
+    RetirementPolicy, TrustKey, diagnose, install, local_trust, prepare_update, repair,
+    schedule_self_cleanup, uninstall,
 };
 use clap::{Args, Parser, Subcommand};
 use url::Url;
@@ -32,6 +33,11 @@ struct IntegrationArguments {
     /// install beside an existing installation.
     #[arg(long, global = true)]
     skip_protocol: bool,
+
+    /// Leave the user PATH alone. For a side-by-side install whose `ae` must
+    /// not shadow the primary installation's.
+    #[arg(long, global = true)]
+    skip_path: bool,
 }
 
 #[derive(Args, Debug)]
@@ -64,6 +70,17 @@ struct Arguments {
     /// Detached signature URL. Defaults to the manifest URL with `.json` replaced by `.sig`.
     #[arg(long, global = true)]
     signature_url: Option<Url>,
+
+    /// Install from a manifest URL, a release directory (release-tool output),
+    /// or an unpacked payload with a signed tree manifest, instead of
+    /// --manifest-url.
+    #[arg(long, global = true, value_name = "URL_OR_DIRECTORY", conflicts_with_all = ["manifest_url", "signature_url"])]
+    from: Option<String>,
+
+    /// Channel the release must belong to. `dev` releases are verified with
+    /// the installation's own local signing key instead of the release key.
+    #[arg(long, global = true, value_parser = ["stable", "beta", "nightly", "dev"])]
+    channel: Option<String>,
 
     /// Ed25519 public key as 32-byte hexadecimal. Development builds only:
     /// release builds refuse this override and use their embedded release key.
@@ -135,11 +152,7 @@ async fn run() -> Result<()> {
                 }),
             )?,
             Operation::Update => {
-                let trust = TrustKey::resolve(arguments.public_key.as_deref())?;
-                install(make_install_options(
-                    &arguments, platform, root, trust, false,
-                ))
-                .await?;
+                install(make_install_options(&arguments, platform, root, false)?).await?;
             }
             Operation::Repair => repair(&root)?,
             Operation::Uninstall { remove_data } => uninstall(&root, *remove_data)?,
@@ -147,26 +160,8 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let trust = TrustKey::resolve(arguments.public_key.as_deref())?;
-    install(InstallOptions {
-        signature_url: arguments.signature_url.unwrap_or_else(|| {
-            Url::parse(&arguments.manifest_url.as_str().replace(".json", ".sig"))
-                .expect("derived signature URL")
-        }),
-        manifest_url: arguments.manifest_url,
-        platform,
-        install_root: root,
-        trust,
-        run_setup: !arguments.activation.skip_setup,
-        integrations: InstallIntegrationOptions {
-            register_protocol: !arguments.integrations.skip_protocol,
-            register_shortcuts: !arguments.integrations.skip_shortcuts,
-        },
-        retirement: (!arguments.activation.skip_retire).then_some(RetirementPolicy {
-            force: arguments.activation.force,
-        }),
-    })
-    .await?;
+    let run_setup = !arguments.activation.skip_setup;
+    install(make_install_options(&arguments, platform, root, run_setup)?).await?;
 
     if arguments.automation.self_cleanup {
         schedule_self_cleanup()?;
@@ -178,27 +173,42 @@ fn make_install_options(
     arguments: &Arguments,
     platform: Platform,
     install_root: PathBuf,
-    trust: TrustKey,
     run_setup: bool,
-) -> InstallOptions {
-    InstallOptions {
-        signature_url: arguments.signature_url.clone().unwrap_or_else(|| {
-            Url::parse(&arguments.manifest_url.as_str().replace(".json", ".sig"))
-                .expect("derived signature URL")
-        }),
-        manifest_url: arguments.manifest_url.clone(),
+) -> Result<InstallOptions> {
+    let source = match &arguments.from {
+        Some(location) => ReleaseSource::from_location(location)?,
+        None => match &arguments.signature_url {
+            Some(signature_url) => ReleaseSource::Remote {
+                manifest_url: arguments.manifest_url.clone(),
+                signature_url: signature_url.clone(),
+            },
+            None => ReleaseSource::remote(arguments.manifest_url.clone())?,
+        },
+    };
+    // The dev channel trusts only the installation's own local key; every
+    // other channel trusts this build's release anchor.
+    let trust = if arguments.channel.as_deref() == Some(LOCAL_CHANNEL) {
+        local_trust(&install_root)?
+    } else {
+        TrustKey::resolve(arguments.public_key.as_deref())?
+    };
+    Ok(InstallOptions {
+        source,
         platform,
         install_root,
         trust,
+        expected_channel: arguments.channel.clone(),
         run_setup,
+        restore_forge: true,
         integrations: InstallIntegrationOptions {
             register_protocol: !arguments.integrations.skip_protocol,
             register_shortcuts: !arguments.integrations.skip_shortcuts,
+            register_path: !arguments.integrations.skip_path,
         },
         retirement: (!arguments.activation.skip_retire).then_some(RetirementPolicy {
             force: arguments.activation.force,
         }),
-    }
+    })
 }
 
 #[cfg(test)]

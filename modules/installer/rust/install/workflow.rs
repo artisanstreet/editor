@@ -11,22 +11,21 @@ use std::{
     process::Stdio,
 };
 
-use chrono::Utc;
-use serde::Serialize;
-use url::Url;
-
 use crate::{
     background_process::{background_command, detached_background_command},
     error::{InstallerError, Result, io},
     integrations::{
         OwnedIntegration, apply_protocol, prepare_protocol, remove_protocol, verify_protocol,
     },
-    manifest::TrustKey,
+    manifest::{ReleaseRecord, TrustKey},
     platform::Platform,
     processes::{Retirement, RetirementPolicy, retire_superseded},
     shortcuts,
 };
+use chrono::Utc;
+use serde::Serialize;
 
+use super::source::ReleaseSource;
 use super::{
     authority::{
         EntryKind, FileIdentity, InstallerLock, PendingMarker, PendingMarkerKind, RootMode,
@@ -56,15 +55,26 @@ pub struct InstallIntegrationOptions {
     pub register_protocol: bool,
     /// Whether this install owns the desktop and Start Menu launchers.
     pub register_shortcuts: bool,
+    /// Whether this install puts its permanent `ae` on the user PATH. A
+    /// side-by-side install (such as the `dev` channel) must not shadow the
+    /// primary installation's `ae`.
+    pub register_path: bool,
 }
 
 pub struct InstallOptions {
-    pub manifest_url: Url,
-    pub signature_url: Url,
+    /// Where the release comes from.
+    pub source: ReleaseSource,
     pub platform: Platform,
     pub install_root: PathBuf,
     pub trust: TrustKey,
+    /// Channel the release must belong to; `None` accepts the release's own
+    /// channel (an existing installation still pins its channel).
+    pub expected_channel: Option<String>,
     pub run_setup: bool,
+    /// Whether a Forge stopped by retirement is started again from the new
+    /// release. A caller that relaunches the Editor itself leaves this off so
+    /// the Editor owns the Forge it starts.
+    pub restore_forge: bool,
     pub integrations: InstallIntegrationOptions,
     /// `None` leaves superseded editor and Forge processes running. A policy
     /// retires them and controls whether a stuck Forge may be ended.
@@ -78,7 +88,7 @@ pub struct InstallOptions {
 pub(super) fn activate_release(
     root_lock: &InstallerLock,
     options: &InstallOptions,
-    manifest: &crate::manifest::ReleaseManifest,
+    record: &ReleaseRecord,
     release: &Path,
 ) -> Result<Retirement> {
     let lifecycle_ae = release_cli(release)?;
@@ -89,7 +99,12 @@ pub(super) fn activate_release(
     }
     root_lock.fence()?;
     let retirement = retire_for(options, release, &lifecycle_ae)?;
-    let stable_ae = install_stable_cli(root_lock, &options.install_root, release)?;
+    let stable_ae = install_stable_cli(
+        root_lock,
+        &options.install_root,
+        release,
+        options.integrations.register_path,
+    )?;
     let protocol = if options.integrations.register_protocol {
         prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
     } else {
@@ -102,7 +117,7 @@ pub(super) fn activate_release(
         root_lock,
         &options.install_root,
         release,
-        manifest,
+        record,
         options,
         &ActivationIntegrations {
             stable_ae: &stable_ae,
@@ -180,7 +195,7 @@ pub(super) fn restore_retired_forge(
     release: &Path,
     retirement: Retirement,
 ) -> Result<()> {
-    if should_restore_retired_forge(options.run_setup, retirement) {
+    if options.restore_forge && should_restore_retired_forge(options.run_setup, retirement) {
         invoke_ae(release, &["start"])?;
     }
     Ok(())
@@ -207,7 +222,7 @@ fn activate(
     lock: &InstallerLock,
     root: &Path,
     release: &Path,
-    manifest: &crate::manifest::ReleaseManifest,
+    record: &ReleaseRecord,
     options: &InstallOptions,
     integrations: &ActivationIntegrations<'_>,
 ) -> Result<()> {
@@ -244,25 +259,19 @@ fn activate(
         "install_root": root,
         "platform": options.platform.os,
         "architecture": options.platform.arch,
-        "channel": manifest.channel.as_str(),
+        "channel": record.channel.as_str(),
         "components": installed_components(),
         "integrations": integration_records,
         "installed_at": now,
         "updated_at": now,
         "activation_state": "active",
         "finalization_state": "complete",
-        "active_version": manifest.product_version.as_str(),
+        "active_version": record.product_version.as_str(),
         "permanent_ae_path": integrations.stable_ae,
         "artifact": {
-            "artifact_id": manifest.artifacts.iter()
-                .find(|artifact| artifact.platform == options.platform.os
-                    && artifact.architecture == options.platform.arch)
-                .map_or("unknown", |artifact| artifact.id.as_str()),
-            "sha256": manifest.artifacts.iter()
-                .find(|artifact| artifact.platform == options.platform.os
-                    && artifact.architecture == options.platform.arch)
-                .map_or("", |artifact| artifact.sha256.as_str()),
-            "signing_key_id": manifest.signing_identity.key_id.as_str(),
+            "artifact_id": record.artifact_id.as_str(),
+            "sha256": record.artifact_sha256.as_str(),
+            "signing_key_id": record.signing_key_id.as_str(),
         },
         "transaction": { "state": "idle" }
     });
@@ -294,7 +303,12 @@ fn activate(
     Ok(())
 }
 
-fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Result<PathBuf> {
+fn install_stable_cli(
+    lock: &InstallerLock,
+    root: &Path,
+    release: &Path,
+    integrate_path: bool,
+) -> Result<PathBuf> {
     lock.fence()?;
     let source = release_cli(release)?;
     let bin = root.join("bin");
@@ -316,7 +330,9 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
                 require_identity(&temporary, EntryKind::File, temporary_identity)?;
                 remove_owned_file(&temporary)?;
                 lock.fence()?;
-                path_registry::integrate_path(&bin)?;
+                if integrate_path {
+                    path_registry::integrate_path(&bin)?;
+                }
                 return Ok(stable);
             }
             require_identity(&stable, EntryKind::File, stable_identity)?;
@@ -332,7 +348,9 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
                         stable_identity,
                     )?;
                     lock.fence()?;
-                    path_registry::integrate_path(&bin)?;
+                    if integrate_path {
+                        path_registry::integrate_path(&bin)?;
+                    }
                     return Ok(stable);
                 }
                 #[cfg(not(windows))]
@@ -350,7 +368,9 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
     }
     std::fs::rename(&temporary, &stable).map_err(io(&stable))?;
     lock.fence()?;
-    path_registry::integrate_path(&bin)?;
+    if integrate_path {
+        path_registry::integrate_path(&bin)?;
+    }
     Ok(stable)
 }
 
@@ -435,7 +455,7 @@ pub fn repair(root: &Path) -> Result<()> {
     if !ordinary_file_exists(&bootstrap)? {
         return Err(InstallerError::MissingInstaller(bootstrap));
     }
-    let stable = install_stable_cli(&root_lock, root, &release)?;
+    let stable = install_stable_cli(&root_lock, root, &release, !is_local_channel_root(root))?;
     if stable != state.permanent_ae_path {
         return Err(InstallerError::InvalidInstallation(
             "permanent ae path is outside the bootstrap-owned layout".to_owned(),
@@ -650,4 +670,19 @@ pub(super) fn invoke_ae(release: &Path, arguments: &[&str]) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Whether `root` holds a side-by-side local (`dev`) installation, whose
+/// permanent `ae` must never be put on the user PATH.
+fn is_local_channel_root(root: &Path) -> bool {
+    std::fs::read(root.join("installation.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|document| {
+            document
+                .get("channel")
+                .and_then(serde_json::Value::as_str)
+                .map(|channel| channel == crate::local::LOCAL_CHANNEL)
+        })
+        .unwrap_or(false)
 }

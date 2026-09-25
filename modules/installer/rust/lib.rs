@@ -11,6 +11,7 @@ mod background_process;
 mod error;
 mod install;
 mod integrations;
+mod local;
 mod manifest;
 mod payload;
 mod platform;
@@ -19,9 +20,11 @@ mod shortcuts;
 
 pub use error::{InstallerError, Result};
 pub use install::{
-    InstallIntegrationOptions, InstallOptions, diagnose, install, prepare_update, repair, uninstall,
+    InstallIntegrationOptions, InstallOptions, RELEASE_MANIFEST_NAME, RELEASE_SIGNATURE_NAME,
+    ReleaseSource, diagnose, install, prepare_update, repair, uninstall,
 };
-pub use manifest::TrustKey;
+pub use local::{LOCAL_CHANNEL, LOCAL_TRUST_DIRECTORY, LocalRelease, LocalSigner, local_trust};
+pub use manifest::{TREE_MANIFEST_NAME, TREE_SIGNATURE_NAME, TrustKey};
 pub use platform::{Platform, resolve_install_root};
 pub use processes::RetirementPolicy;
 
