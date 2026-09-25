@@ -638,6 +638,18 @@ fn production_title_is_the_native_title() {
     assert!(!WINDOW_TITLE.contains("phase"));
 }
 
+#[test]
+fn window_titles_name_the_host_and_mark_non_stable_builds() {
+    let title = super::super::selectors::window_title("This computer");
+    assert!(
+        title.starts_with("Artisan Editor — This computer"),
+        "{title}"
+    );
+    // Test binaries run outside an installed payload, so they are unstaged
+    // and must say so rather than passing for a release.
+    assert!(title.contains("Unstaged"), "{title}");
+}
+
 #[gpui::test]
 fn terminal_service_failure_clears_transient_state_keeps_draft_and_transcript(
     cx: &mut TestAppContext,

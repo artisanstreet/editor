@@ -166,7 +166,9 @@ impl NativeWorkspace {
 impl Render for NativeWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = self.sessions[self.selected].view.clone();
-        window.set_window_title(&format!("{WINDOW_TITLE} — {}", view.read(cx).machine_label));
+        window.set_window_title(&super::selectors::window_title(
+            &view.read(cx).machine_label,
+        ));
         div().size_full().child(view)
     }
 }
