@@ -533,11 +533,7 @@ fn readiness_follows_only_probed_authentication() {
         engine_readiness(&state, "codex", READINESS_NOW_MS),
         EngineReadiness::NotReady
     );
-    assert!(!engine_models_admittable(
-        &state,
-        "codex",
-        READINESS_NOW_MS
-    ));
+    assert!(!engine_models_admittable(&state, "codex", READINESS_NOW_MS));
 
     state.begin_refresh_seq("codex", 1);
     assert_eq!(
@@ -554,11 +550,7 @@ fn readiness_follows_only_probed_authentication() {
         engine_readiness(&state, "codex", READINESS_NOW_MS),
         EngineReadiness::Ready
     );
-    assert!(engine_models_admittable(
-        &state,
-        "codex",
-        READINESS_NOW_MS
-    ));
+    assert!(engine_models_admittable(&state, "codex", READINESS_NOW_MS));
 
     // A later refresh failure keeps the last-good authenticated verdict:
     // a stale reply without an observation time never replaces the
@@ -616,11 +608,7 @@ fn stale_last_good_is_not_fresh_readiness() {
         engine_readiness(&state, "codex", READINESS_NOW_MS),
         EngineReadiness::NotReady
     );
-    assert!(!engine_models_admittable(
-        &state,
-        "codex",
-        READINESS_NOW_MS
-    ));
+    assert!(!engine_models_admittable(&state, "codex", READINESS_NOW_MS));
     // While the re-probe is admitted the verdict is honestly pending.
     state.begin_refresh_seq("codex", 1);
     assert_eq!(

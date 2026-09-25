@@ -162,7 +162,6 @@ pub mod thread_read_tracker;
 pub mod thread_retention_settings_policy;
 pub mod thread_route_gate_policy;
 pub mod thread_screen;
-pub mod thread_title_policy;
 pub mod thread_title_settings_policy;
 pub mod titlebar_header_presentation;
 pub mod transcript;

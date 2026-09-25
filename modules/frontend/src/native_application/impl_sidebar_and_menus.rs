@@ -33,20 +33,10 @@ impl NativeApplication {
                     thread.has_started_response && project_id == Some(&thread.project_id)
                 })
                 .map(|thread| {
-                    // The live harness summary is known for the mounted
-                    // thread; every other row keeps the stored listing title.
-                    let summary_title = self.retained_summary_title(&thread.thread_id);
-                    let title = thread_display_title(
-                        ThreadTitleInput {
-                            summary_title: summary_title.as_deref(),
-                            title: thread.title.as_str(),
-                            title_locked: false,
-                        },
-                        ThreadTitleMode::default(),
-                    );
+                    // The listing carries the Forge's resolved display title.
                     CommandMenuEntry::thread(
                         thread.thread_id.as_str(),
-                        title.to_owned(),
+                        thread.title.as_str().to_owned(),
                         thread.title.as_str(),
                     )
                 })

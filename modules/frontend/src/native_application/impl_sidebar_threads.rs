@@ -10,8 +10,8 @@ pub(super) struct SidebarThreadsState {
     focus: HashMap<ThreadId, FocusHandle>,
     hover: Rc<RefCell<SlidingHoverState>>,
     bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
-    generation: u64,
-    pending: Option<(ProjectId, u64)>,
+    pub(super) generation: u64,
+    pub(super) pending: Option<(ProjectId, u64)>,
     next_read: Option<Instant>,
     selection: SidebarSelectionFade,
     selection_frame_pending: bool,
@@ -329,7 +329,7 @@ impl NativeApplication {
             .foreground
             .blend(&self.desktop_theme.secondary.opacity(weight));
         let title = self
-            .listed_thread_display_title(&thread.thread_id, cx)
+            .listed_thread_display_title(&thread.thread_id)
             .unwrap_or_else(|| thread.title.as_str().to_owned());
         let selector = format!("artisan-sidebar-thread-{}", thread.thread_id.as_str());
         let click_thread = thread.thread_id.clone();

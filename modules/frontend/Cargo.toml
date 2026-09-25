@@ -510,10 +510,6 @@ name = "thread_route_gate_policy"
 path = "../../tests/frontend/thread_route_gate_policy.rs"
 
 [[test]]
-name = "thread_title_policy"
-path = "../../tests/frontend/thread_title_policy.rs"
-
-[[test]]
 name = "thread_title_settings_policy"
 path = "../../tests/frontend/thread_title_settings_policy.rs"
 

@@ -338,35 +338,24 @@ fn install_ready_message_surface(
     application.ack_draft_saves(cx);
 }
 
-/// Admits one harness run-terminal observation carrying `summary_title`
-/// through the real engine-observation handler.
-fn install_summary_title(
+/// Delivers a Forge sidebar listing in which `thread_id` carries the
+/// Forge-resolved `title`, through the real sidebar-read handler.
+fn install_listed_title(
     application: &mut NativeApplication,
     cx: &mut Context<NativeApplication>,
     thread_id: &ThreadId,
-    summary_title: &str,
+    title: &str,
 ) {
-    let terminal = artisan_domain::RunTerminalObservation::new(
-        artisan_domain::ObservationId::parse("obs-summary").expect("observation"),
-        artisan_domain::ObservationSequence::new(0).expect("sequence"),
-        artisan_domain::RunTerminalState::Completed,
-        None,
-        Some(summary_title.to_owned()),
-    )
-    .expect("terminal observation");
-    application.handle_service_event(
-        NativeTransportEvent::EngineObservation(artisan_protocol::ServerEvent {
-            cursor: artisan_protocol::EventCursor::new(1).expect("cursor"),
-            event: artisan_domain::Event::EngineObservation(
-                artisan_domain::EngineObservationEvent {
-                    thread_id: thread_id.clone(),
-                    observation: artisan_domain::Observation::RunTerminal(terminal),
-                    attribution: None,
-                },
-            ),
-        }),
-        cx,
-    );
+    let project_id = application
+        .selected_project
+        .clone()
+        .expect("a selected project");
+    let generation = application.sidebar_threads.generation + 1;
+    application.sidebar_threads.generation = generation;
+    application.sidebar_threads.pending = Some((project_id.clone(), generation));
+    let listing = ThreadListing::new(vec![thread(thread_id.as_str(), project_id.as_str(), title)])
+        .expect("listing");
+    application.receive_sidebar_threads(&project_id, generation, Ok(listing), cx);
 }
 
 /// Drives the engine-settings controller to a persisted configuration

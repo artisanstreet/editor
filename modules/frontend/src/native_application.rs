@@ -125,11 +125,12 @@ use crate::{
     },
     native_thread_picker::{NativeThreadPicker, ThreadPickerAction},
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
-    thread_title_policy::{
-        ThreadTitleInput, ThreadTitleMode, UNNAMED_THREAD_TITLE, refined_thread_title,
-        thread_display_title,
-    },
 };
+
+/// The label of a new-thread route before its thread exists; native task
+/// creation also writes it as the placeholder title the Forge later
+/// resolves.
+pub(crate) const UNNAMED_THREAD_TITLE: &str = "New thread";
 
 // Phase-1 split submodules (see native_application/).
 
